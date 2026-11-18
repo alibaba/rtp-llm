@@ -1,5 +1,6 @@
 package org.flexlb.cache.match.localstandby;
 
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
@@ -16,6 +17,8 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -31,19 +34,22 @@ class LocalStandbyCacheManagerTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setCacheMatching(new KvcmCacheMatchingConfig());
         when(configService.loadBalanceConfig()).thenReturn(config);
-        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(configService);
+        CacheMetricsReporter metrics = mock(CacheMetricsReporter.class);
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(configService, metrics);
         try {
             WorkerStatus original = worker(1);
             manager.observe(original);
             Request request = mock(Request.class);
             when(request.getBlockCacheKeys()).thenReturn(KEYS);
             when(request.getCacheKeyBlockSize()).thenReturn(16L);
+            when(request.getSeqLen()).thenReturn(32L);
             ServerStatus selected = new ServerStatus();
             selected.setServerIp("127.0.0.1");
             selected.setHttpPort(8080);
             selected.setRole(RoleType.PREFILL);
             selected.setWorkerGeneration(1);
             selected.setSuccess(true);
+            selected.setKvcmMatchedBlocks(1);
 
             manager.recordRoutedRequest(request, List.of(selected));
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
@@ -53,6 +59,7 @@ class LocalStandbyCacheManagerTest {
                 match = manager.findMatchingEngines(KEYS, RoleType.PREFILL, List.of(ADDRESS), 16);
             }
             assertEquals(Map.of(ADDRESS, 2), match);
+            verify(metrics, timeout(1000)).reportLocalStandbyPrediction(RoleType.PREFILL, ADDRESS, 0, 32);
             assertEquals(Map.of(), manager.findMatchingEngines(KEYS, RoleType.PREFILL, List.of(ADDRESS), 32));
 
             manager.observe(worker(2));

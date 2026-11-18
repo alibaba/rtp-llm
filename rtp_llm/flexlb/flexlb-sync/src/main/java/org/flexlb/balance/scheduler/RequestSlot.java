@@ -749,6 +749,7 @@ public final class RequestSlot {
         PublicationPermit permit = requirePublicationPermitLocked(PublicationKind.DELIVERY);
         try {
             Response response = buildSuccessResponse(item.routeResponse(), deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE);
+            response.setDispatchBatchId(expectedBatchId);
             transitionLocked(RequestState.Phase.ACKNOWLEDGED, deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE
                     ? "batch enqueue acknowledged" : "route decision delivered");
             DeliveryPublication publication = new DeliveryPublication(pendingItem, response, permit,
@@ -1845,9 +1846,10 @@ public final class RequestSlot {
                     outcome = TerminalOutcome.fail(message);
                     error = StrategyErrorType.DISPATCH_FAILED;
                 } else if (event.workerSuccessful()) {
-                    return claimTerminalActionLocked(event, TerminalOutcome.complete("decode completed"),
-                            buildSuccessResponse(item.routeResponse(),
-                                    deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE), true);
+                    Response response = buildSuccessResponse(item.routeResponse(),
+                            deliveryClaimKind == DeliveryClaimKind.BATCH_ENQUEUE);
+                    response.setDispatchBatchId(batchId);
+                    return claimTerminalActionLocked(event, TerminalOutcome.complete("decode completed"), response, true);
                 } else {
                     message = "worker error code " + event.workerErrorCode();
                     outcome = TerminalOutcome.fail(message);

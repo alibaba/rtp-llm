@@ -246,7 +246,7 @@ class CostBasedPrefillStrategyBlockerTest {
                     verify(directory).prefillRoutingSnapshot(role);
                     verify(outside, never()).admissionRejectReason(anyInt());
                     verify(secondEndpoint, never()).admissionRejectReason(anyInt());
-                    verify(cache).findMatchingEngines(any(),
+                    verify(cache).lookup(any(),
                             eq(role), eq(List.of("first", "outside", "second")), org.mockito.ArgumentMatchers.anyLong());
                     verify(pin).close();
                 }

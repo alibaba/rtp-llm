@@ -64,7 +64,8 @@ public class CostBasedPrefillStrategy {
 
         // Cache matching sees every live Prefill, including busy or blocked workers.
         EndpointDiscovery discovery = discoverEndpoints(roleType, group);
-        Map<String, Integer> cacheMatchResults = discovery.directory().isEmpty() ? Map.of()
+        CacheAwareService.CacheMatch cacheMatch = discovery.directory().isEmpty()
+                ? new CacheAwareService.CacheMatch(Map.of(), false)
                 : getCacheMatchResults(balanceContext, roleType, discovery);
         if (discovery.candidates().isEmpty()) {
             return blockedWithDiagnostics(Response.error(roleType.getErrorType()),
@@ -72,7 +73,7 @@ public class CostBasedPrefillStrategy {
         }
         Map<String, Integer> rejections = new java.util.HashMap<>();
         PrefillCandidateSet survivors = evaluateCandidates(
-                discovery, balanceContext, cacheMatchResults, rejections);
+                discovery, balanceContext, cacheMatch == null ? Map.of() : cacheMatch.matches(), rejections);
         if (survivors.size() == 0) {
             return blockedWithDiagnostics(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
                     new PlacementKey(roleType, group), discovery.candidates().size(), rejections);
@@ -138,6 +139,10 @@ public class CostBasedPrefillStrategy {
                 survivors.ownershipVersion(selectedIndex),
                 selectedPin);
         try {
+            if (cacheMatch != null && cacheMatch.kvcm()) {
+                selectedRole.serverStatus().setKvcmMatchedBlocks(
+                        cacheMatch.matches().getOrDefault(survivors.endpointAddress(selectedIndex), 0));
+            }
             reportSelectedEstimates(
                     roleType,
                     best,
@@ -471,12 +476,12 @@ public class CostBasedPrefillStrategy {
         return new EndpointDiscovery(directory, matching);
     }
 
-    private Map<String, Integer> getCacheMatchResults(
+    private CacheAwareService.CacheMatch getCacheMatchResults(
             BalanceContext balanceContext,
             RoleType roleType,
             EndpointDiscovery discovery) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(
+        return cacheAwareService.lookup(
                 blockCacheKeys, roleType, discovery.addresses(), balanceContext.getRequest().getCacheKeyBlockSize());
     }
 

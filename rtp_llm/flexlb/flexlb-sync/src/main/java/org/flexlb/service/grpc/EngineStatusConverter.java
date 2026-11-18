@@ -114,7 +114,7 @@ public class EngineStatusConverter {
                                 PriorityPreemptionProgress.CANCELED;
                         case PRIORITY_PREEMPTION_NONE, UNRECOGNIZED ->
                                 PriorityPreemptionProgress.NONE;
-                    });
+                    }, task.getPrefixLengthValid());
             tasks.put(String.valueOf(task.getRequestId()), observation);
         }
         return Map.copyOf(tasks);

@@ -12,6 +12,7 @@ import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.CacheAwareService.CacheMatch;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -107,7 +108,8 @@ class PdfusionSchedulingTest {
         }
         WorkerDirectory directory = new WorkerDirectory(endpoints);
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(Map.of());
+        when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(new CacheMatch(Map.of(), false));
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class)),

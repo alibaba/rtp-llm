@@ -1,5 +1,6 @@
 package org.flexlb.dao.loadbalance;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -13,6 +14,9 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class Response {
+
+    @JsonIgnore
+    private long dispatchBatchId;
 
     @JsonProperty("server_status")
     private List<ServerStatus> serverStatus;
@@ -66,6 +70,7 @@ public class Response {
         copy.realMasterHost = source.realMasterHost;
         copy.queueLength = source.queueLength;
         copy.enqueuedByMaster = source.enqueuedByMaster;
+        copy.dispatchBatchId = source.dispatchBatchId;
         copy.requiresGenerateInput = source.requiresGenerateInput;
         if (source.workerSummary != null) {
             copy.workerSummary = new LinkedHashMap<>();

@@ -746,8 +746,15 @@ vector<int> GenerateStream::currentExecuteTokens(int batch_idx) const {
 }
 
 void GenerateStream::step() {
+    if (iter_count_ == 0) {
+        first_prepared_prefix_length_.store(initial_reuse_length_, std::memory_order_relaxed);
+    }
     // iter_count represents the times of the stream participates in running
     iter_count_++;
+}
+
+int GenerateStream::firstPreparedPrefixLength() const {
+    return first_prepared_prefix_length_.load(std::memory_order_relaxed);
 }
 
 void GenerateStream::spStep() {

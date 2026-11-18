@@ -257,6 +257,14 @@ public class MetricConstant {
      */
     public static final String CACHE_HIT_RATIO = "app.cache.hit.ratio";
 
+    public static final String CACHE_LOCAL_STANDBY_PREDICTED_TOKENS = "app.cache.local.standby.predicted.tokens";
+    public static final String CACHE_LOCAL_STANDBY_PREDICTED_RATIO = "app.cache.local.standby.predicted.ratio";
+    public static final String CACHE_HIT_COMPARISON_ACTUAL_TOKENS = "app.cache.hit.comparison.actual.tokens";
+    public static final String CACHE_HIT_COMPARISON_INPUT_TOKENS = "app.cache.hit.comparison.input.tokens";
+    public static final String CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS = "app.cache.hit.comparison.kvcm.predicted.tokens";
+    public static final String CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS = "app.cache.hit.comparison.kvcm.local.delta.tokens";
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS = "app.cache.hit.comparison.local.standby.delta.tokens";
+
     /**
      * Recent cache-key hit token count for requests in the current metric bucket.
      */

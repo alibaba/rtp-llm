@@ -1,6 +1,7 @@
 package org.flexlb.cache.match.localstandby;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.LocalStandbyConfig;
@@ -32,8 +33,10 @@ public class LocalStandbyCacheManager {
     private final LocalStandbyCacheIndex index;
     private final ThreadPoolExecutor updates;
     private final Map<String, WorkerStatus> workers = new ConcurrentHashMap<>();
+    private final LocalStandbyComparisonService comparison;
 
-    public LocalStandbyCacheManager(ConfigService configService) {
+    public LocalStandbyCacheManager(ConfigService configService, CacheMetricsReporter metrics) {
+        this.comparison = new LocalStandbyComparisonService(metrics);
         var matching = configService.loadBalanceConfig().getCacheMatching();
         boolean enabled = matching instanceof KvcmCacheMatchingConfig;
         config = matching instanceof KvcmCacheMatchingConfig kvcm
@@ -60,6 +63,59 @@ public class LocalStandbyCacheManager {
 
     public void remove(WorkerStatus worker) {
         workers.remove(worker.getIpPort(), worker);
+    }
+
+    public void recordRoutedRequest(Request request, List<ServerStatus> selected) {
+        recordRoutedRequest(request, selected, 0);
+    }
+
+    public void recordRoutedRequest(Request request, List<ServerStatus> selected, long batchId) {
+        if (updates == null || request.getBlockCacheKeys() == null
+                || request.getBlockCacheKeys().isEmpty() || selected == null) {
+            return;
+        }
+        List<Long> keys = List.copyOf(request.getBlockCacheKeys());
+        long blockSize = request.getCacheKeyBlockSize();
+        for (ServerStatus route : selected) {
+            if (route == null || !route.isSuccess() || (route.getRole() != RoleType.PREFILL && route.getRole() != RoleType.PDFUSION)) {
+                continue;
+            }
+            WorkerStatus worker = workers.get(route.getServerIp() + ":" + route.getHttpPort());
+            if (worker == null || worker.getGenerationId() != route.getWorkerGeneration()) {
+                continue;
+            }
+            var dispatch = new LocalStandbyComparisonService.Dispatch(request.getRequestId(), route.getRole(),
+                    worker.getIpPort(), worker.getGenerationId(), batchId);
+            Integer kvcmBlocks = route.getKvcmMatchedBlocks();
+            var prediction = kvcmBlocks == null || blockSize <= 0 || request.getSeqLen() <= 0 ? null
+                    : comparison.register(dispatch, route.getGroup(), request.getSeqLen(), blockSize, kvcmBlocks);
+            try {
+                updates.execute(() -> {
+                    try {
+                        if (prediction != null) {
+                            Integer standbyBlocks = matchesGeneration(worker, blockSize)
+                                    ? findMatchingEngines(keys, route.getRole(), List.of(worker.getIpPort()), blockSize)
+                                            .get(worker.getIpPort())
+                                    : null;
+                            comparison.complete(dispatch, prediction,
+                                    matchesGeneration(worker, blockSize) ? standbyBlocks : null);
+                        }
+                    } catch (RuntimeException shadowFailure) {
+                        if (prediction != null) {
+                            comparison.complete(dispatch, prediction, null);
+                        }
+                        log.debug("Local standby comparison failed for request {}", dispatch.requestId(), shadowFailure);
+                    } finally {
+                        addRoutedBlocks(worker, blockSize, keys);
+                    }
+                });
+            } catch (RejectedExecutionException full) {
+                if (prediction != null) {
+                    comparison.discard(dispatch, prediction);
+                }
+                log.debug("Local standby update rejected for request {}", request.getRequestId());
+            }
+        }
     }
 
     public Map<String, Integer> findMatchingEngines(List<Long> keys, RoleType role,
@@ -95,27 +151,8 @@ public class LocalStandbyCacheManager {
         return Map.copyOf(matches);
     }
 
-    public void recordRoutedRequest(Request request, List<ServerStatus> selected) {
-        if (updates == null || request.getBlockCacheKeys() == null
-                || request.getBlockCacheKeys().isEmpty() || selected == null) {
-            return;
-        }
-        List<Long> keys = List.copyOf(request.getBlockCacheKeys());
-        long blockSize = request.getCacheKeyBlockSize();
-        for (ServerStatus route : selected) {
-            if (route == null || !route.isSuccess() || (route.getRole() != RoleType.PREFILL && route.getRole() != RoleType.PDFUSION)) {
-                continue;
-            }
-            WorkerStatus worker = workers.get(route.getServerIp() + ":" + route.getHttpPort());
-            if (worker == null || worker.getGenerationId() != route.getWorkerGeneration()) {
-                continue;
-            }
-            try {
-                updates.execute(() -> addRoutedBlocks(worker, blockSize, keys));
-            } catch (RejectedExecutionException full) {
-                log.debug("Local standby update rejected for request {}", request.getRequestId());
-            }
-        }
+    public void observeCacheHitFeedback(WorkerStatus worker, WorkerStatus.StatusObservation observation) {
+        comparison.observe(worker, observation);
     }
 
     @PreDestroy

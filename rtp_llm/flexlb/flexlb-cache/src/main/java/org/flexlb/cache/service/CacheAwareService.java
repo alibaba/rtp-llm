@@ -17,7 +17,6 @@ import java.util.Map;
  * @author FlexLB
  */
 public interface CacheAwareService {
-
     /**
      * Find matching engines
      *
@@ -27,13 +26,23 @@ public interface CacheAwareService {
      * @param blockSize routed key granularity supplied by Frontend (tokens per key)
      * @return Engine matching result map, key: engineIpPort, value: prefixMatchLength
      */
-    Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> findMatchingEngines(
+    default Map<String, Integer> findMatchingEngines(
             List<Long> blockCacheKeys,
             RoleType roleType,
-            List<String> candidateEngineIpPorts, long blockSize);
+            List<String> candidateEngineIpPorts, long blockSize) {
+        return lookup(blockCacheKeys, roleType, candidateEngineIpPorts, blockSize).matches();
+    }
+
+    CacheMatch lookup(List<Long> keys, RoleType role, List<String> candidates, long blockSize);
 
     /** Records a successful route for standby cache prediction. */
     void recordRoutedRequest(Request request, List<ServerStatus> selected);
+
+    default void recordRoutedRequest(Request request, List<ServerStatus> selected, long batchId) {
+        recordRoutedRequest(request, selected);
+    }
+
+    default void observeCacheHitFeedback(WorkerStatus worker, WorkerStatus.StatusObservation observation) {}
 
     /**
      * Update engine block KV cache status
@@ -55,4 +64,9 @@ public interface CacheAwareService {
      * cannot distinguish two worker generations by itself.
      */
     void removeEngineBlockCache(WorkerStatus workerStatus, EndpointTrace trace);
+
+    /**
+     * Routing matches and whether they came from a successful KVCM query.
+     */
+    record CacheMatch(Map<String, Integer> matches, boolean kvcm) {}
 }

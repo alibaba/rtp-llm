@@ -8,6 +8,7 @@ import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.service.CacheAwareService.CacheMatch;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -19,6 +20,7 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -71,7 +73,8 @@ class CostBasedPrefillSelectionMetricTest {
         publish("10.0.0.1", 8080);
 
         cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(Map.of());
+        when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(new CacheMatch(Map.of(), false));
         reporter = mock(EngineHealthReporter.class);
         strategy = new CostBasedPrefillStrategy(
                 new WorkerDirectory(registry), cache, reporter);
@@ -143,7 +146,7 @@ class CostBasedPrefillSelectionMetricTest {
 
         assertEquals(expectedStatus, result.status());
         if (expectedStatus == PlacementResult.Status.BLOCKED) {
-            verify(cache, Mockito.never()).findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
+            verify(cache, Mockito.never()).lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
         }
         if (result.status() == PlacementResult.Status.SUCCESS) {
             try (SelectedRole selected = result.value()) {
@@ -236,7 +239,7 @@ class CostBasedPrefillSelectionMetricTest {
     void cacheLookupCannotCommitARetiredOrReplacedPrefillGeneration(boolean replace) {
         configureAffinity(600L, 5.0);
         PrefillEndpoint old = (PrefillEndpoint) registry.get(RoleType.PREFILL, "10.0.0.2:8080");
-        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenAnswer(invocation -> {
+        when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenAnswer(invocation -> {
             EndpointRegistry.DetachedGeneration detached;
             WorkerStatus status = old.getStatus();
             status.lock.lock();
@@ -247,7 +250,7 @@ class CostBasedPrefillSelectionMetricTest {
             }
             detached.retireAndAwait();
             if (replace) { publish("10.0.0.2", 8080); }
-            return Map.of("10.0.0.2:8080", 5);
+            return new CacheMatch(Map.of("10.0.0.2:8080", 5), false);
         });
 
         var stale = strategy.select(context, RoleType.PREFILL, null);
@@ -255,8 +258,8 @@ class CostBasedPrefillSelectionMetricTest {
         assertEquals(PlacementResult.Status.BLOCKED, stale.status(),
                 "a cache lookup must not transfer ownership to a different endpoint generation");
         // A stale cache entry must not revive a removed worker on the next snapshot.
-        org.mockito.Mockito.doReturn(Map.of("10.0.0.2:8080", 5)).when(cache)
-                .findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
+        org.mockito.Mockito.doReturn(new CacheMatch(Map.of("10.0.0.2:8080", 5), false)).when(cache)
+                .lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
         try (SelectedRole selected = select()) {
             assertEquals(replace ? "10.0.0.2" : "10.0.0.1", selected.serverStatus().getServerIp());
         }
@@ -269,17 +272,18 @@ class CostBasedPrefillSelectionMetricTest {
         StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL, "10.0.0.2:8080", target);
         context.getRequest().setCacheKeyBlockSize(100L);
         context.getRequest().setBlockCacheKeys(List.of(1L));
-        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
-                .thenReturn(Map.of("10.0.0.1:8080", 9, "10.0.0.2:8080", 1));
+        when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(new CacheMatch(Map.of("10.0.0.1:8080", 9, "10.0.0.2:8080", 1), true));
 
         var result = strategy.select(context, RoleType.PREFILL, "target");
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         try (var selected = result.value()) {
             assertEquals("target", selected.serverStatus().getGroup());
+            assertEquals(1, ServerStatus.copyOf(selected.serverStatus()).getKvcmMatchedBlocks());
         }
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> candidates = ArgumentCaptor.forClass(List.class);
-        verify(cache).findMatchingEngines(any(), any(), candidates.capture(), org.mockito.ArgumentMatchers.anyLong());
+        verify(cache).lookup(any(), any(), candidates.capture(), org.mockito.ArgumentMatchers.anyLong());
         assertEquals(Set.of("10.0.0.1:8080", "10.0.0.2:8080"), Set.copyOf(candidates.getValue()));
     }
 
@@ -319,7 +323,7 @@ class CostBasedPrefillSelectionMetricTest {
             if (result.value() != null) { result.value().close(); }
             @SuppressWarnings("unchecked")
             ArgumentCaptor<List<String>> candidates = ArgumentCaptor.forClass(List.class);
-            verify(cache).findMatchingEngines(any(), any(), candidates.capture(), org.mockito.ArgumentMatchers.anyLong());
+            verify(cache).lookup(any(), any(), candidates.capture(), org.mockito.ArgumentMatchers.anyLong());
             assertEquals(Set.of("10.0.0.1:8080", "10.0.0.2:8080"), Set.copyOf(candidates.getValue()),
                     "alive P must reach cache matching even when immediate dispatch is full");
             assertEquals(PlacementResult.Status.BLOCKED, result.status(), "do not fall back to the colder idle P");
@@ -342,8 +346,8 @@ class CostBasedPrefillSelectionMetricTest {
             publish(ip, 8080);
             cacheLeader = ip;
         }
-        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
-                .thenReturn(Map.of(cacheLeader + ":8080", 5));
+        when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(new CacheMatch(Map.of(cacheLeader + ":8080", 5), false));
 
         try (SelectedRole selected = select()) {
             assertEquals(cacheLeader, selected.serverStatus().getServerIp(),
@@ -555,8 +559,8 @@ class CostBasedPrefillSelectionMetricTest {
         context.getRequest().setRequestId(20_001L);
         context.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L, 4L, 5L));
         context.getRequest().setCacheKeyBlockSize(100L);
-        when(cache.findMatchingEngines(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
-                .thenReturn(Map.of("10.0.0.2:8080", 5));
+        when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(new CacheMatch(Map.of("10.0.0.2:8080", 5), false));
     }
 
     private void publish(String ip, int port) {

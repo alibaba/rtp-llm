@@ -140,9 +140,19 @@ public interface EngineScheduler extends AutoCloseable {
 
     enum ReportedPhase { PENDING, RECEIVED, KV_ALLOCATED, RUNNING }
 
+    /**
+     * Immutable task status, including whether the engine prepared the reported prefix.
+     */
     record Task(long requestId, long batchId, int inputLength, int prefixLength, int priority,
                 ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,
-                long endTimeMillis, RequestFailure failure) {}
+                long endTimeMillis, RequestFailure failure, boolean prefixLengthValid) {
+        public Task(long requestId, long batchId, int inputLength, int prefixLength, int priority,
+                    ReportedPhase phase, int iterations, long waitingMillis, long executionMillis,
+                    long endTimeMillis, RequestFailure failure) {
+            this(requestId, batchId, inputLength, prefixLength, priority, phase, iterations, waitingMillis,
+                    executionMillis, endTimeMillis, failure, false);
+        }
+    }
 
     /**
      * Captures active and finished request state for Master polling.

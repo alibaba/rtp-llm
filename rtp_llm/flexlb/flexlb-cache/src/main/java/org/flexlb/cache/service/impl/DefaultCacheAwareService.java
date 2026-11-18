@@ -57,30 +57,30 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(List<Long> keys, RoleType role,
+    public CacheMatch lookup(List<Long> keys, RoleType role,
             List<String> candidates, long blockSize) {
-        if (keys == null || keys.isEmpty() || candidates.isEmpty()) return Map.of();
+        if (keys == null || keys.isEmpty() || candidates.isEmpty()) return new CacheMatch(Map.of(), false);
         long started = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         if (kvcm != null && kvcm.enabled()) {
             if (kvcm.useStandby() && standby.autoSwitch()) {
-                return standby.findMatchingEngines(keys, role, candidates, blockSize);
+                return new CacheMatch(standby.findMatchingEngines(keys, role, candidates, blockSize), false);
             }
             try {
                 var result = kvcm.findMatchingEngines(keys, blockSize, candidates);
                 reportFindLatency(role, started, FIND_METRIC_SUCCESS);
-                return result;
+                return new CacheMatch(result, true);
             } catch (RuntimeException failure) {
                 reportFindLatency(role, started, FIND_METRIC_FAILURE);
                 long now = System.nanoTime(), next = nextKvcmWarning.get();
                 if (now >= next && nextKvcmWarning.compareAndSet(next, now + TimeUnit.SECONDS.toNanos(30)))
                     log.warn("KVCM lookup failed; using the local standby index: {}", failure.toString());
-                return standby.findMatchingEngines(keys, role, candidates, blockSize);
+                return new CacheMatch(standby.findMatchingEngines(keys, role, candidates, blockSize), false);
             }
         }
         try {
             var result = kvCacheManager.findMatchingEngines(keys, candidates);
             reportFindLatency(role, started, FIND_METRIC_SUCCESS);
-            return result;
+            return new CacheMatch(result, false);
         } catch (RuntimeException failure) {
             reportFindLatency(role, started, FIND_METRIC_FAILURE);
             throw failure;
@@ -89,8 +89,20 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
     @Override
     public void recordRoutedRequest(Request request, List<ServerStatus> selected) {
+        recordRoutedRequest(request, selected, 0);
+    }
+
+    @Override
+    public void recordRoutedRequest(Request request, List<ServerStatus> selected, long batchId) {
         if (standby != null) {
-            standby.recordRoutedRequest(request, selected);
+            standby.recordRoutedRequest(request, selected, batchId);
+        }
+    }
+
+    @Override
+    public void observeCacheHitFeedback(WorkerStatus worker, WorkerStatus.StatusObservation observation) {
+        if (standby != null) {
+            standby.observeCacheHitFeedback(worker, observation);
         }
     }
 

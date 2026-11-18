@@ -382,11 +382,14 @@ class RtpSchedulerTest {
             scheduler.enqueue(input(1, true), new Listener());
             var before = scheduler.tasks();
             assertEquals(EngineScheduler.ReportedPhase.RECEIVED, before.getFirst().phase());
+            assertFalse(before.getFirst().prefixLengthValid());
             assertEquals(8, cache.snapshot(0, false).availableBlocks(), "A status query must not allocate");
             var work = scheduler.schedule();
             complete(scheduler, work, config); drain(scheduler);
             var ready = scheduler.tasks().getFirst();
             assertEquals(EngineScheduler.ReportedPhase.KV_ALLOCATED, ready.phase());
+            assertTrue(ready.prefixLengthValid());
+            assertEquals(0, ready.prefixLength());
             Thread.sleep(20);
             var later = scheduler.tasks().getFirst();
             assertEquals(ready.waitingMillis(), later.waitingMillis());

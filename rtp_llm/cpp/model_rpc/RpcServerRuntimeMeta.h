@@ -43,9 +43,10 @@ public:
         EngineScheduleInfo                  info;
         std::unordered_set<int64_t>         emitted_preemption_overlays;
         for (auto& [id, entry] : running_streams_) {
-            auto task_info  = entry.task_info;
-            task_info.phase = derivePhase(entry.stream);
-            auto overlay    = priority_preemption_overlays_.find(id);
+            auto task_info                         = entry.task_info;
+            task_info.phase                        = derivePhase(entry.stream);
+            task_info.first_prepared_prefix_length = entry.stream->firstPreparedPrefixLength();
+            auto overlay                           = priority_preemption_overlays_.find(id);
             if (overlay != priority_preemption_overlays_.end()) {
                 task_info.priority_preemption_progress = PriorityPreemptionProgress::CANCELING;
                 emitted_preemption_overlays.insert(id);
@@ -223,12 +224,13 @@ public:
 
 protected:
     struct StreamRuntimeSnapshot {
-        int64_t   end_time_ms     = -1;
-        int64_t   begin_time_us   = 0;
-        int64_t   waiting_time_ms = 0;
-        int64_t   prefix_length   = 0;
-        int64_t   input_length    = 0;
-        size_t    iterate_count   = 0;
+        int64_t   end_time_ms                  = -1;
+        int64_t   begin_time_us                = 0;
+        int64_t   waiting_time_ms              = 0;
+        int64_t   prefix_length                = 0;
+        int64_t   input_length                 = 0;
+        size_t    iterate_count                = 0;
+        int64_t   first_prepared_prefix_length = -1;
         ErrorInfo status;
     };
 
@@ -239,23 +241,25 @@ protected:
         const auto time_info = stream->getTimeInfo();
 
         StreamRuntimeSnapshot snapshot;
-        snapshot.end_time_ms     = autil::TimeUtility::currentTimeInMilliSeconds();
-        snapshot.begin_time_us   = time_info.begin_time_us;
-        snapshot.waiting_time_ms = time_info.wait_time_us / 1000;
-        snapshot.prefix_length   = stream->prefixLength();
-        snapshot.input_length    = stream->inputLength();
-        snapshot.iterate_count   = stream->iterCount();
-        snapshot.status          = stream->statusInfo();
+        snapshot.end_time_ms                  = autil::TimeUtility::currentTimeInMilliSeconds();
+        snapshot.begin_time_us                = time_info.begin_time_us;
+        snapshot.waiting_time_ms              = time_info.wait_time_us / 1000;
+        snapshot.prefix_length                = stream->prefixLength();
+        snapshot.first_prepared_prefix_length = stream->firstPreparedPrefixLength();
+        snapshot.input_length                 = stream->inputLength();
+        snapshot.iterate_count                = stream->iterCount();
+        snapshot.status                       = stream->statusInfo();
         return snapshot;
     }
 
     static void applyStreamRuntimeSnapshot(EngineScheduleInfo::TaskInfo& task_info,
                                            const StreamRuntimeSnapshot&  snapshot) {
-        task_info.end_time_ms     = snapshot.end_time_ms;
-        task_info.prefix_length   = snapshot.prefix_length;
-        task_info.input_length    = snapshot.input_length;
-        task_info.waiting_time_ms = snapshot.waiting_time_ms;
-        task_info.iterate_count   = snapshot.iterate_count;
+        task_info.end_time_ms                  = snapshot.end_time_ms;
+        task_info.prefix_length                = snapshot.prefix_length;
+        task_info.first_prepared_prefix_length = snapshot.first_prepared_prefix_length;
+        task_info.input_length                 = snapshot.input_length;
+        task_info.waiting_time_ms              = snapshot.waiting_time_ms;
+        task_info.iterate_count                = snapshot.iterate_count;
         task_info.execution_time_ms =
             computeExecutionTimeMs(snapshot.end_time_ms, snapshot.begin_time_us, snapshot.waiting_time_ms);
     }

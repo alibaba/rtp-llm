@@ -77,7 +77,8 @@ public class RouteService {
                 balanceContext.setResponse(result);
                 if (result != null && result.isSuccess() && !balanceContext.getRequest().isVitRouteOnly()) {
                     if (cacheAwareService != null) {
-                        cacheAwareService.recordRoutedRequest(balanceContext.getRequest(), result.getServerStatus());
+                        cacheAwareService.recordRoutedRequest(balanceContext.getRequest(), result.getServerStatus(),
+                                result.getDispatchBatchId());
                     }
                     recentCacheKeyTraceReporter.report(balanceContext);
                 }

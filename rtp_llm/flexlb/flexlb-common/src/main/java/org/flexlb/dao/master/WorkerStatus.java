@@ -537,7 +537,17 @@ public class WorkerStatus {
             long batchId,
             TaskPhase phase,
             long executionTimeMs,
-            PriorityPreemptionProgress priorityPreemptionProgress) {
+            PriorityPreemptionProgress priorityPreemptionProgress,
+            boolean prefixLengthValid) {
+
+        public TaskObservation(long requestId, long prefixLength, long prefillTime, long inputLength,
+                               long waitingTime, long iterateCount, long endTimeMs, long dpRank, long errorCode,
+                               String errorMessage, long batchId, TaskPhase phase, long executionTimeMs,
+                               PriorityPreemptionProgress priorityPreemptionProgress) {
+            this(requestId, prefixLength, prefillTime, inputLength, waitingTime, iterateCount, endTimeMs,
+                    dpRank, errorCode, errorMessage, batchId, phase, executionTimeMs,
+                    priorityPreemptionProgress, false);
+        }
 
         /** A pending observation that reports only priority cancellation progress. */
         @JsonIgnore

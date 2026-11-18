@@ -63,6 +63,33 @@ TEST(RpcServerRuntimeMetaTest, EnqueueReadsBatchIdFromStreamInput) {
     EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
 }
 
+TEST(RpcServerRuntimeMetaTest, DistinguishesUnpreparedPrefixFromPreparedZeroHit) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 104;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::tensor({1, 2, 3}, torch::kInt32);
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+
+    meta.enqueue(input->request_id, stream);
+    auto info = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].first_prepared_prefix_length, -1);
+
+    stream->step();
+    info = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_EQ(info.running_task_info_list[0].first_prepared_prefix_length, 0);
+
+    stream->setReuseLength(2);
+    stream->setInitialReuseLength(2);
+    stream->step();
+    meta.dequeue(input->request_id, stream);
+    info = meta.getEngineScheduleInfo(-1);
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].first_prepared_prefix_length, 0);
+}
+
 TEST(RpcServerRuntimeMetaTest, EnqueueConvertsWaitTimeFromMicrosecondsToMilliseconds) {
     RpcServerRuntimeMeta meta;
     auto                 input = std::make_shared<GenerateInput>();

@@ -488,7 +488,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         long executionMillis = finished ? Math.max(0, (now - stream.timingStarted) / 1_000_000 - waitMillis) : -1;
         return new Task(stream.input.requestId(), stream.input.groupId(), stream.input.tokens(), stream.reused,
             stream.input.priority(), phase, progress.iterations(), waitMillis, executionMillis,
-            endTimeMillis, failure);
+            endTimeMillis, failure, prefill() && stream.lease != null);
     }
 
     private QueueSnapshot queueSnapshot(boolean reportRound) {

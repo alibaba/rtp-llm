@@ -328,6 +328,16 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     startTime,
                     ep);
 
+            try {
+                if ((observation.role() == RoleType.PREFILL || observation.role() == RoleType.PDFUSION)
+                        && (observation.finishedTasks().values().stream().anyMatch(WorkerStatus.TaskObservation::prefixLengthValid)
+                        || observation.runningTasks().values().stream().anyMatch(WorkerStatus.TaskObservation::prefixLengthValid))) {
+                    cacheAwareService.observeCacheHitFeedback(workerStatus, observation);
+                }
+            } catch (RuntimeException feedbackFailure) {
+                logger.warn("Cache hit feedback failed for {}", ipPort, feedbackFailure);
+            }
+
             logWorkerStatusUpdate(startTime, workerStatus);
 
         } catch (Throwable e) {

@@ -1,5 +1,6 @@
 package org.flexlb.dao.loadbalance;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -13,6 +14,8 @@ public class ServerStatus {
     @JsonProperty("worker_generation")
     @JsonInclude(JsonInclude.Include.NON_DEFAULT)
     private long workerGeneration;
+    @JsonIgnore
+    private Integer kvcmMatchedBlocks;
     @JsonProperty("role")
     private RoleType role;
 
@@ -67,6 +70,7 @@ public class ServerStatus {
         copy.prefillTime = source.prefillTime;
         copy.group = source.group;
         copy.workerGeneration = source.workerGeneration;
+        copy.kvcmMatchedBlocks = source.kvcmMatchedBlocks;
         copy.debugInfo = DebugInfo.copyOf(source.debugInfo);
         copy.requestId = source.requestId;
         copy.success = source.success;

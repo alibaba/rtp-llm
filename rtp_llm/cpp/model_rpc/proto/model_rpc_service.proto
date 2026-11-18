@@ -648,6 +648,8 @@ message TaskInfoPB {
     int64 execution_time_ms = 13;
     PriorityPreemptionProgressPB priority_preemption_progress = 14;
     int32 priority = 15;
+    // True only after the engine has resolved and prepared the cache hit.
+    bool prefix_length_valid = 16;
 }
 
 message UpdateWeightsRequestPB {

@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,8 +25,15 @@ import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_VIEWS_MAP_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_FIND_MATCHING_ENGINES_RT;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
@@ -80,6 +88,13 @@ public class CacheMetricsReporter {
      * Register all cache-related monitoring metrics
      */
     private void registerCacheMetrics() {
+        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_HIT_COMPARISON_INPUT_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         // Engine local cache metrics
         monitor.register(CACHE_ENGINE_LOCAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_ENGINE_LOCAL_BYTES, FlexMetricType.GAUGE);
@@ -116,6 +131,25 @@ public class CacheMetricsReporter {
 
         // Engine view map size metrics
         monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
+    }
+
+    public void reportLocalStandbyPrediction(RoleType role, String address, long hitTokens, long inputTokens) {
+        FlexMetricTags tags = FlexMetricTags.of("role", role.name(), "engineIp", address);
+        monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, tags, hitTokens);
+        monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
+    }
+
+    public void reportCacheHitComparison(RoleType role, String address, String group, String state,
+                                         long inputTokens, long actual, long kvcmLocal, Long standby) {
+        FlexMetricTags tags = FlexMetricTags.of("role", role.name(), "engineIp", address,
+                "group", group == null ? "" : group, "taskState", state, "cacheMatchSource", "KVCM");
+        monitor.report(CACHE_HIT_COMPARISON_INPUT_TOKENS, tags, inputTokens);
+        monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, actual);
+        monitor.report(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS, tags, kvcmLocal);
+        monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, tags, actual - kvcmLocal);
+        if (standby != null) {
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, tags, actual - standby);
+        }
     }
 
     /**

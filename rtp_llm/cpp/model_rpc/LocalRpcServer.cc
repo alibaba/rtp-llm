@@ -686,10 +686,14 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_role("RoleType." + roleTypeToString(status_info.role));
     response->set_role_type(static_cast<RoleTypePB>(status_info.role));
 
+    const bool reports_prefill_cache =
+        status_info.role == rtp_llm::RoleType::PREFILL || status_info.role == rtp_llm::RoleType::PDFUSION;
     for (const auto& task : engine_schedule_info.running_task_info_list) {
         TaskInfoPB* task_info = response->add_running_task_info();
         task_info->set_request_id(task.request_id);
-        task_info->set_prefix_length(task.prefix_length);
+        const bool prefix_valid = reports_prefill_cache && task.first_prepared_prefix_length >= 0;
+        task_info->set_prefix_length(prefix_valid ? task.first_prepared_prefix_length : task.prefix_length);
+        task_info->set_prefix_length_valid(prefix_valid);
         task_info->set_input_length(task.input_length);
         task_info->set_waiting_time_ms(task.waiting_time_ms);
         task_info->set_iterate_count(task.iterate_count);
@@ -710,7 +714,9 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     for (const auto& task : engine_schedule_info.finished_task_info_list) {
         TaskInfoPB* task_info = response->add_finished_task_list();
         task_info->set_request_id(task.request_id);
-        task_info->set_prefix_length(task.prefix_length);
+        const bool prefix_valid = reports_prefill_cache && task.first_prepared_prefix_length >= 0;
+        task_info->set_prefix_length(prefix_valid ? task.first_prepared_prefix_length : task.prefix_length);
+        task_info->set_prefix_length_valid(prefix_valid);
         task_info->set_input_length(task.input_length);
         task_info->set_waiting_time_ms(task.waiting_time_ms);
         task_info->set_iterate_count(task.iterate_count);
@@ -746,8 +752,8 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
         for (const auto& group : cache_manager->cacheConfig().topology().groups()) {
             // Match the HBM publisher's eligibility, including its exact tag exclusions.
             if (!cacheGroupPublishesEvents(group.policy)
-                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE
-                || group.tag == "csa_state" || group.tag == "swa_kv") {
+                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.tag == "csa_state"
+                || group.tag == "swa_kv") {
                 continue;
             }
             if (group.policy.group_type == CacheGroupType::LINEAR) {
@@ -1198,7 +1204,8 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must be positive");
         }
         const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            context->deadline() - std::chrono::system_clock::now()).count();
+                                      context->deadline() - std::chrono::system_clock::now())
+                                      .count();
         if (remaining_ms <= 0) {
             return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "remote task expired before execution");
         }
