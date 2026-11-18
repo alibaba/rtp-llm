@@ -165,6 +165,34 @@ def _admission_reject_reason_from_response(response) -> AdmissionRejectReason:
         return AdmissionRejectReason.INVALID
 
 
+def vit_hash_deadline(input: GenerateInput) -> float:
+    configured_timeout = input.generate_config.mm_timeout_ms
+    if not configured_timeout or configured_timeout <= 0:
+        configured_timeout = max(
+            (
+                i.mm_preprocess_config.mm_timeout_ms
+                for i in input.mm_inputs
+                if i.mm_preprocess_config.mm_timeout_ms > 0
+            ),
+            default=120000,
+        )
+    limits = [configured_timeout]
+    for name in ("ttft_timeout_ms", "timeout_ms"):
+        limit = getattr(input.generate_config, name, None)
+        if limit and limit > 0:
+            limits.append(limit)
+    return time.monotonic() + min(limits) / 1000.0
+
+
+def remaining_vit_hash_time(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise FtRuntimeException(
+            ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
+        )
+    return remaining
+
+
 class MasterClient:
     """Client for FlexLB schedule gRPC API (master and optional slave)."""
 
@@ -585,7 +613,12 @@ class MasterClient:
         return extract_qos_priority(input)
 
     async def get_vit_cache_metadata(
-        self, address: RoleAddr, keys: List[str], input: Optional[GenerateInput] = None
+        self,
+        address: RoleAddr,
+        keys: List[str],
+        input: Optional[GenerateInput] = None,
+        *,
+        deadline: Optional[float] = None,
     ):
         """Probe hashes, then submit only missing media when routing requires them.
 
@@ -593,28 +626,14 @@ class MasterClient:
         clear the ViT affinity pin and use the legacy embedding route. Required
         hash acquisition errors and timeouts still fail the request.
         """
-        started = time.monotonic()
         unique_keys = list(dict.fromkeys(keys))
         probe_timeout = DEFAULT_REQUEST_TIMEOUT_SEC
         if input is not None:
             # The first hash probe carries only keys, even on a warm hit.
             check_download_urls(item.url for item in input.mm_inputs)
             input.greennet_verified_vit = None
-            configured_timeout = input.generate_config.mm_timeout_ms
-            if not configured_timeout or configured_timeout <= 0:
-                configured_timeout = max(
-                    (
-                        i.mm_preprocess_config.mm_timeout_ms
-                        for i in input.mm_inputs
-                        if i.mm_preprocess_config.mm_timeout_ms > 0
-                    ),
-                    default=120000,
-                )
-            limits = [configured_timeout]
-            for name in ("ttft_timeout_ms", "timeout_ms"):
-                limit = getattr(input.generate_config, name, None)
-                if limit and limit > 0:
-                    limits.append(limit)
+            if deadline is None:
+                deadline = vit_hash_deadline(input)
             try:
                 configured_probe_ms = int(
                     os.environ.get(
@@ -623,7 +642,9 @@ class MasterClient:
                 )
             except ValueError:
                 configured_probe_ms = DEFAULT_VIT_HASH_PROBE_TIMEOUT_MS
-            probe_timeout = min(max(1, configured_probe_ms), min(limits)) / 1000.0
+            probe_timeout = min(
+                max(1, configured_probe_ms) / 1000.0, remaining_vit_hash_time(deadline)
+            )
         with internal_span(
             "rtp_llm.vit.hash_probe",
             **{
@@ -699,11 +720,7 @@ class MasterClient:
                 raise FtRuntimeException(
                     ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
                 )
-        remaining = min(limits) / 1000.0 - (time.monotonic() - started)
-        if remaining <= 0:
-            raise FtRuntimeException(
-                ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"
-            )
+        remaining = remaining_vit_hash_time(deadline)
         with internal_span(
             "rtp_llm.vit.hash_fill",
             **{

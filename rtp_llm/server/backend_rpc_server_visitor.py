@@ -27,6 +27,8 @@ from rtp_llm.server.master_client import (
     VIT_ROUTE_STALE_CODE,
     FlexlbResponse,
     MasterClient,
+    remaining_vit_hash_time,
+    vit_hash_deadline,
 )
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.mm_cache_metadata import snapshot_from_metadata
@@ -60,6 +62,7 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+VIT_HASH_CONCURRENCY_RETRIES = 2
 _RETRYABLE_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.GET_HOST_FAILED,
@@ -305,15 +308,24 @@ class BackendRPCServerVisitor:
                 keys = multimodal_cache_keys(input)
             metadata = None
             if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
-                vit_result = await self.master_client.get_backend_role_addrs(
-                    block_cache_keys=[],
-                    cache_key_block_size=self._cache_key_block_size(),
-                    input=input,
-                    request_id=input.request_id,
-                    cache_affinity_keys=keys,
-                    vit_only=True,
-                )
-                if vit_result.is_ok:
+                deadline = vit_hash_deadline(input)
+                for attempt in range(VIT_HASH_CONCURRENCY_RETRIES + 1):
+                    vit_result = await self.master_client.get_backend_role_addrs(
+                        block_cache_keys=[],
+                        cache_key_block_size=self._cache_key_block_size(),
+                        input=input,
+                        request_id=input.request_id,
+                        cache_affinity_keys=keys,
+                        vit_only=True,
+                        timeout_s=remaining_vit_hash_time(deadline),
+                    )
+                    if not vit_result.is_ok:
+                        if (
+                            not vit_result.connection_failed
+                            and vit_result.error_code not in (404, 405, 501)
+                        ):
+                            return vit_result
+                        break
                     vit_addrs = [
                         addr
                         for addr in vit_result.role_addrs
@@ -324,7 +336,7 @@ class BackendRPCServerVisitor:
                             ExceptionType.ROUTE_ERROR,
                             "master returned invalid ViT route",
                         )
-                    selected_vit = vit_addrs[0]
+                    vit = vit_addrs[0]
                     selected_status = None
                     for status in (vit_result.result or {}).get("server_status", []):
                         if not isinstance(status, dict):
@@ -344,21 +356,30 @@ class BackendRPCServerVisitor:
                             ExceptionType.ROUTE_ERROR,
                             "master returned ViT route without matching server status",
                         )
-                    route_args["selected_vit"] = selected_status
-                    metadata = await self.master_client.get_vit_cache_metadata(
-                        selected_vit, keys, input=input
-                    )
-                    if metadata is None:
-                        # A proxy without the hash RPC uses the normal embedding
-                        # route, which preserves inference without ViT cache affinity.
-                        selected_vit = None
-                        route_args.pop("selected_vit")
-                elif not vit_result.connection_failed and vit_result.error_code not in (
-                    404,
-                    405,
-                    501,
-                ):
-                    return vit_result
+                    try:
+                        metadata = await self.master_client.get_vit_cache_metadata(
+                            vit, keys, input=input, deadline=deadline
+                        )
+                    except FtRuntimeException as error:
+                        if (
+                            error.exception_type
+                            != ExceptionType.CONCURRENCY_LIMIT_ERROR
+                            or attempt == VIT_HASH_CONCURRENCY_RETRIES
+                        ):
+                            raise
+                        route_logger.info(
+                            "Retrying ViT hash route after concurrency limit, request_id=%s, retry=%d, old_address=%s:%s",
+                            input.request_id,
+                            attempt + 1,
+                            vit.ip,
+                            vit.grpc_port,
+                        )
+                        continue
+                    # An older proxy may not serve hashes. Only pin a worker that returned metadata.
+                    if metadata is not None:
+                        selected_vit = vit
+                        route_args["selected_vit"] = selected_status
+                    break
             try:
                 with internal_span(
                     "rtp_llm.frontend.expand_routing_tokens",

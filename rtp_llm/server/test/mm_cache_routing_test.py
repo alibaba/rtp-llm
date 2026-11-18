@@ -465,6 +465,65 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             request.mm_inputs[0].url,
         )
 
+    async def test_hash_concurrency_limit_reselects_vit_before_routing_pd(self):
+        keys = multimodal_cache_keys(self.request)
+        client = self.visitor.master_client
+        workers = [
+            self.vit.model_copy(update={"grpc_port": port})
+            for port in (8001, 8002, 8003)
+        ]
+        statuses = [{**self.status, "grpc_port": w.grpc_port} for w in workers]
+        client.get_backend_role_addrs.side_effect = [
+            FlexlbResponse(role_addrs=[worker], result={"server_status": [status]})
+            for worker, status in zip(workers, statuses)
+        ] + [FlexlbResponse.ok([self.prefill, workers[-1]])]
+        client.get_vit_cache_metadata.side_effect = [
+            FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, "busy"),
+            FtRuntimeException(ExceptionType.CONCURRENCY_LIMIT_ERROR, "busy again"),
+            metadata(keys, [[31, 32, 33]]),
+        ]
+        await self.visitor.get_master_route_addrs(self.request)
+        reads = client.get_vit_cache_metadata.await_args_list
+        self.assertEqual([call.args[0] for call in reads], workers)
+        self.assertEqual(len({call.kwargs["deadline"] for call in reads}), 1)
+        *selections, pd = client.get_backend_role_addrs.await_args_list
+        self.assertEqual(len(selections), 3)
+        for call in selections:
+            self.assertTrue(call.kwargs["vit_only"])
+            self.assertEqual(call.kwargs["request_id"], self.request.request_id)
+            self.assertEqual(call.kwargs["cache_affinity_keys"], keys)
+        self.assertEqual(pd.kwargs["selected_vit"], statuses[-1])
+        self.assertEqual(pd.kwargs["seq_len"], 5)
+
+    async def test_hash_errors_stop_before_pd_at_the_retry_limit(self):
+        client = self.visitor.master_client
+        client.get_backend_role_addrs.side_effect = None
+        client.get_backend_role_addrs.return_value = FlexlbResponse(
+            role_addrs=[self.vit], result={"server_status": [self.status]}
+        )
+        for code, calls in (
+            (ExceptionType.CONCURRENCY_LIMIT_ERROR, 3),
+            (ExceptionType.UNSAFE_INPUT_CONTENT, 1),
+        ):
+            with self.subTest(code=code):
+                client.get_backend_role_addrs.reset_mock()
+                client.get_vit_cache_metadata.reset_mock()
+                errors = [
+                    FtRuntimeException(code, f"failure {i}") for i in range(calls)
+                ]
+                client.get_vit_cache_metadata.side_effect = errors
+                with self.assertRaises(FtRuntimeException) as raised:
+                    await self.visitor.get_master_route_addrs(self.request)
+                self.assertIs(raised.exception, errors[-1])
+                self.assertEqual(client.get_vit_cache_metadata.await_count, calls)
+                self.assertEqual(client.get_backend_role_addrs.await_count, calls)
+                self.assertTrue(
+                    all(
+                        call.kwargs["vit_only"]
+                        for call in client.get_backend_role_addrs.await_args_list
+                    )
+                )
+
     async def test_v41_route_keys_match_backend_canonical_tokens_and_identity(self):
         from rtp_llm.server.cache_key_routing import get_block_cache_keys
 
@@ -934,11 +993,12 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             async def GetMultimodalHashes(self, request, context):
                 payloads.append(request)
                 seen_headers.append(dict(context.invocation_metadata()))
-                if not request.HasField("inputs"):
+                probing = not request.HasField("inputs")
+                if probing and reject != "probe":
                     result = MultimodalHashResponsePB(worker_instance="epoch")
                     result.entries.add(key=keys[0], hash_hit=False)
                     return result
-                if reject:
+                if reject and (probing or reject != "probe"):
                     context.set_trailing_metadata(
                         (
                             (
@@ -989,6 +1049,14 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 await client.get_vit_cache_metadata(vit, keys, input=self.request)
             self.assertEqual(
                 raised.exception.exception_type, ExceptionType.CONCURRENCY_LIMIT_ERROR
+            )
+            reject = "probe"
+            previous_calls = len(payloads)
+            result = await client.get_vit_cache_metadata(vit, keys, input=self.request)
+            self.assertTrue(result["entries"][0]["hash_hit"])
+            self.assertEqual(
+                [request.HasField("inputs") for request in payloads[previous_calls:]],
+                [False, True],
             )
             reject = 2
             with self.assertRaises(FtRuntimeException) as malformed:
