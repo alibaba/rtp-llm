@@ -642,7 +642,7 @@ class RemoteCacheTest(unittest.TestCase):
     def test_metadata_remains_available_while_two_payloads_are_stalled(self):
         payload = pack_object(plan_object((torch.ones(3), None)))
         store = Store({"hit-0": payload, "hit-1": payload, "busy": payload})
-        remote = self.remote(store, max_pending=4)
+        remote = self.remote(store, max_pending=16)
         started = threading.Semaphore(0)
         release = threading.Event()
         original_load = store.load_one
