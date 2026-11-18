@@ -225,6 +225,7 @@ def _partial_replay(
     STATE_STRIDE: tl.constexpr,
     RECORD_STRIDE: tl.constexpr,
     TILE_V: tl.constexpr,
+    ACCEPT_STRIDE: tl.constexpr,
     IN_PLACE: tl.constexpr = False,
     CHECKPOINT_PERIOD: tl.constexpr = 0,
     CHECKPOINT_STRIDE: tl.constexpr = 0,
@@ -234,7 +235,7 @@ def _partial_replay(
     layer_head = tl.program_id(1)
     layer = layer_head // HEADS
     head = layer_head % HEADS
-    count = tl.load(ACCEPT + row)
+    count = tl.load(ACCEPT + row * ACCEPT_STRIDE)
     src = tl.load(READ + row)
     dst = src if IN_PLACE else tl.load(WRITE + row * QUERY)
     record = tl.load(RECORD_IDS + row)
@@ -314,6 +315,7 @@ def replay_partial_acceptance(stage: LinearDoubleBufferStage, accept: torch.Tens
         state.stride(0),
         records.stride(0),
         32,
+        ACCEPT_STRIDE=accept.stride(0),
         IN_PLACE=stage.in_place,
         CHECKPOINT_PERIOD=period,
         CHECKPOINT_STRIDE=stride,
