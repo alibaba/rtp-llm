@@ -991,14 +991,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
 
         // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
         // decode stream, so client output must come exclusively from pollStreamOutput().
-        std::optional<StreamState> observed_state;
-        const auto                 check_progress = [&] {
-            const auto state = stream->getStatus();
-            if (!observed_state || state != *observed_state) {
-                observed_state = state;
-                RpcMetricsCollector collector;
-                generate_context.reportMetrics(collector);
-            }
+        const auto check_progress = [&] {
             if (!prefill_caller_ctx) {
                 return FirstError::Snapshot{};
             }
@@ -1009,7 +1002,6 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             }
             return remote;
         };
-        // Also sample the Master-enqueued path, which has no Prefill RPC to poll.
         generate_context.error_status = pollStreamOutput(
             server_context, generate_context.request_key, response_writer, generate_context.getStream(), check_progress);
         prefill_cancel_guard.completed = generate_context.error_status.ok() && !server_context->IsCancelled()

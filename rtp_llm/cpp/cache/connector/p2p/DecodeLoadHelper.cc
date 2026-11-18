@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -17,22 +18,6 @@
 namespace rtp_llm {
 
 namespace {
-
-std::string formatGrpcHostPort(const std::string& host, uint32_t port) {
-    if (host.empty() || port == 0 || port > 65535) {
-        return "";
-    }
-    if (host.front() == '[' || host.back() == ']') {
-        if (host.front() == '[' && host.back() == ']') {
-            return host + ":" + std::to_string(port);
-        }
-        return "";
-    }
-    if (host.find(':') != std::string::npos) {
-        return "[" + host + "]:" + std::to_string(port);
-    }
-    return host + ":" + std::to_string(port);
-}
 
 struct WorkerAddrParts {
     std::string host;
