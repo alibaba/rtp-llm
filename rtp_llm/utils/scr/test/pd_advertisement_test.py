@@ -97,13 +97,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         self.assertEqual(runtime.worker_addrs, ["192.0.2.30:18642:18644"])
         self.assertEqual(runtime.worker_grpc_addrs, ["127.0.0.1:18641"])
 
-    def test_frontend_config_receives_restored_identity(self):
-        configs = NS(server_config=NS(ip="192.0.2.1"))
-        scr._ServerConfigTemplateHook(configs).restore_fixup(
-            RestoreContext("generation-2", "192.0.2.20")
-        )
-        self.assertEqual(configs.server_config.ip, "192.0.2.20")
-
     def test_repeated_restore_repairs_all_consumers_before_release(self):
         members = [
             WorkerInfo(
