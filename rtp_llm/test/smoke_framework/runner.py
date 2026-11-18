@@ -148,85 +148,96 @@ def _run_smoke_test(test_name: str, test_config: Mapping[str, Any]) -> None:
         local_rel_path = common_def.REL_PATH
 
     env_args = _build_env_args(smoke_args, envs)
-    _configure_optional_internal_env(test_config)
 
     _env_keys_set: list = []
-    if isinstance(env_args, list):
-        for env_str in env_args:
-            if "=" in env_str:
-                key, value = env_str.split("=", 1)
-                _env_keys_set.append((key, os.environ.get(key)))
-                os.environ[key] = value
-
-    gpu_count = get_gpu_count(test_config)
-    for k in ("GPU_COUNT", "WORLD_SIZE"):
-        if k not in os.environ:
-            _env_keys_set.append((k, None))
-    os.environ.setdefault("GPU_COUNT", str(gpu_count))
-    os.environ.setdefault("WORLD_SIZE", str(gpu_count))
-
-    logging.info("cwd: %s test_name: %s envs: %s", os.getcwd(), test_name, env_args)
-
-    # 12 of 207 smoke task_info files are JSONC (start with `//` header comments).
-    # Match legacy entry.py behavior: prefer json5 (handles comments), fall back
-    # to stdlib json. Without this, parsing fails with "Expecting value: line 1
-    # column 1" because stdlib json doesn't accept `//` comments.
-    with open(os.path.join(local_rel_path, task_info_path), "r") as f:
+    try:
+        before_optional = dict(os.environ)
         try:
-            import json5
+            _configure_optional_internal_env(test_config)
+        finally:
+            for key in before_optional.keys() | os.environ.keys():
+                if before_optional.get(key) != os.environ.get(key):
+                    _env_keys_set.append((key, before_optional.get(key)))
+        if isinstance(env_args, list):
+            for env_str in env_args:
+                if "=" in env_str:
+                    key, value = env_str.split("=", 1)
+                    _env_keys_set.append((key, os.environ.get(key)))
+                    os.environ[key] = value
 
-            x = json5.load(f)
-        except ImportError:
-            x = json.load(f)
-    # Temporarily update common_def.REL_PATH so resolve_prompt_refs (and
-    # any other code that reads it) uses the per-test data root.
-    saved_rel_path = common_def.REL_PATH
-    common_def.REL_PATH = local_rel_path
-    # Clear prompt cache so it reloads from the correct data tree.
-    import rtp_llm.test.smoke.utils as _smoke_utils
-    _smoke_utils._PROMPT_CACHE = None
-    try:
-        if "query_result" in x:
-            x["query_result"] = [resolve_prompt_refs(qr) for qr in x["query_result"]]
-    finally:
-        common_def.REL_PATH = saved_rel_path
-    task_info = TaskInfo(**x, taskinfo_rel_path=os.path.join(local_rel_path, task_info_path))
+        gpu_count = get_gpu_count(test_config)
+        for k in ("GPU_COUNT", "WORLD_SIZE"):
+            if k not in os.environ:
+                _env_keys_set.append((k, None))
+        os.environ.setdefault("GPU_COUNT", str(gpu_count))
+        os.environ.setdefault("WORLD_SIZE", str(gpu_count))
 
-    runner_class = get_runner_type(smoke_args, envs)
-    logging.info("runner_class: %s", str(runner_class))
+        logging.info("cwd: %s test_name: %s envs: %s", os.getcwd(), test_name, env_args)
 
-    # kvcm_config: legacy `entry.py` had a separate `--kvcm-envs` arg; under
-    # pytest dispatch, parse the same KVCM-control keys out of `envs` and
-    # forward to CaseRunner so RemoteKVCMServer.start_server() sees
-    # ENABLE_DEBUG_SERVICE / KVCM_LOG_LEVEL / STORAGE_CONFIG /
-    # INSTANCE_GROUP_CONFIG / TEST_*_FAILURE etc. Without this the kvcm spawns
-    # with enable_debug_service=false and fault-injection cases
-    # (remote_cache_match_fail / write_start_fail / write_finish_fail) can't
-    # trigger their failure paths → COMPARE_FAILED on PR 537 run 39175306.
-    kvcm_config: Dict[str, str] = {}
-    if isinstance(envs, list):
-        for env_str in envs:
-            if "=" in env_str:
-                k, v = env_str.split("=", 1)
-                kvcm_config[k] = v
+        # 12 of 207 smoke task_info files are JSONC (start with `//` header comments).
+        # Match legacy entry.py behavior: prefer json5 (handles comments), fall back
+        # to stdlib json. Without this, parsing fails with "Expecting value: line 1
+        # column 1" because stdlib json doesn't accept `//` comments.
+        with open(os.path.join(local_rel_path, task_info_path), "r") as f:
+            try:
+                import json5
 
-    runner_params: Dict[str, Any] = {
-        "task_info": task_info,
-        "env_args": env_args,
-        "gpu_card": gpu_card,
-        "smoke_args": smoke_args,
-        "kvcm_config": kvcm_config,
-    }
+                x = json5.load(f)
+            except ImportError:
+                x = json.load(f)
+        # Temporarily update common_def.REL_PATH so resolve_prompt_refs (and
+        # any other code that reads it) uses the per-test data root.
+        saved_rel_path = common_def.REL_PATH
+        common_def.REL_PATH = local_rel_path
+        # Clear prompt cache so it reloads from the correct data tree.
+        import rtp_llm.test.smoke.utils as _smoke_utils
 
-    for param in ("sleep_time_qr", "kill_remote", "concurrency_test"):
-        if param in test_config:
-            runner_params[param] = test_config[param]
+        _smoke_utils._PROMPT_CACHE = None
+        try:
+            if "query_result" in x:
+                x["query_result"] = [
+                    resolve_prompt_refs(qr) for qr in x["query_result"]
+                ]
+        finally:
+            common_def.REL_PATH = saved_rel_path
+        task_info = TaskInfo(
+            **x, taskinfo_rel_path=os.path.join(local_rel_path, task_info_path)
+        )
 
-    # prompt_batch queries are routed to /batch_infer per-query in CaseRunner.
-    # Keep the server environment identical to the legacy Bazel smoke contract.
+        runner_class = get_runner_type(smoke_args, envs)
+        logging.info("runner_class: %s", str(runner_class))
 
-    runner = runner_class(**runner_params)
-    try:
+        # kvcm_config: legacy `entry.py` had a separate `--kvcm-envs` arg; under
+        # pytest dispatch, parse the same KVCM-control keys out of `envs` and
+        # forward to CaseRunner so RemoteKVCMServer.start_server() sees
+        # ENABLE_DEBUG_SERVICE / KVCM_LOG_LEVEL / STORAGE_CONFIG /
+        # INSTANCE_GROUP_CONFIG / TEST_*_FAILURE etc. Without this the kvcm spawns
+        # with enable_debug_service=false and fault-injection cases
+        # (remote_cache_match_fail / write_start_fail / write_finish_fail) can't
+        # trigger their failure paths → COMPARE_FAILED on PR 537 run 39175306.
+        kvcm_config: Dict[str, str] = {}
+        if isinstance(envs, list):
+            for env_str in envs:
+                if "=" in env_str:
+                    k, v = env_str.split("=", 1)
+                    kvcm_config[k] = v
+
+        runner_params: Dict[str, Any] = {
+            "task_info": task_info,
+            "env_args": env_args,
+            "gpu_card": gpu_card,
+            "smoke_args": smoke_args,
+            "kvcm_config": kvcm_config,
+        }
+
+        for param in ("sleep_time_qr", "kill_remote", "concurrency_test"):
+            if param in test_config:
+                runner_params[param] = test_config[param]
+
+        # prompt_batch queries are routed to /batch_infer per-query in CaseRunner.
+        # Keep the server environment identical to the legacy Bazel smoke contract.
+
+        runner = runner_class(**runner_params)
         task_states = runner.run()
         logging.info("raw info: %s", str(task_states))
         assert task_states.ret is True, (

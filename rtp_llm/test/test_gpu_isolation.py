@@ -22,33 +22,44 @@ from conftest import _xdist_gpu_slot, pytest_configure_node, pytest_testnodedown
 
 @pytest.mark.multi_arch_cuda
 def test_xdist_replacement_reuses_logical_gpu_slot():
-    """gw4 replaces gw0 in a four-worker run; it is not a fifth GPU user."""
-    assert _xdist_gpu_slot(worker_index=4, worker_count=4, slot_count=4) == 0
-    assert _xdist_gpu_slot(worker_index=7, worker_count=4, slot_count=4) == 3
+    assert _xdist_gpu_slot(worker_index=2, worker_count=4, slot_count=4) == 2
+    with pytest.raises(ValueError, match="controller-assigned"):
+        _xdist_gpu_slot(worker_index=4, worker_count=4, slot_count=4)
 
 
 @pytest.mark.multi_arch_cuda
 def test_xdist_controller_counts_logical_slots_not_replacements():
+    from unittest.mock import Mock
+
     config = SimpleNamespace()
 
-    def node(worker_id, workeroutput=None):
+    def node(worker_id):
+        channel = Mock()
+        channel.receive.side_effect = lambda **kw: channel.send.call_args.args[0]
+        gateway = Mock(id=worker_id)
+        gateway.spec.popen = True
+        gateway.remote_exec.return_value = channel
         return SimpleNamespace(
             config=config,
-            gateway=SimpleNamespace(id=worker_id),
+            gateway=gateway,
             workerinput={"workercount": 4},
-            workeroutput=workeroutput or {},
+            workeroutput={},
         )
 
-    pytest_configure_node(node("gw0"))
-    pytest_configure_node(node("gw4"))
+    nodes = [node(f"gw{i}") for i in range(4)]
+    for worker in nodes:
+        pytest_configure_node(worker)
+    # gw2 fails first; gw4 must inherit slot 2, while gw0 still owns slot 0.
+    nodes[2].workeroutput = {"rtp_gpu_cvd": "2", "rtp_gpu_slot": 2}
+    pytest_testnodedown(nodes[2], error=None)
+    replacement = node("gw4")
+    pytest_configure_node(replacement)
+    assert replacement.workerinput["rtp_gpu_slot"] == 2
+    assert config._rtp_gpu_slot_allocations["gw0"] == 0
     assert config._rtp_expected_gpu_workers == 4
-
-    pytest_testnodedown(
-        node("gw4", {"rtp_gpu_cvd": "0", "rtp_gpu_slot": 0}), error=None
-    )
-    assert config._rtp_worker_gpu_records == {
-        0: {"cvd": "0", "worker": "gw4"}
-    }
+    replacement.workeroutput = {"rtp_gpu_cvd": "2", "rtp_gpu_slot": 2}
+    pytest_testnodedown(replacement, error=None)
+    assert config._rtp_worker_gpu_records == {2: {"cvd": "2", "worker": "gw4"}}
 
 
 def _cvd_gpus():

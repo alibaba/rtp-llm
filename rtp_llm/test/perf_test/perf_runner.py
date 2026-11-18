@@ -56,41 +56,41 @@ def run_perf_test(test_name: str, test_config: dict, data_dir: Path):
     """
     # Track keys we set so we can restore them in finally — same pattern smoke uses.
     _env_keys_set: list = []
-    for k, v in test_config.get("envs", {}).items():
-        _env_keys_set.append((k, os.environ.get(k)))
-        os.environ[k] = v
-    _env_keys_set.append(("PERF_TEST_NAME", os.environ.get("PERF_TEST_NAME")))
-    os.environ["PERF_TEST_NAME"] = test_name
-
-    argv = _build_argv(test_name, test_config, data_dir)
-
-    baseline_path = None
-    baseline_rel = test_config.get("baseline", "")
-    if baseline_rel:
-        candidate = str(data_dir / baseline_rel)
-        if not os.path.exists(candidate):
-            raise AssertionError(
-                f"Baseline file configured but not found for {test_name}: {candidate}"
-            )
-        if os.path.getsize(candidate) == 0:
-            raise AssertionError(
-                f"Baseline file configured but is empty for {test_name}: {candidate}"
-            )
-        baseline_path = candidate
-
-    from rtp_llm.test.perf_test.batch_decode_test import main
-    from rtp_llm.test.perf_test.perf_config import parse_args, prepare_config
-    from rtp_llm.test.perf_test.test_entry import (
-        _print_new_golden,
-        _try_convert_model_path,
-        upload_results_to_oss,
-        validate_against_baseline,
-        write_summary_to_odps,
-        write_test_meta,
-    )
-
     saved_argv = sys.argv
     try:
+        for k, v in test_config.get("envs", {}).items():
+            _env_keys_set.append((k, os.environ.get(k)))
+            os.environ[k] = v
+        _env_keys_set.append(("PERF_TEST_NAME", os.environ.get("PERF_TEST_NAME")))
+        os.environ["PERF_TEST_NAME"] = test_name
+
+        argv = _build_argv(test_name, test_config, data_dir)
+
+        baseline_path = None
+        baseline_rel = test_config.get("baseline", "")
+        if baseline_rel:
+            candidate = str(data_dir / baseline_rel)
+            if not os.path.exists(candidate):
+                raise AssertionError(
+                    f"Baseline file configured but not found for {test_name}: {candidate}"
+                )
+            if os.path.getsize(candidate) == 0:
+                raise AssertionError(
+                    f"Baseline file configured but is empty for {test_name}: {candidate}"
+                )
+            baseline_path = candidate
+
+        from rtp_llm.test.perf_test.batch_decode_test import main
+        from rtp_llm.test.perf_test.perf_config import parse_args, prepare_config
+        from rtp_llm.test.perf_test.test_entry import (
+            _print_new_golden,
+            _try_convert_model_path,
+            upload_results_to_oss,
+            validate_against_baseline,
+            write_summary_to_odps,
+            write_test_meta,
+        )
+
         sys.argv = _try_convert_model_path(argv)
 
         args, remaining = parse_args()

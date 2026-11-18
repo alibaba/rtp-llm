@@ -467,6 +467,7 @@ class SiluMulMaskedTest(unittest.TestCase):
 
     @pytest.mark.manual
     @pytest.mark.perf
+    @unittest.skip("Manual performance test; excluded from unittest discovery")
     def test_silu_mul_masked_fp8_beam_search_skew_performance(self):
         """Manual H20 guard for the 96-expert production beam-search shape.
 

@@ -446,40 +446,42 @@ class DistributedServerTest(unittest.TestCase):
         stop_event = threading.Event()
 
         # rank1
-        stop_event = threading.Event()
         t = threading.Thread(
             target=regist_server, args=(py_env_configs, 1, 2, stop_event)
         )
         t.start()
 
-        # rank0
-        py_env_configs_0: PyEnvConfigs = setup_args(args=[])
-        setup_and_configure_server(py_env_configs_0)
-        stop_event = threading.Event()
-        py_env_configs_0.server_config.ip = socket.gethostbyname(
-            socket.gethostname()
-        )
-        set_parallelism_config(
-            py_env_configs_0.parallelism_config,
-            0,
-            py_env_configs_0.ffn_disaggregate_config,
-        )
-        py_env_configs_0.server_config.set_local_rank(
-            py_env_configs_0.parallelism_config.local_rank
-        )
-        py_env_configs_0.distribute_config.set_local_rank(
-            py_env_configs_0.parallelism_config.local_rank
-        )
-        server0 = ds.DistributedServer(
-            py_env_configs_0,
-            rank=0,
-            world_size=2,
-        )
-        server0.bootstrap()
+        try:
+            # rank0
+            py_env_configs_0: PyEnvConfigs = setup_args(args=[])
+            setup_and_configure_server(py_env_configs_0)
+            py_env_configs_0.server_config.ip = socket.gethostbyname(
+                socket.gethostname()
+            )
+            set_parallelism_config(
+                py_env_configs_0.parallelism_config,
+                0,
+                py_env_configs_0.ffn_disaggregate_config,
+            )
+            py_env_configs_0.server_config.set_local_rank(
+                py_env_configs_0.parallelism_config.local_rank
+            )
+            py_env_configs_0.distribute_config.set_local_rank(
+                py_env_configs_0.parallelism_config.local_rank
+            )
+            server0 = ds.DistributedServer(
+                py_env_configs_0,
+                rank=0,
+                world_size=2,
+            )
+            server0.bootstrap()
 
-        assert len(server0._world_info.members) == 2
-        assert server0._world_info.master is not None
-        stop_event.set()
+            assert len(server0._world_info.members) == 2
+            assert server0._world_info.master is not None
+        finally:
+            stop_event.set()
+            t.join(timeout=10)
+        assert not t.is_alive(), "registration thread did not stop"
 
 
 if __name__ == "__main__":

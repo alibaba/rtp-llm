@@ -627,6 +627,7 @@ class GetTopkRaggedCPTest(TestCase):
         )
 
     @skipIf(torch.cuda.device_count() < 2, "need 2 CUDA devices")
+    @pytest.mark.gpu(type="H20", count=2)
     def test_tp2_restore_and_topk_match_reference(self):
         context = mp.get_context("spawn")
         port_manager = PortManager()

@@ -72,15 +72,20 @@ def _clone_item(item, new_name: str):
     funcargs/fixtureinfo are reinitialized — `copy.copy` shares these
     and breaks setup (funcargs=None on the clone).
     """
+    from _pytest.unittest import TestCaseFunction
+
     cls = type(item)
-    return cls.from_parent(
+    replica = cls.from_parent(
         parent=item.parent,
-        name=new_name,
+        name=item.name if isinstance(item, TestCaseFunction) else new_name,
         callspec=getattr(item, "callspec", None),
         fixtureinfo=getattr(item, "_fixtureinfo", None),
         keywords=dict(item.keywords),
         originalname=getattr(item, "originalname", None),
     )
+
+    replica._nodeid = f"{item.parent.nodeid}::{new_name}"
+    return replica
 
 
 def pytest_collection_modifyitems(session, config, items: List):
