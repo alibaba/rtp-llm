@@ -80,7 +80,7 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             if (role != Role.prefill || !nativeBool(config, "reuse_cache", false)
                     || !nativeBool(config, "enable_device_cache", true))
                 throw new IllegalArgumentException("Mock Remote requires Prefill with local reuse enabled");
-            nativeInt(config, "mock.cache.remote.read.timeout.ms", 20, 1, 1000);
+            nativeInt(config, "mock.cache.remote.read.timeout.ms", 500, 1, 1000);
         }
         nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
         finalizeSettings((ObjectNode) config);
@@ -172,7 +172,7 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             result.put("enable_remote_cache", true)
                 .put("kvcm_instance_group", business.path("kvcm_instance_group").asText("default"))
                 .put("kvcm_instance_id_salt", business.path("kvcm_instance_id_salt").asText())
-                .put("mock.cache.remote.read.timeout.ms", nativeInt(business, "mock.cache.remote.read.timeout.ms", 20, 1, 1000));
+                .put("mock.cache.remote.read.timeout.ms", nativeInt(business, "mock.cache.remote.read.timeout.ms", 500, 1, 1000));
         }
         result.setAll((ObjectNode) compute.effectiveSettings());
         return result;

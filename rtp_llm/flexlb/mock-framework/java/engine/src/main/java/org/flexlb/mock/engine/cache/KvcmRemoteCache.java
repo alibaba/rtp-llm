@@ -70,7 +70,7 @@ public final class KvcmRemoteCache implements AutoCloseable {
         String instance = registration.path("instance_id").asText();
         String address = values.path("mock.cache.remote.endpoint").asText();
         boolean vip = RtpConfig.nativeBool(values, "kvcm_enable_vipserver", false);
-        var timeout = Duration.ofMillis(RtpConfig.nativeInt(values, "mock.cache.remote.read.timeout.ms", 20, 1, 1000));
+        var timeout = Duration.ofMillis(RtpConfig.nativeInt(values, "mock.cache.remote.read.timeout.ms", 500, 1, 1000));
         var endpoint = address.isBlank()
             ? KvcmDiscovery.discover(values.path(vip ? "kvcm_vipserver_domain" : "kvcm_server_address").asText(), instance, vip)
             : KvcmDiscovery.direct(URI.create(address));

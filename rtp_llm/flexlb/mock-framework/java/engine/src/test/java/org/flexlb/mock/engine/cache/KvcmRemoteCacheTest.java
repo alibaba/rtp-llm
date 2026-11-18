@@ -36,7 +36,7 @@ class KvcmRemoteCacheTest {
         assertNotEquals(registration.path("instance_id"), KvcmRemoteCache.registration(config(), Map.of()).path("instance_id"));
     }
 
-    @Test void transientReadFailureDoesNotDisableFollowingRemoteLookup() throws Exception {
+    @Test void transientReadFailureDoesNotDisableDelayedFollowingRemoteLookup() throws Exception {
         var json = new ObjectMapper();
         var calls = new java.util.concurrent.atomic.AtomicInteger();
         var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
@@ -49,7 +49,11 @@ class KvcmRemoteCacheTest {
                 else if (calls.incrementAndGet() == 1) {
                     exchange.sendResponseHeaders(503, -1);
                     return;
-                } else response.put("cache_location_len", "1");
+                } else {
+                    try { Thread.sleep(80); }
+                    catch (InterruptedException error) { Thread.currentThread().interrupt(); return; }
+                    response.put("cache_location_len", "1");
+                }
                 byte[] bytes = json.writeValueAsBytes(response);
                 exchange.sendResponseHeaders(200, bytes.length);
                 exchange.getResponseBody().write(bytes);
@@ -59,8 +63,7 @@ class KvcmRemoteCacheTest {
         var root = root();
         ((ObjectNode) root.path("component").path("config"))
             .put("enable_remote_cache", true).put("reuse_cache", true)
-            .put("mock.cache.remote.endpoint", "http://127.0.0.1:" + server.getAddress().getPort())
-            .put("mock.cache.remote.read.timeout.ms", 1000);
+            .put("mock.cache.remote.endpoint", "http://127.0.0.1:" + server.getAddress().getPort());
         var config = RtpConfig.load(root);
         try (var cache = new KvCacheManager(2, 20, 0);
              var remote = KvcmRemoteCache.start(config, cache, new org.flexlb.mock.metrics.EventMetrics("prefill"))) {
