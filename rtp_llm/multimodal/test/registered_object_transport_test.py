@@ -8,13 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+
 from rtp_llm.multimodal.kvcm.registered_transport import (
     RegisteredObjectTransport,
     RegisteredTransportPool,
     RegisteredTransportUnavailableError,
     _enable_sync_memops,
 )
-from torch.utils._python_dispatch import TorchDispatchMode
 
 
 class CudaRdmaSyncMemopsTest(unittest.TestCase):
@@ -228,7 +229,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         pool = object.__new__(RegisteredTransportPool)
         pool._condition = threading.Condition()
         pool._slots = [slot]
-        pool._in_use = set()
+        pool._in_use = {}
         pool._accepting = True
         pool._closed = False
         pool._gc_stop = threading.Event()
@@ -249,7 +250,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         pool._gc_tick()
         self.assertTrue(slot.quarantined)
         slot._quarantine_started -= 2
-        pool._in_use.add(slot)
+        pool._in_use[slot] = False
         pool._gc_tick()
         self.assertTrue(slot.quarantined)
         pool.release(slot)

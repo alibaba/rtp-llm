@@ -59,6 +59,7 @@ class VitResourceConfigTest(unittest.TestCase):
                     "enable": True,
                     "namespace": "model@revision/processor@revision",
                     "gdr_enable": False,
+                    "gdr_num": 4,
                     "audit": True,
                     "read_timeout_ms": 1000,
                 },
@@ -74,6 +75,7 @@ class VitResourceConfigTest(unittest.TestCase):
         self.assertTrue(config.mm_remote_cache_enable)
         self.assertTrue(config.mm_remote_cache_audit)
         self.assertFalse(config.mm_remote_cache_gdr_enable)
+        self.assertEqual(config.mm_remote_cache_gdr_num, 4)
         self.assertEqual(config.mm_remote_cache_read_timeout_ms, 1000)
         self.assertEqual(config.mm_remote_cache_max_pending, 8)
 
@@ -83,6 +85,7 @@ class VitResourceConfigTest(unittest.TestCase):
             {"MM_EMBEDDING_CACHE_CONFIG": '{"local":{"cpu_max_bytes":123}}'},
         )
         self.assertEqual(config.mm_cache_cpu_max_bytes, 0)
+        self.assertEqual(config.mm_remote_cache_gdr_num, 1)
 
     def test_embedding_json_rejects_bad_types_typos_and_duplicate_keys(self):
         for value in (
@@ -94,6 +97,10 @@ class VitResourceConfigTest(unittest.TestCase):
             '{"local":{"cpu_max_bytes":false}}',
             '{"remote":{"enable":1}}',
             '{"remote":{"max_pending":0}}',
+            '{"remote":{"gdr_num":0}}',
+            '{"remote":{"gdr_num":-1}}',
+            '{"remote":{"gdr_num":true}}',
+            '{"remote":{"gdr_num":1.5}}',
             '{"local":{"cpu_max_bytes":-1}}',
             '{"remote":{"namespace":" "}}',
             '{"remote":{},"remote":{}}',

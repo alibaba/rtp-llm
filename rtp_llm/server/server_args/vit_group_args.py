@@ -116,6 +116,7 @@ _EMBEDDING_CACHE_FIELDS = {
         "enable": ("mm_remote_cache_enable", bool, None),
         "namespace": ("mm_remote_cache_namespace", str, None),
         "gdr_enable": ("mm_remote_cache_gdr_enable", bool, None),
+        "gdr_num": ("mm_remote_cache_gdr_num", int, 1),
         "audit": ("mm_remote_cache_audit", bool, None),
         "read_timeout_ms": ("mm_remote_cache_read_timeout_ms", int, 1),
         "write_timeout_ms": ("mm_remote_cache_write_timeout_ms", int, 1),

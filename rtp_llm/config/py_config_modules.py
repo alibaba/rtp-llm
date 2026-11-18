@@ -365,6 +365,7 @@ class VitConfig:
         self.mm_remote_cache_enable: bool = False
         # None retains legacy env compatibility when JSON omits these switches.
         self.mm_remote_cache_gdr_enable: Optional[bool] = None
+        self.mm_remote_cache_gdr_num: int = 1
         self.mm_remote_cache_audit: Optional[bool] = None
         self.mm_remote_cache_namespace: str = ""
         self.mm_remote_cache_write_timeout_ms: int = 1000
@@ -494,6 +495,7 @@ class VitConfig:
             f"mm_remote_cache_write_timeout_ms: {self.mm_remote_cache_write_timeout_ms}\n"
             f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"
             f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
+            f"mm_remote_cache_gdr_num: {self.mm_remote_cache_gdr_num}\n"
             f"mm_remote_cache_max_pending: {self.mm_remote_cache_max_pending}\n"
             f"mm_remote_cache_read_timeout_ms: {self.mm_remote_cache_read_timeout_ms}\n"
             f"mm_remote_cache_quarantine_ttl_seconds: {self.mm_remote_cache_quarantine_ttl_seconds}\n"

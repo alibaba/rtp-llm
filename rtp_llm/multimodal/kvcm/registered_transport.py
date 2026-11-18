@@ -14,6 +14,7 @@ import uuid
 from contextlib import ExitStack, contextmanager, nullcontext
 
 import torch
+
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
@@ -459,8 +460,8 @@ class RegisteredTransportPool:
         quarantine_ttl_seconds=300,
         observe_hold=None,
     ):
-        if slots not in (1, 2):
-            raise ValueError("expected one or two registered clients")
+        if type(slots) is not int or slots <= 0:
+            raise ValueError("slots must be a positive integer")
         if type(quarantine_ttl_seconds) is not int or quarantine_ttl_seconds <= 0:
             raise ValueError("quarantine_ttl_seconds must be a positive integer")
         self._quarantine_ttl_seconds = quarantine_ttl_seconds
@@ -470,7 +471,7 @@ class RegisteredTransportPool:
         self._accepting = True
         self._closed = False
         self._slots = []
-        self._in_use = set()
+        self._in_use = {}  # slot -> whether the lease is for a write
         try:
             for _ in range(slots):
                 self._slots.append(
@@ -557,15 +558,24 @@ class RegisteredTransportPool:
                 return slot.object_size(key, **kwargs)
         return None
 
-    def acquire(self, *, wait=False):
-        """Reads try once. Only background writers wait for an active lease."""
+    def acquire(self, *, for_write=False):
+        """Reads try once. Background writers wait for a lease."""
         with self._condition:
             while self._accepting and not self.quarantined:
-                for slot in self._slots:
-                    if not slot.quarantined and slot not in self._in_use:
-                        self._in_use.add(slot)
+                healthy = [slot for slot in self._slots if not slot.quarantined]
+                # A multi-slot pool reserves one healthy slot for read leases.
+                if for_write and len(self._slots) > 1:
+                    active_writes = sum(
+                        self._in_use.get(slot, False) for slot in healthy
+                    )
+                    if active_writes >= len(healthy) - 1:
+                        self._condition.wait()
+                        continue
+                for slot in healthy:
+                    if slot not in self._in_use:
+                        self._in_use[slot] = for_write
                         return slot
-                if not wait:
+                if not for_write:
                     break
                 self._condition.wait()
         return None
@@ -577,7 +587,7 @@ class RegisteredTransportPool:
 
     def release(self, slot):
         with self._condition:
-            self._in_use.remove(slot)
+            self._in_use.pop(slot)
             self._condition.notify_all()
 
     def close(self):

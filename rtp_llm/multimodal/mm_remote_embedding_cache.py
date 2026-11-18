@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import torch
+
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
@@ -214,6 +215,7 @@ class MMRemoteEmbeddingCache:
                     registered_factory,
                     max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
                     device=device,
+                    slots=getattr(vit_config, "mm_remote_cache_gdr_num", 1),
                     observe_stage=cls._observe_stage,
                     quarantine_ttl_seconds=getattr(
                         vit_config, "mm_remote_cache_quarantine_ttl_seconds", 300
@@ -867,7 +869,7 @@ class MMRemoteEmbeddingCache:
             failure_stage = "client_acquire"
             try:
                 if self._gdr_pool is not None:
-                    slot = self._gdr_pool.acquire(wait=True)
+                    slot = self._gdr_pool.acquire(for_write=True)
                 queue_ms = (time.perf_counter() - queued_at) * 1000
                 self._report_queue_wait("write", queued_at)
                 if self._gdr_pool is not None and slot is None:

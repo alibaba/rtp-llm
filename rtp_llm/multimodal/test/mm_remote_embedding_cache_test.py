@@ -1,15 +1,16 @@
 import concurrent.futures
-from enum import Enum
 import json
 import os
 import threading
 import time
 import unittest
 import weakref
+from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
@@ -151,8 +152,9 @@ class RemoteCacheTest(unittest.TestCase):
         )
 
     def test_lookup_failure_keeps_sanitized_service_or_grpc_cause(self):
-        import grpc
         from unittest.mock import Mock
+
+        import grpc
 
         from rtp_llm.multimodal.kvcm.lookup import KvMetaLookup, KvMetaLookupError
 
@@ -451,7 +453,7 @@ class RemoteCacheTest(unittest.TestCase):
         )
 
     def test_two_slow_writes_preserve_distinct_results_without_blocking_callers(self):
-        remote, slots = self.slot_cache()
+        remote, slots = self.slot_cache(3)
         results = [(torch.arange(8) + i, None) for i in range(2)]
         slots[0].objects["hit"] = pack_object(
             plan_object(
@@ -483,17 +485,51 @@ class RemoteCacheTest(unittest.TestCase):
                 packed.wait(5)  # Both background writers hold independent slots.
                 for value, _ in results:
                     value.zero_()
-                self.assertIsNone(remote.load("hit"))
-                self.assertIsNone(remote.load("hit"))
-                self.assertEqual(remote.stats()["inflight_tasks"], 2)
+                torch.testing.assert_close(remote.load("hit")[0], torch.arange(8))
             finally:
                 resume.set()
-            for slot in slots:
-                self.assertTrue(slot.saved.wait(2))
             remote._write_executor.shutdown(wait=True)
             for i in range(2):
                 torch.testing.assert_close(remote.load(str(i))[0], torch.arange(8) + i)
-        self.assertEqual(remote.stats()["miss"], 2)
+        self.assertEqual(remote.stats()["write_success"], 2)
+
+    def test_two_slots_keep_capacity_for_reads_while_second_write_waits(self):
+        remote, (write_slot, read_slot) = self.slot_cache()
+        value = torch.arange(8)
+        result = (value, None)
+        read_slot.objects["hit"] = pack_object(
+            plan_object(
+                {"cache_key": "hit", "version": 1, "result": result, "greennet": None}
+            )
+        )
+        packing, waiting, resume = (threading.Event() for _ in range(3))
+        condition = remote._gdr_pool._condition
+        original_wait = condition.wait
+
+        def slow_pack(plan):
+            packing.set()
+            if not resume.wait(5):
+                raise TimeoutError("pack did not resume")
+            return pack_object(plan)
+
+        def observe_wait(timeout=None):
+            waiting.set()
+            return original_wait(timeout)
+
+        with patch.object(write_slot, "pack", side_effect=slow_pack), patch.object(
+            condition, "wait", side_effect=observe_wait
+        ):
+            try:
+                remote.submit_result("one", result)
+                self.assertTrue(packing.wait(2))
+                remote.submit_result("two", result)
+                self.assertTrue(waiting.wait(2))
+                torch.testing.assert_close(remote.load("hit")[0], value)
+            finally:
+                resume.set()
+                remote._write_executor.shutdown(wait=True)
+        self.assertEqual(remote.stats()["write_success"], 2)
+        self.assertFalse(read_slot.saved.is_set())
 
     def test_caller_timeout_keeps_only_the_active_read_slot(self):
         remote, slots = self.slot_cache()
@@ -2371,6 +2407,7 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
         import io
 
         from PIL import Image
+
         from rtp_llm.config.generate_config import GenerateConfig
         from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
         from rtp_llm.openai.renderers.deepseekv41_renderer import _image_records_to_urls
@@ -2843,6 +2880,34 @@ class DownloadedImageCacheTest(unittest.TestCase):
 
 
 class GdrStartupLifetimeTest(unittest.TestCase):
+    def test_startup_creates_the_configured_number_of_registered_slots(self):
+        import tempfile
+        from unittest.mock import Mock
+
+        slots = [
+            Mock(instance_id="test", instance_group="test", quarantined=False)
+            for _ in range(4)
+        ]
+        vit = VitConfig()
+        vit.mm_remote_cache_namespace = "immutable-model-revision"
+        vit.mm_remote_cache_gdr_enable = True
+        vit.mm_remote_cache_gdr_num = len(slots)
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
+            side_effect=slots,
+        ) as constructor, patch(
+            "rtp_llm.multimodal.kvcm._config.RtpKvMetaObjectClientConfig.from_env",
+            return_value=object(),
+        ):
+            model = SimpleNamespace(
+                model_type="test", compute_dtype="bf16", ckpt_path=directory
+            )
+            cache = MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
+            cache.close()
+        self.assertEqual(constructor.call_count, len(slots))
+        for slot in slots:
+            slot.close.assert_called_once()
+
     def test_startup_client_creation_registers_before_first_report(self):
         from unittest import mock
 
