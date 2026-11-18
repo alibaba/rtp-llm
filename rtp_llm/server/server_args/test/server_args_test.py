@@ -122,6 +122,47 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class DynamicDecodeArgumentsTest(TestCase):
+    def test_dynamic_decode_backend_parser_and_default(self):
+        from rtp_llm.server.server_args import server_args
+
+        enabled = server_args.setup_args(["--enable_dynamic_decode_backend", "1"])
+        disabled = server_args.setup_args([])
+        self.assertTrue(enabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+        self.assertFalse(disabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+
+    def test_gate_threshold_registration_precedence_and_lazy_parsing(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args([]).py_hw_kernel_config
+            self.assertIsNone(config.dyn_decode_gate_thresholds)
+        with patch.dict(
+            os.environ,
+            {
+                "DYN_DECODE_GATE_THRESHOLDS": "invalid-json",
+                "ENABLE_DYNAMIC_DECODE_BACKEND": "0",
+            },
+            clear=True,
+        ):
+            config = server_args.setup_args([]).py_hw_kernel_config
+            self.assertFalse(config.enable_dynamic_decode_backend)
+            self.assertEqual(config.dyn_decode_gate_thresholds, "invalid-json")
+            restored = pickle.loads(pickle.dumps(config))
+            self.assertEqual(restored.dyn_decode_gate_thresholds, "invalid-json")
+            config = server_args.setup_args(
+                ["--dyn_decode_gate_thresholds", "cli-json"]
+            ).py_hw_kernel_config
+            self.assertEqual(config.dyn_decode_gate_thresholds, "cli-json")
+        with patch.dict(os.environ, {"DYN_DECODE_GATE_THRESHOLDS": ""}, clear=True):
+            self.assertEqual(
+                server_args.setup_args(
+                    []
+                ).py_hw_kernel_config.dyn_decode_gate_thresholds,
+                "",
+            )
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

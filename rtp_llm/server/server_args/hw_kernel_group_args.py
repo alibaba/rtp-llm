@@ -112,10 +112,26 @@ def validate_hw_kernel_group_args(
 
 
 def init_hw_kernel_group_args(parser, hw_kernel_config):
+    hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
+    hw_kernel_group.add_argument(
+        "--enable_dynamic_decode_backend",
+        env_name="ENABLE_DYNAMIC_DECODE_BACKEND",
+        bind_to=(hw_kernel_config, "enable_dynamic_decode_backend"),
+        type=str2bool,
+        default=False,
+        help="Validate and benchmark decode attention backends before graph capture",
+    )
+    hw_kernel_group.add_argument(
+        "--dyn_decode_gate_thresholds",
+        env_name="DYN_DECODE_GATE_THRESHOLDS",
+        bind_to=(hw_kernel_config, "dyn_decode_gate_thresholds"),
+        type=str,
+        default=None,
+        help="Complete inline JSON thresholds, parsed only when the dynamic decode gate runs",
+    )
     ##############################################################################################################
     # 硬件/Kernel 特定优化
     ##############################################################################################################
-    hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
 
     hw_kernel_group.add_argument(
         "--enable_cuda_graph",
