@@ -72,7 +72,42 @@ class FixedRoleTest(unittest.TestCase):
             self.assertEqual(int(env["DSV41_SM90_DECODE_GRAPH_MAX_ROWS"]), max(batches))
             self.assertEqual(env["DSV41_SM90_DECODE_GRAPH"], "1")
             self.assertEqual(env["ROLE_TYPE"], "DECODE")
-            self.assertGreater(output, 1)
+            self.assertEqual(
+                (batches, output),
+                ((1, 4, 16), 512) if mode == "perf" else ((1,), 32),
+            )
+
+    def test_kv_budgets_cover_matrix_after_fixed_pool_reservations(self):
+        # Regression geometry from the 40-layer 1017 SM90 checkpoint: byte KV
+        # rows are 584 wide, with each KV block aligned to 576 bytes.
+        def aligned(size):
+            return (size + 575) // 576 * 576
+
+        fixed_block_bytes = 40 * aligned(128 * 584) + 3 * 8192
+        full_block_bytes = (
+            3 * aligned(64 * 584)
+            + 3 * 64 * 132
+            + aligned(128 * 584)
+            + 128 * 132
+        )
+        for role in ("prefill", "decode"):
+            for mode in ("smoke", "perf"):
+                with self.subTest(role=role, mode=mode):
+                    options, _, batches, _ = recipe(role, mode, "/model", "/tokenizer")
+                    self.assertEqual(options["dsv4_fixed_pool_blocks"], 256)
+                    fixed_bytes = options["dsv4_fixed_pool_blocks"] * fixed_block_bytes
+                    full_blocks = (
+                        options["kv_cache_mem_mb"] * 1024**2 - fixed_bytes
+                    ) // full_block_bytes
+                    # Block zero is reserved; budget every local history up to
+                    # the advertised maximum, not only one 64K request.
+                    self.assertGreaterEqual(
+                        (full_blocks - 1) * 128, (max(LENGTHS) + 1024) * max(batches)
+                    )
+                    self.assertLessEqual(options["kv_cache_mem_mb"], 3072)
+                    self.assertGreaterEqual(
+                        options["dsv4_fixed_pool_blocks"] - 1, 3 * max(batches)
+                    )
 
     def test_prefetch_switch_is_not_overridden_by_recipe(self):
         for enabled in ("0", "1"):

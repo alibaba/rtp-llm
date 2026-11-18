@@ -70,6 +70,9 @@ def recipe(role, mode, checkpoint, tokenizer):
         "enable_cuda_graph": int(decode),
         "decode_capture_config": ",".join(map(str, local_batches)),
         "dsv4_fixed_pool_blocks": 256,
+        # Fixed blocks size SWA/state pools only. Budget FULL pools explicitly
+        # for 64K; decode perf retains up to 16 local histories concurrently.
+        "kv_cache_mem_mb": 3072 if decode and mode == "perf" else 1024,
         "reuse_cache": 0,
         "load_method": "scratch",
         "reserver_runtime_mem_mb": 32768,
