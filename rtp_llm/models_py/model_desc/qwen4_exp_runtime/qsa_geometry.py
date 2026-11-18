@@ -18,7 +18,12 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 
 from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
-from .step_metadata import cached_query_geometry, cached_step_value, tensor_signature
+from .step_metadata import (
+    cached_prefill_geometry,
+    cached_query_geometry,
+    cached_step_value,
+    tensor_signature,
+)
 
 
 def _draft_incremental_prefill_geometry(
@@ -103,9 +108,6 @@ def _draft_incremental_prefill_geometry(
             "prefix_lengths [B]"
         )
     host_prefixes = self.host_values(prefixes)
-    prefixes = prefixes.to(
-        device=device, dtype=torch.int64, non_blocking=True
-    ).contiguous()
     if any(value <= 0 if draft else value < 0 for value in host_prefixes):
         requirement = "nonzero" if draft else "non-negative"
         raise RuntimeError(
@@ -119,8 +121,6 @@ def _draft_incremental_prefill_geometry(
         )
 
     cu_seqlens = self.main_inputs.cu_seqlens_device
-    expected_cu = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-    expected_cu[1:] = torch.tensor(lengths, dtype=torch.int32, device=device).cumsum(0)
     if (
         tuple(cu_seqlens.shape) != (batch_size + 1,)
         or cu_seqlens.dtype != torch.int32
@@ -130,12 +130,6 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA draft incremental prefill cu_seqlens do not "
             "match input_lengths"
         )
-    checks.add(
-        (cu_seqlens != expected_cu).any(),
-        "qwen4_exp QSA draft incremental prefill cu_seqlens do not match input_lengths",
-    )
-    expected_cu_kv = torch.zeros_like(expected_cu)
-    visible_ends = prefixes + torch.tensor(lengths, dtype=torch.int64, device=device)
     host_visible_ends = [
         prefix + length for prefix, length in zip(host_prefixes, lengths)
     ]
@@ -148,7 +142,6 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA draft incremental prefill cumulative KV lengths "
             "exceed int32"
         )
-    expected_cu_kv[1:] = visible_ends.to(torch.int32).cumsum(0)
     cu_kv_seqlens = self.main_inputs.cu_kv_seqlens_device
     if (
         tuple(cu_kv_seqlens.shape) != (batch_size + 1,)
@@ -159,6 +152,14 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not "
             "provide device int32 [B + 1] metadata"
         )
+    geometry = cached_prefill_geometry(self, lengths, host_prefixes, ratio, device)
+    prefixes = geometry.prefixes
+    expected_cu = geometry.cu_seqlens
+    expected_cu_kv = geometry.cu_kv_seqlens
+    checks.add(
+        (cu_seqlens != expected_cu).any(),
+        "qwen4_exp QSA draft incremental prefill cu_seqlens do not match input_lengths",
+    )
     if draft_prefix_reuse:
         checks.add(
             (cu_kv_seqlens != expected_cu_kv).any()
@@ -172,12 +173,7 @@ def _draft_incremental_prefill_geometry(
         )
 
     prefix_values = host_prefixes
-    logical_positions = torch.cat(
-        [
-            torch.arange(prefix, prefix + length, device=device)
-            for prefix, length in zip(prefix_values, lengths)
-        ]
-    ).to(torch.int64)
+    logical_positions = geometry.logical_positions
     position_ids = self.main_inputs.combo_position_ids
     index_factor = int(rope_config.index_factor)
     if position_ids is None or int(position_ids.numel()) != token_count * index_factor:
@@ -259,15 +255,9 @@ def _draft_incremental_prefill_geometry(
         device=device,
     )
 
-    row_offsets = torch.arange(max(lengths), dtype=torch.int64, device=device)
-    visible_lengths = prefixes[:, None] + row_offsets[None, :] + 1
-    valid_rows = (
-        row_offsets[None, :]
-        < torch.tensor(lengths, dtype=torch.int64, device=device)[:, None]
-    )
-    visible_lengths = torch.where(valid_rows, visible_lengths, 0)
-    compressed_lengths = (visible_lengths // ratio).to(torch.int32)
-    final_compressed_lengths = (visible_ends // ratio).to(torch.int32)
+    visible_lengths = geometry.visible_lengths
+    compressed_lengths = geometry.compressed_lengths
+    final_compressed_lengths = geometry.final_compressed_lengths
     required_kv_columns = (
         final_compressed_lengths + kv_entries_per_block - 1
     ) // kv_entries_per_block
