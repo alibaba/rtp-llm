@@ -18,6 +18,8 @@ __all__ = [
     "fused_bias_add",
     "fused_bias_gelu",
     "fused_bias_gelu_quant_fp8",
+    "cutlass_scaled_mm_blockwise_sm120_fp8",
+    "has_cutlass_scaled_mm_blockwise_sm120_fp8",
     "fused_qk_rmsnorm",
     "FlashInferMlaAttnParams",
     "layernorm",
@@ -96,8 +98,23 @@ def fused_bias_gelu_quant_fp8(
     bias: torch.Tensor,
     output: torch.Tensor,
     scales: torch.Tensor,
+    add_bias: bool = True,
 ) -> None:
-    """Fused bias, exact GELU, and per-block FP8 UE8M0 quantization."""
+    """Fused optional bias, exact GELU, and per-block FP8 quantization."""
+
+def has_cutlass_scaled_mm_blockwise_sm120_fp8() -> bool:
+    ...
+
+def cutlass_scaled_mm_blockwise_sm120_fp8(
+    D: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    A_sf: torch.Tensor,
+    B_sf: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    use_gelu: bool = False,
+) -> None:
+    ...
 
 def fused_qk_rmsnorm(
     IO: torch.Tensor,
