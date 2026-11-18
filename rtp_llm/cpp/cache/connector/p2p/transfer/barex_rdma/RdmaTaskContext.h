@@ -34,7 +34,9 @@ public:
     ~RdmaStagingBufferPool();
 
     std::optional<HostStagingBlockPool::HostStagingBlockBatch>
-    mallocBatchWithBackoff(size_t count, std::chrono::milliseconds timeout);
+    mallocBatchWithBackoff(size_t count,
+                          std::chrono::milliseconds timeout,
+                          const std::shared_ptr<TransferTask>& task = nullptr);
     size_t strideBytes() const;
     size_t blockCount() const;
 
