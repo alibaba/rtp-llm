@@ -5,6 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
+import java.util.Map;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -24,13 +29,19 @@ import org.flexlb.mock.engine.scheduler.EngineScheduler.RemotePrefix;
 import org.flexlb.mock.metrics.EventMetrics;
 
 /**
- * Metadata-only Remote Cache backed by a dedicated KVCM instance with dummy storage.
+ * Shares metadata-only Remote Cache through a stable deployment identity and dummy storage.
+ * Registers the instance before reading or publishing; unavailable KVCM falls back to local compute.
  */
 public final class KvcmRemoteCache implements AutoCloseable {
+    private static final System.Logger LOG = System.getLogger(KvcmRemoteCache.class.getName());
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Duration WRITE_TIMEOUT = Duration.ofMillis(1500);
 
+    private final ObjectNode registration;
     private final String instance;
+
+    private volatile URI registeredEndpoint;
+
     private final Duration readTimeout;
     private final KvcmDiscovery endpoint;
     private final KvCacheManager local;
@@ -40,9 +51,10 @@ public final class KvcmRemoteCache implements AutoCloseable {
     private final ThreadPoolExecutor writer = new ThreadPoolExecutor(1, 1, 0, TimeUnit.SECONDS,
         new ArrayBlockingQueue<>(128), Thread.ofPlatform().daemon().name("mock-remote-writer").factory());
 
-    private KvcmRemoteCache(String instance, Duration readTimeout, KvcmDiscovery endpoint,
+    private KvcmRemoteCache(ObjectNode registration, Duration readTimeout, KvcmDiscovery endpoint,
                             KvCacheManager local, EventMetrics metrics) {
-        this.instance = instance;
+        this.registration = registration;
+        this.instance = registration.path("instance_id").asText();
         this.readTimeout = readTimeout;
         this.endpoint = endpoint;
         this.local = local;
@@ -54,7 +66,8 @@ public final class KvcmRemoteCache implements AutoCloseable {
     public static KvcmRemoteCache start(RtpConfig config, KvCacheManager local, EventMetrics metrics) {
         if (!config.remoteCache()) return null;
         var values = config.business();
-        String instance = values.path("mock.cache.remote.instance.id").asText();
+        var registration = registration(config, System.getenv());
+        String instance = registration.path("instance_id").asText();
         String address = values.path("mock.cache.remote.endpoint").asText();
         boolean vip = RtpConfig.nativeBool(values, "kvcm_enable_vipserver", false);
         var timeout = Duration.ofMillis(RtpConfig.nativeInt(values, "mock.cache.remote.read.timeout.ms", 20, 1, 1000));
@@ -62,7 +75,7 @@ public final class KvcmRemoteCache implements AutoCloseable {
             ? KvcmDiscovery.discover(values.path(vip ? "kvcm_vipserver_domain" : "kvcm_server_address").asText(), instance, vip)
             : KvcmDiscovery.direct(URI.create(address));
         try {
-            return new KvcmRemoteCache(instance, timeout, endpoint, local, metrics);
+            return new KvcmRemoteCache(registration, timeout, endpoint, local, metrics);
         } catch (RuntimeException | Error error) {
             endpoint.close();
             throw error;
@@ -77,7 +90,7 @@ public final class KvcmRemoteCache implements AutoCloseable {
         int start = local.localPrefixLength(keys);
         if (start == limit) return input;
         URI target = endpoint.current();
-        if (target == null || !reads.tryAcquire()) {
+        if (target == null || !target.equals(registeredEndpoint) || !reads.tryAcquire()) {
             metrics.increment("mock_remote_cache_read_skipped");
             return input;
         }
@@ -97,6 +110,7 @@ public final class KvcmRemoteCache implements AutoCloseable {
             Thread.currentThread().interrupt();
             return input;
         } catch (IOException | RuntimeException error) {
+            registeredEndpoint = null;
             metrics.increment("mock_remote_cache_read_failure");
             return input;
         } finally {
@@ -121,42 +135,51 @@ public final class KvcmRemoteCache implements AutoCloseable {
         http.shutdownNow();
     }
 
+    // All P replicas with the same deployment and cache layout share one instance, including after restart.
+    static ObjectNode registration(RtpConfig config, Map<String, String> env) {
+        var values = config.business();
+        String group = values.path("kvcm_instance_group").asText("default");
+        if (group.isBlank()) throw new IllegalArgumentException("Empty kvcm_instance_group");
+        var identity = JSON.createObjectNode().put("format", 1).put("instance_group", group)
+            .put("salt", values.path("kvcm_instance_id_salt").asText())
+            .put("biz", env.getOrDefault("BIZ_NAME", ""))
+            .put("deployment", env.getOrDefault("DEPLOYMENT_NAME", ""))
+            .put("model", values.path("model_name").asText("mock"))
+            .put("block_size", config.tokensPerCacheKey()).put("cp_size", config.cpSize())
+            .put("cache_key_hash_seed", config.cacheKeySeed()).put("image_token_id", config.imageToken());
+        String instance;
+        try {
+            instance = "mock_remote_" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(identity.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 unavailable", error);
+        }
+        var result = JSON.createObjectNode().put("instance_group", group).put("instance_id", instance)
+            .put("block_size", config.tokensPerCacheKey()).put("default_query_type", "QT_PREFIX_MATCH");
+        result.putObject("model_deployment").put("model_name", values.path("model_name").asText("mock"))
+            .put("dtype", "fp8").put("use_mla", false).put("tp_size", 1).put("dp_size", 1).put("pp_size", 1);
+        // Dummy storage tracks metadata only; 4096 is its logical per-block accounting unit, not real KV bytes.
+        result.putArray("location_spec_infos").addObject().put("name", "mock_kv").put("size", "4096");
+        return result;
+    }
+
     private void discover() {
         try {
-            endpoint.get();
-        } catch (RuntimeException error) {
+            ensureRegistered(endpoint.get());
+        } catch (IOException | RuntimeException error) {
             metrics.increment("mock_remote_cache_discovery_failure");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
         }
     }
 
-    private void write(List<Long> keys) {
-        try {
-            URI target = endpoint.get();
-            var start = post(target, "/api/startWriteCache", request(keys).put("write_timeout_seconds", 5), WRITE_TIMEOUT);
-            String session = start.path("write_session_id").asText(start.path("writeSessionId").asText());
-            if (!session.isBlank()) {
-                var finish = request(List.of()).put("write_session_id", session);
-                var locations = start.path("locations");
-                boolean dummy = true;
-                for (var location : locations) {
-                    String type = location.path("type").asText();
-                    if (!type.equals("6") && !type.equals("ST_DUMMY")) {
-                        dummy = false;
-                        break;
-                    }
-                }
-                finish.putObject("success_blocks").put("offset", dummy ? locations.size() : 0);
-                post(target, "/api/finishWriteCache", finish, WRITE_TIMEOUT);
-                if (!dummy) throw new IOException("Mock Remote requires a KVCM dummy storage candidate");
-            } else if (!start.path("locations").isEmpty()) {
-                throw new IOException("KVCM returned locations without a write session");
-            }
-            metrics.increment("mock_remote_cache_write_success");
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-        } catch (IOException | RuntimeException error) {
-            metrics.increment("mock_remote_cache_write_failure");
-        }
+    private void ensureRegistered(URI target) throws IOException, InterruptedException {
+        if (target.equals(registeredEndpoint)) return;
+        post(target, "/api/registerInstance", registration.deepCopy().put("trace_id", UUID.randomUUID().toString()), WRITE_TIMEOUT);
+        registeredEndpoint = target;
+        LOG.log(System.Logger.Level.INFO, "Remote cache registered: instance=" + instance
+            + " group=" + registration.path("instance_group").asText());
+        metrics.increment("mock_remote_cache_registration_success");
     }
 
     private JsonNode post(URI target, String path, ObjectNode request, Duration timeout)
@@ -182,6 +205,38 @@ public final class KvcmRemoteCache implements AutoCloseable {
         if (code.equals("9") || code.equals("SERVER_NOT_LEADER")) endpoint.invalidate(target);
         if (!code.equals("1") && !code.equals("OK")) throw new IOException("KVCM status " + code);
         return body;
+    }
+
+    private void write(List<Long> keys) {
+        try {
+            URI target = endpoint.get();
+            ensureRegistered(target);
+            var start = post(target, "/api/startWriteCache", request(keys).put("write_timeout_seconds", 5), WRITE_TIMEOUT);
+            String session = start.path("write_session_id").asText(start.path("writeSessionId").asText());
+            if (!session.isBlank()) {
+                var finish = request(List.of()).put("write_session_id", session);
+                var locations = start.path("locations");
+                boolean dummy = true;
+                for (var location : locations) {
+                    String type = location.path("type").asText();
+                    if (!type.equals("6") && !type.equals("ST_DUMMY")) {
+                        dummy = false;
+                        break;
+                    }
+                }
+                finish.putObject("success_blocks").put("offset", dummy ? locations.size() : 0);
+                post(target, "/api/finishWriteCache", finish, WRITE_TIMEOUT);
+                if (!dummy) throw new IOException("Mock Remote requires a KVCM dummy storage candidate");
+            } else if (!start.path("locations").isEmpty()) {
+                throw new IOException("KVCM returned locations without a write session");
+            }
+            metrics.increment("mock_remote_cache_write_success");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        } catch (IOException | RuntimeException error) {
+            registeredEndpoint = null;
+            metrics.increment("mock_remote_cache_write_failure");
+        }
     }
 
     private ObjectNode request(List<Long> keys) {

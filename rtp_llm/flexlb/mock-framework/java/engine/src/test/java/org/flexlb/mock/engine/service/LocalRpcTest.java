@@ -69,6 +69,7 @@ class LocalRpcTest {
     @Test void remoteReuseCrossesWorkersAndPreservesLocalCapacityAndMetrics() throws Exception {
         var json = new ObjectMapper();
         var published = ConcurrentHashMap.<String>newKeySet();
+        var registered = ConcurrentHashMap.<String>newKeySet();
         var pending = new ConcurrentHashMap<String, List<String>>();
         var failRead = new java.util.concurrent.atomic.AtomicBoolean();
         var server = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
@@ -78,7 +79,13 @@ class LocalRpcTest {
                 var result = json.createObjectNode();
                 result.putObject("header").putObject("status").put("code", "OK");
                 switch (exchange.getRequestURI().getPath()) {
+                    case "/api/registerInstance" -> {
+                        assertEquals(2, request.path("block_size").asInt());
+                        assertEquals("remote-test", request.path("instance_group").asText());
+                        registered.add(request.path("instance_id").asText());
+                    }
                     case "/api/getCacheLocationLen" -> {
+                        assertTrue(registered.contains(request.path("instance_id").asText()));
                         if (failRead.get()) {
                             exchange.sendResponseHeaders(503, -1);
                             return;
@@ -93,6 +100,7 @@ class LocalRpcTest {
                         result.put("cache_location_len", Integer.toString(hits));
                     }
                     case "/api/startWriteCache" -> {
+                        assertTrue(registered.contains(request.path("instance_id").asText()));
                         var keys = new ArrayList<String>();
                         for (var key : request.path("block_keys")) keys.add(key.asText());
                         String id = UUID.randomUUID().toString();
@@ -115,11 +123,17 @@ class LocalRpcTest {
         });
         server.start();
         var settings = Map.<String, Object>of("enable_remote_cache", true,
-            "mock.cache.remote.instance.id", "remote-test",
+            "kvcm_instance_group", "remote-test",
             "mock.cache.remote.endpoint", "http://127.0.0.1:" + server.getAddress().getPort(),
             "mock.cache.remote.read.timeout.ms", 1000);
         try (var first = LLMMockEngine.start(config("1", settings));
              var second = LLMMockEngine.start(config("1", settings))) {
+            for (var node : List.of(first, second)) {
+                await(() -> {
+                    try { return metrics(node).contains("mock_remote_cache_registration_success_total{"); }
+                    catch (Exception error) { throw new RuntimeException(error); }
+                });
+            }
             assertEquals(0, generate(first, 1).getTotalReuseLen());
             await(() -> published.size() == 2);
             assertEquals(0, second.cacheManager().itemCount());
@@ -127,6 +141,7 @@ class LocalRpcTest {
             var coldCapacity = second.cacheManager().snapshot(0, false);
             var restored = generate(second, 2);
             assertEquals(4, restored.getRemoteReuseLen());
+            assertEquals(1, registered.size());
             assertEquals(0, restored.getLocalReuseLen());
             assertEquals(4, restored.getTotalReuseLen());
             assertEquals(4, sample(metrics(second), "rtp_llm_stream_cache_remote_reuse_length_sum", ""));

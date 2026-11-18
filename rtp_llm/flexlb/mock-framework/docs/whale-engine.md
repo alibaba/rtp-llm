@@ -130,7 +130,7 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 
 先在专用 KVCM 中创建 `dummy` 存储（`root_path=memory://`）和独立 Remote 实例组。组内注册一个供所有 P 共用的实例，块大小使用逻辑键跨度，例如基础块 256、CP4 时为 1024。实例配置一个固定大小的 location spec。按「目标逻辑块数 × spec 字节数」配置实例组字节配额，并在组内设置 LRU、水位和回收周期。KVCM 进程资源和元数据存储容量需单独评估。
 
-只在 Prefill 设置 `ENABLE_REMOTE_CACHE=true`、`REUSE_CACHE=true` 和 `MOCK_CACHE_REMOTE_INSTANCE_ID`。Whale 使用 `RECO_ENABLE_VIPSERVER` / `RECO_VIPSERVER_DOMAIN` 发现该 KVCM。独立测试可显式设置 `MOCK_CACHE_REMOTE_ENDPOINT`（Meta HTTP）；也可用 `RECO_SERVER_ADDRESS` 作为 gRPC 发现入口。读取超时 `MOCK_CACHE_REMOTE_READ_TIMEOUT_MS` 默认 20 ms。首轮对照可用同一镜像关／开 Remote，保持 Master `LOCAL_SYNC` 和 P/D HBM 事件关闭。
+只在 Prefill 设置 `ENABLE_REMOTE_CACHE=true`、`REUSE_CACHE=true`。Whale 使用 `RECO_ENABLE_VIPSERVER` / `RECO_VIPSERVER_DOMAIN` 发现该 KVCM。独立测试可显式设置 `MOCK_CACHE_REMOTE_ENDPOINT`（Meta HTTP）；也可用 `RECO_SERVER_ADDRESS` 作为 gRPC 发现入口。读取超时 `MOCK_CACHE_REMOTE_READ_TIMEOUT_MS` 默认 20 ms。首轮对照可用同一镜像关／开 Remote，保持 Master `LOCAL_SYNC` 和 P/D HBM 事件关闭。
 
 Prefill 在进入 Engine 队列前读缺失前缀的长度，成功后减少 Forward 计算 token。入队后的本地匹配必须仍能衔接这段 Remote 前缀。失败或并发满时按本地命中继续，Device 准入和 PD 生命周期保持原有语义。成功完成后有界后台任务提交 KVCM 写入，队列满时丢弃写入。模拟只计查询耗时。监控 Remote 复用使用 `rtp_llm_stream_cache_remote_reuse_length`，查询耗时和失败、写回失败及丢弃使用 `mock_remote_cache_*` 指标。
 
@@ -167,3 +167,5 @@ Prefill 在进入 Engine 队列前读缺失前缀的长度，成功后减少 For
 Prefill 使用 `split_size` 和 feature hash 计算输入长度和缓存 key。Real ViT 缓存未命中时会解析图片
 并计算特征。该调用只回传元数据，Real ViT 可以保留已有的 RDMA 配置。实验延迟包含等待视觉结果的时间，
 省去 embedding 搬运。若使用 Mock Frontend，其自身的 ViT 查询仍要求 Mock 专用 RPC。
+
+Remote 实例 ID 由部署的 `BIZ_NAME`、`DEPLOYMENT_NAME`、模型和缓存布局确定性生成；同部署所有 P 共享，重启和扩容不变，缓存布局改变时隔离。无需配置 `MOCK_CACHE_REMOTE_INSTANCE_ID`，该参数已删除。使用原生 `RECO_INSTANCE_GROUP`（默认 `default`）选择预先创建的 Dummy 存储实例组，可用 `RECO_INSTANCE_ID_SALT` 增加隔离。Engine 自动注册实例，实例组须允许新增实例。ID 使用稳定 SHA-256，不承诺与 Real C++ 的 ID 相同，也不共享 Real 的物理 KV 数据。
