@@ -10,6 +10,7 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 
 namespace rtp_llm {
@@ -130,6 +131,8 @@ private:
     const bool                    owner_;
     std::string                   store_key_namespace_;
     kmonitor::MetricsReporterPtr  metrics_reporter_;
+    KmonStatusMetricPtr           capture_enabled_metric_;
+    KmonStatusMetricPtr           capture_broken_metric_;
 
     std::atomic<bool>     capture_enabled_{true};
     std::atomic<uint64_t> failure_count_{0};

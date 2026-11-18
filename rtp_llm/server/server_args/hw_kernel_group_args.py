@@ -245,6 +245,35 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         ),
     )
 
+    hw_kernel_group.add_argument(
+        "--enable_fuse_kernels",
+        env_name="ENABLE_FUSE_KERNELS",
+        bind_to=(hw_kernel_config, "enable_fuse_kernels"),
+        type=str2bool,
+        default=True,
+        help=(
+            "Enable optional MLA, Indexer and MLP fusion kernels. "
+            "Required layout kernels (strided slice and output BMM) remain enabled."
+        ),
+    )
+
+    hw_kernel_group.add_argument(
+        "--glm5_cp_opt",
+        env_name="GLM5_CP_OPT",
+        bind_to=(hw_kernel_config, "glm5_cp_opt"),
+        type=str2bool,
+        default=False,
+        help="Enable direct NCCL and packed GLM5 prefill gathers.",
+    )
+    hw_kernel_group.add_argument(
+        "--enable_glm5_cmp",
+        env_name="RTP_LLM_GLM5_CMP",
+        bind_to=(hw_kernel_config, "enable_glm5_cmp"),
+        type=str2bool,
+        default=False,
+        help="Enable GLM5 CMP when model and hardware support it.",
+    )
+
 
 def _parse_comma_separated_ints(
     config: str, config_name: str, item_name: str, raise_on_empty: bool = True

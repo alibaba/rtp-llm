@@ -171,6 +171,7 @@ class DashScShutdownManager:
         self._active_requests = 0
 
     def start_unavailable(self, reason: str) -> None:
+        kmonitor.set_serving(False)
         with self._lock:
             if self._unavailable:
                 return
@@ -185,6 +186,7 @@ class DashScShutdownManager:
         )
 
     def start_draining(self, reason: str) -> None:
+        kmonitor.set_serving(False)
         with self._lock:
             if self._draining:
                 return
@@ -754,6 +756,10 @@ class DashScApp:
                     grammar_validator=grammar_validator,
                     v41_processor_config=v41_processor_config,
                     max_seq_len=model_config.max_seq_len,
+                    monitor_interval_s=max(
+                        float(self.server_config.monitor_interval or 1),
+                        0.1,
+                    ),
                 )
 
             loop = self._start_enqueue_loop()
@@ -800,8 +806,12 @@ class DashScApp:
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
             )
+            if not is_proxy:
+                servicer.start_metrics()
             logging.info("[DashScApp] gRPC server bound on port %s", port)
+            kmonitor.start_serving_when_ready()
         except BaseException as e:
+            kmonitor.set_serving(False)
             _abort_bind_barrier(bind_barrier)
             error_trace = traceback.format_exc()
             logging.error("[DashScApp] start failed: %s\n%s", e, error_trace)

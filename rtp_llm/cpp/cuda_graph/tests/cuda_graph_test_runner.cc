@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace py = pybind11;
 namespace rtp_llm {
@@ -261,6 +262,8 @@ private:
 
 PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
     using namespace rtp_llm;
+    // Query the state linked into this test module, which owns the runner.
+    m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
     py::register_exception<DirtyCudaGraphCaptureError>(m, "DirtyCudaGraphCaptureError", PyExc_RuntimeError);
     py::class_<CudaGraphTestRunner>(m, "CudaGraphRunner")
         .def(py::init<>())

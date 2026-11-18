@@ -19,6 +19,99 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class Glm5EnvironmentArgumentsTest(TestCase):
+    def test_registered_flags_cli_override_env_and_survive_pickle(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        env = {
+            "RTP_LLM_FRONTEND_METRICS_ENABLE": "1",
+            "GLM5_CP_OPT": "1",
+            "RTP_LLM_GLM5_CMP": "1",
+            "DETERMINISTIC_GEMM": "1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = setup_args([])
+            self.assertTrue(
+                pickle.loads(pickle.dumps(config.fmha_config)).deterministic_gemm
+            )
+            self.assertTrue(config.server_config.frontend_metrics_enable)
+            restored = pickle.loads(pickle.dumps(config.py_hw_kernel_config))
+            self.assertTrue(restored.glm5_cp_opt)
+            self.assertTrue(restored.enable_glm5_cmp)
+            config = setup_args(
+                [
+                    "--deterministic_gemm",
+                    "0",
+                    "--frontend_metrics_enable",
+                    "0",
+                    "--glm5_cp_opt",
+                    "0",
+                    "--enable_glm5_cmp",
+                    "0",
+                ]
+            )
+            self.assertFalse(config.fmha_config.deterministic_gemm)
+            self.assertFalse(config.server_config.frontend_metrics_enable)
+            self.assertFalse(config.py_hw_kernel_config.glm5_cp_opt)
+            self.assertFalse(config.py_hw_kernel_config.enable_glm5_cmp)
+
+    def test_old_worker_config_state_defaults_new_options_off(self):
+        from rtp_llm.ops import FMHAConfig
+
+        for config_type, fields in (
+            (FMHAConfig, ("deterministic_gemm",)),
+            (HWKernelConfig, ("glm5_cp_opt", "enable_glm5_cmp")),
+        ):
+            config = config_type()
+            for field in fields:
+                setattr(config, field, True)
+            restored = config_type.__new__(config_type)
+            restored.__setstate__(config.__getstate__()[:11])
+            for field in fields:
+                self.assertFalse(getattr(restored, field))
+
+    def test_loader_path_after_default_database_load(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.utils import fastsafetensors_config as loader_config
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("os.path.isfile", return_value=False),
+        ):
+            setup_args([])
+            loader_config.ensure_fastsafetensors_configured()
+            config = setup_args(["--fastsafetensors_config", "custom.json"])
+            self.assertIsNone(config.load_config.fastsafetensors_config_json)
+            self.assertNotIn("FASTSAFETENSORS_CONFIG_JSON", os.environ)
+            self.assertEqual(os.environ["FASTSAFETENSORS_CONFIG"], "custom.json")
+
+    def test_loader_cli_overrides_environment_and_is_published(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with patch.dict(
+            os.environ,
+            {"FASTSAFETENSORS_CONFIG_JSON": "{}", "FASTSAFETENSORS_CONFIG": "old.json"},
+            clear=True,
+        ):
+            config = setup_args(
+                [
+                    "--fastsafetensors_config_json",
+                    '{"num_readers": 2}',
+                    "--fastsafetensors_config",
+                    "new.json",
+                ]
+            )
+            self.assertEqual(
+                config.load_config.fastsafetensors_config_json, '{"num_readers": 2}'
+            )
+            self.assertEqual(config.load_config.fastsafetensors_config, "new.json")
+            self.assertEqual(
+                os.environ["FASTSAFETENSORS_CONFIG_JSON"],
+                config.load_config.fastsafetensors_config_json,
+            )
+            self.assertEqual(os.environ["FASTSAFETENSORS_CONFIG"], "new.json")
+
+
 class AllReduceArgumentsTest(TestCase):
     def test_default_auto_and_retired_environment(self):
         from rtp_llm.server.server_args import server_args

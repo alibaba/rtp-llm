@@ -9,7 +9,86 @@ import unittest
 
 import torch
 
-from rtp_llm.utils.model_weight import concat_1, stack_0, stack_moe_w1
+from rtp_llm.utils.model_weight import (
+    concat_1,
+    get_sp_tensor_blocked,
+    pad,
+    sp_0_w13,
+    stack_0,
+    stack_moe_w1,
+)
+
+
+class TestScalePadding(unittest.TestCase):
+    def test_ue8m0_padding_preserves_raw_scale_bytes(self):
+        raw = torch.tensor([[125, 126, 127], [128, 129, 130]], dtype=torch.uint8)
+        scale = raw.view(torch.float8_e8m0fnu)
+        for dim in (0, 1):
+            actual = pad([scale], 4, dim)
+            expected = torch.cat(
+                [scale.float(), torch.zeros((2, 3) if dim == 0 else (2, 1))], dim=dim
+            ).to(scale.dtype)
+            torch.testing.assert_close(
+                actual.view(torch.uint8), expected.view(torch.uint8)
+            )
+
+
+class TestScaleSharding(unittest.TestCase):
+    def test_ue8m0_shared_expert_shards_preserve_bytes(self):
+        for device in ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]:
+            raw = torch.arange(32, dtype=torch.uint8, device=device).reshape(8, 4)
+            for size in (1, 2):
+                for rank in range(size):
+                    with self.subTest(device=device, size=size, rank=rank):
+                        actual = sp_0_w13(
+                            raw.view(torch.float8_e8m0fnu),
+                            tp=size,
+                            tp_rank=rank,
+                            ep=2,
+                            ep_rank=0,
+                            dp=1,
+                            dp_rank=0,
+                            ffn_tp_rank=rank,
+                            ffn_tp_size=size,
+                        )
+                        width = 4 // size
+                        expected = torch.cat(
+                            [
+                                raw[rank * width : (rank + 1) * width],
+                                raw[4 + rank * width : 4 + (rank + 1) * width],
+                            ]
+                        )
+                        self.assertEqual(actual.dtype, torch.float8_e8m0fnu)
+                        torch.testing.assert_close(actual.view(torch.uint8), expected)
+
+    def test_ue8m0_qkv_shards_preserve_bytes(self):
+        for device in ["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]:
+            for kv_heads in (1, 2):
+                raw = torch.arange(
+                    2 * (4 + 2 * kv_heads), dtype=torch.uint8, device=device
+                ).reshape(2, -1)
+                for rank in range(2):
+                    with self.subTest(device=device, kv_heads=kv_heads, rank=rank):
+                        actual = get_sp_tensor_blocked(
+                            raw.view(torch.float8_e8m0fnu),
+                            head_num=4,
+                            head_num_kv=kv_heads,
+                            size_per_head=128,
+                            tp=2,
+                            tp_rank=rank,
+                        )
+                        kv_rank = rank if kv_heads == 2 else 0
+                        expected = raw[
+                            :,
+                            [
+                                2 * rank,
+                                2 * rank + 1,
+                                4 + kv_rank,
+                                4 + kv_heads + kv_rank,
+                            ],
+                        ]
+                        self.assertEqual(actual.dtype, torch.float8_e8m0fnu)
+                        torch.testing.assert_close(actual.view(torch.uint8), expected)
 
 
 class TestStackMoeW1(unittest.TestCase):
