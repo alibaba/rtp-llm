@@ -39,11 +39,13 @@ bool TransferTask::success() const {
 
 void TransferTask::cancel() {
     std::function<void()> done_callback;
+    decltype(cancel_callbacks_) cancel_callbacks;
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         if (done_) {
             return;
         }
+        cancel_callbacks.swap(cancel_callbacks_);
         if (in_flight_ == 0) {
             // PENDING: fast fail，立即终止
             done_               = true;
@@ -62,7 +64,25 @@ void TransferTask::cancel() {
             }
         }
     }
+    for (const auto& entry : cancel_callbacks) {
+        invokeDoneCallback(entry.second);
+    }
     invokeDoneCallback(done_callback);
+}
+
+size_t TransferTask::addCancelCallback(std::function<void()> callback) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (done_ || cancel_requested_) {
+        return 0;
+    }
+    const auto id = next_cancel_callback_id_++;
+    cancel_callbacks_.emplace(id, std::move(callback));
+    return id;
+}
+
+void TransferTask::removeCancelCallback(size_t id) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    cancel_callbacks_.erase(id);
 }
 
 bool TransferTask::startTransfer() {
@@ -206,7 +226,17 @@ TransferTaskStore::addTask(const std::string& unique_key,
     auto task = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms, std::move(on_batch_copied));
     completed_batches_.erase(unique_key);
     task_map_[unique_key] = task;
+    auto callback = task_added_callback_;
+    lock.unlock();
+    if (callback) {
+        callback();
+    }
     return task;
+}
+
+void TransferTaskStore::setTaskAddedCallback(std::function<void()> callback) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    task_added_callback_ = std::move(callback);
 }
 
 std::shared_ptr<TransferTask> TransferTaskStore::getTask(const std::string& unique_key) const {

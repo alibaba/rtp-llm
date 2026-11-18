@@ -1,4 +1,3 @@
-import os
 import unittest
 from unittest.mock import patch
 
@@ -104,28 +103,26 @@ class GdnNormQuantTest(unittest.TestCase):
                 self.assertTrue(torch.equal(s, refs))
             field.copy_(saved)
 
-    def test_decode_legacy_small_and_hooks_preserve_original_path(self):
+    def test_decode_small_and_hooks_preserve_original_path(self):
+        module = "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm.norm_quant"
+        for role, width, rows in (
+            ("DECODE", 3072, 2048),
+            ("PREFILL", 3072, 16),
+            ("PREFILL", 1536, 2730),
+        ):
+            norm, projection = self.build(width, role=role)
+            x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+            gate = torch.randn_like(x)
+            with patch(module, side_effect=AssertionError("unexpected fused path")):
+                self.assertTrue(
+                    torch.equal(
+                        norm.forward_project(x, gate, projection),
+                        projection(norm(x, gate)),
+                    )
+                )
         norm, projection = self.build()
         x = torch.randn(2048, 3072, device="cuda", dtype=torch.bfloat16)
         gate = torch.randn_like(x)
-        module = "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm.norm_quant"
-        for role, quant_mode, rows in (
-            ("DECODE", "auto", 2048),
-            ("PREFILL", "legacy", 2048),
-            ("PREFILL", "auto", 16),
-        ):
-            norm.role = role
-            with (
-                patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL=quant_mode),
-                patch(module, side_effect=AssertionError("unexpected fused path")),
-            ):
-                self.assertTrue(
-                    torch.equal(
-                        norm.forward_project(x[:rows], gate[:rows], projection),
-                        projection(norm(x[:rows], gate[:rows])),
-                    )
-                )
-        norm.role = "PREFILL"
         calls = []
         hook = norm.register_forward_hook(lambda *args: calls.append("norm"))
         with patch(module, side_effect=AssertionError("hook must be honored")):
@@ -135,7 +132,13 @@ class GdnNormQuantTest(unittest.TestCase):
 
     def test_production_factory_dispatcher_enters_fusion_with_exact_output(self):
         module = "rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_norm.norm_quant"
-        for width, rows in ((1536, 4093), (1536, 4096), (3072, 2048), (3072, 4096)):
+        for width, rows in (
+            (1536, 2731),
+            (1536, 4093),
+            (1536, 4096),
+            (3072, 2048),
+            (3072, 4096),
+        ):
             norm, projection = self.build(width, factory=True)
             x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
             gate = torch.randn(

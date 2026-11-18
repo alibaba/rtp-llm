@@ -443,6 +443,27 @@ TEST_F(RdmaTransferServiceTest, StagingPoolTimeoutDoesNotRetainReleasedSlot) {
     EXPECT_EQ(memory_manager->dereg_count.load(), 1);
 }
 
+TEST_F(RdmaTransferServiceTest, CancellingStagingWaitDoesNotRequireFreeSlot) {
+    auto memory_manager = std::make_shared<MockRdmaMemoryManager>();
+    auto pool = RdmaStagingBufferPool::create(
+        memory_manager, HostStagingBlockPool::kAlignment, HostStagingBlockPool::kAlignment);
+    ASSERT_NE(pool, nullptr);
+    auto held = pool->mallocBatchWithBackoff(1, std::chrono::seconds(1));
+    ASSERT_TRUE(held.has_value());
+    auto task = std::make_shared<TransferTask>(KeyBlockInfoMap{}, currentTimeMs() + 5000);
+    auto wait = std::async(std::launch::async, [pool, task] {
+        return pool->mallocBatchWithBackoff(1, std::chrono::seconds(5), task);
+    });
+
+    EXPECT_EQ(wait.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+    task->cancel();
+    ASSERT_EQ(wait.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    EXPECT_FALSE(wait.get().has_value());
+
+    held.reset();
+    EXPECT_TRUE(pool->mallocBatchWithBackoff(1, std::chrono::seconds(1)).has_value());
+}
+
 TEST_F(RdmaTransferServiceTest, A3_RdmaReadToPinnedStagingThenH2d_Success) {
     service_.reset();
     auto memory_manager = std::make_shared<MockRdmaMemoryManager>();
@@ -540,7 +561,7 @@ TEST_F(RdmaTransferServiceTest, B1_ContextTimeout_NoMatchingRecvTask) {
     EXPECT_EQ(resp.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_TIMEOUT);
 }
 
-TEST_F(RdmaTransferServiceTest, B3_ReadFailureIsNotReclassifiedByElapsedTaskDeadline) {
+TEST_F(RdmaTransferServiceTest, B3_ExpiredRecvTaskIsRejectedBeforeRead) {
     service_.reset();
     auto failing_client = std::make_shared<MockRdmaClient>(true /*conn*/, false /*read*/);
     service_ = std::make_shared<RdmaTransferService>(task_store_, failing_client);
@@ -557,8 +578,8 @@ TEST_F(RdmaTransferServiceTest, B3_ReadFailureIsNotReclassifiedByElapsedTaskDead
     auto closure = issueTransfer(&req, &resp);
 
     ASSERT_TRUE(closure->waitFor(kWait));
-    EXPECT_EQ(resp.error_code(), ::rdma_transfer::RDMA_TRANSFER_RDMA_FAILED);
-    EXPECT_NE(resp.error_message().find("mock RDMA read failed"), std::string::npos);
+    EXPECT_EQ(resp.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_NE(resp.error_message().find("expired in the Decode worker queue"), std::string::npos);
 }
 
 TEST_F(RdmaTransferServiceTest, B4_WatchdogRepliesBeforePhysicalCallbackButTaskRemainsInflight) {

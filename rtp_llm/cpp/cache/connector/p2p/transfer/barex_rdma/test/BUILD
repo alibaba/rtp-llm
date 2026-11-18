@@ -88,6 +88,7 @@ cc_test(
     }),
     copts = test_copts,
     env = {},
+    exec_properties = {"gpu": "L20_CU13"},
     tags = [
         "manual",
     ],

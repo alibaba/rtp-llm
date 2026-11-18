@@ -180,6 +180,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":model_rpc_pool",
+        ":rpc_error_code",
         ":registered_cache_staging",
     ],
 )

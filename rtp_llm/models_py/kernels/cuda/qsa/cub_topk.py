@@ -1,4 +1,4 @@
-"""Opt-in SM120 QSA TopK with native CUDA ordering and token expansion.
+"""SM120 QSA TopK with native CUDA ordering and token expansion.
 
 The model-local kernel uses NVIDIA CUB's installed stable block sort APIs. It does
 not vendor vLLM/CUB source. Stable uint32 keys retain the pinned Torch TopK
@@ -8,7 +8,6 @@ Compilation occurs during eager warmup; an unprimed CUDA graph falls back.
 
 import hashlib
 import logging
-import os
 import threading
 from pathlib import Path
 
@@ -25,12 +24,9 @@ _CUDA_SOURCE = Path(__file__).with_name("topk.cuh").read_text()
 
 
 def is_supported(scores, lengths):
-    mode = os.getenv("RTP_QWEN4_TARGET_TOPK_IMPL", "native")
-    if mode not in ("native", "cub"):
-        raise ValueError("RTP_QWEN4_TARGET_TOPK_IMPL must be native or cub")
     decode = (
         scores.ndim == 2
-        and 1 <= scores.shape[0] <= (32768 if mode == "cub" else 32)
+        and 1 <= scores.shape[0] <= 32
         and (2047 <= scores.shape[1] <= 2176 or 4095 <= scores.shape[1] <= 4352)
     )
     large_prefill = (

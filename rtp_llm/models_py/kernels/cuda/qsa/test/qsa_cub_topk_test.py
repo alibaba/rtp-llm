@@ -211,7 +211,7 @@ class QsaCubTopkTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _mtp3_target_lengths(rows, generation=0):
+    def _selection_lengths(rows, generation=0):
         # Include fewer than 512 blocks, all four tail widths and full capacity.
         pattern = torch.tensor(
             [0, 1, 2, 3, 4, 7, 8, 129, 2044, 2045, 2050, 4095, 4099, 8191, 8192],
@@ -221,7 +221,7 @@ class QsaCubTopkTest(unittest.TestCase):
         return pattern.roll(generation).repeat((rows + 14) // 15)[:rows].contiguous()
 
     @staticmethod
-    def _fill_mtp3_target_scores(scores, kind):
+    def _fill_selection_scores(scores, kind):
         scores.normal_()
         if kind == "equal":
             scores.zero_()
@@ -238,151 +238,122 @@ class QsaCubTopkTest(unittest.TestCase):
             scores.zero_()
             scores.view(torch.int32)[:, ::2] = -2147483648
 
-    def test_target_backend_preserves_native_default_and_capacity_guards(self):
+    def test_default_dispatch_preserves_target_fallback_and_capacity_guards(self):
         self.assertEqual(torch.version.git_version, cub._TORCH_GIT)
-        with patch.dict("os.environ", RTP_QWEN4_TARGET_TOPK_IMPL="invalid"):
-            with self.assertRaisesRegex(ValueError, "must be native or cub"):
-                cub.is_supported(None, None)
-        with patch.dict(
-            "os.environ",
-            RTP_QWEN4_TARGET_TOPK_IMPL="native",
+        for rows, columns in (
+            (0, 2048),
+            (33, 2047),
+            (64, 2048),
+            (256, 2048),
+            (64, 2144),
+            (64, 2046),
+            (1, 16385),
+            (8193, 2145),
         ):
-            for rows in (64, 256):
-                scores = torch.randn(rows, 2048, device="cuda")
-                lengths = self._mtp3_target_lengths(rows)
+            scores = torch.empty(rows, columns, device="cuda")
+            lengths = self._selection_lengths(rows).clamp(max=columns * 4)
+            self.assertFalse(cub.is_supported(scores, lengths), (rows, columns))
+        for rows, columns in (
+            (1, 2048),
+            (16, 2048),
+            (32, 2048),
+            (32, 2176),
+            (32, 4352),
+            (64, 2145),
+            (64, 4096),
+        ):
+            scores = torch.empty(rows, columns, device="cuda")
+            lengths = self._selection_lengths(rows)
+            self.assertTrue(cub.is_supported(scores, lengths), (rows, columns))
+            with patch.object(torch.version, "git_version", "unqualified-runtime"):
                 self.assertFalse(cub.is_supported(scores, lengths))
-            for rows in (1, 16, 32):
-                scores = torch.randn(rows, 2048, device="cuda")
-                self.assertTrue(
-                    cub.is_supported(scores, self._mtp3_target_lengths(rows))
-                )
-        with patch.dict(
-            "os.environ",
-            RTP_QWEN4_TARGET_TOPK_IMPL="cub",
-        ):
-            for rows, columns in (
-                (0, 2048),
-                (32769, 2048),
-                (64, 1024),
-                (64, 2046),
-                (64, 16385),
-                (32769, 4096),
-            ):
+
+    def test_padded_score_widths_match_torch_in_default_domain(self):
+        for rows in (2, 16, 32):
+            for columns in list(range(2047, 2177)) + list(range(4095, 4353)):
                 scores = torch.randn(rows, columns, device="cuda")
-                lengths = self._mtp3_target_lengths(rows).clamp(max=columns * 4)
-                self.assertFalse(cub.is_supported(scores, lengths))
-            for rows in (64, 256):
-                scores = torch.randn(rows, 2048, device="cuda")
-                lengths = self._mtp3_target_lengths(rows)
-                self.assertTrue(cub.is_supported(scores, lengths))
-                with patch.object(torch.version, "git_version", "unqualified-runtime"):
-                    self.assertFalse(cub.is_supported(scores, lengths))
-
-    def test_padded_score_widths_and_all_mtp_row_counts_match_torch(self):
-        with patch.dict("os.environ", RTP_QWEN4_TARGET_TOPK_IMPL="cub"):
-            for rows in (2, 48, 64):
-                for columns in list(range(2047, 2177)) + list(range(4095, 4353)):
-                    scores = torch.randn(rows, columns, device="cuda")
-                    lengths = torch.arange(rows, device="cuda", dtype=torch.int32) * 379
-                    lengths[0] = columns * 4 - 1
-                    for kind in ("random", "ties", "nonfinite", "signed_zero"):
-                        self._fill_mtp3_target_scores(scores, kind)
-                        for finite in (True, False):
-                            actual = cub.try_cub_qsa_tokens(
-                                scores, lengths, finite_only=finite
-                            )
-                            self.assertIsNotNone(actual, (rows, columns, kind))
-                            torch.testing.assert_close(
-                                actual,
-                                self.reference(scores, lengths, finite),
-                                rtol=0,
-                                atol=0,
-                            )
-
-    def test_mtp3_target_all_tokens_match_pinned_torch_without_native_fallback(self):
-        self.assertEqual(torch.version.git_version, cub._TORCH_GIT)
-        with patch.dict(
-            "os.environ",
-            RTP_QWEN4_TARGET_TOPK_IMPL="cub",
-        ):
-            for rows in (64, 256):
-                scores = torch.empty(rows, 2048, device="cuda")
-                lengths = self._mtp3_target_lengths(rows)
-                for kind in (
-                    "random",
-                    "equal",
-                    "ties",
-                    "nonfinite",
-                    "negative_nan",
-                    "signed_zero",
-                ):
-                    self._fill_mtp3_target_scores(scores, kind)
+                lengths = torch.arange(rows, device="cuda", dtype=torch.int32) * 379
+                lengths[0] = columns * 4 - 1
+                for kind in ("random", "ties", "nonfinite", "signed_zero"):
+                    self._fill_selection_scores(scores, kind)
                     for finite in (True, False):
-                        expected = self.reference(scores, lengths, finite)
-                        with patch.object(
-                            torch,
-                            "topk",
-                            side_effect=AssertionError(
-                                "MTP3 target CUB did not dispatch"
-                            ),
-                        ):
-                            actual = try_select_qsa_tokens(
-                                scores,
-                                lengths,
-                                compress_ratio=4,
-                                token_budget=2048,
-                                scores_are_masked=False,
-                                finite_only=finite,
-                            )
-                        self.assertIsNotNone(actual)
-                        self.assertEqual(actual.shape, (rows, 2051))
-                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                        actual = cub.try_cub_qsa_tokens(
+                            scores, lengths, finite_only=finite
+                        )
+                        self.assertIsNotNone(actual, (rows, columns, kind))
+                        torch.testing.assert_close(
+                            actual,
+                            self.reference(scores, lengths, finite),
+                            rtol=0,
+                            atol=0,
+                        )
 
-    def test_mtp3_target_owner_masked_scores_keep_all_tail_tokens(self):
-        with patch.dict(
-            "os.environ",
-            RTP_QWEN4_TARGET_TOPK_IMPL="cub",
-        ):
-            for rows in (64, 256):
-                scores = torch.randn(rows, 2048, device="cuda")
-                lengths = self._mtp3_target_lengths(rows)
-                scores.masked_fill_(
-                    torch.arange(2048, device="cuda")[None, :] >= lengths[:, None] // 4,
-                    float("-inf"),
+    def test_default_all_tokens_match_pinned_torch_without_native_fallback(self):
+        self.assertEqual(torch.version.git_version, cub._TORCH_GIT)
+        for rows in (16, 32):
+            scores = torch.empty(rows, 2048, device="cuda")
+            lengths = self._selection_lengths(rows)
+            for kind in (
+                "random",
+                "equal",
+                "ties",
+                "nonfinite",
+                "negative_nan",
+                "signed_zero",
+            ):
+                self._fill_selection_scores(scores, kind)
+                for finite in (True, False):
+                    expected = self.reference(scores, lengths, finite)
+                    with patch.object(
+                        torch,
+                        "topk",
+                        side_effect=AssertionError("Default CUB did not dispatch"),
+                    ):
+                        actual = try_select_qsa_tokens(
+                            scores,
+                            lengths,
+                            compress_ratio=4,
+                            token_budget=2048,
+                            scores_are_masked=False,
+                            finite_only=finite,
+                        )
+                    self.assertIsNotNone(actual)
+                    self.assertEqual(actual.shape, (rows, 2051))
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_default_owner_masked_scores_keep_all_tail_tokens(self):
+        for rows in (16, 32):
+            scores = torch.randn(rows, 2048, device="cuda")
+            lengths = self._selection_lengths(rows)
+            scores.masked_fill_(
+                torch.arange(2048, device="cuda")[None, :] >= lengths[:, None] // 4,
+                float("-inf"),
+            )
+            expected = self.reference(scores, lengths)
+            with patch.object(
+                torch,
+                "topk",
+                side_effect=AssertionError("Owner-masked CUB did not dispatch"),
+            ):
+                actual = try_select_qsa_tokens(
+                    scores,
+                    lengths,
+                    compress_ratio=4,
+                    token_budget=2048,
+                    scores_are_masked=True,
                 )
-                expected = self.reference(scores, lengths)
-                with patch.object(
-                    torch,
-                    "topk",
-                    side_effect=AssertionError(
-                        "MTP3 owner-masked CUB did not dispatch"
-                    ),
-                ):
-                    actual = try_select_qsa_tokens(
-                        scores,
-                        lengths,
-                        compress_ratio=4,
-                        token_budget=2048,
-                        scores_are_masked=True,
-                    )
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-    def test_mtp3_target_two_live_graphs_reuse_metadata_on_nondefault_stream(self):
+    def test_default_two_live_graphs_reuse_metadata_on_nondefault_stream(self):
         self.assertEqual(torch.version.git_version, cub._TORCH_GIT)
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         states = []
         try:
-            with (
-                torch.cuda.stream(stream),
-                patch.dict(
-                    "os.environ",
-                    RTP_QWEN4_TARGET_TOPK_IMPL="cub",
-                ),
-            ):
-                for rows in (64, 256):
+            with torch.cuda.stream(stream):
+                for rows in (16, 32):
                     scores = torch.randn(rows, 2048, device="cuda")
-                    lengths = self._mtp3_target_lengths(rows)
+                    lengths = self._selection_lengths(rows)
                     for _ in range(3):
                         self.assertIsNotNone(cub.try_cub_qsa_tokens(scores, lengths))
                     graph = torch.cuda.CUDAGraph()
@@ -402,8 +373,8 @@ class QsaCubTopkTest(unittest.TestCase):
                 ):
                     first_output = None
                     for index, (scores, lengths, graph, actual) in enumerate(states):
-                        self._fill_mtp3_target_scores(scores, kind)
-                        lengths.copy_(self._mtp3_target_lengths(scores.shape[0], step))
+                        self._fill_selection_scores(scores, kind)
+                        lengths.copy_(self._selection_lengths(scores.shape[0], step))
                         expected = self.reference(scores, lengths)
                         graph.replay()
                         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -421,15 +392,14 @@ class QsaCubTopkTest(unittest.TestCase):
                 graph.reset()
             torch.cuda.current_stream().wait_stream(stream)
 
-    def test_mtp3_target_unprimed_capture_and_failed_build_keep_native_selector(self):
+    def test_default_unprimed_capture_and_failed_build_keep_native_selector(self):
         self.assertEqual(torch.version.git_version, cub._TORCH_GIT)
-        for rows in (64, 256):
+        for rows in (16, 32):
             scores = torch.randn(rows, 2048, device="cuda")
-            lengths = self._mtp3_target_lengths(rows)
-            # Warm the unchanged Torch/expansion graph operations, not CUB.
-            with patch.dict(
-                "os.environ",
-                RTP_QWEN4_TARGET_TOPK_IMPL="native",
+            lengths = self._selection_lengths(rows)
+            # Warm the fallback graph operations without initializing CUB.
+            with patch.object(cub, "_BUILD_FAILED", True), patch.object(
+                cub, "_MODULE", None
             ):
                 for _ in range(3):
                     try_select_qsa_tokens(
@@ -440,10 +410,6 @@ class QsaCubTopkTest(unittest.TestCase):
                         scores_are_masked=False,
                     )
             with (
-                patch.dict(
-                    "os.environ",
-                    RTP_QWEN4_TARGET_TOPK_IMPL="cub",
-                ),
                 patch.object(cub, "_MODULE", None),
                 patch.object(cub, "_BUILD_FAILED", False),
             ):
@@ -459,8 +425,8 @@ class QsaCubTopkTest(unittest.TestCase):
                             scores_are_masked=False,
                         )
                     self.assertIsNone(unavailable)
-                    self._fill_mtp3_target_scores(scores, "negative_nan")
-                    lengths.copy_(self._mtp3_target_lengths(rows, 3))
+                    self._fill_selection_scores(scores, "negative_nan")
+                    lengths.copy_(self._selection_lengths(rows, 3))
                     graph.replay()
                     torch.testing.assert_close(
                         actual, self.reference(scores, lengths), rtol=0, atol=0
@@ -468,10 +434,6 @@ class QsaCubTopkTest(unittest.TestCase):
                 finally:
                     graph.reset()
             with (
-                patch.dict(
-                    "os.environ",
-                    RTP_QWEN4_TARGET_TOPK_IMPL="cub",
-                ),
                 patch.object(cub, "_MODULE", None),
                 patch.object(cub, "_BUILD_FAILED", True),
             ):

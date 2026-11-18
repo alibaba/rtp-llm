@@ -211,6 +211,8 @@ std::string buildRegisterInstanceRequest(const KVCacheEventPublisherContext& con
     writeString(writer, "instance_id", context.instance_id);
     writer.Key("block_size");
     writer.Int(context.block_size_tokens);
+    writer.Key("disable_write_session");
+    writer.Bool(true);
 
     writer.Key("model_deployment");
     writer.StartObject();
