@@ -8,6 +8,12 @@
 
 namespace rtp_llm {
 
+namespace no_block_copy_detail {
+// CUDA tests can replace a result after the real runtime call. Thread-local so
+// fault injection cannot affect copies on another worker; null in production.
+inline thread_local int (*cuda_result_for_test)(const char* phase, int result) = nullptr;
+}  // namespace no_block_copy_detail
+
 enum class DeviceHostCopyDirection {
     H2D,
     D2H
@@ -123,6 +129,8 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&    
 // scratch is optional; passing one lets callers reuse GPU staging and device metadata buffers.
 // H2D: compact host payload -> GPU staging -> tile.gpu by tile.host_offset.
 // D2H: tile.gpu -> GPU staging by tile.host_offset -> compact host payload.
+// CUDA: false permits fallback only before submission or after a successful
+// stream drain. Invalid pointers/sizes throw; unconfirmed completion aborts.
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch = nullptr);
 void releaseStagedMemoryCopyScratch(StagedMemoryCopyScratch& scratch);
 

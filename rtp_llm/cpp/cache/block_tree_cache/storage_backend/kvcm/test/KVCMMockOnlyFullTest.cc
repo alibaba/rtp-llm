@@ -404,6 +404,7 @@ TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
         }));
     RemoteOperationRequestPB read_request;
     read_request.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(read_request);
     read_request.add_group_tags("default");
     read_request.add_block_ids(environment.block_id);
     read_request.add_uris(expected_read_uris.front());
@@ -558,7 +559,8 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
     }
 }
 
-TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource) {
+TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionWithoutFreezingLocalSource) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_tp2_broadcast_failure");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
     auto metrics_reporter =
@@ -625,24 +627,25 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
     const auto source_ref_count = environment.device_pool->refCount(environment.block_id);
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    // A non-OK gRPC status does not prove whether the worker touched the
-    // transfer buffer, so a permanent FROZEN reference replaces the request pin.
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
-    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
-    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    // Ordinary WRITE has no local destination to protect. Its existing
+    // failed session settlement remains independent of source ownership.
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
+    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
     for (const auto& state : states) {
         const auto requests = snapshotRequests(state);
         ASSERT_EQ(requests.size(), 1u);
         EXPECT_EQ(requests.front().op(), REMOTE_OPERATION_WRITE);
     }
+    EXPECT_TRUE(backend->frozenTasks().empty());
     backend->shutdown();
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
-    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
+    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
     EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
@@ -719,6 +722,7 @@ TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
 
     RemoteOperationRequestPB request;
     request.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(request);
     request.add_group_tags("default");
     request.add_block_ids(environment.block_id);
     RemoteOperationResponsePB response;
@@ -763,6 +767,7 @@ TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
         }));
     RemoteOperationRequestPB read_request;
     read_request.set_op(REMOTE_OPERATION_READ);
+    identifyReadRequest(read_request);
     read_request.add_group_tags("default");
     read_request.add_block_ids(environment.block_id);
     read_request.add_uris("read_uri");
@@ -1081,6 +1086,7 @@ TEST(KVCMMockOnlyFullTest, StartWriteFailureDoesNotFinishSession) {
 }
 
 TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_abort_write");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
@@ -1116,7 +1122,8 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
         }));
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
+    EXPECT_TRUE(backend->frozenTasks().empty());
 }
 
 TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {

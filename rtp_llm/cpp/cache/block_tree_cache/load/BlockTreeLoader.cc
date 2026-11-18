@@ -534,37 +534,8 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
 }
 
 void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
-    const auto complete = [this, task](ErrorInfo error) noexcept {
+    const auto complete = [task](ErrorInfo) noexcept {
         task->phase = LoadTaskRunner::Task::Phase::FINISHED;
-        if (error.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
-            const auto&          transfer    = task->completionTransfer();
-            auto                 observation = CompletionStageContext::forWorkflow(metrics_reporter_,
-                                                                   task->load_descs,
-                                                                   "load",
-                                                                   transfer.requestId().value_or(-1),
-                                                                   transfer.traceId(),
-                                                                   false);
-            CompletionStageScope freeze(observation, "freeze_blocks", "workflow_callback");
-            // Ordinary LOAD references still protect both ends until settlement.
-            // Preserve those physical slots before publishing the failure.
-            for (const TransferDescriptor& desc : task->load_descs) {
-                const auto& result = desc.source_tier == Tier::HOST ? task->host_result : task->disk_result;
-                if (result.status.code() != ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
-                    continue;
-                }
-                const GroupSetPtr& group_set   = tree_->groupSets()[desc.group_set_id];
-                IBlockPool*        source_pool = desc.source_tier == Tier::HOST ?
-                                                     static_cast<IBlockPool*>(group_set->hostPool().get()) :
-                                                     static_cast<IBlockPool*>(group_set->diskPool().get());
-                for (BlockIdxType block : desc.source_blocks) {
-                    source_pool->freezeBlock(block);
-                }
-                const auto& device_pools = group_set->devicePools();
-                for (size_t member = 0; member < device_pools.size(); ++member) {
-                    device_pools[member]->freezeBlock(desc.target_blocks[member]);
-                }
-            }
-        }
         for (const Tier tier : {Tier::HOST, Tier::DISK}) {
             const auto&  transfer = tier == Tier::HOST ? task->host_to_device_task : task->disk_to_device_task;
             const auto&  result   = tier == Tier::HOST ? task->host_result : task->disk_result;

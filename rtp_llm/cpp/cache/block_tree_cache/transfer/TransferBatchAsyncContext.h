@@ -12,8 +12,10 @@ namespace rtp_llm {
 
 class TransferBatchAsyncContext final: public TransferAsyncContext {
 public:
-    explicit TransferBatchAsyncContext(size_t block_count = 0, std::shared_ptr<void> completion_guard = nullptr):
-        block_count_(block_count), completion_guard_(std::move(completion_guard)) {}
+    explicit TransferBatchAsyncContext(size_t                                block_count      = 0,
+                                       std::shared_ptr<void>                 completion_guard = nullptr,
+                                       std::shared_ptr<TransferBufferSafety> proof            = nullptr):
+        block_count_(block_count), completion_guard_(std::move(completion_guard)), completion_proof_(std::move(proof)) {}
 
     void           waitDone() override;
     void           onDone(DoneCallback callback) override;
@@ -24,13 +26,14 @@ public:
     void complete(TransferResult result);
 
 private:
-    mutable std::mutex        mutex_;
-    std::condition_variable   done_cv_;
-    bool                      done_{false};
-    TransferResult            result_;
-    size_t                    block_count_{0};
-    std::shared_ptr<void>     completion_guard_;
-    std::vector<DoneCallback> callbacks_;
+    mutable std::mutex                    mutex_;
+    std::condition_variable               done_cv_;
+    bool                                  done_{false};
+    TransferResult                        result_;
+    size_t                                block_count_{0};
+    std::shared_ptr<void>                  completion_guard_;
+    std::shared_ptr<TransferBufferSafety> completion_proof_;
+    std::vector<DoneCallback>              callbacks_;
 };
 
 }  // namespace rtp_llm
