@@ -97,12 +97,11 @@ def _select_tokens(
         )
     else:
         ends = bounds[1]
-    if deepselect.is_available(logits.device, logits.dtype):
-        selected = deepselect.try_select_tokens(
-            logits, ends, out=out, filter_finite=filter_finite
-        )
-        if selected is not None:
-            return selected
+    selected = deepselect.try_select_tokens(
+        logits, ends, out=out, filter_finite=filter_finite
+    )
+    if selected is not None:
+        return selected
     output = (
         out
         if out is not None

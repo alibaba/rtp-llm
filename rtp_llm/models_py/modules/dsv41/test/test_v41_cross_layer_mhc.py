@@ -2,6 +2,7 @@
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -332,6 +333,27 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         self.assertFalse(torch.equal(first[0], second[0]))
         for got, ref in zip(second, expected):
             torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    def test_prefill_post_boundaries_follow_cached_layer_calls(self):
+        from rtp_llm.models_py.modules.dsv41.prefill.forward import (
+            _prefill_post_boundaries,
+        )
+
+        layers = make_blocks(count=5, engram_layers=(3,))
+        model = SimpleNamespace(layers=layers)
+        calls = tuple(layer._forward_prefill_fast_fp8 for layer in layers)
+        with patch.dict(os.environ, {"DSV41_FUSED_CROSS_LAYER_MHC": "0"}):
+            plan = _prefill_post_boundaries(model, calls)
+        self.assertEqual(plan, (True, True, False, True, False))
+        self.assertIs(_prefill_post_boundaries(model, calls), plan)
+
+        # A replacement dispatch table may contain an ordinary callable, and a
+        # rebuilt layer stack may have different predecessor links.
+        layers[2].attn_hc.set_previous(layers[0].ffn_hc)
+        calls = (*calls[:4], layers[4])
+        self.assertEqual(
+            _prefill_post_boundaries(model, calls), (True, False, False, False, None)
+        )
 
     def test_enable_gate_predecessor_and_debug_guards(self):
         left, right, _ = make_blocks()

@@ -1212,7 +1212,7 @@ class BatchedBoundedSWA(unittest.TestCase):
             types.SimpleNamespace(kv_full=kv), common
         )
         self.assertEqual([t.shape[0] for t in swa], [2048, 128])
-        self.assertEqual(starts, [30720, 256])
+        self.assertSequenceEqual(starts, [30720, 256])
 
 
 if __name__ == "__main__":

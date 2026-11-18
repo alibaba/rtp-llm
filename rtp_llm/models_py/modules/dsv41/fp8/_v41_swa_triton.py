@@ -15,7 +15,8 @@ codec, or selected as a fallback for an already allocated 584B cache.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from functools import partial
+from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 import triton
@@ -417,6 +418,57 @@ def is_supported_fresh_store(
     )
 
 
+def _store_cp_direct(
+    k,
+    k_cache_raw,
+    compact_slots,
+    unique_blocks,
+    full_entries_per_block,
+    cp_rank,
+    fresh_slots,
+    fresh_out,
+):
+    rows = k.shape[0]
+    if not rows:
+        return
+    _quantize_and_insert_swa_kernel[(rows,)](
+        k,
+        k_cache_raw,
+        compact_slots,
+        k.stride(0),
+        k_cache_raw.stride(0),
+        ENTRIES=full_entries_per_block,
+        unique_blocks=unique_blocks,
+        rank=cp_rank,
+        local_bytes=k_cache_raw.shape[1],
+        CP_BYTES=True,
+        fresh_out=fresh_out,
+        fresh_slots=fresh_slots,
+        STORE_FRESH=fresh_out is not None,
+        num_warps=4,
+    )
+
+
+def prepare_fresh_store(
+    k, raw, slots, full_entries_per_block, cp_rank, cp_size, compaction, fresh_slots
+) -> Optional[Callable[[torch.Tensor], None]]:
+    """Bind this write's checked inputs before the caller reads the prefix."""
+    if not is_supported_fresh_store(
+        k, raw, slots, full_entries_per_block, cp_rank, cp_size, compaction, fresh_slots
+    ):
+        return None
+    return partial(
+        _store_cp_direct,
+        k,
+        raw,
+        compaction.compact_slots,
+        compaction.unique_blocks,
+        full_entries_per_block,
+        cp_rank,
+        fresh_slots,
+    )
+
+
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,
@@ -440,7 +492,6 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
     unique_blocks = compaction.unique_blocks
     if slot_mapping.numel() == 0 or (unique_blocks.numel() == 0 and fresh_out is None):
         return
-    local_bytes = k_cache_raw.shape[1]
     if (
         _cp_addressing_supported(
             k_cache_raw,
@@ -455,23 +506,18 @@ def quantize_and_insert_k_cache_cp_byte_sliced(
             for t in (k, compaction.compact_slots, unique_blocks)
         )
     ):
-        _quantize_and_insert_swa_kernel[(slot_mapping.numel(),)](
+        _store_cp_direct(
             k,
             k_cache_raw,
             compaction.compact_slots,
-            k.stride(0),
-            k_cache_raw.stride(0),
-            ENTRIES=full_entries_per_block,
-            unique_blocks=unique_blocks,
-            rank=cp_rank,
-            local_bytes=local_bytes,
-            CP_BYTES=True,
-            fresh_out=fresh_out,
-            fresh_slots=fresh_slots,
-            STORE_FRESH=fresh_out is not None,
-            num_warps=4,
+            unique_blocks,
+            full_entries_per_block,
+            cp_rank,
+            fresh_slots,
+            fresh_out,
         )
         return
+    local_bytes = k_cache_raw.shape[1]
     full_stride = local_bytes * cp_size
     full_raw = torch.empty(
         (unique_blocks.numel(), full_stride),

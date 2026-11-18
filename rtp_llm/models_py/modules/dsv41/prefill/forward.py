@@ -214,6 +214,36 @@ def _prefill_fast_path_layer_calls(
     return layer_calls
 
 
+def _prefill_post_boundaries(v4, layer_calls) -> Tuple[Optional[bool], ...]:
+    """None selects the ordinary block. A fast block may defer to a linked fast successor."""
+    cached = getattr(v4, "_dsv41_prefill_post_boundaries", None)
+    if cached is not None and cached[0] is layer_calls:
+        return cached[1]
+
+    from rtp_llm.models_py.modules.dsv41.block import Block
+    from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
+        has_delayed_post_connection,
+    )
+
+    fast_body = Block._forward_prefill_fast_fp8
+    boundaries = [
+        False if getattr(call, "__func__", None) is fast_body else None
+        for call in layer_calls
+    ]
+    for i in range(len(boundaries) - 1):
+        if boundaries[i] is None or boundaries[i + 1] is None:
+            continue
+        layer, successor = v4.layers[i], v4.layers[i + 1]
+        boundaries[i] = (
+            type(layer) is Block
+            and type(successor) is Block
+            and has_delayed_post_connection(layer, successor)
+        )
+    result = tuple(boundaries)
+    v4._dsv41_prefill_post_boundaries = (layer_calls, result)
+    return result
+
+
 def _prefill_fast_path_enabled(
     v4: "V4Transformer",
     prepare_hidden_fn: Optional[Any],
@@ -519,15 +549,19 @@ def forward_layers(
     use_prefill_fast_path = _prefill_fast_path_enabled(
         v4, prepare_hidden_fn, prefill_fast_layer_calls
     )
+    post_boundaries: Tuple[Optional[bool], ...] = ()
+    defer_posts = False
     if not use_prefill_fast_path:
         prefill_fast_layer_calls = None
     else:
-        from rtp_llm.models_py.modules.dsv41.block import Block
         from rtp_llm.models_py.modules.dsv41.hc.decode_transition import (
             PendingDecodePost,
-            can_defer_decode_post,
+            cross_layer_mhc_enabled,
         )
         from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
+
+        post_boundaries = _prefill_post_boundaries(v4, prefill_fast_layer_calls)
+        defer_posts = cross_layer_mhc_enabled()
     record_range_ctx = (
         _profiler.disable_record_function_ranges
         if use_prefill_fast_path
@@ -782,26 +816,15 @@ def forward_layers(
                             call_kwargs = routing_kwargs
                             if (
                                 use_prefill_fast_path
-                                and getattr(layer_call, "__func__", None)
-                                is Block._forward_prefill_fast_fp8
+                                and post_boundaries[layer_idx] is not None
                             ):
-                                next_layer = (
-                                    v4.layers[layer_idx + 1]
-                                    if layer_idx + 1 < len(layer_calls)
-                                    else None
-                                )
                                 preserve = layer_idx + 1 in capture_ids or (
                                     ced_tail is not None and layer_idx in (19, 20)
                                 )
                                 defer = (
-                                    next_layer is not None
-                                    and getattr(
-                                        layer_calls[layer_idx + 1], "__func__", None
-                                    )
-                                    is Block._forward_prefill_fast_fp8
-                                    and can_defer_decode_post(
-                                        v4.layers[layer_idx], next_layer, preserve
-                                    )
+                                    defer_posts
+                                    and post_boundaries[layer_idx]
+                                    and not preserve
                                 )
                                 call_kwargs = {
                                     **routing_kwargs,

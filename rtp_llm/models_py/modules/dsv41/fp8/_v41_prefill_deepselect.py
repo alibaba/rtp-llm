@@ -46,10 +46,12 @@ def is_available(
 
 def is_supported(logits, ends, out=None, *, filter_finite=True, enabled=None) -> bool:
     """Metadata-only admission; no score or bound is read back to the host."""
+    if not logits.is_cuda or not is_available(
+        logits.device, logits.dtype, enabled=enabled
+    ):
+        return False
     if not (
-        logits.is_cuda
-        and logits.dtype in (torch.float32, torch.bfloat16)
-        and logits.ndim == 2
+        logits.ndim == 2
         and 0 < logits.shape[0] <= 2**31 - 1
         and 512 <= logits.shape[1] < 2**23
         and logits.stride(1) == 1
@@ -93,7 +95,7 @@ def is_supported(logits, ends, out=None, *, filter_finite=True, enabled=None) ->
         storage = out.untyped_storage().data_ptr()
         if any(t.untyped_storage().data_ptr() == storage for t in (logits, ends)):
             return False
-    return is_available(logits.device, logits.dtype, enabled=enabled)
+    return True
 
 
 def try_select_tokens(
