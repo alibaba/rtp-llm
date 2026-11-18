@@ -72,6 +72,7 @@ cc_test(
     deps = [
         ":mock_generate_stream",
         ":test_rpc_server",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",

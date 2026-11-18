@@ -15,6 +15,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
@@ -499,6 +501,37 @@ TEST_F(P2PConnectorTest, StartLoadUsesDecodeTpPlanWithMultiplePipelineStages) {
 
     auto decode_config = createDecodeConfig().scheduler_config;
     decode_config.parallelism_config.pp_size = 2;
+    const auto make_layout = [&](const auto& config, RoleType role, const std::vector<int>& stage_sizes) {
+        P2PPipelineLayoutPB layout;
+        const int tp_size = config.parallelism_config.tp_size;
+        layout.set_worker_count(stage_sizes.size() * tp_size);
+        int layer_index = 0;
+        for (int layer_count : stage_sizes) {
+            auto* stage = layout.add_stages();
+            stage->set_main_layer_begin(layer_index);
+            stage->set_main_layer_count(layer_count);
+            for (int rank = 0; rank < tp_size; ++rank) {
+                stage->add_worker_indices((layout.stages_size() - 1) * tp_size + rank);
+            }
+            const auto shards = ShardLayoutFactory::fromTopology(
+                *config.topology, config.parallelism_config, role, config.cache_key_tokens_per_block);
+            encodeP2PShardLayout(shards, stage->mutable_main_shards());
+            for (int layer = 0; layer < layer_count; ++layer) {
+                auto* metadata = stage->add_layers();
+                for (const auto& tag : config.topology->layer(layer_index++).group_tags) {
+                    metadata->add_tags(tag);
+                }
+            }
+        }
+        return layout.SerializeAsString();
+    };
+    auto prefill_config = config_;
+    auto& prefill_scheduler_config = prefill_config.scheduler_config;
+    prefill_scheduler_config.pipeline_layout = make_layout(prefill_scheduler_config, RoleType::PREFILL, {2});
+    decode_config.pipeline_layout = make_layout(decode_config, RoleType::DECODE, {1, 1});
+    connector_.reset();
+    connector_ = std::make_unique<P2PConnector>(prefill_config, mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(connector_->init());
     decode_config.worker_addrs.clear();
     std::vector<std::unique_ptr<TestRpcServer>> second_stage;
     for (int rank = 0; rank < decode_config.parallelism_config.tp_size; ++rank) {
@@ -523,6 +556,7 @@ TEST_F(P2PConnectorTest, StartLoadUsesDecodeTpPlanWithMultiplePipelineStages) {
     auto stream = createGenerateStream(key, 5021, 10000);
     auto meta = createMockMeta(stream.get(), /*prefill_tp_size=*/2);
     meta->setPrefillAddr("127.0.0.1", prefill_rpc.listenPort());
+    meta->setPrefillPipelineLayout(prefill_scheduler_config.pipeline_layout);
     auto resource = createValidKVCacheResource();
     auto read = decode.asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(read.ok()) << read.error_info.ToString();
@@ -534,11 +568,11 @@ TEST_F(P2PConnectorTest, StartLoadUsesDecodeTpPlanWithMultiplePipelineStages) {
     const auto request = prefill_rpc.service()->getLastStartLoadRequest();
     ASSERT_EQ(request.workers_size(), 4);
 
-    const auto decode_plan = decode.planFor(/*prefill_tp_size=*/2, /*prefill_cp_size=*/1, key);
+    const auto decode_plan = decode.planFor(/*prefill_tp_size=*/2, /*prefill_cp_size=*/1, key, prefill_scheduler_config.pipeline_layout);
     ASSERT_TRUE(decode_plan->ok());
     EXPECT_EQ(decode_plan->plan.routes.size(), 4u);
-    for (int rank = 0; rank < 2; ++rank) {
-        EXPECT_EQ(decode_plan->plan.forDecodeRank(rank).size(), 2u);
+    for (int rank = 0; rank < request.workers_size(); ++rank) {
+        EXPECT_EQ(decode_plan->plan.forDecodeRank(rank).size(), 1u);
     }
     ASSERT_EQ(request.plan_digest(), decode_plan->plan.digest());
     ASSERT_EQ(request.active_route_ids_size(), 4);
@@ -558,7 +592,7 @@ TEST_F(P2PConnectorTest, StartLoadUsesDecodeTpPlanWithMultiplePipelineStages) {
         EXPECT_EQ(dispatched.plan_digest(), request.plan_digest());
         for (const auto& route : dispatched.routes()) {
             EXPECT_GE(route.peer_index(), 0);
-            EXPECT_LT(route.peer_index(), 2);
+            EXPECT_LT(route.peer_index(), request.workers_size());
             prefill_route_ids.insert(route.route_id());
         }
     }
