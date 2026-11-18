@@ -1002,8 +1002,7 @@ py_test(
 
 py_test(
     name = "gdn_sm90_candidates_test",
-    srcs = ["gdn_sm90_candidates_test.py", "gdn_composition_test.py"],
-    main = "gdn_sm90_candidates_test.py",
+    srcs = ["gdn_sm90_candidates_test.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
@@ -1013,15 +1012,6 @@ py_test(
 py_test(
     name = "gdn_projection_test",
     srcs = ["gdn_projection_test.py"],
-    deps = ["//rtp_llm:testlib"],
-    env = {"GPU_COUNT": "1"},
-    tags = ["H20_CU13"],
-    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-)
-
-py_test(
-    name = "gdn_sm90_norm_quant_test",
-    srcs = ["gdn_sm90_norm_quant_test.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],

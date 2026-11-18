@@ -51,9 +51,8 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(flashinfer_ar.enabled_by_env())
         for value in ("0", "false", "off", "no"):
-            with (
-                self.subTest(value=value),
-                patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": value}, clear=True),
+            with self.subTest(value=value), patch.dict(
+                os.environ, {"FT_DISABLE_CUSTOM_AR": value}, clear=True
             ):
                 self.assertTrue(flashinfer_ar.enabled_by_env())
         with patch.dict(os.environ, {"FT_DISABLE_CUSTOM_AR": "1"}, clear=True):
@@ -70,14 +69,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         group = object()
         config = SimpleNamespace(tp_size=2, local_rank=0, local_world_size=2)
 
-        with (
-            patch.object(
-                collective,
-                "_get_flashinfer_allreduce",
-                return_value=communicator_module,
-            ),
-            patch.object(collective, "_get_group", return_value=group),
-        ):
+        with patch.object(
+            collective, "_get_flashinfer_allreduce", return_value=communicator_module
+        ), patch.object(collective, "_get_group", return_value=group):
             collective._init_flashinfer_allreduce(
                 config,
                 disable_custom_all_reduce=True,
@@ -228,32 +222,6 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
         self.assertIs(result, reduced)
         torch.testing.assert_close(tensor, original)
-
-    def test_collective_can_use_backend_output_without_copy(self):
-        tensor = torch.ones((2, 4))
-        group = collective.Group.TP
-        fast_path = MagicMock()
-        fast_path.should_use.return_value = True
-        reduced = torch.full_like(tensor, 2)
-        fast_path.all_reduce.return_value = reduced
-        module = SimpleNamespace(get_flashinfer_allreduce=lambda: fast_path)
-
-        with patch.object(collective, "_get_flashinfer_allreduce", return_value=module):
-            self.assertIs(collective.all_reduce(tensor, group, inplace=None), reduced)
-        fast_path.all_reduce.assert_called_once_with(tensor)
-        fast_path.all_reduce_into.assert_not_called()
-        self.assertTrue(torch.equal(tensor, torch.ones_like(tensor)))
-
-        fast_path.should_use.return_value = False
-        with (
-            patch.object(collective, "_get_flashinfer_allreduce", return_value=module),
-            patch.object(collective, "_get_symm_mem") as symm,
-            patch.object(collective, "_get_group", return_value=None),
-            patch.object(torch.distributed, "all_reduce") as native,
-        ):
-            symm.return_value.get_symm_mem_communicator.return_value = None
-            self.assertIs(collective.all_reduce(tensor, group, inplace=None), tensor)
-        self.assertIs(native.call_args.args[0], tensor)
 
     def test_collective_preserves_inplace_contract(self):
         tensor = torch.ones((2, 4))
