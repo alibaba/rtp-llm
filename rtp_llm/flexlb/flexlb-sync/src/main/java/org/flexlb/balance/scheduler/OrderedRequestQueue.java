@@ -8,7 +8,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.NavigableSet;
 import java.util.TreeSet;
-import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
@@ -111,31 +110,11 @@ final class OrderedRequestQueue {
         return result;
     }
 
+    int highestUnscannedPriority() { return pendingPriorities.length() - 1; }
+
     boolean hasUnscannedRequests() {
         return priorityOrdering ? !pendingPriorities.isEmpty()
                 : fifo.hasPendingRequests();
-    }
-
-    /**
-     * Visit linked entries in bucket order. The caller holds the coordinator lock
-     * and the visitor must leave the queue unchanged.
-     */
-    void forEachEntry(Consumer<GlobalQueueEntry> visitor) {
-        if (priorityOrdering) {
-            for (Bucket bucket : priorityBuckets) {
-                if (bucket != null) {
-                    visitBucket(bucket, visitor);
-                }
-            }
-        } else {
-            visitBucket(fifo, visitor);
-        }
-    }
-
-    private static void visitBucket(Bucket bucket, Consumer<GlobalQueueEntry> visitor) {
-        for (GlobalQueueEntry entry = bucket.head; entry != null; entry = entry.next) {
-            visitor.accept(entry);
-        }
     }
 
     /** Start scanning at this request, or keep an existing earlier scan position. */

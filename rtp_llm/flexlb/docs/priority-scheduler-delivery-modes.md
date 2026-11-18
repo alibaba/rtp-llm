@@ -192,11 +192,23 @@ different policy groups progress independently; an unbound group overlaps all
 groups. The policy group is frozen at ingress and reused for route selection. Once a route is committed, delivery backpressure can delay
 the group but cannot trigger a second route selection.
 
-PRIORITY does not create a separate request TTL. QUEUE resolves one absolute
-scheduling expiration from the public configuration:
+With `prefillCostOrder` enabled, a single estimator refreshes cache benefits
+for a bounded window of ready requests. Each free planner takes the next ready request immediately. Business priority
+comes first when enabled. Within the same priority, requests with fresh estimates
+are ordered by benefit, followed by requests without estimates in arrival order.
+
+With `prefillQueueShedding` enabled, a separate monitor evaluates blocked
+placement attempts with a Prefill work estimate. It reads pool pressure and
+picks candidates outside the queue lock. Each eviction checks that the same
+blocked attempt still owns the queue entry. The request timer enforces the
+absolute deadline even when the monitor or estimator is busy.
+
+QUEUE resolves one scheduling deadline at ingress. The effective wait is
+`scheduler.queueTimeoutMs`, capped by `prefillQueueShedding.maxWaitMs` when
+shedding is enabled.
 
 ```text
-expires_at_ms = flexlb_admission_time_ms + scheduler.queueTimeoutMs
+expires_at_ms = flexlb_admission_time_ms + effective_wait_ms
 ```
 
 The deadline covers queueing, routing, and delivery acknowledgement. Prompt

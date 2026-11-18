@@ -1147,6 +1147,7 @@ public final class RequestSlot {
             } else if (item != null && item.prefillEp() != null) {
                 diagnostics = item.prefillEp().queueWaitDiagnostics();
             } else if (globalQueue != null) {
+                globalQueue.recordPlacementTimeout(future);
                 diagnostics = globalQueue.waitDiagnostics();
             } else {
                 diagnostics = Map.of("cause", "waiting for placement");

@@ -18,8 +18,6 @@ final class GlobalQueueEntry {
     volatile boolean removed;
     /** Latest fleet-side work estimate used by eviction decisions. */
     volatile PrefillQueueShedding.Estimate sheddingEstimate;
-    /** Whether the arrival has not yet been classified with the controller. */
-    volatile boolean classifyArrival = true;
     /** Set once planning proves the request needs no cached prefix. */
     volatile boolean knownColdRequest;
     /** Latest blocked placement key observed while waiting in queue. */
