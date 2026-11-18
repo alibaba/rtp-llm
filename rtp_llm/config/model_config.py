@@ -169,6 +169,8 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "use_new_loader",
+        "require_weight_update",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -682,6 +684,28 @@ class ModelConfig(CppModelConfig):
 
         self.attn_config.rope_config.style = rope_type[rope_override_args["type"]]
 
+        if rope_override_args["type"] in ("dynamicntk", "llama3"):
+            rope = self.attn_config.rope_config
+            scale = float(rope_override_args.get("factor", rope.scale))
+            original = int(
+                rope_override_args.get("original_max_position_embeddings", rope.max_pos)
+            )
+            low = float(rope_override_args.get("low_freq_factor", rope.factor1))
+            high = float(rope_override_args.get("high_freq_factor", rope.factor2))
+            if not math.isfinite(scale) or scale <= 0 or (scale != 1.0 and original <= 0):
+                raise ValueError(
+                    "scaled RoPE override requires a positive factor and "
+                    "original_max_position_embeddings"
+                )
+            if rope_override_args["type"] == "llama3" and scale != 1.0:
+                if not math.isfinite(low) or not math.isfinite(high) or not 0 < low < high:
+                    raise ValueError(
+                        "Llama3 RoPE override requires 0 < low_freq_factor < high_freq_factor"
+                    )
+            # scale=1 needs no scaling fields; preserve style-only overrides.
+            rope.scale, rope.max_pos = scale, original
+            rope.factor1, rope.factor2 = low, high
+
         if rope_override_args["type"] == "yarn":
             assert (
                 "factor" in rope_override_args
@@ -794,6 +818,11 @@ class ModelConfig(CppModelConfig):
         self.mm_related_params = VitParameters()
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.quant_config = None
+        # None selects the model registry default; bool is an explicit override.
+        self.use_new_loader: Optional[bool] = None
+        # None means the deployment has not declared whether UpdateWeights is
+        # required.  Automatic NewLoader routing requires an explicit choice.
+        self.require_weight_update: Optional[bool] = None
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -1158,7 +1187,10 @@ def build_model_config(
     """
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
+    model_config.ptuning_path = model_args.ptuning_path
     model_config.model_type = model_args.model_type
+    model_config.use_new_loader = model_args.use_new_loader
+    model_config.require_weight_update = model_args.require_weight_update
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
         model_config.local_extra_data_path = vit_config.local_extra_data_path

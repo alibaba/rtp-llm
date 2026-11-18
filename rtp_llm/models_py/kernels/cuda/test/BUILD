@@ -6,6 +6,32 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_library(
+    name = "scaled_rope_reference",
+    testonly = True,
+    srcs = ["scaled_rope_reference.py"],
+    deps = ["//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+[
+    py_test(
+        name = "scaled_rope_test_" + platform,
+        srcs = ["scaled_rope_test.py"],
+        main = "scaled_rope_test.py",
+        deps = [":scaled_rope_reference", "//rtp_llm/models_py:kernels", "//rtp_llm:torch"],
+        # CI must execute GPU code, never inherit the local CPU interpreter mode.
+        env = {"TRITON_INTERPRET": "0"},
+        tags = [platform],
+        exec_properties = {"gpu": platform},
+        target_compatible_with = select({
+            "@//:using_cuda13_x86": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for platform in ["L20_CU13", "H20_CU13"]
+]
+
 py_test (
     name = "per_token_group_quant_8bit_test",
     srcs = ["per_token_group_quant_8bit_test.py"],

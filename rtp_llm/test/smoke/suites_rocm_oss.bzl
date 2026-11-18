@@ -46,6 +46,12 @@ def rocm_oss_suites():
         name = "smoke_rocm_dense",
         tests = [
             smoke_test(
+                name = "newloader_rocm_qwen3_8b",
+                task_info = "data/model/qwen3/q_r_new_model_py.json",
+                smoke_args = "--use_new_loader true --require_weight_update false --use_asm_pa 1 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000",
+                gpu_type = ["MI308X-ROCM7"],
+            ),
+            smoke_test(
                 name="rocm_dense_qwen3_8b_hipgraph_tp2",
                 task_info="data/model/qwen3/q_r_new_model_py.json",
                 smoke_args="--use_swizzleA 1 --use_asm_pa 1 --disable_flashinfer_native 1 --warm_up 0 --use_aiter_pa 1 --seq_size_per_block 16 --act_type BF16 --test_block_num 1000 --reserver_runtime_mem_mb 70000 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1,2,3,4,5,6,7,8' --tp_size 2 --world_size 2",

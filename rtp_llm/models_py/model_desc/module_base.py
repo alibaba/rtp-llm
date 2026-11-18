@@ -50,13 +50,24 @@ class GptModelBase(nn.Module):
             and getattr(py_hw_kernel_config, "enable_decode_cascade_attention", False)
             else 0
         )
-        self.layer_num: int = config.num_layers
-        self.vocab_size: int = config.vocab_size
+        self.layer_num: int = (
+            config["num_hidden_layers"]
+            if isinstance(config, Mapping)
+            else config.num_layers
+        )
+        self.vocab_size: int = (
+            config["vocab_size"] if isinstance(config, Mapping) else config.vocab_size
+        )
 
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
         self._mtp_aux_capture_layer_ids = tuple(
-            config.capture_aux_hidden_layer_ids or ()
+            (
+                config.get("capture_aux_hidden_layer_ids")
+                if isinstance(config, Mapping)
+                else getattr(config, "capture_aux_hidden_layer_ids", None)
+            )
+            or ()
         )
         self._mtp_aux_capture_layer_id_set = frozenset(self._mtp_aux_capture_layer_ids)
         self._mtp_target_hidden_states: Optional[torch.Tensor] = None

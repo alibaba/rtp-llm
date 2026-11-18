@@ -28,6 +28,19 @@ using namespace ::testing;
 
 namespace rtp_llm {
 
+TEST(LocalRpcServerCapabilityTest, UpdateWeightsWithoutManagerIsUnimplemented) {
+    LocalRpcServer server;
+    grpc::ServerContext context;
+    UpdateWeightsRequestPB request;
+    request.set_name("model");
+    request.set_desc("checkpoint");
+    request.set_method("reload");
+    EmptyPB response;
+    const auto status = server.UpdateWeights(&context, &request, &response);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
+    EXPECT_NE(status.error_message().find("unavailable"), std::string::npos);
+}
+
 class MockGenerateStream: public GenerateStream {
 public:
     MockGenerateStream(const std::shared_ptr<GenerateInput>& input,

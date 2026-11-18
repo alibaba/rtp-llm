@@ -127,6 +127,7 @@ class BaseModel(object):
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
+        self._uses_new_loader = False
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
@@ -186,6 +187,9 @@ class BaseModel(object):
             raise Exception("current model can't support cuda graph in py model mode")
 
         self.custom_module = self._init_custom_module()
+        if self._use_new_loader(skip_python_model=skip_python_model):
+            self._load_with_new_loader()
+            return
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
@@ -482,6 +486,111 @@ class BaseModel(object):
     def _load_custom_module(self):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
+
+    @property
+    def uses_new_loader(self) -> bool:
+        return self._uses_new_loader
+
+    def _new_loader_unsupported_reason(self, *, skip_python_model=False):
+        from rtp_llm.utils.new_loader_support import new_loader_unsupported_reason
+
+        reason = new_loader_unsupported_reason(
+            self.model_config,
+            parallelism_config=self.parallelism_config,
+            force_cpu_load_weights=self.force_cpu_load_weights,
+            skip_python_model=skip_python_model,
+            load_method=self.load_method,
+        )
+        if reason is not None:
+            return reason
+        if self._weight_alias_names:
+            return (
+                "draft global-weight aliases are not supported by this NewLoader batch"
+            )
+        if (
+            self.custom_module is not None
+            and self.custom_module.get_custom_weight_info()
+        ):
+            return "downstream custom checkpoint weights are not supported by this NewLoader batch"
+        return None
+
+    def _use_new_loader(self, *, skip_python_model=False):
+        # Registration is explicit here, not an import side effect of core.
+        import rtp_llm.models_py.new_models  # noqa: F401
+        from rtp_llm.models_py.registry import is_model_registered
+        from rtp_llm.utils.new_loader import is_new_loader_enabled
+
+        config = self.model_config
+        registered = is_model_registered(config.model_type)
+        enabled = is_new_loader_enabled(config, default_enabled=registered)
+        reason = None
+        if enabled:
+            reason = (
+                self._new_loader_unsupported_reason(skip_python_model=skip_python_model)
+                if registered
+                else f"model_type={config.model_type!r} is not registered with NewLoader"
+            )
+            if reason is not None:
+                if config.use_new_loader is True:
+                    raise ValueError(
+                        f"NewLoader was explicitly enabled but is unsupported: {reason}"
+                    )
+                enabled = False
+                logging.info("NewLoader compatibility fallback: %s", reason)
+        self._uses_new_loader = enabled
+        logging.info(
+            "loader route for model_type=%s: %s",
+            config.model_type,
+            "newloader" if enabled else "legacy",
+        )
+        return enabled
+
+    def _load_with_new_loader(self):
+        from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+        from rtp_llm.models_py.quant_methods import QuantizationConfig
+
+        parallelism = self.parallelism_config
+        self.device = self._get_device_str()
+        loader = NewModelLoader(
+            model_config=self.model_config,
+            model_path=self.model_config.ckpt_path,
+            load_config=NewLoaderConfig(
+                tp_size=parallelism.tp_size,
+                tp_rank=parallelism.tp_rank,
+                # Preserve the resolved topology, including the default EP=TP
+                # for dense models. The loader skips expert filtering when the
+                # model has no experts, but validates topology consistency.
+                ep_size=parallelism.ep_size,
+                ep_rank=parallelism.ep_rank,
+                compute_dtype=self.model_config.compute_dtype,
+                device=self.device,
+                load_method=NewModelLoader.resolve_requested_load_method(
+                    self.load_method
+                ),
+                parallelism_config=parallelism,
+                fmha_config=self.fmha_config,
+                quant_config=QuantizationConfig(
+                    "none", hw_kernel_config=self.hw_kernel_config
+                ),
+                max_generate_batch_size=self.max_generate_batch_size,
+            ),
+        )
+        self.py_model = loader.load()
+        # Only engine-global tensors use the existing boundary names. Layer
+        # weights remain registered Python parameters, never legacy W dicts.
+        self.weight = ModelWeights(
+            self.model_config.num_layers, self.device, self.model_config.compute_dtype
+        )
+        for name, tensor in self.py_model.runtime_weight_view().items():
+            self.weight.set_global_weight(name, tensor)
+        self.py_model.weight = self.weight
+        self._load_custom_module()
+        self.model_weights_loader = loader
+        self.weight_manager = None
+        self.py_eplb = None
+        logging.warning(
+            "NewLoader selected: online UpdateWeights is unavailable for this deployment"
+        )
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading

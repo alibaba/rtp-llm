@@ -132,6 +132,20 @@ flashinfer_platforms = [
 
 flashinfer_attention_tests = [
     {
+        "name": "test_scaled_rope_prefill",
+        "main": "test_scaled_rope_prefill.py",
+        "extra_srcs": ["base_attention_test.py"],
+        "extra_deps": [
+            "//rtp_llm/models_py:new_loader_models",
+            "//rtp_llm/models_py/kernels/cuda/test:scaled_rope_reference",
+            # The HF parser regression imports legacy Llama/BaseModel, whose
+            # CustomModule annotations import the embedding engine interface.
+            "//rtp_llm:models",
+            "//rtp_llm:async_model",
+            "//rtp_llm:safetensors",
+        ],
+    },
+    {
         "name": "test_py_flashinfer_mha_decode",
         "main": "test_py_flashinfer_mha_decode.py",
         "extra_srcs": [
@@ -176,7 +190,7 @@ flashinfer_attention_tests = [
         main = test["main"],
         tags = [platform["gpu"]],
         target_compatible_with = CUDA13_X86_ONLY,
-        deps = flashinfer_test_deps,
+        deps = flashinfer_test_deps + test.get("extra_deps", []),
     )
     for test in flashinfer_attention_tests
     for platform in flashinfer_platforms
