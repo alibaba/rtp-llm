@@ -158,7 +158,7 @@ protected:
                                   true,
                                   physical_geometry ? payload_ : 0);
         // Keep every corruption case in one executor batch.
-        // Disk staging reserves half its slots for FULL.
+        // Keep enough staging for the private async FULL pool and the legacy byte split.
         engine_ = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_},
                                                                true,
                                                                DeviceHostCopyOptions{},

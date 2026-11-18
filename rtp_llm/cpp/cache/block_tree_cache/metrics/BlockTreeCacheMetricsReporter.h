@@ -92,6 +92,8 @@ public:
     void reportLoadJoin(size_t dependency_count) const;
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
     void reportInsertHardStop() const;
+    void
+    reportInvariantViolation(size_t group_set_id, const char* type, const char* reason, bool stable) const noexcept;
 
     int64_t reportTransferStarted(TransferOperation operation, Tier source_tier, Tier target_tier);
     // Report once after all batches/ranks of a logical copy have completed.

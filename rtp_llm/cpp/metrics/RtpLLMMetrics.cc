@@ -24,6 +24,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInsertMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInvariantMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
@@ -954,6 +955,15 @@ bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags) {
     insert_hard_stop_qps_metric->Report(tags, 1);
+}
+
+bool RtpLLMCacheInvariantMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(violation_qps_metric, "rtp_llm_kv_cache_invariant_violation_qps");
+    return true;
+}
+
+void RtpLLMCacheInvariantMetrics::report(const kmonitor::MetricsTags* tags) {
+    violation_qps_metric->Report(tags, 1);
 }
 
 bool RtpLLMDecodePublicationMetrics::init(kmonitor::MetricsGroupManager* manager) {

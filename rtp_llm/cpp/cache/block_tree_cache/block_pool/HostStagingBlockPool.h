@@ -63,12 +63,18 @@ public:
 
     HostStagingBlockPool(size_t block_count, size_t stride_bytes);
 
-    // Nonblocking all-or-nothing allocation. WorkLoop uses private pools with
-    // no requestBatch waiters; only its direction owner allocates/returns leases.
+    // Nonblocking all-or-nothing allocation. Each load WorkLoop owns private pools
+    // and a local wait queue; it allocates and returns all of its staging leases.
     std::optional<HostStagingBlockBatch> tryMallocBatch(size_t count);
 
     size_t capacity() const {
         return block_count_;
+    }
+    size_t strideBytes() const {
+        return stride_bytes_;
+    }
+    size_t backingBytes() const {
+        return backing_.backingBytes();
     }
 
     // Fair, all-or-nothing allocation; existing async waiters are never bypassed.

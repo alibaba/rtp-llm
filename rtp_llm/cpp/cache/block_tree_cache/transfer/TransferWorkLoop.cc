@@ -85,7 +85,8 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
                                    std::shared_ptr<HostStagingBlockPool>          staging,
                                    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
                                    int64_t                                        world_rank,
-                                   size_t                                         worker_index):
+                                   size_t                                         worker_index,
+                                   std::shared_ptr<HostStagingBlockPool>          swa_staging):
     groups_(std::move(groups)),
     crc_(std::move(crc)),
     disk_io_executor_(disk_io_executor),
@@ -100,7 +101,10 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
             throw std::invalid_argument("async transfer requires positive M/Q");
         if (capacity_ > std::numeric_limits<size_t>::max() / batch_limit_)
             throw std::overflow_error("async transfer descriptor capacity overflow");
-        staging_.pool = std::move(staging);
+        if (operation_ == TransferOperation::EVICT && (staging || swa_staging))
+            throw std::invalid_argument("evict WorkLoop must not own staging pools");
+        // A single supplied pool remains useful for standalone load owners.
+        staging_.pools = {staging, swa_staging ? std::move(swa_staging) : std::move(staging)};
         for (const auto& group : groups_) {
             if (!group->devicePools().empty())
                 crc_waiting_.try_emplace(group->devicePools().front()->deviceIndex());
@@ -288,7 +292,7 @@ bool TransferWorkLoop::plan(Entry& entry) {
                  first.target_tier == Tier::DISK   ? Step::DISK_WRITE :
                                                      Step::CRC_LOAD;
     if (combined) {
-        if (!staging_.pool)
+        if (!staging_.pools[stagingIndex(entry)])
             throw std::invalid_argument("async disk staging is unavailable");
         entry.batch_timer   = timer(entry.task,
                                   "worker_batch_total",
@@ -316,6 +320,10 @@ bool TransferWorkLoop::plan(Entry& entry) {
     return true;
 }
 
+size_t TransferWorkLoop::stagingIndex(const Entry& entry) const {
+    return group(entry)->groupType() == CacheGroupType::SWA ? 1 : 0;
+}
+
 bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
     if (!waiting && entry.task.expired()) {
         fail(entry,
@@ -323,15 +331,15 @@ bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
                                               CacheCopyError::NOT_EXECUTED)));
         return false;
     }
-    auto& resource = staging_;
-    if (!waiting && !resource.waiting.empty()) {
-        waitForResource(entry, resource.waiting);
+    if (!waiting && !staging_.waiting.empty()) {
+        waitForResource(entry, staging_.waiting);
+        retryStaging();
         return false;
     }
-    auto leases = resource.pool->tryMallocBatch(entry.task.descriptors().size());
+    auto leases = staging_.pools[stagingIndex(entry)]->tryMallocBatch(entry.task.descriptors().size());
     if (!leases) {
         if (!waiting)
-            waitForResource(entry, resource.waiting);
+            waitForResource(entry, staging_.waiting);
         return false;
     }
     entry.staging = std::move(*leases);
@@ -344,15 +352,16 @@ bool TransferWorkLoop::acquireStaging(Entry& entry, bool waiting) {
 void TransferWorkLoop::releaseStaging(Entry& entry) {
     if (entry.staging.empty())
         return;
-    auto& resource = staging_;
     entry.staging.clear();
-    retryStaging(resource);
+    retryStaging();
 }
 
-void TransferWorkLoop::retryStaging(StagingResource& resource) {
-    // Only the owner uses these pools; no requestBatch callback can run here.
-    while (auto* waiting = resource.waiting.head) {
-        bool blocked = false;
+void TransferWorkLoop::retryStaging() {
+    // Preserve FIFO within each pool, while a blocked FULL waiter must not
+    // prevent SWA from using its independent capacity (and vice versa).
+    std::array<bool, 2> blocked{};
+    for (auto* waiting = staging_.waiting.head; waiting;) {
+        auto* next = waiting->next;
         withEntry(*waiting, [&] {
             // Remove a failed waiter before withEntry finishes and destroys it.
             block_tree_cache_detail::ScopeRollback unqueue([&] { removeWaiter(*waiting); });
@@ -364,16 +373,16 @@ void TransferWorkLoop::retryStaging(StagingResource& resource) {
                          CacheCopyError::NOT_EXECUTED)));
                 return;
             }
-            if (!acquireStaging(*waiting, true)) {
+            const auto lane = stagingIndex(*waiting);
+            if (blocked[lane] || !acquireStaging(*waiting, true)) {
                 unqueue.dismiss();
-                blocked = true;
+                blocked[lane] = true;
                 return;
             }
             unqueue.run();
             ready_.push(*waiting);
         });
-        if (blocked)
-            break;
+        waiting = next;
     }
 }
 
@@ -687,7 +696,7 @@ void TransferWorkLoop::expireResourceWaiters() {
     }
     // An expired FIFO head may have needed more blocks than the next waiter.
     // Retry against existing free capacity without waiting for another release.
-    retryStaging(staging_);
+    retryStaging();
 }
 
 void TransferWorkLoop::run() {

@@ -367,17 +367,23 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
     if (!setup.engine->asyncEnabled()) {
         recordLegacyStaging(*setup.engine, writer_, is_swa);
     } else {
-        const auto& pool = setup.engine->load_loops_.front()->staging_.pool;
+        const size_t lane = is_swa ? 1 : 0;
+        const auto&  pool = setup.engine->load_loops_.front()->staging_.pools[lane];
         if (pool) {
-            const auto workers        = setup.engine->transferWorkerCount();
-            const auto evict_blocks   = setup.engine->evict_loops_.front()->staging_.pool->capacity();
-            writer_.addResolvedConfigInt("staging_load_blocks", pool->capacity() * workers);
-            writer_.addResolvedConfigInt("staging_evict_blocks", evict_blocks * workers);
-            writer_.addResolvedConfigInt("staging_stride_bytes", pool->stride_bytes_);
-            writer_.addResolvedConfigInt("staging_data_bytes",
-                                         (pool->capacity() + evict_blocks) * workers * pool->stride_bytes_);
-            writer_.addResolvedConfigInt("disk_to_device_batch_capacity",
-                                         std::min(max_descriptors_per_task, pool->capacity()));
+            size_t full_blocks = 0, swa_blocks = 0, staging_bytes = 0;
+            for (const auto& loop : setup.engine->load_loops_) {
+                full_blocks += loop->staging_.pools[0]->capacity();
+                swa_blocks += loop->staging_.pools[1]->capacity();
+                for (const auto& staging : loop->staging_.pools)
+                    staging_bytes += staging->capacity() * staging->strideBytes();
+            }
+            writer_.addResolvedConfigInt("staging_load_blocks", is_swa ? swa_blocks : full_blocks);
+            writer_.addResolvedConfigInt("staging_evict_blocks", 0);
+            writer_.addResolvedConfigInt("staging_full_blocks", full_blocks);
+            writer_.addResolvedConfigInt("staging_swa_blocks", swa_blocks);
+            writer_.addResolvedConfigInt("staging_stride_bytes", pool->strideBytes());
+            writer_.addResolvedConfigInt("staging_data_bytes", staging_bytes);
+            writer_.addResolvedConfigInt("disk_to_device_batch_capacity", max_descriptors_per_task);
         }
     }
     writer_.addResolvedConfig("requested_copy_strategy", options_.copy_strategy);
@@ -889,9 +895,7 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
             if (descriptors.empty()) {
                 continue;
             }
-            const size_t direction_batch_size =
-                std::min(descriptor_batch_size,
-                         engine->batchLimit(descriptors.front().source_tier, descriptors.front().target_tier));
+            const size_t direction_batch_size = std::min(descriptor_batch_size, engine->batchLimit());
             if (options_.business_concurrency > 0) {
                 RTP_LLM_CHECK(business_pool != nullptr);
                 const size_t                business_size  = options_.descriptors_per_business;

@@ -39,10 +39,9 @@ public:
 
     // Group a logical request by direction and GroupSet, then submit bounded batches.
     std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
-    // Maximum physical batch for this route, precomputed during initialization.
-    size_t batchLimit(Tier source, Tier target) const noexcept {
-        return async_ && source == Tier::DISK && target == Tier::DEVICE ? staging_batch_limit_ :
-                                                                          max_descriptors_per_batch_;
+    // Staging pools are validated at initialization to hold a full configured batch.
+    size_t batchLimit() const noexcept {
+        return max_descriptors_per_batch_;
     }
     const std::vector<GroupSetPtr>& groupSets() const noexcept {
         return group_sets_;
@@ -81,7 +80,6 @@ private:
 
     std::vector<GroupSetPtr> group_sets_;
     size_t                   max_descriptors_per_batch_;
-    size_t                   staging_batch_limit_;
 
     std::unique_ptr<DiskIOExecutor> disk_io_executor_;
 

@@ -10,13 +10,14 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 namespace {
 
 // Bounds on cache mutex hold time and log volume, not user-facing knobs.
-constexpr size_t  kNodesPerBatch      = 1024;
+constexpr size_t  kNodesPerBatch      = 128;
 constexpr size_t  kScanPercent        = 5;
 constexpr size_t  kMaxDetailsPerCycle = 10;
 constexpr int64_t kMaxIntervalMs      = std::numeric_limits<int64_t>::max() / 1000;
@@ -317,6 +318,13 @@ void FullPrefixInvariantScanner::publishBatch(const std::vector<FullViolationDet
     cycle_nodes_scanned_ += nodes_scanned;
 
     for (const FullViolationDetail& detail : details) {
+        // Report every observation, including details suppressed by the log cap.
+        if (metrics_reporter_ != nullptr) {
+            metrics_reporter_->reportInvariantViolation(detail.group_set_id,
+                                                        fullViolationTypeName(detail.type),
+                                                        invalidResourceReasonName(detail.reason),
+                                                        detail.stable);
+        }
         if (detail.stable) {
             ++cycle_stable_;
         } else {

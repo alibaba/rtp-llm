@@ -87,17 +87,6 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
     return layout;
 }
 
-size_t asyncTransferBatchLimit(size_t configured_batch, size_t staging_blocks, bool has_device_disk_route) {
-    if (!configured_batch)
-        throw std::invalid_argument("invalid async transfer batch size");
-    if (!has_device_disk_route)
-        return configured_batch;
-    if (staging_blocks < 2 || staging_blocks % 2)
-        throw std::invalid_argument("invalid async staging budget");
-    // Each direction gets N/2 slots, shared by all cache group types.
-    return std::min(configured_batch, staging_blocks / 2);
-}
-
 size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop, bool async) {
     if (!workers || (async && !slots_per_loop))
         throw std::invalid_argument("invalid CRC workspace count");

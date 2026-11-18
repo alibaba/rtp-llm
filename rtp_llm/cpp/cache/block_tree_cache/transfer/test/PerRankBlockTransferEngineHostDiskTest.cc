@@ -51,7 +51,7 @@ TEST(PerRankBlockTransferEngineConfigTest, BatchLimitIsAvailableForBothBackends)
         SCOPED_TRACE(async);
         PerRankBlockTransferEngine engine({}, false, {}, 128, 17, 2, 32, nullptr, 0, 2, async);
         ASSERT_EQ(engine.asyncEnabled(), async);
-        EXPECT_EQ(engine.batchLimit(Tier::HOST, Tier::DISK), 17u);
+        EXPECT_EQ(engine.batchLimit(), 17u);
     }
 }
 

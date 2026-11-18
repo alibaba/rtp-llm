@@ -437,6 +437,25 @@ void BlockTreeCacheMetricsReporter::reportInsertHardStop() const {
     }
 }
 
+void BlockTreeCacheMetricsReporter::reportInvariantViolation(size_t      group_set_id,
+                                                             const char* type,
+                                                             const char* reason,
+                                                             bool        stable) const noexcept {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    try {
+        if (auto* metrics = metrics_reporter_->getMetricsGroup<RtpLLMCacheInvariantMetrics>()) {
+            auto tags = metrics_reporter_->getTags();
+            tags.AddTag("group_set_id", std::to_string(group_set_id));
+            tags.AddTag("type", type);
+            tags.AddTag("reason", reason);
+            tags.AddTag("status", stable ? "stable" : "transient");
+            metrics->report(&tags);
+        }
+    } catch (...) {}  // Optional metric failures must not suppress diagnostic logs.
+}
+
 void BlockTreeCacheMetricsReporter::reportLoadJoin(size_t dependency_count) const {
     if (metrics_reporter_ == nullptr) {
         return;
