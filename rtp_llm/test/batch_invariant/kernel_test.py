@@ -1,4 +1,4 @@
-"""Exercise the fixed CUDA tiles with the Qwen3.6 projection and attention shapes."""
+"""Exercise the fixed CUDA tiles with Qwen3.6 and Qwen3-8B shapes."""
 
 import argparse
 
@@ -6,16 +6,22 @@ import torch
 from torch.nn.functional import linear
 from gdn_test import bit_mismatches
 
+from rtp_llm.models_py.modules.base.cuda.norm import FusedQKRMSNorm
+from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.models_py.triton_kernels.attention.batch_invariant import (
     batch_invariant_paged_attention,
 )
 from rtp_llm.models_py.triton_kernels.common.batch_invariant_linear import (
     batch_invariant_linear,
 )
+from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.utils.model_weight import W
 
 
-def check_projections():
-    dims = (
+def check_projections(qwen3_8b):
+    vocab_size = 151936 if qwen3_8b else 248320
+    hybrid_dims = (
         (2048, 1),
         (2048, 256),
         (2048, 1024),
@@ -24,13 +30,18 @@ def check_projections():
         (2048, 12352),
         (4096, 2048),
         (512, 2048),
-        (2048, 248320),
+        (2048, vocab_size),
+    )
+    dims = (
+        ((4096, 6144), (4096, 4096), (4096, 24576), (12288, 4096), (4096, vocab_size))
+        if qwen3_8b
+        else hybrid_dims
     )
     for k, n in dims:
         x = torch.randn((193, k), device="cuda", dtype=torch.bfloat16) * 0.125
         # RTP stores regular projections in [in, out] order and the LM head in
         # [out, in] order. Exercise both strides.
-        head = n == 248320
+        head = n == vocab_size
         weight_shape = (n, k) if head else (k, n)
         weight = torch.randn(weight_shape, device="cuda", dtype=x.dtype) * 0.03125
         if not head:
@@ -40,17 +51,63 @@ def check_projections():
         assert expected.dtype == (torch.float32 if head else torch.bfloat16)
         reference = linear(target.float(), weight.float())[0]
         torch.testing.assert_close(
-            expected.float(), reference, rtol=1e-4 if head else 0.004, atol=3e-6
+            expected.float(),
+            reference,
+            rtol=1e-4 if head else 0.004,
+            atol=1e-5 if qwen3_8b else 3e-6,
         )
-        for batch, slot in ((x[:64], 42), (x[:65].roll(22, 0), 64), (x, 42)):
+        batches = ((x[:64], 42), (x[:65].roll(22, 0), 64), (x, 42))
+        for batch, slot in batches:
             actual = batch_invariant_linear(batch, weight, output_fp32=head)[slot]
             assert bit_mismatches(expected, actual) == 0, (k, n, batch.shape[0], slot)
         print(f"projection {k} x {n} {expected.dtype}: equal", flush=True)
+        if qwen3_8b:
+            native = rtp_llm_ops.cublas_gemm_bf16_bf16_fp32 if head else linear
+            solo = native(target, weight)[0]
+            differences = [
+                bit_mismatches(solo, native(batch, weight)[slot])
+                for batch, slot in batches
+            ]
+            print(f"regular projection {k} x {n}, 64/65/193 rows: {differences}")
 
 
-def check_attention(trtllm_baseline):
+def check_dense_mlp():
+    x = torch.randn((193, 4096), device="cuda", dtype=torch.bfloat16) * 0.125
+    weights = {
+        key: torch.randn(shape, device=x.device, dtype=x.dtype) * 0.03125
+        for key, shape in ((W.ffn_w13, (4096, 24576)), (W.ffn_w2, (12288, 4096)))
+    }
+    for invariant in (False, True):
+        hw = HWKernelConfig()
+        hw.batch_invariant = invariant
+        mlp = DenseMLP(ActivationType.Swiglu, ParallelismConfig(), weights, None, hw)
+        expected = mlp(x[42:43])[0]
+        differences = [
+            bit_mismatches(expected, mlp(batch)[row])
+            for batch, row in ((x[:64], 42), (x[:65].roll(22, 0), 64), (x, 42))
+        ]
+        print(f"dense MLP, invariant={invariant}, 64/65/193 rows: {differences}")
+        if invariant:
+            assert differences == [0, 0, 0]
+
+
+def check_qk_norm(head_dim, query_heads, kv_heads):
+    qkv = torch.randn(
+        (193, (query_heads + 2 * kv_heads) * head_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    weights = torch.rand((2, head_dim), dtype=qkv.dtype, device=qkv.device)
+    norm = FusedQKRMSNorm(*weights, query_heads, kv_heads, head_dim)
+    expected = norm(qkv[42:43].clone())[0]
+    for batch, slot in ((qkv[:64], 42), (qkv[:65].roll(22, 0), 64), (qkv, 42)):
+        assert bit_mismatches(expected, norm(batch.clone())[slot]) == 0
+    print("Q/K RMSNorm: equal for solo and 64/65/193 rows", flush=True)
+
+
+def check_attention(trtllm_baseline, dims, query_heads, kv_heads):
     q_len, noise_len = 131, 257
-    dims, query_heads, kv_heads, page_size = 256, 16, 2, 64
+    page_size = 64
     query = torch.randn(
         (q_len + noise_len, query_heads, dims), device="cuda", dtype=torch.bfloat16
     )
@@ -90,7 +147,9 @@ def check_attention(trtllm_baseline):
 
     # Check causal indexing across noncontiguous pages against FP32 attention.
     k, v = (
-        x.reshape(kv_heads, -1, dims)[:, :q_len].repeat_interleave(8, dim=0).float()
+        x.reshape(kv_heads, -1, dims)[:, :q_len]
+        .repeat_interleave(query_heads // kv_heads, dim=0)
+        .float()
         for x in cache[page_ids[0, :3]].permute(1, 2, 0, 3, 4)
     )
     q = query[:q_len].transpose(0, 1).float()
@@ -142,15 +201,15 @@ def check_attention(trtllm_baseline):
         print("TRTLLM baseline split differences:", bit_mismatches(solo[128:], tail))
 
 
-def check_decode_attention(trtllm_baseline):
+def check_decode_attention(trtllm_baseline, dims, query_heads, kv_heads):
     torch.manual_seed(537)
-    q = torch.randn((33, 16, 256), dtype=torch.bfloat16, device="cuda")
-    cache = torch.randn((512, 2, 2, 64, 256), dtype=q.dtype, device="cuda")
+    q = torch.randn((33, query_heads, dims), dtype=torch.bfloat16, device="cuda")
+    cache = torch.randn((512, 2, kv_heads, 64, dims), dtype=q.dtype, device="cuda")
     target_pages = torch.arange(1, 257, device="cuda", dtype=torch.int32)
     peer_pages = torch.arange(256, 512, device="cuda", dtype=torch.int32)
     table = torch.cat((target_pages[None], peer_pages.expand(32, -1)))
     requests = torch.arange(33, device="cuda", dtype=torch.int32)
-    scale = 256**-0.5
+    scale = dims**-0.5
     for target in (193, 4097):
         lengths = torch.tensor(
             [target] + [16380] * 32, device="cuda", dtype=torch.int32
@@ -197,12 +256,17 @@ def check_decode_attention(trtllm_baseline):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--trtllm-baseline", action="store_true")
+    parser.add_argument("--qwen3-8b", action="store_true")
     args = parser.parse_args()
     torch.manual_seed(157)
     torch.backends.cuda.matmul.allow_tf32 = False
-    check_projections()
-    check_attention(args.trtllm_baseline)
-    check_decode_attention(args.trtllm_baseline)
+    dims = (128, 32, 8) if args.qwen3_8b else (256, 16, 2)
+    check_projections(args.qwen3_8b)
+    if args.qwen3_8b:
+        check_dense_mlp()
+        check_qk_norm(*dims)
+    check_attention(args.trtllm_baseline, *dims)
+    check_decode_attention(args.trtllm_baseline, *dims)
 
 
 if __name__ == "__main__":

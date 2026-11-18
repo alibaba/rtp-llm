@@ -30,7 +30,9 @@ def main():
     parser.add_argument(
         "--legacy", action="store_true", help="Report baseline differences"
     )
-    parser.add_argument("--tp4-397b", action="store_true")
+    model = parser.add_mutually_exclusive_group()
+    model.add_argument("--tp4-397b", action="store_true")
+    model.add_argument("--qwen3-30b", action="store_true")
     args = parser.parse_args()
     torch.manual_seed(48)
     config = ModelConfig()
@@ -41,6 +43,12 @@ def main():
         config.expert_num = 512
         config.moe_inter_size = 1024
         config.moe_k = 10
+    elif args.qwen3_30b:
+        config.model_type = "qwen_3_moe"
+        config.hidden_size = 2048
+        config.expert_num = 128
+        config.moe_inter_size = 768
+        config.moe_k = 8
     else:
         config.hidden_size = 2048
         config.expert_num = 256
@@ -84,7 +92,7 @@ def main():
             expert_x=hidden, expert_topk_ids=ids, expert_topk_weights=weights
         )
         output = executor.execute(payload, "SiGLU", None, None, False, None)
-        return ids[row], weights[row], output.fused_expert_output[row]
+        return logits[row], ids[row], weights[row], output.fused_expert_output[row]
 
     expected = run(x[:64], 0)
     for hidden, row in ((x, 0), (x.roll(-1, 0), 64), (x[:1], 0)):
@@ -93,10 +101,11 @@ def main():
             bit_mismatches(left, right) for left, right in zip(expected, actual)
         ]
         print(
-            f"64 vs {len(hidden)} tokens, target row {row}: ids, weights, output {differences}"
+            f"64 vs {len(hidden)} tokens, target row {row}: "
+            f"router logits, ids, weights, output {differences}"
         )
         if not args.legacy:
-            assert differences == [0, 0, 0]
+            assert differences == [0, 0, 0, 0]
 
 
 if __name__ == "__main__":

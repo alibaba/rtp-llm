@@ -18,7 +18,6 @@ CONTINUATION = " red blue green yellow"
 TARGET_LENGTH = 193
 SHORT_LENGTH = 11
 LONG_LENGTH = 321
-VOCAB_SIZE = 248320
 
 
 @dataclass
@@ -27,6 +26,15 @@ class Output:
     logits: np.ndarray
     logprobs: np.ndarray
     sampled_logprobs: np.ndarray
+
+
+def read_vocab_size(checkpoint):
+    with (checkpoint / "config.json").open(encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    text_config = config.get("text_config") or {}
+    vocab_size = text_config.get("vocab_size", config.get("vocab_size"))
+    assert isinstance(vocab_size, int) and vocab_size > 0, (checkpoint, vocab_size)
+    return vocab_size
 
 
 def make_prompt(tokenizer, length, lead):
@@ -71,7 +79,7 @@ def read_tensor(tensor, data_type, field, dtype):
     )
 
 
-def collect(call, expected_tokens):
+def collect(call, steps, vocab_size):
     tokens, logits, sampled = [], [], []
     for response in call:
         output = response.flatten_output
@@ -83,13 +91,17 @@ def collect(call, expected_tokens):
             output.aux_info[0].softmax_probs, pb.TensorPB.FP32, "fp32_data", "<f4"
         )
         assert ids.size == probs.size == 1, (ids.shape, probs.shape)
-        assert row.size == row.shape[-1] == VOCAB_SIZE, row.shape
+        assert row.ndim and row.shape[-1] == vocab_size and row.size == vocab_size, (
+            row.shape,
+            vocab_size,
+        )
         assert np.isfinite(row).all() and 0 < probs.item() <= 1
         tokens.append(ids.item())
-        logits.append(row.reshape(VOCAB_SIZE))
+        logits.append(row.reshape(vocab_size))
         sampled.append(probs.item())
-    np.testing.assert_array_equal(tokens, expected_tokens)
+    assert len(tokens) == steps, (len(tokens), steps, tokens)
     logits = np.stack(logits)
+    assert logits.shape == (steps, vocab_size), logits.shape
     logprobs = torch.log_softmax(torch.from_numpy(logits), dim=-1).numpy()
     sampled_logprobs = np.log(np.asarray(sampled, dtype=np.float32))
     return Output(
@@ -98,15 +110,31 @@ def collect(call, expected_tokens):
 
 
 def compare(reference, actual, name):
-    for field in ("tokens", "logits", "logprobs", "sampled_logprobs"):
+    differences, first_differences = {}, {}
+    for field in Output.__annotations__:
         first, second = getattr(reference, field), getattr(actual, field)
         assert first.dtype == second.dtype and first.shape == second.shape
-        different = np.count_nonzero(first.view(np.uint32) != second.view(np.uint32))
-        assert not different, f"{name} {field}: {different} elements differ"
-    print(
-        f"{name}: {actual.logits.size} logits and full-vocab FP32 logprobs match",
-        flush=True,
-    )
+        first_bits, second_bits = first.view(np.uint32), second.view(np.uint32)
+        mismatch = first_bits != second_bits
+        differences[field] = int(np.count_nonzero(mismatch))
+        if differences[field]:
+            index = np.unravel_index(mismatch.argmax(), mismatch.shape)
+            first_differences[field] = {
+                "index": [int(position) for position in index],
+                "reference": first[index].item(),
+                "actual": second[index].item(),
+                "reference_bits": hex(first_bits[index]),
+                "actual_bits": hex(second_bits[index]),
+            }
+    result = {
+        "case": name,
+        "steps": len(actual.tokens),
+        "logits_shape": list(actual.logits.shape),
+        "different_elements": differences,
+        "first_differences": first_differences,
+    }
+    print(json.dumps(result), flush=True)
+    assert not first_differences, f"{name}: {differences}"
 
 
 def record_offsets(log_dir):
@@ -186,9 +214,10 @@ def main():
     parser.add_argument("--save", type=Path)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--chunked", action="store_true")
-    parser.add_argument("--off-smoke", action="store_true")
+    parser.add_argument("--greedy-smoke", "--off-smoke", action="store_true")
     args = parser.parse_args()
     tokenizer = Tokenizer.from_file(str(args.checkpoint / "tokenizer.json"))
+    vocab_size = read_vocab_size(args.checkpoint)
     fixed = tokenizer.encode(CONTINUATION, add_special_tokens=False).ids
     target = make_prompt(tokenizer, TARGET_LENGTH, " The ocean is calm.")
     short = make_prompt(tokenizer, SHORT_LENGTH, " Good.")
@@ -198,7 +227,7 @@ def main():
     with grpc.insecure_channel(args.address) as channel:
         grpc.channel_ready_future(channel).result(timeout=600)
         stub = RpcServiceStub(channel)
-        if args.off_smoke:
+        if args.greedy_smoke:
             tokens = []
             for response in start_request(stub, target, 8):
                 output = response.flatten_output.output_ids
@@ -208,21 +237,25 @@ def main():
                     ).flatten()
                 )
             assert len(tokens) == 8
-            print(f"off-mode greedy tokens: {list(map(int, tokens))}", flush=True)
+            print(f"greedy tokens: {list(map(int, tokens))}", flush=True)
             return
 
         offsets = record_offsets(args.log_dir)
-        solo = collect(start_request(stub, target, len(fixed), measure=True), fixed)
+        solo = collect(
+            start_request(stub, target, len(fixed), measure=True),
+            len(fixed),
+            vocab_size,
+        )
         evidence(args.log_dir, offsets, chunked=args.chunked)
+        baseline = solo
         if args.reference:
             with np.load(args.reference) as reference:
-                compare(
-                    Output(
-                        **{field: reference[field] for field in Output.__annotations__}
-                    ),
-                    solo,
-                    "cross-budget solo",
+                baseline = Output(
+                    **{field: reference[field] for field in Output.__annotations__}
                 )
+            compare(baseline, solo, "cross-budget solo")
+        np.testing.assert_array_equal(solo.tokens, fixed)
+        print(f"fixed continuation tokens: {solo.tokens.tolist()}", flush=True)
         if args.save:
             np.savez(args.save, **vars(solo))
 
@@ -255,7 +288,7 @@ def main():
                 pass
             for ids, call in zip(order, calls):
                 if ids is target:
-                    actual = collect(call, fixed)
+                    actual = collect(call, len(fixed), vocab_size)
                 else:
                     for _ in call:
                         pass
@@ -266,7 +299,7 @@ def main():
                 target_first=target_first,
                 chunked=args.chunked,
             )
-            compare(solo, actual, f"target {'first' if target_first else 'last'}")
+            compare(baseline, actual, f"target {'first' if target_first else 'last'}")
 
 
 if __name__ == "__main__":
