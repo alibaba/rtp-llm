@@ -111,6 +111,7 @@ class Qwen3Model(GptModelBase):
         self._local_global_layer_ids = tuple(layer_ids)
         self._cached_kv_cache = None
         self._layer_kv_caches = None
+        self._eager_prefill_plan = None
         self.embed_tokens = (
             Embedding(
                 config, parallelism_config, weights.get_global_weight(W.embedding)
@@ -148,6 +149,7 @@ class Qwen3Model(GptModelBase):
         # if the caller supplies the same handle again.
         self._cached_kv_cache = None
         self._layer_kv_caches = None
+        self._eager_prefill_plan = None
         initialized = super().initialize(init_resource)
         self._get_cached_layer_kv_caches()
         return initialized
@@ -200,6 +202,11 @@ class Qwen3Model(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
         capture = self.capture_context(inputs.capture_hidden_states)
         capture_enabled = capture.enabled
+        workspace = None
+        if torch.version.hip is not None:
+            from rtp_llm.models_py.model_desc.rocm_eager_qwen3 import prepare_workspace
+
+            workspace = prepare_workspace(self, inputs, hidden_states, capture_enabled)
         layer_ids = self._local_global_layer_ids
         layer_kv_caches = self._get_cached_layer_kv_caches()
         grouped_fmha = isinstance(fmha_impl, Mapping)
@@ -210,19 +217,23 @@ class Qwen3Model(GptModelBase):
                 if grouped_fmha
                 else fmha_impl
             )
-            hidden_states = decoder_layer(
-                hidden_states,
-                layer_fmha_impl,
-                kv_cache=(
-                    layer_kv_caches[local_idx]
-                    if layer_kv_caches is not None
-                    else (
-                        self.kv_cache.get_layer_cache(local_idx)
-                        if self.kv_cache is not None
-                        else None
-                    )
-                ),
+            layer_cache = (
+                layer_kv_caches[local_idx]
+                if layer_kv_caches is not None
+                else (
+                    self.kv_cache.get_layer_cache(local_idx)
+                    if self.kv_cache is not None
+                    else None
+                )
             )
+            if workspace is not None:
+                hidden_states = workspace.layer(
+                    local_idx, hidden_states, layer_fmha_impl, layer_cache
+                )
+            else:
+                hidden_states = decoder_layer(
+                    hidden_states, layer_fmha_impl, kv_cache=layer_cache
+                )
             if capture_enabled:
                 capture.capture_layer(layer_ids[local_idx], hidden_states)
         if self.norm is not None:
