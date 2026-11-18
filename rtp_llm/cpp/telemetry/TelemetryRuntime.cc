@@ -333,7 +333,11 @@ bool TelemetryRuntime::init(
         exporter_options.ssl_cipher.clear();
         exporter_options.ssl_cipher_suite.clear();
         exporter_options.compression.clear();
-        exporter_options.retry_policy_max_attempts       = 5;
+        // 导出是旁路：单批只做一次尝试。OTel v1.21 的重试只在传输成功且
+        // HTTP 状态可重试时触发（429/503 等），DNS 失败不重试；这里关闭
+        // 应用层重试，保证失败批次受 http_timeout_ms 约束并快速返回，
+        // 拥堵时丢批不拖垮导出线程。
+        exporter_options.retry_policy_max_attempts       = 1;
         exporter_options.retry_policy_initial_backoff    = std::chrono::duration<float>{1.0f};
         exporter_options.retry_policy_max_backoff        = std::chrono::duration<float>{5.0f};
         exporter_options.retry_policy_backoff_multiplier = 1.5f;

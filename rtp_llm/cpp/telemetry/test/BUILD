@@ -1,6 +1,16 @@
 load("//:def.bzl", "copts")
 
 cc_test(
+    name = "curl_dns_config_test",
+    srcs = ["curl_dns_config_test.cc"],
+    linkopts = ["-pthread"],
+    # Binds loopback UDP port 53 and (in the sync-DNS crash-tier check)
+    # rewrites /etc/resolv.conf inside a forked child, restored by the parent.
+    tags = ["no-sandbox"],
+    deps = ["@curl//:curl"],
+)
+
+cc_test(
     name = "telemetry_test",
     srcs = ["telemetry_test.cc"],
     copts = copts(),
