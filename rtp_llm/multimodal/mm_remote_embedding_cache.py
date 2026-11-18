@@ -116,11 +116,13 @@ class MMRemoteEmbeddingCache:
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=8, thread_name_prefix="mm-remote-metadata"
         )
+        transfer_workers = 2
         self._transfer_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="mm-remote-cache"
+            max_workers=transfer_workers, thread_name_prefix="mm-remote-cache"
         )
-        # Slow transfers leave admission capacity for new lookups.
-        self._transfer_pending = threading.BoundedSemaphore(max(2, max_pending // 2))
+        # Admit only as many payloads as can run. A stalled transfer must not
+        # leave subsequent hits waiting out their deadline in the executor.
+        self._transfer_slots = threading.BoundedSemaphore(transfer_workers)
         self._write_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="mm-remote-write"
         )
@@ -1076,7 +1078,7 @@ class MMRemoteEmbeddingCache:
 
         def release():
             if transfer_admitted:
-                self._transfer_pending.release()
+                self._transfer_slots.release()
             self._release(cost)
 
         def lookup():
@@ -1183,7 +1185,7 @@ class MMRemoteEmbeddingCache:
                 return None
 
             timing["nbytes"] = size
-            if not self._transfer_pending.acquire(blocking=False):
+            if not self._transfer_slots.acquire(blocking=False):
                 self._count("admission_skip")
                 outcome = "admission_skip"
                 self._report_skip("read", "transfer_admission")
