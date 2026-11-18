@@ -135,3 +135,14 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+# Manual comparison of the two ragged prefill TopK backends on SM100.
+py_test(
+    name = "prefill_topk_sm100_ab",
+    srcs = ["benchmark_topk_v3_tie_break.py"],
+    main = "benchmark_topk_v3_tie_break.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    args = ["--quick", "--output", "topk_ab.json"],
+    tags = ["manual"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)

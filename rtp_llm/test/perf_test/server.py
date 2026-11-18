@@ -37,7 +37,8 @@ class EngineServer:
             process_file_name="process.log",
             smoke_args_str=engine_cli,
         )
-        if not self._server.start_server():
+        startup_timeout = int(os.getenv("PERF_SERVER_START_TIMEOUT_S", "1600"))
+        if not self._server.start_server(timeout=startup_timeout):
             self._server.print_process_log()
             raise RuntimeError(
                 "Engine server failed to start. Check process.log above for details."

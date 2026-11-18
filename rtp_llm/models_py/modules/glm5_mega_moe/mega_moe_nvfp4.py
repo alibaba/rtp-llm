@@ -1,6 +1,7 @@
 """Native NVFP4 routed experts using DeepGEMM 2.8.2 symmetric-memory MoE."""
 
 import logging
+import os
 
 import torch
 from torch import nn
@@ -80,6 +81,18 @@ def prepare_native_nvfp4_weights(w1, s1, g1, w2, s2, g2):
 
 def quantize_native_nvfp4_input(x):
     """DeepGEMM's per-token NVFP4 format without CPU copies during capture."""
+    if (
+        os.getenv("RTP_LLM_FUSED_NVFP4_INPUT", "0") == "1"
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.stride(1) == 1
+        and 0 < x.shape[1] <= 8192
+        and x.shape[1] % 64 == 0
+    ):
+        from .nvfp4_input_triton import quantize_input
+
+        return quantize_input(x)
+
     from deep_gemm.utils.math import cast_to_ue4m3_nearest, nvfp4_global_scale
 
     rows, hidden = x.shape

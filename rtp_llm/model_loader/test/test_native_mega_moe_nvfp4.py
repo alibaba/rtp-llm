@@ -257,6 +257,40 @@ class NativeNvfp4KernelTest(unittest.TestCase):
         dist.destroy_process_group()
         cls.directory.cleanup()
 
+    def test_fused_activation_pack_matches_eager(self):
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_nvfp4 import (
+            quantize_native_nvfp4_input,
+        )
+        from rtp_llm.models_py.modules.glm5_mega_moe.nvfp4_input_triton import (
+            quantize_input,
+        )
+        from triton.testing import do_bench_cudagraph
+
+        torch.manual_seed(42)
+        for rows, hidden in (
+            (1, 4096),
+            (32, 7168),
+            (64, 4096),
+            (128, 7168),
+            (1024, 7168),
+        ):
+            value = torch.randn(rows, hidden, dtype=torch.bfloat16, device="cuda")
+            value[0, :16] = -0.0
+            with patch.dict(os.environ, {"RTP_LLM_FUSED_NVFP4_INPUT": "0"}):
+                expected = quantize_native_nvfp4_input(value)
+                actual = quantize_input(value)
+                for reference, fused in zip(expected, actual):
+                    torch.testing.assert_close(fused, reference, rtol=0, atol=0)
+                with torch.cuda.stream(torch.cuda.Stream()):
+                    old_ms = do_bench_cudagraph(
+                        lambda: quantize_native_nvfp4_input(value), rep=10
+                    )
+                    new_ms = do_bench_cudagraph(lambda: quantize_input(value), rep=10)
+                print(
+                    f"NVFP4 input rows={rows} hidden={hidden}: eager={old_ms*1000:.2f}us fused={new_ms*1000:.2f}us",
+                    flush=True,
+                )
+
     def test_fp8_conversion_preserves_projection_scales_and_accuracy(self):
         from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
             OnlineMegaMoeNvfp4FromFp8Weight,
