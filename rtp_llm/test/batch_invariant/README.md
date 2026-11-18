@@ -1,4 +1,4 @@
-# Qwen BF16 batch-invariant inference
+# Qwen batch-invariant inference
 
 The startup switch is `RTP_BATCH_INVARIANT=1`. An unset variable or `0`
 selects the regular engine paths. Use NVIDIA L20D (SM103),
@@ -106,19 +106,33 @@ run_case() (
     cd "$work/mode-${mode}-budget-${budget}"
     unset ACT_TYPE
     act=()
-    if [ "$mode" = 0 ] && [ "$model_type" = qwen35_moe ]; then act=(--act_type bf16); fi
+    quant=()
+    if [ -n "${quantization:-}" ]; then quant=(--quantization "$quantization"); fi
+    if [ "$mode" = 0 ] && [ "$model_type" = qwen35_moe ] && [ -z "${quantization:-}" ]; then
+        act=(--act_type bf16)
+    fi
     RTP_BATCH_INVARIANT="$mode" python3 -m rtp_llm.start_server \
         --checkpoint_path "$checkpoint" --tokenizer_path "$checkpoint" \
-        --model_type "$model_type" "${act[@]}" --max_seq_len 1024 --kv_cache_mem_mb 4096 \
+        --model_type "$model_type" "${act[@]}" "${quant[@]}" \
+        --max_seq_len 1024 --kv_cache_mem_mb 4096 \
         --start_port "$start_port" --prefill_chunk_size "$budget" > server.log 2>&1 &
     server=$!
-    trap 'kill "$server" 2>/dev/null; wait "$server" 2>/dev/null' EXIT
+    trap 'kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true' EXIT
+    grpc_port=$((start_port + 1))
+    deadline=$((SECONDS + 1500))
+    until (: >/dev/tcp/127.0.0.1/"$grpc_port") 2>/dev/null; do
+        if ! kill -0 "$server" 2>/dev/null || (( SECONDS >= deadline )); then
+            tail -40 server.log
+            exit 1
+        fi
+        sleep 1
+    done
     if [ "$mode" = 1 ] && [ "$budget" = 0 ]; then
         python3 "$tests/service_test.py" --checkpoint "$checkpoint" \
-            --address "127.0.0.1:$((start_port + 1))" --greedy-smoke | tee greedy.log
+            --address "127.0.0.1:$grpc_port" --greedy-logits | tee greedy.log
     fi
     python3 "$tests/service_test.py" --checkpoint "$checkpoint" \
-        --address "127.0.0.1:$((start_port + 1))" "$@" 2>&1 | tee rpc.log
+        --address "127.0.0.1:$grpc_port" "$@" 2>&1 | tee rpc.log
 )
 
 run_case 1 0 --save "$work/solo.npz"
@@ -336,5 +350,174 @@ The container's run directory is
 
 The longest service test prompt was 321 tokens. Long-context service tests,
 throughput and latency remain unmeasured. Other GPU architectures, parallel
-topologies, quantization, CUDA graphs and cross-request prefix reuse remain
-outside the supported configuration and fail their startup checks.
+topologies, CUDA graphs and cross-request prefix reuse remain outside the
+supported configuration and fail their startup checks.
+
+## FP8_PER_BLOCK on SM103
+
+The quantized path uses E4M3 weights, 128×128 weight blocks and per-token
+activation scales over 128 channels. RTP quantizes the mounted BF16 weights
+at load time with `--quantization FP8_PER_BLOCK` and packs the UE8M0 scales.
+The existing DeepGEMM linear and expert GEMMs consume those operands
+directly. The router and shared-expert gate keep their BF16 weights. The BI
+LM head keeps the checkpoint's BF16 weights and produces FP32 logits.
+Dequantization in `fp8_block_test.py` is for comparison against the same
+FP8 operands in FP32, with a BF16 cast to match each GEMM output.
+[vLLM FP8 linear and MoE](https://github.com/vllm-project/vllm/blob/2ab8393191d2d0489e14ba84b67799bd3ab2c079/vllm/model_executor/layers/quantization/fp8.py) ·
+[vLLM FP8 utilities](https://github.com/vllm-project/vllm/blob/2ab8393191d2d0489e14ba84b67799bd3ab2c079/vllm/model_executor/layers/quantization/utils/fp8_utils.py) ·
+[vLLM fused experts](https://github.com/vllm-project/vllm/blob/2ab8393191d2d0489e14ba84b67799bd3ab2c079/vllm/model_executor/layers/fused_moe/fused_moe.py)
+
+The baseline inference source is `9733309ded9dd5586ec28609e11d5ab876d9a91f`.
+The cached wheel was built at `384de3fc5bf853a5372cbac5bd5fb13237fc11e9`.
+The diff between those two commits contains only tests and their README.
+Use separate virtual environments for the baseline and updated wheels, and
+use the updated `service_test.py` with either wheel.
+
+```bash
+checkpoint=/mnt/fuse/Qwen/Qwen3.6-35B-A3B
+model_type=qwen35_moe
+quantization=FP8_PER_BLOCK
+start_port=20380
+export CUDA_VISIBLE_DEVICES=0
+export WORLD_SIZE=1 LOCAL_WORLD_SIZE=1 TP_SIZE=1 DP_SIZE=1 EP_SIZE=1 PP_SIZE=1
+export WORLD_RANK=0 LOCAL_RANK=0 ROLE_TYPE=PDFUSION
+# With the baseline wheel active, verify ordinary greedy generation.
+work="$(mktemp -d)"
+run_case 0 0 --greedy-logits
+# With the updated wheel active, verify BI on the same checkpoint and quantizer.
+work="$(mktemp -d)"
+run_case 1 0 --save "$work/solo.npz"
+run_case 1 192 --chunked --reference "$work/solo.npz"
+run_case 0 0 --greedy-logits
+python3 "$tests/fp8_block_test.py" --legacy
+python3 "$tests/fp8_block_test.py"
+```
+
+The ordinary 35B service returned eight greedy tokens and `8 × 248320`
+finite FP32 logits. The checkpoint revision was
+[`995ad96eacd98c81ed38be0c5b274b04031597b0`](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/tree/995ad96eacd98c81ed38be0c5b274b04031597b0).
+The loader supplied the GDN QKVZ projection as E4M3 `[12288, 2048]`
+with packed int32 scales `[12288, 4]`. The expert GEMMs used E4M3 weights
+`[256, 1024, 2048]` and `[256, 2048, 512]` with scales `[256, 1024, 4]`
+and `[256, 2048, 1]`. The factory selected `CudaFp8GEMMLinear` with
+DeepGEMM and `fp8_per_block_no_dp` with `PureTpRouterFp8PerBlock` and
+`DeepGemmHybridExecutor`. The default FP32 LM-head storage was observed
+in the regular service. BI used BF16 storage and FP32 output.
+
+In the 35B-shaped operator test, the regular MoE first differed across
+256/257 rows at flat index 17 in the down GEMM's FP8 operand. The change
+affected 72 FP8 bytes, 13780 down GEMM output elements and 1732 merged
+elements. The logical scales, router output, top-k and first expert GEMM
+matched. BI selects the existing contiguous route throughout. With the
+same target row and different neighbor amplitudes, the registered FP8
+linears and both expert GEMMs matched bitwise across 64, 256, 257 and 525
+rows, including the effective FP8 operands and scales.
+
+The 35B service with BI returned the same eight greedy tokens as the regular
+service. The updated wheel with BI off also matched the baseline wheel's
+eight token IDs and all 1986560 raw FP32 logits bitwise.
+
+### Qwen3.5-397B-A17B FP8_PER_BLOCK TP4
+
+The mounted BF16 checkpoint at
+[`7cad2bae11cb49ca79f7d6a0954de2e2756f4e27`](https://huggingface.co/Qwen/Qwen3.5-397B-A17B/tree/7cad2bae11cb49ca79f7d6a0954de2e2756f4e27)
+used online FP8_PER_BLOCK loading on L20D GPUs 4–7 with TP4 and EP1. The
+ordinary service returned eight tokens and `8 × 248320` finite FP32 logits.
+It selected the same Linear and MoE strategies as the 35B service. One
+rank's GDN QKVZ projection used E4M3 `[5120, 4096]` and scales `[5120, 8]`.
+Expert weights were E4M3 `[512, 512, 4096]` and `[512, 4096, 256]`, with
+packed int32 scales `[512, 512, 8]` and `[512, 4096, 1]`.
+
+```bash
+checkpoint=/mnt/fuse/Qwen/Qwen3.5-397B-A17B
+model_type=qwen35_moe
+quantization=FP8_PER_BLOCK
+start_port=20980
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+export WORLD_SIZE=4 LOCAL_WORLD_SIZE=4 TP_SIZE=4 DP_SIZE=1 EP_SIZE=1 PP_SIZE=1
+# With the baseline wheel active.
+work="$(mktemp -d)"
+run_case 0 0 --greedy-logits
+# With the updated wheel active.
+work="$(mktemp -d)"
+run_case 1 0 --save "$work/solo.npz"
+run_case 1 192 --chunked --reference "$work/solo.npz"
+run_case 0 0 --greedy-logits
+python3 "$tests/fp8_block_test.py" --tp4-397b --legacy
+python3 "$tests/fp8_block_test.py" --tp4-397b
+```
+
+The rank-local MoE test found the first regular-path difference at flat
+index 6 in the down GEMM's FP8 operand across 256/257 rows. It counted
+70 differing bytes, 32148 differing down GEMM outputs and 3721 differing
+merged elements. The fixed contiguous route matched bitwise at every
+tested size and target position.
+
+With BI on, 397B returned the same eight greedy IDs as the regular service.
+The updated wheel with BI off ran on GPUs 0–3. It matched the baseline
+wheel on GPUs 4–7 for all eight greedy token IDs, raw FP32 logits, and
+both sets of logprobs.
+
+### Fixed-continuation results
+
+Each comparison used the 193-token solo request at budget 0 as the reference
+for the same model and quantizer. The four counts are token IDs, raw FP32
+logits, full-vocabulary FP32 logprobs, and the logprob computed from the
+selected-token probability returned by RTP. Each comparison covered four
+steps and 993280 vocabulary elements. RTP's batch recorder confirmed the
+listed co-batches and target positions during both prefill and decode.
+
+| Prefill budget | Case and batch prompt lengths | Actual target grants | 35B FP8 TP1 | 397B FP8 TP4 |
+| --- | --- | --- | --- | --- |
+| 0 | Target first, 193/11/321 | 193 | 0/0/0/0 | 0/0/0/0 |
+| 0 | Target last, 321/11/193 | 193 | 0/0/0/0 | 0/0/0/0 |
+| 192 | Solo | 192+1 | 0/0/0/0 | 0/0/0/0 |
+| 192 | Target first, 193/11 | 192+1 | 0/0/0/0 | 0/0/0/0 |
+| 192 | Target last, 11/193 | 128+65 | 0/0/0/0 | 0/0/0/0 |
+
+The BF16 regression ran the same five comparisons on each model below.
+All four counts were zero at every step. The configured GPU lists are the
+container's physical device indices.
+
+| BF16 checkpoint | Devices | TP/EP | Steps per case | Vocabulary elements per case |
+| --- | --- | --- | --- | --- |
+| Qwen3-8B | 2 | 1/1 | 4 | 607744 |
+| Qwen3-30B-A3B | 4 | 1/1 | 4 | 607744 |
+| Qwen3.6-35B-A3B | 3 | 1/1 | 4 | 993280 |
+| Qwen3.5-397B-A17B | 0,1,2,3 | 4/1 | 4 | 993280 |
+
+The original server, RPC, backend and scheduling logs are under
+`/home/admin/rtp-bi-fp8-1118/runs/`. Each phase directory contains
+`server.log`, `backend-trace.jsonl`, `logs/batch_schedule.*.log`, and the
+applicable `greedy.log` and `rpc.log`. The operator and config test logs sit
+alongside `runs/`.
+
+### Qwen3-30B-A3B FP8_DYNAMIC_PER_TENSOR baseline
+
+The mounted BF16 checkpoint at `ad44e777bcd18fa416d9da3bd8f70d33ebb85d39`
+was loaded with `--quantization FP8_DYNAMIC_PER_TENSOR`, L20D TP1 and
+`RTP_BATCH_INVARIANT=0`. The baseline selected `CudaFp8PerTensorLinear`
+and `CutlassExpertsFp8`. The expert GEMM emitted `Arch conditional MMA
+instruction used without targeting appropriate compute capability` on SM103.
+The same failure appeared in the rank-local expert check. The ordinary
+greedy RPC produced no complete output before the failed backend was stopped.
+This combination is service-unverified for BI.
+
+Reproduce with the baseline wheel and the same launch function.
+
+```bash
+checkpoint=/mnt/fuse/Qwen/Qwen3-30B-A3B
+model_type=qwen_3_moe
+quantization=FP8_DYNAMIC_PER_TENSOR
+start_port=21080
+export CUDA_VISIBLE_DEVICES=1
+export WORLD_SIZE=1 LOCAL_WORLD_SIZE=1 TP_SIZE=1 DP_SIZE=1 EP_SIZE=1 PP_SIZE=1
+work="$(mktemp -d)"
+run_case 0 0 --greedy-logits
+```
+
+The first CUDA failure is on line 73 of
+`/home/admin/rtp-bi-fp8-1118/runs/Qwen3-30B-A3B/fp8-tensor-baseline/server.log`.
+The tensor format's regular linear uses E4M3 weights with a scalar FP32 scale,
+and `CutlassExpertsFp8` uses one FP32 weight scale per expert. Official
+prequantized checkpoints remain service-unverified in this round.

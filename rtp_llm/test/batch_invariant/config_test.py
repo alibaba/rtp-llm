@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from rtp_llm.config.engine_config import EngineConfig, configure_batch_invariant_model
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.ops import CPRotateMethod, DataType, TaskType
 from rtp_llm.server.server_args.server_args import setup_args
 
@@ -82,6 +83,16 @@ class BatchInvariantConfigTest(unittest.TestCase):
             model.linear_attention_config.ssm_state_dtype = DataType.TYPE_FP32
             model.mm_model_config.is_multimodal = True
             configure_batch_invariant_model(engine, model)
+            model.quant_config = Fp8BlockWiseQuantConfig()
+            configure_batch_invariant_model(engine, model)
+            engine.moe_config.moe_strategy = "fp8_per_block_no_dp_masked"
+            with self.assertRaisesRegex(ValueError, "local DeepGEMM MoE"):
+                configure_batch_invariant_model(engine, model)
+            engine.moe_config.moe_strategy = "auto"
+            model.quant_config = Fp8BlockWiseQuantConfig(group_size=64)
+            with self.assertRaisesRegex(ValueError, "FP8_PER_BLOCK with 128x128"):
+                configure_batch_invariant_model(engine, model)
+            model.quant_config = None
             model.num_layers = 60
             model.hidden_size = 4096
             model.expert_num = 512
@@ -95,6 +106,8 @@ class BatchInvariantConfigTest(unittest.TestCase):
             parallel = engine.parallelism_config
             parallel.world_size = parallel.local_world_size = parallel.tp_size = 4
             parallel.ffn_tp_size = 4
+            configure_batch_invariant_model(engine, model)
+            model.quant_config = Fp8BlockWiseQuantConfig()
             configure_batch_invariant_model(engine, model)
             parallel.ep_size = 4
             with self.assertRaisesRegex(ValueError, "DP_SIZE=EP_SIZE=PP_SIZE=1"):
