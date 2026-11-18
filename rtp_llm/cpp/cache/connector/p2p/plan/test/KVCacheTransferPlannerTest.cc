@@ -160,7 +160,140 @@ void expectNoHeadPartitioning(const TransferPlan& plan) {
     }
 }
 
+PipelineTransferLayout pipeline(const std::vector<int>& cuts, const ShardLayout& shards) {
+    PipelineTransferLayout result;
+    int                    layer_begin = 0;
+    for (int count : cuts) {
+        auto& stage            = result.stages.emplace_back();
+        stage.main_layer_begin = layer_begin;
+        stage.main_layer_count = count;
+        stage.main_shards      = shards;
+        stage.layer_tags.resize(count, {kFullTag});
+        for (int lane = 0; lane < shards.rankCount(); ++lane) {
+            stage.worker_indices.push_back(static_cast<int>(result.worker_count++));
+        }
+        layer_begin += count;
+    }
+    return result;
+}
+
 }  // namespace
+
+TEST(PlannerPipeline, CoversDifferentStageCutsInBothDirections) {
+    const std::vector<std::pair<std::vector<int>, std::vector<int>>> cuts = {
+        {{8}, {3, 5}}, {{3, 5}, {8}}, {{3, 5}, {2, 6}}, {{3, 5}, {2, 4, 2}}};
+    for (const auto& [src_cuts, dst_cuts] : cuts) {
+        auto       src    = pipeline(src_cuts, mhaLayout(1));
+        auto       dst    = pipeline(dst_cuts, mhaLayout(2));
+        const auto result = KVCacheTransferPlanner::planStages(src, dst, "request");
+        ASSERT_TRUE(result.ok()) << result.error.ToString();
+        expectUniqueRouteIds(result.plan);
+        expectAllRouteBytesMatch(result.plan);
+        std::set<std::pair<int, int>> seen;
+        for (const auto& route : result.plan.routes) {
+            const auto& source_stage = src.stages.at(route.src_rank);
+            const auto& target_stage = dst.stages.at(route.dst_rank / 2);
+            EXPECT_EQ(route.src_partition.count, 2);
+            ASSERT_FALSE(route.layers.empty());
+            for (const auto& layer : route.layers) {
+                EXPECT_EQ(layer.global_id, source_stage.main_layer_begin + layer.src_local_id);
+                EXPECT_EQ(layer.global_id, target_stage.main_layer_begin + layer.dst_local_id);
+                EXPECT_LT(layer.src_local_id, source_stage.main_layer_count);
+                EXPECT_LT(layer.dst_local_id, target_stage.main_layer_count);
+                EXPECT_TRUE(seen.emplace(layer.global_id, route.dst_rank % 2).second);
+            }
+        }
+        EXPECT_EQ(seen.size(), 16u);
+        EXPECT_EQ(result.plan.digest(), KVCacheTransferPlanner::planStages(src, dst, "request").plan.digest());
+    }
+}
+
+TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
+    auto src                       = pipeline({3, 5}, mlaLayout(2, CPRotateMethod::ALL_GATHER, true));
+    auto dst                       = pipeline({2, 4, 2}, mlaLayout(1));
+    src.stages.back().draft_shards = src.stages.back().main_shards;
+    dst.stages.back().draft_shards = dst.stages.back().main_shards;
+    for (auto* side : {&src, &dst}) {
+        auto& stage = side->stages.back();
+        stage.draft_shards.groups.at(kFullTag).kv_block_stride_bytes *= 2;
+        stage.layer_tags.push_back({kFullTag});
+    }
+    dst.stages.back().layer_tags.push_back({kFullTag});
+    auto& mixed_src                       = src.stages.back();
+    auto& mixed_dst                       = dst.stages[1];
+    mixed_src.main_shards.groups["mixed"] = mixed_src.main_shards.groups.at(kFullTag);
+    mixed_dst.main_shards.groups["mixed"] = mixed_dst.main_shards.groups.at(kFullTag);
+    mixed_src.layer_tags[2].push_back("mixed");
+    mixed_dst.layer_tags[3].push_back("mixed");
+    const auto result = KVCacheTransferPlanner::planStages(src, dst, "request");
+    ASSERT_TRUE(result.ok()) << result.error.ToString();
+    std::set<size_t> draft_positions;
+    int              mixed_routes = 0;
+    for (const auto& route : result.plan.routes) {
+        ASSERT_FALSE(route.layers.empty());
+        if (route.cache_tag == "mixed") {
+            ASSERT_EQ(route.layers.size(), 1u);
+            EXPECT_EQ(route.layers.front().global_id, 5);
+            EXPECT_EQ(route.layers.front().src_local_id, 2);
+            EXPECT_EQ(route.layers.front().dst_local_id, 3);
+            ++mixed_routes;
+        }
+        for (const auto& layer : route.layers) {
+            EXPECT_LE(layer.global_id, 8);
+            if (layer.global_id == 8) {
+                EXPECT_EQ(route.src_bytes, 2 * kMlaBlockBytes);
+                EXPECT_EQ(route.dst_rank, 2);
+                EXPECT_EQ(layer.src_local_id, 5);
+                EXPECT_EQ(layer.dst_local_id, 2);
+                for (auto pos : KVCacheTransferPlanner::resolveKeys(route.src_keys, 5)) {
+                    if (pos >= 2) {  // A Decode hit on the first two keys leaves [2, 5) to copy.
+                        EXPECT_TRUE(draft_positions.insert(pos).second);
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_EQ(mixed_routes, 2);
+    EXPECT_EQ(draft_positions, (std::set<size_t>{2, 3, 4}));
+}
+
+TEST(PlannerPipeline, RejectsInvalidCoverageAndWorkerMapping) {
+    const auto src                     = pipeline({3, 5}, mlaLayout(1));
+    const auto dst                     = pipeline({2, 4, 2}, mlaLayout(1));
+    auto       overlap                 = dst;
+    overlap.stages[1].main_layer_begin = 1;
+    EXPECT_FALSE(KVCacheTransferPlanner::planStages(src, overlap, "request").ok());
+
+    auto duplicate_worker                        = dst;
+    duplicate_worker.stages[1].worker_indices[0] = 0;
+    EXPECT_FALSE(KVCacheTransferPlanner::planStages(src, duplicate_worker, "request").ok());
+
+    auto missing_src_tag = src;
+    missing_src_tag.stages[1].layer_tags[2].clear();
+    const auto missing = KVCacheTransferPlanner::planStages(missing_src_tag, dst, "request");
+    EXPECT_FALSE(missing.ok());
+    EXPECT_TRUE(missing.plan.routes.empty());
+    EXPECT_NE(missing.error.ToString().find("global layer 5"), std::string::npos);
+}
+
+TEST(PlannerPipeline, UsesExplicitWorkerIndicesInRoutesAndDigest) {
+    const auto src = pipeline({8}, mlaLayout(1));
+    auto       dst = pipeline({3, 5}, mlaLayout(2));
+    const auto original = KVCacheTransferPlanner::planStages(src, dst, "request");
+    ASSERT_TRUE(original.ok()) << original.error.ToString();
+
+    std::swap(dst.stages[0].worker_indices[1], dst.stages[1].worker_indices[1]);
+    const auto remapped = KVCacheTransferPlanner::planStages(src, dst, "request");
+    ASSERT_TRUE(remapped.ok()) << remapped.error.ToString();
+    ASSERT_EQ(remapped.plan.routes.size(), 4u);
+    ASSERT_FALSE(remapped.plan.routes[1].layers.empty());
+    ASSERT_FALSE(remapped.plan.routes[3].layers.empty());
+    EXPECT_EQ(remapped.plan.routes[1].dst_rank, 3);
+    EXPECT_EQ(remapped.plan.routes[1].layers.front().global_id, 0);
+    EXPECT_EQ(remapped.plan.routes[3].dst_rank, 1);
+    EXPECT_EQ(remapped.plan.routes[3].layers.front().global_id, 3);
+    EXPECT_NE(remapped.plan.digest(), original.plan.digest());
+}
 
 // ===========================================================================
 // 组 A：plan() 产出的 route 集与字段

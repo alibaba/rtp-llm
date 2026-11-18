@@ -9,6 +9,22 @@
 
 namespace rtp_llm {
 
+struct PipelineTransferLayout {
+    struct Stage {
+        int main_layer_begin = 0;
+        int main_layer_count = 0;
+        // Indexed by stage-local layer ID. The last stage can append draft layers
+        // in publication order; Decode may have additional draft layers after those.
+        std::vector<std::vector<std::string>> layer_tags;
+        std::vector<int>                      worker_indices;  // TP lane -> index in the side's worker list
+        ShardLayout                           main_shards;
+        ShardLayout                           draft_shards;
+    };
+
+    size_t             worker_count = 0;
+    std::vector<Stage> stages;
+};
+
 /// @brief P2P KV cache 传输编排器。
 ///
 /// 把 TP 不对称、RR CP、非 RR CP、CP 字节切分统一成一份 TransferPlan。由两侧 rank0
@@ -19,6 +35,12 @@ namespace rtp_llm {
 /// (src.pc, dst.pc, topology, source_replica_offset) 缓存。
 class KVCacheTransferPlanner {
 public:
+    /// Match global layers across PP cuts, then reuse plan() for every stage
+    /// intersection and its cache tags. No per-request block window is needed.
+    static PlanResult planStages(const PipelineTransferLayout& prefill,
+                                 const PipelineTransferLayout& decode,
+                                 const std::string&            unique_key);
+
     /// @brief 布局级编排：产出与请求无关的 route 集。
     static PlanResult plan(const ShardLayout&              src,
                            const ShardLayout&              dst,
