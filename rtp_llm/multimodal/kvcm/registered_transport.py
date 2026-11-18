@@ -395,6 +395,7 @@ class RegisteredTransportPool:
         self._accepting = True
         self._closed = False
         self._in_use = {}  # slot -> whether the lease is for a write
+        self._pending_gc_success = []
         self._create_slots(factory, slots, max_object_bytes, device, observe_stage)
         self.instance_id = self._client.instance_id
         self.instance_group = self._client.instance_group
@@ -484,8 +485,13 @@ class RegisteredTransportPool:
             ]
             if recovered:
                 self._condition.notify_all()
-            if self._closed and not self._close_registration_if_safe():
-                recovered.clear()  # The closed pool still owns the registration.
+            if self._closed:
+                # Closed slots share one MR: count every expired slot only
+                # after native teardown succeeds, even across several ticks.
+                self._pending_gc_success.extend(recovered)
+                recovered = []
+                if self._close_registration_if_safe():
+                    recovered, self._pending_gc_success = self._pending_gc_success, []
         for operation in recovered:
             self._report_hold(operation, "gc_success")
         self._report_hold("unknown", "held")
