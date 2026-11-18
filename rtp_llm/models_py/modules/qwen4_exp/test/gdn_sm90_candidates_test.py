@@ -685,7 +685,7 @@ class GdnSm90CandidateTest(unittest.TestCase):
                         self.assertBytesEqual(actual, expected)
 
     def test_decode_small_batch_value_tile(self):
-        for batch in (16, 17, 32, 63, 64):
+        for batch in (16, 17, 32, 63, 64, 65, 70, 100, 128):
             with self.subTest(batch=batch):
                 qkv = torch.randn(batch, 5120, device="cuda", dtype=torch.bfloat16)
                 a = torch.randn(batch, 24, device="cuda", dtype=torch.bfloat16)
@@ -693,6 +693,8 @@ class GdnSm90CandidateTest(unittest.TestCase):
                 alog = torch.randn(24, device="cuda", dtype=torch.float32)
                 bias = torch.randn(24, device="cuda", dtype=torch.bfloat16)
                 lengths = torch.full((batch,), 65, device="cuda", dtype=torch.int32)
+                lengths[0] = 0
+                lengths[1] = 66
                 mapping = torch.arange(
                     1, 2 * batch + 1, device="cuda", dtype=torch.int32
                 ).view(batch, 2)
@@ -707,7 +709,11 @@ class GdnSm90CandidateTest(unittest.TestCase):
                     qkv, a, b, alog, bias, states, mapping, lengths, 64, value_tile=8
                 )
                 expected_state = states.clone()
-                for tune_h20 in (False, True):
+                for tuning in (
+                    {},
+                    {"tune_h20": True},
+                    {"tune_h20_bf16": True},
+                ):
                     states.copy_(initial)
                     output = try_packed_decode(
                         qkv,
@@ -719,7 +725,7 @@ class GdnSm90CandidateTest(unittest.TestCase):
                         mapping,
                         lengths,
                         64,
-                        tune_h20=tune_h20,
+                        **tuning,
                     )
                     self.assertBytesEqual(output, expected)
                     self.assertBytesEqual(states, expected_state)

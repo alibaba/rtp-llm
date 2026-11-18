@@ -178,6 +178,7 @@ def try_packed_decode(
     sequence_length=1,
     *,
     tune_h20=False,
+    tune_h20_bf16=False,
 ):
     """TP2 decode/verify; native lengths use 0 padding or 2+ and per-step slots."""
     if qkv.ndim != 2 or block_map is None or lengths is None:
@@ -216,8 +217,11 @@ def try_packed_decode(
         and not any(tensor.requires_grad for tensor in (qkv, a, b, alog, bias))
     ):
         return None
-    # Spread the first wave of single-token CTAs across state heads.
-    heads_first = tune_h20 and sequence_length == 1 and 16 <= batch <= 64
+    # vLLM f1a7d496 uses four value rows for FP32-state SM90 Decode.
+    # On H20 with paged state, the smaller tile benefits from head-first CTAs.
+    heads_first = sequence_length == 1 and (
+        (tune_h20 and 16 <= batch <= 64) or (tune_h20_bf16 and 64 <= batch <= 128)
+    )
     return _run_packed_decode(
         qkv,
         a,

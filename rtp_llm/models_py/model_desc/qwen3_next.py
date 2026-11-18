@@ -1328,11 +1328,23 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
 
             if attn_tp_size == 2 and self.decode_gdn.ssm_state_dtype == torch.float32:
-                self.decode_gdn._packed_decode = (
-                    partial(try_packed_decode, tune_h20=True)
-                    if self.use_sm90_gdn_fp8_decode
-                    else try_packed_decode
-                )
+                packed_decode = try_packed_decode
+                if self.use_sm90_gdn_fp8_decode:
+                    packed_decode = partial(try_packed_decode, tune_h20=True)
+                elif (
+                    os.environ.get("RTP_QWEN4_SM90_GDN_BF16_PACKED", "1") == "1"
+                    and self._qkvz_ba_fused
+                    and not _is_rocm
+                    and fused_w.is_cuda
+                    and fused_w.dtype == torch.bfloat16
+                    and torch.cuda.get_device_capability(fused_w.device) == (9, 0)
+                    and torch.cuda.get_device_properties(
+                        fused_w.device
+                    ).multi_processor_count
+                    == 78
+                ):
+                    packed_decode = partial(try_packed_decode, tune_h20_bf16=True)
+                self.decode_gdn._packed_decode = packed_decode
                 self.decode_gdn._packed_verify = extended_gdn
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
