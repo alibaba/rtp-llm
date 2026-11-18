@@ -83,21 +83,6 @@ filegroup(
     srcs = ["data/model/qwen3/q_r_new_model_py.json"],
 )
 
-py_library(
-    name = "pace_smoke_fixture",
-    srcs = [
-        "pace_fixture.py", "remote_kvcm_server.py",
-    ],
-    deps = ["//rtp_llm:psutil", "//rtp_llm:requests", "//rtp_llm/test/utils:test_util"],
-)
-
-py_test(
-    name = "remote_kvcm_server_test",
-    srcs = ["remote_kvcm_server_test.py"],
-    deps = [":pace_smoke_fixture"],
-    legacy_create_init = 0,
-)
-
 # ============================================================================
 # Open-source smoke test suites (platform-grouped)
 # ============================================================================
