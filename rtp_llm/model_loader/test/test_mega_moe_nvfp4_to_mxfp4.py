@@ -16,6 +16,7 @@ from rtp_llm.model_loader.ffn_weight import (
     FfnConfig,
     MoeAtomicWeight,
     MoeConfig,
+    MoeWeight,
 )
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -208,6 +209,75 @@ class Nvfp4ToMxfp4Test(unittest.TestCase):
         )
         shared.layer_id = 3
         self.assertIs(shared.create(shared, self.quant), shared)
+
+    def test_full_moe_load_preserves_mxfp4_dtype_with_ep4(self):
+        from deep_gemm.utils import per_token_cast_to_fp4
+
+        for rank in range(4):
+            with self.subTest(rank=rank):
+                kernels = [moe_weight(name) for name in (W.moe_w1, W.moe_w2)]
+                info = ModelWeightInfo(
+                    [], [[MoeWeight(kernels, MoeConfig(expert_num=4))]]
+                ).to_quant_weight_info(self.quant)
+                with patch.dict(os.environ, {"MOE_STRATEGY": "mega_moe_se"}):
+                    info = _apply_mega_moe_fp4_wrappers(info, quant_config=self.quant)
+                tensors, expected = {}, {}
+                for kernel in kernels:
+                    refs = []
+                    for j, ckpt in enumerate(kernel.weights):
+                        key = ckpt.name.format(i=3, expert_id=rank)
+                        base = key.removesuffix(".weight")
+                        # Negative nibbles ensure the packed result has signed bytes.
+                        tensors[key] = torch.full((4, 32), 0xBA, dtype=torch.uint8)
+                        tensors[base + ".weight_scale"] = torch.ones(
+                            (4, 4), dtype=torch.float8_e4m3fn
+                        )
+                        factor = float((rank + 1) * (j + 1))
+                        tensors[base + ".weight_scale_2"] = torch.tensor(factor)
+                        dense = torch.tensor([-1.0, -1.5]).repeat(4, 32) * factor
+                        refs.append(
+                            per_token_cast_to_fp4(
+                                dense.bfloat16(), use_ue8m0=True, gran_k=32
+                            )
+                        )
+                    expected[kernel.name] = torch.cat([p for p, _ in refs]).unsqueeze(0)
+                    scale_name = W.moe_s1 if kernel.name == W.moe_w1 else W.moe_s2
+                    expected[scale_name] = torch.cat([s for _, s in refs]).unsqueeze(0)
+                config = SimpleNamespace(
+                    get_selected_experts=lambda *_: [rank],
+                    merge_lora=False,
+                    tp_size=4,
+                    tp_rank=rank,
+                    ep_size=4,
+                    ep_rank=rank,
+                    dp_size=1,
+                    dp_rank=0,
+                    ffn_tp_size=1,
+                    ffn_tp_rank=0,
+                    hidden_size=64,
+                    head_num=1,
+                    head_num_kv=1,
+                    size_per_head=64,
+                    moe_pure_tp_mode=False,
+                    bit=4,
+                    compute_dtype=torch.bfloat16,
+                    # CUDA's MoE shuffle is an identity operation. Keep this
+                    # CPU regression independent of libcuda/device initialization.
+                    exported_device=SimpleNamespace(
+                        shuffle_moe_weight=lambda tensor, *_: tensor
+                    ),
+                )
+                actual = info.layer_weights[0][0].load(
+                    MemorySource(tensors), 3, "cpu", config
+                )
+                self.assertEqual(set(actual), set(expected))
+                for name in expected:
+                    torch.testing.assert_close(
+                        actual[name], expected[name], rtol=0, atol=0
+                    )
+                for name in (W.moe_w1, W.moe_w2):
+                    self.assertEqual(actual[name].dtype, torch.int8)
+                    self.assertTrue((actual[name] < 0).any())
 
     def test_mtp_concrete_offset_takes_precedence_over_runtime_layer(self):
         src = moe_weight(prefix="model.layers.45.mlp.experts")
