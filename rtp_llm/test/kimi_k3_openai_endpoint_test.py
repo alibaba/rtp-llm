@@ -231,8 +231,7 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
         self.assertIsInstance(endpoint.chat_renderer, KimiK3Renderer)
         env = PyEnvConfigs()
         env.server_config.ip = "127.0.0.1"
-        env.server_config.server_port = 0
-        env.server_config.frontend_metrics_enable = False
+        env.server_config.start_port = 0
         env.model_args.model_type = model
         with (
             patch("rtp_llm.frontend.frontend_server.AccessLogger"),

@@ -56,7 +56,15 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
             )
         else:
             self.addCleanup(sys.modules.pop, "deep_gemm", None)
-        sys.modules["deep_gemm"] = SimpleNamespace(get_block_m_for_mega_moe_fp8=Mock())
+        sys.modules["deep_gemm"] = SimpleNamespace(
+            get_block_m_for_mega_moe_fp8=Mock(),
+            fp8_fp4_mega_moe=Mock(
+                side_effect=AssertionError("unexpected kernel execution")
+            ),
+            get_symm_buffer_for_mega_moe=Mock(
+                side_effect=AssertionError("unexpected arena allocation")
+            ),
+        )
 
     def executor(self, recipe="mega_moe", *, prepared=True):
         cfg = SimpleNamespace(
