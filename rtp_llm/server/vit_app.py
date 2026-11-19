@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import logging
 import socket
 import threading
@@ -133,6 +134,10 @@ class VitEndpointApp:
             grpc_port: gRPC 端口号（从外部传入）
             http_port: HTTP 端口号（从外部传入，如果为 None 且最终计算后仍为 None，表示工作进程模式（不启动 HTTP 服务器）
         """
+        # Exclude long-lived model and engine objects from request-time GC.
+        gc.collect()
+        gc.freeze()
+
         # 启动 gRPC 服务器
         self._start_grpc(grpc_port)
 
