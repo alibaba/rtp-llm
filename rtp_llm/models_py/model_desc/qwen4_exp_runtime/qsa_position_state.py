@@ -12,6 +12,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 
 from .qsa_cache_views import _block_table, _typed_2d_pool
+from .step_metadata import rope_config_signature
 
 
 def _tensor_key(tensor):
@@ -40,6 +41,7 @@ class _PositionGeometry:
     invalid: torch.Tensor | None
     checked_by: DeviceChecks | None = None
     group_lookup: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
+    groups_all_current: bool | None = None
     undo_slots: torch.Tensor | None = None
     rope_cache: dict = field(default_factory=dict)
 
@@ -276,23 +278,27 @@ class QSAPositionState:
             )
         return g.rope_cache[key]
 
+    def prefix_reuse_group_rope(self, config, checks):
+        g = self.geometry
+        if g.groups_all_current is None:
+            # Use the same device geometry as the sidecar reads. Carry the
+            # decision with the existing pre-write verdict on the first layer.
+            _, in_current, _ = self._group_lookup()
+            (all_current,) = checks.verify(payload=in_current.all().reshape(1))
+            g.groups_all_current = bool(all_current)
+        return self.rope(config, group=True)
+
     def rope(self, config, *, group=False, dtype=torch.bfloat16):
         g = self.geometry
-        key = (
-            str(config.style),
-            config.dim,
-            config.base,
-            getattr(config, "scale", 1.0),
-            config.index_factor,
-            getattr(config, "mrope_dim1", 0),
-            getattr(config, "mrope_dim2", 0),
-            getattr(config, "mrope_dim3", 0),
-            getattr(config, "mrope_interleaved", False),
-            dtype,
-        )
-        if not group and key in g.rope_cache:
+        share = not group or g.groups_all_current is True
+        key = (group, rope_config_signature(config), dtype, self.pool.device)
+        if share and key in g.rope_cache:
             return g.rope_cache[key]
-        if group:
+        if not group:
+            positions = g.positions
+        elif share:
+            positions = self._group_lookup()[2]
+        else:
             inputs = self.group_rope_inputs(config, dtype)
             if inputs is not None:
                 from rtp_llm.models_py.kernels.cuda.qsa.position_state import (
@@ -300,7 +306,7 @@ class QSAPositionState:
                 )
 
                 return group_position_rope(*inputs)
-        positions = self.group_positions() if group else g.positions
+            positions = self.group_positions()
         result = build_qsa_rope(
             positions.reshape(-1),
             config,
@@ -308,7 +314,7 @@ class QSAPositionState:
             dtype=dtype,
             device=self.pool.device,
         )
-        if not group:
+        if share:
             g.rope_cache[key] = result
         return result
 

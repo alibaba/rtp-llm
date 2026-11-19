@@ -10,11 +10,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_KV_TAG,
     INDEXER_STATE_TAG,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
-    build_qsa_rope,
-    build_qsa_rope_from_logical_positions,
-    is_qsa_rope_style,
-)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
 
 from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
@@ -23,6 +19,8 @@ from .step_metadata import (
     cached_prefill_geometry,
     cached_query_geometry,
     cached_step_value,
+    prefill_current_rope,
+    prefill_group_rope,
     tensor_signature,
 )
 
@@ -184,7 +182,9 @@ def _draft_incremental_prefill_geometry(
             f"match index_factor={index_factor}: got {actual} values for "
             f"{token_count} tokens"
         )
-    current_cos, current_sin = build_qsa_rope(
+    share_rope = not (draft or draft_prefix_reuse) and self.metadata_cache is not None
+    current_cos, current_sin = prefill_current_rope(
+        self,
         position_ids,
         rope_config,
         token_count=token_count,
@@ -194,6 +194,7 @@ def _draft_incremental_prefill_geometry(
             logical_positions if self.position_state_cache is None else None
         ),
         checks=checks,
+        share=share_rope,
     )
 
     kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
@@ -298,19 +299,24 @@ def _draft_incremental_prefill_geometry(
     )
 
     position_state = self.positions(ratio, checks)
-    if position_state is not None:
-        rope_cos, rope_sin = position_state.rope(rope_config, group=True)
-    else:
-        block_starts = logical_positions - logical_positions.remainder(ratio)
-        rope_cos, rope_sin = build_qsa_rope_from_logical_positions(
-            block_starts,
+    if position_state is None:
+        rope_cos, rope_sin = prefill_group_rope(
+            self,
+            logical_positions,
             rope_config,
+            ratio=ratio,
             token_count=token_count,
             dtype=torch.bfloat16,
             device=device,
+            share=share_rope,
         )
+    elif share_rope:
+        rope_cos, rope_sin = position_state.prefix_reuse_group_rope(rope_config, checks)
+    else:
+        rope_cos, rope_sin = position_state.rope(rope_config, group=True)
 
-    checks.verify()
+    if not checks.verified:
+        checks.verify()
     return IncrementalPrefillPlan(
         **{
             "lengths": lengths,
