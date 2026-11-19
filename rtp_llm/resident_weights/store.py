@@ -26,7 +26,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, TypeVar, Union
 
-PROTOCOL = 5  # Typed CPU/CUDA allocations; stop older stores before upgrading
+# Records carry initialize_gpu_growth_bytes; stop older stores before upgrading.
+PROTOCOL = 6
 # SCM_RIGHTS carries at most 253 descriptors per message.
 MAX_FDS_PER_FRAME = 200
 # One hung client must not block the single-threaded store for every other GPU on this host.
@@ -239,6 +240,9 @@ class SlotRecord:
     total_bytes: int  # sum of the allocation sizes
     publisher_pid: int
     manifest: Manifest
+    # GPU memory the publishing start's initialize() added, net of what it freed: measured from
+    # handing the loaded model to the engine to publishing. A restart holds it before KV sizing.
+    initialize_gpu_growth_bytes: int = 0
     published_at: float = 0.0
     eplb_dirty: bool = False  # an EPLB rearrangement began and has not committed
     eplb_placement: Dict[str, List[int]] = field(default_factory=dict)

@@ -31,7 +31,7 @@ from rtp_llm.resident_weights import (
     store,
     writable_view,
 )
-from rtp_llm.resident_weights.vmm import VmmAllocation
+from rtp_llm.resident_weights.vmm import VmmAllocation, round_up_to_granularity
 
 FINGERPRINT = {"model_type": "fake", "checkpoint_path": "/fake", "layers": "1"}
 
@@ -774,6 +774,75 @@ class ResidentLoadWeightsTest(_ResidentStoreTest):
         self.assertTrue(outputs)  # kept alive across finish(), as a model would
 
         self.assertIsNotNone(store.list_store(self.name).slots.get(_slot_key()))
+        # Transforms done before the engine starts are in its free-memory sizing already.
+        self.assertEqual(self._published_record().initialize_gpu_growth_bytes, 0)
+
+    def test_restart_credits_what_the_cold_initialize_allocated(self):
+        # A cold engine sizes its KV cache before initialize(); a restart sizes it after
+        # attaching everything, so the credit is the GPU growth across initialize().
+        two_mib = 1 << 21
+        kept = round_up_to_granularity(16 << 20, 0)  # the small weight's shared chunk
+        consumed = round_up_to_granularity(two_mib, 0)
+        for grows in (True, False):
+            with self.subTest(grows=grows):
+                store.drop_slot(self.name)
+                weights = _ModelWeights(
+                    [
+                        WeightDict(
+                            0,
+                            {
+                                "w": torch.randn(
+                                    1024, 1024, device="cuda", dtype=torch.bfloat16
+                                ),
+                                "keep": torch.randn(
+                                    16, device="cuda", dtype=torch.bfloat16
+                                ),
+                            },
+                        )
+                    ],
+                    WeightDict(GLOBAL_SCOPE, {}),
+                )
+                manager = _manager()
+                manager.attach_or_load_weights(_FakeLoader(weights), "cuda:0", {})
+
+                class _PyModel:
+                    outputs = None
+
+                    def initialize(self):
+                        layer = weights.weights[0]
+                        if grows:  # fp32 copy: twice the bytes
+                            self.outputs = resident_init_tensors(
+                                layer,
+                                transform_key="test.widen",
+                                output_names=("test.widen.out",),
+                                consumed_names=("w",),
+                                builder=lambda: (layer.pop("w").float(),),
+                            )
+                        elif should_consume_loaded(layer, ("w",)):
+                            layer.pop("w")
+                        return True
+
+                py_model = _PyModel()
+                manager.finalize_after_initialize(py_model)
+                self.assertTrue(py_model.initialize())
+                gc.collect()
+
+                grown = round_up_to_granularity(2 * two_mib, 0) if grows else 0
+                record = self._published_record()
+                self.assertEqual(
+                    sum(a.size_bytes for a in record.manifest.allocations),
+                    kept + grown,
+                )
+                self.assertEqual(record.initialize_gpu_growth_bytes, grown - consumed)
+
+                restored = _ModelWeights([{}], {})
+                restart = _manager()
+                restart.attach_or_load_weights(
+                    _FakeLoader(_build_weights(), restored_into=restored), "cuda:0", {}
+                )
+                self.assertEqual(restart.initialize_gpu_growth_bytes, grown - consumed)
+                restart.discard_attach()
+                self.assertEqual(restart.initialize_gpu_growth_bytes, 0)
 
     def test_finalize_after_initialize_with_a_python_model_waits_for_initialize(self):
         weights = _build_weights()

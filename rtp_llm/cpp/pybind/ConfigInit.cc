@@ -512,6 +512,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
+        .def_readwrite("target_initialize_gpu_growth_bytes", &KVCacheConfig::target_initialize_gpu_growth_bytes)
+        .def_readwrite("draft_initialize_gpu_growth_bytes", &KVCacheConfig::draft_initialize_gpu_growth_bytes)
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)

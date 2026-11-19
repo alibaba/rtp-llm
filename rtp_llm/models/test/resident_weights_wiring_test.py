@@ -366,6 +366,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
             total_bytes=0,
             manifest=SimpleNamespace(allocations=[]),
             eplb_placement={},
+            initialize_gpu_growth_bytes=0,
         )
         result = SimpleNamespace(
             status=store.AttachStatus.HIT, record=record, allocation_fds=[]
