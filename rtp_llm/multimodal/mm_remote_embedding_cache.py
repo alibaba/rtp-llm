@@ -110,6 +110,9 @@ class MMRemoteEmbeddingCache:
             )
         self._client = client
         self._gdr_pool = gdr_pool
+        self._fixed_gdr_client = (
+            client if client is gdr_pool and client_factory is None else None
+        )
         self._factory = client_factory
         self._client_lock = threading.Lock()
         self._client_users = {}
@@ -696,6 +699,12 @@ class MMRemoteEmbeddingCache:
             cls._report_metric(metric, value, {})
 
     def _get_client(self):
+        # The fixed registered client is closed after all three executors drain.
+        # Only replaceable clients need per-operation reference tracking.
+        if self._fixed_gdr_client is not None:
+            if self._closed:
+                raise RuntimeError("remote embedding cache is closed")
+            return self._fixed_gdr_client
         with self._client_lock:
             if self._closed:
                 raise RuntimeError("remote embedding cache is closed")
@@ -705,8 +714,11 @@ class MMRemoteEmbeddingCache:
                 self._client = self._create_client(self._factory, self._transport_mode)
                 self._instance = self._client.instance_id
             client = self._client
-            state = self._client_users.setdefault(id(client), [client, 0, False])
-            state[1] += 1
+            state = self._client_users.get(id(client))
+            if state is None:
+                self._client_users[id(client)] = [client, 1, False]
+            else:
+                state[1] += 1
             return client
 
     @staticmethod
@@ -717,6 +729,8 @@ class MMRemoteEmbeddingCache:
             _log_error("MM_EMB_REMOTE_CLEANUP_ERROR", error, operation="close")
 
     def _retire_client(self, client, error):
+        if self._factory is None:
+            return
         # A classified metadata failure leaves the connection and registered
         # arena usable. Rebuilding them for every conflict/RPC failure is costly.
         check = getattr(client, "is_transfer_quiescent", None)
@@ -728,8 +742,6 @@ class MMRemoteEmbeddingCache:
         # Detach a failed generation immediately, but do not close a shared
         # client while another admitted metadata/transfer operation uses it.
         # Waiting for that operation here could occupy both IO pool workers.
-        if self._factory is None:
-            return
         with self._client_lock:
             if self._client is client:
                 self._client = None
@@ -738,6 +750,8 @@ class MMRemoteEmbeddingCache:
                 state[2] = True
 
     def _release_client(self, client):
+        if client is self._fixed_gdr_client:
+            return
         closing = None
         with self._client_lock:
             state = self._client_users[id(client)]
@@ -950,6 +964,12 @@ class MMRemoteEmbeddingCache:
                     except Exception as error:
                         self._retire_client(client, error)
                         raise
+                    finally:
+                        # save_one has completed the stream work or quarantined
+                        # this slot. Reporting and logging only need its size.
+                        if slot is not None:
+                            self._gdr_pool.release(slot)
+                            slot = None
                 api_ms = (time.perf_counter() - api_started) * 1000
                 outcome = "success"
                 self._count("write_success")
