@@ -56,7 +56,7 @@ index f47d817..c3677e8 100644
  
  class Qwen4ExpBackend(GDNAttentionBackend):
 diff --git a/atom/model_ops/qwen4_exp/ops/ple.py b/atom/model_ops/qwen4_exp/ops/ple.py
-index f45d811..b3cdcd2 100644
+index f45d811..38efd79 100644
 --- a/atom/model_ops/qwen4_exp/ops/ple.py
 +++ b/atom/model_ops/qwen4_exp/ops/ple.py
 @@ -484,6 +484,7 @@ def _conv(
@@ -101,7 +101,16 @@ index f45d811..b3cdcd2 100644
  
  
  def dilated_causal_conv1d(
-@@ -594,8 +596,8 @@ def dilated_causal_conv1d(
+@@ -578,6 +580,8 @@ def dilated_causal_conv1d(
+     has_initial_state: torch.Tensor,
+     dilation: int,
+     num_accepted_tokens: torch.Tensor | None = None,
++    *,
++    update_state: bool = True,
+ ) -> torch.Tensor:
+     """SiLU(conv(inputs)), updating only valid, nonempty destination slots.
+ 
+@@ -594,8 +598,8 @@ def dilated_causal_conv1d(
      requests = state_indices_out.numel()
      if inputs.ndim != 2 or inputs.shape[1] != channels or dilation < 1:
          raise ValueError("invalid dilated convolution input geometry")
@@ -112,7 +121,7 @@ index f45d811..b3cdcd2 100644
      if query_start_loc.numel() != requests + 1:
          raise ValueError("query_start_loc must have requests + 1 entries")
      inputs, weight = inputs.contiguous(), weight.contiguous()
-@@ -617,6 +619,7 @@ def dilated_causal_conv1d(
+@@ -617,6 +621,7 @@ def dilated_causal_conv1d(
          dilation,
          state.stride(0),
          state.stride(1),
@@ -120,7 +129,16 @@ index f45d811..b3cdcd2 100644
          state_indices_in.stride(0),
          state_indices_out.stride(0),
          num_accepted_tokens is not None,
-@@ -638,6 +641,7 @@ def dilated_causal_conv1d(
+@@ -624,7 +629,7 @@ def dilated_causal_conv1d(
+         128,
+         enable_fp_fusion=False,
+     )
+-    if history and requests:
++    if update_state and history and requests:
+         _update[(requests, triton.cdiv(channels, 32))](
+             inputs,
+             state,
+@@ -638,6 +643,7 @@ def dilated_causal_conv1d(
              capacity,
              state.stride(0),
              state.stride(1),
@@ -597,10 +615,27 @@ index 663171a..2a49752 100644
  def _load_q_row(q_ptr, token, head, stride_q_token, stride_q_head, dims, mask):
      return tl.load(
 diff --git a/atom/model_ops/qwen4_exp/ple_layer.py b/atom/model_ops/qwen4_exp/ple_layer.py
-index 333404e..ce66cc8 100644
+index 333404e..2683c49 100644
 --- a/atom/model_ops/qwen4_exp/ple_layer.py
 +++ b/atom/model_ops/qwen4_exp/ple_layer.py
-@@ -704,8 +704,8 @@ class Qwen4ExpPLELayer(nn.Module):
+@@ -623,6 +623,8 @@ class Qwen4ExpPLELayer(nn.Module):
+         state_indices_out: torch.Tensor,
+         has_initial_state: torch.Tensor,
+         num_accepted_tokens: torch.Tensor | None = None,
++        *,
++        update_state: bool = True,
+     ) -> torch.Tensor:
+         """One flat varlen path for prefill, decode and graph padding."""
+         return dilated_causal_conv1d(
+@@ -635,6 +637,7 @@ class Qwen4ExpPLELayer(nn.Module):
+             has_initial_state,
+             self.short_conv_dilation,
+             num_accepted_tokens,
++            update_state=update_state,
+         )
+ 
+     def gated_memory(
+@@ -704,8 +707,8 @@ class Qwen4ExpPLELayer(nn.Module):
              input_ids,
              metadata.query_start_loc,
              metadata.ngram_state,
@@ -1104,7 +1139,7 @@ index a37685b..43f2dec 100644
          mixed = self.model._head_input(hc)
          return PyModelOutputs(mixed, hc)
 diff --git a/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py b/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py
-index 8642f10..f0473f8 100644
+index 8642f10..813a475 100644
 --- a/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py
 +++ b/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py
 @@ -57,6 +57,7 @@ def _write_ple_conv_candidates(
@@ -1115,16 +1150,37 @@ index 8642f10..f0473f8 100644
      IN_STRIDE: tl.constexpr,
      SLOT_ROW_STRIDE: tl.constexpr,
      SLOT_COL_STRIDE: tl.constexpr,
-@@ -77,8 +78,7 @@ def _write_ple_conv_candidates(
-             State
-             + src * STATE_SLOT_STRIDE
-             + c[:, None] * STATE_CHANNEL_STRIDE
+@@ -68,20 +69,19 @@ def _write_ple_conv_candidates(
+     j = tl.arange(0, BLOCK_HISTORY)
+     src = tl.load(In + req * IN_STRIDE)
+     has = tl.load(Has + req) & (src >= 0)
+-    for reverse in tl.static_range(1, QUERY):
+-        prefix = QUERY - reverse
++    # A candidate slot may also contain the committed input history.
++    # Read this request/channel tile once before publishing any candidates.
++    prior = tl.load(
++        State + src * STATE_SLOT_STRIDE + c[:, None] * STATE_CHANNEL_STRIDE
++        + j[None, :] * STATE_HISTORY_STRIDE,
++        has & (c[:, None] < CHANNELS) & (j[None, :] < HISTORY), 0,
++    )
++    for prefix in tl.static_range(1, QUERY + 1):
+         dst = tl.load(Slots + req * SLOT_ROW_STRIDE + (prefix - 1) * SLOT_COL_STRIDE)
+         position = prefix - HISTORY + j[None, :]
+         valid = (dst >= 0) & (c[:, None] < CHANNELS) & (j[None, :] < HISTORY)
+-        old = tl.load(
+-            State
+-            + src * STATE_SLOT_STRIDE
+-            + c[:, None] * STATE_CHANNEL_STRIDE
 -            + HISTORY
 -            + position,
-+            + (HISTORY + position) * STATE_HISTORY_STRIDE,
-             valid & has & (position < 0),
-             0,
-         )
+-            valid & has & (position < 0),
+-            0,
+-        )
++        old_index = tl.broadcast_to((prefix + j[None, :]) % BLOCK_HISTORY, (BLOCK_CHANNELS, BLOCK_HISTORY))
++        old = tl.gather(prior, old_index, axis=1)
+         token = tl.load(
+             Inputs + (req * QUERY + position) * CHANNELS + c[:, None],
+             valid & (position >= 0),
 @@ -91,7 +91,7 @@ def _write_ple_conv_candidates(
              State
              + dst * STATE_SLOT_STRIDE
@@ -1155,19 +1211,12 @@ index 8642f10..f0473f8 100644
          ple_metadata.has_initial_state,
          ple.ple_embedding.eos_token_id,
          history_width=width,
-@@ -181,25 +184,16 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
-         hidden_states, input_ids, ple_metadata.query_start_loc, ngram_context
+@@ -189,17 +192,18 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
+         ple_metadata.state_indices_out,
+         ple_metadata.has_initial_state,
+         ple_metadata.num_accepted_tokens,
++        update_state=False,
      )
-     normalized = ple._apply_norm(ple.norm_conv, gated).flatten(-2).contiguous()
--    conv_output = ple._short_conv(
--        normalized,
--        ple_metadata.query_start_loc,
--        ple_metadata.conv_state,
--        ple_metadata.state_indices_in,
--        ple_metadata.state_indices_out,
--        ple_metadata.has_initial_state,
--        ple_metadata.num_accepted_tokens,
--    )
      if batch_size:
          _write_ple_ngram_candidates[(batch_size,)](
              input_ids,
@@ -1184,7 +1233,7 @@ index 8642f10..f0473f8 100644
              query_len,
              width,
              triton.next_power_of_2(width),
-@@ -218,12 +212,24 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
+@@ -218,6 +222,7 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
              history,
              ple_metadata.conv_state.stride(0),
              ple_metadata.conv_state.stride(1),
@@ -1192,23 +1241,6 @@ index 8642f10..f0473f8 100644
              ple_metadata.state_indices_in.stride(0),
              spec_slots.stride(0),
              spec_slots.stride(1),
-             32,
-             triton.next_power_of_2(history),
-         )
-+    # The final output slot may alias the source slot. Snapshot candidate
-+    # histories before the convolution commits its final state in-place.
-+    conv_output = ple._short_conv(
-+        normalized,
-+        ple_metadata.query_start_loc,
-+        ple_metadata.conv_state,
-+        ple_metadata.state_indices_in,
-+        ple_metadata.state_indices_out,
-+        ple_metadata.has_initial_state,
-+        ple_metadata.num_accepted_tokens,
-+    )
-     return hidden_states + gated.flatten(-2) + conv_output
- 
- 
 diff --git a/atom/plugin/rtpllm/utils/forward_context.py b/atom/plugin/rtpllm/utils/forward_context.py
 index f721fa7..b8081bb 100644
 --- a/atom/plugin/rtpllm/utils/forward_context.py
