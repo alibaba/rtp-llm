@@ -113,7 +113,7 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
                             await visitor.enqueue(input)
                         self.assertEqual(
                             ctx.exception.exception_type,
-                            ExceptionType.MM_NOT_SUPPORTED_ERROR,
+                            ExceptionType.MM_EMPTY_ENGINE_ERROR,
                         )
         visitor.route_ips.assert_not_awaited()
         self.assertEqual(self.model_rpc_client.inputs, [])
@@ -129,7 +129,7 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
         with self.assertRaises(FtRuntimeException) as ctx:
             await visitor.batch_enqueue(inputs)
         self.assertEqual(
-            ctx.exception.exception_type, ExceptionType.MM_NOT_SUPPORTED_ERROR
+            ctx.exception.exception_type, ExceptionType.MM_EMPTY_ENGINE_ERROR
         )
         visitor.route_ips.assert_not_awaited()
         self.assertEqual(self.model_rpc_client.batches, [])

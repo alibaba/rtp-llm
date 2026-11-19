@@ -1260,6 +1260,10 @@ class RuntimeExceptionStatusTest(TestCase):
                 (ExceptionType.INVALID_PARAMS, grpc.StatusCode.INVALID_ARGUMENT),
                 (ExceptionType.TRAFFIC_LIMIT_ERROR, grpc.StatusCode.RESOURCE_EXHAUSTED),
                 (ExceptionType.MM_LONG_PROMPT_ERROR, grpc.StatusCode.INVALID_ARGUMENT),
+                (
+                    ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED,
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                ),
                 (ExceptionType.MM_DOWNLOAD_FAILED, grpc.StatusCode.INTERNAL),
                 (ExceptionType.UNSAFE_INPUT_CONTENT, grpc.StatusCode.PERMISSION_DENIED),
                 (ExceptionType.CANCELLED_ERROR, grpc.StatusCode.CANCELLED),

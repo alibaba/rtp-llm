@@ -119,7 +119,7 @@ private:
                 return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, error_msg);
             }
         } else {
-            return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "no mm process engine!");
+            return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "no mm process engine!");
         }
     }
 };

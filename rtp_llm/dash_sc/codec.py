@@ -116,13 +116,13 @@ DASH_ERROR_DATA_INSPECTION = DashErrorSpec(
 )
 DASH_ERROR_TOO_LONG = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=413,
     status_name="InvalidParameter",
 )
 DASH_ERROR_UNSUPPORTED = DashErrorSpec(
     error_no=LLMFinishReason.STOP_ENGINE_PARAM,
-    finish_reason=LLMFinishReason.STOP_ENGINE_PARAM,
+    finish_reason=LLMFinishReason.USE_PARAMETER_STATUS,
     status_code=422,
     status_name="InvalidParameter",
 )

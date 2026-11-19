@@ -1,8 +1,11 @@
+import io
 import pickle
 import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
+
+from PIL import Image
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.metrics import AccMetrics
@@ -35,6 +38,30 @@ class _WorkItem:
 
 
 class MultiprocessPreprocessExecutorTest(unittest.TestCase):
+    def test_image_pixel_limit_survives_worker_transport_as_input_error(self):
+        data = io.BytesIO()
+        Image.new("RGB", (8, 8)).save(data, format="PNG")
+        data.seek(0)
+
+        def preprocess(_inputs, _config):
+            with Image.open(data):
+                self.fail("Pillow should reject the image in open()")
+
+        with patch.object(Image, "MAX_IMAGE_PIXELS", 16), patch.multiple(
+            mm_preprocess,
+            _worker_preprocess_func=preprocess,
+            _worker_vit_config=SimpleNamespace(),
+            _worker_preprocess_params={},
+        ), self.assertRaises(_PreprocessTaskError) as raised:
+            _worker_process_task([])
+        error = pickle.loads(pickle.dumps(raised.exception)).error
+        self.assertIsInstance(error, FtRuntimeException)
+        self.assertEqual(
+            error.exception_type, ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED
+        )
+        self.assertIn("64 pixels", error.message)
+        self.assertIn("32 pixels", error.message)
+
     def test_download_error_survives_worker_transport_without_becoming_timeout(self):
         for with_samples in (False, True):
             with self.subTest(with_samples=with_samples):

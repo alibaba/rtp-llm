@@ -22,11 +22,8 @@ from urllib3.exceptions import ReadTimeoutError
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_error_messages import MMErr
-from rtp_llm.multimodal.mm_preprocess import (
-    _report_preprocess_timing,
-    _run_preprocess_task,
-    _unpack_preprocess_result,
-)
+from rtp_llm.multimodal.mm_preprocess import LocalPreprocessExecutor
+from rtp_llm.multimodal.mm_work_item import MMWorkItem
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41 import (
     deepseek_v41_vision as vision_module,
 )
@@ -406,15 +403,27 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
         )
 
     def prepare_through_executor_boundary(self, data):
-        payload = _run_preprocess_task(
+        executor = LocalPreprocessExecutor(
             vision_module.DeepSeekV41VisionEmbedding.preprocess_input,
-            [self.media(data)],
             self.vit_config,
             {"processor_config": self.config, "gpu_preprocess": False},
         )
-        result, total_ms, download_ms = _unpack_preprocess_result(payload)
-        _report_preprocess_timing(total_ms, download_ms)
-        return result
+        work_item = MMWorkItem([self.media(data)])
+        executor.submit(work_item)
+        executor.get_result(work_item)
+        return work_item.preprocess_result
+
+    def test_oversized_image_is_a_typed_input_error_before_resize(self):
+        data = image_data(8, 8)
+        with patch.object(Image, "MAX_IMAGE_PIXELS", 16), self.assertRaises(
+            FtRuntimeException
+        ) as raised:
+            self.prepare_through_executor_boundary(data)
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED
+        )
+        self.assertIn("64 pixels", raised.exception.message)
+        self.assertIn("32 pixels", raised.exception.message)
 
     def test_cpu_pixels_and_rgb_decode_keep_order_and_owned_storage(self):
         sources = [
@@ -470,7 +479,7 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
         ):
             with self.assertLogs(level="ERROR"):
                 actual = self.prepare_through_executor_boundary(data)
-            with self.assertRaisesRegex(ValueError, MMErr.IMG_OPEN):
+            with self.assertRaisesRegex(FtRuntimeException, MMErr.IMG_OPEN):
                 self.prepare_through_executor_boundary(b"not an image")
         torch.testing.assert_close(actual.patches, expected.patches, rtol=0, atol=0)
 
@@ -479,8 +488,13 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
             with self.subTest(length=len(data)), patch(
                 "rtp_llm.metrics.kmonitor.report"
             ) as report:
-                with self.assertRaisesRegex(ValueError, MMErr.IMG_OPEN) as raised:
+                with self.assertRaisesRegex(
+                    FtRuntimeException, MMErr.IMG_OPEN
+                ) as raised:
                     self.prepare(data)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+                )
                 self.assertIsInstance(raised.exception.__cause__, OSError)
                 self.assertNotIn(
                     GaugeMetrics.VIT_IMAGE_RESIZE_RT_US_METRIC,
@@ -493,8 +507,13 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
             with self.subTest(gpu_preprocess=gpu_preprocess), patch.object(
                 Image.Image, "load", side_effect=OSError("image decode failed")
             ):
-                with self.assertRaisesRegex(ValueError, MMErr.IMG_OPEN) as raised:
+                with self.assertRaisesRegex(
+                    FtRuntimeException, MMErr.IMG_OPEN
+                ) as raised:
                     self.prepare(data, gpu_preprocess=gpu_preprocess)
+                self.assertEqual(
+                    raised.exception.exception_type, ExceptionType.MM_WRONG_FORMAT_ERROR
+                )
                 self.assertIsInstance(raised.exception.__cause__, OSError)
 
     def test_byte_limit_rejects_before_image_decode(self):

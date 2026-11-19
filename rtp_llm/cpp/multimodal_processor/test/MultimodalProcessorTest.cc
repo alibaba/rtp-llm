@@ -155,7 +155,7 @@ TEST(MultimodalErrorTest, validatesMultimodalErrorCodes) {
 }
 
 TEST(MultimodalErrorTest, parsesKnownErrorCodes) {
-    constexpr std::array<ErrorCode, 7> cases = {{
+    constexpr std::array<ErrorCode, 8> cases = {{
         ErrorCode::MM_LONG_PROMPT_ERROR,
         ErrorCode::MM_WRONG_FORMAT_ERROR,
         ErrorCode::MM_PROCESS_ERROR,
@@ -163,6 +163,7 @@ TEST(MultimodalErrorTest, parsesKnownErrorCodes) {
         ErrorCode::MM_NOT_SUPPORTED_ERROR,
         ErrorCode::MM_DOWNLOAD_FAILED,
         ErrorCode::MM_REMOTE_RPC_FAILED,
+        ErrorCode::MM_IMAGE_PIXEL_LIMIT_EXCEEDED,
     }};
 
     for (const auto code : cases) {
@@ -176,6 +177,7 @@ TEST(MultimodalErrorTest, parsesKnownErrorCodes) {
 TEST(MultimodalErrorTest, classifiesRetryableErrorsCentrally) {
     EXPECT_FALSE(isRetryableMultimodalError(ErrorCode::MM_LONG_PROMPT_ERROR));
     EXPECT_FALSE(isRetryableMultimodalError(ErrorCode::MM_WRONG_FORMAT_ERROR));
+    EXPECT_FALSE(isRetryableMultimodalError(ErrorCode::MM_IMAGE_PIXEL_LIMIT_EXCEEDED));
     EXPECT_TRUE(isRetryableMultimodalError(ErrorCode::MM_PROCESS_ERROR));
     EXPECT_FALSE(isRetryableMultimodalError(ErrorCode::MM_NOT_SUPPORTED_ERROR));
     EXPECT_TRUE(isRetryableMultimodalError(ErrorCode::MM_EMPTY_ENGINE_ERROR));

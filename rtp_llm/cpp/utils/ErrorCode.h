@@ -26,15 +26,16 @@ enum class ErrorCode {
     GRAMMAR_VERIFY_EXCEPTION          = 613,
 
     // multimodal error
-    MM_LONG_PROMPT_ERROR   = 901,
-    MM_WRONG_FORMAT_ERROR  = 902,
-    MM_PROCESS_ERROR       = 903,
-    MM_EMPTY_ENGINE_ERROR  = 904,
-    MM_NOT_SUPPORTED_ERROR = 905,
-    MM_DOWNLOAD_FAILED     = 906,
-    MM_REMOTE_RPC_FAILED   = 907,
-    UNSAFE_INPUT_CONTENT   = 908,
-    UNSAFE_OUTPUT_CONTENT  = 909,
+    MM_LONG_PROMPT_ERROR          = 901,
+    MM_WRONG_FORMAT_ERROR         = 902,
+    MM_PROCESS_ERROR              = 903,
+    MM_EMPTY_ENGINE_ERROR         = 904,
+    MM_NOT_SUPPORTED_ERROR        = 905,
+    MM_DOWNLOAD_FAILED            = 906,
+    MM_REMOTE_RPC_FAILED          = 907,
+    UNSAFE_INPUT_CONTENT          = 908,
+    UNSAFE_OUTPUT_CONTENT         = 909,
+    MM_IMAGE_PIXEL_LIMIT_EXCEEDED = 910,
 
     // Codes starting from 8000 are historically retry-oriented. Individual
     // domains may explicitly classify lower codes through their retry policy.
@@ -64,7 +65,7 @@ enum class ErrorCode {
     WAIT_TO_RUN_TIMEOUT                   = 8213,
     KEEP_ALIVE_TIMEOUT                    = 8214,
     // Broadcast failed or returned no valid completion result; remote I/O may still be running.
-    TRANSFER_COMPLETION_UNKNOWN           = 8215,
+    TRANSFER_COMPLETION_UNKNOWN = 8215,
 
     // cache store error
     LOAD_CACHE_TIMEOUT                   = 8300,
@@ -253,6 +254,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "UNSAFE_INPUT_CONTENT";
         case ErrorCode::UNSAFE_OUTPUT_CONTENT:
             return "UNSAFE_OUTPUT_CONTENT";
+        case ErrorCode::MM_IMAGE_PIXEL_LIMIT_EXCEEDED:
+            return "MM_IMAGE_PIXEL_LIMIT_EXCEEDED";
         case ErrorCode::MM_REMOTE_RPC_FAILED:
             return "MM_REMOTE_RPC_FAILED";
         case ErrorCode::GET_PART_NODE_STATUS_FAILED:

@@ -358,7 +358,7 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
     prefill_context.markMultimodalAttemptStarted();
     if (mm_processor_ == nullptr) {
         const auto error =
-            ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "multimodal inputs require a configured multimodal processor");
+            ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "multimodal inputs require a configured multimodal processor");
         RTP_LLM_LOG_WARNING("request [%ld] rejected: %s", prefill_context.request_id, error.ToString().c_str());
         prefill_context.setRetryable(false);
         setContextError(prefill_context, error);

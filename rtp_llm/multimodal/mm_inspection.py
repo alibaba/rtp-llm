@@ -15,6 +15,7 @@ from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple
 
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCacheEntry
 from rtp_llm.multimodal.mm_work_item import _input_has_url
@@ -334,6 +335,9 @@ class MMInspectionCoordinator:
             def _stamp(fut: "concurrent.futures.Future") -> None:
                 try:
                     verdict = fut.result()
+                except FtRuntimeException as error:
+                    entry.set_greennet_error(error)
+                    return
                 except Exception as error:  # noqa: BLE001 - convert to process error
                     inspect_error = RuntimeError(f"greennet inspect failed: {error}")
                     self.report_vit_error(inspect_error, entry)
@@ -438,6 +442,9 @@ class MMInspectionCoordinator:
                     verdict = completed.result()
                     if verdict is None:
                         raise RuntimeError("GreenNet returned no verdict")
+                except FtRuntimeException as error:
+                    entry.set_greennet_error(error)
+                    return
                 except BaseException as error:
                     verdict = GreenNetVerdict(False, code=11, message=str(error))
                 entry.set_greennet_verdict(verdict)

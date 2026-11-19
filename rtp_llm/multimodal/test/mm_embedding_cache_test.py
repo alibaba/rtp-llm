@@ -195,6 +195,21 @@ def _assert_read_copies_are_released(testcase, entry, device_type):
 
 
 class UncachedEntryReadinessTest(unittest.TestCase):
+    def test_completed_inspection_survives_later_compute_failure(self):
+        from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+
+        for verdict in (GreenNetVerdict(True), GreenNetVerdict(False, 2)):
+            with self.subTest(verdict=verdict):
+                entry = MMEmbeddingCacheEntry()
+                entry.set_greennet_verdict(verdict)
+                entry.set_greennet_error(
+                    FtRuntimeException(
+                        ExceptionType.GENERATE_TIMEOUT, "embedding timed out"
+                    )
+                )
+                self.assertIs(entry.wait_greennet(timeout=0), verdict)
+
     def test_inspection_error_survives_late_verdict(self):
         from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
         from rtp_llm.multimodal.greennet_hook import GreenNetVerdict

@@ -903,7 +903,7 @@ class BackendRPCServerVisitor:
             and input.mm_inputs
         ):
             raise FtRuntimeException(
-                ExceptionType.MM_NOT_SUPPORTED_ERROR,
+                ExceptionType.MM_EMPTY_ENGINE_ERROR,
                 "Multimodal requests require a VIT domain when VIT_SEPARATION=2.",
             )
         if input.prompt_length <= 0:

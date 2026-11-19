@@ -385,26 +385,31 @@ class InspectionPipelineTest(TestCase):
                 finally:
                     engine.stop()
 
-    def test_ssrf_preprocessing_error_survives_inspection_wait(self):
-        error = FtRuntimeException(
-            ExceptionType.MM_WRONG_FORMAT_ERROR, "url ssrf check failed"
-        )
-        with patch.object(SourceModel, "preprocess_input", side_effect=error):
-            engine = self._make_engine(SourceModel())
-            provider = SourceProvider()
-            engine._inspection._greennet_provider = provider
-            try:
-                with self.assertRaises(FtRuntimeException) as raised:
-                    engine.wait_greennet_verdict(
-                        [self._make_input("http://10.0.0.1/image.png")],
-                        timeout_ms=5000,
-                        request_id=92,
-                    )
-                self.assertIs(raised.exception, error)
-                self.assertEqual(provider.calls, [])
-                self.assertEqual(engine.mm_part.forward_urls, [])
-            finally:
-                engine.stop()
+    def test_typed_preprocessing_errors_survive_inspection_wait(self):
+        for code in (
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+            ExceptionType.INVALID_PARAMS,
+            ExceptionType.MM_DOWNLOAD_FAILED,
+            ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED,
+        ):
+            with self.subTest(code=code):
+                error = FtRuntimeException(code, "media preprocessing failed")
+                with patch.object(SourceModel, "preprocess_input", side_effect=error):
+                    engine = self._make_engine(SourceModel())
+                    provider = SourceProvider()
+                    engine._inspection._greennet_provider = provider
+                    try:
+                        with self.assertRaises(FtRuntimeException) as raised:
+                            engine.wait_greennet_verdict(
+                                [self._make_input("http://10.0.0.1/image.png")],
+                                timeout_ms=5000,
+                                request_id=92,
+                            )
+                        self.assertIs(raised.exception, error)
+                        self.assertEqual(provider.calls, [])
+                        self.assertEqual(engine.mm_part.forward_urls, [])
+                    finally:
+                        engine.stop()
 
     def test_untyped_preprocessing_failure_keeps_process_error_verdict(self):
         with patch.object(

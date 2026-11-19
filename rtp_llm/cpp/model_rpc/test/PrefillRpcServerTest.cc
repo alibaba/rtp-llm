@@ -1196,7 +1196,7 @@ TEST_F(PrefillRpcServerTest, multimodalProcessRejectsMissingProcessor) {
 
     EXPECT_TRUE(context->hasError());
     EXPECT_FALSE(context->shouldRetry());
-    EXPECT_EQ(context->error_info.code(), ErrorCode::MM_NOT_SUPPORTED_ERROR);
+    EXPECT_EQ(context->error_info.code(), ErrorCode::MM_EMPTY_ENGINE_ERROR);
     EXPECT_NE(context->error_status.error_message().find("multimodal inputs require a configured multimodal processor"),
               std::string::npos);
     EXPECT_FALSE(context->multimodalProcessed());

@@ -12,6 +12,9 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Set, Tuple
 
+from PIL import Image
+
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
@@ -118,11 +121,16 @@ def _run_preprocess_task(
                 try:
                     result = preprocess_func(mm_inputs, vit_config, **preprocess_params)
                 except Exception as error:
-                    if preprocess_metrics.samples or timings is not None:
-                        raise _PreprocessTaskError(
-                            error, preprocess_metrics.samples, timings
-                        ) from error
-                    raise
+                    task_error = error
+                    if isinstance(error, Image.DecompressionBombError):
+                        task_error = FtRuntimeException(
+                            ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED, str(error)
+                        )
+                    elif not preprocess_metrics.samples and timings is None:
+                        raise
+                    raise _PreprocessTaskError(
+                        task_error, preprocess_metrics.samples, timings
+                    ) from error
                 finally:
                     _reset_download_region(region_token)
     return PreprocessTaskResult(

@@ -1877,12 +1877,8 @@ class MMProcessEngine:
         self.report_vit_error(error, entry)
         vit_media.finish_producer(entry, error)
         try:
-            if (
-                isinstance(error, FtRuntimeException)
-                and error.exception_type == ExceptionType.MM_WRONG_FORMAT_ERROR
-            ):
-                # Invalid media (including SSRF rejection) is a client error,
-                # not an inspection-service failure. Preserve it for RPC waiters.
+            if isinstance(error, FtRuntimeException):
+                # Both embedding and inspection waiters need the original RPC code.
                 entry.set_greennet_error(error)
             elif not entry.is_greennet_decided:
                 verdict = GreenNetVerdict(passed=False, code=11, message=str(error))

@@ -718,6 +718,13 @@ class MMEmbeddingCacheEntry:
     def set_greennet_error(self, error: Exception) -> None:
         """Wake inspection waiters without losing a typed preprocessing error."""
         with self._state_lock:
+            if self._greennet_error is not None or (
+                self._greennet_checked
+                and self._greennet_verdict is not None
+                and (self._greennet_verdict.passed or self._greennet_verdict.code == 2)
+            ):
+                # A later compute failure cannot change an actual inspection decision.
+                return
             self._greennet_error = error
             self._greennet_event.set()
 

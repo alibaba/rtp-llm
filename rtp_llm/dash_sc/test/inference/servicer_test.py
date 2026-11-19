@@ -1614,6 +1614,30 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     async def test_multimodal_error_keeps_public_contract(self) -> None:
         cases = (
             (
+                ExceptionType.MM_LONG_PROMPT_ERROR,
+                "input after multimodal process is 1048576 >= max_seq_len(1048576)",
+                413,
+                "InvalidParameter",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
+                ExceptionType.MM_NOT_SUPPORTED_ERROR,
+                "cannot calculate loss in multimodal query",
+                422,
+                "InvalidParameter",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
+                ExceptionType.MM_IMAGE_PIXEL_LIMIT_EXCEEDED,
+                "Image exceeds the pixel limit",
+                400,
+                "InvalidParameter",
+                LLMFinishReason.STOP_ENGINE_PARAM,
+                LLMFinishReason.USE_PARAMETER_STATUS,
+            ),
+            (
                 ExceptionType.MM_WRONG_FORMAT_ERROR,
                 "url ssrf check failed",
                 400,
