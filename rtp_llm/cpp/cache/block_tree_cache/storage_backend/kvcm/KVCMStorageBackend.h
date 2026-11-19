@@ -69,7 +69,7 @@ public:
         const std::string& trace_id,
         std::chrono::steady_clock::time_point completion_deadline = std::chrono::steady_clock::time_point::max()) const;
     // Forgets completed READ evidence and drops SDK recovery for RUNNING READs.
-    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id);
+    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id, bool released = false);
     // Configure before serving READ requests; cleanup does not own their buffers.
     void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
     // Retained non-protected READ targets; enumeration removes only RELEASED

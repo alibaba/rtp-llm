@@ -12,7 +12,8 @@ namespace rtp_llm {
 namespace {
 
 bool sameTarget(const TransferCompletionTarget& first, const TransferCompletionTarget& second) noexcept {
-    if (first.remote != second.remote || first.peers.size() != second.peers.size())
+    if (first.remote != second.remote || first.peers.size() != second.peers.size()
+        || first.kvcm_read_released != second.kvcm_read_released)
         return false;
     for (size_t rank = 0; rank < first.peers.size(); ++rank) {
         if (first.peers[rank].rank != second.peers[rank].rank
@@ -24,9 +25,10 @@ bool sameTarget(const TransferCompletionTarget& first, const TransferCompletionT
 
 }  // namespace
 
-void TransferCompletionCleanup::Prepared::submit() noexcept {
+void TransferCompletionCleanup::Prepared::submit(bool kvcm_read_released) noexcept {
     if (node_.empty())
         return;
+    node_.front().target.kvcm_read_released = kvcm_read_released;
     auto owner = std::move(owner_);
     owner->submit(node_);
 }

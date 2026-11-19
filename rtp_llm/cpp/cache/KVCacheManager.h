@@ -198,7 +198,8 @@ private:
     TransferTaskRegistry::State localTransferCompletion(
         const TransferExecutionTrace& trace_id,
         std::chrono::steady_clock::time_point completion_deadline = std::chrono::steady_clock::time_point::max()) const;
-    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(
+        const TransferExecutionTrace& trace_id, bool kvcm_read_released = false) const;
     bool startFrozenTaskRecovery();
     void stopFrozenTaskRecovery() noexcept;
 

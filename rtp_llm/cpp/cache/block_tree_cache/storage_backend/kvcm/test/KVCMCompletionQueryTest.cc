@@ -240,6 +240,7 @@ TEST(KVCMCompletionQueryTest, LocalReadCleanupAfterSafeCompletionOrUnfreeze) {
             auto forget = [&](const auto& target, const auto& traces, int timeout_ms) {
                 ++forget_calls;
                 EXPECT_FALSE(target.remote);
+                EXPECT_EQ(target.kvcm_read_released, !safe);
                 EXPECT_EQ(target.peers.size(), 1u);
                 EXPECT_EQ(traces.size(), 1u);
                 return worker->manager->forgetTransferCompletion(target, traces, timeout_ms);

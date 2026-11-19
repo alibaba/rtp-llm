@@ -34,7 +34,7 @@ public:
 
         // Transfers the preallocated node at most once. Destruction alone never
         // submits cleanup, including when the operation has not become safe.
-        void submit() noexcept;
+        void submit(bool kvcm_read_released = false) noexcept;
         bool empty() const noexcept {
             return node_.empty();
         }

@@ -175,9 +175,8 @@ bool FrozenTask::unfreeze() noexcept {
     for (const auto& target : targets_) {
         target.release();
     }
-    // Cleanup acknowledges every participant after physical release. Workers
-    // delete safe completion records but retain admission bans on forget.
-    cleanup_.submit();
+    // Only this path can authorize cleanup of an unproven KVCM READ.
+    cleanup_.submit(/*kvcm_read_released=*/std::holds_alternative<std::string>(execution_.trace_id));
     {
         std::lock_guard<std::mutex> lock(mutex_);
         released_at_us_ = wallTimeUs();

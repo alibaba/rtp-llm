@@ -951,6 +951,8 @@ enum TransferCompletionForgetStatusPB {
 
 message TransferCompletionForgetRequestPB {
     repeated TransferCompletionKeyPB keys = 1;
+    // The coordinator has released the FrozenTask holds for these KVCM reads.
+    bool kvcm_read_released = 2;
 }
 
 message TransferCompletionForgetEntryPB {

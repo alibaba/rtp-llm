@@ -1558,14 +1558,15 @@ public:
         completion_cleanup_ = std::move(cleanup);
     }
 
-    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id) {
+    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id, bool released) {
         const auto result = read_registry_->forget(trace_id);
         if (result == TransferTaskRegistry::ForgetResult::INVALID) {
             RTP_LLM_LOG_WARNING("KVCM READ completion forget rejected rank=%ld trace=%s reason=empty_trace",
                                 static_cast<long>(parallelism_config_.world_rank), trace_id.c_str());
-        } else if (result == TransferTaskRegistry::ForgetResult::RUNNING && read_registry_->readExited(trace_id)) {
-            // The coordinator queues forget for an unproven READ only after unfreeze.
-            // Erasing it earlier could make recovery mistake it for a never-admitted READ.
+        } else if (released && result == TransferTaskRegistry::ForgetResult::RUNNING &&
+                   read_registry_->readExited(trace_id)) {
+            // Keep unproven evidence until unfreeze. A missing record can be taken
+            // as evidence that the READ never started.
             try {
                 if (client_wrapper_)
                     client_wrapper_->discardReadRecovery(trace_id);
@@ -3131,8 +3132,8 @@ TransferTaskRegistry::State KVCMStorageBackend::queryReadCompletion(const std::s
     return impl_->queryReadCompletion(trace_id, completion_deadline);
 }
 
-TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id) {
-    return impl_->forgetReadCompletion(trace_id);
+TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id, bool released) {
+    return impl_->forgetReadCompletion(trace_id, released);
 }
 
 void KVCMStorageBackend::setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {

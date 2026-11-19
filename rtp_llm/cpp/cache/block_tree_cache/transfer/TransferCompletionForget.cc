@@ -190,8 +190,10 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
     try {
         std::vector<FunctionRequestPB> requests(target.peers.size());
         for (auto& request : requests) {
+            auto* forget = request.mutable_completion_forget();
+            forget->set_kvcm_read_released(target.kvcm_read_released);
             for (const auto index : valid_indices)
-                encodeKey(traces[index], *request.mutable_completion_forget()->add_keys());
+                encodeKey(traces[index], *forget->add_keys());
         }
         const int submit_timeout = remainingTimeout(deadline);
         if (submit_timeout == 0) {
