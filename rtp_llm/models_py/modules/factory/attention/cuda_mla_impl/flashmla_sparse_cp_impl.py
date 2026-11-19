@@ -702,10 +702,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         # Sharded prefill caches require gathering before attention.
         gather_enabled = (
-            self.kv_cache_sharded
-            and attn_inputs is not None
+            attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
-            and (not self.use_cuda_graph or self.kv_cache_sharded)
+            and not self.use_cuda_graph
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
 
