@@ -1,15 +1,16 @@
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from rtp_llm import start_server
+from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class ServiceDrainingPropagationTest(unittest.TestCase):
     def test_each_launch_passes_a_fresh_event_to_all_process_groups(self):
-        configs = Mock()
+        configs = PyEnvConfigs()
         configs.parallelism_config.dp_size = 1
         with ExitStack() as stack:
             for name in (
@@ -38,11 +39,15 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
             for role in (RoleType.PDFUSION, RoleType.PDFUSION, RoleType.VIT):
                 configs.role_config.role_type = role
                 start_server.start_server(configs)
+                manager_class.return_value.request_failure_shutdown.assert_not_called()
                 event = manager_class.call_args.kwargs["service_draining"]
                 self.assertIsNot(event, previous)
                 self.assertFalse(event.is_set())
-                for starter in [vit] if role == RoleType.VIT else starters:
-                    self.assertIs(starter.call_args.args[-1], event)
+                if role == RoleType.VIT:
+                    self.assertIs(vit.call_args.args[2], event)
+                else:
+                    for starter in starters:
+                        self.assertIs(starter.call_args.args[3], event)
                 event.set()
                 previous = event
 

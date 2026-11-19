@@ -62,7 +62,7 @@ class StartServerFailureTest(unittest.TestCase):
         ):
             start_server(configs)
         mark_ready.assert_not_called()
-        self.assertTrue(frontend.call_args.args[-1].is_set())
+        self.assertTrue(frontend.call_args.args[3].is_set())
 
     def test_health_check_failure_after_shutdown_preserves_graceful_exit(self):
         py_env_configs = PyEnvConfigs()
