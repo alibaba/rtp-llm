@@ -13,7 +13,8 @@ from unittest.mock import patch
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_ENV_CASES
-from rtp_llm.ops import HWKernelConfig, RoleType, TaskType
+from rtp_llm.ops import CPAllGatherImpl, HWKernelConfig, RoleType, TaskType
+from rtp_llm.server.server_args.util import str2_cp_all_gather_impl
 from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
@@ -146,6 +147,47 @@ class PrefillMultimodalRetryArgumentsTest(TestCase):
         with patch.dict(os.environ, {}, clear=True):
             config = server_args.setup_args([]).pd_separation_config
         self.assertEqual(config.prefill_retry_times, 0)
+
+
+class DynamicDecodeArgumentsTest(TestCase):
+    def test_dynamic_decode_backend_parser_and_default(self):
+        from rtp_llm.server.server_args import server_args
+
+        enabled = server_args.setup_args(["--enable_dynamic_decode_backend", "1"])
+        disabled = server_args.setup_args([])
+        self.assertTrue(enabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+        self.assertFalse(disabled.py_hw_kernel_config.enable_dynamic_decode_backend)
+
+    def test_gate_threshold_registration_precedence_and_lazy_parsing(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args([]).py_hw_kernel_config
+            self.assertIsNone(config.dyn_decode_gate_thresholds)
+        with patch.dict(
+            os.environ,
+            {
+                "DYN_DECODE_GATE_THRESHOLDS": "invalid-json",
+                "ENABLE_DYNAMIC_DECODE_BACKEND": "0",
+            },
+            clear=True,
+        ):
+            config = server_args.setup_args([]).py_hw_kernel_config
+            self.assertFalse(config.enable_dynamic_decode_backend)
+            self.assertEqual(config.dyn_decode_gate_thresholds, "invalid-json")
+            restored = pickle.loads(pickle.dumps(config))
+            self.assertEqual(restored.dyn_decode_gate_thresholds, "invalid-json")
+            config = server_args.setup_args(
+                ["--dyn_decode_gate_thresholds", "cli-json"]
+            ).py_hw_kernel_config
+            self.assertEqual(config.dyn_decode_gate_thresholds, "cli-json")
+        with patch.dict(os.environ, {"DYN_DECODE_GATE_THRESHOLDS": ""}, clear=True):
+            self.assertEqual(
+                server_args.setup_args(
+                    []
+                ).py_hw_kernel_config.dyn_decode_gate_thresholds,
+                "",
+            )
 
 
 class CacheConfigArgumentsTest(TestCase):
@@ -731,6 +773,10 @@ class ServerArgsSetTest(TestCase):
                 self.assertTrue(trace_config.enabled)
                 self.assertEqual(trace_config.sampler_ratio, 0.25)
 
+    def test_invalid_cp_all_gather_impl_is_rejected(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            str2_cp_all_gather_impl("fuse")
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -756,6 +802,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["RTP_LLM_TORCH_ALLOCATOR_DUMP_COOLDOWN_SECONDS"] = "30"
         os.environ["LOADER_RECYCLE_HANDLES"] = "false"
         os.environ["MOE_PURE_TP_PRESHARD"] = "true"
+        os.environ["RTP_CP_IMPL"] = "FUSED"
         os.environ["MM_IMAGE_MAX_FILE_SIZE_KB"] = "2048"
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
@@ -782,6 +829,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
         self.assertEqual(py_env_configs.parallelism_config.dp_size, 2)
         self.assertEqual(py_env_configs.parallelism_config.world_size, 8)
+        self.assertEqual(
+            py_env_configs.prefill_cp_config.all_gather_impl, CPAllGatherImpl.FUSED
+        )
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
@@ -932,6 +982,8 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--output_dispatcher_worker_count",
             "4",
+            "--cp_all_gather_impl",
+            "legacy",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -953,6 +1005,9 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
         self.assertEqual(py_env_configs.parallelism_config.dp_size, 4)
         self.assertEqual(py_env_configs.parallelism_config.world_size, 32)
+        self.assertEqual(
+            py_env_configs.prefill_cp_config.all_gather_impl, CPAllGatherImpl.LEGACY
+        )
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)

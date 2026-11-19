@@ -74,6 +74,22 @@ FLASHINFER_TRTLLM_GEN_IMPLS = {
 }
 
 
+def get_all_supported_impls(
+    attn_configs, attn_inputs, fmha_config=None, parallelism_config=None
+) -> List[type[FMHAImplBase]]:
+    impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    return [
+        impl
+        for impl in dict.fromkeys(impls)
+        if _implementation_allows_cuda_graph_selection_mode(
+            impl, CudaGraphSelectionMode.EAGER
+        )
+        and not _is_fmha_impl_disabled(impl.__name__, fmha_config)
+        and impl.support(attn_configs, attn_inputs)
+        and impl.support_parallelism_config(parallelism_config)
+    ]
+
+
 def get_mla_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -258,8 +274,11 @@ def get_fmha_impl(
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        # Prefill CP gathers the full KV cache before regular TP decode. Decode
+        # backends do not need to implement the prefill communication method.
+        if attn_inputs.is_prefill and not impl.support_parallelism_config(
+            parallelism_config
+        ):
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
