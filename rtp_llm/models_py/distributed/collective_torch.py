@@ -20,28 +20,34 @@ _CPP_PARALLEL_MODE_DP_AND_TP = 2
 _UDS_SUN_PATH_LIMIT = 108
 
 
-def _npu_runtime() -> bool:
-    try:
-        import torch_npu  # noqa: F401
-        return torch.npu.is_available()
-    except (ImportError, OSError):
-        # (ImportError, OSError) matches the repo-wide torch_npu import
-        # contract (device_type.py:31): some hosts raise OSError from
-        # torch_npu's C extension loader instead of ImportError.
-        return False
+from rtp_llm.device.device_type import get_device_type, DeviceType
 
 
-_is_npu = _npu_runtime()
+def _is_npu() -> bool:
+    """Delegate to get_device_type() — single source of truth.
+
+    An independent torch_npu probe here could disagree with the backend
+    selection (backend_manager uses get_device_type() to pick hccl/nccl).
+    On a dual-runtime host (CUDA + NPU both visible), two probes can give
+    opposite answers, causing comm callbacks to move tensors to the wrong
+    device for the selected backend.
+    """
+    return get_device_type() == DeviceType.Ascend
 
 
 def _accel_device_id() -> int:
-    return torch.npu.current_device() if _is_npu else torch.cuda.current_device()
+    # Prefer the process-level local_rank from the parallelism config:
+    # torch.npu/cuda.current_device() is thread-local, and the NormalEngine
+    # loop thread does not inherit the main thread's set_device() binding.
+    if _parallelism_config is not None:
+        return _parallelism_config.local_rank
+    return torch.npu.current_device() if _is_npu() else torch.cuda.current_device()
 
 def _accel_device(device_id: int) -> torch.device:
-    return torch.device("npu" if _is_npu else "cuda", device_id)
+    return torch.device("npu" if _is_npu() else "cuda", device_id)
 
 def _accel_is_device_tensor(t: torch.Tensor) -> bool:
-    return t.is_npu if _is_npu else t.is_cuda
+    return t.is_npu if _is_npu() else t.is_cuda
 
 class Group(Enum):
     """Process group types for collective operations"""
@@ -101,7 +107,7 @@ def _init_flashinfer_allreduce(
 ) -> None:
     if parallelism_config.tp_size <= 1:
         return
-    if _is_npu:
+    if _is_npu():
         return  # flashinfer is CUDA-only; NPU TP uses the HCCL all-reduce path
     _get_flashinfer_allreduce().init_flashinfer_allreduce(
         _get_group(Group.TP),
@@ -368,7 +374,7 @@ def _create_process_groups(
         # Single TP group: WORLD is the TP group, init symm_mem for it.
         # symm_mem is CUDA-only (TorchSymmMemCommunicator hard-requires
         # torch.cuda); NPU TP uses the HCCL all-reduce path instead.
-        if not _is_npu:
+        if not _is_npu():
             _get_symm_mem().init_symm_mem_communicator(
                 torch.distributed.group.WORLD,
                 disable_custom_all_reduce=disable_custom_all_reduce,
