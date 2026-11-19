@@ -1043,12 +1043,11 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     });
 
     try {
-        auto status = syncPrefix(prefill_context);
-        if (!status.ok()) {
-            return status;
-        }
-        status = finishStream(prefill_context);
-        if (!status.ok()) {
+        if (syncPrefix(prefill_context).ok()) {
+            auto status = finishStream(prefill_context);
+            if (status.ok()) {
+                RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
+            }
             return status;
         }
     } catch (const std::invalid_argument& e) {
@@ -1057,20 +1056,21 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
         setContextError(prefill_context,
                         error_info,
                         serializeErrorMsg(prefill_context.request_key, prefill_context.request_info, error_info));
-        return prefill_context.error_status;
     } catch (const std::exception& e) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch exception [" + e.what() + "]";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
-        return prefill_context.error_status;
     } catch (...) {
         auto error_msg = "request [" + prefill_context.request_key + "] catch unknown exception";
         setContextError(prefill_context, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error_msg));
-        return prefill_context.error_status;
     }
 
-    RTP_LLM_LOG_DEBUG("request [%ld] all done", prefill_context.request_id);
-
-    return grpc::Status::OK;
+    // Early RPC failures have no stream teardown to publish their Engine terminal status.
+    if (!prefill_context.getStream() && prefill_context.error_info.hasError() && prefill_context.request_id > 0
+        && prefill_context.meta) {
+        prefill_context.meta->finishUnqueuedTask(
+            prefill_context.request_id, request->token_ids_size(), prefill_context.error_info);
+    }
+    return prefill_context.error_status;
 } catch (const std::invalid_argument& e) {
     const auto request_key = request ? std::to_string(request->request_id()) : "unknown";
     const auto error_info =
