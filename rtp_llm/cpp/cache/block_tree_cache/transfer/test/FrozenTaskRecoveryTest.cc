@@ -54,7 +54,7 @@ TEST(FrozenTaskRecoveryTest, StopDuringQueryWaitsForExitAndDiscardsSafeReleasePe
     pool->incTreeRef(block, BlockTreeRefType::CACHE);
     FrozenTask::ExecutionInfo info;
     info.trace_id = "51";
-    info.participant_ranks = {{0, "local"}};
+    info.rank_count = 1;
     info.target_blocks = {{pool, block}};
     auto task = std::make_shared<FrozenTask>(FrozenTask::prepare(info),
         TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O pending"), CacheCopyError::COPY_FAILED));
@@ -74,7 +74,7 @@ TEST(FrozenTaskRecoveryTest, StopDuringQueryWaitsForExitAndDiscardsSafeReleasePe
             TransferCompletionQueryResult safe;
             safe.trace_id = execution.trace_id;
             safe.registry_type = execution.registry_type;
-            safe.ranks.push_back({0, "local", State::BUFFER_SAFE});
+            safe.ranks.push_back({0, State::BUFFER_SAFE});
             safe.all_safe = true;
             return safe;
         });

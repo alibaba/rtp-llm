@@ -1324,11 +1324,7 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBefo
         ASSERT_EQ(records.size(), 1u);
         const auto& execution = records.front()->execution();
         EXPECT_EQ(execution.registry_type, RegistryType::BLOCK_TRANSFER);
-        ASSERT_EQ(execution.participant_ranks.size(), servers.size());
-        for (const auto& peer : execution.participant_ranks) {
-            ASSERT_LT(peer.rank, servers.size());
-            EXPECT_EQ(peer.address, servers[peer.rank]->address());
-        }
+        EXPECT_EQ(execution.rank_count, servers.size());
         std::lock_guard<std::mutex> lock(state->mutex);
         ASSERT_EQ(state->requests.size(), 2u);
         for (const auto& request : state->requests)

@@ -201,20 +201,12 @@ public:
         execution.registry_type = RegistryType::KVCM_READ;
         execution.trace_id = requests.front().remote_request().trace_id();
         execution.uses_rpc = broadcast_manager_ != nullptr;
-        if (broadcast_manager_) {
-            const auto& addresses = broadcast_manager_->workerAddresses();
-            for (size_t rank = 0; rank < addresses.size(); ++rank)
-                execution.participant_ranks.push_back({rank, addresses[rank]});
-        } else {
-            execution.participant_ranks.push_back({0, "local"});
-        }
+        execution.rank_count = broadcast_manager_ ? broadcast_manager_->workerNum() : 1;
         TransferCompletionCleanup::Prepared cleanup;
         if (completion_cleanup_) {
             TransferCompletionTarget target;
             target.remote = execution.uses_rpc;
-            for (const auto& peer : execution.participant_ranks) {
-                target.peers.push_back({peer.rank, peer.address});
-            }
+            target.rank_count = execution.rank_count;
             cleanup = completion_cleanup_->prepare(std::move(target), {execution.registry_type, execution.trace_id});
         }
         return std::make_shared<ReadCompletionContext>(this, std::move(execution), std::move(cleanup));

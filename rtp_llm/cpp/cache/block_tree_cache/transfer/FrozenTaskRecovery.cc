@@ -23,7 +23,7 @@ Proof validate(const FrozenTask::ExecutionInfo& execution, const TransferComplet
     if (!validTransferCompletionKey(execution.registry_type, execution.trace_id)
         || query.registry_type != execution.registry_type || query.trace_id != execution.trace_id)
         return {false, false, "recovery query trace does not match frozen execution"};
-    const auto count = execution.participant_ranks.size();
+    const auto count = execution.rank_count;
     if (count == 0 || query.ranks.size() != count
         || (!execution.uses_rpc && count != 1))
         return {false, false, "recovery query does not cover the original participants"};
@@ -31,15 +31,7 @@ Proof validate(const FrozenTask::ExecutionInfo& execution, const TransferComplet
         return {false, false, nullptr};
     bool all_safe = true;
     for (size_t rank = 0; rank < count; ++rank) {
-        const FrozenTask::TransferParticipant* peer = nullptr;
         const TransferCompletionRankResult* row = nullptr;
-        for (const auto& candidate : execution.participant_ranks) {
-            if (candidate.rank == rank) {
-                if (peer)
-                    return {false, false, "frozen execution has duplicate participant ranks"};
-                peer = &candidate;
-            }
-        }
         for (const auto& candidate : query.ranks) {
             if (candidate.rank == rank) {
                 if (row)
@@ -47,12 +39,11 @@ Proof validate(const FrozenTask::ExecutionInfo& execution, const TransferComplet
                 row = &candidate;
             }
         }
-        if (!peer || !row || peer->address.empty() || peer->address != row->server_address)
-            return {false, false, "recovery query rank or address does not match frozen execution"};
-        if (execution.uses_rpc && (!row->cq_received || !row->cq_ok || !row->grpc_code))
-            return {false, false, "remote recovery query has no successful CQ and gRPC evidence"};
-        if (!row->error.empty() || (row->grpc_code && *row->grpc_code != 0)
-            || (row->cq_received && !row->cq_ok))
+        if (!row)
+            return {false, false, "recovery query is missing a participant rank"};
+        if (execution.uses_rpc && !row->grpc_code)
+            return {false, false, "remote recovery query has no gRPC status"};
+        if (!row->error.empty() || (row->grpc_code && *row->grpc_code != 0))
             return {false, false, "recovery query participant has a transport error"};
         if (row->state != State::UNKNOWN && row->state != State::RUNNING && row->state != State::BUFFER_SAFE)
             return {false, false, "recovery query participant has an invalid completion state"};
@@ -80,10 +71,9 @@ void recordException(const std::shared_ptr<FrozenTask>& task, const char* error)
         failure.registry_type = task->execution().registry_type;
         failure.trace_id = task->execution().trace_id;
         failure.error = error;
-        for (const auto& peer : task->execution().participant_ranks) {
+        for (size_t rank = 0; rank < task->execution().rank_count; ++rank) {
             TransferCompletionRankResult row;
-            row.rank = peer.rank;
-            row.server_address = peer.address;
+            row.rank = rank;
             row.error = error;
             failure.ranks.push_back(std::move(row));
         }

@@ -45,7 +45,7 @@ FrozenTask::ExecutionInfo execution(uint64_t                           trace,
     FrozenTask::ExecutionInfo info;
     info.trace_id = std::to_string(trace);
     info.uses_rpc = true;
-    info.participant_ranks = {{0, "worker-0:100"}, {1, "worker-1:100"}};
+    info.rank_count = 2;
     info.target_blocks = std::move(targets);
     return info;
 }
@@ -78,7 +78,7 @@ TEST(FrozenTaskTest, ReleasesEachOwnedTargetOnceBeforeSubmittingForget) {
     });
     const auto info = execution(36, {{primary, shared}, {primary, shared}, {primary, unique}, {secondary, other}});
     FrozenTask first(FrozenTask::prepare(info), unknownResult(),
-                     cleanup.prepare({true, {{0, "worker-0:100"}, {1, "worker-1:100"}}}, uint64_t{36}));
+                     cleanup.prepare({true, 2}, uint64_t{36}));
     primary->setCapacityChangeCallback({});
     FrozenTask second(FrozenTask::prepare(execution(37, {{primary, shared}})), unknownResult());
     first.freeze();

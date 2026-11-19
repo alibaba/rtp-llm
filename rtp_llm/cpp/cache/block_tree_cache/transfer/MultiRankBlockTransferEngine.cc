@@ -25,7 +25,7 @@ class MultiRankTransferAsyncContext final:
     public std::enable_shared_from_this<MultiRankTransferAsyncContext> {
 public:
     static std::shared_ptr<MultiRankTransferAsyncContext>
-    create(const std::vector<std::string>&                 worker_addresses,
+    create(size_t                                         worker_count,
            size_t                                         block_count,
            SharedTransferStageTimer                       wait_timer,
            std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
@@ -34,7 +34,7 @@ public:
            CacheStageContext                              identity,
            const char*                                    completion_operation) {
         auto context = std::shared_ptr<MultiRankTransferAsyncContext>(
-            new MultiRankTransferAsyncContext(worker_addresses.size(), block_count));
+            new MultiRankTransferAsyncContext(worker_count, block_count));
         context->wait_timer_  = std::move(wait_timer);
         context->reporter_    = std::move(reporter);
         context->request_id_  = request_id;
@@ -184,16 +184,17 @@ private:
     }
 
     void aggregateRankResults(TransferResult& result) const {
-        if (broadcast_result_->rankCount() != worker_count_) {
+        const auto responses = broadcast_result_->responses();
+        if (responses.size() != worker_count_) {
             result.merge({ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer response count mismatch"),
                           CacheCopyError::RPC_FAILED});
         }
         result.expandBlockErrors(block_count_);
-        broadcast_result_->forEachRankResponse([&](size_t rank, bool, const auto* rpc, const std::string&) {
-            if (!rpc || !rpc->status.ok()) {
-                return;
+        for (size_t rank = 0; rank < responses.size(); ++rank) {
+            if (!broadcast_result_->rpcSucceeded(rank)) {
+                continue;
             }
-            const auto& response = rpc->response;
+            const auto& response = responses[rank];
             TransferResult rank_result{
                 ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid transfer response"),
                 CacheCopyError::RPC_FAILED};
@@ -227,7 +228,7 @@ private:
                               "rank=" + std::to_string(rank) + " {" + rank_result.status.ToString() + "}");
             }
             result.merge(std::move(rank_result));
-        });
+        }
     }
 
     bool publish(TransferResult result, TransferResult published_result) {
@@ -320,8 +321,8 @@ MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(
     broadcast_manager_(std::move(broadcast_manager)),
     metrics_reporter_(std::move(metrics_reporter)) {}
 
-std::vector<std::string> MultiRankBlockTransferEngine::participantAddresses() const {
-    return broadcast_manager_ ? broadcast_manager_->workerAddresses() : std::vector<std::string>{};
+size_t MultiRankBlockTransferEngine::workerCount() const {
+    return broadcast_manager_ ? broadcast_manager_->workerNum() : 0;
 }
 
 std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(TransferTask task,
@@ -374,7 +375,7 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
     for (auto& rank_request : requests) {
         rank_request.mutable_mem_request()->set_timeout_ms(broadcast_timeout_ms);
     }
-    auto context = MultiRankTransferAsyncContext::create(broadcast_manager_->workerAddresses(),
+    auto context = MultiRankTransferAsyncContext::create(broadcast_manager_->workerNum(),
                                                         block_count,
                                                         std::move(wait_timer),
                                                         metrics_reporter_,

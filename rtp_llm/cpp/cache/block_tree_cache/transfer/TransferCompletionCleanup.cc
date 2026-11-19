@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 
-#include <algorithm>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -12,14 +11,7 @@ namespace rtp_llm {
 namespace {
 
 bool sameTarget(const TransferCompletionTarget& first, const TransferCompletionTarget& second) noexcept {
-    if (first.remote != second.remote || first.peers.size() != second.peers.size())
-        return false;
-    for (size_t rank = 0; rank < first.peers.size(); ++rank) {
-        if (first.peers[rank].rank != second.peers[rank].rank
-            || first.peers[rank].address != second.peers[rank].address)
-            return false;
-    }
-    return true;
+    return first.remote == second.remote && first.rank_count == second.rank_count;
 }
 
 }  // namespace
@@ -28,14 +20,8 @@ TransferCompletionCleanup::Prepared
 TransferCompletionCleanup::prepare(TransferCompletionTarget target, TransferCompletionKey key) {
     if (!validTransferCompletionKey(key))
         throw std::invalid_argument("completion cleanup requires a nonempty execution trace");
-    if (target.peers.empty() || (!target.remote && target.peers.size() != 1))
+    if (target.rank_count == 0 || (!target.remote && target.rank_count != 1))
         throw std::invalid_argument("completion cleanup requires the original participants");
-    std::sort(target.peers.begin(), target.peers.end(),
-              [](const auto& first, const auto& second) { return first.rank < second.rank; });
-    for (size_t rank = 0; rank < target.peers.size(); ++rank) {
-        if (target.peers[rank].rank != rank || target.peers[rank].address.empty())
-            throw std::invalid_argument("completion cleanup requires unique original ranks and addresses");
-    }
     Prepared prepared;
     prepared.node_.push_back(Entry{std::move(target), std::move(key)});
     return prepared;
@@ -98,14 +84,13 @@ void TransferCompletionCleanup::logFailure(
         if (entry) {
             context << " remote=" << entry->target.remote << " trace=";
             context << entry->key.trace_id;
-            for (const auto& peer : entry->target.peers)
-                context << " peer=" << peer.rank << "@" << peer.address;
+            context << " rank_count=" << entry->target.rank_count;
         }
         if (response) {
             for (const auto& rank : response->ranks) {
                 if (rank.result == TransferTaskRegistry::ForgetResult::DONE && rank.error.empty())
                     continue;
-                context << " failed_rank=" << rank.rank << " address=" << rank.server_address
+                context << " failed_rank=" << rank.rank
                         << " status=" << static_cast<int>(rank.result)
                         << " grpc_code=" << rank.grpc_code.value_or(-1)
                         << " error=" << rank.error;

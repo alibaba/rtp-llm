@@ -28,7 +28,7 @@ void answer(size_t rank, const FunctionRequestPB& request, FunctionResponsePB& r
     }
 }
 
-enum class Reply { RUNNING, UNKNOWN, WRONG_RANK, WRONG_KEY, WRONG_REGISTRY, INVALID_STATE, TRANSPORT_ERROR, STALE_PROOF, SAFE, FENCED };
+enum class Reply { RUNNING, UNKNOWN, WRONG_RANK, WRONG_KEY, WRONG_REGISTRY, INVALID_STATE, TRANSPORT_ERROR, DUPLICATE_RANK, SAFE, FENCED };
 
 TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAndEveryParticipant) {
     std::atomic<Reply> reply{Reply::RUNNING};
@@ -51,7 +51,7 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
                 break;
             case Reply::INVALID_STATE: row->set_state(static_cast<TransferCompletionStatePB>(99)); break;
             case Reply::TRANSPORT_ERROR: return grpc::Status(grpc::StatusCode::UNAVAILABLE, "query reply lost");
-            case Reply::STALE_PROOF:
+            case Reply::DUPLICATE_RANK:
             case Reply::SAFE: break;
             case Reply::FENCED:
                 row->set_state(TRANSFER_COMPLETION_UNKNOWN);
@@ -73,7 +73,7 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
         info.registry_type = key.registry_type;
         info.trace_id = key.trace_id;
         info.uses_rpc = true;
-        info.participant_ranks = {{1, addresses[1]}, {0, addresses[0]}};
+        info.rank_count = addresses.size();
         auto task = std::make_shared<FrozenTask>(FrozenTask::prepare(info),
             TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "lost read reply"), CacheCopyError::RPC_FAILED));
         task->freeze();
@@ -83,13 +83,11 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
                 identity.trace_id = original.trace_id;
                 identity.registry_type = original.registry_type;
                 identity.remote = original.uses_rpc;
-                identity.expected_rank_count = original.participant_ranks.size();
-                for (const auto& peer : original.participant_ranks)
-                    identity.expected_peers.push_back({peer.rank, peer.address});
+                identity.expected_rank_count = original.rank_count;
                 auto evidence = query.query(identity, timeout);
-                if (reply == Reply::STALE_PROOF) {
+                if (reply == Reply::DUPLICATE_RANK) {
                     EXPECT_TRUE(evidence.all_safe);
-                    evidence.ranks.back().server_address = "previous-worker";
+                    evidence.ranks.back().rank = evidence.ranks.front().rank;
                 }
                 return evidence;
             });
@@ -100,7 +98,7 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
         ASSERT_EQ(running->ranks.size(), 2u);
         EXPECT_EQ(running->ranks[1].state, State::RUNNING);
         for (const auto pending : {Reply::UNKNOWN, Reply::WRONG_RANK, Reply::WRONG_KEY, Reply::WRONG_REGISTRY,
-                                   Reply::INVALID_STATE, Reply::TRANSPORT_ERROR, Reply::STALE_PROOF}) {
+                                   Reply::INVALID_STATE, Reply::TRANSPORT_ERROR, Reply::DUPLICATE_RANK}) {
             SCOPED_TRACE(static_cast<int>(pending));
             reply = pending;
             EXPECT_EQ(recovery.runOnce(2000).released, 0u);

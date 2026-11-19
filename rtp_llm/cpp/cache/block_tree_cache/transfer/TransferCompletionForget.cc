@@ -109,13 +109,9 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
         auto& entry = result.entries[index];
         entry.registry_type = traces[index].registry_type;
         entry.trace_id = traces[index].trace_id;
-        entry.ranks.resize(target.peers.size());
+        entry.ranks.resize(target.rank_count);
         for (size_t rank = 0; rank < entry.ranks.size(); ++rank)
             entry.ranks[rank].rank = rank;
-        for (const auto& peer : target.peers) {
-            if (peer.rank < entry.ranks.size())
-                entry.ranks[peer.rank].server_address = peer.address;
-        }
     }
     if (timeout_ms <= 0 || traces.empty()) {
         fail(result, "completion forget requires a nonempty batch and positive timeout");
@@ -123,33 +119,17 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
     }
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     const auto rpc_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
-    if (target.peers.empty()) {
+    if (target.rank_count == 0) {
         fail(result, "completion forget requires the original participants");
         return result;
     }
-    std::vector<bool> seen(target.peers.size(), false);
-    for (const auto& peer : target.peers) {
-        if (peer.rank >= seen.size() || seen[peer.rank] || peer.address.empty()) {
-            fail(result, "completion forget participants contain a missing, duplicate, or invalid rank");
-            return result;
-        }
-        seen[peer.rank] = true;
-    }
-    if (!target.remote && (target.peers.size() != 1 || !local_forget_)) {
+    if (!target.remote && (target.rank_count != 1 || !local_forget_)) {
         fail(result, "local completion forget requires one participant and a local handler");
         return result;
     }
-    if (target.remote) {
-        if (!broadcast_manager_ || broadcast_manager_->workerAddresses().size() != target.peers.size()) {
-            fail(result, "completion forget manager does not match the original participant count");
-            return result;
-        }
-        for (const auto& peer : target.peers) {
-            if (broadcast_manager_->workerAddresses()[peer.rank] != peer.address) {
-                fail(result, "completion forget manager does not match the original participant addresses");
-                return result;
-            }
-        }
+    if (target.remote && (!broadcast_manager_ || broadcast_manager_->workerNum() != target.rank_count)) {
+        fail(result, "completion forget manager does not match the original participant count");
+        return result;
     }
     std::vector<size_t> valid_indices;
     valid_indices.reserve(traces.size());
@@ -189,7 +169,7 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
         return result;
     }
     try {
-        std::vector<FunctionRequestPB> requests(target.peers.size());
+        std::vector<FunctionRequestPB> requests(target.rank_count);
         for (auto& request : requests) {
             for (const auto index : valid_indices)
                 encodeKey(traces[index], *request.mutable_completion_forget()->add_keys());
@@ -213,21 +193,24 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
         const int wait_timeout = remainingTimeout(deadline);
         // Zero is an infinite wait in BroadcastResult; never pass it here.
         const bool completed = rpc->done() || (wait_timeout > 0 && rpc->waitDone(wait_timeout, false));
-        if (!completed)
-            result.error = "completion forget deadline exceeded";
-        rpc->forEachRankResponse([&](size_t rank, bool received, const auto* worker, const std::string& dispatch_error) {
+        if (!completed || !rpc->success()) {
+            result.error = completed ? "completion forget RPC failed: " + rpc->failureSummary() :
+                                       "completion forget deadline exceeded";
+            for (const auto index : valid_indices) {
+                for (auto& row : result.entries[index].ranks)
+                    row.error = result.error;
+            }
+            return result;
+        }
+        const auto replies = rpc->responses();
+        for (size_t rank = 0; rank < target.rank_count; ++rank) {
+            const auto& reply = replies.at(rank);
             const TransferCompletionForgetResponsePB* response = nullptr;
             std::string rank_error;
-            if (!worker)
-                rank_error = dispatch_error.empty() ? "completion forget has no successful CQ event" : dispatch_error;
-            else if (!worker->status.ok()) {
-                rank_error = worker->status.error_message();
-                if (rank_error.empty())
-                    rank_error = "completion forget RPC failed";
-            } else if (!worker->response.has_completion_forget())
+            if (!reply.has_completion_forget())
                 rank_error = "missing completion forget response";
             else {
-                response = &worker->response.completion_forget();
+                response = &reply.completion_forget();
                 if (response->worker_case() != TransferCompletionForgetResponsePB::kRank
                     || response->rank() != rank)
                     rank_error = "completion forget worker rank mismatch";
@@ -237,17 +220,14 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
             for (size_t wire_index = 0; wire_index < valid_indices.size(); ++wire_index) {
                 const auto index = valid_indices[wire_index];
                 auto& row = result.entries[index].ranks.at(rank);
-                row.cq_received = received;
-                row.cq_ok = worker != nullptr;
-                if (worker)
-                    row.grpc_code = worker->status.error_code();
+                row.grpc_code = grpc::StatusCode::OK;
                 if (!rank_error.empty())
                     row.error = rank_error;
                 else
                     decodeEntry(response->entries(wire_index), traces[index], row);
             }
-        });
-        const bool within_deadline = completed && remainingTimeout(deadline) > 0;
+        }
+        const bool within_deadline = remainingTimeout(deadline) > 0;
         if (!within_deadline)
             result.error = "completion forget deadline exceeded";
         summarize(result, within_deadline);

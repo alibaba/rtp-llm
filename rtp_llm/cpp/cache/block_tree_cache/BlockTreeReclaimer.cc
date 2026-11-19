@@ -160,11 +160,7 @@ TransferCompletionQueryResult BlockTreeReclaimer::queryTransferCompletion(const 
     identity.registry_type       = execution.registry_type;
     identity.trace_id            = execution.trace_id;
     identity.remote              = execution.uses_rpc;
-    identity.expected_rank_count = execution.participant_ranks.size();
-    identity.expected_peers.reserve(execution.participant_ranks.size());
-    for (const auto& peer : execution.participant_ranks) {
-        identity.expected_peers.push_back({peer.rank, peer.address});
-    }
+    identity.expected_rank_count = execution.rank_count;
     return TransferCompletionQuery(transfer_broadcast_manager_,
                                    [this](const TransferCompletionKey& key) {
                                        return localTransferCompletion(key);

@@ -19,11 +19,6 @@ struct TransferCompletionQueryResult;
 
 class FrozenTask {
 public:
-    struct TransferParticipant {
-        size_t      rank{0};
-        std::string address;
-    };
-
     struct TargetBlock {
         std::shared_ptr<IBlockPool> pool;
         BlockIdxType block{NULL_BLOCK_IDX};
@@ -33,7 +28,7 @@ public:
         RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
         std::string trace_id;
         bool uses_rpc{false};
-        std::vector<TransferParticipant> participant_ranks;
+        size_t rank_count{0};
         std::vector<TargetBlock> target_blocks;
     };
 

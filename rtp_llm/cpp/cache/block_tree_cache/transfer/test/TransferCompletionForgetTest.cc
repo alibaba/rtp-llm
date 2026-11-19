@@ -2,7 +2,6 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
 #include <stdexcept>
@@ -19,14 +18,6 @@ namespace {
 using Outcome = TransferTaskRegistry::ForgetResult;
 using Trace = TransferCompletionKey;
 using block_tree_cache_test::CompletionRpcTestServer;
-
-TransferCompletionTarget target(const std::vector<std::string>& addresses, bool remote = true) {
-    TransferCompletionTarget value;
-    value.remote = remote;
-    for (size_t rank = 0; rank < addresses.size(); ++rank)
-        value.peers.push_back({rank, addresses[rank]});
-    return value;
-}
 
 TransferCompletionForgetStatusPB wireStatus(Outcome outcome) {
     switch (outcome) {
@@ -80,8 +71,7 @@ TEST(TransferCompletionForgetTest, RemoteBatchRequiresAllOriginalRanksButRunning
     auto manager = std::make_shared<BroadcastManager>(addresses);
     ASSERT_TRUE(manager->init());
     TransferCompletionForget forget(manager);
-    auto routing = target(addresses);
-    std::reverse(routing.peers.begin(), routing.peers.end());
+    const TransferCompletionTarget routing{true, addresses.size()};
     TransferCompletionCleanup cleanup;
     const Trace ordinary{uint64_t{71}}, kvcm{std::string("71")};
     cleanup.enqueue(cleanup.prepare(routing, ordinary));

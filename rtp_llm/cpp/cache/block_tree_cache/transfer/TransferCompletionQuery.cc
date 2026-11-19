@@ -100,29 +100,16 @@ TransferCompletionQuery::query(const TransferCompletionIdentity& execution, int 
     result.ranks.resize(execution.expected_rank_count);
     for (size_t rank = 0; rank < result.ranks.size(); ++rank)
         result.ranks[rank].rank = rank;
-    for (const auto& peer : execution.expected_peers) {
-        if (peer.rank < result.ranks.size())
-            result.ranks[peer.rank].server_address = peer.address;
-    }
     if (timeout_ms <= 0 || !validTransferCompletionKey(key)) {
         fail(result, "completion query requires a valid trace and positive timeout");
         return result;
     }
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     const auto rpc_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
-    if (result.ranks.empty() || execution.expected_peers.size() != result.ranks.size()) {
+    if (result.ranks.empty()) {
         fail(result, "completion query requires the complete original participant set");
         return result;
     }
-    std::vector<bool> seen(result.ranks.size(), false);
-    for (const auto& peer : execution.expected_peers) {
-        if (peer.rank >= seen.size() || seen[peer.rank] || peer.address.empty()) {
-            fail(result, "completion query participants contain a missing, duplicate, or invalid rank");
-            return result;
-        }
-        seen[peer.rank] = true;
-    }
-
     if (!execution.remote) {
         if (result.ranks.size() != 1 || !local_reader_) {
             fail(result, "local completion query requires one participant and a local reader");
@@ -148,15 +135,9 @@ TransferCompletionQuery::query(const TransferCompletionIdentity& execution, int 
         return result;
     }
 
-    if (!broadcast_manager_ || broadcast_manager_->workerAddresses().size() != result.ranks.size()) {
+    if (!broadcast_manager_ || broadcast_manager_->workerNum() != result.ranks.size()) {
         fail(result, "completion query manager does not match the original participant count");
         return result;
-    }
-    for (const auto& row : result.ranks) {
-        if (broadcast_manager_->workerAddresses()[row.rank] != row.server_address) {
-            fail(result, "completion query manager does not match the original participant addresses");
-            return result;
-        }
     }
     try {
         std::vector<FunctionRequestPB> requests(result.ranks.size());
@@ -181,25 +162,16 @@ TransferCompletionQuery::query(const TransferCompletionIdentity& execution, int 
         const int wait_timeout = remainingTimeout(deadline);
         // Zero means an infinite wait to BroadcastResult; never pass it here.
         const bool completed = rpc->done() || (wait_timeout > 0 && rpc->waitDone(wait_timeout, false));
-        if (!completed)
-            result.error = "completion query deadline exceeded";
-        rpc->forEachRankResponse([&](size_t rank, bool received, const auto* worker, const std::string& dispatch_error) {
-            auto& row = result.ranks.at(rank);
-            row.cq_received = received;
-            row.cq_ok = worker != nullptr;
-            if (!worker) {
-                row.error = dispatch_error.empty() ? "completion query has no successful CQ event" : dispatch_error;
-                return;
-            }
-            row.grpc_code = worker->status.error_code();
-            if (!worker->status.ok()) {
-                row.error = worker->status.error_message();
-                if (row.error.empty())
-                    row.error = "completion query RPC failed";
-            } else {
-                decodeResponse(worker->response, key, row);
-            }
-        });
+        if (!completed || !rpc->success()) {
+            fail(result, completed ? "completion query RPC failed: " + rpc->failureSummary() :
+                                     "completion query deadline exceeded");
+            return result;
+        }
+        const auto responses = rpc->responses();
+        for (auto& row : result.ranks) {
+            row.grpc_code = grpc::StatusCode::OK;
+            decodeResponse(responses.at(row.rank), key, row);
+        }
         if (remainingTimeout(deadline) == 0) {
             result.error = "completion query deadline exceeded";
         }

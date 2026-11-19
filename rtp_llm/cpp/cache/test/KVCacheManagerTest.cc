@@ -2313,7 +2313,7 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
         auto& registry = *manager.block_tree_cache_->transfer_dispatcher_->task_registry_;
         ASSERT_TRUE(registry.begin(trace));
         ASSERT_TRUE(registry.finish(trace, true));
-        reclaimer.completion_cleanup_->enqueue(reclaimer.completion_cleanup_->prepare({false, {{0, "local"}}}, trace));
+        reclaimer.completion_cleanup_->enqueue(reclaimer.completion_cleanup_->prepare({false, 1}, trace));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (reclaimer.completion_cleanup_->size() != 0 && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
