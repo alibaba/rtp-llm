@@ -888,7 +888,10 @@ class BackendRPCServerVisitor:
             route_span.finish()
 
     def check_sp_supported(self, input: GenerateInput):
-        if not self.sp_config or not self.sp_config.model_type:
+        if not self.sp_config or (
+            not self.sp_config.model_type
+            and self.sp_config.type != SpeculativeType.DSPARK
+        ):
             return
         # Disabling proposals per request does not replace the DSpark executor:
         # its prefill output does not contain a full probability tensor.

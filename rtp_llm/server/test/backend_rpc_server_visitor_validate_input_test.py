@@ -6,7 +6,8 @@ import torch
 from pydantic import ValidationError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, RoleType
+from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode, RoleType
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.utils.base_model_datatypes import GenerateInput
 
@@ -63,6 +64,39 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
                 pd_sep_config=pd_sep_config,
                 addresses=[],
             )
+
+    async def test_dspark_frontend_without_draft_weights_rejects_before_routing(self):
+        self.visitor.sp_config = SimpleNamespace(
+            model_type="", type=SpeculativeType.DSPARK
+        )
+        self.visitor.host_service.service_available = True
+        valid = _make_input(2, 1, force_disable_sp_run=True)
+        bad = _make_input(
+            2,
+            1,
+            force_disable_sp_run=True,
+            return_all_probs=ReturnAllProbsMode.ORIGINAL,
+        )
+        with patch.object(self.visitor, "route_ips") as route:
+            for submit in (
+                lambda: self.visitor.enqueue(bad),
+                lambda: self.visitor.batch_enqueue([valid, bad]),
+            ):
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "return_all_probs"
+                ) as ctx:
+                    await submit()
+                self.assertEqual(
+                    ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+                )
+            route.assert_not_called()
+            self.assertEqual(self.model_rpc_client.inputs, [])
+            self.assertEqual(self.model_rpc_client.batches, [])
+
+            stream = await self.visitor.enqueue(valid)
+            self.assertEqual([out async for out in stream], [])
+            route.assert_awaited_once()
+            self.assertIs(self.model_rpc_client.inputs[-1], valid)
 
     async def test_prefill_only_accepts_nonempty_prompt_without_generation_capacity(
         self,

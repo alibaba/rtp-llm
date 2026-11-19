@@ -906,6 +906,12 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
     if (stream->hasError()) {
         return false;
     }
+    // Standalone frontends and direct RPC clients may not know the worker's draft type.
+    if (stream->getReturnAllProbs() != ReturnAllProbsMode::NONE && propose_params_
+        && propose_params_->sp_type == SP_TYPE_DSPARK) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "DSpark does not support return_all_probs");
+        return false;
+    }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
         return true;
     }
