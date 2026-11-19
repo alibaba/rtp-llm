@@ -1,0 +1,128 @@
+import json
+import os
+import subprocess
+import tempfile
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+from ..dashboard import validate_dashboard
+
+
+def timestamp():
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def write_json(path, value):
+    path = Path(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=path.parent,
+            prefix=".publish-",
+            encoding="utf-8",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            stream.write(
+                json.dumps(
+                    value, ensure_ascii=False, allow_nan=False, default=str, indent=2
+                )
+                + "\n"
+            )
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+_step_identity = ContextVar("step_identity", default=None)
+
+
+class StepTrace:
+    def __init__(self, directory, case, launch):
+        self.run_id = uuid4().hex
+        self._seq = 0
+        self.directory = Path(directory).resolve()
+        self.directory.mkdir(parents=True, exist_ok=False)
+        write_json(
+            self.directory / "configuration.json",
+            {"run_id": self.run_id, "case": case.to_dict(), "launch": launch},
+        )
+        if case.view is not None:
+            view = json.loads(case.view.read_text(encoding="utf-8"))
+            validate_dashboard(view)
+            write_json(self.directory / "view.json", view)
+        source = case.source
+        if source.is_file():
+            (self.directory / "case.yaml").write_bytes(source.read_bytes())
+        self._streams = {
+            name: (self.directory / f"{name}.jsonl").open("x", encoding="utf-8")
+            for name in ("events", "gates")
+        }
+
+    @contextmanager
+    def step(self, phase_id, step_id, interface):
+        token = _step_identity.set((self, phase_id, step_id, interface))
+        try:
+            yield
+        finally:
+            _step_identity.reset(token)
+
+    def emit(self, stream="events", **event):
+        identity = _step_identity.get()
+        if identity is not None and identity[0] is self:
+            for key, value in zip(("phase_id", "step_id", "interface"), identity[1:]):
+                event.setdefault(key, value)
+        self._seq += 1
+        event.update(run_id=self.run_id, seq=self._seq)
+        event.setdefault("recorded_at", timestamp())
+        self._streams[stream].write(
+            json.dumps(event, ensure_ascii=False, allow_nan=False, default=str) + "\n"
+        )
+        self._streams[stream].flush()
+
+    def record_git_state(self, directories):
+        def git(directory, *arguments):
+            return subprocess.run(
+                ["git", "-C", directory, *arguments],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            ).stdout
+
+        worktrees = {}
+        for directory in sorted(set(map(str, directories))):
+            try:
+                root = git(directory, "rev-parse", "--show-toplevel").rstrip("\n")
+            except (OSError, subprocess.SubprocessError):
+                root = None
+
+            location = root or directory
+            if location not in worktrees:
+                state = {"worktree": root, "directories": []}
+                for key, arguments in [
+                    ("commit", ["rev-parse", "HEAD"]),
+                    ("status", ["status", "--porcelain"]),
+                    ("diff", ["diff", "--binary", "HEAD"]),
+                ]:
+                    try:
+                        state[key] = git(location, *arguments).rstrip()
+                    except (OSError, subprocess.SubprocessError) as error:
+                        state[key] = {"unavailable": str(error)}
+                worktrees[location] = state
+            worktrees[location]["directories"].append(directory)
+        write_json(self.directory / "git-state.json", list(worktrees.values()))
+
+    def close(self, result):
+        try:
+            write_json(
+                self.directory / "result.json", {**result, "run_id": self.run_id}
+            )
+        finally:
+            for stream in self._streams.values():
+                stream.close()
