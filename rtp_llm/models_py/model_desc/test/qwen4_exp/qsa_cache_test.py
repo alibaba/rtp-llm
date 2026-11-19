@@ -6,7 +6,10 @@ from unittest.mock import Mock, patch
 import torch
 from torch import nn
 
-from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_KV_TAG
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+    INDEXER_KV_TAG,
+    INDEXER_ROPE_POS_TAG,
+)
 from rtp_llm.models_py.model_desc.module_base import AttnImplFactory
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     _same_tensor_metadata,
@@ -256,6 +259,8 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         self.assertIs(context.main_inputs, fmha_inputs)
         self.assertIs(second.main_inputs, fmha_inputs)
         self.assertIs(plan.visible_lengths, first.visible_lengths)
+        self.assertIs(plan.current_cos, first.current_cos)
+        self.assertIs(plan.rope_sin, first.rope_sin)
         self.assertEqual(plan.kv_pool.data_ptr(), other_kv.kv_cache_base.data_ptr())
         self.assertNotEqual(plan.kv_pool.data_ptr(), first.kv_pool.data_ptr())
         small_pool = replace(
@@ -326,6 +331,149 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         context.main_inputs.is_cuda_graph = True
         with self.assertRaisesRegex(RuntimeError, "does not support CUDA Graph"):
             context._draft_incremental_prefill_geometry(**options)
+
+    def check_prefix_reuse_rope_across_layers(self, device, prefix, length):
+        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = torch.ones(self.D, device=device)
+        indexer = self._decode_indexer()
+        entries = self.KV_TOKENS_PER_BLOCK // self.RATIO
+        pages = (
+            prefix + length + self.KV_TOKENS_PER_BLOCK - 1
+        ) // self.KV_TOKENS_PER_BLOCK
+        table = torch.arange(1, pages + 1, device=device, dtype=torch.int32)[None]
+        kv_pool = torch.zeros(
+            pages + 1, entries * self.D * 2, device=device, dtype=torch.uint8
+        )
+        state_pool = torch.zeros(pages + 1, 2 * self.RATIO * self.D, device=device)
+        mrope = SimpleNamespace(
+            **(
+                vars(self.rope_config)
+                | dict(dim=64, mrope_dim1=12, mrope_dim2=10, mrope_dim3=10)
+            )
+        )
+        for config, sidecar in (
+            (self._base_rope_config(1), False),
+            (self._base_rope_config(3), False),
+            (mrope, False),
+            (mrope, True),
+        ):
+            with self.subTest(
+                style=config.style, factor=config.index_factor, sidecar=sidecar
+            ):
+                context = self._draft_incremental_context(
+                    kv_pool,
+                    state_pool,
+                    prefixes=[prefix],
+                    lengths=[length],
+                    kv_table=table,
+                    state_table=table,
+                    position_factor=config.index_factor,
+                    is_mtp_draft=False,
+                )
+                context.main_inputs.prefix_lengths_device = (
+                    context.main_inputs.prefix_lengths
+                )
+                if sidecar:
+                    context = replace(
+                        context,
+                        position_state_cache=SimpleNamespace(
+                            tag=INDEXER_ROPE_POS_TAG,
+                            seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+                            kv_cache_base=torch.zeros(
+                                pages + 1,
+                                2 * self.RATIO * 3,
+                                dtype=torch.int32,
+                                device=device,
+                            ),
+                        ),
+                        position_state_inputs=context.indexer_state_inputs,
+                    )
+
+                def prepare(context, metadata, config=config):
+                    return replace(
+                        context, metadata_cache=metadata
+                    )._draft_incremental_prefill_geometry(
+                        indexer=indexer,
+                        token_count=length,
+                        device=device,
+                        rope_config=config,
+                        draft=False,
+                    )
+
+                def assert_rope_equal(actual, expected):
+                    for name in ("current_cos", "current_sin", "rope_cos", "rope_sin"):
+                        torch.testing.assert_close(
+                            getattr(actual, name),
+                            getattr(expected, name),
+                            rtol=0,
+                            atol=0,
+                        )
+
+                expected = prepare(context, None)
+                for metadata, count in ((None, 24), ({}, 2)):
+                    with patch.object(
+                        torch, "cos", wraps=torch.cos
+                    ) as cos, patch.object(torch, "sin", wraps=torch.sin) as sin:
+                        plans = [prepare(context, metadata) for _ in range(12)]
+                    self.assertEqual((cos.call_count, sin.call_count), (count, count))
+                    for plan in plans:
+                        assert_rope_equal(plan, expected)
+                        if metadata is not None:
+                            self.assertIs(plan.current_cos, plans[0].current_cos)
+                            self.assertIs(plan.rope_cos, plans[0].rope_cos)
+
+                changed_config = SimpleNamespace(
+                    **(vars(config) | dict(base=2000, scale=2.0))
+                )
+                adjusted = prepare(context, metadata, changed_config)
+                assert_rope_equal(adjusted, prepare(context, None, changed_config))
+                self.assertFalse(
+                    torch.equal(adjusted.current_cos, expected.current_cos)
+                )
+
+                positions = context.main_inputs.combo_position_ids
+                if sidecar:
+                    positions[1::3].add_(31)
+                    changed = prepare(context, {})
+                    assert_rope_equal(changed, prepare(context, None))
+                    self.assertFalse(
+                        torch.equal(changed.current_cos, expected.current_cos)
+                    )
+                    self.assertFalse(torch.equal(changed.rope_sin, expected.rope_sin))
+
+                    # A group starting before this chunk reads layer-local history.
+                    context.main_inputs.prefix_lengths_device = (
+                        context.main_inputs.prefix_lengths - 1
+                    )
+                    cache = context.position_state_cache
+                    other_layer = replace(
+                        context,
+                        position_state_cache=SimpleNamespace(
+                            tag=cache.tag,
+                            seq_size_per_block=cache.seq_size_per_block,
+                            kv_cache_base=torch.full_like(cache.kv_cache_base, 47),
+                        ),
+                    )
+                    historical_metadata = {}
+                    first = prepare(context, historical_metadata)
+                    second = prepare(other_layer, historical_metadata)
+                    assert_rope_equal(first, prepare(context, None))
+                    assert_rope_equal(second, prepare(other_layer, None))
+                    self.assertFalse(torch.equal(first.rope_cos[0], second.rope_cos[0]))
+                else:
+                    positions[0] += 1
+                    for _ in range(2):
+                        with self.assertRaisesRegex(
+                            ValueError, "three axes are equal|logical cache positions"
+                        ):
+                            prepare(context, metadata)
+
+    def test_prefix_reuse_rope_across_layers_cpu(self):
+        self.check_prefix_reuse_rope_across_layers(torch.device("cpu"), 128, 9)
+
+    @skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_prefix_reuse_rope_across_layers_cuda(self):
+        self.check_prefix_reuse_rope_across_layers(torch.device("cuda:0"), 6144, 2048)
 
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
