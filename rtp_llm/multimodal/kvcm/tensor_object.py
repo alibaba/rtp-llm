@@ -148,6 +148,8 @@ def pack_object(
             observe_stage("write", name) if observe_stage is not None else nullcontext()
         )
 
+    if len(plan.tensors) != len(plan.header["tensors"]):
+        raise ValueError("packing plan no longer owns its tensors")
     with stage("pack_allocate"):
         if out is None:
             output = torch.zeros(plan.nbytes, dtype=torch.uint8)
@@ -158,15 +160,17 @@ def pack_object(
             ):
                 raise ValueError("invalid packing buffer")
             output = out[:plan.nbytes]
-            output.zero_()  # Alignment padding is part of the wire digest.
     with stage("pack_payload"):
+        end = plan.payload_offset
         for tensor, spec in zip(plan.tensors, plan.header["tensors"]):
-            if not spec["nbytes"]:
-                continue
             start = plan.payload_offset + spec["offset"]
-            with cuda_graph_gate.operation():
-                source = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
-                output[start : start + spec["nbytes"]].copy_(source, non_blocking=False)
+            if out is not None and start > end:
+                output[end:start].zero_()
+            end = start + spec["nbytes"]
+            if spec["nbytes"]:
+                with cuda_graph_gate.operation():
+                    source = tensor.detach().contiguous().reshape(-1).view(torch.uint8)
+                    output[start:end].copy_(source, non_blocking=False)
     # A memoryview avoids another full bytes copy during checksumming.
     with stage("pack_checksum"):
         plan.header["sha256"] = "0" * 64
@@ -179,6 +183,10 @@ def pack_object(
     header = json.dumps(plan.header, separators=(",", ":"), allow_nan=False).encode()
     prefix = _PREFIX.pack(_MAGIC, len(header)) + header
     output[: len(prefix)].copy_(torch.frombuffer(bytearray(prefix), dtype=torch.uint8))
+    if out is not None:
+        # Tensor bytes are overwritten by copy_; only alignment gaps keep
+        # bytes from the previous use of this pinned buffer.
+        output[len(prefix) : plan.payload_offset].zero_()
     return output
 
 
