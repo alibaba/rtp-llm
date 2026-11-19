@@ -86,7 +86,12 @@ class EmbOutcomeMetric(MetricBase):
                 return []
             self._last = now
             counts = self._counts
-            self._counts = defaultdict(lambda: defaultdict(int))
+            # Keep emitting zero for previously active series. Monitoring
+            # averages over reported points and would otherwise ignore idle time.
+            self._counts = defaultdict(
+                lambda: defaultdict(int),
+                ((key, defaultdict(int)) for key in counts),
+            )
         return [
             point
             for (operation, stage), statuses in counts.items()
@@ -126,6 +131,7 @@ class EmbLatencyMetric(MetricBase):
         )
         self._lock = Lock()
         self._samples = {}
+        self._stage_keys = set()
         self._last = time.monotonic()
 
     def report(self, value, tags):
@@ -152,9 +158,11 @@ class EmbLatencyMetric(MetricBase):
                 return []
             self._last = now
             samples, self._samples = self._samples, {}
+            if self._is_stage:
+                self._stage_keys.update(samples)
+            stage_keys = tuple(self._stage_keys)
 
         points = []
-        stage_counts = defaultdict(lambda: defaultdict(int))
         for key, entry in samples.items():
             tags = dict(self.tags, **dict(zip(self._tag_names, key)))
             points.append(MetricDataPoint(entry.total / entry.count, tags))
@@ -170,13 +178,18 @@ class EmbLatencyMetric(MetricBase):
                             running, dict(tags, le=label), self.name + "_bucket"
                         )
                     )
-            if self._is_stage:
-                operation, stage, status = key
-                outcome = status if status in ("success", "skipped") else "error"
-                stage_counts[operation, stage][outcome] += entry.count
-                points.append(
-                    MetricDataPoint(entry.count / interval, tags, PREFIX + "stage_qps")
-                )
+
+        stage_counts = defaultdict(lambda: defaultdict(int))
+        for key in stage_keys:
+            operation, stage, status = key
+            sample = samples.get(key)
+            count = sample.count if sample is not None else 0
+            outcome = status if status in ("success", "skipped") else "error"
+            stage_counts[operation, stage][outcome] += count
+            tags = dict(self.tags, operation=operation, stage=stage, status=status)
+            points.append(
+                MetricDataPoint(count / interval, tags, PREFIX + "stage_qps")
+            )
 
         # Existing dashboards consume these views of the same observations.
         for (operation, stage), counts in stage_counts.items():
