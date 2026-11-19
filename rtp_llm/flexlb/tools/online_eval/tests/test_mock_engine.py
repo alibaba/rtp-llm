@@ -212,7 +212,7 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
             self.pb2.StatusVersionPB(latest_finished_version=-1)
         )
         self.assertEqual(1, len(status.finished_task_list))
-        self.assertEqual("123", status.finished_task_list[0].request_id)
+        self.assertEqual(123, status.finished_task_list[0].request_id)
 
         cache = await decode_stub.GetCacheStatus(
             self.pb2.CacheVersionPB(need_cache_keys=True)
@@ -231,7 +231,7 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pb2.CANCEL_STATUS_NOT_FOUND, missing.status)
         self.assertNotIn(999, self.prefill._cancelled)
 
-    async def test_decode_cancel_rpc_is_unimplemented(self) -> None:
+    async def test_decode_cancel_requires_explicit_prefill_route(self) -> None:
         import grpc
 
         decode_stub = self.pb2_grpc.RpcServiceStub(self.decode_channel)
@@ -239,7 +239,21 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(grpc.aio.AioRpcError) as raised:
             await decode_stub.Cancel(self.pb2.CancelRequestPB(request_id=456))
 
-        self.assertEqual(grpc.StatusCode.UNIMPLEMENTED, raised.exception.code())
+        self.assertEqual(grpc.StatusCode.INVALID_ARGUMENT, raised.exception.code())
+
+    async def test_decode_cancel_forwards_only_to_explicit_prefill(self) -> None:
+        self.prefill._register_prefill_owner(self._input_pb(request_id=456))
+        decode_stub = self.pb2_grpc.RpcServiceStub(self.decode_channel)
+        result = await decode_stub.Cancel(
+            self.pb2.CancelRequestPB(
+                request_id=456,
+                prefill_address=f"127.0.0.1:{self.prefill.grpc_port}",
+            )
+        )
+        self.assertEqual(self.pb2.CANCEL_STATUS_ACCEPTED, result.status)
+        self.assertIn(456, self.prefill._cancelled)
+        self.assertEqual(1, self.decode._rpc_counts["cancel"])
+        self.assertEqual(1, self.prefill._rpc_counts["cancel"])
 
     async def test_batch_generate_rpc_is_unimplemented(self) -> None:
         import grpc

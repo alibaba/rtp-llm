@@ -95,30 +95,6 @@ bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
     return true;
 }
 
-ErrorInfo P2PSchedulerDecodeRead::checkPeerCpLayout(int prefill_tp_size, int prefill_cp_size) const {
-    const auto& cp_cfg = config_.parallelism_config.prefill_cp_config;
-
-    // kv_cache_sharded 是部署级同配开关（OpaqueKVCacheSpec::fixedRegionCpSize 的 DECODE
-    // 分支已依赖此前提），因此本端可以推出对端应有的 CP 片数。
-    const bool peer_sharded = cp_cfg.is_prefill_enabled() && cp_cfg.kv_cache_sharded;
-    const int  derived      = peer_sharded ? prefill_tp_size : 1;
-    if (prefill_cp_size != derived) {
-        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                         "peer CP layout drift: reported prefill_cp_size=" + std::to_string(prefill_cp_size)
-                             + " but local config derives " + std::to_string(derived)
-                             + " (kv_cache_sharded=" + std::to_string(cp_cfg.kv_cache_sharded ? 1 : 0)
-                             + ", prefill_tp_size=" + std::to_string(prefill_tp_size) + ")");
-    }
-    // 仅在启用 KV 分片时以配置的 CP 片数校验物理布局。
-    if (peer_sharded && cp_cfg.prefill_cp_size > 0 && cp_cfg.prefill_cp_size != prefill_cp_size) {
-        return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                         "peer CP layout drift: reported prefill_cp_size=" + std::to_string(prefill_cp_size)
-                             + " but local prefill_cp_config.prefill_cp_size="
-                             + std::to_string(cp_cfg.prefill_cp_size));
-    }
-    return ErrorInfo::OkStatus();
-}
-
 std::shared_ptr<const PlanResult> P2PSchedulerDecodeRead::planFor(int                prefill_tp_size,
                                                                   int                prefill_cp_size,
                                                                   const std::string& unique_key,
@@ -364,15 +340,6 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
     if (!no_transfer && !config_.topology) {
         return report_early_failure(
             ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "cache topology is null"));
-    }
-    if (!no_transfer && !pipeline) {
-        // 漂移断言（设计文档 §3.2.4）：这是「对端 layout 由本端推导」唯一的保护，
-        // 把配置漂移从传输期的疑难杂症变成入口处的确定性报错。
-        const auto drift = checkPeerCpLayout(prefill_tp_size, prefill_cp_size);
-        if (drift.hasError()) {
-            RTP_LLM_LOG_WARNING("asyncRead: %s", drift.ToString().c_str());
-            return report_early_failure(drift);
-        }
     }
     // 编排层：计算传输计划并投影成每个 worker 的 route 列表。route 现在**驱动执行**，
     // §2.1 那条「两侧 CP 必须相等」的硬拒因此删除 —— 非对称 CP 由 planner 的白名单

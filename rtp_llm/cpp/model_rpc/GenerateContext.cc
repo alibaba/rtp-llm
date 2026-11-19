@@ -15,8 +15,9 @@ GenerateContext::~GenerateContext() {
                           finished,
                           static_cast<bool>(stream_));
     }
-    stopStream();
+    cancelStreamOnTeardown();
     reportTime();
+    stopStream();
 }
 
 void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exception_unwinding) {
@@ -273,7 +274,6 @@ void GenerateContext::stopStreamForRetry() {
 }
 
 void GenerateContext::stopStream() {
-    cancelStreamOnTeardown();
     if (stream_) {
         if (meta) {
             meta->dequeue(request_id, stream_);

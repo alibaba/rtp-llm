@@ -326,20 +326,54 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadB
     EXPECT_EQ(result.context->transfer_deadline_ms_, request_deadline_ms);
 }
 
-TEST(P2PSchedulerDecodeReadTest, UnshardedPeerUsesOnePhysicalCpShard) {
-    P2PConnectorSchedulerConfig config;
-    auto&                       cp = config.parallelism_config.prefill_cp_config;
-    cp.prefill_cp_size             = 4;
-    for (auto method : {CPRotateMethod::DISABLED, CPRotateMethod::PREFILL_CP}) {
-        cp.method = method;
-        for (bool sharded : {false, true}) {
-            cp.kv_cache_sharded = sharded;
-            P2PSchedulerDecodeRead scheduler(config, nullptr, nullptr);
-
-            const bool active = method == CPRotateMethod::PREFILL_CP && sharded;
-            EXPECT_EQ(scheduler.checkPeerCpLayout(/*prefill_tp_size=*/4, /*prefill_cp_size=*/1).hasError(), active);
-            EXPECT_EQ(scheduler.checkPeerCpLayout(/*prefill_tp_size=*/4, /*prefill_cp_size=*/4).hasError(), !active);
+TEST_F(P2PConnectorSchedulerTest, PeerCpPlanUsesAdvertisedSizeInsteadOfDecodeConfiguration) {
+    for (bool local_sharded : {false, true}) {
+        P2PConnectorSchedulerConfig config;
+        config.topology                   = makeSingleMlaTopology();
+        config.parallelism_config.tp_size = 2;
+        auto& cp                          = config.parallelism_config.prefill_cp_config;
+        cp.method                         = local_sharded ? CPRotateMethod::PREFILL_CP : CPRotateMethod::DISABLED;
+        cp.kv_cache_sharded               = local_sharded;
+        cp.prefill_cp_size                = 8;  // Deliberately differs from the selected peer.
+        P2PSchedulerDecodeRead scheduler(config, nullptr, nullptr);
+        for (int peer_cp_size : {1, 2}) {
+            SCOPED_TRACE(::testing::Message() << "local_sharded=" << local_sharded << " peer_cp_size=" << peer_cp_size);
+            const auto plan = scheduler.planFor(2, peer_cp_size, "advertised-cp-layout");
+            ASSERT_TRUE(plan->ok()) << plan->error.ToString();
+            EXPECT_FALSE(plan->plan.routes.empty());
         }
+    }
+}
+
+TEST_F(P2PConnectorSchedulerTest, SingleStagePlanUsesFullPeerLayoutWithLocalCpDisabled) {
+    const auto topology      = makeSingleMlaTopology();
+    const auto encode_layout = [&](ParallelismConfig pc, RoleType role) {
+        P2PPipelineLayoutPB layout;
+        layout.set_worker_count(pc.tp_size);
+        auto* stage = layout.add_stages();
+        stage->set_main_layer_begin(0);
+        stage->set_main_layer_count(1);
+        for (int rank = 0; rank < pc.tp_size; ++rank) {
+            stage->add_worker_indices(rank);
+        }
+        encodeP2PShardLayout(ShardLayoutFactory::fromTopology(*topology, pc, role, 1), stage->mutable_main_shards());
+        stage->add_layers()->add_tags("group0");
+        return layout.SerializeAsString();
+    };
+    P2PConnectorSchedulerConfig config;
+    config.topology                   = topology;
+    config.parallelism_config.tp_size = 2;
+    config.pipeline_layout            = encode_layout(config.parallelism_config, RoleType::DECODE);
+    P2PSchedulerDecodeRead scheduler(config, nullptr, nullptr);
+    ParallelismConfig      peer;
+    peer.tp_size                  = 2;
+    peer.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    for (bool peer_sharded : {false, true}) {
+        peer.prefill_cp_config.kv_cache_sharded = peer_sharded;
+        const auto advertised_layout            = encode_layout(peer, RoleType::PREFILL);
+        const auto plan = scheduler.planFor(2, peer_sharded ? 2 : 1, "single-stage-peer-layout", advertised_layout);
+        ASSERT_TRUE(plan->ok()) << plan->error.ToString();
+        EXPECT_FALSE(plan->plan.routes.empty());
     }
 }
 
@@ -525,6 +559,33 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastTimeout) {
 
     EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
+}
+
+TEST_F(P2PConnectorSchedulerTest, HandleRead_DeadlineCrossingInCancellationCheckRemainsTimeout) {
+    auto release = std::make_shared<std::promise<void>>();
+    auto gate    = release->get_future().share();
+    auto cleanup = std::shared_ptr<void>(nullptr, [release](void*) { release->set_value(); });
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestGate(P2PConnectorBroadcastType::HANDLE_READ, [gate] { gate.wait(); });
+    }
+    const auto deadline_ms          = currentTimeMs() + 300;
+    const auto deadline             = std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms));
+    bool       cancellation_checked = false;
+    const auto error                = sendPrefillKV(
+        "deadline-crosses-cancel-check",
+        1005,
+        {{"127.0.0.1", 12345}},
+        deadline_ms,
+        [&] {
+            cancellation_checked = true;
+            // Deterministically model resource-store expiry being observed by
+            // the cancellation callback at the transfer deadline.
+            gate.wait_until(deadline);
+            return true;
+        },
+        deadline_ms + 5000);
+    EXPECT_TRUE(cancellation_checked);
+    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
 }
 
 // Cancel completion must release the caller without waiting for blocked HANDLE_READ workers.
@@ -1070,12 +1131,12 @@ TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) 
     EXPECT_EQ(layer.block_ids(1), 12);
 }
 
-TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {
+TEST_F(P2PConnectorSchedulerTest, AsyncReadCpAcceptsDifferentAdvertisedSourceCpSize) {
     rebuildSchedulerWithLayerAttnTypes({CacheGroupType::FULL}, /*cp_size=*/2);
 
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeSingleMlaTopology());
-    resource->mutableBlockIds(resource->groupTags().at(0)).assign({10});
+    resource->mutableBlockIds(resource->groupTags().at(0)).assign({10, 11});
     resource->cacheKeys() = {100, 101};
     auto meta = createMockMeta(2013, "test_async_read_cp_mismatch", currentTimeMs() + 5000);
     // TP happens to match Decode, but effective KV-cache CP does not.
@@ -1083,12 +1144,11 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {
     meta->setPrefillCpSize(1);
 
     auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
-    EXPECT_FALSE(result.ok());
-    EXPECT_EQ(result.context, nullptr);
-    EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 0);
-    for (const auto& server : tp_broadcast_servers_) {
-        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
-    }
+    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    ASSERT_NE(result.context, nullptr);
+    waitAsyncContextDone(result.context);
+    EXPECT_TRUE(result.context->success());
+    EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_NoTransferCompletesWithoutDecodeBuffers) {

@@ -7,6 +7,8 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 TOOL_DIR = Path(__file__).resolve().parents[1]
 if str(TOOL_DIR) not in sys.path:
@@ -91,3 +93,61 @@ class LoadClientDiscoveryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealEngineStreamRoutingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_master_admitted_real_request_attaches_to_decode_generate_stream(
+        self,
+    ):
+        client = LoadClient.__new__(LoadClient)
+        client.args = SimpleNamespace(engine_protocol="rtp", timeout_ms=1000)
+        client._role_addr = Mock(
+            side_effect=lambda response, role: {
+                "PREFILL": "prefill:1",
+                "DECODE": "decode:2",
+            }.get(role, "")
+        )
+        client._channel = AsyncMock(return_value="decode-channel")
+
+        async def empty_stream():
+            if False:
+                yield None
+
+        stub = Mock()
+        stub.GenerateStreamCall.return_value = empty_stream()
+        client.pb2_grpc = SimpleNamespace(RpcServiceStub=Mock(return_value=stub))
+        input_pb = SimpleNamespace(request_id=123)
+        await client._read_engine_stream(
+            input_pb, SimpleNamespace(enqueued_by_master=True)
+        )
+        client._channel.assert_awaited_once_with("decode:2")
+        stub.GenerateStreamCall.assert_called_once_with(input_pb, timeout=1.0)
+        stub.FetchResponse.assert_not_called()
+
+    async def test_auto_protocol_uses_empty_mock_topology_and_caches_result(self):
+        client = LoadClient.__new__(LoadClient)
+        client._channel = AsyncMock(return_value="prefill-channel")
+        stub = SimpleNamespace(
+            GetPeerInfo=AsyncMock(return_value=SimpleNamespace(tp_size=0))
+        )
+        client.pb2 = SimpleNamespace(GetPeerInfoRequestPB=Mock(return_value="probe"))
+        client.pb2_grpc = SimpleNamespace(RpcServiceStub=Mock(return_value=stub))
+        self.assertTrue(await client._uses_mock_protocol("prefill:1"))
+        self.assertTrue(await client._uses_mock_protocol("prefill:1"))
+        stub.GetPeerInfo.assert_awaited_once_with("probe", timeout=1.0)
+
+    async def test_failed_protocol_probe_keeps_decode_route_and_can_retry(self):
+        import grpc
+
+        client = LoadClient.__new__(LoadClient)
+        client._channel = AsyncMock(return_value="prefill-channel")
+        stub = SimpleNamespace(
+            GetPeerInfo=AsyncMock(
+                side_effect=[grpc.RpcError(), SimpleNamespace(tp_size=4)]
+            )
+        )
+        client.pb2 = SimpleNamespace(GetPeerInfoRequestPB=Mock(return_value="probe"))
+        client.pb2_grpc = SimpleNamespace(RpcServiceStub=Mock(return_value=stub))
+        self.assertFalse(await client._uses_mock_protocol("prefill:1"))
+        self.assertFalse(await client._uses_mock_protocol("prefill:1"))
+        self.assertEqual(2, stub.GetPeerInfo.await_count)

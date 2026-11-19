@@ -126,6 +126,7 @@ class FlexLBSmokeBase:
         }
         config = self.pb2.GenerateConfigPB(
             max_new_tokens=max(1, output_len),
+            can_use_pd_separation=output_len > 1,
             num_return_sequences=1,
             top_p=1.0,
             top_k=0,

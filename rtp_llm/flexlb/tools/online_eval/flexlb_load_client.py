@@ -39,6 +39,9 @@ def peak_bucket_qps(epoch_ms_values: List[float], window_ms: int) -> float:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("trace", help="query/trace JSONL")
+    parser.add_argument(
+        "--engine-protocol", choices=("auto", "mock", "rtp"), default="auto"
+    )
     parser.add_argument("--flexlb-http-addr", default="127.0.0.1:7001")
     parser.add_argument("--flexlb-grpc-target", help="override flexlb gRPC target")
     parser.add_argument(
@@ -765,17 +768,45 @@ class LoadClient:
         result["wall_clock_ts"] = time.time()
         return result
 
+    async def _uses_mock_protocol(self, prefill_addr: str) -> bool:
+        import grpc
+
+        cache = getattr(self, "_mock_prefill_protocol", None)
+        if cache is None:
+            cache = self._mock_prefill_protocol = {}
+        if prefill_addr in cache:
+            return cache[prefill_addr]
+        if not prefill_addr:
+            return False
+        channel = await self._channel(prefill_addr)
+        stub = self.pb2_grpc.RpcServiceStub(channel)
+        try:
+            info = await stub.GetPeerInfo(self.pb2.GetPeerInfoRequestPB(), timeout=1.0)
+        except grpc.RpcError:
+            # Probe failures do not establish a mock protocol and may be retried.
+            return False
+        cache[prefill_addr] = info.tp_size == 0
+        return cache[prefill_addr]
+
     async def _read_engine_stream(
         self, input_pb, schedule_response
     ) -> tuple[Optional[float], Optional[float]]:
         prefill_addr = self._role_addr(schedule_response, "PREFILL")
         pdfusion_addr = self._role_addr(schedule_response, "PDFUSION")
-        target = prefill_addr or pdfusion_addr
+        protocol = getattr(self.args, "engine_protocol", "auto")
+        real_engine = protocol == "rtp" or (
+            protocol == "auto" and not await self._uses_mock_protocol(prefill_addr)
+        )
+        target = (
+            (self._role_addr(schedule_response, "DECODE") or pdfusion_addr)
+            if real_engine
+            else (prefill_addr or pdfusion_addr)
+        )
         if not target:
-            raise RuntimeError("schedule response has no PREFILL/PDFUSION address")
+            raise RuntimeError("schedule response has no serving engine address")
         channel = await self._channel(target)
         stub = self.pb2_grpc.RpcServiceStub(channel)
-        if schedule_response.enqueued_by_master:
+        if schedule_response.enqueued_by_master and not real_engine:
             stream = stub.FetchResponse(
                 self.pb2.FetchRequestPB(request_id=input_pb.request_id),
                 timeout=self.args.timeout_ms / 1000.0,
@@ -805,6 +836,7 @@ class LoadClient:
         }
         config = self.pb2.GenerateConfigPB(
             max_new_tokens=max(1, req.output_len),
+            can_use_pd_separation=req.output_len > 1,
             num_return_sequences=1,
             top_p=1.0,
             top_k=0,

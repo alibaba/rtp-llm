@@ -395,6 +395,7 @@ void modelInputFields(IO& io, Input& in) {
     io.tensor(in.request_id);
     io.tensor(in.request_pd_separation);
     io.tensor(in.request_deadline_ms);
+    io.template scalar<int64_t>(in.p2p_deadline_clock_offset_ms);
     io.tensor(in.cache_keys);
     optionalTensorListFields(io, in.multimodal_features);
     optionalTensorListFields(io, in.mm_extra_input);

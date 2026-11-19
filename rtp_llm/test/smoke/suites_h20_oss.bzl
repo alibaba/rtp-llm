@@ -580,7 +580,7 @@ def h20_oss_suites():
                     "decode": [],
                 },
                 smoke_args = {
-                    "frontend": "--use_local 1 --role_type FRONTEND --warm_up 0",
+                    "frontend": "--use_local 1 --role_type FRONTEND --warm_up 0 --frontend_server_count 1",
                     "prefill": "--warm_up 0 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
                     "decode": "--warm_up 0 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --tp_size 2 --dp_size 2 --world_size 4 --act_type BF16 --seq_size_per_block 2048 --reserver_runtime_mem_mb 12000 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 },

@@ -503,7 +503,7 @@ class BatchChatCompletionRequest(BaseModel):
 
 # output
 class BatchChatCompletionResponse(BaseModel):
-  responses: List[ChatCompletionResponse]  # one response per request, in the same order
+  responses: List[Union[ChatCompletionResponse, dict]]  # ordered; failures are {"error": {...}}
 ```
 
 ``` python
@@ -524,6 +524,10 @@ class BatchChatCompletionResponse(BaseModel):
 #   ]
 # }
 ```
+单项推理失败仍返回 HTTP 200，`responses` / `response_batch` 中对应位置为
+`{"error": {"error_code": ..., "error_message": ...}}`，其他项继续返回结果。
+调用方必须逐项检查 `error`；请求格式或整批前置校验失败仍通过 HTTP 错误状态返回。
+
 #### Prompt Processing APIs
 ``` python
 @app.post("/chat/render")

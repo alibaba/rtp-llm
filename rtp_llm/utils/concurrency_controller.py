@@ -14,6 +14,11 @@ class ConcurrencyException(Exception):
 
 class ConcurrencyController:
     def __init__(self, max_concurrency: int = 1) -> None:
+        now_ms = time.time_ns() // 1_000_000
+        if not EPOCH_2020_MS <= now_ms < REQUEST_ID_TIMESTAMP_LIMIT_MS:
+            raise RuntimeError(
+                "Frontend clock is outside the request-ID timestamp range; synchronize the host clock before startup"
+            )
         self.max_concurrency = max_concurrency
         self.lock = Lock()
         self.current_concurrency = Value("i", 0)

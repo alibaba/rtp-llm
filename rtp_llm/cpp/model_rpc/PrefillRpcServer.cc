@@ -405,6 +405,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                   const GenerateInputPB*                 request,
                                                   grpc::ServerWriter<GenerateOutputsPB>* response_writer) try {
+    c10::InferenceMode inference_guard(true);
     if (!request) {
         return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "null generate request"));
     }
@@ -1011,7 +1012,8 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
     const auto& cp = pc.prefill_cp_config;
     response->set_cp_size(static_cast<int32_t>(cp.is_enabled() && cp.kv_cache_sharded ? pc.tp_size : 1));
-    if ((pc.pp_size > 1 || (request && request->requester_pp_size() > 1)) && engine_ && engine_->getCacheManager()) {
+    // Advertise actual cache geometry for single-stage peers as well as pipelines.
+    if (engine_ && engine_->getCacheManager()) {
         response->set_pipeline_layout(engine_->getCacheManager()->p2pPipelineLayout());
     }
     RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d", pc.tp_size, response->cp_size());

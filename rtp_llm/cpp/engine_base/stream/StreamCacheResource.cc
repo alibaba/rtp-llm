@@ -321,6 +321,13 @@ void StreamCacheResource::trackReleasedP2PLoad() {
     }
 }
 
+void StreamCacheResource::failPrefillPublication(const ErrorInfo& error) {
+    if (resource_context_.role_type == RoleType::PREFILL && stream_->queryPdSep() && resource_context_.cache_manager) {
+        resource_context_.cache_manager->failP2PPublication(
+            stream_->streamId(), stream_->uniqueKey(), stream_->deadlineMs(), error);
+    }
+}
+
 void StreamCacheResource::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {

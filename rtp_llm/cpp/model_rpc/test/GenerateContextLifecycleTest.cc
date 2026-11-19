@@ -17,8 +17,17 @@ namespace {
 
 class LifecycleTestStream: public GenerateStream {
 public:
-    explicit LifecycleTestStream(int64_t request_id):
-        GenerateStream(makeInput(request_id), makeModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
+    explicit LifecycleTestStream(int64_t request_id, RoleType role = RoleType::PDFUSION):
+        GenerateStream(
+            makeInput(request_id, role), makeModelConfig(), RuntimeConfig{}, makeResourceContext(role), nullptr) {}
+
+    void setPdTimings() {
+        generate_status_->initial_kv_allocation_rt_us = 11;
+        loading_cache_start_time_us_                  = 100;
+        loading_cache_done_time_us_                   = 123;
+        running_started_time_us_                      = 200;
+        generation_done_time_us_                      = 245;
+    }
 
     ErrorResult<GenerateOutputs> nextOutput(int64_t /*wait_timeout_ms*/ = 0) override {
         return ErrorResult<GenerateOutputs>(GenerateOutputs{});
@@ -33,11 +42,18 @@ public:
     }
 
 private:
-    static std::shared_ptr<GenerateInput> makeInput(int64_t request_id) {
+    static ResourceContext makeResourceContext(RoleType role) {
+        ResourceContext context;
+        context.role_type = role;
+        return context;
+    }
+
+    static std::shared_ptr<GenerateInput> makeInput(int64_t request_id, RoleType role) {
         auto input             = std::make_shared<GenerateInput>();
         input->request_id      = request_id;
         input->begin_time_us   = currentTimeUs();
         input->generate_config = std::make_shared<GenerateConfig>();
+        input->generate_config->pd_separation = role == RoleType::DECODE;
         input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
         return input;
     }
@@ -66,6 +82,21 @@ public:
 
     mutable int cancellation_queries = 0;
 };
+
+TEST(GenerateContextLifecycleTest, DecodeRpcMetricsReadAllThreeStreamStages) {
+    auto meta    = std::make_shared<RpcServerRuntimeMeta>();
+    auto context = makeContext(1007, meta);
+    auto stream  = std::make_shared<LifecycleTestStream>(1007, RoleType::DECODE);
+    stream->setPdTimings();
+    stream->setState(StreamState::FINISHED);
+    context->setStream(stream);
+    context->markRpcHandlingCompleted();
+    RpcMetricsCollector collector;
+    context->collectBasicMetrics(collector);
+    EXPECT_EQ(collector.allocate_resource_rt_us, 11);
+    EXPECT_EQ(collector.load_cache_from_prefill_rt_us, 23);
+    EXPECT_EQ(collector.local_generate_rt_us, 45);
+}
 
 TEST(GenerateContextLifecycleTest, TeardownWithoutActiveStreamDoesNotQueryRpcCancellation) {
     kmonitor::MetricsReporterPtr reporter;

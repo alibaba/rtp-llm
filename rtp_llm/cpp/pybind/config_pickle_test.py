@@ -114,7 +114,7 @@ class _InvalidTypePDSepConfig:
             RoleType.PDFUSION,
             True,
             "not-an-int",
-        ] + [0] * 9
+        ] + [0] * 16
         return _new_config, (PDSepConfig,), tuple(state)
 
 
@@ -146,9 +146,9 @@ class PDSepConfigPickleTest(unittest.TestCase):
         self.assertEqual(restored.max_rpc_timeout_ms, 119)
 
     def test_rejects_invalid_state_length(self):
-        for size in (9, 10, 11, 13, 22):
+        for size in (9, 10, 11, 12, 13, 17, 18, 20, 22):
             with self.subTest(size=size), self.assertRaisesRegex(
-                RuntimeError, "expected 12 or 19 fields"
+                RuntimeError, "expected 19 fields"
             ):
                 pickle.loads(pickle.dumps(_MalformedPDSepConfig(size)))
 

@@ -25,6 +25,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -77,6 +78,57 @@ class RequestRegistryTest {
             lifecycle.closeExpiration();
             lifecycle.closePublisher();
         }
+    }
+
+    @Test
+    void distinctStringIdsKeepTheirOriginalLifecycleIdentity() throws Exception {
+        Map<String, CompletableFuture<Response>> responses = new HashMap<>();
+        for (String requestId : List.of("00123", "123", "req-abc", "9223372036854775808")) {
+            BalanceContext context = RequestLifecycleTestSupport.context(config, requestId);
+            CompletableFuture<Response> future = lifecycle.register(context);
+            responses.put(requestId, future);
+            assertEquals(requestId, lifecycle.getRequestState(requestId, 0L).requestId());
+            assertFalse(future.isDone());
+        }
+        assertEquals(4, lifecycle.trackedRequestCount());
+
+        for (var response : responses.entrySet()) {
+            String requestId = response.getKey();
+            RequestState cancelled =
+                    lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+            assertEquals(requestId, cancelled.requestId());
+            assertEquals(
+                    StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
+                    response.getValue().get(5, TimeUnit.SECONDS).getCode());
+            assertEquals(
+                    RequestState.Phase.CANCELLED, lifecycle.getRequestState(requestId, 0L).state());
+        }
+        assertEquals(0, lifecycle.trackedRequestCount());
+    }
+
+    @Test
+    void lifecycleRetainsOriginalNumericIdAcrossStateAndCancellation() {
+        BalanceContext context = RequestLifecycleTestSupport.context(config, "007");
+        context.setOriginalNumericRequestId(123L);
+        lifecycle.register(context);
+
+        assertEquals(123L, lifecycle.getRequestState("007", 0L).originalNumericRequestId());
+        RequestState cancelled = lifecycle.cancelRequest("007", 0L, CancelReason.CLIENT_CANCELLED);
+        assertEquals("007", cancelled.requestId());
+        assertEquals(123L, cancelled.originalNumericRequestId());
+    }
+
+    @Test
+    void reportsUnexpectedRegistrationFailureWithoutRegisteringTheRequest() {
+        BalanceContext context = context(101L);
+        config.getRequestLifecycle().setRequest(null);
+
+        Response response = lifecycle.register(context).join();
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
+        assertEquals(0, lifecycle.trackedRequestCount());
+        verify(requestReporter).reportLifecycleFailure("registration");
     }
 
     @Test

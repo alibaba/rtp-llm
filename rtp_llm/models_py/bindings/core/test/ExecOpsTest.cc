@@ -898,7 +898,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptyCpProjection) {
     EXPECT_EQ(call_count, 0);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreContinuesAfterOneP2PLayerDispatchFailure) {
+TEST_F(ExecOpsTest, testWriteCacheStoreFailsBeforeDispatchingLaterRequestsOnP2PLayerFailure) {
     auto inputs                  = makePyCacheStoreInputs(4, 1);
     inputs.request_id            = torch::tensor({int64_t(42), int64_t(43)}, torch::kInt64);
     inputs.publish_start_tokens  = torch::tensor({0, 0}, torch::kInt32);
@@ -928,8 +928,8 @@ TEST_F(ExecOpsTest, testWriteCacheStoreContinuesAfterOneP2PLayerDispatchFailure)
     inputs.prefix_lengths_host  = torch::tensor({0, 0}, torch::kInt32);
     inputs.host_kv_cache_offset = torch::tensor({{1}, {2}}, torch::kInt32);
     auto config = makeCacheConfig(4, 64, 0, 16, layer_cache.tag);
-    ASSERT_NO_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr));
-    EXPECT_EQ(dispatched, (std::vector<int64_t>{42, 43}));
+    EXPECT_THROW(runtimeWriteCacheStore(inputs, layer_cache, config, nullptr, 0, 0, 1, nullptr), std::runtime_error);
+    EXPECT_EQ(dispatched, (std::vector<int64_t>{42}));
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreSkipsEmptySparseP2PProjection) {

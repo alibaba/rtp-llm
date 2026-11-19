@@ -318,6 +318,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
     plan.model_input.multimodal_features = std::vector<torch::Tensor>{torch::tensor({3.5f})};
     plan.model_input.mm_extra_input      = std::vector<torch::Tensor>{torch::tensor({4.5f})};
     plan.model_input.input_embeddings    = std::vector<torch::Tensor>{torch::tensor({5.5f})};
+    plan.model_input.p2p_deadline_clock_offset_ms = -1234;
     plan.is_decode                      = true;
     plan.draft_next_position_ids        = torch::tensor({71, 72}, torch::kInt32);
     plan.finished_request_ids           = {81, 82};
@@ -333,6 +334,7 @@ TEST_F(PPSerializationTest, PlanPreservesEveryModelInputTensorAndScalar) {
         EXPECT_TRUE(torch::equal(actual, torch::tensor({value, value + 100}, torch::kInt64)));
     }
     EXPECT_EQ(received.model_input.kv_cache_group_tags, (std::vector<std::string>{"linear", "full"}));
+    EXPECT_EQ(received.model_input.p2p_deadline_clock_offset_ms, -1234);
     EXPECT_EQ(received.model_input.kv_block_stride_bytes, 1024u);
     EXPECT_EQ(received.model_input.kv_scale_stride_bytes, 2048u);
     EXPECT_EQ(received.model_input.seq_size_per_block, 128u);
