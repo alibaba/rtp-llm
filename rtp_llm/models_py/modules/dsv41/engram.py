@@ -531,12 +531,12 @@ class _PinnedSharedTable:
                 # attaching processes (lock waiters that find the file present)
                 # never materialize the ~94 GiB pair from the checkpoint.
                 staging_started = time.monotonic()
-                sources = (weight, scales) if loader is None else loader()
                 partial = Path(str(data_path) + f".partial.{os.getpid()}")
                 try:
                     with open(partial, "w+b") as file:
                         os.chmod(partial, 0o600)
-                        file.truncate(total_bytes)
+                        os.posix_fallocate(file.fileno(), 0, total_bytes)
+                        sources = (weight, scales) if loader is None else loader()
                         mapping = mmap.mmap(file.fileno(), total_bytes)
                         try:
                             destination = np.frombuffer(mapping, dtype=np.uint8)

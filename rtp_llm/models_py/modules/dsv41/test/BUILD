@@ -13,6 +13,7 @@ _CPU_ONLY_TESTS = [
     "test_cache_tags",
     "test_deep_gemm_scratch",
     "test_engram",
+    "test_engram_staging",
     "test_flash_mla_heads",
     "test_v41_delayed_hc",
     "test_v41_mega_mhc_compact",
