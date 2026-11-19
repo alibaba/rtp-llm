@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <type_traits>
 #include <utility>
 
@@ -18,7 +19,30 @@ struct HasTransferDeadline<Client,
                            std::void_t<decltype(&Client::LoadKvCachesWithDeadline),
                                        decltype(&Client::SaveKvCachesWithDeadline)>>: std::true_type {};
 
+template<typename Client, typename Trace, typename = void>
+struct HasLateReadSafety: std::false_type {};
+
+template<typename Client, typename Trace>
+struct HasLateReadSafety<Client, Trace, std::void_t<decltype(&Client::QueryReadBufferSafety),
+                                                   decltype(&Trace::read_execution_id)>>: std::true_type {};
+
 }  // namespace detail
+
+template<typename Trace, typename Client = kv_cache_manager::TransferClient>
+void setSdkReadExecutionId(std::shared_ptr<Trace>& trace, const std::string& trace_id) {
+    if constexpr (detail::HasLateReadSafety<Client, Trace>::value) {
+        if (!trace)
+            trace = std::make_shared<Trace>();
+        trace->read_execution_id = trace_id;
+    }
+}
+
+template<typename Client>
+bool querySdkReadBufferSafety(Client& client, const std::string& trace_id, int64_t deadline_ms) {
+    if constexpr (detail::HasLateReadSafety<Client, kv_cache_manager::TransferTraceInfo>::value)
+        return client.QueryReadBufferSafety(trace_id, deadline_ms);
+    return false;
+}
 
 template<typename Client>
 kv_cache_manager::ClientErrorCode

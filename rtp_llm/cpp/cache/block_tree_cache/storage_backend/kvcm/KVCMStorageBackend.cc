@@ -40,6 +40,7 @@
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
 #include "kvcm_client/HostCacheStateCompat.h"
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
@@ -1528,7 +1529,24 @@ public:
     }
 
     TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const {
-        return read_registry_->queryAndBlockMissing(std::vector<std::string>{trace_id}).front();
+        using State = TransferTaskRegistry::State;
+        const auto state = read_registry_->queryAndBlockMissing(std::vector<std::string>{trace_id}).front();
+        if (state != State::RUNNING || !client_wrapper_ || parallelism_config_.role_type == RoleType::DECODE ||
+            kv_cache_config_.block_tree_frozen_recovery_interval_ms == 0)
+            return state;
+        const auto deadline = Clock::now() +
+            std::chrono::milliseconds(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms);
+        const auto deadline_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count();
+        try {
+            if (client_wrapper_->queryReadBufferSafety(trace_id, deadline_ms)) {
+                read_registry_->finish(trace_id, true);
+                return State::BUFFER_SAFE;
+            }
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("KVCM READ late safety query failed trace=%s", trace_id.c_str());
+        }
+        return state;
     }
 
     void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
@@ -2217,7 +2235,11 @@ private:
                                          const TransferTask& task,
                                          const RemoteOperationRequestPB* request = nullptr,
                                          kvcm::PayloadDispatchProof* proof = nullptr) {
-        const auto                           trace_info = makeTransferTraceInfo(blocks, request);
+        auto                                 trace_info = makeTransferTraceInfo(blocks, request);
+        if (operation == REMOTE_OPERATION_READ && request && kv_cache_config_.block_tree_frozen_recovery_interval_ms > 0 &&
+            parallelism_config_.role_type != RoleType::DECODE) {
+            kvcm::setSdkReadExecutionId(trace_info, request->trace_id());
+        }
         auto                                 completion = kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED;
         RtpLLMRemoteCacheSDKMetricsCollector collector;
         collector.remote_sdk_block_num               = static_cast<int64_t>(uris.size());

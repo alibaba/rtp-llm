@@ -117,6 +117,7 @@ public:
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
                                  TransferCompletion*                                         completion = nullptr,
                                  std::optional<std::chrono::steady_clock::time_point>         deadline = std::nullopt);
+    bool queryReadBufferSafety(const std::string& trace_id, int64_t deadline_ms);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
