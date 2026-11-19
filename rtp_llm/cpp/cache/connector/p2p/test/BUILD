@@ -22,7 +22,10 @@ cc_library(
 
 cc_library(
     name = "mock_generate_stream",
-    visibility = ["//rtp_llm/cpp/model_rpc/test:__pkg__"],
+    visibility = [
+        "//rtp_llm/cpp/cache/test:__pkg__",
+        "//rtp_llm/cpp/model_rpc/test:__pkg__",
+    ],
     hdrs = [
         "MockGenerateStream.h",
     ],

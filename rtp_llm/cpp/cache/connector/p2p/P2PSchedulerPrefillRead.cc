@@ -294,31 +294,26 @@ P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBro
     };
     while (!result->done()) {
         result->checkDone();
-        if (!cancel_result && is_cancelled && is_cancelled()) {
-            RTP_LLM_LOG_WARNING("sendKVCache: request cancelled by client, request_id: %ld, unique_key: %s",
-                                request_id,
-                                unique_key.c_str());
-            cancel_result = cancel_workers();
-            if (!cancel_result) {
-                // Cancellation is already terminal for this StartLoad. Do not
-                // keep waiting for the original HANDLE_READ merely because the
-                // best-effort cancel RPC could not be created.
-                cancel_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
-            }
-        }
-        if (!cancel_result && currentTimeMs() >= deadline_ms) {
+        // Store expiry also makes is_cancelled() true. Classify the deadline
+        // first, and sample it again after the callback in case it crossed the
+        // boundary while inspecting cancellation. Cleanup must not turn a
+        // transfer timeout into a client-cancellation result.
+        bool       deadline_exceeded = currentTimeMs() >= deadline_ms;
+        const bool cancelled         = !deadline_exceeded && is_cancelled && is_cancelled();
+        deadline_exceeded            = deadline_exceeded || currentTimeMs() >= deadline_ms;
+        if (!cancel_result && (deadline_exceeded || cancelled)) {
             RTP_LLM_LOG_WARNING(
-                "sendKVCache: broadcast still pending past deadline_ms=%ld, cancelling, request_id: %ld, unique_key: %s",
-                deadline_ms,
+                "sendKVCache: cancelling pending broadcast, request_id=%ld unique_key=%s deadline_exceeded=%d",
                 request_id,
-                unique_key.c_str());
-            cancel_result = cancel_workers();
+                unique_key.c_str(),
+                deadline_exceeded);
             if (deadline_exceeded_out) {
-                *deadline_exceeded_out = true;
+                *deadline_exceeded_out = deadline_exceeded;
             }
+            cancel_result = cancel_workers();
             if (!cancel_result) {
-                // The transfer deadline remains authoritative even when the
-                // cancel broadcast itself cannot be started.
+                // Termination remains authoritative even if best-effort worker
+                // cancellation cannot be submitted.
                 cancel_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
             }
         }

@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.DeliveryStrategyTestSupport.unavailable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -51,9 +52,34 @@ import static org.mockito.Mockito.when;
  */
 class BatchDeliveryStrategyTest {
 
+    @Test
+    void unsupportedBatchItemUsesRouteDeliveryWithoutConsumingTheBatchSuffix() {
+        Fixture fixture = new Fixture(702L);
+        ScheduledRequest head = fixture.item(1L);
+        ScheduledRequest next = fixture.item(2L);
+        var config = SchedulingTestConfig.batchConfig();
+        var context = RequestLifecycleTestSupport.context(config, 1L);
+        context.getRequest().setMaxNewTokens(1);
+        context.setGenerateInputPb(
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setCanUsePdSeparation(false)
+                                        .setMaxNewTokens(1))
+                        .build()
+                        .toByteString());
+        when(head.ctx()).thenReturn(context);
+
+        fixture.context.deliver(
+                fixture.strategy, List.of(head, next), "route", 1, OptionalLong.empty());
+
+        assertEquals(List.of(List.of(head)), fixture.telemetry.routes());
+        assertFalse(fixture.slots.unstartedWorkMs().containsKey(next));
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void byteBudgetSplitsLargeImageRequestsButPreservesTextBatchCount(boolean images)
+    void byteBudgetSplitsLargePayloadsButPreservesSmallBatchCount(boolean largePayload)
             throws Exception {
         Fixture fixture = new Fixture(701L);
         var config = SchedulingTestConfig.batchConfig();
@@ -69,15 +95,17 @@ class BatchDeliveryStrategyTest {
         prefill.setServerIp("127.0.0.1");
         prefill.setHttpPort(8080);
         prefill.setGrpcPort(8090);
-        var template = EngineRpcService.GenerateInputPB.newBuilder().addTokenIds(129264);
-        if (images) {
-            template.addMultimodalInputs(
-                    EngineRpcService.MultimodalInputPB.newBuilder()
-                            .setMultimodalTensor(
-                                    EngineRpcService.TensorPB.newBuilder()
-                                            .setBf16Data(
-                                                    ByteString.copyFrom(
-                                                            new byte[20 * 1024 * 1024]))));
+        var template =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .addTokenIds(129264)
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setCanUsePdSeparation(true)
+                                        .setMaxNewTokens(8)
+                                        .setNumBeams(1)
+                                        .setNumReturnSequences(1));
+        if (largePayload) {
+            template.getRequestInfoBuilder().setTraceId("x".repeat(20 * 1024 * 1024));
         }
         ByteString sharedBody = template.build().toByteString();
         List<ScheduledRequest> remaining = new ArrayList<>();
@@ -86,6 +114,8 @@ class BatchDeliveryStrategyTest {
             BalanceContext context = new BalanceContext(config);
             Request request = new Request();
             request.setRequestId(Long.toString(id));
+            request.setMaxNewTokens(8);
+            request.setNumBeams(1);
             context.setRequest(request);
             // Rope concatenation shares the large immutable payload across all 64 inputs.
             context.setGenerateInputPb(
@@ -99,7 +129,7 @@ class BatchDeliveryStrategyTest {
             when(item.batchPayloadSizeUpperBound()).thenCallRealMethod();
             remaining.add(item);
         }
-        int maxImageBatchCount = (GrpcConstants.MAX_MESSAGE_SIZE - 16) / (20 * 1024 * 1024 + 1024);
+        int maxLargeBatchCount = (GrpcConstants.MAX_MESSAGE_SIZE - 16) / (20 * 1024 * 1024 + 1024);
         List<Integer> rpcCounts = new CopyOnWriteArrayList<>();
         List<Long> rpcBatchIds = new CopyOnWriteArrayList<>();
         List<Long> sentIds = new CopyOnWriteArrayList<>();
@@ -116,14 +146,11 @@ class BatchDeliveryStrategyTest {
                                 for (var external : slot.getRequestsList()) {
                                     var input = external.getInput();
                                     sentIds.add(input.getRequestId());
-                                    assertEquals(images ? 1 : 0, input.getMultimodalInputsCount());
-                                    if (images) {
+                                    assertEquals(0, input.getMultimodalInputsCount());
+                                    if (largePayload) {
                                         assertEquals(
                                                 20 * 1024 * 1024,
-                                                input.getMultimodalInputs(0)
-                                                        .getMultimodalTensor()
-                                                        .getBf16Data()
-                                                        .size());
+                                                input.getRequestInfo().getTraceId().length());
                                     }
                                     response.addSuccesses(
                                             EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
@@ -147,7 +174,8 @@ class BatchDeliveryStrategyTest {
                                 OptionalLong.of(9999L)));
                 var batch = fixture.submission.command();
                 int count = batch.exactItems().size();
-                assertEquals(images ? Math.min(maxImageBatchCount, remaining.size()) : 64, count);
+                assertEquals(
+                        largePayload ? Math.min(maxLargeBatchCount, remaining.size()) : 64, count);
                 assertNull(
                         fixture.context.committedBoundary(),
                         "size boundary must leave suffix queued");
@@ -179,7 +207,7 @@ class BatchDeliveryStrategyTest {
             }
             List<Integer> expectedCounts = new ArrayList<>();
             for (int left = 64; left > 0; ) {
-                int count = images ? Math.min(maxImageBatchCount, left) : left;
+                int count = largePayload ? Math.min(maxLargeBatchCount, left) : left;
                 expectedCounts.add(count);
                 left -= count;
             }

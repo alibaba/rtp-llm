@@ -8,7 +8,7 @@ Frontend、FlexLB master、Prefill、Decode 必须来自同一发布版本，使
 
 本次切换不支持这四部分跨新旧版本混跑：
 
-- P/D handoff 由 Decode 发起，使用 GetPeerInfo 查询 Prefill 拓扑，通过 StartLoad 获取 KV 和首 token。
+- P/D handoff 由 Decode 发起，使用 GetPeerInfo 查询 Prefill 拓扑，通过 StartLoad 获取 KV 和首 token。单 stage 同样返回完整的 Prefill KV 布局；Decode 以对端公布的 CP 和物理布局规划传输，不再用本地 CP 配置推导或校验 Prefill 的 CP 大小。
 - 新请求从 Decode.GenerateStreamCall 获取输出；旧 EnqueueGroup / FetchResponse 不提供过渡实现。
 - 新 Decode 要求 Prefill 的 GetPeerInfo / StartLoad 与当前分组 KV 布局一致。KV 传输、远端缓存和 host-cache 对端仍须遵守同构建协议契约。
 
@@ -34,7 +34,17 @@ Prefill 多模态瞬时错误可用 PREFILL_RETRY_TIMES 配置额外尝试次数
 
 KV 单次通信默认预算为 5 秒，从 worker 开始发送计时，上限为请求剩余时间。等待 Prefill 注册、产出 KV 和返回首 token 使用请求 deadline。冷启动或建链需要更长预算时，可调整 `--load_cache_timeout_ms`。RDMA 在传输 deadline 后等待 `--p2p_transfer_not_done_resource_hold_ms` 再尝试关闭连接。Decode 通过租约查询确认停写才释放 KV，`--p2p_lease_query_timeout_ms` 控制单次查询的上限，`--p2p_kv_leak_exit_threshold_min_percent` 和 `--p2p_kv_leak_exit_threshold_max_percent` 设置启动时抽取滞留退出阈值的区间。
 
-旧同步 Decode RPC 的 `rtp_llm_rpc_` 阶段指标 `allocate_resource_rt_us`、`load_cache_from_prefill_rt_us`、`local_generate_rt_us`、`load_cache_min_rt_us`、`load_cache_max_rt_us` 和 `load_cache_polling_cost_us` 随旧路径下线。新链路可用 `rtp_llm_stream_loading_cache_latency_us` 观察流的加载耗时，用 `rtp_llm_p2p_connector_decode_schedule_cost_time_us` 和 `rtp_llm_p2p_connector_decode_worker_total_cost_time_us` 分别观察协调与 worker 耗时。这些指标的计时边界不同，已启用 tracing 的部署还可查看 Decode 生成和 KV 加载 span。
+Decode 入口继续上报 `rtp_llm_rpc_allocate_resource_rt_us`、`rtp_llm_rpc_load_cache_from_prefill_rt_us` 和 `rtp_llm_rpc_local_generate_rt_us`，分别对应首次 KV 分配、KV 加载和本地生成。旧 RemoteLoad 的逐 rank 最短/最长耗时和轮询开销不再产生样本。流级加载指标与 P2P 协调/worker 指标仍可用于分层定位，计时边界不相同。
+
+GetPeerInfo 使用最多 15 秒的探测预算，并受请求剩余时间约束；探测超时归为连接超时，允许前端按连接失败策略重路由。`--load_cache_timeout_ms` 只控制 KV 通信，不控制拓扑探测。
+
+## 多模态与 CP 部署约束
+
+`VIT_SEPARATION_LOCAL` 下，Decode 入口需要本地 ViT 展开 token layout，Prefill 需要本地 ViT 生成 embedding。两侧 checkpoint 都必须包含完整的多模态权重，并为 ViT 权重和缓存池预留显存；默认自动 KV 定容会扣除这部分占用。独立 ViT 部署应在 Decode、Prefill 和前端一致配置远端 ViT 分离模式，避免闲置的本地 ViT 实例。v41 等模型特有的本地处理约束仍以模型实现为准。
+
+PD handoff 的 token IDs、span 和特征哈希是跨角色缓存身份契约。两侧必须使用相同模型权重、预处理和确定性的 ViT 执行；Prefill 发现哈希不一致会返回 `MM_PROCESS_ERROR`，不会在 Decode 已持有旧 token IDs 时单侧改写身份，也不会通过重试掩盖确定性失配。发布验收应包含真实多模态请求和哈希失配负例。
+
+CP 方法是角色相关配置：Prefill 使用实际通信方法（`ALL_GATHER`、`ALL_GATHER_WITH_OVERLAP` 或 `ALLTOALL`），Decode 使用 `PREFILL_CP` 表示上游开启 CP。分片开关须配套，fixed/SWA Decode 还需明确 `prefill_cp_size`。将未启用实际 CP 的 Prefill 与期望 CP 分片的 Decode 配对属于配置错误，应拒绝，不能通过放宽布局校验兼容。
 
 ## 回滚
 
@@ -43,3 +53,5 @@ KV 单次通信默认预算为 5 秒，从 worker 开始发送计时，上限为
 本文说明发布要求，不表示上述 CI 或部署验证已经完成；以对应准确 commit 的完整 CI 和部署证据为准。
 
 旧 RPC 指标名继续注册。Decode 入口上报首次 KV 分配、Prefill 缓存加载和本地生成阶段耗时。旧 RemoteLoad 的逐 rank 最短、最长耗时及轮询开销在新路径不再产生样本。
+
+前端启动时校验主机墙钟必须处于请求 ID 的可编码窗口（2020-01-01 至约 2037-06）。窗口外会明确拒绝启动并要求同步时钟，避免健康探针正常却所有业务请求报 500。运行后回拨仍由共享逻辑槽保持单调；真正耗尽编码空间时拒绝分配。

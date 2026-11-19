@@ -519,6 +519,40 @@ TEST_F(CacheStoreAsyncWriterTest, TimeoutRetainsAllocatorBlockUntilLatePublicati
     EXPECT_EQ(allocator->freeBlocksNum(), initial_free_blocks);
 }
 
+TEST_F(CacheStoreAsyncWriterTest, RejectedP2PPublicationFailsTrackedCycleBeforeDecodeDispatch) {
+    auto config  = makeWriterTestCacheConfig("stored", /*kv_stride=*/16, /*block_num=*/3);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+    const auto                    layout = manager->getMainModelGroupedCacheLayerLayout();
+    torch_ext::PyCacheStoreInputs inputs;
+    inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
+    inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
+    inputs.publish_start_tokens  = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset  = torch::tensor({1}, torch::kInt32).reshape({1, 1});
+    inputs.request_id            = torch::tensor({int64_t{42}}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+    inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
+    std::atomic<bool> invoked{false};
+    inputs.p2p_layer_write = [&invoked](auto&&...) {
+        invoked.store(true);
+        return false;
+    };
+    torch_ext::LayerKVCache layer;
+    layer.kv_cache_base      = layout.at("stored", 0).kv_addr;
+    layer.seq_size_per_block = 1;
+    layer.layer_id           = 0;
+    layer.tag                = "stored";
+    CacheStoreAsyncWriter writer(/*device_id=*/-1, manager);
+    writer.init(/*track_store_completions=*/true);
+    writer.write(inputs, layer);
+    writer.finishSubmissions();
+    EXPECT_TRUE(invoked.load());
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    writer.init(/*track_store_completions=*/true);
+    writer.finishSubmissions();
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
 TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCallback) {
     auto       config    = makeWriterTestCacheConfig("stored", /*kv_stride=*/16, /*block_num=*/3);
     const auto unrelated = makeWriterTestCacheConfig("unrelated", /*kv_stride=*/16, /*block_num=*/3);

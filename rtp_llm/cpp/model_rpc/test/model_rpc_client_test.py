@@ -54,6 +54,7 @@ from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
+    _grpc_status_details,
     StreamState,
     _selected_pd_separation,
     _split_host_port,
@@ -207,6 +208,49 @@ def _prefill_role_addr(ip="prefill", grpc_port=9000):
 
 def _decode_role_addr(ip="decode", grpc_port=9001):
     return RoleAddr(role=RoleType.DECODE, ip=ip, http_port=8001, grpc_port=grpc_port)
+
+
+class GrpcErrorTrailerTest(TestCase):
+    def test_mapping_pair_iterable_and_aio_metadata_preserve_details(self):
+        encoded = b"structured-error"
+        pairs = (("other", "value"), ("grpc-status-details-bin", encoded))
+        for metadata in (None, (), {}, pairs, dict(pairs), grpc.aio.Metadata(*pairs)):
+            with self.subTest(metadata=type(metadata).__name__):
+                self.assertEqual(
+                    _grpc_status_details(metadata), encoded if metadata else None
+                )
+
+    def test_real_aio_rpc_preserves_structured_error_trailers(self):
+        async def run():
+            encoded = b"backend-error-details"
+
+            async def fail(request, context):
+                context.set_trailing_metadata((("grpc-status-details-bin", encoded),))
+                await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "rejected")
+
+            server = grpc.aio.server()
+            server.add_generic_rpc_handlers(
+                (
+                    grpc.method_handlers_generic_handler(
+                        "test.Error",
+                        {"Call": grpc.unary_unary_rpc_method_handler(fail)},
+                    ),
+                )
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            await server.start()
+            try:
+                async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+                    with self.assertRaises(grpc.aio.AioRpcError) as caught:
+                        await channel.unary_unary("/test.Error/Call")(b"request")
+                    self.assertEqual(
+                        _grpc_status_details(caught.exception.trailing_metadata()),
+                        encoded,
+                    )
+            finally:
+                await server.stop(None)
+
+        asyncio.run(run())
 
 
 class MultimodalFpsValidationTest(TestCase):
@@ -2327,7 +2371,6 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(input_pb.generate_config.unique_key, "decode-batch-unique-key")
 
 
-
 class _MetadataCaptureServicer(model_rpc_service_pb2_grpc.RpcServiceServicer):
     def __init__(self):
         self.metadata = None
@@ -4254,7 +4297,6 @@ class ClientSpanSettlementTest(TestCase):
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "backend_error_code=999999: request: [7]: future error")
-
 
 
 class FakeBatchStub:

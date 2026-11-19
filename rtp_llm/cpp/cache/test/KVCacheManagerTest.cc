@@ -21,6 +21,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStateMachine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -1000,6 +1002,56 @@ TEST_F(KVCacheManagerTest, SetKVBlockValueAndBlockCopy) {
     std::fill(expected_layer0.begin() + k_bytes, expected_layer0.end(), 2);
     assertBlockBytesEq(cache_manager, /*layer_id=*/0, block_dst, expected_layer0);
     assertBlockBytesEq(cache_manager, /*layer_id=*/1, block_dst, expected_block);
+}
+
+TEST_F(KVCacheManagerTest, FailedPrefillPublicationTerminatesRequestAndWakesPayloadWait) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 6, 2, rtp_llm::DataType::TYPE_INT8);
+    auto manager      = std::make_shared<KVCacheManager>(cache_config, false);
+    ASSERT_TRUE(manager->init());
+
+    P2PConnectorConfig config;
+    config.role_type                   = RoleType::PREFILL;
+    config.worker_config.tp_size       = 1;
+    config.worker_config.tp_rank       = 0;
+    config.worker_config.layer_all_num = 1;
+    config.worker_config.topology      = cache_config.topologyPtr();
+    auto worker = std::make_shared<P2PWorkerPrefillRead>(config.worker_config, nullptr, nullptr, nullptr);
+    ASSERT_TRUE(worker->init());
+    auto connector                     = std::make_shared<P2PConnector>(config, nullptr, nullptr);
+    connector->prefill_                = std::make_unique<P2PConnectorPrefill>(config, nullptr, nullptr);
+    connector->prefill_->worker_       = worker;
+    connector->prefill_->stream_store_ = std::make_shared<P2PConnectorResourceStore>(nullptr);
+    manager->p2p_connector_            = connector;
+    auto              store            = connector->streamStore();
+    const std::string key              = "failed-prefill-publication";
+    const auto        deadline         = store->requestDeadline(key, 60000);
+    ASSERT_GT(deadline, currentTimeMs());
+    auto pending = std::async(std::launch::async, [&] { return store->waitPrefillPayloadReady(key, deadline); });
+
+    auto input                            = std::make_shared<GenerateInput>();
+    input->request_id                     = 7009;
+    input->request_deadline_ms            = deadline;
+    input->input_ids                      = torch::zeros({1}, torch::kInt32);
+    input->generate_config                = std::make_shared<GenerateConfig>();
+    input->generate_config->unique_key    = key;
+    input->generate_config->pd_separation = true;
+    auto            stream                = std::make_shared<MockGenerateStream>(input);
+    ResourceContext context;
+    context.role_type             = RoleType::PREFILL;
+    context.cache_manager         = manager;
+    auto                 resource = std::make_shared<StreamCacheResource>(stream.get(), context);
+    GenerateStateMachine state(resource);
+    state.reportEvent(StreamEvents::Error, ErrorCode::CACHE_STORE_STORE_FAILED, "injected publication failure");
+    const auto status = pending.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        store->markCancelled(key, deadline);
+    }
+    EXPECT_FALSE(pending.get());
+    EXPECT_TRUE(store->isMarkedCancelled(key));
+    auto buffer = worker->getComputedBuffersStore()->getBuffer(7009, deadline);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->error().code(), ErrorCode::CACHE_STORE_STORE_FAILED);
 }
 
 TEST_F(KVCacheManagerTest, WriteP2PLayer_HoldsAllocatorReferenceUntilLayerCleanup) {

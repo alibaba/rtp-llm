@@ -300,17 +300,17 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                       unique_key.c_str(),
                       request_id,
                       wait_resource_cost_us);
-    // Wrap is_cancelled to also directly cancel the local worker's send
-    // when the gRPC client disconnects — bypassing the CANCEL_HANDLE_READ
-    // broadcast RPC hop. Remote workers (other TP ranks) still receive
-    // the broadcast; this only accelerates rank-0's own worker.
+    // A failed Prefill stream must interrupt the worker broadcast as promptly
+    // as a disconnected Decode client, including while no layers are published.
+    // Stop the local worker here; the scheduler broadcasts cancellation to peers.
     auto direct_cancel = [is_cancelled,
                           worker = worker_,
+                          store  = stream_store_,
                           request_id,
                           unique_key,
                           transfer_deadline_ms,
                           request_deadline_ms]() -> bool {
-        if (is_cancelled && is_cancelled()) {
+        if ((is_cancelled && is_cancelled()) || store->isMarkedCancelled(unique_key)) {
             worker->cancelRequest(request_id, unique_key, transfer_deadline_ms, request_deadline_ms);
             return true;
         }

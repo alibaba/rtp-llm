@@ -2255,27 +2255,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     return c;
                 }
-                if (t.size() != 12)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 12 or 19 fields, got "
-                                             + std::to_string(t.size()));
-                PDSepConfig c;
-                try {
-                    c.role_type                     = t[0].cast<RoleType>();
-                    c.cache_store_rdma_mode         = t[1].cast<bool>();
-                    c.cache_store_listen_port       = t[2].cast<int64_t>();
-                    c.cache_store_connect_port      = t[3].cast<int64_t>();
-                    c.cache_store_rdma_listen_port  = t[4].cast<int64_t>();
-                    c.cache_store_rdma_connect_port = t[5].cast<int64_t>();
-                    c.remote_rpc_server_port        = t[6].cast<int64_t>();
-                    c.load_cache_timeout_ms         = t[7].cast<int64_t>();
-                    c.max_rpc_timeout_ms            = t[8].cast<int64_t>();
-                    c.worker_port_offset            = t[9].cast<int64_t>();
-                    c.prefill_retry_times           = t[10].cast<int64_t>();
-                    c.prefill_retry_timeout_ms      = t[11].cast<int64_t>();
-                } catch (const std::exception& e) {
-                    throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
-                }
-                return c;
+                throw std::runtime_error("Invalid PDSepConfig state: expected 19 fields, got "
+                                         + std::to_string(t.size()));
             }));
 
     // Register PrefillCPConfig

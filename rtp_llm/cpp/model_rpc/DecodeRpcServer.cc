@@ -421,7 +421,14 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         grpc::Status                                  status;
         size_t                                        enqueued_stream_count = 0;
         bool                                          completed = false;
+        bool                                          cleaned               = false;
         ~BatchContextGuard() {
+            cleanup();
+        }
+        void cleanup() {
+            if (cleaned)
+                return;
+            cleaned            = true;
             const auto cleanup = [](auto&& operation) noexcept {
                 try {
                     operation();
@@ -600,6 +607,19 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
                 prefill_request, &ack, address, batch_deadline_ms, client_cancelled);
             if (client_cancelled())
                 return guard.status = grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "batch cancelled"});
+            if (status.error_code() == grpc::StatusCode::UNIMPLEMENTED && !master_admitted) {
+                // EnqueueBatch rejected the capability before admitting any item.
+                guard.submitted_prefill.clear();
+                guard.cleanup();
+                response->Clear();
+                for (auto& item : *effective.mutable_inputs())
+                    item.mutable_generate_config()->set_can_use_pd_separation(false);
+                return prefill_server_caller_->forwardBatchGenerate(effective,
+                                                                    response,
+                                                                    address,
+                                                                    batch_has_unbounded_request ? 0 : batch_deadline_ms,
+                                                                    client_cancelled);
+            }
             std::unordered_set<int64_t> accepted;
             if (status.ok() && ack.batch_id() == prefill_request.batch_id()) {
                 for (const auto& success : ack.successes())

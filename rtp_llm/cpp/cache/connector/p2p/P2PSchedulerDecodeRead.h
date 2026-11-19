@@ -73,12 +73,6 @@ private:
                         uint64_t                                             plan_digest      = 0,
                         bool                                                 pipeline         = false);
 
-    /// @brief 校验对端上报的 CP 片数与本端配置推导出的值一致（设计文档 §3.2.4）。
-    ///
-    /// 「对端 layout 由本端推导」是跨端协议零改动的前提，这条断言是它唯一的保护：
-    /// 把配置漂移 / 版本不一致从传输期的疑难杂症变成首个请求上的确定性报错。
-    ErrorInfo checkPeerCpLayout(int prefill_tp_size, int prefill_cp_size) const;
-
     /// @brief 按两侧布局和有界副本偏移缓存计划，避免跨 Decode DP 固定选中同一源。
     std::shared_ptr<const PlanResult> planFor(int                prefill_tp_size,
                                               int                prefill_cp_size,

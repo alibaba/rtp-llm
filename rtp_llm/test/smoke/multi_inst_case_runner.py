@@ -89,7 +89,6 @@ def _wait_tcp_port_ready(
             time.sleep(1.0)
 
 
-
 def _dump_manager_logs(managers, max_lines: int = 200) -> None:
     """Best-effort process-log dump for managers whose run failed mid-flight."""
     for manager in managers:
@@ -714,16 +713,33 @@ class DpSeperationCaseRunner(CaseRunner):
         decode_port = MagaServerManager.get_free_port()
         gpu_ids = [str(x) for x in get_gpu_ids()]
 
-        # 提前选择机器，直接指定具体的机器地址而不是使用负载均衡
+        def role_addresses(base_port, world_size, args, envs):
+            return ",".join(
+                _build_local_dp_addresses(
+                    base_port,
+                    world_size // max(1, _extract_int_arg(args, "--pp_size", 1)),
+                    _extract_int_arg(args, "--tp_size", 1),
+                    _extract_int_arg(
+                        args,
+                        "--worker_info_port_num",
+                        int(envs.get("WORKER_INFO_PORT_NUM", MIN_WORKER_INFO_PORT_NUM)),
+                    ),
+                )
+            )
+
         decode_endpoint = EndPoint(
             type="Vipserver",
-            address=f"127.0.0.1:{decode_port}",
+            address=role_addresses(
+                decode_port, decode_gpu_size, decode_args, decode_envs
+            ),
             protocol="http",
             path="/",
         )
         prefill_endpoint = EndPoint(
             type="Vipserver",
-            address=f"127.0.0.1:{prefill_port}",
+            address=role_addresses(
+                prefill_port, prefill_gpu_size, prefill_args, prefill_envs
+            ),
             protocol="http",
             path="/",
         )
@@ -876,7 +892,25 @@ class DpSeperationCaseRunner(CaseRunner):
                     servers, enable_remote_cache=enable_remote_cache
                 )
 
-            task_states = self.curl_server(curl_server_mgr)
+            dp_repeats = max(
+                _extract_int_arg(prefill_args, "--dp_size", 1),
+                _extract_int_arg(decode_args, "--dp_size", 1),
+            )
+            if frontend_server_manager is not None and dp_repeats > 1:
+                import copy
+
+                original_queries = self.task_info.query_result
+                self.task_info.query_result = [
+                    copy.deepcopy(query)
+                    for query in original_queries
+                    for _ in range(dp_repeats)
+                ]
+                try:
+                    task_states = self.curl_server(curl_server_mgr)
+                finally:
+                    self.task_info.query_result = original_queries
+            else:
+                task_states = self.curl_server(curl_server_mgr)
             prefill_server_manager.stop_server()
             decode_server_manager.stop_server()
 

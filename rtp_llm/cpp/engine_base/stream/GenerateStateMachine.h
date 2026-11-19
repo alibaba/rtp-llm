@@ -9,11 +9,10 @@
 #include <string>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
-
-class StreamCacheResource;  // forward declaration
 
 // Stream 生命周期状态机，将原先分散在 FIFOScheduler 中的状态转移逻辑集中管理。
 // 状态转移路径: WAITING -> LOADING_CACHE -> WAITING -> RUNNING -> FINISHED
@@ -38,6 +37,9 @@ public:
         if (error_info.ok() && event == StreamEvents::Error) {
             error_info = ErrorInfo(error_code, std::forward<T>(error_msg));
             first_error.record(error_info);
+            if (stream_cache_resource_) {
+                stream_cache_resource_->failPrefillPublication(error_info);
+            }
         }
         events_.append(event);
     }

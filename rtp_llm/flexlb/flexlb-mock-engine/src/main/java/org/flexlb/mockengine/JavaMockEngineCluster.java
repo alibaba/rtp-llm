@@ -2029,8 +2029,8 @@ public final class JavaMockEngineCluster {
          * racing later Enqueue of the same rid is rejected with the typed
          * 8429 before reaching the scheduler. The production 10-minute
          * recently-seen TTL is simplified away (mock cancels are sub-second
-         * races, far inside the window). Decode rejects the RPC with
-         * UNIMPLEMENTED (production role contract). The HTTP control-plane
+         * races, far inside the window). Decode forwards cancellation to the
+         * explicit Prefill control address. The HTTP control-plane
          * {@code /cancel_request} (diagnostics surface, not the master's
          * live path) keeps its own JSON shape with the
          * {@code already_finished} flag.
@@ -2077,6 +2077,30 @@ public final class JavaMockEngineCluster {
                                                     .CANCEL_STATUS_UNSPECIFIED)
                                     .build());
                     observer.onCompleted();
+                    return;
+                }
+                if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                    final java.net.URI prefillAddress;
+                    try {
+                        prefillAddress =
+                                java.net.URI.create("http://" + request.getPrefillAddress());
+                    } catch (IllegalArgumentException failure) {
+                        observer.onError(
+                                io.grpc.Status.INVALID_ARGUMENT
+                                        .withDescription("invalid prefill_address")
+                                        .asException());
+                        return;
+                    }
+                    FastRpcService prefill = services.get(prefillAddress.getPort());
+                    if (prefill == null
+                            || prefill.roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                        observer.onError(
+                                io.grpc.Status.UNAVAILABLE
+                                        .withDescription("Prefill cancel route is unavailable")
+                                        .asException());
+                        return;
+                    }
+                    prefill.cancel(request, observer);
                     return;
                 }
                 CancelResult result = cancelRequest(request.getRequestId());

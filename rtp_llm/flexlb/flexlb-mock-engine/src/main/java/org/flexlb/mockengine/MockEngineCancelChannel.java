@@ -5,12 +5,11 @@ import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.engine.grpc.RequestId;
 
-import java.net.URI;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Resolves mock Prefill cancellation by gRPC port and returns accepted, seen-but-finished or
+ * Resolves mock Decode cancellation by gRPC port and returns accepted, seen-but-finished or
  * fenced-absent outcomes. Injected RPC faults leave engine state unchanged; successful cancellation
  * still requires worker terminal feedback before scheduler cleanup.
  */
@@ -30,74 +29,53 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
     @Override
     public CompletableFuture<CancelAck> cancel(
             CancelTarget target, String requestId, long timeoutMs) {
-        JavaMockEngineCluster.FastRpcService service = services.get(prefillPort(target));
-        if (service == null) {
+        JavaMockEngineCluster.FastRpcService service =
+                target == null ? null : services.get(target.decodeGrpcPort());
+        if (service == null || !target.isRoutable()) {
             return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
         }
-        long engineRequestId;
+        CompletableFuture<CancelAck> result = new CompletableFuture<>();
         try {
-            engineRequestId = RequestId.toEngineRequestId(requestId);
-        } catch (IllegalArgumentException error) {
-            return CompletableFuture.failedFuture(error);
-        }
-        // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as the
-        // gRPC Cancel handler and the HTTP /cancel_request surface: an armed
-        // fault short-circuits BEFORE cancelRequest so the engine cancel
-        // state machine is never touched (production semantics "RPC failed =
-        // engine state unchanged": no fences, no terminal records, no census
-        // branch) while the arrival stays counted.
-        JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
-        if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
-            // cancel_no_respond: never complete the future — the in-process
-            // mirror of a hanging RPC; the caller's cancel-ack timeout fails it.
-            return new CompletableFuture<>();
-        }
-        if (fault == JavaMockEngineCluster.CancelFaultKind.ERROR) {
-            // cancel_error: transport-layer failure -> failed future, no
-            // fence installed (mirrors the gRPC INTERNAL error path).
-            return CompletableFuture.failedFuture(
-                    new IllegalStateException("mock cancel error injection"));
-        }
-        if (fault == JavaMockEngineCluster.CancelFaultKind.UNEXPECTED_STATUS) {
-            // cancel_unexpected_status: the RPC "succeeds" but the ack status
-            // sits outside the contract — mirror the master-side response
-            // mapping failing on the out-of-contract status instead of
-            // accepting it (same terminal shape as HttpMockEngineCancel
-            // Channel's unknown-status IllegalStateException).
-            return CompletableFuture.failedFuture(
-                    new IllegalStateException("unexpected cancel ack status"));
-        }
-        try {
-            // Deliberately inspect only the addressed Prefill. Scanning other
-            // workers would hide an incorrect Prefill route in tests.
-            JavaMockEngineCluster.CancelResult result = service.cancelRequest(engineRequestId);
-            if (result.found()) {
-                return CompletableFuture.completedFuture(CancelAck.ACCEPTED);
-            }
-            // Production-faithful mapping (C++ Cancel handler): a request
-            // this engine has seen but already finished answers NOT_FOUND
-            // (the completion record stays deliverable from the retain
-            // window); a never-seen rid answers REQUEST_FENCED — cancelRequest
-            // installed the ABSENT_FENCE record that rejects any racing
-            // later Enqueue of that rid with the typed 8429.
-            return CompletableFuture.completedFuture(
-                    result.alreadyFinished() ? CancelAck.NOT_FOUND : CancelAck.REQUEST_FENCED);
-        } catch (UnsupportedOperationException e) {
-            return CompletableFuture.completedFuture(CancelAck.FAILED);
-        } catch (Exception e) {
-            // Contract: never throw synchronously; surface as a failed future.
-            return CompletableFuture.failedFuture(e);
-        }
-    }
+            var request =
+                    org.flexlb.engine.grpc.EngineRpcService.CancelRequestPB.newBuilder()
+                            .setRequestId(RequestId.toEngineRequestId(requestId))
+                            .setPrefillAddress(target.prefillAddress())
+                            .build();
+            service.cancel(
+                    request,
+                    new io.grpc.stub.StreamObserver<>() {
+                        @Override
+                        public void onNext(
+                                org.flexlb.engine.grpc.EngineRpcService.CancelResponsePB response) {
+                            switch (response.getStatus()) {
+                                case CANCEL_STATUS_ACCEPTED -> result.complete(CancelAck.ACCEPTED);
+                                case CANCEL_STATUS_NOT_FOUND ->
+                                        result.complete(CancelAck.NOT_FOUND);
+                                case CANCEL_STATUS_TOMBSTONED ->
+                                        result.complete(CancelAck.REQUEST_FENCED);
+                                default ->
+                                        result.completeExceptionally(
+                                                new IllegalStateException(
+                                                        "unexpected cancel ack status"));
+                            }
+                        }
 
-    static int prefillPort(CancelTarget target) {
-        if (target == null || !target.isRoutable()) {
-            return -1;
+                        @Override
+                        public void onError(Throwable failure) {
+                            result.completeExceptionally(failure);
+                        }
+
+                        @Override
+                        public void onCompleted() {
+                            if (!result.isDone()) {
+                                result.completeExceptionally(
+                                        new IllegalStateException("empty cancel response"));
+                            }
+                        }
+                    });
+        } catch (RuntimeException failure) {
+            result.completeExceptionally(failure);
         }
-        try {
-            return URI.create("http://" + target.prefillAddress()).getPort();
-        } catch (IllegalArgumentException e) {
-            return -1;
-        }
+        return result;
     }
 }

@@ -670,6 +670,38 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
 }
 
 // 测试: waitPrefillPayloadReady 超时（first token not found），返回 INTERNAL 错误
+TEST_F(P2PConnectorTest, HandleRead_PrefillFailureInterruptsPendingWorkerRead) {
+    const std::string key      = "prefill-execution-failure";
+    auto              stream   = createGenerateStream(key, 5018, 60000);
+    auto              resource = createValidKVCacheResource(2, 2);
+    auto              meta     = createMockMeta(stream.get());
+    ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
+    for (auto& server : tp_broadcast_servers_) {
+        server->service()->setP2PRequestSleepMillis(P2PConnectorBroadcastType::HANDLE_READ, 3000);
+    }
+    auto request = createValidStartLoadRequest(key, stream->deadlineMs(), 2);
+    auto pending = std::async(std::launch::async, [&] {
+        P2PConnectorStartLoadResponsePB response;
+        connector_->handleRead(request, response);
+        return response;
+    });
+    for (int i = 0;
+         i < 200
+         && tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::HANDLE_READ) == 0;
+         ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    EXPECT_GT(tp_broadcast_servers_[0]->service()->getP2PRequestCallCount(P2PConnectorBroadcastType::HANDLE_READ), 0);
+    connector_->streamStore()->markTerminal(
+        key, stream->deadlineMs(), P2PConnectorResourceStore::TerminalReason::FAILED);
+    const auto status = pending.wait_for(std::chrono::seconds(1));
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready) {
+        connector_->streamStore()->markCancelled(key, stream->deadlineMs());
+    }
+    EXPECT_NE(pending.get().error_code(), ErrorCodePB::NONE_ERROR);
+}
+
 TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     // 1. 添加有效的 resource entry
     std::string unique_key  = "test_wait_side_channel_timeout";

@@ -13,8 +13,8 @@
 
 namespace rtp_llm {
 
-constexpr int32_t kPeerInfoProbeDefaultMs = 1000;
-constexpr int32_t kPeerInfoProbeMaxMs     = 1000;
+constexpr int32_t kPeerInfoProbeDefaultMs = 15000;
+constexpr int32_t kPeerInfoProbeMaxMs     = 15000;
 
 namespace {
 
@@ -357,6 +357,7 @@ ErrorResult<PrefillPeerInfo> PrefillServerCaller::getPrefillPeerInfo(const std::
     grpc::ClientContext ctx;
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(probe_timeout_ms));
 
+    ctx.set_wait_for_ready(true);
     GetPeerInfoRequestPB  request;
     request.set_requester_pp_size(decode_pp_size);
     GetPeerInfoResponsePB response;
@@ -366,7 +367,9 @@ ErrorResult<PrefillPeerInfo> PrefillServerCaller::getPrefillPeerInfo(const std::
         RTP_LLM_LOG_ERROR(
             "getPrefillPeerInfo: GetPeerInfo RPC failed for %s: %s", addr.c_str(), status.error_message().c_str());
         const auto error = errorInfoFromGrpcStatus(status);
-        return ErrorInfo(error.code(), "GetPeerInfo peer=" + addr + ": " + error.ToString());
+        const auto code =
+            status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED ? ErrorCode::CONNECT_TIMEOUT : error.code();
+        return ErrorInfo(code, "GetPeerInfo peer=" + addr + ": " + error.ToString());
     }
 
     PrefillPeerInfo info;
