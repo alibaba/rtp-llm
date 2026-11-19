@@ -2400,17 +2400,36 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             ))
             if not hashes:
                 return
-            future = self._v6d_scheduler.submit_local_cache_touches(hashes)
-            future.add_done_callback(self._on_v6d_cache_touch_done)
+            touch_id = f"{os.getpid()}:{time.monotonic_ns()}"
+            request_ids = tuple(dict.fromkeys(request_id for request_id, _ in touches))
+            future = self._v6d_scheduler.submit_local_cache_touches(hashes, touch_id=touch_id)
+            logger.info(
+                "[navi-v6d-touch-submit] touch_id=%s request_count=%d request_ids=%s "
+                "block_count=%d block_hashes_sample=%s",
+                touch_id, len(request_ids), request_ids[:8], len(hashes), hashes[:4],
+            )
+            future.add_done_callback(partial(
+                self._on_v6d_cache_touch_done, touch_id=touch_id,
+            ))
         except Exception:
             # A best-effort eviction hint must never reject or delay inference.
             logger.exception("failed to submit V6D resident cache touch")
 
     @staticmethod
-    def _on_v6d_cache_touch_done(future) -> None:
+    def _on_v6d_cache_touch_done(future, *, touch_id="") -> None:
         try:
             results = future.result()
             failures = sum(isinstance(result, BaseException) for result in results)
+            completed = [result for result in results if isinstance(result, dict)]
+            logger.info(
+                "[navi-v6d-touch-complete] touch_id=%s storage_nodes=%d failures=%d "
+                "requested=%d touched=%d missing=%d busy=%d",
+                touch_id, len(results), failures,
+                sum(result.get("requested", 0) for result in completed),
+                sum(result.get("touched", 0) for result in completed),
+                sum(result.get("missing", 0) for result in completed),
+                sum(result.get("busy", 0) for result in completed),
+            )
             if failures:
                 logger.warning("V6D resident touch failed on %d/%d storage nodes",
                                failures, len(results))
