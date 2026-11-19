@@ -475,6 +475,85 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
     def test_prefix_reuse_rope_across_layers_cuda(self):
         self.check_prefix_reuse_rope_across_layers(torch.device("cuda:0"), 6144, 2048)
 
+    def test_prefill_checks_share_success_without_sharing_layer_pools(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+
+        context = replace(
+            self._draft_incremental_context(
+                self.kv_base,
+                self.state_base,
+                prefixes=[8],
+                lengths=[16],
+                is_mtp_draft=False,
+            ),
+            metadata_cache={},
+        )
+        options = dict(
+            indexer=self._decode_indexer(),
+            token_count=16,
+            device=self.kv_base.device,
+            rope_config=self.rope_config,
+            draft=False,
+        )
+
+        def plan(owner):
+            checks = DeviceChecks()
+            # The model preflight is covered separately; exercise the planner
+            # with the scope marker it supplies before any persistent write.
+            checks.prefill_metadata_readonly = True
+            object.__setattr__(owner, "_prewrite_checks", checks)
+            return owner._draft_incremental_prefill_geometry(**options), checks
+
+        expected, first = plan(context)
+        self.assertTrue(first._checks)
+        other = replace(
+            context,
+            indexer_kv_cache=SimpleNamespace(
+                **{
+                    **vars(context.indexer_kv_cache),
+                    "kv_cache_base": self.kv_base.clone(),
+                }
+            ),
+            indexer_state_cache=SimpleNamespace(
+                **{
+                    **vars(context.indexer_state_cache),
+                    "kv_cache_base": self.state_base.clone(),
+                }
+            ),
+        )
+        actual, second = plan(other)
+        # This fixture has no position pool. Its separate logical RoPE check
+        # must remain even after the six read-only CU/page flags are accepted.
+        self.assertEqual(len(first._checks) - len(second._checks), 6)
+        self.assertEqual(len(second._checks), 1)
+        self.assertIs(second._checks[0][1], ValueError)
+        self.assertNotEqual(
+            actual.state_pool.data_ptr(), expected.state_pool.data_ptr()
+        )
+        torch.testing.assert_close(actual.visible_lengths, expected.visible_lengths)
+        other.main_inputs.combo_position_ids.add_(1)
+        with self.assertRaisesRegex(ValueError, "logical cache positions"):
+            plan(other)
+        other.main_inputs.combo_position_ids.sub_(1)
+        smaller = replace(
+            other,
+            indexer_state_cache=SimpleNamespace(
+                **{
+                    **vars(other.indexer_state_cache),
+                    "kv_cache_base": self.state_base[:6].clone(),
+                }
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+            plan(smaller)
+        context.main_inputs.cu_seqlens_device[0] = 1
+        with self.assertRaisesRegex(RuntimeError, "cu_seqlens do not match"):
+            plan(context)
+        context.main_inputs.cu_seqlens_device[0] = 0
+        context.indexer_state_inputs.kv_cache_block_id_device[0, 2] = 0
+        with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+            plan(context)
+
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
         alias = values.view_as(values)

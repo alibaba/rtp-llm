@@ -18,6 +18,7 @@ from .step_metadata import (
     cached_prefill_geometry,
     cached_query_geometry,
     cached_step_value,
+    check_prefill_metadata_once,
     prefill_current_rope,
     prefill_group_rope,
     tensor_signature,
@@ -154,9 +155,15 @@ def _draft_incremental_prefill_geometry(
     prefixes = geometry.prefixes
     expected_cu = geometry.cu_seqlens
     expected_cu_kv = geometry.cu_kv_seqlens
-    checks.add(
-        (cu_seqlens != expected_cu).any(),
-        "qwen4_exp QSA draft incremental prefill cu_seqlens do not match input_lengths",
+    check_prefill_metadata_once(
+        self,
+        checks,
+        ("query_cu", tuple(lengths)),
+        (cu_seqlens,),
+        lambda: checks.add(
+            (cu_seqlens != expected_cu).any(),
+            "qwen4_exp QSA draft incremental prefill cu_seqlens do not match input_lengths",
+        ),
     )
     if draft_prefix_reuse:
         checks.add(
@@ -165,9 +172,15 @@ def _draft_incremental_prefill_geometry(
             "qwen4_exp QSA MTP draft prefix-reuse has invalid local cu_kv_seqlens metadata",
         )
     else:
-        checks.add(
-            (cu_kv_seqlens != expected_cu_kv).any(),
-            "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not match prefix+input lengths",
+        check_prefill_metadata_once(
+            self,
+            checks,
+            ("visible_cu", tuple(host_visible_ends)),
+            (cu_kv_seqlens,),
+            lambda: checks.add(
+                (cu_kv_seqlens != expected_cu_kv).any(),
+                "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not match prefix+input lengths",
+            ),
         )
 
     prefix_values = host_prefixes
@@ -262,12 +275,24 @@ def _draft_incremental_prefill_geometry(
     required_kv_columns = (
         final_compressed_lengths + kv_entries_per_block - 1
     ) // kv_entries_per_block
-    _validate_required_blocks(
-        kv_table,
-        required_kv_columns,
-        pool_blocks=int(kv_pool.shape[0]),
-        tag=INDEXER_KV_TAG,
-        checks=checks,
+    check_prefill_metadata_once(
+        self,
+        checks,
+        (
+            "indexer_kv_pages",
+            tuple(host_visible_ends),
+            ratio,
+            kv_entries_per_block,
+            int(kv_pool.shape[0]),
+        ),
+        (kv_table,),
+        lambda: _validate_required_blocks(
+            kv_table,
+            required_kv_columns,
+            pool_blocks=int(kv_pool.shape[0]),
+            tag=INDEXER_KV_TAG,
+            checks=checks,
+        ),
     )
 
     # A completed group may read committed raw keys preceding the new rows.
@@ -289,12 +314,18 @@ def _draft_incremental_prefill_geometry(
             state_pairs.append((request_idx, logical_block))
     from .qsa_cache_views import _validate_state_pairs
 
-    _validate_state_pairs(
-        state_table,
-        state_pairs,
-        int(state_pool.shape[0]),
-        "draft incremental tail",
-        checks=checks,
+    check_prefill_metadata_once(
+        self,
+        checks,
+        ("indexer_state_pages", tuple(state_pairs), int(state_pool.shape[0])),
+        (state_table,),
+        lambda: _validate_state_pairs(
+            state_table,
+            state_pairs,
+            int(state_pool.shape[0]),
+            "draft incremental tail",
+            checks=checks,
+        ),
     )
 
     position_state = self.positions(ratio, checks)
