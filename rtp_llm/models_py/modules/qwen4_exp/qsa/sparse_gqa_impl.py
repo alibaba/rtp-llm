@@ -23,6 +23,7 @@ target verification and bounded draft prefill support CUDA Graph. Layout and
 publication preflights complete before either side or main-cache writes.
 """
 
+import os
 from typing import Optional
 
 import torch
@@ -663,9 +664,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         lengths = [
             int(length)
-            for length in host_input_mirror(
-                self.attn_inputs, "input_lengths"
-            ).tolist()
+            for length in host_input_mirror(self.attn_inputs, "input_lengths").tolist()
         ]
         if (
             not lengths
@@ -708,7 +707,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                     seq_q, seq_k, seq_v, seq_selected, selected_has_count=True
                 )
                 if seq_out is None:
-                    raise ValueError("counted QSA selection requires SM90 prefill geometry")
+                    raise ValueError(
+                        "counted QSA selection requires SM90 prefill geometry"
+                    )
                 used_sm90 = True
             else:
                 used_sm90 = supports_sm90_sparse_prefill(
@@ -756,6 +757,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_paged_fmha import (
             sparse_paged_gqa_attn,
+            try_h20_direct_paged_decode,
             try_sm90_packed_paged_decode,
         )
 
@@ -765,16 +767,27 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and not self._is_mtp_draft
             and query_len == 1
         ):
-            output = try_sm90_packed_paged_decode(
-                q.view(batch, self.head_num, self.head_dim),
+            decode_q = q.view(batch, self.head_num, self.head_dim)
+            decode_args = (
+                decode_q,
                 kv_cache.kv_cache_base,
                 block_table,
                 kv_lens,
                 selected_indices,
-                page_size=page_size,
-                kv_head_num=self.kv_head_num,
-                output_gate=output_gate,
             )
+            decode_kwargs = {
+                "page_size": page_size,
+                "kv_head_num": self.kv_head_num,
+                "output_gate": output_gate,
+            }
+            if (
+                not self.is_prefill
+                and os.environ.get("RTP_QWEN4_EXPERIMENT_H20_DIRECT_DECODE", "1") == "1"
+            ):
+                output = try_h20_direct_paged_decode(*decode_args, **decode_kwargs)
+                if output is not None:
+                    return output
+            output = try_sm90_packed_paged_decode(*decode_args, **decode_kwargs)
             if output is not None:
                 return output
 

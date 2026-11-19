@@ -55,6 +55,7 @@ def fused_moe_kernel(
     scale_ue8m0: tl.constexpr,
     even_Ks: tl.constexpr,
     REMOTE_EXPERT: tl.constexpr = None,
+    SWAP_AB: tl.constexpr = False,
 ):
     """
     Fused MoE GEMM kernel.
@@ -126,7 +127,10 @@ def fused_moe_kernel(
         b_scale_ptrs = b_scale_ptr + off_experts * stride_bse + offs_bsn * stride_bsn
 
     # Accumulate in fp32
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    if SWAP_AB:
+        accumulator = tl.zeros((BLOCK_SIZE_N, BLOCK_SIZE_M), dtype=tl.float32)
+    else:
+        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     for k_start in range(0, K, BLOCK_SIZE_K):
         if even_Ks:
@@ -165,7 +169,10 @@ def fused_moe_kernel(
                     other=0.0,
                 )
                 b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
-            if BLOCK_SIZE_N > group_n:
+            if SWAP_AB:
+                partial = tl.dot(tl.trans(b), tl.trans(a))
+                accumulator += partial * (b_scale * a_scale[None, :])
+            elif BLOCK_SIZE_N > group_n:
                 accumulator += tl.dot(a, b) * a_scale[:, None] * b_scale[None, :]
             else:
                 accumulator += tl.dot(a, b) * (a_scale[:, None] * b_scale)
@@ -174,6 +181,9 @@ def fused_moe_kernel(
 
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    if SWAP_AB:
+        accumulator = tl.trans(accumulator)
 
     # Apply router weights if requested
     if MUL_ROUTED_WEIGHT:
@@ -204,6 +214,7 @@ def invoke_fused_moe_kernel(
     scale_ue8m0: bool = False,
     *,
     skip_remote_experts: bool = False,
+    swap_ab: bool = False,
 ) -> None:
     assert sorted_token_ids.stride(0) == 1
 
@@ -211,6 +222,9 @@ def invoke_fused_moe_kernel(
         triton.cdiv(sorted_token_ids.shape[0], META["BLOCK_SIZE_M"])
         * triton.cdiv(B.shape[1], META["BLOCK_SIZE_N"]),
     )
+
+    if swap_ab:
+        assert block_shape is not None and config["BLOCK_SIZE_N"] <= block_shape[0]
 
     K = B.shape[2]
     even_Ks = K % config["BLOCK_SIZE_K"] == 0
@@ -281,6 +295,7 @@ def invoke_fused_moe_kernel(
         scale_ue8m0=scale_ue8m0,
         even_Ks=even_Ks,
         REMOTE_EXPERT=B.shape[0] if skip_remote_experts else None,
+        SWAP_AB=swap_ab,
         **config,
     )
 
@@ -304,7 +319,9 @@ def _sum_moe_routes(
     for lane in tl.static_range(4):
         partial = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
         for route in tl.static_range(lane, TOP_K, 4):
-            partial += tl.load(routed + offset + route * HIDDEN, valid, 0).to(tl.float32)
+            partial += tl.load(routed + offset + route * HIDDEN, valid, 0).to(
+                tl.float32
+            )
         total += partial
     tl.store(output + row[:, None] * HIDDEN + column[None, :], total, valid)
 

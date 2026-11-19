@@ -392,6 +392,7 @@ def _sparse_paged_grouped_split_kernel(
     BLOCK_N: tl.constexpr,
     WITH_GATE: tl.constexpr = False,
     OUT_BTHD: tl.constexpr = False,
+    PV_BF16_RESIDUAL: tl.constexpr = False,
 ):
     """Tensor-core grouped sparse paged GQA.
 
@@ -503,9 +504,7 @@ def _sparse_paged_grouped_split_kernel(
             scores = tl.where(valid[None, :], scores, float("-inf"))
             next_max = tl.maximum(maximum, tl.max(scores, 1))
             alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
-            weights = tl.where(
-                valid[None, :], tl.exp(scores - next_max[:, None]), 0.0
-            )
+            weights = tl.where(valid[None, :], tl.exp(scores - next_max[:, None]), 0.0)
             # The softmax normalizer stays in raw probability space; only the PV
             # operand carries the per-token V scale.
             normalizer = normalizer * alpha + tl.sum(weights, 1)
@@ -519,10 +518,14 @@ def _sparse_paged_grouped_split_kernel(
             scores = tl.where(valid[None, :], scores, float("-inf"))
             next_max = tl.maximum(maximum, tl.max(scores, 1))
             alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
-            weights = tl.where(
-                valid[None, :], tl.exp(scores - next_max[:, None]), 0.0
-            )
-            acc = acc * alpha[:, None] + tl.dot(weights.to(tl.bfloat16), values)
+            weights = tl.where(valid[None, :], tl.exp(scores - next_max[:, None]), 0.0)
+            rounded_weights = weights.to(tl.bfloat16)
+            pv = tl.dot(rounded_weights, values)
+            if PV_BF16_RESIDUAL:
+                # Preserve the low part of the FP32 softmax weights for Decode.
+                residual = (weights - rounded_weights.to(tl.float32)).to(tl.bfloat16)
+                pv = tl.dot(residual, values, pv)
+            acc = acc * alpha[:, None] + pv
             normalizer = normalizer * alpha + tl.sum(weights, 1)
             maximum = next_max
 
@@ -631,9 +634,7 @@ def _resolve_paged_slots(
         visible = tl.load(lengths + row * length_stride)
     else:
         req = tl.arange(0, REQUEST_BLOCK)
-        end = tl.load(
-            cu_seqlens + (req + 1) * cu_stride, req < batch, other=2147483647
-        )
+        end = tl.load(cu_seqlens + (req + 1) * cu_stride, req < batch, other=2147483647)
         request = tl.sum((row >= end).to(tl.int32), axis=0)
         start = tl.load(cu_seqlens + request * cu_stride)
         visible = tl.load(lengths + request * length_stride) + row - start + 1
@@ -646,7 +647,8 @@ def _resolve_paged_slots(
     candidate = (token >= 0) & (token < visible) & (logical < logical_blocks)
     physical = tl.load(
         block_table + request * table_row_stride + logical * table_col_stride,
-        candidate, other=0,
+        candidate,
+        other=0,
     )
     valid = candidate & (physical > 0) & (physical < cache_blocks)
     packed_offset = tl.cumsum(valid.to(tl.int32)) - 1
@@ -971,7 +973,13 @@ def try_sm90_packed_paged_decode(
     )
     cu_q, cu_k = torch.empty((2, batch + 1), device=q.device, dtype=torch.int32)
     _paged_decode_cu_seqlens[(1,)](
-        slots, cu_q, cu_k, batch, width, BLOCK=triton.next_power_of_2(batch), num_warps=1
+        slots,
+        cu_q,
+        cu_k,
+        batch,
+        width,
+        BLOCK=triton.next_power_of_2(batch),
+        num_warps=1,
     )
     k, v = torch.empty((2, batch * width, 1, dim), device=q.device, dtype=q.dtype)
     block = 16
@@ -996,6 +1004,48 @@ def try_sm90_packed_paged_decode(
     return output if output_gate is None else output * torch.sigmoid(output_gate)
 
 
+def try_h20_direct_paged_decode(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    kv_lens: torch.Tensor,
+    selected: torch.Tensor,
+    *,
+    page_size: int,
+    kv_head_num: int,
+    output_gate: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """Read sparse BF16 KV directly in the existing grouped split kernel."""
+    batch, heads, dim = q.shape
+    if (
+        not 16 <= batch <= 64
+        or page_size != 64
+        or selected.shape != (batch, 1, 2051)
+        or q.stride(-1) != 1
+        or selected.stride(-1) != 1
+        or not _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num)
+        or "H20" not in torch.cuda.get_device_name(q.device)
+    ):
+        return None
+    output = sparse_paged_gqa_attn(
+        q.unsqueeze(2),
+        kv_cache,
+        block_table,
+        kv_lens,
+        selected,
+        page_size=page_size,
+        kv_head_num=kv_head_num,
+        graph_capture=torch.cuda.is_current_stream_capturing(),
+        output_gate=(
+            None if output_gate is None else output_gate.view(batch, 1, heads, dim)
+        ),
+        validate_selected=False,
+        bthd_output=True,
+        _h20_direct_decode=True,
+    )
+    return output.view(batch, heads * dim)
+
+
 def sparse_paged_gqa_attn(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -1013,6 +1063,7 @@ def sparse_paged_gqa_attn(
     fp16_pv: bool = False,
     validate_selected: bool = True,
     bthd_output: bool = False,
+    _h20_direct_decode: bool = False,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
 
@@ -1153,8 +1204,11 @@ def sparse_paged_gqa_attn(
     kv_lens = kv_lens.contiguous()
     selected = selected.contiguous()
     output = torch.empty(
-        (batch, query_len, q_heads, head_dim) if bthd_output
-        else (batch, q_heads, query_len, head_dim),
+        (
+            (batch, query_len, q_heads, head_dim)
+            if bthd_output
+            else (batch, q_heads, query_len, head_dim)
+        ),
         device=q.device,
         dtype=q.dtype,
     )
@@ -1180,9 +1234,14 @@ def sparse_paged_gqa_attn(
     if grouped_ok:
         kv_heads = int(kv_cache.shape[2])
         group = q_heads // kv_heads
-        block_n, warps, stages, splits = _grouped_split_config(
-            batch * query_len, kv_heads, selected_width
-        )
+        if _h20_direct_decode:
+            # Balance smaller batches with finer splits across H20 SMs.
+            block_n, warps = 64, 2
+            stages, splits = (1, 32) if batch <= 16 else (2, 16)
+        else:
+            block_n, warps, stages, splits = _grouped_split_config(
+                batch * query_len, kv_heads, selected_width
+            )
         partial = (
             torch.empty(
                 (batch, q_heads, query_len, splits, head_dim + 2),
@@ -1224,13 +1283,16 @@ def sparse_paged_gqa_attn(
             BLOCK_N=block_n,
             WITH_GATE=output_gate is not None,
             OUT_BTHD=bthd_output,
+            PV_BF16_RESIDUAL=_h20_direct_decode,
             num_warps=warps,
             num_stages=stages,
         )
         if splits > 1:
             if not bthd_output and output_gate is not None:
                 output = torch.empty(
-                    (batch, query_len, q_heads, head_dim), device=q.device, dtype=q.dtype
+                    (batch, query_len, q_heads, head_dim),
+                    device=q.device,
+                    dtype=q.dtype,
                 ).transpose(1, 2)
             _merge_sparse_paged_splits_kernel[(batch * q_heads * query_len,)](
                 partial,
