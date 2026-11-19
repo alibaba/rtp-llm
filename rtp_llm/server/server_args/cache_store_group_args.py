@@ -111,7 +111,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "p2p_kv_force_release_timeout_ms"),
         type=int,
         default=300000,
-        help="Decode：单请求 KV 隔离多久后强制回收（毫秒，必须为正数）。",
+        help="已废弃，仅用于兼容旧启动参数。KV 需要确认物理传输结束才会释放。",
     )
 
     cache_store_group.add_argument(

@@ -205,7 +205,8 @@ void RdmaKVCacheSender::loadToRemote(
     uint32_t                                                               port,
     const std::shared_ptr<::rdma_transfer::RdmaLayerBlockTransferRequest>& transfer_request,
     std::function<void(TransferErrorCode, const std::string&)>             callback,
-    int64_t                                                                deadline_ms) {
+    int64_t                                                                deadline_ms,
+    const std::function<bool()>&                                           is_cancelled) {
     if (!callback) {
         RTP_LLM_LOG_ERROR("loadToRemote callback is null");
         return;
@@ -222,6 +223,10 @@ void RdmaKVCacheSender::loadToRemote(
     }
 
     const auto remaining_ms = deadline_ms - currentTimeMs();
+    if (is_cancelled && is_cancelled()) {
+        callback(TransferErrorCode::CANCELLED, "transfer cancelled before RDMA submission");
+        return;
+    }
     if (remaining_ms <= 0) {
         callback(TransferErrorCode::TIMEOUT, "transfer deadline expired during RDMA preparation");
         return;
@@ -263,7 +268,7 @@ void RdmaKVCacheSender::send(const transfer::SendRequest&                       
         callback2(TransferErrorCode::BUILD_REQUEST_FAILED, "make rdma transfer request failed");
         return;
     }
-    loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms);
+    loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms, request.is_cancelled);
 }
 
 }  // namespace barex_rdma

@@ -38,9 +38,7 @@ public:
                                  int64_t                                              lease_query_timeout_ms,
                                  bool                                                 no_transfer          = false,
                                  int64_t                                              request_deadline_ms  = 0,
-                                 int64_t                                              transfer_deadline_ms = 0,
-                                 int                                                  kv_force_release_timeout_ms =
-                                     CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs):
+                                 int64_t                                              transfer_deadline_ms = 0):
         resource_(resource),
         unique_key_(std::move(unique_key)),
         collector_(collector),
@@ -49,7 +47,6 @@ public:
         request_deadline_ms_(request_deadline_ms),
         transfer_deadline_ms_(transfer_deadline_ms),
         transfer_stop_at_ms_(localTransferDeadline(transfer_deadline_ms)),
-        kv_force_release_timeout_ms_(kv_force_release_timeout_ms),
         done_(false),
         success_(false),
         error_code_(ErrorCode::NONE_ERROR) {}
@@ -189,7 +186,6 @@ private:
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
     void              applyMergedReadOutcome(const MergedReadOutcome& outcome);
     void              beginLeaseHold();
-    bool              expireLeaseHoldIfNeeded(int64_t now_us);
     void              releaseLeaseHoldLocked(bool all_ranks_stopped, int64_t now_us);
     std::function<void()> completionCallback() const;
     void                  registerReadCompletionCallbacksLocked();
@@ -206,7 +202,6 @@ private:
     const int64_t request_deadline_ms_;
     const int64_t transfer_deadline_ms_;  // original wire deadline/identity
     const int64_t transfer_stop_at_ms_;   // anchored once in the local steady-clock domain
-    const int64_t kv_force_release_timeout_ms_{CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs};
 
     static int64_t localTransferDeadline(int64_t wall_deadline_ms) {
         if (wall_deadline_ms <= 0) {

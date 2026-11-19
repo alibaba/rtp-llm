@@ -284,12 +284,15 @@ public:
         return true;
     }
 
+    enum class DispatchFailurePolicy { kThrow, kContinue, kStop };
+
     template<typename RequestPB, typename ResponsePB, typename RpcCall>
     std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>>
     broadcast(const std::vector<RequestPB>& requests,
               int timeout_ms,
               const RpcCall& rpc_call,
-              const std::function<grpc::Status(RequestPB&)>& before_dispatch = {}) const {
+              const std::function<grpc::Status(RequestPB&)>& before_dispatch = {},
+              DispatchFailurePolicy failure_policy = DispatchFailurePolicy::kThrow) const {
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
             RTP_LLM_LOG_WARNING(
@@ -309,25 +312,38 @@ public:
         for (int rank = 0; rank < worker_size; ++rank) {
             const auto& addr        = worker_addrs_[rank];
             auto        conn_status = rpc_pool_->getConnection(addr);
-            if (!conn_status.ok()) {
+            if (!conn_status.ok() && failure_policy != DispatchFailurePolicy::kContinue) {
                 RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%d addr=%s", rank, addr.c_str());
                 return nullptr;
             }
 
             contexts[rank]      = std::make_shared<CtxT>();
             auto& ctx           = contexts.at(rank);
-            ctx->stub           = conn_status.value().stub;
             ctx->request        = requests.at(rank);
             ctx->server_addr    = addr;
             ctx->timeout_ms     = timeout_ms;
             ctx->client_context = std::make_shared<grpc::ClientContext>();
             ctx->client_context->set_deadline(deadline);
+            if (conn_status.ok()) {
+                ctx->stub = conn_status.value().stub;
+            } else {
+                ctx->status = grpc::Status(grpc::StatusCode::UNAVAILABLE, "broadcast connection unavailable");
+            }
         }
 
         auto result = std::make_shared<ResultT>(std::move(contexts));
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx = result->worker_contexts_.at(rank);
+            if (!ctx->stub) {
+                result->finishRank(static_cast<size_t>(rank), true);
+                continue;
+            }
             try {
+                if (failure_policy == DispatchFailurePolicy::kStop && result->firstError().error.hasError()) {
+                    ctx->status = grpc::Status(grpc::StatusCode::CANCELLED, "earlier rank failed");
+                    result->finishRank(static_cast<size_t>(rank), true);
+                    continue;
+                }
                 if (before_dispatch) {
                     auto status = before_dispatch(ctx->request);
                     if (!status.ok()) {
@@ -336,16 +352,24 @@ public:
                         continue;
                     }
                 }
+                auto tag = std::make_unique<CompletionTag<ResultT>>(result, static_cast<size_t>(rank));
                 auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
                 RTP_LLM_CHECK_WITH_INFO(reader != nullptr, "broadcast rpc call returned null reader, rank=%d", rank);
-                auto tag = std::make_unique<CompletionTag<ResultT>>(result, static_cast<size_t>(rank));
                 reader->Finish(&ctx->response, &ctx->status, tag.get());
                 (void)tag.release();
+                continue;
             } catch (const std::exception& error) {
-                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s", rank, error.what());
+                if (failure_policy == DispatchFailurePolicy::kThrow) {
+                    RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s", rank, error.what());
+                }
+                ctx->status = grpc::Status(grpc::StatusCode::INTERNAL, error.what());
             } catch (...) {
-                RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error", rank);
+                if (failure_policy == DispatchFailurePolicy::kThrow) {
+                    RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error", rank);
+                }
+                ctx->status = grpc::Status(grpc::StatusCode::INTERNAL, "broadcast RPC dispatch failed");
             }
+            result->finishRank(static_cast<size_t>(rank), true);
         }
 
         return result;
