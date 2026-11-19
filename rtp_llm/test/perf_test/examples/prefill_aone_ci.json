@@ -1,0 +1,471 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "qwen2.5-0.5b-prefill-aone-ci",
+    "type": "qwen_2",
+    "checkpoint": "Qwen/Qwen2.5-0.5B-Instruct",
+    "tokenizer": "Qwen/Qwen2.5-0.5B-Instruct",
+    "topology": {
+      "tp": 2,
+      "dp": 1,
+      "pp": 1,
+      "ep": 1
+    }
+  },
+  "engine": {
+    "max_seq_len": 577,
+    "max_batch_tokens": 2304,
+    "concurrency_limit": 4,
+    "args": {
+      "reuse_cache": 1
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false"
+    }
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "transport": "dashsc_input_ids",
+    "probe_block_size": 64,
+    "workspace_tokens": 2560,
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "measure_runs": 1,
+    "seed": 1,
+    "max_cases": 30,
+    "request_batches": [
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 256,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 256,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 256,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 256,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 256,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 256,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 320,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 320,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 320,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 320,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 384,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 384,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 384,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 384,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 448,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 448,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 448,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 448,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 576,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 512,
+            "cache_len": 64
+          },
+          {
+            "count": 1,
+            "input_len": 576,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 576,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 512,
+            "cache_len": 128
+          },
+          {
+            "count": 1,
+            "input_len": 576,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 1,
+            "input_len": 512,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 576,
+            "cache_len": 0
+          }
+        ]
+      },
+      {
+        "request_groups": [
+          {
+            "count": 3,
+            "input_len": 512,
+            "cache_len": 192
+          },
+          {
+            "count": 1,
+            "input_len": 576,
+            "cache_len": 0
+          }
+        ]
+      }
+    ]
+  },
+  "execution": {
+    "backend": "aone",
+    "resource": "daily",
+    "gpu_type": "H20_CU13",
+    "max_parallel": 2,
+    "gpus_per_machine": 1
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

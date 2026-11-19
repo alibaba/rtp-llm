@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "model": {
+    "label": "ssh-decode-example",
+    "type": "qwen_2",
+    "checkpoint": "Qwen/Qwen2.5-0.5B-Instruct",
+    "tokenizer": "Qwen/Qwen2.5-0.5B-Instruct",
+    "topology": {
+      "tp": 1,
+      "dp": 2,
+      "pp": 1,
+      "ep": 2
+    }
+  },
+  "engine": {
+    "max_seq_len": 4097,
+    "max_batch_tokens": 8192,
+    "concurrency_limit": 4,
+    "args": {},
+    "env": {}
+  },
+  "workload": {
+    "kind": "grid",
+    "input_lengths": [
+      128
+    ],
+    "output_lengths": [
+      8
+    ],
+    "batch": {
+      "strategy": "fixed",
+      "sizes": [
+        2,
+        4
+      ]
+    },
+    "measure_runs": 1,
+    "warmup_runs": 0,
+    "generate_config": {
+      "top_k": 1
+    },
+    "profiling": {
+      "enabled": false
+    }
+  },
+  "execution": {
+    "backend": "ssh",
+    "hosts": [
+      {
+        "ssh_target": "gpu-a",
+        "advertise_host": "192.0.2.11"
+      },
+      {
+        "ssh_target": "gpu-b",
+        "advertise_host": "192.0.2.12"
+      }
+    ],
+    "gpus_per_machine": 1,
+    "start_port": 12333,
+    "python_bin": "/opt/conda310/bin/python",
+    "source": {
+      "ref": "auto",
+      "build_policy": "build",
+      "build_driver": "/opt/rtp-perf/build-driver/driver.py",
+      "bazel_config": "cuda13"
+    }
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

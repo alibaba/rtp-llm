@@ -80,3 +80,8 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# Internal planning docs: kept local only, never commit (may carry internal
+# infra details); track sanitized docs under docs/ if they must be published.
+/docs/superpowers/
+/openspec/

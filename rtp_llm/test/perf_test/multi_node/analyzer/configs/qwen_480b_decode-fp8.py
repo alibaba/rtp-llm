@@ -1,4 +1,8 @@
-from module_base import ModuleConf, TestSetUp, calc_gemm_mem_io, calc_gemm_num_flop
+from rtp_llm.test.perf_test.multi_node.analyzer.configs.module_base import (
+    ModuleConf,
+    calc_gemm_mem_io,
+    calc_gemm_num_flop,
+)
 
 hidden_size = 6144
 qkv_size = 14336
@@ -76,3 +80,9 @@ module_config = {
         * int(num_experts_per_tok * x.batch_size),
     ),
 }
+
+# These fixed kernel dimensions/formulas describe the original TP1 setup.
+for name, spec in module_config.items():
+    spec.mode = "decode"
+    spec.tp_size = 1
+    spec.formula_per_kernel = name in ("qkv_gemm", "o_gemm")

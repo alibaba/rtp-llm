@@ -3,17 +3,42 @@
 # The 4 GiB memory prefix cache does not guarantee 1M residency.
 # Set REMOTE_JIT_DIR to a trusted shared root in the test environment;
 # an empty value disables remote restore/publish (local JIT still works).
-load("//rtp_llm/test/perf_test:defs.bzl", "perf_test")
+load("//rtp_llm/test/smoke:defs.bzl", "get_world_size_from_smoke_args")
+
+def _glm5x_perf_test(name, model_type, ckpt_path, gpu_type, envs, args, deps, env_inherit, entry_point):
+    """Private adapter for the two upstream GLM grid suites."""
+    world_size = get_world_size_from_smoke_args(" ".join(args))
+    test_args = [
+        "--model_type", model_type,
+        "--checkpoint_path", ckpt_path,
+        "--tokenizer_path", ckpt_path,
+        "--perf_test_name", name,
+    ]
+    for key, value in envs.items():
+        test_args += ["--test_env", key + "=" + value]
+    native.py_test(
+        name = name,
+        main = entry_point,
+        srcs = [entry_point],
+        timeout = "eternal",
+        deps = ["//rtp_llm:pyodps", "//rtp_llm:testlib"] + deps,
+        data = ["//rtp_llm:sdk"],
+        args = test_args + args,
+        tags = ["manual", gpu_type],
+        exec_properties = {"gpu": gpu_type, "gpu_count": str(world_size)},
+        env_inherit = env_inherit,
+        env = {"WORLD_SIZE": str(world_size)},
+    )
 
 def cu13_glm5x_perf_suites():
-    perf_test(
+    _glm5x_perf_test(
         entry_point = "//rtp_llm/test/perf_test:glm5x_test_entry.py",
         deps = ["//rtp_llm/test/perf_test:glm5x_perf_lib"],
         env_inherit = ["REMOTE_JIT_DIR"],
         name = "glm5x_cu13_cp4_prefill_perf",
         model_type = "glm_5",
         ckpt_path = "/mnt/hf3fs/3fs/models/GLM-5.3-FP4Moe-FP8ue8m0/",
-        gpu_type = "L20D_TEST",
+        gpu_type = "SM103_CU13",
         envs = {
                    "CUDA_HOME": "/usr/local/cuda",
                    "NVCC_PREPEND_FLAGS": "-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++",
@@ -122,14 +147,14 @@ def cu13_glm5x_perf_suites():
                    "1"
                ],
     )
-    perf_test(
+    _glm5x_perf_test(
         entry_point = "//rtp_llm/test/perf_test:glm5x_test_entry.py",
         deps = ["//rtp_llm/test/perf_test:glm5x_perf_lib"],
         env_inherit = ["REMOTE_JIT_DIR"],
         name = "glm5x_cu13_dp4_decode_perf",
         model_type = "glm_5",
         ckpt_path = "/mnt/hf3fs/3fs/models/GLM-5.3-FP4Moe-FP8ue8m0/",
-        gpu_type = "L20D_TEST",
+        gpu_type = "SM103_CU13",
         envs = {
                    "CUDA_HOME": "/usr/local/cuda",
                    "NVCC_PREPEND_FLAGS": "-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++",
