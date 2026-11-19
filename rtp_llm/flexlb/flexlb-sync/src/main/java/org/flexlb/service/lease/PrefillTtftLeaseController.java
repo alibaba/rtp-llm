@@ -25,7 +25,7 @@ public final class PrefillTtftLeaseController {
     private static final Logger LOG = LoggerFactory.getLogger(PrefillTtftLeaseController.class);
     private final ConfigService configs;
     private final PrefillLeaseManager leases;
-    private final PrefillTtftMetricReader metrics;
+    private final PrefillTtftStatusReader metrics;
     private final Map<String, GroupWindow> windows = new ConcurrentHashMap<>();
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(task -> {
         Thread thread = new Thread(task, "prefill-ttft-lease");
@@ -36,7 +36,7 @@ public final class PrefillTtftLeaseController {
 
     public PrefillTtftLeaseController(ConfigService configs,
                                       PrefillLeaseManager leases,
-                                      PrefillTtftMetricReader metrics) {
+                                      PrefillTtftStatusReader metrics) {
         this.configs = configs;
         this.leases = leases;
         this.metrics = metrics;
@@ -49,7 +49,7 @@ public final class PrefillTtftLeaseController {
         private int direction;
         private int violations;
         private volatile String result = "waiting";
-        private volatile PrefillTtftMetricReader.Measurement measurement;
+        private volatile PrefillTtftStatusReader.Measurement measurement;
     }
 
     @PostConstruct
@@ -131,7 +131,8 @@ public final class PrefillTtftLeaseController {
             return;
         }
         try {
-            var measurement = metrics.read(config, serving.stream().map(WorkerView::address).toList(), now);
+            var measurement = metrics.read(config, serving.stream().map(WorkerView::address).toList(), now,
+                    window.stableSinceMs + config.getSettleSeconds() * 1000);
             window.measurement = measurement;
             if (measurement.samples() < config.getMinSamples()) {
                 window.violations = 0;
@@ -173,7 +174,7 @@ public final class PrefillTtftLeaseController {
                     measurement.meanMs(), measurement.samples());
         } catch (Exception failure) {
             window.violations = 0;
-            window.result = "TTFT query unavailable: " + failure.getClass().getSimpleName();
+            window.result = "Worker status TTFT unavailable: " + failure.getClass().getSimpleName();
             if (failure instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }

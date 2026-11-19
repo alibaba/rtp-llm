@@ -45,6 +45,7 @@ public class EngineGrpcService {
             if (configService != null && roleType == RoleType.PREFILL) {
                 var config = configService.loadBalanceConfig().getRouter().getRoles().getPrefill().getChunkLease();
                 boolean controlled = config.isEnabled() && config.getGroups().contains(worker.getGroup());
+                worker.setCollectPrefillTtft(controlled && config.isAutomatic());
                 if (controlled && worker.prefillChunkLease().command() == null) {
                     worker.prefillChunkLease().change(true);
                     worker.prefillChunkCapacity().freeze();

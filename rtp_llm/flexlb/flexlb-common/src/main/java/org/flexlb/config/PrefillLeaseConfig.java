@@ -4,7 +4,6 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * Optional test controller for the number of Prefill workers publishing chunks.
@@ -25,15 +24,4 @@ public final class PrefillLeaseConfig {
     private int consecutiveViolations = 3;
     private double ttftLowerMs = 100;
     private double ttftUpperMs = 200;
-    private String metricStoreUrl = "";
-    private String metricToken = "";
-    private String metricTenant = "";
-    private long queryTimeoutMs = 3000;
-    private String ttftMetric = "vllm.time_to_first_token_seconds";
-    private String metricNodeLabel = "host.name";
-    private Map<String, String> metricLabels = Map.of();
-    /**
-     * Explicit Master logical address to metric node label; never inferred from readiness.
-     */
-    private Map<String, String> workerMetricNodes = Map.of();
 }

@@ -251,6 +251,45 @@ class GrpcWorkerStatusRunnerTest {
         nextPoll.close();
     }
 
+    @Test
+    void finishedCursorRegressionRetiresGenerationAndReplacementPollsFromInitialCursor() {
+        ConfigService config = mock(ConfigService.class);
+        when(config.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        EndpointRegistry registry = RunnerTestSupport.endpointRegistry(config);
+        WorkerStatus status = RunnerTestSupport.discovered(RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "site");
+        WorkerDirectory directory = directory(registry, status);
+        RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, status.getLogicalIpPort(), status);
+        var previous = RunnerTestSupport.response(status, true, 2);
+        previous.setLatestFinishedVersion(10L);
+        RunnerTestSupport.publish(status, previous);
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        var response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .setStatusVersion(3)
+                .setLatestFinishedVersion(0)
+                .setAlive(true)
+                .build();
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        new GrpcWorkerStatusRunner(status.getLogicalIpPort(), "site", RoleType.PREFILL, null, status,
+                status.tryBeginStatusPoll(), directory, mock(EngineHealthReporter.class), grpc, 5000,
+                mock(CacheAwareService.class), Runnable::run).run();
+        assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
+        assertNull(status.tryBeginStatusPoll());
+        WorkerStatus replacement =
+                RunnerTestSupport.discovered(RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "site");
+        directory.currentOrDiscover(RoleType.PREFILL, replacement.getLogicalIpPort(), () -> replacement);
+        assertTrue(replacement.getGenerationId() != status.getGenerationId());
+        assertTrue(replacement.prefillTtftWindow() != status.prefillTtftWindow());
+        new GrpcWorkerStatusRunner(replacement.getLogicalIpPort(), "site", RoleType.PREFILL, null, replacement,
+                replacement.tryBeginStatusPoll(), directory, mock(EngineHealthReporter.class), grpc, 5000,
+                mock(CacheAwareService.class), Runnable::run).run();
+        var cursors = ArgumentCaptor.forClass(Long.class);
+        verify(grpc, org.mockito.Mockito.times(2)).getWorkerStatusAsync(anyString(), anyInt(), cursors.capture(),
+                anyLong(), any(), any());
+        assertEquals(java.util.List.of(10L, -1L), cursors.getAllValues());
+    }
+
     private static WorkerDirectory directory(
             EndpointRegistry registry, WorkerStatus status) {
         WorkerDirectory directory = new WorkerDirectory(registry);

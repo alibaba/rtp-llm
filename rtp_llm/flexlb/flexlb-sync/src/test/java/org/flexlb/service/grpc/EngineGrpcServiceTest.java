@@ -16,6 +16,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -40,6 +41,33 @@ class EngineGrpcServiceTest {
         assertEquals(needsCacheKeys, request.getValue().getNeedCacheKeys());
         assertEquals(7, request.getValue().getLatestCacheVersion());
     }
+    @Test
+    void collectsTtftOnlyForAutomaticControlledWorkersAndClearsOnDisable() {
+        EngineGrpcClient client = mock(EngineGrpcClient.class);
+        ConfigService configs = mock(ConfigService.class);
+        FlexlbConfig config = new FlexlbConfig();
+        when(configs.loadBalanceConfig()).thenReturn(config);
+        EngineGrpcService service = new EngineGrpcService(client, configs);
+        WorkerStatus worker = RunnerTestSupport.discovered(RoleType.PREFILL, "test", "127.0.0.1", 8080, 8081, "site");
+        service.getWorkerStatusAsync("127.0.0.1", 8081, 0, 100, RoleType.PREFILL, worker);
+        RunnerTestSupport.publish(worker, RunnerTestSupport.response(worker, true, 1));
+        long now = System.currentTimeMillis() + 1000;
+        assertThrows(IllegalStateException.class, () -> worker.prefillTtftWindow().read(now, now, 30000, 0));
+        var lease = config.getRouter().getRoles().getPrefill().getChunkLease();
+        lease.setEnabled(true);
+        lease.setAutomatic(true);
+        lease.setGroups(List.of("test"));
+        service.getWorkerStatusAsync("127.0.0.1", 8081, 0, 100, RoleType.PREFILL, worker);
+        RunnerTestSupport.publish(worker, RunnerTestSupport.response(worker, true, 2));
+        var collected = worker.prefillTtftWindow();
+        assertEquals(0, collected.read(now, now, 30000, 0).count());
+        lease.setAutomatic(false);
+        service.getWorkerStatusAsync("127.0.0.1", 8081, 0, 100, RoleType.PREFILL, worker);
+        RunnerTestSupport.publish(worker, RunnerTestSupport.response(worker, true, 3));
+        assertTrue(worker.prefillTtftWindow() != collected);
+        assertThrows(IllegalStateException.class, () -> worker.prefillTtftWindow().read(now, now, 30000, 0));
+    }
+
     @Test
     void firstControlledPollEnablesLeaseAndSubsequentPollCarriesRevocation() {
         EngineGrpcClient client = mock(EngineGrpcClient.class);

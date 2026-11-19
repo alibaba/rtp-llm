@@ -8,7 +8,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -25,7 +24,7 @@ import static org.mockito.Mockito.when;
 class PrefillTtftLeaseControllerTest {
     private final ConfigService configs = mock(ConfigService.class);
     private final PrefillLeaseManager leases = mock(PrefillLeaseManager.class);
-    private final PrefillTtftMetricReader metrics = mock(PrefillTtftMetricReader.class);
+    private final PrefillTtftStatusReader metrics = mock(PrefillTtftStatusReader.class);
     private PrefillLeaseConfig config;
     private PrefillTtftLeaseController controller;
     private List<WorkerView> workers;
@@ -60,12 +59,12 @@ class PrefillTtftLeaseControllerTest {
     void lowTtftRevokesOnlyAfterStableWindowAndConsecutiveViolations() throws Exception {
         measurement(50, 100);
         controller.evaluate("g", config, 1_000);
-        verify(metrics, never()).read(eq(config), anyList(), anyLong());
+        verify(metrics, never()).read(eq(config), anyList(), anyLong(), anyLong());
         controller.evaluate("g", config, 4_000);
         verify(leases, never()).changeIfCurrent(anyString(), anyString(), anyString(), anyBoolean());
         controller.evaluate("g", config, 5_000);
         verify(leases).changeIfCurrent("g", PrefillTtftLeaseController.members(workers), "b", false);
-        verify(metrics).read(config, List.of("a", "b"), 4_000);
+        verify(metrics).read(config, List.of("a", "b"), 4_000, 1_000);
     }
 
     @Test
@@ -79,11 +78,11 @@ class PrefillTtftLeaseControllerTest {
 
     @Test
     void missingOrInsufficientDataBreaksConsecutiveViolations() throws Exception {
-        when(metrics.read(eq(config), anyList(), anyLong()))
-                .thenReturn(new PrefillTtftMetricReader.Measurement(50, 100, 4_000))
-                .thenThrow(new IOException("unavailable"))
-                .thenReturn(new PrefillTtftMetricReader.Measurement(50, 1, 6_000))
-                .thenReturn(new PrefillTtftMetricReader.Measurement(50, 100, 7_000));
+        when(metrics.read(eq(config), anyList(), anyLong(), anyLong()))
+                .thenReturn(new PrefillTtftStatusReader.Measurement(50, 100, 4_000))
+                .thenThrow(new IllegalStateException("unavailable"))
+                .thenReturn(new PrefillTtftStatusReader.Measurement(50, 1, 6_000))
+                .thenReturn(new PrefillTtftStatusReader.Measurement(50, 100, 7_000));
         controller.evaluate("g", config, 1_000);
         for (long now : new long[]{4_000, 5_000, 6_000, 7_000}) {
             controller.evaluate("g", config, now);
@@ -118,16 +117,16 @@ class PrefillTtftLeaseControllerTest {
         workers = List.of(worker("a", false, 0), worker("b", false, 0));
         controller.evaluate("g", config, 1_000);
         verify(leases).changeIfCurrent("g", PrefillTtftLeaseController.members(workers), "a", true);
-        verify(metrics, never()).read(eq(config), anyList(), anyLong());
+        verify(metrics, never()).read(eq(config), anyList(), anyLong(), anyLong());
         assertTrue(controller.status("g").get("result").toString().contains("minServingWorkers"));
     }
 
     @Test
     void configurationChangeWhileQueryRunsDiscardsDecision() throws Exception {
         config.setConsecutiveViolations(1);
-        when(metrics.read(eq(config), anyList(), anyLong())).thenAnswer(call -> {
+        when(metrics.read(eq(config), anyList(), anyLong(), anyLong())).thenAnswer(call -> {
             when(configs.loadBalanceConfig()).thenReturn(new FlexlbConfig());
-            return new PrefillTtftMetricReader.Measurement(250, 100, call.getArgument(2));
+            return new PrefillTtftStatusReader.Measurement(250, 100, call.getArgument(2));
         });
         controller.evaluate("g", config, 1_000);
         controller.evaluate("g", config, 4_000);
@@ -145,9 +144,9 @@ class PrefillTtftLeaseControllerTest {
         assertTrue(controller.status("g").get("result").toString().contains("discarded measurement"));
     }
 
-    private void measurement(double mean, double samples) throws Exception {
-        when(metrics.read(eq(config), anyList(), anyLong()))
-                .thenAnswer(call -> new PrefillTtftMetricReader.Measurement(mean, samples, call.getArgument(2)));
+    private void measurement(double mean, long samples) throws Exception {
+        when(metrics.read(eq(config), anyList(), anyLong(), anyLong()))
+                .thenAnswer(call -> new PrefillTtftStatusReader.Measurement(mean, samples, call.getArgument(2)));
     }
 
     private static WorkerView worker(String address, boolean serving, int pending) {

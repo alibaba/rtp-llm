@@ -295,3 +295,8 @@ Master 在 worker generation 锁内修改 lease 并立即清除未分配 chunk�
 P 撤销时冻结当前 chunk，停止发布新容量，但继续处理已预留/在途/接收的请求。
 `DRAINING` 结束需要 P 的 active tasks 与 Master 已提交请求数均归零，不能只看 chunk pending。
 lease 为单 Master 测试进程中的显式版本控制，不使用 TTL，也不扩展到 SDK fallback。
+
+自动 lease 控制复用成功提交的 WorkerStatus active/finished 请求时间戳，在每个 generation 内保存有界
+TTFT 窗口。相同 requestId 只记一次，首 token 事件时间决定所属窗口；重复 status 不刷新 freshness。
+finished 游标回退与 status version 回退一样退休旧 generation，避免重启后继续携带旧 finished cursor。
+配置、窗口口径与数据覆盖限制见 [06-configuration-and-observability](06-configuration-and-observability.md)。

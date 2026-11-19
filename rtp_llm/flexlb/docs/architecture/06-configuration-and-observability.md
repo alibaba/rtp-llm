@@ -738,7 +738,7 @@ Prefill 的 waiting/running 快照和 finished 通知都能确认请求。活跃
 不提供切主状态恢复；Master 重启前应停止实验并排空，再重新建立接流集合。
 
 - `enabled`：开启显式 lease；要求 `chunkBatchingEnabled=true` 和非 BATCH dispatch。
-- `automatic`：默认 false。false 时通过手动接口控制；true 时按现有监控 TTFT **请求加权平均值**控制。
+- `automatic`：默认 false。false 时通过手动接口控制；true 时按 WorkerStatus 请求 TTFT **请求加权平均值**控制。
 - `groups`：显式受控 group 列表。首次接入时所有节点先获得 lease，确认后才能分配 chunk。
   关闭功能或移除受控 group 时，状态同步会恢复这些节点的接流权限。
 - `minServingWorkers` / `maxServingWorkers`：自动模式接流下限与新增 lease 的上限，最少为 1；手动模式允许全部摘流。
@@ -749,20 +749,27 @@ Prefill 的 waiting/running 快照和 finished 通知都能确认请求。活跃
   `consecutiveViolations`（3）：测量窗口、决策周期、最少请求数、连续越界次数。
 - `settleSeconds`（30）和 `maxMetricAgeSeconds`（30）：切换完成后先等待稳定，再等待整个统计窗口
   与采集延迟经过；不使用混有上一接流集合工况的窗口连续调节。
-- `metricStoreUrl`、`metricToken`、`metricTenant`：KMon/PromQL 查询地址及认证，地址不含 `/api/v1/query`。
-- `ttftMetric` 默认 `vllm.time_to_first_token_seconds`，查询其 `_sum` 和 `_count`；
-  TTFT 起点沿用该指标生产端定义，不宣称与 WorkerStatus 时间戳完全相同。
-- `metricNodeLabel` 默认 `host.name`；`workerMetricNodes` 必须显式将 Master 的逻辑地址
-  （含引擎索引，例如 `10.0.0.1:8001@0`）映射到该标签的实际值，不从 ready 或 IP 猜测。
-- `metricLabels` 是必填且非空的精确匹配标签，应按实际后端标签限定集群、部署、P role、模型及引擎，避免同主机其他服务混入。
-  一个 metric node 必须唯一对应一个受控 worker；共享 host 的多个引擎应选用实际存在的唯一指标标签，
-  本控制器不会将主机总指标错误拆分到多个 worker。标识缺失或重复时暂停自动决策。
-- `queryTimeoutMs`（3000）：每次指标查询超时。查询失败、缺节点、无样本、非有限值或旧数据时保持 lease。
+- `windowSeconds` 最大 600 秒；每个 worker generation 最多保留 100000 个请求样本。
+  容量溢出或可见 finished 游标缺口污染的窗口不用于调节，等待新的完整窗口。
 
-自动控制只读取当前已确认接流 worker 的指标：先对各序列累计 sum/count 求窗口增量，
-再以总耗时除以总请求数。空闲节点不会作为一个零 TTFT 样本参与；不平均节点均值或 P95。
-第一版不使用尚未验证可查询的 KMon histogram buckets，不提供 P95 控制。
-状态查询中的 `measurement` 为最近一次成功读取的数据，`result` 说明本次是否可用于决策。
+仅启用 automatic 的受控 group 收集 TTFT；关闭 automatic/功能或移出 group 会清空窗口，
+再次开启后等待完整新窗口。默认关闭时不保留请求 TTFT 样本。
+自动控制只读取当前已确认接流 worker 的已提交 WorkerStatus：
+每个请求以 `first_token_time_ms - request_received_time_ms` 计算 TTFT，按 requestId 去重。
+起点是 P engine arrival，终点是 scheduler 首次产出 token；与大盘 output processor 的首 token
+统计边界不同，不能视为与大盘严格相等。全部接流 P 必须支持现有请求时间戳字段；
+不支持字段的旧引擎与真正无样本节点无法区分，不应混入本实验。窗口按 first-token 事件时间选取；仅接纳本次接流集合稳定期后
+进入 P 的请求，切换前已入队的请求不会污染新集合的决策。总耗时除以总有效请求数得到 mean，
+不平均节点均值，不提供 P95 控制。待命节点与无样本节点不作为零 TTFT 样本参与。
+
+数据随真正递增并成功提交的 status version 更新，重复响应不刷新采集时间；无样本、状态过期、
+无效时间戳、可见 finished 游标增量大于响应条数时保持 lease。没有首 token 的请求没有有效 TTFT，
+包括执行前失败，直接排除；样本数不足仍保持。首次接入等待完整窗口。finished 游标回退按引擎重启
+处理，退休旧 generation，从新 generation 的初始游标重新同步，旧样本不跨代保留。
+上游 Engine→DashLLM 账本自身若已丢记录，本协议不能证明全量覆盖；这里是完整可观察窗口，
+不是所有请求的无损统计。无需 KMon 地址、token 或节点标签映射，也不新增 P 请求采样和协议。
+状态查询中的 `measurement` 为最近一次成功读取的数据，`oldestStatusMs` 是所用节点最早状态接收时间，
+`result` 说明本次是否可用于决策。
 
 手动接口（沿用现有内部控制端点的访问范围）：
 

@@ -19,11 +19,21 @@ class PrefillLeaseConfigTest {
     }
 
     @Test
-    void rejectsAutomaticControlWithoutExplicitMetricIdentities() {
+    void automaticControlUsesWorkerStatusWithoutMetricCredentials() {
+        var config = ConfigTestFixtures.parse("""
+                {"dispatcher":{"type":"NON_BATCH"},"router":{"roles":{"prefill":{
+                  "chunkBatchingEnabled":true,"chunkLease":{"enabled":true,"automatic":true,"groups":["test"]}
+                }}}}
+                """);
+        assertTrue(config.getRouter().getRoles().getPrefill().getChunkLease().isAutomatic());
+    }
+
+    @Test
+    void rejectsWindowsLargerThanRetainedWorkerStatusHistory() {
         assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
                 {"dispatcher":{"type":"NON_BATCH"},"router":{"roles":{"prefill":{
                   "chunkBatchingEnabled":true,"chunkLease":{"enabled":true,"automatic":true,"groups":["test"],
-                    "metricStoreUrl":"http://localhost:1234"}
+                    "windowSeconds":601}
                 }}}}
                 """));
     }

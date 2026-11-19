@@ -210,6 +210,13 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                     + cursor.statusVersion() + ", response="
                                     + responseVersion);
                 }
+                if (observation.latestFinishedVersion() != null
+                        && observation.latestFinishedVersion() < cursor.latestFinishedTaskVersion()) {
+                    endpointToRetire = workerDirectory.beginRetirement(roleType, ipPort, workerStatus);
+                    generationRetiring = true;
+                    throw new IllegalStateException("Worker finished-task cursor regressed: committed="
+                            + cursor.latestFinishedTaskVersion() + ", response=" + observation.latestFinishedVersion());
+                }
                 workerStatus.recordSuccessfulPoll(observation.alive());
                 WorkerEndpoint exactEndpoint = workerDirectory.exactEndpoint(
                         roleType, ipPort, workerStatus);

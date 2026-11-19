@@ -40,6 +40,8 @@ public class WorkerStatus {
 
     private final PrefillChunkCapacity prefillChunkCapacity = new PrefillChunkCapacity();
     private final PrefillChunkLease prefillChunkLease = new PrefillChunkLease();
+    private volatile PrefillTtftWindow prefillTtftWindow = new PrefillTtftWindow();
+    private boolean collectPrefillTtft;
 
     /** Serializes lifecycle transitions for this generation. */
     public final transient ReentrantLock lock = new ReentrantLock();
@@ -672,10 +674,25 @@ public class WorkerStatus {
             throw new IllegalStateException(
                     "prepared status is stale or has already been published");
         }
+        if (collectPrefillTtft && prepared.observation.role() == RoleType.PREFILL) {
+            prefillTtftWindow.collect(prepared.observation, System.currentTimeMillis());
+        }
         prefillChunkLease.confirm(prepared.observation.chunkLeaseVersion, prepared.observation.chunkLeaseEnabled);
         PrefillChunk chunk = prepared.observation.prefillChunk;
         prefillChunkCapacity.update(prefillChunkLease.allows(chunk) ? chunk : null,
                 prepared.observation.prefillStepTokenBudget);
+    }
+
+    public void setCollectPrefillTtft(boolean enabled) {
+        requireGenerationLock();
+        if (collectPrefillTtft != enabled) {
+            prefillTtftWindow = new PrefillTtftWindow();
+            collectPrefillTtft = enabled;
+        }
+    }
+
+    public PrefillTtftWindow prefillTtftWindow() {
+        return prefillTtftWindow;
     }
 
     public PrefillChunkLease prefillChunkLease() {

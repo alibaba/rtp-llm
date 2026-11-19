@@ -183,30 +183,10 @@ public final class FlexlbConfigValidator {
         positive(lease.getMaxMetricAgeSeconds(), path + ".maxMetricAgeSeconds");
         positive(lease.getMinSamples(), path + ".minSamples");
         positive(lease.getConsecutiveViolations(), path + ".consecutiveViolations");
-        positive(lease.getQueryTimeoutMs(), path + ".queryTimeoutMs");
+        require(lease.getWindowSeconds() <= 600, path + ".windowSeconds", "must not exceed 600 seconds");
         require(Double.isFinite(lease.getTtftLowerMs()) && lease.getTtftLowerMs() > 0
                 && Double.isFinite(lease.getTtftUpperMs()) && lease.getTtftUpperMs() > lease.getTtftLowerMs(), path,
                 "requires finite 0 < ttftLowerMs < ttftUpperMs");
-        if (lease.isAutomatic()) {
-            require(lease.getMetricStoreUrl() != null && lease.getMetricStoreUrl().matches("https?://[^\\s]+"),
-                    path + ".metricStoreUrl", "requires an HTTP(S) metric store URL");
-            require(lease.getTtftMetric() != null && lease.getTtftMetric().matches("[a-zA-Z_:][a-zA-Z0-9_:.]*"),
-                    path + ".ttftMetric", "must be a metric name");
-            require(lease.getMetricNodeLabel() != null && lease.getMetricNodeLabel().matches("[a-zA-Z_][a-zA-Z0-9_.]*"),
-                    path + ".metricNodeLabel", "must be a metric label");
-            require(lease.getMetricLabels() != null && !lease.getMetricLabels().isEmpty()
-                    && lease.getWorkerMetricNodes() != null, path,
-                    "metric scope labels and worker identity map are required");
-            require(!lease.getWorkerMetricNodes().isEmpty(), path + ".workerMetricNodes", "must map worker addresses");
-            lease.getMetricLabels()
-                    .forEach((key, value) -> require(
-                            key != null && key.matches("[a-zA-Z_][a-zA-Z0-9_.]*") && value != null
-                                    && !key.equals(lease.getMetricNodeLabel()),
-                            path + ".metricLabels", "invalid or duplicate node label"));
-            lease.getWorkerMetricNodes()
-                    .forEach((key, value) -> require(key != null && !key.isBlank() && value != null && !value.isBlank(),
-                            path + ".workerMetricNodes", "requires nonempty addresses and metric identities"));
-        }
     }
 
     private static void validateQueue(SchedulerConfig queue) {
