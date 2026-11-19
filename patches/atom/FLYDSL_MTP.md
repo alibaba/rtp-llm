@@ -14,15 +14,20 @@ Read indices are packed once per forward, not once per GDN layer. Mixed batches
 retain the original path. This adapter is for fixed-length candidate chains,
 not speculative trees.
 
-Apply `patches/atom/qwen38_replayssm.patch` to ATOM
-0.1.8+g9af739efc and `patches/aiter/qwen38_flydsl_gdn_mtp.patch` to
-amd-aiter 0.1.29+rocm7.2.0.git97d2389. FlyDSL is 0.4.2.
-Also apply `patches/aiter/qwen38_python310_compat.patch`: it moves
-heuristics dictionaries outside decorators so Python 3.10 source inspection
-can find the Triton function. Numerical function bodies are unchanged.
-The internal installer pins source, patch and output hashes and applies these patches
-after wheel installation; it rejects unreviewed changes. No C++ RTP rebuild
-is required for this Python/kernel-generator adapter.
+For the RTP production profile, install ATOM `0.1.8+g9af739efc`,
+amd-aiter `0.1.29+rocm7.2.0.git97d2389` and FlyDSL `0.4.2` first.
+Run the same post-install command used by the internal ROCm image on the
+freshly installed packages, supplying the Python interpreter for those packages
+and the pinned FlyDSL wheel:
+
+```sh
+bash patches/apply_qwen38_rocm.sh /opt/conda310/bin/python /path/to/flydsl-0.4.2-cp310-cp310-manylinux_2_27_x86_64.whl
+```
+
+The base ATOM patch includes layer-wise P/D cache publication. The installer
+recognizes the production wheel with this base patch already applied.
+The ATOM `0.1.1.dev1+g0189b3506` profile uses its version-specific adapter
+in `patches/atom/main_0189b3506/`.
 
 GPU checks cover indexed MTP reads and graph replay with partial acceptance:
 ```sh

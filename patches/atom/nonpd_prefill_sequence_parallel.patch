@@ -250,7 +250,7 @@ diff --git a/atom/models/qwen4_exp.py b/atom/models/qwen4_exp.py
 +                for i in range(self.start_layer, self.end_layer)
 +                if self.layers[i].ple is not None
 +            ),
-+            default=-1,
++            default=self.start_layer - 1,
 +        )
 +
 +    def _sequence_parallel(self, num_tokens: int) -> _SequenceParallel | None:

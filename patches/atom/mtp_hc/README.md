@@ -20,7 +20,6 @@ python3 patches/atom/mtp_hc/apply.py
 python3 patches/atom/mtp_hc/apply.py --verify-only
 ```
 
-For the internal copy use `internal_source/dockerfile/mtp_hc/apply.py`.
 The installer checks version and source/patch/output hashes, validates in a
 temporary directory, refuses unknown local edits, and is idempotent. Restart
 workers after applying. There is no C++ change required by this patch.
