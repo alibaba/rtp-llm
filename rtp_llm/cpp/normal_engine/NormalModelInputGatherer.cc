@@ -712,7 +712,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                     stream->completeTokenIds().select(0, i).narrow(0, 0, full_length).clone());
                 const auto& original = *stream->generateInput();
                 model_input.request_is_multimodal->push_back(
-                    (original.multimodal_inputs && !original.multimodal_inputs->empty())
+                    original.hasMultimodalInputs()
                     || (original.multimodal_features && !original.multimodal_features->empty())
                     || (original.mm_extra_input && !original.mm_extra_input->empty()));
             }

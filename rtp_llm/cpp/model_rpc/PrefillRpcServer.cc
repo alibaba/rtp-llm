@@ -350,7 +350,10 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
 
     auto& input = prefill_context.generate_input;
     RTP_LLM_CHECK_WITH_INFO(input != nullptr, "multimodal processing requires a prepared generate input");
-    if (!input->multimodal_inputs || input->multimodal_inputs->empty()) {
+    const auto* request = prefill_context.rpc_context.request;
+    RTP_LLM_CHECK_WITH_INFO(request != nullptr, "multimodal processing requires a generate RPC request");
+    const auto& mm_inputs = request->multimodal_inputs();
+    if (mm_inputs.multimodal_inputs().empty()) {
         prefill_context.markMultimodalProcessed(false);
         return;
     }
@@ -366,14 +369,12 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         return;
     }
 
-    const auto* request     = prefill_context.rpc_context.request;
-    const auto* wire_inputs = request && request->has_multimodal_inputs() ? &request->multimodal_inputs() : nullptr;
-    auto        result      = updateMultimodalFeaturesWithTrace(input,
+    auto result = updateMultimodalFeaturesWithTrace(*input,
                                                     prefill_context.trace_span_guard ?
-                                                                    prefill_context.trace_span_guard->sharedSpan() :
-                                                                    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
-                                                    prefill_context.server_context,
-                                                    wire_inputs);
+                                                        prefill_context.trace_span_guard->sharedSpan() :
+                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+                                                    mm_inputs,
+                                                    prefill_context.server_context);
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);

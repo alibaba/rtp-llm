@@ -104,11 +104,11 @@ public:
     bool fail = false;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>,
-                                                      std::string,
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>&,
+                                                      const std::string&,
                                                       int64_t,
                                                       grpc::ServerContext*,
-                                                      const MultimodalInputsPB* = nullptr) override {
+                                                      std::optional<bool>) override {
         if (fail) {
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "intentional stream restoration test");
         }
@@ -179,7 +179,7 @@ TEST_P(MultimodalCudaStreamTest, CompletesWhileDefaultStreamHasPendingDependency
     {
         // Warm the exact GPU fill/copy kernels and caching allocator bins first.
         auto warm_input = makeInput();
-        ASSERT_TRUE(processor.updateMultimodalFeatures(warm_input).ok());
+        ASSERT_TRUE(processor.updateMultimodalFeatures(*warm_input).ok());
         assertHostReady(warm_input);
     }
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -196,7 +196,7 @@ TEST_P(MultimodalCudaStreamTest, CompletesWhileDefaultStreamHasPendingDependency
     ASSERT_EQ(gate_status, CUDA_SUCCESS);
     std::fprintf(stderr, "MM CUDA gate closed: pinned_allocator=%s\n", GetParam() ? "cold" : "warm");
     std::fflush(stderr);
-    const auto result                   = processor.updateMultimodalFeatures(input);
+    const auto result                   = processor.updateMultimodalFeatures(*input);
     const bool completed_before_release = !gate.deadlineReleased() && gate.isStillClosed();
     const auto restored_stream          = c10::cuda::getCurrentCUDAStream(0);
     gate.release();
@@ -221,7 +221,7 @@ TEST(MultimodalCudaStreamRestorationTest, RestoresCallerStreamOnError) {
     GpuOutputProcessor         processor;
     processor.fail = true;
     auto input     = makeInput();
-    EXPECT_FALSE(processor.updateMultimodalFeatures(input).ok());
+    EXPECT_FALSE(processor.updateMultimodalFeatures(*input).ok());
     EXPECT_EQ(c10::cuda::getCurrentCUDAStream(0), original_stream);
 }
 

@@ -300,13 +300,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
 }
 
 ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
-    std::shared_ptr<GenerateInput>&                                     input,
+    GenerateInput&                                                      input,
     const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
-    grpc::ServerContext*                                                server_context,
-    const MultimodalInputsPB*                                           wire_inputs) {
-    if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || !input->multimodal_inputs
-        || input->multimodal_inputs->empty()) {
-        return mm_processor_->updateMultimodalFeatures(input, server_context, wire_inputs);
+    const MultimodalInputsPB&                                           mm_inputs,
+    grpc::ServerContext*                                                server_context) {
+    if (!telemetry::TelemetryRuntime::isActive() || parent_span == nullptr || mm_inputs.multimodal_inputs().empty()) {
+        return mm_processor_->updateMultimodalFeatures(input, mm_inputs, server_context);
     }
 
     opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span;
@@ -326,11 +325,11 @@ ErrorInfo LocalRpcServer::updateMultimodalFeaturesWithTrace(
         if (span != nullptr) {
             active_span = std::make_unique<opentelemetry::trace::Scope>(span);
         }
-        guard.setAttribute(telemetry::kAttrRequestId, std::to_string(input->request_id));
+        guard.setAttribute(telemetry::kAttrRequestId, std::to_string(input.request_id));
     } catch (...) {}
 
     // Include preprocessing, embedding transport and token expansion in one operation.
-    auto result = mm_processor_->updateMultimodalFeatures(input, server_context, wire_inputs);
+    auto result = mm_processor_->updateMultimodalFeatures(input, mm_inputs, server_context);
     if (!result.ok()) {
         status = grpc::Status(grpc::StatusCode::INTERNAL, "");
         try {
@@ -350,10 +349,10 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
     output.reset();
     try {
         output = QueryConverter::transQuery(&input_pb);
-        if (mm_processor_ != nullptr && output->multimodal_inputs && !output->multimodal_inputs->empty()) {
+        if (mm_processor_ != nullptr && !input_pb.multimodal_inputs().multimodal_inputs().empty()) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
             auto mm_res =
-                updateMultimodalFeaturesWithTrace(output, parent_span, server_context, &input_pb.multimodal_inputs());
+                updateMultimodalFeaturesWithTrace(*output, parent_span, input_pb.multimodal_inputs(), server_context);
             if (!mm_res.ok()) {
                 return mm_res;
             }

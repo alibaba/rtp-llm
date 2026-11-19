@@ -39,16 +39,21 @@ public:
         return inputLength() - prefix_length;
     }
 
+    bool hasMultimodalInputs() const {
+        return !multimodal_input_types.empty() || (multimodal_inputs && !multimodal_inputs->empty());
+    }
+
     std::map<int, int> multimodalLengths() const {
         std::map<int, int> lengths;
-        if (!multimodal_inputs.has_value() || !multimodal_features.has_value()) {
-            return {};
-        } else {
-            RTP_LLM_CHECK(multimodal_inputs.value().size() == multimodal_features.value().size());
-            int mm_num = multimodal_inputs.value().size();
-            for (int i = 0; i < mm_num; ++i) {
-                lengths[multimodal_inputs.value()[i].mm_type] += multimodal_features.value()[i].size(0);
-            }
+        const bool         has_rpc_types = !multimodal_input_types.empty();
+        if (!multimodal_features || (!has_rpc_types && !multimodal_inputs)) {
+            return lengths;
+        }
+        const auto media_count = has_rpc_types ? multimodal_input_types.size() : multimodal_inputs->size();
+        RTP_LLM_CHECK(media_count == multimodal_features->size());
+        for (size_t i = 0; i < media_count; ++i) {
+            const auto media_type = has_rpc_types ? multimodal_input_types[i] : (*multimodal_inputs)[i].mm_type;
+            lengths[media_type] += (*multimodal_features)[i].size(0);
         }
         return lengths;
     }
@@ -86,11 +91,10 @@ public:
             // still has to prepend the same resident system prompt and shift
             // the sidecar.  Raw media without that sidecar is not a cache-only
             // request and must remain fail-closed when its mask is missing.
-            const bool has_raw_inputs       = multimodal_inputs && !multimodal_inputs->empty();
             const bool has_cache_spans      = multimodal_cache_spans && !multimodal_cache_spans->empty();
             const bool needs_execution_mask = (multimodal_features && !multimodal_features->empty())
                                               || (mm_locs && mm_locs->numel() != 0)
-                                              || (has_raw_inputs && !has_cache_spans);
+                                              || (hasMultimodalInputs() && !has_cache_spans);
             if (!text_tokens_mask && needs_execution_mask) {
                 throw std::invalid_argument("multimodal system prefix requires a text token mask");
             }
@@ -160,7 +164,8 @@ public:
     bool                            need_release_resource = true;
     bool                            fake_query            = false;
     // For multi-modality models
-    std::optional<std::vector<MultimodalInput>> multimodal_inputs;
+    std::optional<std::vector<MultimodalInput>> multimodal_inputs;       // native request media
+    std::vector<int32_t>                        multimodal_input_types;  // RPC media types, in request order
     std::optional<std::vector<torch::Tensor>>   multimodal_features;
     std::optional<torch::Tensor>                text_tokens_mask;  // text part for 1 and multimodal part for 0
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations

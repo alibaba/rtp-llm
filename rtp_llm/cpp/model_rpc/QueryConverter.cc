@@ -282,31 +282,9 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
     const auto& media = input->multimodal_inputs().multimodal_inputs();
-    if (!media.empty()) {
-        std::vector<MultimodalInput> mm_inputs;
-        mm_inputs.reserve(media.size());
-        for (const auto& item : media) {
-            const auto&        mm_preprocess_config = item.mm_preprocess_config();
-            std::vector<float> crop_positions;
-            for (const auto& crop_position : mm_preprocess_config.crop_positions()) {
-                crop_positions.push_back(crop_position);
-            }
-            mm_inputs.emplace_back(
-                item.multimodal_url(),
-                torch::empty(1),
-                item.multimodal_type(),
-                mm_preprocess_config.width(),
-                mm_preprocess_config.height(),
-                mm_preprocess_config.min_pixels(),
-                mm_preprocess_config.max_pixels(),
-                mm_preprocess_config.fps(),
-                mm_preprocess_config.min_frames(),
-                mm_preprocess_config.max_frames(),
-                crop_positions,
-                mm_preprocess_config.mm_timeout_ms(),
-                mm_preprocess_config.max_long_side_pixel() > 0 ? mm_preprocess_config.max_long_side_pixel() : -1);
-        }
-        generate_input->multimodal_inputs = std::move(mm_inputs);
+    generate_input->multimodal_input_types.reserve(media.size());
+    for (const auto& item : media) {
+        generate_input->multimodal_input_types.push_back(item.multimodal_type());
     }
     generate_input->group_size = input->group_size() > 0 ? input->group_size() : 1;
     if (input->has_group_id()) {

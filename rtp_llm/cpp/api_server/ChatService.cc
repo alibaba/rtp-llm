@@ -27,7 +27,7 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t           
 
     input->multimodal_inputs = std::move(rendered_input.multimodal_inputs);
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+        auto mm_res = mm_processor_->updateMultimodalFeatures(*input);
         if (!mm_res.ok()) {
             throw HttpApiServerException(HttpApiServerException::MULTIMODAL_ERROR,
                                          "mm_processor updateMultimodalFeatures failed: " + mm_res.ToString());

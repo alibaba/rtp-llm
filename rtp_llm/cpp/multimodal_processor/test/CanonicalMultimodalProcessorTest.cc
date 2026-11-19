@@ -33,11 +33,11 @@ public:
     std::vector<int32_t> row_hashes{101, 102, 103};
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>,
-                                                      std::string               = "",
-                                                      int64_t                   = 0,
-                                                      grpc::ServerContext*      = nullptr,
-                                                      const MultimodalInputsPB* = nullptr) override {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>&,
+                                                      const std::string&,
+                                                      int64_t,
+                                                      grpc::ServerContext*,
+                                                      std::optional<bool>) override {
         MultimodalOutput output;
         output.mm_features.push_back(torch::ones({3, 4}, torch::kFloat32));
         output.mm_feature_hashes =
@@ -60,7 +60,7 @@ TEST_F(CanonicalMultimodalProcessorTest, SemanticModeStoresCanonicalIdsAndHashSi
     FeatureHashProcessor processor(kImageToken);
     auto                 input = makeInput();
 
-    ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+    ASSERT_TRUE(processor.updateMultimodalFeatures(*input).ok());
     EXPECT_EQ(tensorValues(input->input_ids), (std::vector<int32_t>{7, kImageToken, kImageToken, kImageToken, 8}));
     EXPECT_EQ(tensorValues(*input->text_tokens_mask), (std::vector<int32_t>{1, 0, 0, 0, 1}));
     EXPECT_EQ(tensorValues(*input->mm_locs), (std::vector<int32_t>{1}));
@@ -73,11 +73,11 @@ TEST_F(CanonicalMultimodalProcessorTest, SemanticModeStoresCanonicalIdsAndHashSi
 TEST_F(CanonicalMultimodalProcessorTest, DifferentFeaturesKeepCanonicalIdsButChangeSidecar) {
     FeatureHashProcessor processor(kImageToken);
     auto                 first = makeInput();
-    ASSERT_TRUE(processor.updateMultimodalFeatures(first).ok());
+    ASSERT_TRUE(processor.updateMultimodalFeatures(*first).ok());
 
     processor.row_hashes = {201, 202, 203};
     auto second          = makeInput();
-    ASSERT_TRUE(processor.updateMultimodalFeatures(second).ok());
+    ASSERT_TRUE(processor.updateMultimodalFeatures(*second).ok());
 
     EXPECT_TRUE(torch::equal(first->input_ids, second->input_ids));
     ASSERT_TRUE(first->multimodal_cache_spans);
@@ -89,7 +89,7 @@ TEST_F(CanonicalMultimodalProcessorTest, DefaultModePreservesLegacyHashAsTokenBe
     FeatureHashProcessor processor(-1);
     auto                 input = makeInput();
 
-    ASSERT_TRUE(processor.updateMultimodalFeatures(input).ok());
+    ASSERT_TRUE(processor.updateMultimodalFeatures(*input).ok());
     EXPECT_EQ(tensorValues(input->input_ids), (std::vector<int32_t>{7, 101, 102, 103, 8}));
     EXPECT_TRUE(!input->multimodal_cache_spans || input->multimodal_cache_spans->empty());
 }

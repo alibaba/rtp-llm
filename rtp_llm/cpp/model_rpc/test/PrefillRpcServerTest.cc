@@ -107,15 +107,13 @@ public:
     std::optional<bool> input_inspection_enabled;
 
 private:
-    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> mm_inputs,
-                                                      std::string                        ip_port = "",
-                                                      int64_t                                    = 0,
-                                                      grpc::ServerContext*                       = nullptr,
-                                                      const MultimodalInputsPB* wire_inputs      = nullptr) override {
-        if (wire_inputs && wire_inputs->has_input_inspection_enabled()) {
-            input_inspection_enabled = wire_inputs->input_inspection_enabled().value();
-        }
-        const auto result_code = result_codes_[std::min<size_t>(call_count_, result_codes_.size() - 1)];
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
+                                                      const std::string&,
+                                                      int64_t,
+                                                      grpc::ServerContext*,
+                                                      std::optional<bool> inspect) override {
+        input_inspection_enabled = inspect;
+        const auto result_code   = result_codes_[std::min<size_t>(call_count_, result_codes_.size() - 1)];
         ++call_count_;
         if (result_code != ErrorCode::NONE_ERROR) {
             return ErrorInfo(result_code, "multimodal test error");
@@ -221,10 +219,10 @@ public:
 class PrefillRpcServerTest: public DeviceTestBase {
 protected:
     std::shared_ptr<GenerateInput> makeMultimodalInput() {
-        auto input               = std::make_shared<GenerateInput>();
-        input->generate_config   = std::make_shared<GenerateConfig>();
-        input->input_ids         = torch::tensor({0, 1, 2}, torch::kInt32);
-        input->multimodal_inputs = std::vector<MultimodalInput>{MultimodalInput("image")};
+        auto input                    = std::make_shared<GenerateInput>();
+        input->generate_config        = std::make_shared<GenerateConfig>();
+        input->input_ids              = torch::tensor({0, 1, 2}, torch::kInt32);
+        input->multimodal_input_types = {1};
         return input;
     }
 
@@ -278,36 +276,41 @@ TEST_F(PrefillRpcServerTest, GenerateHandoffDoesNotSendRemovedBoundaryField) {
     for (const std::string mode : {"enabled", "disabled", "not_ready", "error"}) {
         SCOPED_TRACE(mode);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "0" : "1");
-        ::rtp_llm::test::withDecodePublicationStartup([&] {
-        GenerateInputPB request;
-        auto            context = makeContext(&request);
-        context->meta           = std::make_shared<RpcServerRuntimeMeta>();
-        context->request_id     = 42;
-        auto stream             = makeWaitingStream();
-        // Model output: three prompt tokens have KV, token 7 was just sampled.
-        stream->complete_token_ids_->data(0)[3] = 7;
-        stream->complete_token_ids_->setSeqLength(4);
-        if (mode != "not_ready") {
-            stream->reportEvent(StreamEvents::NeedRemoteGenerate);
-        }
-        if (mode == "error") {
-            stream->reportError(ErrorCode::CANCELLED, "failed prefill");
-        }
-        context->setStream(stream);
-        auto client            = std::make_shared<HandoffClient>();
-        context->client_stream = client;
-        TestPrefillRpcServer server;
-        server.setEngineForTest(false);
-        server.setProcessIdForTest("prefill");
-        server.remoteGenerateForTest(*context);
-        ASSERT_EQ(client->writes.size(), 1u);
-        const auto& handoff = client->writes.front();
-        EXPECT_EQ(handoff.stage(), RemoteStage::GENERATE);
-        EXPECT_EQ(handoff.request_id(), 42);
-        EXPECT_EQ(handoff.client_id(), "prefill");
-        EXPECT_EQ(handoff.first_generate_token_id(), 7);
-        EXPECT_EQ(GenerateRequestPB::descriptor()->FindFieldByNumber(13), nullptr);
-        }, [&] { TearDown(); metrics_reporter_.reset(); });
+        ::rtp_llm::test::withDecodePublicationStartup(
+            [&] {
+                GenerateInputPB request;
+                auto            context = makeContext(&request);
+                context->meta           = std::make_shared<RpcServerRuntimeMeta>();
+                context->request_id     = 42;
+                auto stream             = makeWaitingStream();
+                // Model output: three prompt tokens have KV, token 7 was just sampled.
+                stream->complete_token_ids_->data(0)[3] = 7;
+                stream->complete_token_ids_->setSeqLength(4);
+                if (mode != "not_ready") {
+                    stream->reportEvent(StreamEvents::NeedRemoteGenerate);
+                }
+                if (mode == "error") {
+                    stream->reportError(ErrorCode::CANCELLED, "failed prefill");
+                }
+                context->setStream(stream);
+                auto client            = std::make_shared<HandoffClient>();
+                context->client_stream = client;
+                TestPrefillRpcServer server;
+                server.setEngineForTest(false);
+                server.setProcessIdForTest("prefill");
+                server.remoteGenerateForTest(*context);
+                ASSERT_EQ(client->writes.size(), 1u);
+                const auto& handoff = client->writes.front();
+                EXPECT_EQ(handoff.stage(), RemoteStage::GENERATE);
+                EXPECT_EQ(handoff.request_id(), 42);
+                EXPECT_EQ(handoff.client_id(), "prefill");
+                EXPECT_EQ(handoff.first_generate_token_id(), 7);
+                EXPECT_EQ(GenerateRequestPB::descriptor()->FindFieldByNumber(13), nullptr);
+            },
+            [&] {
+                TearDown();
+                metrics_reporter_.reset();
+            });
     }
 }
 
@@ -389,6 +392,7 @@ TEST_F(PrefillRpcServerTest, AllocateNegotiatesPrefillCompletionPerAttempt) {
         GenerateInputPB request;
         request.set_request_id(42);
         request.add_token_ids(1);
+        request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
         auto context            = makeContext(&request);
         context->generate_input = makeMultimodalInput();
         context->generate_input->generate_config->role_addrs.emplace_back(
@@ -582,6 +586,7 @@ TEST_F(PrefillRpcServerTest, prepareAllocateResourceRetriesDecodeWithoutRepeatin
     request.add_token_ids(0);
     request.add_token_ids(1);
     request.add_token_ids(2);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
     context->generate_input->generate_config->role_addrs.emplace_back(
@@ -1130,6 +1135,7 @@ TEST_F(PrefillRpcServerTest, pollRemoteOutputForwardsTokensWithoutAuxInfo) {
 TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryable) {
     GenerateInputPB request;
     request.set_request_id(1);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
@@ -1154,6 +1160,7 @@ TEST_F(PrefillRpcServerTest, multimodalProcessMarksDeterministicErrorNonRetryabl
 TEST_F(PrefillRpcServerTest, multimodalProcessKeepsTransientErrorRetryable) {
     GenerateInputPB request;
     request.set_request_id(1);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
@@ -1188,6 +1195,7 @@ TEST_F(PrefillRpcServerTest, multimodalProcessRejectsMissingPreparedInput) {
 TEST_F(PrefillRpcServerTest, multimodalProcessRejectsMissingProcessor) {
     GenerateInputPB request;
     request.set_request_id(1);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
@@ -1304,6 +1312,7 @@ TEST_F(PrefillRpcServerTest, multimodalProcessDoesNotMutateOriginalRequest) {
     request.add_token_ids(0);
     request.add_token_ids(1);
     request.add_token_ids(2);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
@@ -1330,6 +1339,7 @@ TEST_F(PrefillRpcServerTest, multimodalProcessDoesNotMutateOriginalRequest) {
 TEST_F(PrefillRpcServerTest, successfulMultimodalProcessIsReusedAcrossRetries) {
     GenerateInputPB request;
     request.set_request_id(1);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
@@ -1347,6 +1357,7 @@ TEST_F(PrefillRpcServerTest, successfulMultimodalProcessIsReusedAcrossRetries) {
 TEST_F(PrefillRpcServerTest, retryResetKeepsSuccessfulMultimodalResult) {
     GenerateInputPB request;
     request.set_request_id(1);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 
@@ -1453,6 +1464,7 @@ TEST_F(PrefillRpcServerTest, allocateRequestUsesExpandedTokenIds) {
     request.add_token_ids(0);
     request.add_token_ids(1);
     request.add_token_ids(2);
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context            = makeContext(&request);
     context->generate_input = makeMultimodalInput();
 

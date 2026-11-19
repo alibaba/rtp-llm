@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <grpcpp/server_context.h>
 
 #include <utility>
@@ -75,11 +76,19 @@ private:
     int64_t                           semantic_mm_token_id_;
     int64_t                           max_seq_len_;
 
-    virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                                              std::string                                 ip_port = "",
-                                                              int64_t                   request_id                = 0,
-                                                              grpc::ServerContext*      server_context = nullptr,
-                                                              const MultimodalInputsPB* wire_inputs    = nullptr) = 0;
+    virtual ErrorResult<MultimodalOutput>
+    MultimodalEmbedding(const std::vector<MultimodalInput>& mm_inputs,
+                        const std::string&                  ip_port,
+                        int64_t                             request_id,
+                        grpc::ServerContext*                server_context,
+                        std::optional<bool>                 input_inspection_enabled = std::nullopt) = 0;
+
+    virtual ErrorResult<MultimodalOutput> MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
+                                                                     const std::string&        ip_port,
+                                                                     int64_t                   request_id,
+                                                                     grpc::ServerContext*      context);
+
+    ErrorInfo setGenerateMultimodalFeatures(GenerateInput& input, MultimodalOutput& embedding);
 
     ErrorResult<ExpandedOutput>
     expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
@@ -92,9 +101,11 @@ private:
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
 public:
-    ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
-                                       grpc::ServerContext*                     server_context = nullptr,
-                                       const MultimodalInputsPB*                wire_inputs    = nullptr);
+    ErrorInfo updateMultimodalFeatures(GenerateInput& input);
+
+    ErrorInfo updateMultimodalFeatures(GenerateInput&            input,
+                                       const MultimodalInputsPB& mm_inputs,
+                                       grpc::ServerContext*      server_context);
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs,

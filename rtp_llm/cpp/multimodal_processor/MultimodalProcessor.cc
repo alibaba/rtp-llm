@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+#include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
 
 namespace rtp_llm {
 
@@ -241,51 +242,86 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
     return ErrorInfo::OkStatus();
 }
 
-ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
-                                                        grpc::ServerContext*                     server_context,
-                                                        const MultimodalInputsPB*                wire_inputs) {
-    if (input->generate_config && input->generate_config->calculate_loss) {
-        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
-    }
-    std::string ip_port = "";
-    if (input->generate_config) {
-        for (auto& role_addr : input->generate_config->role_addrs) {
+namespace {
+
+std::string vitRoleAddress(const GenerateInput& input) {
+    if (input.generate_config) {
+        for (const auto& role_addr : input.generate_config->role_addrs) {
             if (role_addr.role == RoleType::VIT) {
-                ip_port = role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
-                break;
+                return role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
             }
         }
     }
-    if (!input->multimodal_inputs || input->multimodal_inputs->empty()) {
+    return {};
+}
+
+}  // namespace
+
+ErrorResult<MultimodalOutput> MultimodalProcessor::MultimodalEmbeddingFromRpc(const MultimodalInputsPB& inputs,
+                                                                              const std::string&        ip_port,
+                                                                              int64_t                   request_id,
+                                                                              grpc::ServerContext*      context) {
+    std::optional<bool> inspect;
+    if (inputs.has_input_inspection_enabled()) {
+        inspect = inputs.input_inspection_enabled().value();
+    }
+    return MultimodalEmbedding(
+        MultimodalPbConverter::mediaReferencesFromPb(inputs), ip_port, request_id, context, inspect);
+}
+
+ErrorInfo MultimodalProcessor::updateMultimodalFeatures(GenerateInput& input) {
+    if (input.generate_config && input.generate_config->calculate_loss) {
+        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
+    }
+    if (!input.multimodal_inputs || input.multimodal_inputs->empty()) {
         return ErrorInfo::OkStatus();
     }
 #if USING_CUDA
-    // Isolate the complete receiving chain, not just its final D2H. RDMA
-    // providers and feature hashing can enqueue CUDA work before pinning, and
-    // a producer event recorded on an already blocked default stream cannot
-    // make a late stream switch safe.
     ScopedMultimodalCudaStream mm_stream;
 #endif
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
-        MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context, wire_inputs));
+        MultimodalEmbedding(*input.multimodal_inputs, vitRoleAddress(input), input.request_id, nullptr));
+    return setGenerateMultimodalFeatures(input, mm_embedding_res);
+}
+
+ErrorInfo MultimodalProcessor::updateMultimodalFeatures(GenerateInput&            input,
+                                                        const MultimodalInputsPB& mm_inputs,
+                                                        grpc::ServerContext*      server_context) {
+    if (input.generate_config && input.generate_config->calculate_loss) {
+        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
+    }
+    if (mm_inputs.multimodal_inputs().empty()) {
+        return ErrorInfo::OkStatus();
+    }
+#if USING_CUDA
+    // The receiving stream covers RDMA, feature hashing and the final D2H copy.
+    ScopedMultimodalCudaStream mm_stream;
+#endif
+    CHECK_AND_RETURN_REF(
+        mm_embedding_res,
+        MultimodalEmbeddingFromRpc(mm_inputs, vitRoleAddress(input), input.request_id, server_context));
+    return setGenerateMultimodalFeatures(input, mm_embedding_res);
+}
+
+ErrorInfo MultimodalProcessor::setGenerateMultimodalFeatures(GenerateInput& input, MultimodalOutput& mm_embedding_res) {
     auto                       mm_features = std::move(mm_embedding_res.mm_features);
     std::vector<torch::Tensor> mm_extra_input;
     if (mm_embedding_res.mm_extra_input.has_value()) {
         mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
     }
     CHECK_AND_RETURN_REF(expanded_ids,
-                         expandTokenIds(mm_features, input->input_ids, {}, mm_embedding_res.mm_feature_hashes));
+                         expandTokenIds(mm_features, input.input_ids, {}, mm_embedding_res.mm_feature_hashes));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
     RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
-    input->multimodal_features    = std::move(mm_features);
-    input->mm_position_ids        = std::move(mm_embedding_res.mm_position_ids);
-    input->mm_extra_input         = std::move(mm_extra_input);
-    input->input_ids              = expanded_ids.expanded_ids;
-    input->text_tokens_mask       = expanded_ids.text_tokens_mask;
-    input->mm_locs                = expanded_ids.locs;
-    input->multimodal_cache_spans = std::move(expanded_ids.cache_spans);
+    input.multimodal_features    = std::move(mm_features);
+    input.mm_position_ids        = std::move(mm_embedding_res.mm_position_ids);
+    input.mm_extra_input         = std::move(mm_extra_input);
+    input.input_ids              = expanded_ids.expanded_ids;
+    input.text_tokens_mask       = expanded_ids.text_tokens_mask;
+    input.mm_locs                = expanded_ids.locs;
+    input.multimodal_cache_spans = std::move(expanded_ids.cache_spans);
     return ErrorInfo::OkStatus();
 }
 
@@ -318,7 +354,7 @@ ErrorResult<MultimodalFeature>
 MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                         input_ids,
                                            const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
     MultimodalFeature mm_features;
-    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
+    CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs, {}, 0, nullptr));
     mm_features.features = std::move(mm_embedding_res.mm_features);
     CHECK_AND_RETURN_REF(expanded_ids,
                          expandTokenIds(mm_features.features, input_ids, {}, mm_embedding_res.mm_feature_hashes));
