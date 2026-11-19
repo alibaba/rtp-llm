@@ -1,5 +1,8 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
+#include <cstdint>
+#include <functional>
 #include <vector>
 #include <cstddef>
 
@@ -36,6 +39,9 @@ public:
     /// @param tasks 待拷贝任务列表（dst_ptr 必须由调用者预先分配）
     /// @return 成功返回 true，若 device 未初始化或 dst_ptr 为 nullptr 则返回 false
     bool batchCopyToDevice(std::vector<CopyTask>& tasks);
+    TransferErrorCode batchCopyToDevice(std::vector<CopyTask>& tasks,
+                                        int64_t deadline_ms,
+                                        const std::function<bool()>& is_cancelled = {});
 };
 
 }  // namespace tcp

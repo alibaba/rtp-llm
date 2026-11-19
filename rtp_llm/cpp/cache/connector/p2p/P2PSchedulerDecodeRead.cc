@@ -401,7 +401,8 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
                                                                         config_.p2p_lease_query_timeout_ms,
                                                                         no_transfer,
                                                                         request_deadline_ms,
-                                                                        transfer_deadline_ms);
+                                                                        transfer_deadline_ms,
+                                                                        config_.p2p_kv_force_release_timeout_ms);
 
     const auto enqueue_time_us = currentTimeUs();
     auto       submit_result   = async_read_pool_->pushTask(
@@ -564,6 +565,7 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t                             
         params.type                = P2PConnectorBroadcastType::READ;
         params.routes              = std::move(rank_routes);
         params.plan_digest         = plan_digest;
+        params.is_cancelled        = [&context] { return context.cancelRequested(); };
         tp_sync_result             = tp_broadcast_client_->broadcast(std::move(params));
     }
     const int64_t broadcast_cost_us = currentTimeUs() - broadcast_start_us;

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <algorithm>
 #include <unordered_map>
 #include <limits>
 
@@ -51,11 +52,16 @@ const std::string& TcpTaskContext::getUniqueKey() const {
 }
 
 bool TcpTaskContext::isTimeout() const {
-    return currentTimeMs() > deadline_ms_;
+    return currentTimeMs() >= static_cast<int64_t>(getDeadlineMs());
+}
+
+bool TcpTaskContext::isCancelled() const {
+    return task_ && task_->isCancelled();
 }
 
 uint64_t TcpTaskContext::getDeadlineMs() const {
-    return static_cast<uint64_t>(deadline_ms_);
+    const auto effective_deadline_ms = task_ ? std::min(deadline_ms_, task_->deadlineMs()) : deadline_ms_;
+    return static_cast<uint64_t>(std::max<int64_t>(0, effective_deadline_ms));
 }
 
 bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
@@ -173,13 +179,19 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
         RTP_LLM_LOG_WARNING("executeCopy: no blocks to transfer, unique_key: %s", unique_key_.c_str());
         return fail(TransferErrorCode::BUFFER_MISMATCH, "no blocks to transfer");
     }
-    const bool copy_success = cuda_copy_util.batchCopyToDevice(copy_tasks);
-    if (!copy_success) {
+    const auto copy_status = cuda_copy_util.batchCopyToDevice(
+        copy_tasks, getDeadlineMs(), [this] { return isCancelled(); });
+    if (copy_status == TransferErrorCode::CANCELLED) {
+        return fail(copy_status, "recv task cancelled before H2D copy");
+    }
+    if (copy_status == TransferErrorCode::TIMEOUT) {
+        return fail(copy_status, "deadline expired before H2D copy");
+    }
+    if (copy_status != TransferErrorCode::OK) {
         RTP_LLM_LOG_WARNING("P2P TCP H2D copy failed, partition_layer_key=%s stage=cuda_h2d copy_tasks=%zu",
                             unique_key_.c_str(), copy_tasks.size());
+        return fail(copy_status, "H2D copy returned false");
     }
-    if (!copy_success)
-        return fail(TransferErrorCode::COPY_FAILED, "H2D copy returned false");
     return true;
 }
 

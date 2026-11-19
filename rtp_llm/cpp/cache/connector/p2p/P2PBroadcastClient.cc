@@ -46,13 +46,14 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::broadcast(Broadc
         requests.push_back(std::move(request));
     }
 
-    return broadcastRequests(std::move(requests), params.unique_key, params.deadline_ms);
+    return broadcastRequests(std::move(requests), params.unique_key, params.deadline_ms, params.is_cancelled);
 }
 
 std::shared_ptr<P2PBroadcastClient::Result>
 P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
                                       const std::string&             unique_key,
-                                      int64_t                        deadline_ms) {
+                                      int64_t                        deadline_ms,
+                                      const std::function<bool()>&   is_cancelled) {
 
     // gRPC 超时与物理传输共用绝对 deadline_ms（D）。
     for (const auto& request : requests) {
@@ -74,17 +75,23 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
         return nullptr;
     }
 
-    // Stamp the remaining budget immediately before submission, after route construction.
-    // The gRPC deadline bounds the call on this machine; workers must not interpret
-    // this machine's absolute timestamp using their own wall clock.
-    for (auto& request : requests) {
+    // Recompute the budget after acquiring the connections and before each rank's RPC.
+    auto before_dispatch = [deadline_ms, &is_cancelled](FunctionRequestPB& request) -> grpc::Status {
+        const auto remaining_ms = deadline_ms - currentTimeMs();
+        if (remaining_ms <= 0) {
+            return {grpc::StatusCode::DEADLINE_EXCEEDED, "P2P broadcast deadline expired before rank dispatch"};
+        }
+        if (is_cancelled && is_cancelled()) {
+            return {grpc::StatusCode::CANCELLED, "P2P broadcast cancelled before rank dispatch"};
+        }
         auto* p2p_request = request.mutable_p2p_request();
         if (p2p_request->type() == P2PConnectorBroadcastType::READ
             || p2p_request->type() == P2PConnectorBroadcastType::HANDLE_READ
             || p2p_request->type() == P2PConnectorBroadcastType::HANDLE_READ_NO_TRANSFER) {
-            p2p_request->set_transfer_timeout_ms(timeout_ms);
+            p2p_request->set_transfer_timeout_ms(remaining_ms);
         }
-    }
+        return grpc::Status::OK;
+    };
 
     // Define the RPC call lambda for ExecuteFunction
     auto rpc_call = [deadline_ms](std::shared_ptr<RpcService::Stub>&    stub,
@@ -97,7 +104,10 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        std::move(requests), static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())), rpc_call);
+        std::move(requests),
+        static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())),
+        rpc_call,
+        before_dispatch);
     if (!result) {
         RTP_LLM_LOG_WARNING("broadcast failed, cannot create broadcast result");
         return nullptr;
