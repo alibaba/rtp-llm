@@ -50,6 +50,76 @@ class TestFA3DecodeGraphPadding(unittest.TestCase):
         )
 
 
+class TestFA3DecodeAdaptiveSplits(unittest.TestCase):
+    def setUp(self):
+        self.geometry = SimpleNamespace(
+            head_num=16,
+            kv_head_num=4,
+            size_per_head=256,
+            kernel_tokens_per_block=256,
+            max_seq_len=262144,
+        )
+
+    def test_scheduler_and_forward_use_the_same_split_count(self):
+        for cached_tokens, splits in (
+            (65535, 0),
+            (65536, 80),
+            (262144, 80),
+            (262145, 0),
+        ):
+            with self.subTest(cached_tokens=cached_tokens):
+                inputs = SimpleNamespace(
+                    is_cuda_graph=False,
+                    sequence_lengths=torch.tensor([cached_tokens - 1]),
+                    sequence_lengths_plus_1_device=torch.tensor([cached_tokens]),
+                    decode_cu_seqlens_device=torch.tensor([0, 1]),
+                    kv_cache_kernel_block_id_device=torch.zeros(1, 256),
+                )
+                fa3 = mock.Mock()
+                fa3.flash_attn_with_kvcache.return_value = torch.empty(1, 16, 256)
+                with mock.patch.dict(
+                    "os.environ", {"PPU_FA3_DECODE_ADAPTIVE_SPLITS": "1"}
+                ):
+                    op = FA3DecodeAttnOp(self.geometry, inputs)
+                with (
+                    mock.patch(
+                        f"{FA3DecodeAttnOp.__module__}._import_fa3_interface",
+                        return_value=fa3,
+                    ),
+                    mock.patch.object(op, "_split_kv_cache", return_value=(None, None)),
+                ):
+                    params = op.prepare(inputs)
+                    op.forward(torch.empty(1, 16, 256), None, params)
+                self.assertEqual(
+                    fa3.get_scheduler_metadata.call_args.kwargs["num_splits"], splits
+                )
+                self.assertEqual(
+                    fa3.flash_attn_with_kvcache.call_args.kwargs["num_splits"], splits
+                )
+
+    def test_automatic_splits_for_unsupported_inputs(self):
+        long_kv = torch.tensor([98303])
+        mixed_kv = torch.tensor([98303, 127])
+        device_lengths = SimpleNamespace(numel=lambda: 1, device=torch.device("cuda"))
+        with mock.patch.dict("os.environ", {"PPU_FA3_DECODE_ADAPTIVE_SPLITS": "1"}):
+            eager = FA3DecodeAttnOp(self.geometry, SimpleNamespace(is_cuda_graph=False))
+            graph = FA3DecodeAttnOp(self.geometry, SimpleNamespace(is_cuda_graph=True))
+            self.geometry.kv_head_num = 2
+            other_geometry = FA3DecodeAttnOp(
+                self.geometry, SimpleNamespace(is_cuda_graph=False)
+            )
+        self.assertEqual(eager._select_num_splits(mixed_kv), 0)
+        self.assertEqual(eager._select_num_splits(device_lengths), 0)
+        self.assertEqual(graph._select_num_splits(long_kv), 0)
+        self.assertEqual(other_geometry._select_num_splits(long_kv), 0)
+
+    def test_adaptive_splits_are_opt_in(self):
+        with mock.patch.dict("os.environ") as env:
+            env.pop("PPU_FA3_DECODE_ADAPTIVE_SPLITS", None)
+            eager = FA3DecodeAttnOp(self.geometry, SimpleNamespace(is_cuda_graph=False))
+        self.assertEqual(eager._select_num_splits(torch.tensor([98303])), 0)
+
+
 class TestFA3GraphReplayLeavesBlockTableAlone(unittest.TestCase):
     """The host block-table padding contract belongs to CudaGraphRunner.
 

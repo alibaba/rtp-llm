@@ -23,6 +23,9 @@ For each FA3 env:
   - "0": disable the FA3 backend. MRoPE has no PyFlashinfer prefill fallback on PPU
          because the open-source PyFlashinfer RoPE path is not true Qwen3.5 MRoPE.
 
+PPU_FA3_DECODE_ADAPTIVE_SPLITS=1 enables tuning for eager, single-request
+decode with Qwen3.5-9B TP=1 attention geometry and 64K to 256K KV tokens.
+
 Requires: flash_attn_3 whl installed (PPU-adapted build).
 """
 
@@ -115,6 +118,15 @@ class FA3DecodeAttnOp:
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.softmax_scale = 1.0 / (self.head_dim**0.5)
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        geometry = (
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim,
+            self.seq_size_per_block,
+        )
+        self._adaptive_splits = os.environ.get(
+            "PPU_FA3_DECODE_ADAPTIVE_SPLITS"
+        ) == "1" and geometry == (16, 4, 256, 256)
         self.max_seqlen_k = int(getattr(attn_configs, "max_seq_len", 0) or 0)
         if self.max_seqlen_k <= 0:
             max_seq_len = getattr(attn_inputs, "max_seq_len", None)
@@ -137,7 +149,7 @@ class FA3DecodeAttnOp:
         )
 
     def _get_scheduler_metadata(
-        self, batch_size, max_seqlen_k, cache_seqlens, cu_seqlens_q
+        self, batch_size, max_seqlen_k, cache_seqlens, cu_seqlens_q, num_splits=0
     ):
         """Get or refresh FA3 scheduler metadata for tile/split planning."""
         import torch
@@ -156,9 +168,19 @@ class FA3DecodeAttnOp:
             cu_seqlens_q=cu_seqlens_q,
             page_size=self.seq_size_per_block,
             causal=True,
-            num_splits=0,  # auto
+            num_splits=num_splits,
         )
         return metadata
+
+    def _select_num_splits(self, sequence_lengths):
+        # Graph replays can change KV lengths while retaining the captured launch.
+        if not self._adaptive_splits or self.enable_cuda_graph:
+            return 0
+        if sequence_lengths.numel() != 1 or sequence_lengths.device.type != "cpu":
+            return 0
+        # Use the host length captured by the engine and account for the new token.
+        kv_length = sequence_lengths.item() + 1
+        return 80 if 65536 <= kv_length <= 262144 else 0
 
     def _get_max_seqlen_k(self, attn_inputs, cache_seqlens):
         if self.max_seqlen_k > 0:
@@ -229,7 +251,8 @@ class FA3DecodeAttnOp:
 
     def prepare(self, attn_inputs):
         """Prepare FA3 parameters from RTP-LLM attention inputs."""
-        batch_size = attn_inputs.sequence_lengths.size(0)
+        sequence_lengths = attn_inputs.sequence_lengths
+        batch_size = sequence_lengths.size(0)
         if self.enable_cuda_graph:
             if self._batch_size not in (0, batch_size):
                 raise RuntimeError(
@@ -254,13 +277,14 @@ class FA3DecodeAttnOp:
         max_seqlen_k = self._get_max_seqlen_k(attn_inputs, cache_seqlens)
 
         # Get scheduler metadata (FA3 tile planning)
+        num_splits = self._select_num_splits(sequence_lengths)
         if self.enable_cuda_graph:
             self._scheduler_metadata = self._refresh_graph_scheduler_metadata(
                 batch_size, max_seqlen_k, cache_seqlens, cu_seqlens_q
             )
         else:
             self._scheduler_metadata = self._get_scheduler_metadata(
-                batch_size, max_seqlen_k, cache_seqlens, cu_seqlens_q
+                batch_size, max_seqlen_k, cache_seqlens, cu_seqlens_q, num_splits
             )
 
         self.fmha_params = _FA3Params(
@@ -270,6 +294,7 @@ class FA3DecodeAttnOp:
             max_seqlen_k=max_seqlen_k,
             cu_seqlens_q=cu_seqlens_q,
             scheduler_metadata=self._scheduler_metadata,
+            num_splits=num_splits,
         )
         return self.fmha_params
 
@@ -341,7 +366,7 @@ class FA3DecodeAttnOp:
             max_seqlen_q=1,
             max_seqlen_k=params.max_seqlen_k,
             scheduler_metadata=params.scheduler_metadata,
-            num_splits=0,
+            num_splits=params.num_splits,
         )
 
         # Reshape output: [batch_size, num_heads * head_dim]
@@ -614,6 +639,7 @@ class _FA3Params:
         max_seqlen_k,
         cu_seqlens_q,
         scheduler_metadata,
+        num_splits=0,
     ):
         self.batch_size = batch_size
         self.cache_seqlens = cache_seqlens
@@ -621,6 +647,7 @@ class _FA3Params:
         self.max_seqlen_k = max_seqlen_k
         self.cu_seqlens_q = cu_seqlens_q
         self.scheduler_metadata = scheduler_metadata
+        self.num_splits = num_splits
 
 
 class _FA3PrefillParams:
