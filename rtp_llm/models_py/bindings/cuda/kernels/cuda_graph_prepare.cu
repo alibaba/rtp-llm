@@ -120,7 +120,8 @@ void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrep
                 "invalid cuda graph prepare fill region count: ",
                 params.region_count);
 
-    int64_t total_count = params.mask_count + (params.zero_byte_count + 3) / 4;
+    // Budget four zero stores per thread to avoid oversubscribing small tails.
+    int64_t total_count = params.mask_count + (params.zero_byte_count + 15) / 16;
     for (int32_t i = 0; i < params.region_count; ++i) {
         total_count += params.regions[i].count > 0 ? params.regions[i].count : 0;
     }

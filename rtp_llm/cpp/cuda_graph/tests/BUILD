@@ -380,3 +380,45 @@ cc_test(
     copts = copts(),
     deps = ["//rtp_llm/cpp/utils:math_utils"],
 )
+
+cc_test(
+    name = "cuda_graph_prepare_microbenchmark",
+    srcs = ["cuda_graph_prepare_microbenchmark.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_cuda//cuda:cudart",
+        "@local_config_cuda//cuda:cuda_headers",
+    ],
+    target_compatible_with = select({
+        "@//:using_cuda": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "cuda_graph_runner_microbenchmark",
+    srcs = [
+        "cuda_graph_runner_microbenchmark.py",
+        "cuda_graph_attention_prepare_test.py",
+        "cuda_graph_tagged_cache_test.py",
+    ],
+    main = "cuda_graph_runner_microbenchmark.py",
+    # Optional, locally saved baseline for the benchmark's same-GPU ABBA mode.
+    data = [":test_cuda_graph_runner", "//:th_transformer"] + glob(["saved_runner/*.so"]),
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/test/model_test/test_util",
+    ],
+    env = {
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "RTP_LLM_MTP_ASYNC_PREPARE": "1",
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)

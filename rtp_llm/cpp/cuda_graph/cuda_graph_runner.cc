@@ -11,7 +11,6 @@
 #include <limits>
 #include <string>
 #include <c10/core/InferenceMode.h>
-#include <pybind11/stl.h>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -245,6 +244,19 @@ void addCudaGraphPrepareFillRegionFromDevice(CudaGraphPrepareFillParams& params,
     region.value_ptr    = value_tensor.data_ptr<int32_t>() + value_index;
     region.value_offset = value_offset;
     region.step         = step;
+}
+
+void addCudaGraphPrepareIotaRegion(CudaGraphPrepareFillParams& params,
+                                   torch::Tensor&              tensor,
+                                   int64_t                     start,
+                                   int64_t                     end,
+                                   int32_t                     first_value,
+                                   int32_t                     step) {
+    const int32_t old_region_count = params.region_count;
+    addCudaGraphPrepareFillRegion(params, tensor, start, end, first_value);
+    if (params.region_count != old_region_count) {
+        params.regions[params.region_count - 1].step = step;
+    }
 }
 
 #endif
@@ -713,14 +725,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           query_rows,
                                           selected_graph_batch_size,
                                           0);
-            addCudaGraphPrepareFillRegionFromDevice(fill_params,
-                                                    py_model_inputs_.attention_inputs.cu_seqlens_device,
-                                                    state.current_batch_size + 1,
-                                                    query_rows + 1,
-                                                    inputs.attention_inputs.cu_seqlens_device,
-                                                    state.current_batch_size,
-                                                    num_tokens_per_bs_,
-                                                    num_tokens_per_bs_);
+            addCudaGraphPrepareIotaRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.cu_seqlens_device,
+                                          state.current_batch_size + 1,
+                                          query_rows + 1,
+                                          live_tokens + num_tokens_per_bs_,
+                                          num_tokens_per_bs_);
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.cu_seqlens_device,
                                           query_rows + 1,
@@ -859,7 +869,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 
     if (inputs.attention_inputs.linear_replay) {
-        auto source              = *inputs.attention_inputs.linear_replay;
+        const auto& source              = *inputs.attention_inputs.linear_replay;
         auto source_tensors      = source.tensors();
         auto destination_tensors = py_model_inputs_.attention_inputs.linear_replay->tensors();
         RTP_LLM_CHECK_WITH_INFO(source.slot_ids.numel() == state.current_batch_size,
@@ -903,7 +913,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         tryAddD2DCopy(inputs.attention_inputs.decode_cu_seqlens_device,
                       py_model_inputs_.attention_inputs.decode_cu_seqlens_device,
                       (state.current_batch_size + 1) * sizeof(int));
-    } else if (is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
+    } else if (!isGenerationPrefillCudaGraph()) {
         // Legacy embedding/MTP prefill keeps its BERT ID copies in attention
         // preparation. Generation-prefill refreshes them in prepareInputData().
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
@@ -2355,7 +2365,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.input_lengths_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_device.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =
-        capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, token_slice_len);
+        capture_mem_hold_.py_model_inputs_.attention_inputs.padding_offset.slice(0, 0, seq_len_or_tokens);
 
     // Common slice operations for attention inputs
     if (capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths.defined()) {
