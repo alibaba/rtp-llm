@@ -46,6 +46,7 @@ class SharedURLCacheTest(unittest.TestCase):
     def setUp(self):
         self.owner = URLDataCache(2)
         self.handle = self.owner.share(2)
+        self.addCleanup(self.owner.close)
         self.ctx = multiprocessing.get_context("spawn")
 
     def test_two_cold_workers_fetch_independently_then_a_third_hits(self):
@@ -133,7 +134,7 @@ class SharedURLCacheTest(unittest.TestCase):
         client.insert_cache(key, BytesIO(b"whole"))
         self.assertEqual(client.check_cache(key).read(), b"whole")
 
-    def test_busy_index_and_unavailable_owner_bypass_cache(self):
+    def test_unavailable_owner_bypasses_cache(self):
         client = URLDataCache(2)
         client.attach(self.handle, 2)
 
@@ -142,9 +143,6 @@ class SharedURLCacheTest(unittest.TestCase):
             self.assertEqual(data.read(), b"source")
             return hit
 
-        # Even a suspended index owner cannot block another request.
-        with self.owner._store.lock:
-            self.assertFalse(fetch())
         self.assertFalse(fetch())
         self.assertTrue(fetch())
         with tempfile.TemporaryDirectory() as directory:
@@ -161,6 +159,18 @@ class SharedURLCacheTest(unittest.TestCase):
                     self.assertFalse(fetch())
                     self.assertEqual(exchange.call_count, 1)
                 self.assertLess(time.monotonic() - begin, 1)
+
+    def test_cache_does_not_start_connection_threads_in_vit_process(self):
+        client = URLDataCache(2)
+        client.attach(self.handle, 2)
+        with patch.object(
+            threading.Thread,
+            "start",
+            side_effect=AssertionError("shared cache started a connection thread in ViT"),
+        ):
+            for _ in range(32):
+                client.insert_cache(b"x" * 32, BytesIO(b"cached"))
+                self.assertEqual(client.check_cache(b"x" * 32).read(), b"cached")
 
     def test_different_keys_load_in_parallel_and_share_lru_budget(self):
         barrier = threading.Barrier(2)

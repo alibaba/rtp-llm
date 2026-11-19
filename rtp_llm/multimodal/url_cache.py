@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import multiprocessing
 import os
 import socket
 import socketserver
@@ -10,12 +11,15 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from multiprocessing.util import Finalize
 
 # Local cache access is optional. Bound the whole socket exchange, including
 # connect and transfer, so a stalled cache owner cannot stall an HTTP download.
 _CACHE_TIMEOUT = 0.1
+_CACHE_WORKERS = 16
+_CACHE_START_TIMEOUT = 20
 # One request per private Unix connection: key and byte count (-1 for GET).
 _REQUEST = struct.Struct("!32sq")
 _SIZE = struct.Struct("!q")
@@ -83,6 +87,9 @@ class _Handler(socketserver.StreamRequestHandler):
     def handle(self):
         deadline = time.monotonic() + _CACHE_TIMEOUT
         try:
+            capacity = self.server.capacity.value
+            if capacity != self.server.store.capacity:
+                self.server.store.resize(capacity)
             key, size = _REQUEST.unpack(
                 _read(self.rfile, _REQUEST.size, self.request, deadline)
             )
@@ -103,18 +110,57 @@ class _Handler(socketserver.StreamRequestHandler):
             return
 
 
-class _Server(socketserver.ThreadingUnixStreamServer):
-    daemon_threads = True
+class _Server(socketserver.UnixStreamServer):
     request_queue_size = 128
 
-    def __init__(self, path, store):
-        self.store = store
+    def __init__(self, path, capacity, replace_existing):
+        self.capacity = capacity
+        self.store = _ByteStore(capacity.value, replace_existing=replace_existing)
         super().__init__(path, _Handler)
+        self._available = threading.BoundedSemaphore(_CACHE_WORKERS)
+        self._workers = ThreadPoolExecutor(_CACHE_WORKERS, thread_name_prefix="vit-url")
+
+    def process_request(self, request, client_address):
+        # The download cache is optional. A full worker pool should cause a
+        # cache bypass instead of queueing work after the caller's deadline.
+        if not self._available.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        self._workers.submit(self._serve_request, request, client_address)
+
+    def _serve_request(self, request, client_address):
+        try:
+            self.finish_request(request, client_address)
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            self._available.release()
+
+    def server_close(self):
+        super().server_close()
+        self._workers.shutdown()
 
 
-def _stop_server(server, directory):
-    server.shutdown()
-    server.server_close()
+def _serve_cache(path, capacity, replace_existing, ready):
+    # The ViT request process must not share its GIL with socket handling,
+    # transient request allocations, or collection in the download cache.
+    with _Server(path, capacity, replace_existing) as server:
+        with ready:
+            ready.send_bytes(b"")
+        server.serve_forever(poll_interval=0.05)
+
+
+def _stop_cache(process, directory):
+    if process is not None:
+        if process.pid is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+        if process.pid is not None:
+            process.join()
+        process.close()
     directory.cleanup()
 
 
@@ -123,27 +169,51 @@ class URLDataCache:
         self._store = _ByteStore(cache_size, replace_existing=replace_existing)
         self._capacity = cache_size
         self._address = None
-        self._owner_pid = None
+        self._shared_capacity = None
+        self._finalizer = None
 
     def share(self, capacity):
         """Pass just the socket path to every engine and its replacement workers."""
         self.resize_cache(capacity)
         if self._address is None and capacity > 0:
+            ctx = multiprocessing.get_context("spawn")
+            directory = process = None
             try:
                 directory = tempfile.TemporaryDirectory(prefix="vit-url-", dir="/tmp")
                 path = os.path.join(directory.name, "cache.sock")
-                server = _Server(path, self._store)
-                threading.Thread(
-                    target=server.serve_forever, args=(0.05,), daemon=True
-                ).start()
-            except (OSError, RuntimeError):
+                shared_capacity = ctx.Value("q", capacity)
+                reader, writer = ctx.Pipe(duplex=False)
+                with reader, writer:
+                    process = ctx.Process(
+                        name="vit-url-cache",
+                        target=_serve_cache,
+                        args=(path, shared_capacity, self._store.replace_existing, writer),
+                        daemon=True,
+                    )
+                    process.start()
+                    writer.close()
+                    if not reader.poll(_CACHE_START_TIMEOUT):
+                        raise TimeoutError("shared URL cache did not start")
+                    reader.recv_bytes()
+            except (EOFError, OSError, RuntimeError):
+                if directory is not None:
+                    _stop_cache(process, directory)
                 logging.exception("Shared URL cache unavailable; bypassing cache")
                 self._address = ""
             else:
+                self._shared_capacity = shared_capacity
                 self._address = path
-                self._owner_pid = os.getpid()
-                Finalize(self, _stop_server, args=(server, directory), exitpriority=1)
+                self._finalizer = Finalize(
+                    self, _stop_cache, args=(process, directory), exitpriority=1
+                )
         return self._address if capacity > 0 else None
+
+    def close(self):
+        if self._finalizer is not None:
+            self._finalizer()
+            self._finalizer = None
+            self._address = ""
+            self._shared_capacity = None
 
     def attach(self, handle, capacity):
         self._address = handle
@@ -152,6 +222,8 @@ class URLDataCache:
     def resize_cache(self, capacity):
         self._capacity = capacity
         self._store.resize(capacity)
+        if self._shared_capacity is not None:
+            self._shared_capacity.value = max(0, capacity)
 
     def _exchange(self, key, data, deadline):
         end = time.monotonic() + _CACHE_TIMEOUT
@@ -170,14 +242,14 @@ class URLDataCache:
                 return _read(stream, size, sock, end) if size >= 0 else None
 
     def check_cache(self, key, deadline=None):
-        if self._address is None or self._owner_pid == os.getpid():
+        if self._address is None:
             data = self._store.get(key)
         else:
             data = self._exchange(key, None, deadline)
         return None if data is None else BytesIO(data)
 
     def insert_cache(self, key, source, deadline=None):
-        if self._address is None or self._owner_pid == os.getpid():
+        if self._address is None:
             self._store.put(key, source.getvalue())
         else:
             self._exchange(key, source.getvalue(), deadline)
