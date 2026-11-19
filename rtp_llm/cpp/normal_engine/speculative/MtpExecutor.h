@@ -201,7 +201,8 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          bool                        release_after_draft_graph = false);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;

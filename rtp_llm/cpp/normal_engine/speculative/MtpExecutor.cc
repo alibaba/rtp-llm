@@ -1588,11 +1588,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         batch_size = model_input.input_lengths.size(0);
 
-        releaseAllModelBuffers();
+        // The deferred tail owns the previous target and draft-prefill
+        // buffers. The draft decode graph uses a separate model and runs
+        // after that tail on the same CUDA stream.
+        // Indexer sharing reads the previous round's seed before draft submission.
+        // Preserve its tail drain before inspecting that request-scoped state.
+        const bool release_after_draft_graph =
+            deferred_decode_tail_ && propose_step_ > 1 && !useAsyncPrepare() && !mtp_indexer_share_enabled_;
+        if (!release_after_draft_graph) {
+            releaseAllModelBuffers();
+        }
         launchTargetVerifyPrepareAsync(model_input, batch_size);
         if (propose_step_ > 1) {
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-            draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+            draftModelDecode(model_input,
+                             stream_groups,
+                             draft_probs_list,
+                             draft_token_ids_t,
+                             model_forward_us,
+                             release_after_draft_graph);
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
         }
     }
@@ -3118,7 +3132,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
                                    torch::Tensor&              draft_token_ids_t,
-                                   int64_t&                    model_forward_us) {
+                                   int64_t&                    model_forward_us,
+                                   bool                        release_after_draft_graph) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -3194,12 +3209,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         }
     }
 
-    bool pre_target_from_device_state = false;
-    auto pre_target_token_t           = gatherPreviousTargetTokens(
-        stream_groups, batch_size, useStreamAsync() || useAsyncDeviceState(), pre_target_from_device_state);
-    draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
-    draft_token_columns.push_back(pre_propose_token_t_raw);
-
     const size_t decode_steps = propose_step_ - 1;
     // The optional graph expands the fixed n-1 forwards, native LM heads,
     // logits collectives, greedy samplers and recurrent updates at startup.
@@ -3212,10 +3221,23 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
     const bool used_loop_graph = !loop_output.draft_token_ids.empty();
     if (used_loop_graph) {
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - loop_start_us;
+    }
+    if (release_after_draft_graph) {
+        releaseAllModelBuffers();
+    }
+    // The previous target token is only consumed when assembling verify
+    // inputs. Queue the whole draft graph before gathering that token.
+    bool pre_target_from_device_state = false;
+    auto pre_target_token_t           = gatherPreviousTargetTokens(
+        stream_groups, batch_size, useStreamAsync() || useAsyncDeviceState(), pre_target_from_device_state);
+    draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
+    draft_token_columns.push_back(pre_propose_token_t_raw);
+
+    if (used_loop_graph) {
         RTP_LLM_CHECK_WITH_INFO(loop_output.draft_token_ids.size() == decode_steps
                                     && loop_output.draft_probs.size() == decode_steps,
                                 "whole MTP draft graph returned the wrong number of steps");
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - loop_start_us;
         for (size_t i = 0; i < decode_steps; ++i) {
             draft_token_columns.push_back(loop_output.draft_token_ids[i]);
             const auto& probs = loop_output.draft_probs[i];

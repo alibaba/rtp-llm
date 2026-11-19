@@ -10,11 +10,15 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <string>
 #include <vector>
 #include <cstring>
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
+#endif
 
 namespace rtp_llm {
 namespace {
@@ -74,9 +78,30 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
                             batch_size,
                             previous_seq_lengths.numel(),
                             accept_lengths.numel());
-    if (batch_size == 0 || block_count == 0) {
+    if (current_table.numel() == 0) {
         return current_table.clone();
     }
+
+#if USING_CUDA
+    if (group_count <= 64 && group_count * batch_size <= std::numeric_limits<int32_t>::max()
+        && current_table.is_contiguous() && previous_seq_lengths.is_contiguous() && accept_lengths.is_contiguous()) {
+        uint64_t linear_groups = 0;
+        for (int64_t group = 0; group < group_count; ++group) {
+            if (group_types[group] == CacheGroupType::LINEAR) {
+                linear_groups |= uint64_t{1} << group;
+            }
+        }
+        auto next_table = torch::empty_like(current_table);
+        invokeMtpAdvanceLinearCacheBlockTable(current_table,
+                                              previous_seq_lengths,
+                                              accept_lengths,
+                                              next_table,
+                                              linear_groups,
+                                              seq_size_per_block,
+                                              cuda_graph::graphGetCurrentStream().stream());
+        return next_table;
+    }
+#endif
 
     // Build one permutation per request, then apply it to every LINEAR group.
     // This is the vectorized form of LinearBlocksUtil.h's two sequential
@@ -718,6 +743,20 @@ void MtpBatchStreamProcessor::overlayMtpCacheSnapshots(const StreamGroups& strea
 
     if (buckets.empty()) {
         return;
+    }
+    if (buckets.size() == 1) {
+        const auto& [widths, bucket] = *buckets.begin();
+        if (static_cast<int64_t>(bucket.rows.size()) == row && model_input.kv_cache_block_id.dim() == 3
+            && model_input.kv_cache_kernel_block_id.dim() == 3
+            && bucket.physical_tables.front().size(0) == model_input.kv_cache_block_id.size(0)
+            && bucket.kernel_tables.front().size(0) == model_input.kv_cache_kernel_block_id.size(0)
+            && widths.first == model_input.kv_cache_block_id.size(2)
+            && widths.second == model_input.kv_cache_kernel_block_id.size(2)) {
+            // Every row is already an authoritative snapshot in batch order.
+            model_input.kv_cache_block_id        = torch::cat(bucket.physical_tables, 1);
+            model_input.kv_cache_kernel_block_id = torch::cat(bucket.kernel_tables, 1);
+            return;
+        }
     }
     // Generic gathering produces pinned host tables. Move the complete mixed
     // batch once, preserving freshly admitted host rows, then replace only the
