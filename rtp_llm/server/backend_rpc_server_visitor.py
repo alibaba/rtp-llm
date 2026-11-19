@@ -18,7 +18,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation
+from rtp_llm.ops import SpeculativeExecutionConfig, SpeculativeType, VitSeparation
 from rtp_llm.server.cache_key_routing import (
     get_block_cache_keys,
     get_v41_cache_key_seed,
@@ -890,6 +890,16 @@ class BackendRPCServerVisitor:
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
             return
+        # Disabling proposals per request does not replace the DSpark executor:
+        # its prefill output does not contain a full probability tensor.
+        if input.generate_config.return_all_probs and (
+            not input.generate_config.force_disable_sp_run
+            or self.sp_config.type == SpeculativeType.DSPARK
+        ):
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "speculative decoding does not support return_all_probs",
+            )
         if input.generate_config.force_disable_sp_run:
             return
 
@@ -907,12 +917,6 @@ class BackendRPCServerVisitor:
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
-            )
-        # speculative decoding does not support return_all_probs
-        if input.generate_config.return_all_probs:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "speculative decoding does not support return_all_probs",
             )
 
     def check_prefill_cp_supported(self, input: GenerateInput) -> None:

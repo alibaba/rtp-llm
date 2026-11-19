@@ -11,8 +11,14 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    RoleAddr,
+    RoleType,
+)
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
     get_role_names,
@@ -160,6 +166,36 @@ class _FakeMasterClient:
             }
         )
         return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
+
+
+class BackendRPCServerVisitorDSparkAdmissionTest(unittest.TestCase):
+    def test_full_probabilities_respect_the_engine_even_if_proposals_are_disabled(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        for sp_type, force_off, output, rejected in [
+            (SpeculativeType.DSPARK, True, ReturnAllProbsMode.ORIGINAL, True),
+            (SpeculativeType.DSPARK, True, ReturnAllProbsMode.DEFAULT, True),
+            (SpeculativeType.DSPARK, False, ReturnAllProbsMode.ORIGINAL, True),
+            (SpeculativeType.DSPARK, True, ReturnAllProbsMode.NONE, False),
+            (SpeculativeType.DSPARK, False, ReturnAllProbsMode.NONE, False),
+            (SpeculativeType.MTP, True, ReturnAllProbsMode.ORIGINAL, False),
+        ]:
+            with self.subTest(sp_type=sp_type, force_off=force_off, output=output):
+                visitor.sp_config = SimpleNamespace(model_type="draft", type=sp_type)
+                request = SimpleNamespace(
+                    token_ids=torch.tensor([1]),
+                    generate_config=GenerateConfig(
+                        force_disable_sp_run=force_off, return_all_probs=output
+                    ),
+                )
+                if rejected:
+                    with self.assertRaises(FtRuntimeException) as err:
+                        visitor.check_sp_supported(request)
+                    self.assertEqual(
+                        err.exception.exception_type,
+                        ExceptionType.UNSUPPORTED_OPERATION,
+                    )
+                else:
+                    visitor.check_sp_supported(request)
 
 
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
