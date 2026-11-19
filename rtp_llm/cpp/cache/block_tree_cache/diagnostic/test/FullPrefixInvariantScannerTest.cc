@@ -332,6 +332,7 @@ TEST_F(FullPrefixScannerTest, BackgroundScanLogsViolationWithoutAffectingTreeOpe
 }
 
 TEST_F(FullPrefixScannerTest, ReportsViolationsBeforeCycleCompletionAndBeyondLogCap) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     test::TestLogCapture log_capture("full_prefix_scan_metrics");
     SyntheticTree        tree(makeMixedGroupSets());
     const auto           nodes =
@@ -352,7 +353,8 @@ TEST_F(FullPrefixScannerTest, ReportsViolationsBeforeCycleCompletionAndBeyondLog
         tags.AddTag("type", "invalid_resource");
         tags.AddTag("reason", reason);
         tags.AddTag("status", status);
-        auto* series = metrics->violation_qps_metric->DeclareMetric(&tags);
+        const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+        auto* series = metrics->violation_qps_metric->DeclareMetric(&serving_tags);
         ASSERT_NE(series, nullptr);
         kmonitor::MetricsRecord record(nullptr, nullptr, 0);
         series->Snapshot(&record, 1000);

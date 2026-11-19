@@ -62,7 +62,8 @@ double snapshotUnfreezeBlocks(const kmonitor::MetricsReporterPtr& reporter,
     tags.AddTag("backend", backend);
     tags.AddTag("forced", "false");
     auto* metric = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>()->unfreeze_blocks_qps_metric;
-    auto* series = metric->DeclareMetric(&tags);
+    const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+    auto* series = metric->DeclareMetric(&serving_tags);
     kmonitor::MetricsRecord record(nullptr, nullptr, 0);
     series->Snapshot(&record, 1000);
     EXPECT_TRUE(metric->UndeclareMetric(series));
@@ -2494,6 +2495,7 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
 }
 
 TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCapacity) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig config;
     config.enable_memory_cache  = true;

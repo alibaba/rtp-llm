@@ -591,6 +591,7 @@ static void holdClaimedCompletion() noexcept {
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, CoordinatorSuccessDoesNotDependOnWaiterPublication) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     std::promise<void> release_response;
     auto               response_ready = release_response.get_future().share();
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
@@ -647,7 +648,8 @@ TEST_F(MultiRankBlockTransferEngineTest, CoordinatorSuccessDoesNotDependOnWaiter
         tags.AddTag("scope", "coordinator_completion");
         tags.AddTag("stage", "completion_total");
         tags.AddTag("success", success ? "true" : "false");
-        auto* metric = metrics->transfer_stage_qps_metric->DeclareMetric(&tags);
+        const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+        auto* metric = metrics->transfer_stage_qps_metric->DeclareMetric(&serving_tags);
         if (!metric) {
             ADD_FAILURE() << "missing completion metric";
             return -1.0;

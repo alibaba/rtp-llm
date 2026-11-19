@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {
@@ -39,7 +40,8 @@ kmonitor::MetricsTags stageTags(const char* stage, const char* source, bool succ
 }
 
 double snapshotMetric(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags) {
-    auto* series = metric->DeclareMetric(&tags);
+    const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+    auto* series = metric->DeclareMetric(&serving_tags);
     if (series == nullptr) {
         ADD_FAILURE() << "missing metric: " << tags.ToString();
         return -1;
@@ -377,6 +379,7 @@ TEST_P(ConcurrentLoadTaskRunnerTest, BothDirectionsSubmitAndDrainBeforeCompletio
 }
 
 TEST_P(ConcurrentLoadTaskRunnerTest, PreservesStageMetricsAndReportsOnlyTheSuccessfulDirectionsWait) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     const auto [host_first, host_success, disk_success] = GetParam();
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
@@ -461,6 +464,7 @@ INSTANTIATE_TEST_SUITE_P(CompletionOrdersAndFailures,
                          ::testing::Combine(::testing::Bool(), ::testing::Bool(), ::testing::Bool()));
 
 TEST(LoadTaskRunnerTest, InlineTransfersReportWaitBeforeBusinessCompletion) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<RecordingPerRankEngine>(std::deque<bool>{true, true});
@@ -499,6 +503,7 @@ TEST(LoadTaskRunnerTest, InlineTransfersReportWaitBeforeBusinessCompletion) {
 }
 
 TEST(LoadTaskRunnerTest, SingleDirectionDoesNotReportWaitingForAnAbsentTransfer) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     for (Tier tier : {Tier::HOST, Tier::DISK}) {
@@ -523,6 +528,7 @@ TEST(LoadTaskRunnerTest, SingleDirectionDoesNotReportWaitingForAnAbsentTransfer)
 }
 
 TEST(LoadTaskRunnerTest, SimultaneousCompletionsReportExactlyOneDirectionalWait) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
     LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
     auto                           engine = std::make_shared<PendingPerRankEngine>();

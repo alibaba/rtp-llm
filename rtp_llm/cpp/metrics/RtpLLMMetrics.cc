@@ -49,7 +49,7 @@ void RtpLLMGrpcConnectFailureMetrics::report(const kmonitor::MetricsTags*       
                                              RtpLLMGrpcConnectFailureMetricsCollector* collector) {
     kmonitor::MetricsTags failure_tags = tags ? *tags : kmonitor::MetricsTags{};
     failure_tags.AddTag("direction", collector->direction);
-    connect_failed_qps_metric->Report(&failure_tags, 1);
+    reportKmonMetric(connect_failed_qps_metric, &failure_tags, 1);
 }
 
 #define REPORT_QPS(name)                                                                                               \
@@ -645,10 +645,10 @@ void RtpLLMCacheEventDropMetrics::report(const kmonitor::MetricsTags* tags,
                                         RtpLLMCacheEventDropMetricsCollector* collector) {
     kmonitor::MetricsTags queue_tags = tags ? *tags : kmonitor::MetricsTags{};
     queue_tags.AddTag("reason", "queue_full");
-    drop_qps_metric->Report(&queue_tags, collector->queue_full_count);
+    reportKmonMetric(drop_qps_metric, &queue_tags, collector->queue_full_count);
     kmonitor::MetricsTags report_tags = tags ? *tags : kmonitor::MetricsTags{};
     report_tags.AddTag("reason", "report_failed");
-    drop_qps_metric->Report(&report_tags, collector->report_failed_count);
+    reportKmonMetric(drop_qps_metric, &report_tags, collector->report_failed_count);
 }
 
 bool RtpLLMCacheOperationMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -705,7 +705,7 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheUnfreezeMetricsCollector* collector) {
-    unfreeze_blocks_qps_metric->Report(tags, collector->blocks);
+    reportKmonMetric(unfreeze_blocks_qps_metric, tags, collector->blocks);
 }
 
 void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector) {
@@ -761,13 +761,13 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*              tags,
                                         RtpLLMCacheTransferStageMetricsCollector* collector) {
     if (collector->dropped_count)
-        transfer_stage_dropped_qps_metric->Report(tags, collector->dropped_count);
+        reportKmonMetric(transfer_stage_dropped_qps_metric, tags, collector->dropped_count);
     if (collector->sample_count == 0)
         return;
     if (collector->tags_prepared) {
-        transfer_stage_latency_us_metric->Report(tags, collector->latency_us);
-        transfer_stage_latency_sum_us_metric->Report(tags, collector->latency_sum_us);
-        transfer_stage_qps_metric->Report(tags, collector->sample_count);
+        reportKmonMetric(transfer_stage_latency_us_metric, tags, collector->latency_us);
+        reportKmonMetric(transfer_stage_latency_sum_us_metric, tags, collector->latency_sum_us);
+        reportKmonMetric(transfer_stage_qps_metric, tags, collector->sample_count);
         return;
     }
     kmonitor::MetricsTags stage_tags = tags ? *tags : kmonitor::MetricsTags{};
@@ -780,8 +780,8 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*            
     if (collector->rank >= 0) {
         stage_tags.AddTag("transfer_rank", std::to_string(collector->rank));
     }
-    transfer_stage_latency_us_metric->Report(&stage_tags, collector->latency_us);
-    transfer_stage_qps_metric->Report(&stage_tags, collector->sample_count);
+    reportKmonMetric(transfer_stage_latency_us_metric, &stage_tags, collector->latency_us);
+    reportKmonMetric(transfer_stage_qps_metric, &stage_tags, collector->sample_count);
 }
 
 void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*          tags,
@@ -897,22 +897,23 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*            
     kmonitor::MetricsTags selection_tags = tags ? *tags : kmonitor::MetricsTags{};
     if (collector->skip_reason != nullptr) {
         selection_tags.AddTag("reason", collector->skip_reason);
-        choose_victim_skip_qps_metric->Report(&selection_tags, collector->skipped);
+        reportKmonMetric(choose_victim_skip_qps_metric, &selection_tags, collector->skipped);
         return;
     }
     if (collector->calls > 0) {
-        evictable_candidate_count_metric->Report(&selection_tags,
-                                                 static_cast<double>(collector->candidates_sum) / collector->calls);
+        reportKmonMetric(
+            evictable_candidate_count_metric, &selection_tags,
+            static_cast<double>(collector->candidates_sum) / collector->calls);
     }
-    choose_victim_latency_sum_us_metric->Report(&selection_tags, collector->latency_sum_us);
-    choose_victim_scanned_candidates_qps_metric->Report(&selection_tags, collector->scanned_candidates);
+    reportKmonMetric(choose_victim_latency_sum_us_metric, &selection_tags, collector->latency_sum_us);
+    reportKmonMetric(choose_victim_scanned_candidates_qps_metric, &selection_tags, collector->scanned_candidates);
     // AddTag inserts without replacing an existing key. Keep the result tag sets separate.
     auto selected_tags = selection_tags;
     selected_tags.AddTag("selected", "true");
-    choose_victim_qps_metric->Report(&selected_tags, collector->selected);
+    reportKmonMetric(choose_victim_qps_metric, &selected_tags, collector->selected);
     auto not_selected_tags = selection_tags;
     not_selected_tags.AddTag("selected", "false");
-    choose_victim_qps_metric->Report(&not_selected_tags, collector->calls - collector->selected);
+    reportKmonMetric(choose_victim_qps_metric, &not_selected_tags, collector->calls - collector->selected);
 }
 
 bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -921,7 +922,7 @@ bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags) {
-    insert_hard_stop_qps_metric->Report(tags, 1);
+    reportKmonMetric(insert_hard_stop_qps_metric, tags, 1);
 }
 
 bool RtpLLMCacheInvariantMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -930,7 +931,7 @@ bool RtpLLMCacheInvariantMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCacheInvariantMetrics::report(const kmonitor::MetricsTags* tags) {
-    violation_qps_metric->Report(tags, 1);
+    reportKmonMetric(violation_qps_metric, tags, 1);
 }
 
 bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -1332,7 +1333,7 @@ bool RtpLLMRemoteCacheControlMetrics::init(kmonitor::MetricsGroupManager* manage
 
 void RtpLLMRemoteCacheControlMetrics::report(const kmonitor::MetricsTags* tags,
                                              RtpLLMRemoteCacheControlMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(enabled_metric, collector->enabled ? 1 : 0);
+    RTP_REPORT_MUTABLE_METRIC(enabled_metric, collector->enabled ? 1 : 0);
 }
 
 bool RtpLLMRemoteCacheOutcomeMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -1345,7 +1346,7 @@ void RtpLLMRemoteCacheOutcomeMetrics::report(const kmonitor::MetricsTags*       
     kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
     event_tags.AddTag("stage", collector->stage);
     event_tags.AddTag("outcome", collector->outcome);
-    outcome_qps_metric->Report(&event_tags, 1);
+    reportKmonMetric(outcome_qps_metric, &event_tags, 1);
 }
 
 }  // namespace rtp_llm

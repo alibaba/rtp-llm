@@ -152,6 +152,9 @@ void CacheStageMetrics::record(const char* stage,
                                const char* operation,
                                const char* source,
                                const char* target) noexcept {
+    if (!isKmonMetricReportingEnabled()) {
+        return;
+    }
     impl_->record({stage, scope, operation, source, target}, latency, rank, success);
 }
 void CacheStageMetrics::flush() {

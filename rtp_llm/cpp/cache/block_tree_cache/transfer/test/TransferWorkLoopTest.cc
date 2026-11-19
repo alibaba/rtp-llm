@@ -31,6 +31,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
@@ -121,7 +122,8 @@ size_t seriesCount(kmonitor::MutableMetric* metric) {
 }
 
 double snapshot(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags) {
-    auto* series = metric->DeclareMetric(&tags);
+    const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+    auto* series = metric->DeclareMetric(&serving_tags);
     if (!series) {
         ADD_FAILURE() << "missing series: " << tags.ToString();
         return -1;
@@ -260,6 +262,8 @@ void prepareOomDeathTest(const char* marker) {
 
 class TransferWorkLoopTest: public ::testing::Test {
 protected:
+    block_tree_cache_test::ScopedServingMetrics serving_metrics_;
+
     void SetUp() override {
         direct_disk_executor = std::make_unique<DiskIOExecutor>(diskOptions());
         direct_disk_executor->start();

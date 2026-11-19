@@ -286,6 +286,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps + [
         ":block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "@havenask//aios/autil:env_util",
         "//rtp_llm/cpp/utils:async_profile_trace",
     ],

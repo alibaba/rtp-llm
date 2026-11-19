@@ -1005,6 +1005,7 @@ TEST_F(HostDiskWatermarkTest, FinishedGroupRestartsWhileAnotherGroupRemainsPendi
 }
 
 TEST_F(HostDiskWatermarkTest, ReportsEvictionBlockQpsAndFailuresBeforeRoundFinishes) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     env_.evictor_->disk_cache_evict_max_pending_bytes_ = 128;
     env_.evictor_->max_descriptors_per_batch_          = 2;
     auto* metrics = env_.metricsReporter()->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
@@ -1260,6 +1261,7 @@ TEST_F(HostDiskWatermarkTest, PendingLeafCompletionMakesParentEligible) {
 }
 
 TEST_F(HostDiskWatermarkTest, DiskAllocationFailureSkipsGroup) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     insertHostNodes(3);
     const auto occupied = env_.groups_[0]->allocateBlocks(4, Tier::DISK, BlockTreeRefType::CACHE);
     ASSERT_TRUE(occupied.has_value());
@@ -1277,6 +1279,7 @@ TEST_F(HostDiskWatermarkTest, DiskAllocationFailureSkipsGroup) {
 }
 
 TEST_F(HostDiskWatermarkTest, AdmissionRejectionClearsPassAndReservations) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     insertHostNodes(3);
     env_.task_pool_->stopAdmission();
     schedule();
@@ -1316,6 +1319,7 @@ TEST_F(HostDiskWatermarkTest, DetachedCompletionStillAdvancesPass) {
 }
 
 TEST_F(HostDiskWatermarkTest, ExpiredBatchesDoNotLeavePassStuck) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     insertHostNodes(3);
     env_.evictor_->disk_timeout_ms_ = 0;
     schedule();
@@ -2952,6 +2956,7 @@ TEST_F(BlockTreeEvictorTest, BatchDropReportsZeroScheduledBlocksWhenPhysicalBloc
 }
 
 TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescriptor) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto host_pool = makePinnedHostPool(2);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
@@ -3019,6 +3024,7 @@ TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescrip
 }
 
 TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnce) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto host_pool = makePinnedHostPool(2);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
@@ -5016,6 +5022,7 @@ TEST_F(BlockTreeEvictorTest, InsertSupersedesEvictionWithoutBlockingNextEviction
 }
 
 TEST_F(BlockTreeEvictorTest, RematchedEvictionReportsCancellationOnlyOnCopySuccess) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
     for (bool success : {true, false}) {
         SCOPED_TRACE(success);
         auto host_pool = makePinnedHostPool(2);
