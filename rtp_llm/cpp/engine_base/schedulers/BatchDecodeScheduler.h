@@ -7,8 +7,11 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
+#include <functional>
+#include <thread>
 #include <list>
 
 namespace rtp_llm {
@@ -21,6 +24,7 @@ struct BatchDecodeSchedulerConfigLocal: public autil::legacy::Jsonizable {
     uint32_t    batch_size_;
     std::string mode_;
 };
+// Test-only scheduler that preserves explicitly requested batches.
 class BatchDecodeScheduler: public SchedulerBase {
 public:
     enum SchedulerType : std::uint8_t {
@@ -30,7 +34,10 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank = 0) {
+                         int                                    dp_rank                 = 0,
+                         std::chrono::milliseconds              allocation_wait_timeout = std::chrono::seconds(30),
+                         std::function<std::chrono::steady_clock::time_point()> now = std::chrono::steady_clock::now):
+        allocation_wait_timeout_(allocation_wait_timeout), now_(std::move(now)) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
@@ -201,8 +208,27 @@ public:
         draining_mixed_modes_ = has_other_mode;
         for (auto& stream : selected_streams) {
             stream->reportEvent(StreamEvents::CanRun);
-            // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
-            while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+            // This synchronous benchmark scheduler cannot execute the selected streams to
+            // reclaim KV while admitting the batch. Bound consecutive allocation retries, but
+            // leave actual cache I/O to the stream/request and connector timeout policies.
+            auto allocation_deadline = now_() + allocation_wait_timeout_;
+            while (stream->getStatus() != StreamState::FINISHED) {
+                const auto previous_state = stream->getStatus();
+                const auto state          = stream->moveToNext();
+                if (state == StreamState::RUNNING || state == StreamState::FINISHED) {
+                    break;
+                }
+                if (state == StreamState::LOADING_CACHE || previous_state == StreamState::LOADING_CACHE) {
+                    // Loading may return to WAITING for materialization/reallocation. Give
+                    // that allocation its own budget, independent of time spent doing I/O.
+                    allocation_deadline = now_() + allocation_wait_timeout_;
+                } else if (state == StreamState::WAITING && now_() >= allocation_deadline) {
+                    stream->reportError(ErrorCode::MALLOC_FAILED,
+                                        "BatchDecodeScheduler: KV allocation reached the "
+                                            + std::to_string(allocation_wait_timeout_.count()) + " ms wait limit");
+                    stream->moveToNext();
+                    break;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
@@ -288,13 +314,15 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
 
-    std::shared_ptr<KVCacheManager> cache_manager_;
-    kmonitor::MetricsReporterPtr    metrics_reporter_;
-    SchedulerType                   scheduler_type_;
-    int                             dp_rank_ = 0;
+    std::shared_ptr<KVCacheManager>                              cache_manager_;
+    kmonitor::MetricsReporterPtr                                 metrics_reporter_;
+    SchedulerType                                                scheduler_type_;
+    int                                                          dp_rank_ = 0;
+    const std::chrono::milliseconds                              allocation_wait_timeout_;
+    const std::function<std::chrono::steady_clock::time_point()> now_;
 };
 
 }  // namespace rtp_llm
