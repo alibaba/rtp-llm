@@ -378,3 +378,14 @@ py_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
 )
+
+# Required deployment gate after changing the optional FlashInfer wheel/lock.
+# Unlike the CPU selector tests, the GPU target fails if the ABI is unavailable.
+test_suite(
+    name = "nvfp4_hybrid_sm120_regression",
+    tests = [
+        ":nvfp4_hybrid_executor_test",
+        ":nvfp4_hybrid_sm120_gpu_test",
+    ],
+    tags = ["manual"],
+)
