@@ -755,13 +755,10 @@ class RemoteCacheTest(unittest.TestCase):
             with patch.object(
                 slot, "object_size", wraps=slot.object_size
             ) as metadata, patch.object(
-                remote._metadata_executor, "submit", wraps=remote._metadata_executor.submit
-            ) as submit, patch.object(
                 remote, "_report_outcome"
             ) as outcome:
                 self.assertIsNone(remote.load("hit"))
                 metadata.assert_called_once()
-                submit.assert_called_once()
                 outcome.assert_any_call("read", "skipped")
             for i in range(2):
                 remote.submit_result(str(i), (value + i, None))
@@ -781,27 +778,14 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
-    def test_read_timeout_before_io_keeps_slot_free_and_skips_sdk(self):
+    def test_expired_read_does_not_issue_metadata_or_lease_a_slot(self):
         remote, (slot,) = self.slot_cache(1)
-        gate = threading.Event()
-        blockers = [
-            remote._metadata_executor.submit(gate.wait, 3)
-            for _ in range(remote._metadata_executor._max_workers)
-        ]
-        try:
-            with patch.object(slot, "object_size", wraps=slot.object_size) as lookup:
-                self.assertIsNone(remote.load("queued", timeout_ms=30))
-                lookup.assert_not_called()
-            recovered = remote._gdr_pool.acquire()
-            self.assertIs(recovered, slot)
-            remote._gdr_pool.release(recovered)
-            self.assertEqual(remote.stats()["inflight_tasks"], 0)
-        finally:
-            gate.set()
-            for blocker in blockers:
-                blocker.result(timeout=1)
-            remote._metadata_executor.shutdown(wait=True)
-        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        with patch.object(slot, "object_size") as metadata:
+            self.assertIsNone(remote.load("expired", timeout_ms=-1))
+            metadata.assert_not_called()
+        self.assertFalse(remote._gdr_pool._in_use)
+        self.assertEqual(remote.stats()["read_timeout"], 1)
+
 
     def test_metadata_remains_available_while_two_payloads_are_stalled(self):
         payload = pack_object(plan_object((torch.ones(3), None)))
@@ -837,63 +821,36 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
-    def test_timed_out_metadata_retains_its_worker_until_it_exits(self):
-        store = Store({})
-        remote = self.remote(store, max_pending=2, metadata_workers=2)
-        entered = threading.Semaphore(0)
-        release = threading.Event()
+    def test_metadata_queries_use_caller_workers_with_full_payload_admission(self):
+        store = Store()
+        remote = self.remote(store, max_pending=1)
+        all_entered = threading.Barrier(8)
+        threads = set()
+        self.assertTrue(remote._reserve(0))
 
-        def block_lookup(*args, **kwargs):
-            entered.release()
-            self.assertTrue(release.wait(3))
+        def miss(key, **kwargs):
+            self.assertEqual(int(key), threading.get_ident())
+            threads.add(threading.get_ident())
+            self.assertTrue(0 < kwargs["timeout_ms"] <= 200)
+            all_entered.wait(1)
             return None
 
-        with (
-            patch.object(store, "object_size", side_effect=block_lookup) as lookup,
-            patch.object(remote, "_report_skip", wraps=remote._report_skip) as skip,
-            concurrent.futures.ThreadPoolExecutor(2) as callers,
-        ):
-            reads = [callers.submit(remote.load, str(i), timeout_ms=200) for i in range(2)]
-            try:
-                self.assertTrue(all(entered.acquire(timeout=1) for _ in reads))
-                for read in reads:
-                    self.assertIsNone(read.result(timeout=1))
-                self.assertIsNone(remote.load("workers-busy", timeout_ms=25))
-                self.assertEqual(lookup.call_count, 2)
-                self.assertEqual(remote.stats()["inflight_tasks"], 0)
-                skip.assert_not_called()
-            finally:
-                release.set()
-        remote.close()
-        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        with patch.object(store, "object_size", side_effect=miss):
+            with concurrent.futures.ThreadPoolExecutor(8) as callers:
+                def load():
+                    return remote.load(str(threading.get_ident()), timeout_ms=200)
 
-    def test_timed_out_queued_reads_cannot_fill_an_unbounded_queue(self):
-        remote, (slot,) = self.slot_cache(1, max_pending=1, metadata_workers=2)
-        gate = threading.Event()
-        blockers = [
-            remote._metadata_executor.submit(gate.wait, 3)
-            for _ in range(remote._metadata_executor._max_workers)
-        ]
-        try:
-            with patch.object(
-                remote._metadata_executor, "submit", wraps=remote._metadata_executor.submit
-            ) as submit, patch.object(slot, "object_size") as metadata, patch.object(
-                remote._gdr_pool, "acquire", wraps=remote._gdr_pool.acquire
-            ) as acquire:
-                for _ in range(2):
-                    self.assertIsNone(remote.load("queued", timeout_ms=10))
-                self.assertEqual(remote.stats()["inflight_tasks"], 0)
-                self.assertIsNone(remote.load("not-admitted", timeout_ms=10))
-                self.assertEqual(submit.call_count, 2)
-                metadata.assert_not_called()
-                acquire.assert_not_called()
-        finally:
-            gate.set()
-            for blocker in blockers:
-                blocker.result(timeout=1)
-            remote._metadata_executor.shutdown(wait=True)
-        self.assertEqual(remote.stats()["inflight_tasks"], 0)
-        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+                try:
+                    reads = [callers.submit(load) for _ in range(8)]
+                    self.assertTrue(all(read.result(timeout=2) is None for read in reads))
+                    self.assertEqual(remote.stats()["inflight_tasks"], 1)
+                finally:
+                    remote._release(0)
+        self.assertEqual(len(threads), 8)
+        self.assertEqual(remote.stats()["miss"], 8)
+        self.assertEqual(remote.stats().get("read_error", 0), 0)
+
+
 
     def test_gdr_preflight_rejections_never_lease_a_slot(self):
         for size, failure, budget in (
@@ -917,16 +874,17 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertEqual(remote.stats()["inflight_tasks"], 0)
                 self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
-    def test_full_payload_admission_still_queries_metadata_without_leasing_a_slot(self):
+    def test_full_write_admission_does_not_block_a_payload_read(self):
         remote, (slot,) = self.slot_cache(1, max_pending=1)
+        value = torch.arange(8)
+        slot.objects["key"] = pack_object(
+            plan_object(
+                {"cache_key": "key", "version": 1, "result": (value, None), "greennet": None}
+            )
+        )
         self.assertTrue(remote._reserve(0))
         try:
-            with patch.object(slot, "object_size", return_value=32) as metadata, patch.object(
-                remote._gdr_pool, "acquire", wraps=remote._gdr_pool.acquire
-            ) as acquire:
-                self.assertIsNone(remote.load("key"))
-                metadata.assert_called_once()
-                acquire.assert_not_called()
+            torch.testing.assert_close(remote.load("key")[0], value)
         finally:
             remote._release(0)
 
@@ -966,24 +924,17 @@ class RemoteCacheTest(unittest.TestCase):
 
     def test_metadata_finishing_after_deadline_never_leases_gdr(self):
         remote, (slot,) = self.slot_cache(1)
-        started, resume = threading.Event(), threading.Event()
 
         def lookup(*args, **kwargs):
-            started.set()
-            resume.wait(3)
+            time.sleep(0.050)
             return 32
 
         with patch.object(slot, "object_size", side_effect=lookup), patch.object(
             remote._gdr_pool, "acquire", wraps=remote._gdr_pool.acquire
         ) as acquire:
-            try:
-                self.assertIsNone(remote.load("late", timeout_ms=30))
-                self.assertTrue(started.is_set())
-                self.assertFalse(remote._gdr_pool._in_use)
-            finally:
-                resume.set()
-                remote._metadata_executor.shutdown(wait=True)
+            self.assertIsNone(remote.load("late", timeout_ms=30))
             acquire.assert_not_called()
+        self.assertEqual(remote.stats()["read_timeout"], 1)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
@@ -1300,49 +1251,10 @@ class RemoteCacheTest(unittest.TestCase):
         )
         self.assertEqual(remote.stats()["hit"], 1)
 
-    def test_executor_queue_delay_is_observable(self):
-        remote = self.remote(Store(), metadata_workers=1)
-        entered = [threading.Event() for _ in range(remote._metadata_executor._max_workers)]
-        release = threading.Event()
-
-        def block(index):
-            entered[index].set()
-            release.wait(3)
-
-        blockers = [remote._metadata_executor.submit(block, i) for i in range(len(entered))]
-        self.assertTrue(all(e.wait(2) for e in entered))
-        submitted = threading.Event()
-        original_submit = remote._metadata_executor.submit
-
-        def submit(lookup):
-            task = original_submit(lookup)
-            submitted.set()
-            return task
-
-        with patch.object(remote._metadata_executor, "submit", side_effect=submit), patch(
-            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
-        ) as report:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as caller:
-                pending = caller.submit(remote.load, "missing")
-                try:
-                    self.assertTrue(submitted.wait(1))
-                    self.assertEqual(remote.stats()["inflight_tasks"], 0)
-                    time.sleep(0.03)
-                finally:
-                    release.set()
-                self.assertIsNone(pending.result(timeout=2))
-            for blocker in blockers:
-                blocker.result(timeout=2)
-        waits = self.metric_values(
-            report, GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC
-        )
-        self.assertEqual(len(waits), 1)
-        self.assertEqual(waits[0][1], {"operation": "read"})
-        self.assertGreaterEqual(waits[0][0], 20)
 
     def test_operation_totals_partition_hit_miss_failure_and_skip_once(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))
-        remote = self.remote(Store({"key": data}), max_pending=1)
+        remote = self.remote(Store({"key": data}), read_transfer_workers=1)
         with patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
         ) as report:
@@ -1351,11 +1263,11 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertIsNone(remote.load("missing"))
             data[-1] ^= 1
             self.assertIsNone(remote.load("key"))
-            self.assertTrue(remote._reserve(0))
+            self.assertTrue(remote._transfer_slots.acquire(blocking=False))
             try:
                 self.assertIsNone(remote.load("key"))
             finally:
-                remote._release(0)
+                remote._transfer_slots.release()
         counts = {}
         for value, tags in self.metric_values(
             report, AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC
@@ -1441,31 +1353,21 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(tags, {"status": "timeout"})
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
-    def test_late_metadata_miss_is_not_a_second_caller_outcome(self):
-        gate = threading.Event()
-        started = threading.Event()
+    def test_late_metadata_miss_counts_one_read_timeout(self):
         remote = self.remote(Store(), read_timeout_ms=30)
 
         def late_miss(*args, **kwargs):
-            started.set()
-            self.assertTrue(gate.wait(3))
+            time.sleep(0.050)
             return None
 
         with patch.object(remote._client, "object_size", side_effect=late_miss):
             with patch.object(remote, "record", wraps=remote.record) as record:
-                try:
-                    self.assertIsNone(remote.load("missing", trace_id="late-miss"))
-                    self.assertTrue(started.is_set())
-                finally:
-                    gate.set()
-                    remote.close()
-        outcomes = [c.args[0] for c in record.call_args_list]
-        self.assertEqual(outcomes, ["read_error", "read_late_complete"])
-        completed = record.call_args_list[-1].kwargs
-        self.assertEqual(completed["trace_id"], "late-miss")
-        self.assertEqual(completed["completion_outcome"], "miss")
+                self.assertIsNone(remote.load("missing", trace_id="late-miss"))
+        record.assert_called_once()
+        self.assertEqual(record.call_args.args[0], "read_error")
+        self.assertEqual(record.call_args.kwargs["stage"], "metadata")
         self.assertEqual(remote.stats().get("miss", 0), 0)
-        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["read_timeout"], 1)
 
     def test_write_rt_includes_snapshot_queue_and_failure_keeps_trace(self):
         for failed in (False, True):
@@ -1732,30 +1634,22 @@ class RemoteCacheTest(unittest.TestCase):
 
     def test_admission_skips_do_not_increment_error_qps(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))
-        remote = self.remote(Store({"key": data}), max_inflight_bytes=1, max_pending=1)
+        remote = self.remote(Store({"key": data}), max_inflight_bytes=1)
         with patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
         ) as report:
-            self.assertIsNone(remote.load("key"))  # Metadata lookup, no payload budget.
-            self.assertTrue(remote._reserve(0))
-            try:
-                self.assertIsNone(remote.load("key"))  # No admitted IO at all.
-            finally:
-                remote._release(0)
+            self.assertIsNone(remote.load("key"))
         self.assertEqual(
             self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC),
-            [(1, {"status": "admission_skip"})] * 2,
+            [(1, {"status": "admission_skip"})],
         )
         self.assertEqual(
             self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
-            [(0, {})] * 2,
+            [(0, {})],
         )
         self.assertEqual(
             self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC),
-            [
-                (1, {"operation": "read", "reason": "payload_budget"}),
-                (1, {"operation": "read", "reason": "transfer_admission"}),
-            ],
+            [(1, {"operation": "read", "reason": "payload_budget"})],
         )
 
     def test_metric_reporting_failure_preserves_result_and_releases_budget(self):
@@ -2608,63 +2502,34 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
         self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
         self.assertEqual(self.cache.stats()["inflight_bytes"], 0)
 
-    def test_metadata_failure_and_blocking_close_remain_bounded_off_request_thread(
-        self,
-    ):
-        release = threading.Event()
-        retired = []
+    def test_native_metadata_deadline_does_not_close_the_client(self):
+        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupTimeout
 
-        class SlowCleanup(FakeClient):
-            def object_size(client, key, **kwargs):
-                raise TimeoutError("metadata deadline")
-
-            def close(client):
-                retired.append(client)
-                release.wait(3)
-                client.closed = True
-
-        self.cache._factory = lambda: SlowCleanup(self.storage)
-        self.cache.read_timeout_ms = 20
-        self.cache._metadata_workers = threading.BoundedSemaphore(2)
-        try:
-            started = time.monotonic()
-            self.assertIsNone(self.cache.load("one"))
-            self.assertIsNone(self.cache.load("two"))
-            self.assertLess(time.monotonic() - started, 0.5)
-            self.assertEqual(len(retired), 2)
-            self.assertFalse(any(client.closed for client in retired))
-            self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
-            self.assertIsNone(self.cache.load("not-admitted"))
-            self.assertEqual(self.cache.stats().get("admission_skip", 0), 0)
-            self.assertEqual(len(retired), 2)
-        finally:
-            release.set()
-            self.cache.close()
-        self.assertTrue(all(client.closed for client in retired))
+        self.cache.load("missing")
+        client = self.clients[-1]
+        with patch.object(
+            client, "object_size", side_effect=KvMetaLookupTimeout("metadata deadline")
+        ), patch.object(client, "close", wraps=client.close) as close:
+            self.assertIsNone(self.cache.load("timeout"))
+            close.assert_not_called()
+        self.assertIsNone(self.cache.load("still-missing"))
+        self.assertEqual(len(self.clients), 1)
+        self.assertEqual(self.cache.stats()["read_timeout"], 1)
         self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
-        self.assertEqual(self.cache.stats()["inflight_bytes"], 0)
-        self.assertEqual(self.cache._client_users, {})
 
-    def test_slow_client_factory_is_also_inside_read_deadline(self):
-        started, release = threading.Event(), threading.Event()
+    def test_expired_client_initialization_does_not_start_rpc(self):
+        client = FakeClient(self.storage)
 
         def factory():
-            started.set()
-            release.wait(3)
-            return FakeClient(self.storage)
+            time.sleep(0.050)
+            return client
 
         self.cache._factory = factory
-        self.cache.read_timeout_ms = 20
-        try:
-            before = time.monotonic()
-            self.assertIsNone(self.cache.load("missing"))
-            self.assertLess(time.monotonic() - before, 0.5)
-            self.assertTrue(started.is_set())
-            self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
-        finally:
-            release.set()
-            self.cache.close()
-        self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
+        self.cache.read_timeout_ms = 30
+        with patch.object(client, "object_size") as metadata:
+            self.assertIsNone(self.cache.load("expired"))
+            metadata.assert_not_called()
+        self.assertEqual(self.cache.stats()["read_timeout"], 1)
         self.assertEqual(self.cache._client_users, {})
 
     def test_partial_native_failure_discards_buffer_and_recreates_client(self):
@@ -3354,7 +3219,6 @@ class GdrStartupLifetimeTest(unittest.TestCase):
                     try:
                         constructor.assert_called_once()
                         self.assertEqual(constructor.call_args.kwargs["slots"], 4)
-                        self.assertEqual(cache._metadata_executor._max_workers, 32)
                         self.assertEqual(
                             cache._transfer_executor._max_workers, read_workers or 4
                         )
