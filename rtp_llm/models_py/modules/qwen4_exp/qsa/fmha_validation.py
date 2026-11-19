@@ -5,6 +5,13 @@ import torch
 from .validation import DeviceChecks
 
 
+def matching_model_prefill_geometry(impl, cache, table, bases, lengths):
+    for receipt in getattr(impl, "_model_prefill_geometry", None) or ():
+        if receipt.matches(impl, cache, table, bases, lengths):
+            return receipt
+    return None
+
+
 def main_geometry_checks(checks, bases, lengths, table, page_size, pages, padded):
     """Queue safe wide-integer checks; the caller owns the single host read."""
     bases = bases.to(device=table.device, dtype=torch.int64, non_blocking=True)
@@ -209,11 +216,13 @@ def _validate_main_paged_geometry(
                 "qwen4_exp QSA paged main block table does not cover the visible KV"
             )
         return page_size
-    for receipt in getattr(self, "_model_prefill_geometry", None) or ():
-        if receipt.matches(self, cache, block_table, sequence_bases, query_lengths):
-            if checks is not None:
-                checks.prefill_metadata_readonly = True
-            return receipt.page_size
+    receipt = matching_model_prefill_geometry(
+        self, cache, block_table, sequence_bases, query_lengths
+    )
+    if receipt is not None:
+        if checks is not None:
+            checks.prefill_metadata_readonly = True
+        return receipt.page_size
     page_size = _try_validate_main_paged_geometry(
         self,
         cache,
