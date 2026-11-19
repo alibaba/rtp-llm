@@ -33,14 +33,15 @@ def enabled(pc) -> bool:
     return template_phase_active() and pc.world_size > pc.local_world_size
 
 
-def _read_topology(world_size: int, local_world_size: int, gang_info: GangInfoReader):
+def read_topology(
+    world_size: int, local_world_size: int, gang_info: GangInfoReader
+) -> dict[int, str]:
     if local_world_size <= 0 or world_size % local_world_size:
         raise ValueError("SCR VIP requires equally sized nodes")
     rows = gang_info.read()
     if not isinstance(rows, dict):
         raise ValueError("SCR gang info must be an object")
     nodes = {}
-    real_ip_by_vip = {}
     node_count = world_size // local_world_size
     if len(rows) != node_count:
         raise ValueError("SCR gang info does not match the complete node topology")
@@ -59,21 +60,7 @@ def _read_topology(world_size: int, local_world_size: int, gang_info: GangInfoRe
                 "SCR gang info requires distinct VIPs and unique node ranks"
             )
         nodes[rank] = vip
-        real_ip_by_vip[vip] = real
-    return nodes, real_ip_by_vip
-
-
-def read_topology(
-    world_size: int, local_world_size: int, gang_info: GangInfoReader
-) -> dict[int, str]:
-    return _read_topology(world_size, local_world_size, gang_info)[0]
-
-
-def real_ip_by_vip(pc, gang_info: GangInfoReader) -> dict[str, str] | None:
-    """Resolve the current underlay only when multi-node SCR uses VIPs."""
-    if not enabled(pc):
-        return None
-    return _read_topology(pc.world_size, pc.local_world_size, gang_info)[1]
+    return nodes
 
 
 def validate_device(address: str) -> None:

@@ -150,11 +150,6 @@ class ScrVipTest(unittest.TestCase):
         self.assertEqual(
             network.read_topology(4, 2, self.reader), {0: "22.0.1.2", 1: "22.0.1.3"}
         )
-        self.rows["model-rank-1"]["real_ip"] = "10.1.2.3"
-        self._write_rows(self.rows)
-        self.assertEqual(
-            network.real_ip_by_vip(self.pc, self.reader)["22.0.1.3"], "10.1.2.3"
-        )
         with patch.object(network, "validate_device") as check:
             self.assertEqual(
                 network.internal_ip(self.pc, "10.0.0.3", self.reader), "22.0.1.3"
@@ -239,15 +234,20 @@ class ScrVipTest(unittest.TestCase):
         self.assertEqual(
             network.read_topology(4, 2, self.reader), {0: "22.0.1.2", 1: "22.0.1.3"}
         )
-        self.assertEqual(
-            network.real_ip_by_vip(self.pc, self.reader),
-            {"22.0.1.2": "10.44.53.114", "22.0.1.3": "10.44.53.83"},
-        )
+        from rtp_llm.config.engine_config import update_worker_addrs
+
+        self.pc.tp_size, self.pc.dp_size, self.pc.dp_rank = 4, 1, 0
+        runtime = SimpleNamespace()
+        update_worker_addrs(runtime, self.pc, self._world(), self.reader.read())
+        self.assertEqual(runtime.worker_addrs[0], "10.44.53.114:22292:22294")
+        self.assertEqual(runtime.worker_addrs[2], "10.44.53.83:22292:22294")
         for phase in ("checkpoint", "restore"):
             for rank in range(4):
-                with self.subTest(phase=phase, rank=rank), patch.dict(
-                    os.environ, {"SCR_PHASE": phase}
-                ), patch.object(network, "validate_device") as device:
+                with (
+                    self.subTest(phase=phase, rank=rank),
+                    patch.dict(os.environ, {"SCR_PHASE": phase}),
+                    patch.object(network, "validate_device") as device,
+                ):
                     self.pc.world_rank = rank
                     self.pc.local_rank = rank % 2
                     expected = "22.0.1.2" if rank < 2 else "22.0.1.3"
@@ -427,7 +427,7 @@ class ScrVipTest(unittest.TestCase):
         self.assertEqual(os.environ["NCCL_SOCKET_IFNAME"], "scr_vxlan0")
         self.assertEqual(os.environ["GLOO_SOCKET_IFNAME"], "scr_vxlan0")
 
-    def test_cache_advertisement_uses_vip_mapping_and_refreshes_underlay(self):
+    def test_cache_advertisement_reads_each_container_ip_and_keeps_rpc_vip(self):
         from rtp_llm.config.engine_config import update_worker_addrs
 
         self.pc.tp_size, self.pc.dp_size, self.pc.dp_rank = 4, 1, 0
@@ -436,16 +436,13 @@ class ScrVipTest(unittest.TestCase):
         for real_ip in ("10.0.0.3", "10.2.0.3"):
             self.rows["model-rank-1"]["real_ip"] = real_ip
             self._write_rows(self.rows)
-            update_worker_addrs(
-                config, self.pc, world, network.real_ip_by_vip(self.pc, self.reader)
-            )
+            update_worker_addrs(config, self.pc, world, self.reader.read())
+            self.assertEqual(config.worker_addrs[0], "10.0.0.2:22292:22294")
             self.assertEqual(config.worker_addrs[2], f"{real_ip}:22292:22294")
             self.assertEqual(config.worker_grpc_addrs[2], "22.0.1.3:22291")
         world.members[2].ip = "22.0.1.99"
-        with self.assertRaisesRegex(KeyError, "22.0.1.99"):
-            update_worker_addrs(
-                config, self.pc, world, network.real_ip_by_vip(self.pc, self.reader)
-            )
+        with self.assertRaisesRegex(ValueError, "does not match platform topology"):
+            update_worker_addrs(config, self.pc, world, self.reader.read())
 
     def test_backend_restore_rereads_underlay_with_the_same_reader(self):
         from rtp_llm.server.backend_manager import BackendManager
@@ -467,7 +464,14 @@ class ScrVipTest(unittest.TestCase):
         backend._world_info = world
         backend.engine = Mock()
         endpoints = [(m.ip, m.server_port, m.world_rank) for m in world.members]
-        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch(
+        with patch.dict(
+            os.environ,
+            {
+                "SCR_PHASE": "restore",
+                "RequestedIP": "10.99.0.3",
+                "HIPPO_SLAVE_IP": "10.99.0.3",
+            },
+        ), patch(
             "rtp_llm.server.backend_manager.get_world_info", return_value=world
         ), patch.object(network, "validate_device"):
             for real_ip in ("10.1.0.3", "10.2.0.3"):
@@ -487,18 +491,34 @@ class ScrVipTest(unittest.TestCase):
                     runtime, world
                 )
 
-    def test_missing_cache_mapping_fails_without_advertising_vip(self):
+    def test_template_preparation_keeps_vips_without_reading_container_ips(self):
         from rtp_llm.config.engine_config import update_worker_addrs
 
-        with self.assertRaisesRegex(
-            ValueError, "requires a current VIP-to-real-IP mapping"
-        ):
-            update_worker_addrs(SimpleNamespace(), self.pc, self._world())
+        self.pc.tp_size, self.pc.dp_size, self.pc.dp_rank = 4, 1, 0
+        self.path.unlink()
+        runtime = SimpleNamespace()
+        update_worker_addrs(runtime, self.pc, self._world())
+        self.assertEqual(runtime.worker_addrs[2], "22.0.1.3:22292:22294")
+        self.assertEqual(runtime.worker_grpc_addrs[2], "22.0.1.3:22291")
+
+    def test_invalid_container_ip_never_falls_back_to_vip(self):
+        from rtp_llm.config.engine_config import update_worker_addrs
+
+        self.pc.tp_size, self.pc.dp_size, self.pc.dp_rank = 4, 1, 0
+        for address in ("127.0.0.1", "0.0.0.0", "224.0.0.1", "22.0.1.3", "invalid"):
+            with self.subTest(address=address):
+                self.rows["model-rank-1"]["real_ip"] = address
+                with self.assertRaises(ValueError):
+                    update_worker_addrs(
+                        SimpleNamespace(), self.pc, self._world(), self.rows
+                    )
+        del self.rows["model-rank-1"]["real_ip"]
+        with self.assertRaisesRegex(KeyError, "real_ip"):
+            update_worker_addrs(SimpleNamespace(), self.pc, self._world(), self.rows)
 
     def test_non_scr_does_not_read_gang_projection(self):
         self.path.unlink()
         with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}):
-            self.assertIsNone(network.real_ip_by_vip(self.pc, self.reader))
             self.assertEqual(
                 network.internal_ip(self.pc, "10.0.0.3", self.reader), "10.0.0.3"
             )
