@@ -30,7 +30,6 @@ using Bf16                          = __nv_bfloat16;
 constexpr int            kMaxRows   = 32;
 constexpr int            kThreads   = 128;
 constexpr int            kMaxBlocks = 64;
-constexpr int            kBarrierTimeoutMs = 10000;
 thread_local std::string error_message;
 
 void check(cudaError_t status) {
@@ -46,7 +45,7 @@ struct Context {
     int          device;
     int          hidden;
     uint64_t     timeout_cycles = 0;
-    ncclComm_t   comm = nullptr;
+    ncclComm_t   comm           = nullptr;
     ncclDevComm  dev{};
     ncclWindow_t window{};
     void*        input       = nullptr;
@@ -74,9 +73,14 @@ struct alignas(16) Pack {
     Bf16 values[8];
 };
 
-__device__ __forceinline__ void sync_or_trap(ncclLsaBarrierSession<ncclCoopCta>& barrier,
-                                            ncclCoopCta coop,
-                                            uint64_t   timeout_cycles) {
+__device__ __forceinline__ void
+sync_or_trap(ncclLsaBarrierSession<ncclCoopCta>& barrier, ncclCoopCta coop, uint64_t timeout_cycles) {
+    if (timeout_cycles == 0) {
+        // NCCL 2.30.4 waitInternal<false> polls the communicator abort flag.
+        // Use the same abort-driven policy as the standard collective by default.
+        barrier.sync(coop, cuda::memory_order_acq_rel);
+        return;
+    }
     const auto status = barrier.sync(coop, cuda::memory_order_acq_rel, timeout_cycles);
     // NCCL returns timeout to the waiting lanes. Make the decision uniform
     // before any lane reads the peer window or a subsequent layer reuses it.
@@ -84,18 +88,18 @@ __device__ __forceinline__ void sync_or_trap(ncclLsaBarrierSession<ncclCoopCta>&
         asm volatile("trap;");
 }
 
-__global__ void reduce_gate(Bf16* output,
-                            const Bf16* shared,
-                            const Bf16* gate,
-                            int count,
-                            int hidden,
-                            ncclDevComm comm,
+__global__ void reduce_gate(Bf16*        output,
+                            const Bf16*  shared,
+                            const Bf16*  gate,
+                            int          count,
+                            int          hidden,
+                            ncclDevComm  comm,
                             ncclWindow_t window,
-                            uint64_t timeout_cycles) {
-    const auto*                        local = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, comm.lsaRank));
-    const auto*                        peer  = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, 1 - comm.lsaRank));
-    const auto*                        shared_packs = reinterpret_cast<const Pack*>(shared);
-    auto*                              output_packs = reinterpret_cast<Pack*>(output);
+                            uint64_t     timeout_cycles) {
+    const auto* local        = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, comm.lsaRank));
+    const auto* peer         = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, 1 - comm.lsaRank));
+    const auto* shared_packs = reinterpret_cast<const Pack*>(shared);
+    auto*       output_packs = reinterpret_cast<Pack*>(output);
     // NCCL Device API "Local AllReduce using LSA" uses an ordinary CUDA
     // launch with one barrier slot per CTA. Both peers launch the same
     // grid; blockIdx.x addresses a slot below requirements.lsaBarrierCount.
@@ -194,13 +198,24 @@ extern "C" int qwen38_lsa_allocate(int device, int hidden, void** output) {
             throw std::runtime_error("LSA hidden size must be positive, divisible by 8 and fit its row capacity");
         check(cudaSetDevice(device));
         validate_device(device);
-        auto context = std::make_unique<Context>(device, hidden);
-        int clock_khz;
-        check(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device));
-        context->timeout_cycles = static_cast<uint64_t>(clock_khz) * kBarrierTimeoutMs;
+        auto         context      = std::make_unique<Context>(device, hidden);
         const size_t window_bytes = static_cast<size_t>(kMaxRows) * hidden * sizeof(Bf16);
         check(ncclMemAlloc(&context->input, window_bytes));
         *output = context.release();
+    });
+}
+
+// NCCL 2.30.4's timed LSA wait counts clock64() SM cycles (not nanoseconds).
+// ClockRate is the advertised peak kHz. At lower clocks a positive deadline
+// can take longer in wall time, so this is a nominal timeout, not a watchdog.
+extern "C" int qwen38_lsa_set_timeout(void* handle, int timeout_ms) {
+    return protect([&] {
+        auto* context = static_cast<Context*>(handle);
+        if (!context || context->comm || timeout_ms < 0)
+            throw std::runtime_error("Set LSA timeout before communicator initialization");
+        int clock_khz;
+        check(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, context->device));
+        context->timeout_cycles = static_cast<uint64_t>(clock_khz) * timeout_ms;
     });
 }
 
@@ -272,6 +287,10 @@ extern "C" int qwen38_lsa_apply(void*       handle,
         const size_t bytes  = rows * context->hidden * sizeof(Bf16);
         check(cudaMemcpyAsync(context->input, input, bytes, cudaMemcpyDeviceToDevice, stream));
         const int blocks = std::min(kMaxBlocks, (rows * context->hidden - 1) / 256 + 1);
+        // Each CTA owns one independent epoch slot. Unused reserved slots do
+        // not participate in a grid-wide barrier. Both ranks use this grid.
+        if (blocks < 1 || blocks > kMaxBlocks)
+            throw std::runtime_error("LSA grid exceeds its reserved barrier slots");
         reduce_gate<<<blocks, kThreads, 0, stream>>>(static_cast<Bf16*>(output),
                                                      static_cast<const Bf16*>(shared),
                                                      static_cast<const Bf16*>(gate),

@@ -34,19 +34,20 @@ void registerLsaBindings(py::module& ops) {
         checkLsa(qwen38_lsa_device(ordinal, bus_id, sizeof(bus_id)));
         return std::string(bus_id);
     });
-    m.def("check_peer", [](int ordinal, const std::string& peer) {
-        checkLsa(qwen38_lsa_peer(ordinal, peer.c_str()));
-    });
+    m.def("check_peer", [](int ordinal, const std::string& peer) { checkLsa(qwen38_lsa_peer(ordinal, peer.c_str())); });
     m.def("unique_id", []() {
         std::string uid(qwen38_lsa_uid_size(), '\0');
         checkLsa(qwen38_lsa_unique_id(uid.data()));
         return py::bytes(uid);
     });
     m.def("allocate", [](int device, int hidden) {
-        void* handle = nullptr;
+        void*                  handle = nullptr;
         py::gil_scoped_release release;
         checkLsa(qwen38_lsa_allocate(device, hidden, &handle));
         return reinterpret_cast<uintptr_t>(handle);
+    });
+    m.def("set_timeout", [](uintptr_t handle, int timeout_ms) {
+        checkLsa(qwen38_lsa_set_timeout(reinterpret_cast<void*>(handle), timeout_ms));
     });
     m.def("connect", [](uintptr_t handle, int rank, const py::bytes& value) {
         const std::string uid = value;
@@ -63,27 +64,28 @@ void registerLsaBindings(py::module& ops) {
         py::gil_scoped_release release;
         checkLsa(qwen38_lsa_activate(reinterpret_cast<void*>(handle)));
     });
-    m.def("apply", [](uintptr_t handle,
-                      uintptr_t partial,
-                      uintptr_t shared,
-                      uintptr_t gate,
-                      uintptr_t output,
-                      int rows,
-                      uintptr_t stream) {
-        checkLsa(qwen38_lsa_apply(reinterpret_cast<void*>(handle),
-                                 reinterpret_cast<const void*>(partial),
-                                 reinterpret_cast<const void*>(shared),
-                                 reinterpret_cast<const void*>(gate),
-                                 reinterpret_cast<void*>(output),
-                                 rows,
-                                 reinterpret_cast<void*>(stream)));
-    });
+    m.def("apply",
+          [](uintptr_t handle,
+             uintptr_t partial,
+             uintptr_t shared,
+             uintptr_t gate,
+             uintptr_t output,
+             int       rows,
+             uintptr_t stream) {
+              checkLsa(qwen38_lsa_apply(reinterpret_cast<void*>(handle),
+                                        reinterpret_cast<const void*>(partial),
+                                        reinterpret_cast<const void*>(shared),
+                                        reinterpret_cast<const void*>(gate),
+                                        reinterpret_cast<void*>(output),
+                                        rows,
+                                        reinterpret_cast<void*>(stream)));
+          });
     m.def("reference", [](uintptr_t handle, uintptr_t partial, uintptr_t output, int rows, uintptr_t stream) {
         checkLsa(qwen38_lsa_reference(reinterpret_cast<void*>(handle),
-                                     reinterpret_cast<const void*>(partial),
-                                     reinterpret_cast<void*>(output),
-                                     rows,
-                                     reinterpret_cast<void*>(stream)));
+                                      reinterpret_cast<const void*>(partial),
+                                      reinterpret_cast<void*>(output),
+                                      rows,
+                                      reinterpret_cast<void*>(stream)));
     });
     m.def("destroy", [](uintptr_t handle) {
         py::gil_scoped_release release;

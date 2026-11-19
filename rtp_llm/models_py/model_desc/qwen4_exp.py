@@ -842,7 +842,13 @@ class Qwen4ExpModel(Qwen35Model):
                     prepare_shared_gemm,
                 )
 
-                prepare_shared_gemm(self.layers, weights.weights)
+                from rtp_llm.models_py.distributed import collective_torch
+
+                prepare_shared_gemm(
+                    self.layers,
+                    weights.weights,
+                    group=collective_torch._get_group(collective_torch.Group.TP),
+                )
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")
