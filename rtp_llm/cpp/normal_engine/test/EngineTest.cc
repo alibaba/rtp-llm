@@ -494,6 +494,41 @@ TEST_F(NormalEngineTest, testPrefillOnlyReturnsOneEmptyOutput) {
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
 }
 
+TEST_F(NormalEngineTest, testDSparkRejectsFullProbabilitiesBeforeScheduling) {
+    CustomConfig config;
+    config.role_type = RoleType::DECODE;
+    auto engine      = createMockEngine(config);
+    ASSERT_TRUE(engine->stop().ok());  // Exercise public admission without running model forwards.
+    auto make_query = [](ReturnAllProbsMode mode, bool force_off) {
+        auto input                                   = std::make_shared<GenerateInput>();
+        input->input_ids                             = torch::tensor({1, 2}, torch::kInt32);
+        input->generate_config                       = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens       = 8;
+        input->generate_config->return_all_probs     = mode;
+        input->generate_config->force_disable_sp_run = force_off;
+        return input;
+    };
+    EXPECT_FALSE(engine->makeStream(make_query(ReturnAllProbsMode::ORIGINAL, true))->hasError());
+    engine->propose_params_ = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_DSPARK, 8);
+    for (const bool force_off : {false, true}) {
+        EXPECT_FALSE(engine->makeStream(make_query(ReturnAllProbsMode::NONE, force_off))->hasError());
+        for (auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+            auto stream = engine->enqueue(make_query(mode, force_off));
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_EQ(stream->curBlocksNum(), 0u);
+        }
+    }
+    auto [admitted, streams] = engine->enqueueMultiple({make_query(ReturnAllProbsMode::DEFAULT, true),
+                                                        make_query(ReturnAllProbsMode::ORIGINAL, false)});
+    EXPECT_EQ(admitted, (std::vector<bool>{false, false}));
+    ASSERT_EQ(streams.size(), 2u);
+    for (const auto& stream : streams) {
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(stream->statusInfo().ToString(), "DSpark does not support return_all_probs");
+    }
+    EXPECT_EQ(engine->getScheduler().onflightStreams(), 0);
+}
+
 TEST_F(NormalEngineTest, testDecodeRoleRejectsPrefillOnlyBeforeScheduling) {
     CustomConfig config;
     config.role_type = RoleType::DECODE;
