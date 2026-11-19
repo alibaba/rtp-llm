@@ -34,16 +34,19 @@ public:
     BatchDecodeScheduler(const RuntimeConfig&                   runtime_config,
                          const std::shared_ptr<KVCacheManager>& cache_manager,
                          const kmonitor::MetricsReporterPtr     metrics_reporter,
-                         int                                    dp_rank = 0) {
+                         int                                    dp_rank               = 0,
+                         bool                                   need_fill_fake_stream = false):
+        need_fill_fake_stream_(need_fill_fake_stream) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
         batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
         scheduler_type_   = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type == 0 ?
-                                SchedulerType::kBatchDecode : SchedulerType::kBatchPrefill;
+                                SchedulerType::kBatchDecode :
+                                SchedulerType::kBatchPrefill;
         dp_rank_          = dp_rank;
-        perf_local_requests_ = runtime_config.use_batch_decode_scheduler
-                               && autil::EnvUtil::getEnv("RTP_LLM_PERF_LOCAL_REQUESTS", false);
-        const char* env   = std::getenv("RTP_LLM_WORKER_STATUS_SNAPSHOT");
+        perf_local_requests_ =
+            runtime_config.use_batch_decode_scheduler && autil::EnvUtil::getEnv("RTP_LLM_PERF_LOCAL_REQUESTS", false);
+        const char* env                 = std::getenv("RTP_LLM_WORKER_STATUS_SNAPSHOT");
         worker_status_snapshot_enabled_ = env != nullptr && std::strcmp(env, "1") == 0;
         publishWorkerStatusSnapshotLocked();
     }
@@ -160,7 +163,8 @@ public:
                         for (auto& buffer : cache_manager_->gpuCacheTensors()) {
                             buffer.zero_();
                             c10::impl::VirtualGuardImpl(buffer.device().type())
-                                .getStream(buffer.device()).synchronize();
+                                .getStream(buffer.device())
+                                .synchronize();
                         }
                         perf_cache_initialized_ = true;
                     }
@@ -211,7 +215,11 @@ public:
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+        // Some local Decode ranks finish the cohort early. Return an empty
+        // batch promptly so NormalEngine can enter the peer step with a fake stream.
+        const bool yield_to_peer_step = need_fill_fake_stream_ && perf_local_requests_;
+        const auto idle_timeout       = yield_to_peer_step ? std::chrono::milliseconds(10) : std::chrono::seconds(30);
+        cond_.wait_for(lock, idle_timeout, [this] {
             return stop_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
@@ -303,8 +311,9 @@ private:
     SchedulerType                                      scheduler_type_;
     int                                                dp_rank_                        = 0;
     bool                                               worker_status_snapshot_enabled_ = false;
-    bool                                               perf_local_requests_ = false;
-    bool                                               perf_cache_initialized_ = false;
+    bool                                               perf_local_requests_            = false;
+    bool                                               perf_cache_initialized_         = false;
+    const bool                                         need_fill_fake_stream_;
     std::shared_ptr<const std::unordered_set<int64_t>> worker_status_running_task_ids_snapshot_;
 };
 

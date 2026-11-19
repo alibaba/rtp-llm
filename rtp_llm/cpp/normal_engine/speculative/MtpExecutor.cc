@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
@@ -52,9 +53,12 @@ namespace {
 
 class ProfileStepGuard {
 public:
-    ProfileStepGuard(const std::function<void()>& start, const std::function<void()>& finish): finish_(finish) {
+    ProfileStepGuard(const std::function<void(bool)>& start,
+                     const std::function<void()>&     finish,
+                     bool                             allow_start = true):
+        finish_(finish) {
         if (start) {
-            start();
+            start(allow_start);
         }
     }
 
@@ -1466,7 +1470,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group,
                          bool                                           warm_up,
                          CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback,
-                         std::function<void()>                          profile_step_start,
+                         std::function<void(bool)>                      profile_step_start,
                          std::function<void()>                          profile_step_finish):
     Executor(),
     cache_manager_(cache_manager),
@@ -1479,6 +1483,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     role_type_(params.pd_sep_config.role_type),
     cache_status_snapshot_refresh_callback_(std::move(cache_status_snapshot_refresh_callback)),
     profile_step_start_(std::move(profile_step_start)),
+    defer_perf_profile_until_real_decode_(params.runtime_config.use_batch_decode_scheduler
+                                          && role_type_ == RoleType::DECODE && params.parallelism_config.dp_size > 1
+                                          && autil::EnvUtil::getEnv("RTP_LLM_PERF_LOCAL_REQUESTS", false)),
     profile_step_finish_(std::move(profile_step_finish)),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     // These runners intentionally do not inherit PyTorch profiler TLS from the
@@ -2444,7 +2451,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
-    ProfileStepGuard profile_guard(profile_step_start_, profile_step_finish_);
+    // Local perf idle steps do not start a window. They still finish or
+    // cancel a window if the real batch ends before num_steps.
+    const bool       allow_profile_start = !defer_perf_profile_until_real_decode_ || !model_input.is_fake_stream;
+    ProfileStepGuard profile_guard(profile_step_start_, profile_step_finish_, allow_profile_start);
     size_t           batch_size   = model_input.input_lengths.size(0);
     spec_logits_processor_present = isTpRank0() && !model_input.is_fake_stream && hasSpecLogitsProcessor(streams);
     if (isTpRank0() && !model_input.is_fake_stream && hasUnsupportedMtpStatefulLogitsProcessor(streams)) {

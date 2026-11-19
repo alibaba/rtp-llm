@@ -30,7 +30,10 @@ try:
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 
-from rtp_llm.models_py.modules.base.cuda.paged_mqa import paged_mqa_context_lens
+from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
+    paged_mqa_context_lens,
+    refresh_paged_mqa_request_ids,
+)
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_write_op import (
     MlaKVCacheWriteOp,
@@ -675,8 +678,12 @@ class SparseMlaImpl(MlaImplBase):
         if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
             return
         lengths_2d = paged_mqa_context_lens(attn_inputs, self.fmha_params)
+        request_ids = refresh_paged_mqa_request_ids(
+            attn_inputs, self.fmha_params, lengths, deep_gemm, forbid_realloc
+        )
+        request_args = {"indices": request_ids} if request_ids is not None else {}
         new_schedule = deep_gemm.get_paged_mqa_logits_metadata(
-            lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms()
+            lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms(), **request_args
         )
 
         current = getattr(self.fmha_params, "schedule_metadata", None)

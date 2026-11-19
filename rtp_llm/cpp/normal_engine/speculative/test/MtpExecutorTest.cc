@@ -2,12 +2,14 @@
 #include <memory>
 #include <limits>
 #include <chrono>
+#include <cstdlib>
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
 #include "pybind11/embed.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -2452,12 +2454,52 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     EXPECT_GT(cache_manager->getKVCacheInfo(-1, true).total_kv_cache, 0);
 }
 
+TEST_F(MtpExecutorTest, testProfileWindowWaitsForRealAndDrainsIdleSteps) {
+    const char*        output_dir = std::getenv("TEST_TMPDIR");
+    StepWindowProfiler profiler(output_dir ? output_dir : ".");
+    profiler.configure(true, "cohort_ended_before_offset", 2, 2);
+    profiler.startStep();
+    profiler.finishStep();
+    EXPECT_TRUE(profiler.enabled());
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.enabled());
+
+    profiler.configure(true, "real_then_idle", 1, 2);
+
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.has_profiler_.load());
+    EXPECT_EQ(profiler.waited_steps_, 0);
+
+    profiler.startStep();
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.has_profiler_.load());
+    profiler.startStep();
+    ASSERT_TRUE(profiler.has_profiler_.load());
+    profiler.finishStep();
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.enabled());
+    EXPECT_FALSE(profiler.has_profiler_.load());
+
+    profiler.configure(true, "disabled_on_idle", 0, 5);
+    profiler.startStep();
+    ASSERT_TRUE(profiler.has_profiler_.load());
+    profiler.finishStep();
+    profiler.configure(false, "", 0, 0);
+    profiler.startStep(false);
+    profiler.finishStep();
+    EXPECT_FALSE(profiler.has_profiler_.load());
+}
+
 TEST_F(MtpExecutorTest, testProfileWindowSkipsIdleAndClosesOnPrefillFailure) {
     auto components                          = createMtpExecutorComponents(MtpExecutorTestConfig{});
     int  starts                              = 0;
     int  finishes                            = 0;
     bool active                              = false;
-    components.executor->profile_step_start_ = [&]() {
+    components.executor->profile_step_start_ = [&](bool allow_start) {
+        EXPECT_TRUE(allow_start);
         EXPECT_FALSE(active);
         active = true;
         ++starts;
@@ -2591,9 +2633,12 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     test_config.vocab_size_override = 4;
     auto components                 = createMtpExecutorComponents(test_config);
 
-    int profile_starts                        = 0;
-    int profile_finishes                      = 0;
-    components.executor->profile_step_start_  = [&]() { ++profile_starts; };
+    int profile_starts                       = 0;
+    int profile_finishes                     = 0;
+    components.executor->profile_step_start_ = [&](bool allow_start) {
+        EXPECT_TRUE(allow_start);
+        ++profile_starts;
+    };
     components.executor->profile_step_finish_ = [&]() { ++profile_finishes; };
     components.fake_target_model->setForwardCallback([&]() {
         EXPECT_EQ(profile_starts, 1);

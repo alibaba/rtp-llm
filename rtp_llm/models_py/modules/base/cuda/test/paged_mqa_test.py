@@ -29,12 +29,25 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 class PagedMqaTest(TestCase):
     def setUp(self):
         torch.manual_seed(921)
-        self.env = patch.dict(os.environ, {"RTP_LLM_INDEXER_NATIVE_MTP": "1"})
+        self.env = patch.dict(
+            os.environ,
+            {"RTP_LLM_INDEXER_NATIVE_MTP": "1", "RTP_LLM_ADAPTIVE_VERIFICATION": "0"},
+        )
         self.env.start()
         self.addCleanup(self.env.stop)
 
-    def fixture(self, batch, next_n, draft=False, heads=32):
-        blocks, page, dim = 20, 64, 128
+    def fixture(
+        self,
+        batch,
+        next_n,
+        draft=False,
+        heads=32,
+        *,
+        blocks=20,
+        topk=512,
+        use_configured_topk=False,
+    ):
+        page, dim = 64, 128
         count = batch * blocks + 1
         cache = torch.empty((count, page, dim + 4), device="cuda", dtype=torch.uint8)
         raw = cache.view(count, -1)
@@ -71,15 +84,18 @@ class PagedMqaTest(TestCase):
             torch.float8_e4m3fn
         )
         weights = torch.rand((batch * next_n, heads), device="cuda") / heads
-        op = IndexerOp(heads, dim, 512, 64)
+        op = IndexerOp(heads, dim, topk, 64)
+        paged_topk = op._paged_topk_op
 
-        def topk(scores, lens, out, workspace, k, width):
+        def record_logits(scores, lens, out, workspace, k, width):
             op.last_logits = scores
-            rtp_llm_ops.topk_v3_tie_break(
+            if use_configured_topk:
+                return paged_topk(scores, lens, out, workspace, k, width)
+            return rtp_llm_ops.topk_v3_tie_break(
                 scores, torch.zeros_like(lens), lens, out, k, width
             )
 
-        op._paged_topk_op = topk
+        op._paged_topk_op = record_logits
         return op, owner, inputs, SimpleNamespace(kv_scale_base=cache), q, weights
 
     def call(self, op, owner, inputs, cache, q, weights):
@@ -162,6 +178,123 @@ class PagedMqaTest(TestCase):
             )
             self.assertTrue(torch.equal(captured_logits[valid], op.last_logits[valid]))
             self.assertTrue(torch.equal(captured_topk.sort().values, ref.sort().values))
+
+    def test_request_id_storage_is_owned_by_bound_params(self):
+        params = rtp_llm_ops.SparseMlaParams()
+        self.assertIsNone(params.paged_mqa_request_ids)
+        ids = torch.zeros(4, dtype=torch.int32)
+        params.paged_mqa_request_ids = ids
+        self.assertEqual(params.paged_mqa_request_ids.data_ptr(), ids.data_ptr())
+
+    def test_adaptive_ragged_groups_match_flattened_after_graph_replay(self):
+        multi_request_widths = [(4, 5, 6), (1, 6, 2), (6, 0, 3), (0, 0, 0)]
+        for batch, replay_widths, context_offset in [
+            (1, [(5,), (1,), (6,), (0,)], 0),
+            (3, multi_request_widths, 0),
+            (3, multi_request_widths, 2048),
+        ]:
+            with self.subTest(batch=batch, context_offset=context_offset), patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_ADAPTIVE_VERIFICATION": "1",
+                    "GLM5_INDEXER_TOPK_BACKEND": "topk_v3",
+                },
+            ):
+                long_context = context_offset > 0
+                args = self.fixture(
+                    batch,
+                    6,
+                    blocks=36 if long_context else 20,
+                    topk=2048 if long_context else 512,
+                    use_configured_topk=long_context,
+                )
+                op, owner, inputs, cache, q, weights = args
+                params = owner.fmha_params
+                capacity = q.shape[0]
+                params.batch_indice_d = torch.zeros(
+                    capacity, device=q.device, dtype=torch.int32
+                )
+
+                def fill(widths):
+                    batch_ids = [
+                        request
+                        for request, width in enumerate(widths)
+                        for _ in range(width)
+                    ]
+                    lengths = [
+                        context_offset + 63 + request * 61 + offset
+                        for request, width in enumerate(widths)
+                        for offset in range(1, width + 1)
+                    ]
+                    padding = capacity - len(lengths)
+                    params.batch_indice_d.copy_(
+                        torch.tensor(batch_ids + [0] * padding, dtype=torch.int32)
+                    )
+                    params.expanded_seq_lens.copy_(
+                        torch.tensor(lengths + [0] * padding, dtype=torch.int32)
+                    )
+
+                fill((6,) * batch)
+                self.refresh(owner, inputs)
+                ids_ptr = params.paged_mqa_request_ids.data_ptr()
+                schedule_ptr = params.schedule_metadata.data_ptr()
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        self.call(*args)
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured_topk = self.call(*args)
+                captured_logits = op.last_logits
+
+                for widths in replay_widths:
+                    fill(widths)
+                    table = inputs.kv_cache_kernel_block_id_device
+                    table.copy_(table.roll(1, 1))
+                    self.refresh(owner, inputs, True)
+                    self.assertEqual(params.paged_mqa_request_ids.data_ptr(), ids_ptr)
+                    self.assertEqual(params.schedule_metadata.data_ptr(), schedule_ptr)
+                    valid_rows = params.expanded_seq_lens > 0
+                    self.assertTrue(
+                        torch.all(params.paged_mqa_request_ids[~valid_rows] == -1)
+                    )
+                    graph.replay()
+                    ref_owner = SimpleNamespace(
+                        fmha_params=SimpleNamespace(
+                            expanded_seq_lens=params.expanded_seq_lens,
+                            batch_indice_d=params.batch_indice_d,
+                            schedule_metadata=None,
+                        ),
+                        seq_size_per_block=64,
+                    )
+                    with patch.dict(os.environ, {"RTP_LLM_INDEXER_NATIVE_MTP": "0"}):
+                        self.refresh(ref_owner, inputs)
+                        reference = self.call(op, ref_owner, inputs, cache, q, weights)
+                    if long_context:
+                        selected = captured_topk[valid_rows]
+                        self.assertTrue(torch.all(selected >= 0))
+                        self.assertTrue(
+                            torch.all(
+                                selected < params.expanded_seq_lens[valid_rows, None]
+                            )
+                        )
+                    valid_logits = (
+                        torch.arange(captured_logits.shape[1], device=q.device)[None, :]
+                        < params.expanded_seq_lens[:, None]
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            captured_logits[valid_logits], op.last_logits[valid_logits]
+                        )
+                    )
+                    self.assertTrue(
+                        torch.equal(
+                            captured_topk[valid_rows].sort().values,
+                            reference[valid_rows].sort().values,
+                        )
+                    )
 
     def test_single_token_decode_and_empty_queries(self):
         args = self.fixture(3, 1)

@@ -95,7 +95,8 @@ public:
 
     // Called around an actual model-forward step. Unlike tick(), these hooks
     // do not consume profiling windows on idle TP synchronization steps.
-    void startStep();
+    // Idle peer steps can service cleanup without starting a new window.
+    void startStep(bool allow_start = true);
     void finishStep();
 
     bool enabled() const {

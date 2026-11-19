@@ -100,8 +100,9 @@ public:
     // without a device-to-host reduction.
     int64_t prefill_max_kv_len = 0;
 
-    // schedule_metadata for deep_gemm
+    // DeepGEMM metadata and request IDs keep their addresses across graph replays.
     torch::Tensor schedule_metadata;
+    torch::Tensor paged_mqa_request_ids;
 
     // CP Plan: compute CP indices on CPU, single cudaMemcpyAsync to device
     void fillCpPlanParams(const torch::Tensor&        padding_mask,

@@ -136,6 +136,14 @@ py_test(
 )
 
 py_test(
+    name = "paged_mqa_test",
+    srcs = ["paged_mqa_test.py"],
+    deps = py_test_deps,
+    tags = ["manual", "SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "indexer_workspace_budget_test",
     srcs = ["indexer_workspace_budget_test.py"],
     deps = py_test_deps,

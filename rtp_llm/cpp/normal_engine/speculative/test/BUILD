@@ -298,7 +298,7 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps() + cuda13_torch_link_deps,
-    args = ["--gtest_filter=MtpExecutorTest.testProfileWindowSkipsIdleAndClosesOnPrefillFailure:MtpExecutorTest.testSingleBatchPrefill:MtpExecutorTest.testSingleBatchDecode"],
+    args = ["--gtest_filter=MtpExecutorTest.testProfileWindowWaitsForRealAndDrainsIdleSteps:MtpExecutorTest.testProfileWindowSkipsIdleAndClosesOnPrefillFailure:MtpExecutorTest.testSingleBatchPrefill:MtpExecutorTest.testSingleBatchDecode"],
     env = {"TEST_USING_DEVICE": "CUDA"},
     tags = ["SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},

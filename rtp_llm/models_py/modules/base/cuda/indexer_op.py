@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+from torch import nn
+
 from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
 from rtp_llm.models_py import prefill_optimization as _prefill_optimization
 from rtp_llm.models_py.distributed.collective_torch import Group, barrier
@@ -16,7 +18,6 @@ from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
 )
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
-from torch import nn
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
@@ -805,11 +806,18 @@ class IndexerOp(nn.Module):
                 (0, self.index_topk), dtype=torch.int32, device=q_fp8.device
             )
 
+        request_args = {}
         if (
             is_target_verify
             and os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") == "1"
         ):
             block_table = block_table.index_select(0, fmha_params.batch_indice_d.long())
+            request_ids = getattr(fmha_params, "paged_mqa_request_ids", None)
+            if (
+                request_ids is not None
+                and os.environ.get("RTP_LLM_INDEXER_NATIVE_MTP", "1") != "0"
+            ):
+                request_args["indices"] = request_ids
         elif is_multi_token_decode:
             num_tokens = q_fp8.shape[0]
             batch_size = block_table.shape[0]
@@ -840,6 +848,7 @@ class IndexerOp(nn.Module):
                 kvlen_2d,
                 self.blocksize,
                 deep_gemm.get_num_sms(),
+                **request_args,
             )
 
         logits = deep_gemm.fp8_paged_mqa_logits(
@@ -851,6 +860,7 @@ class IndexerOp(nn.Module):
             schedule_metadata,
             max_seq_len,
             clean_logits=False,
+            **request_args,
         )
 
         assert (
