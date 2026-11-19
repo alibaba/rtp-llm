@@ -486,6 +486,125 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["write_success"], 2)
         self.assertFalse(read_slot.saved.is_set())
 
+    def test_last_healthy_slot_stays_available_for_reads(self):
+        remote, (usable, failed) = self.slot_cache(
+            max_pending=2, write_transfer_workers=1, write_timeout_ms=5000
+        )
+        failed.quarantined = True
+        value = torch.arange(8)
+        result = (value, None)
+        usable.objects["hit"] = pack_object(
+            plan_object(
+                {"cache_key": "hit", "version": 1, "result": result, "greennet": None}
+            )
+        )
+        with patch.object(remote, "_report_skip", wraps=remote._report_skip) as skip:
+            for key, lease_read_slot in (("idle", False), ("leased", True)):
+                slot = remote._gdr_pool.acquire() if lease_read_slot else None
+                if lease_read_slot:
+                    self.assertIs(slot, usable)
+                try:
+                    remote.submit_result(key, result)
+                    remote._write_executor.submit(lambda: None).result(timeout=1)
+                finally:
+                    if slot is not None:
+                        remote._gdr_pool.release(slot)
+                self.assertNotIn(key, usable.objects)
+                self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                self.assertEqual(remote.stats()["inflight_bytes"], 0)
+                torch.testing.assert_close(remote.load("hit")[0], value)
+            self.assertEqual(
+                [call.args for call in skip.call_args_list],
+                [("write", "write_slot_unavailable")] * 2,
+            )
+        failed.quarantined = False
+        remote.submit_result("idle", result)
+        remote._write_executor.submit(lambda: None).result(timeout=1)
+        torch.testing.assert_close(remote.load("idle")[0], value)
+
+    def test_write_slot_wait_is_bounded(self):
+        remote, (slot,) = self.slot_cache(
+            1, write_transfer_workers=1, write_timeout_ms=30
+        )
+        self.assertIs(remote._gdr_pool.acquire(), slot)
+        try:
+            with patch.object(remote, "_report_skip") as skip:
+                remote.submit_result("busy", (torch.arange(8), None))
+                remote._write_executor.submit(lambda: None).result(timeout=1)
+                skip.assert_called_once_with("write", "write_slot_unavailable")
+                self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        finally:
+            remote._gdr_pool.release(slot)
+
+    def test_slow_restore_leaves_transfer_available_and_retains_payload_budget(self):
+        value = torch.arange(8)
+        store = Store({"hit": pack_object(plan_object((value, None)))})
+        remote = self.remote(store, read_transfer_workers=1)
+        restoring, resume = threading.Event(), threading.Event()
+
+        def slow_first_restore(*args, **kwargs):
+            if not restoring.is_set():
+                restoring.set()
+                self.assertTrue(resume.wait(3))
+            return unpack_object(*args, **kwargs)
+
+        with (
+            patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.unpack_object",
+                side_effect=slow_first_restore,
+            ),
+            concurrent.futures.ThreadPoolExecutor(1) as caller,
+        ):
+            first = caller.submit(remote.load, "hit")
+            try:
+                self.assertTrue(restoring.wait(1))
+                self.assertEqual(remote.stats()["inflight_tasks"], 1)
+                self.assertGreater(remote.stats()["inflight_bytes"], 0)
+                torch.testing.assert_close(remote.load("hit")[0], value)
+            finally:
+                resume.set()
+            torch.testing.assert_close(first.result(timeout=1)[0], value)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def test_read_timeout_keeps_transfer_permit_until_worker_exits(self):
+        value = torch.arange(8)
+        store = Store({"hit": pack_object(plan_object((value, None)))})
+        remote = self.remote(store, read_transfer_workers=1)
+        store.read_gate.clear()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(1) as caller:
+                first = caller.submit(remote.load, "hit", timeout_ms=200)
+                self.assertTrue(store.read_started.wait(1))
+                self.assertIsNone(first.result(timeout=1))
+            with patch.object(remote, "_report_skip") as skip:
+                self.assertIsNone(remote.load("hit"))
+                skip.assert_called_once_with("read", "transfer_admission")
+        finally:
+            store.read_gate.set()
+        remote._transfer_executor.submit(lambda: None).result(timeout=1)
+        torch.testing.assert_close(remote.load("hit")[0], value)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def test_cancelled_or_rejected_transfer_returns_permit(self):
+        value = torch.arange(8)
+        store = Store({"hit": pack_object(plan_object((value, None)))})
+        remote = self.remote(store, read_transfer_workers=1)
+        cancelled = concurrent.futures.Future()
+        cancelled.cancel()
+        with patch.object(
+            remote._transfer_executor,
+            "submit",
+            side_effect=[cancelled, RuntimeError("transfer executor closed")],
+        ):
+            for _ in range(2):
+                self.assertIsNone(remote.load("hit"))
+                self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        torch.testing.assert_close(remote.load("hit")[0], value)
+
     def test_caller_timeout_keeps_only_the_active_read_slot(self):
         remote, slots = self.slot_cache()
         result = (torch.arange(8), None)

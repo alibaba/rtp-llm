@@ -81,6 +81,7 @@ class MMRemoteEmbeddingCache:
         read_transfer_workers=2,
         write_transfer_workers=2,
         read_timeout_ms=200,
+        write_timeout_ms=1000,
         cuda_device=None,
         client_factory=None,
         namespace="",
@@ -95,6 +96,7 @@ class MMRemoteEmbeddingCache:
             max_inflight_bytes,
             max_pending,
             read_timeout_ms,
+            write_timeout_ms,
             metadata_workers,
             read_transfer_workers,
             write_transfer_workers,
@@ -115,6 +117,7 @@ class MMRemoteEmbeddingCache:
         self.max_inflight_bytes = max_inflight_bytes
         self.max_pending = max_pending
         self.read_timeout_ms = read_timeout_ms
+        self.write_timeout_ms = write_timeout_ms
         self.cuda_device = cuda_device
         self._model_identity = model_identity or {}
         scope = json.dumps(
@@ -280,6 +283,7 @@ class MMRemoteEmbeddingCache:
                 else write_transfer_workers
             ),
             read_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
+            write_timeout_ms=vit_config.mm_remote_cache_write_timeout_ms,
             cuda_device=device,
             gdr_enabled=gdr_enabled,
             gdr_pool=client if gdr_enabled else None,
@@ -938,11 +942,18 @@ class MMRemoteEmbeddingCache:
                 # storage; pack is the first operation that needs that storage.
                 failure_stage = "client_acquire"
                 if self._gdr_pool is not None:
-                    slot = self._gdr_pool.acquire(for_write=True)
+                    slot = self._gdr_pool.acquire(
+                        for_write=True, timeout=self.write_timeout_ms / 1000
+                    )
                     if slot is None:
                         outcome = "skipped"
                         if not self._skip_quarantined("write"):
-                            self._report_skip("write", "executor_closed")
+                            reason = (
+                                "executor_closed"
+                                if self._closed
+                                else "write_slot_unavailable"
+                            )
+                            self._report_skip("write", reason)
                         return
                 failure_stage = "pack"
                 with self._observe_stage("write", "pack"):
@@ -1097,8 +1108,6 @@ class MMRemoteEmbeddingCache:
         future = None
         caller_timed_out = False
 
-        transfer_admitted = False
-
         def read_timings():
             return {
                 key: timing[key]
@@ -1110,11 +1119,6 @@ class MMRemoteEmbeddingCache:
                 )
                 if key in timing
             }
-
-        def release():
-            if transfer_admitted:
-                self._transfer_slots.release()
-            self._release(cost)
 
         def lookup():
             timing["queue_ms"] = self._report_queue_wait("read", queued_at)
@@ -1209,6 +1213,17 @@ class MMRemoteEmbeddingCache:
                     # thread; its task/byte budget remains held until done.
                     self._release_client(client)
 
+        def transfer(meta):
+            try:
+                return read(meta)
+            finally:
+                self._transfer_slots.release()
+
+        def release_cancelled_transfer(task):
+            # A cancelled queued task never enters transfer().
+            if task.cancelled():
+                self._transfer_slots.release()
+
         try:
             # _reserve() bounds running and queued work together. A timed-out
             # caller leaves its reservation with the future until it exits.
@@ -1240,10 +1255,14 @@ class MMRemoteEmbeddingCache:
                 outcome = "admission_skip"
                 self._report_skip("read", "transfer_admission")
                 return None
-            transfer_admitted = True
             timing["stage"] = "transfer_queue"
             transfer_queued_at = time.perf_counter()
-            future = self._transfer_executor.submit(read, meta)
+            try:
+                future = self._transfer_executor.submit(transfer, meta)
+            except BaseException:
+                self._transfer_slots.release()
+                raise
+            future.add_done_callback(release_cancelled_transfer)
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
                 outcome = timing["outcome"]
@@ -1370,10 +1389,10 @@ class MMRemoteEmbeddingCache:
                                 ),
                             )
                 finally:
-                    release()
+                    self._release(cost)
 
             if future is None or (future.done() and not caller_timed_out):
-                release()
+                self._release(cost)
             else:
                 future.add_done_callback(complete_read)
 
