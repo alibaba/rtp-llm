@@ -4165,50 +4165,65 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 self._active_scheduled_tokens,
             )
 
-    def _native_prefix_preparation_audit(self, scheduler, request):
-        if not self._pp_capacity_unified:
-            return {}
-        batch_id = getattr(request, "_navi_forward_batch_id", None)
-        prepared = None
-        query_resolved = None
-        load_async = None
-        prefixes = getattr(scheduler, "_prepared_prefill_prefixes", None)
-        if isinstance(prefixes, dict):
-            prepared = request.request_id in prefixes
-            prefix = prefixes.get(request.request_id)
-            if prepared and hasattr(prefix, "resolved"):
-                resolved = prefix.resolved
-                query_resolved = resolved is not None
-                if isinstance(resolved, tuple) and len(resolved) > 4:
-                    load_async = bool(resolved[4])
-        ready_batches = getattr(scheduler, "_prepared_prefill_batches_ready", None)
-        started_batches = getattr(scheduler, "_prepared_prefill_batches_started", None)
-        # These are Native's last scheduling checkpoint, not a new cache query
-        # or a guarantee that an asynchronous KV transfer has completed.
-        return {
-            "native_prefix_prepared": prepared,
-            "native_prefix_query_resolved": query_resolved,
-            "native_prefix_load_async": load_async,
-            "native_prepared_batch_id": batch_id,
-            "native_batch_ready": (
-                ready_batches.get(batch_id) if isinstance(ready_batches, dict) else None
-            ),
-            "native_batch_started": (
-                batch_id in started_batches
-                if batch_id is not None and isinstance(started_batches, (set, frozenset))
-                else None
-            ),
-        }
 
-    def _audit_native_request_state(self, request, queue, scheduler=None):
+    def _native_v6d_request_audit(self, request):
+        if not self._pp_capacity_unified or self._v6d_scheduler is None:
+            return {}
+        fields = dict.fromkeys((
+            "native_v6d_state_present", "native_v6d_match_future_done",
+            "native_v6d_match_tokens", "native_v6d_match_async",
+            "native_v6d_match_arrived_mono_ns", "native_v6d_match_first_poll_mono_ns",
+            "native_v6d_match_latency_recorded", "native_v6d_match_generation",
+            "native_v6d_load_inflight", "native_v6d_load_started_mono_ns",
+            "native_v6d_load_failed", "native_v6d_load_job_started",
+            "native_v6d_load_meta_pending", "native_v6d_lookup_skipped",
+        ))
+        states = getattr(self._v6d_scheduler, "_request_states", None)
+        if not isinstance(states, dict):
+            return fields
+        state = states.get(request.request_id)
+        fields["native_v6d_state_present"] = state is not None
+        if state is None:
+            return fields
+
+        def timestamp_ns(name):
+            value = getattr(state, name, None)
+            return (
+                round(value * 1_000_000_000)
+                if isinstance(value, (int, float)) and math.isfinite(value)
+                else None
+            )
+
+        future = getattr(state, "match_future", None)
+        if future is not None and callable(getattr(future, "done", None)):
+            fields["native_v6d_match_future_done"] = bool(future.done())
+        matched = getattr(state, "resolved_match", None)
+        if isinstance(matched, tuple) and len(matched) == 2 and isinstance(matched[0], int):
+            fields["native_v6d_match_tokens"] = matched[0]
+            fields["native_v6d_match_async"] = bool(matched[1])
+        fields.update(
+            native_v6d_match_arrived_mono_ns=timestamp_ns("match_arrived_at"),
+            native_v6d_match_first_poll_mono_ns=timestamp_ns("match_first_poll_at"),
+            native_v6d_match_latency_recorded=bool(getattr(state, "match_latency_recorded", False)),
+            native_v6d_match_generation=getattr(state, "match_generation", None),
+            native_v6d_load_inflight=bool(getattr(state, "load_inflight", False)),
+            native_v6d_load_started_mono_ns=timestamp_ns("load_started_at"),
+            native_v6d_load_failed=bool(getattr(state, "load_failed", False)),
+            native_v6d_load_job_started=bool(getattr(state, "load_job_started", False)),
+            native_v6d_load_meta_pending=bool(getattr(state, "pending_load_meta", None)),
+            native_v6d_lookup_skipped=bool(getattr(state, "skip_lookup", False)),
+        )
+        return fields
+
+    def _audit_native_request_state(self, request, queue):
         if not self._native_request_state_audit_enabled:
             return
         request_id = str(request.request_id)
         status = getattr(request, "status", None)
         status_name = str(getattr(status, "name", status))
         lookup_complete = self._native_cache_lookup_complete(request)
-        preparation = self._native_prefix_preparation_audit(scheduler, request)
-        observed = (queue, status_name, lookup_complete, *preparation.values())
+        connector_state = self._native_v6d_request_audit(request)
+        observed = (queue, status_name, lookup_complete, *connector_state.values())
         if self._native_request_states.get(request_id) == observed:
             return
         self._native_request_states[request_id] = observed
@@ -4226,7 +4241,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 "prompt_tokens": int(getattr(request, "num_prompt_tokens", 0)),
                 "local_cached_tokens": getattr(stats, "num_local_cached_tokens", None),
                 "external_cached_tokens": getattr(stats, "num_external_cached_tokens", None),
-                **preparation,
+                **connector_state,
             }
         )
 
@@ -4269,7 +4284,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 request = scheduler.requests.get(request_id)
                 if request is not None:
                     self._audit_native_request_state(
-                        request, "running" if running_now else "waiting", scheduler
+                        request, "running" if running_now else "waiting"
                     )
             if self._pp_capacity_unified and self._is_finished_pp_request(
                 scheduler.requests.get(request_id)
