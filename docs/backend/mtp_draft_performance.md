@@ -38,11 +38,12 @@ does not establish numerical equivalence.
 
 ## Sharded draft top-1
 
-Set `RTP_LLM_MTP_SHARDED_TOP1=1` before server startup to select ordinary MTP
-draft tokens from local vocabulary shards. Each TP rank sends one 8-byte
+Supported ordinary MTP draft models select tokens from local vocabulary
+shards by default. Each TP rank sends one 8-byte
 candidate per row instead of its full logits shard, then selects the global
 top-1 token. The LM-head GEMM and logits precision follow the existing policy.
-The default is disabled, and the policy is fixed before graph capture.
+Set `RTP_LLM_MTP_SHARDED_TOP1=0` before server startup to gather full logits
+for debugging or performance comparisons. The policy is fixed before graph capture.
 
 This path requires CUDA, TP greater than one, PP equal to one, and a draft model
 with the MTP graph-step contract. Target execution, DSpARK, NaN-checking mode,
