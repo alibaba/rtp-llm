@@ -391,3 +391,18 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "contiguous_silu_fp8",
+    srcs = ["contiguous_silu_fp8.cu"],
+    hdrs = ["contiguous_silu_fp8.h"],
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "--cuda-gpu-arch=sm_90",
+        "-nvcc_options=ftz=false",
+        "-nvcc_options=fmad=false",
+    ],
+)

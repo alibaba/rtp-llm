@@ -188,11 +188,16 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     const GroupSetPtr& group_set   = tree_->groupSets()[location->group_set_id];
     const auto&        device_pool = group_set->devicePools()[location->member_group_id];
 
+    // A matched linear state can still be in the eviction heap while a
+    // request holds it. Dropping it cannot free a block for this allocation
+    // and can invalidate the whole hybrid prefix on retry.
+    const auto reclaim_member = group_set->groupType() == CacheGroupType::LINEAR ?
+                                    std::make_optional(location->member_group_id) : std::nullopt;
     const size_t initial_free       = device_pool->freeBlocksNum();
     size_t       reclaimed          = 0;
     bool         eviction_triggered = false;
     while (reclaimed < num_blocks) {
-        if (!evictor_.dropLocked(location->group_set_id, Tier::DEVICE, true)) {
+        if (!evictor_.dropLocked(location->group_set_id, Tier::DEVICE, true, reclaim_member)) {
             break;
         }
         eviction_triggered        = true;

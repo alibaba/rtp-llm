@@ -198,6 +198,13 @@ size_t IBlockPool::availableBlocksNum() const {
     return available_blocks_num_;
 }
 
+bool IBlockPool::isCacheOnlyBlock(BlockIdxType block) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    checkAllocatedNoLock(block);
+    return isAvailableNoLock(block);
+}
+
 size_t IBlockPool::usedBlocksNum() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return totalBlocksNumNoLock() - availableFreeBlocksNoLock();

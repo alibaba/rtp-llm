@@ -73,6 +73,7 @@ public:
     // Blocks that can be reclaimed for a new request: physical free blocks plus
     // blocks held exclusively by BlockTreeRefType::CACHE.
     size_t availableBlocksNum() const;
+    bool   isCacheOnlyBlock(BlockIdxType block) const;
     size_t usedBlocksNum() const;
     size_t activeBlocksNum() const;
 

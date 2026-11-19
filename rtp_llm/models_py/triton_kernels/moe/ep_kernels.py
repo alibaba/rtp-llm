@@ -45,6 +45,9 @@ def _fwd_kernel_ep_scatter_1(
     BLOCK_E: tl.constexpr,
     BLOCK_EXPERT_NUM: tl.constexpr,
     ALIGN_M: tl.constexpr,
+    SKIP_GEMM_PADDING: tl.constexpr = False,
+    gemm_m_indices=None,
+    valid_tokens_per_expert=None,
 ):
     cur_expert = tl.program_id(0).to(tl.int64)
     offset_cumsum = tl.arange(0, BLOCK_EXPERT_NUM)
@@ -58,17 +61,23 @@ def _fwd_kernel_ep_scatter_1(
     tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
     cur_expert_start = tl.load(expert_start_loc + cur_expert).to(tl.int64)
     cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
+    if SKIP_GEMM_PADDING:
+        valid = tl.load(valid_tokens_per_expert + cur_expert)
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E).to(tl.int64)
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
         start_m_i64 = start_m.to(tl.int64)
         offs = start_m_i64 + off_expert
-        tl.store(
-            m_indices_start_ptr + offs,
-            cur_expert.to(tl.int32),
-            mask=(offs < cur_expert_token_num)
-            & (cur_expert_start + offs < m_indices_size),
+        in_bounds = (offs < cur_expert_token_num) & (
+            cur_expert_start + offs < m_indices_size
         )
+        tl.store(m_indices_start_ptr + offs, cur_expert.to(tl.int32), mask=in_bounds)
+        if SKIP_GEMM_PADDING:
+            tl.store(
+                gemm_m_indices + cur_expert_start + offs,
+                tl.where(offs < valid, cur_expert.to(tl.int32), -1),
+                mask=in_bounds,
+            )
 
 
 @triton.jit
@@ -161,6 +170,8 @@ def ep_scatter(
     scale_ue8m0: bool = False,
     align_m: int = 128,
     derive_counts_from_topk: bool = False,
+    *,
+    gemm_padding_indices: tuple[torch.Tensor, torch.Tensor] | None = None,
 ):
     BLOCK_E = 128  # token num of per expert is aligned to 128
     BLOCK_D = 128  # block size of quantization
@@ -198,6 +209,9 @@ def ep_scatter(
             num_experts=num_experts,
             BLOCK_SIZE=count_block_size,
         )
+    gemm_m_indices, valid_counts = (
+        gemm_padding_indices if gemm_padding_indices is not None else (None, None)
+    )
     _fwd_kernel_ep_scatter_1[(grid,)](
         layout_num_tokens_per_expert,
         expert_start_loc,
@@ -208,6 +222,9 @@ def ep_scatter(
         BLOCK_E=BLOCK_E,
         BLOCK_EXPERT_NUM=triton.next_power_of_2(num_experts),
         ALIGN_M=align_m,
+        SKIP_GEMM_PADDING=gemm_padding_indices is not None,
+        gemm_m_indices=gemm_m_indices,
+        valid_tokens_per_expert=valid_counts,
     )
     grid = min(recv_topk.shape[0], 1024 * 8)
     _fwd_kernel_ep_scatter_2[(grid,)](
