@@ -43,7 +43,6 @@ cc_test(
     testonly = True,
     srcs = [
         "BlockTransferDispatcherTest.cc",
-        "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy:TransferExecutorTest.cc",
     ],
     copts = test_copts,
     deps = test_deps + [
@@ -59,7 +58,6 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = [
-        "DeviceHostBufferSafetyTest.cc",
         "PerRankBlockTransferEngineDeviceHostTest.cc",
     ],
     copts = test_copts,
@@ -280,20 +278,6 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-)
-
-cc_test(
-    name = "device_host_copy_template_test",
-    exec_properties = {"gpu": "L20_CU13", "gpu_count": "2"},
-    testonly = True,
-    srcs = ["DeviceHostCopyTemplateTest.cc"],
-    copts = test_copts,
-    tags = [
-        "L20_CU13",
-        "exclusive-if-local",
-    ],
-    deps = test_deps + [":block_transfer_engine_test_utils"],
-    env = {"GPU_COUNT": "2"},
 )
 
 cc_test(

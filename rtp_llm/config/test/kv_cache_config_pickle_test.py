@@ -12,8 +12,14 @@ BASE_EVENT_FIELD_VALUES = {
 EVENT_PICKLE_FIELDS = tuple(BASE_EVENT_FIELD_VALUES)
 
 
-def _version_twenty_state(config):
+def _version_twenty_two_state(config):
     state = config.__getstate__()
+    # The former host-placement option was between pool counts and scan interval.
+    return (state[0], 22, *state[2:53], True, *state[53:])
+
+
+def _version_twenty_state(config):
+    state = _version_twenty_two_state(config)
     return (
         state[0],
         20,
@@ -61,11 +67,11 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 80)
-                self.assertEqual(state[:2], ("KVCacheConfig", 22))
-                self.assertEqual(state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values()))
-                self.assertIs(state[69], enable_crc)
-                self.assertEqual(state[78], 6)
+                self.assertEqual(len(state), 79)
+                self.assertEqual(state[:2], ("KVCacheConfig", 23))
+                self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
+                self.assertIs(state[68], enable_crc)
+                self.assertEqual(state[77], 6)
                 # Restoring fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -118,7 +124,7 @@ class KVCacheConfigPickleTest(TestCase):
         source.enable_crc = False
         for name, value in BASE_EVENT_FIELD_VALUES.items():
             setattr(source, name, value)
-        state = source.__getstate__()
+        state = _version_twenty_two_state(source)
         previous = (state[0], 7, *state[2:69])
         original_state = tuple(list(previous))
         restored = KVCacheConfig.__new__(KVCacheConfig)
@@ -133,7 +139,7 @@ class KVCacheConfigPickleTest(TestCase):
         source.enable_crc = False
         source.dsv4_fixed_pool_blocks = 17
         source.block_tree_transfer_worker_count = 7
-        state = source.__getstate__()
+        state = _version_twenty_two_state(source)
         previous = (state[0], 6, *state[2:64])
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
@@ -156,7 +162,7 @@ class KVCacheConfigPickleTest(TestCase):
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
         self.assertEqual(previous, original)
-        self.assertEqual(restored.__getstate__()[:76], source.__getstate__()[:76])
+        self.assertEqual(restored.__getstate__()[:75], source.__getstate__()[:75])
 
     def test_legacy_states_ignore_retired_options(self):
         source = KVCacheConfig()
@@ -170,9 +176,10 @@ class KVCacheConfigPickleTest(TestCase):
         source.block_tree_frozen_force_release_timeout_ms = 120000
 
         state = source.__getstate__()
+        v22_state = _version_twenty_two_state(source)
         for previous in (
             _version_twenty_state(source),
-            (state[0], 21, *state[2:77], 0.35, 0.45, *state[77:]),
+            (state[0], 21, *v22_state[2:77], 0.35, 0.45, *v22_state[77:]),
         ):
             with self.subTest(version=previous[1]):
                 original = tuple(list(previous))
@@ -186,6 +193,18 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertFalse(
                     hasattr(restored, "block_pool_frozen_abort_upper_ratio")
                 )
+
+    def test_version_twenty_two_ignores_fixed_pool_host_placement(self):
+        config = KVCacheConfig()
+        config.dsv4_fixed_pool_blocks = 512
+        config.dsv4_hca_state_pool_blocks = 256
+        config.block_tree_full_prefix_scan_interval_ms = 1500
+        config.block_tree_transfer_worker_count = 5
+        config.block_tree_frozen_force_release_timeout_ms = 120000
+
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(_version_twenty_two_state(config))
+        self.assertEqual(restored.__getstate__(), config.__getstate__())
 
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
         self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
@@ -236,7 +255,7 @@ class KVCacheConfigPickleTest(TestCase):
         source = KVCacheConfig()
         source.enable_crc = False
         source.reuse_cache_tail_blocks = 13
-        state = list(source.__getstate__()[:70])
+        state = list(_version_twenty_two_state(source)[:70])
         state[1] = 8
         state[10] = 4  # Historical checkpoint interval, not a tail count.
         previous = tuple(state)
@@ -293,7 +312,7 @@ class KVCacheConfigPickleTest(TestCase):
                 for _ in range(2):
                     config = pickle.loads(pickle.dumps(config))
                     self.assertEqual(getattr(config, name), timeout)
-                    self.assertEqual(config.__getstate__()[79], timeout)
+                    self.assertEqual(config.__getstate__()[-1], timeout)
                     self.assertIn(f"{name}: {timeout}\n", config.to_string())
         for timeout in (-1, 2**31):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(
@@ -301,7 +320,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:79], timeout))
+                restored.__setstate__((*state[:-1], timeout))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

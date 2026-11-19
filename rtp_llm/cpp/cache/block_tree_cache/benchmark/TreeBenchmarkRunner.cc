@@ -662,9 +662,7 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     }
 
     const auto& engine = cache->transfer_dispatcher_->per_rank_engine_;
-    RTP_LLM_CHECK(engine->asyncEnabled());
     writer_.addResolvedConfig("transfer_implementation", "workloop");
-    writer_.addResolvedConfigInt("btc_transfer_engine_async", engine->asyncEnabled());
     writer_.addResolvedConfigInt("owners_per_direction", engine->transferWorkerCount());
     writer_.addResolvedConfigInt("transfer_worker_count_per_direction", engine->transferWorkerCount());
     writer_.addResolvedConfigInt("enable_disk_cache", cache->config().enable_disk_cache);
@@ -673,7 +671,6 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     writer_.addResolvedConfigInt("transfer_queue_max_size", cache->config().transfer_queue_max_size);
     writer_.addResolvedConfigInt("device_disk_staging_block_count", cache->config().device_disk_staging_block_count);
     writer_.addResolvedConfigInt("enable_crc", 1);
-    writer_.addResolvedConfig("layout_fallback_reason", "none");
     TreeWorkloadGenerator generator(seed_, config);
     const auto            setup_start = Clock::now();
     const auto            metadata    = generator.generateTopology();

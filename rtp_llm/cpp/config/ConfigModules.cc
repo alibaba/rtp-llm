@@ -169,7 +169,6 @@ std::string KVCacheConfig::to_string() const {
         << "dsv4_fixed_pool_blocks: " << dsv4_fixed_pool_blocks << "\n"
         << "dsv41_decoder_swa_pool_blocks: " << dsv41_decoder_swa_pool_blocks << "\n"
         << "dsv4_hca_state_pool_blocks: " << dsv4_hca_state_pool_blocks << "\n"
-        << "dsv4_fixed_pool_use_memory: " << dsv4_fixed_pool_use_memory << "\n"
         << "kv_cache_event_publisher_type: " << kv_cache_event_publisher_type << "\n"
         << "kv_cache_event_manager_endpoint: " << kv_cache_event_manager_endpoint << "\n"
         << "kv_cache_event_instance_group: " << kv_cache_event_instance_group << "\n"

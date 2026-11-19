@@ -42,8 +42,6 @@ class BenchmarkCase:
     # Native process timeout override. The online Tree case needs to cover
     # setup + 15s warmup + 60s measured + drain + profiler teardown.
     expected_process_timeout_seconds: Optional[int] = None
-    requires_cuda_3d_batch: bool = False
-    transfer_implementation: str = "workloop"
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +62,6 @@ SMOKE_CASES = [
         suite="smoke",
         subcommand="transfer",
         params={
-            "--btc-transfer-engine-async": "true",
-            "--enable-crc": "true",
             "--group-set": "full_context",
             "--transfer-directions": "d2h",
             "--transfer-operation-count": "64",
@@ -93,7 +89,6 @@ def _transfer_case(
     min_bytes=0,
     is_perf_rep=False,
     working_set_blocks=0,
-    copy_strategy=None,
     descriptor_batch_size=None,
     business_concurrency=0,
     descriptors_per_business=0,
@@ -112,17 +107,8 @@ def _transfer_case(
     if business_concurrency > 0:
         params["--business-concurrency"] = str(business_concurrency)
         params["--descriptors-per-business"] = str(descriptors_per_business)
-    legacy = (
-        copy_strategy not in (None, "auto")
-        or transfer_worker_count != 1
-        or business_concurrency > 0
-    )
-    params["--btc-transfer-engine-async"] = "false" if legacy else "true"
-    params["--enable-crc"] = "false" if legacy else "true"
-    if legacy:
+    if transfer_worker_count != 1:
         params["--transfer-worker-count"] = str(transfer_worker_count)
-    if copy_strategy is not None:
-        params["--copy-strategy"] = copy_strategy
     if disk_mode is not None:
         params["--disk-io-mode"] = disk_mode
         params["--disk-access-pattern"] = "sequential"
@@ -135,13 +121,11 @@ def _transfer_case(
 
     return BenchmarkCase(
         name=name,
-        transfer_implementation="legacy" if legacy else "workloop",
         suite="profile",
         subcommand="transfer",
         params=params,
         min_logical_bytes=min_bytes,
         requires_disk=disk_mode is not None,
-        requires_cuda_3d_batch=copy_strategy == "cuda-3d-batch",
         is_representative_perf=is_perf_rep,
     )
 
@@ -158,117 +142,19 @@ PROFILE_CASES = [
         is_representative_perf=True,
         expected_process_timeout_seconds=180,
     ),
-    # --- host pair: Device <-> Host, mixed d2h+h2d in one case, one case per
-    # Device<->Host copy strategy (CUDA 1D/3D batch vs staged SM) for direct
-    # comparison. Both variants use descriptor batches at the transfer-engine
-    # API boundary.
-    _transfer_case(
-        "transfer_device_host_full_context_batch",
-        "d2h,h2d",
-        "full_context",
-        8,
-        min_bytes=16 * _GIB,
-        is_perf_rep=True,
-        copy_strategy="batch",
-    ),
-    _transfer_case(
-        "transfer_device_host_full_context_batch_c64_b8_w8",
-        "d2h,h2d",
-        "full_context",
-        64,
-        min_bytes=16 * _GIB,
-        is_perf_rep=True,
-        copy_strategy="batch",
-        descriptor_batch_size=8,
-    ),
-    _transfer_case(
-        "transfer_device_host_full_context_cuda_3d_batch",
-        "d2h,h2d",
-        "full_context",
-        8,
-        min_bytes=16 * _GIB,
-        is_perf_rep=True,
-        copy_strategy="cuda-3d-batch",
-    ),
-    _transfer_case(
-        "transfer_device_host_full_context_cuda_3d_batch_c64_b8_w8",
-        "d2h,h2d",
-        "full_context",
-        64,
-        min_bytes=16 * _GIB,
-        is_perf_rep=True,
-        copy_strategy="cuda-3d-batch",
-        descriptor_batch_size=8,
-    ),
-    _transfer_case(
-        "transfer_device_host_full_context_staged_sm",
-        "d2h,h2d",
-        "full_context",
-        8,
-        min_bytes=16 * _GIB,
-        is_perf_rep=True,
-        copy_strategy="staged-sm",
-    ),
-    _transfer_case(
-        "transfer_device_host_full_context_staged_sm_c64_b8_w8",
-        "d2h,h2d",
-        "full_context",
-        64,
-        min_bytes=16 * _GIB,
-        is_perf_rep=True,
-        copy_strategy="staged-sm",
-        descriptor_batch_size=8,
-    ),
-    _transfer_case(
-        "transfer_device_host_swa_batch",
-        "d2h,h2d",
-        "swa",
-        8,
-        min_bytes=16 * _GIB,
-        copy_strategy="batch",
-    ),
-    _transfer_case(
-        "transfer_device_host_swa_batch_c64_b8_w8",
-        "d2h,h2d",
-        "swa",
-        64,
-        min_bytes=16 * _GIB,
-        copy_strategy="batch",
-        descriptor_batch_size=8,
-    ),
-    _transfer_case(
-        "transfer_device_host_swa_cuda_3d_batch",
-        "d2h,h2d",
-        "swa",
-        8,
-        min_bytes=16 * _GIB,
-        copy_strategy="cuda-3d-batch",
-    ),
-    _transfer_case(
-        "transfer_device_host_swa_cuda_3d_batch_c64_b8_w8",
-        "d2h,h2d",
-        "swa",
-        64,
-        min_bytes=16 * _GIB,
-        copy_strategy="cuda-3d-batch",
-        descriptor_batch_size=8,
-    ),
-    _transfer_case(
-        "transfer_device_host_swa_staged_sm",
-        "d2h,h2d",
-        "swa",
-        8,
-        min_bytes=16 * _GIB,
-        copy_strategy="staged-sm",
-    ),
-    _transfer_case(
-        "transfer_device_host_swa_staged_sm_c64_b8_w8",
-        "d2h,h2d",
-        "swa",
-        64,
-        min_bytes=16 * _GIB,
-        copy_strategy="staged-sm",
-        descriptor_batch_size=8,
+    # Device/Host CRC at two concurrency levels for both GroupSets.
+    *(
+        _transfer_case(
+            f"transfer_device_host_{group_set}_crc{suffix}",
+            "d2h,h2d",
+            group_set,
+            concurrency,
+            min_bytes=16 * _GIB,
+            is_perf_rep=group_set == "full_context",
+            descriptor_batch_size=8,
+        )
+        for group_set in ("full_context", "swa")
+        for concurrency, suffix in ((8, ""), (64, "_c64_b8"))
     ),
     # --- three-tier cycle: Device -> Host -> Disk -> Device ---
     _transfer_case(
@@ -350,33 +236,21 @@ PROFILE_CASES = [
 
 
 def _batch_api_matrix_cases():
-    cases = []
-    variants = (
-        ("C", 1, 640),
-        ("D", 8, 80),
-    )
-    strategies = (
-        ("cuda_batch", "batch"),
-        ("cuda_3d_batch", "cuda-3d-batch"),
-        ("staged_sm", "staged-sm"),
-    )
-    for strategy_name, copy_strategy in strategies:
-        for group_set in ("full_context", "swa"):
-            for direction in ("d2h", "h2d"):
-                for label, descriptors_per_task, task_count in variants:
-                    cases.append(
-                        _transfer_case(
-                            f"matrix_{label}_{direction}_{group_set}_{strategy_name}_"
-                            f"c640_t{task_count}_d{descriptors_per_task}_batch_api",
-                            direction,
-                            group_set,
-                            640,
-                            min_bytes=16 * _GIB,
-                            copy_strategy=copy_strategy,
-                            descriptor_batch_size=descriptors_per_task,
-                        )
-                    )
-    return cases
+    variants = (("C", 1, 640), ("D", 8, 80))
+    return [
+        _transfer_case(
+            f"matrix_{label}_{direction}_{group_set}_crc_"
+            f"c640_t{task_count}_d{descriptors_per_task}_batch_api",
+            direction,
+            group_set,
+            640,
+            min_bytes=16 * _GIB,
+            descriptor_batch_size=descriptors_per_task,
+        )
+        for group_set in ("full_context", "swa")
+        for direction in ("d2h", "h2d")
+        for label, descriptors_per_task, task_count in variants
+    ]
 
 
 PROFILE_CASES.extend(_batch_api_matrix_cases())
@@ -384,42 +258,28 @@ PROFILE_CASES.extend(_batch_api_matrix_cases())
 
 def _e2e_business_cases():
     cases = []
-    direction_strategies = {
-        "d2h": (
-            ("cuda_batch", "batch"),
-            ("cuda_3d_batch", "cuda-3d-batch"),
-            ("staged_sm", "staged-sm"),
-        ),
-        "h2d": (
-            ("cuda_batch", "batch"),
-            ("cuda_3d_batch", "cuda-3d-batch"),
-            ("staged_sm", "staged-sm"),
-        ),
-        "h2disk": (("direct", None),),
-        "disk2d": (("direct", None),),
-    }
-    for direction, strategies in direction_strategies.items():
-        for strategy_name, copy_strategy in strategies:
-            for group_set in ("full_context", "swa"):
-                for upper_concurrency in (1, 4):
-                    for lower_workers in (1, 4):
-                        cases.append(
-                            _transfer_case(
-                                f"e2e_B_{direction}_{group_set}_{strategy_name}_"
-                                f"u{upper_concurrency}_l{lower_workers}_n160_b8",
-                                direction,
-                                group_set,
-                                upper_concurrency * 160,
-                                disk_mode="direct" if "disk" in direction else None,
-                                min_bytes=16 * _GIB,
-                                working_set_blocks=640,
-                                copy_strategy=copy_strategy,
-                                descriptor_batch_size=8,
-                                business_concurrency=upper_concurrency,
-                                descriptors_per_business=160,
-                                transfer_worker_count=lower_workers,
-                            )
+    for direction in ("d2h", "h2d", "h2disk", "disk2d"):
+        disk_mode = "direct" if "disk" in direction else None
+        path = disk_mode or "crc"
+        for group_set in ("full_context", "swa"):
+            for upper_concurrency in (1, 4):
+                for lower_workers in (1, 4):
+                    cases.append(
+                        _transfer_case(
+                            f"e2e_B_{direction}_{group_set}_{path}_"
+                            f"u{upper_concurrency}_l{lower_workers}_n160_b8",
+                            direction,
+                            group_set,
+                            upper_concurrency * 160,
+                            disk_mode=disk_mode,
+                            min_bytes=16 * _GIB,
+                            working_set_blocks=640,
+                            descriptor_batch_size=8,
+                            business_concurrency=upper_concurrency,
+                            descriptors_per_business=160,
+                            transfer_worker_count=lower_workers,
                         )
+                    )
     return cases
 
 

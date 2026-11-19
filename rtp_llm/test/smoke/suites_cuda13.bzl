@@ -83,7 +83,6 @@ def cuda13_suites():
                         "SP_ACT_TYPE=bf16",
                         "GEN_NUM_PER_CIRCLE=3",
                         "MODEL_EVAL_VARIANT=fp8_kv_cache",
-                        "DSV4_FIXED_POOL_USE_MEMORY=0",
                         "DSV4_CHUNK_TOKENS=12288",
                         "ENABLE_GPU_PREFIX_TREE=1",
                         "ENABLE_DSV4_STATE_BLOCK_INDEPENDENT_EVICTION=0",

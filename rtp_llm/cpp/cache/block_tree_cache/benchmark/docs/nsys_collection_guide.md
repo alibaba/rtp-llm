@@ -37,7 +37,7 @@ Tree 和 Transfer binary 均通过 `--model-profile` 加载完整 model profile�
 
 ## 先裸跑目标 workload
 
-下面以 `full_context`、单方向 H2D、CUDA batch strategy 为例。`--min-measured-seconds=5` 足以采到稳定重复事件，同时控制报告大小：
+下面以 `full_context`、单方向 H2D、WorkLoop CRC copy 为例。`--min-measured-seconds=5` 足以采到稳定重复事件，同时控制报告大小：
 
 ```bash
 "$BINARY" transfer \
@@ -52,7 +52,6 @@ Tree 和 Transfer binary 均通过 `--model-profile` 加载完整 model profile�
   --transfer-operation-count 4096 \
   --transfer-concurrency 8 \
   --transfer-descriptor-batch-size 8 \
-  --copy-strategy batch \
   --min-measured-seconds 5
 ```
 
@@ -60,7 +59,6 @@ Tree 和 Transfer binary 均通过 `--model-profile` 加载完整 model profile�
 
 - GroupSet：`full_context` 或 `swa`。
 - 方向：`d2h`、`h2d`、`h2disk`、`disk2d`。
-- Device/Host strategy：`batch` 或 `staged-sm`。
 - Disk case 还需要设置 `--disk-path`、`--disk-io-mode` 和 `--disk-access-pattern`。
 
 ## 采集普通 CUDA timeline
@@ -91,7 +89,6 @@ nsys profile \
     --transfer-operation-count 4096 \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
-    --copy-strategy batch \
     --min-measured-seconds 5
 ```
 
@@ -162,7 +159,6 @@ nsys profile \
     --transfer-operation-count 4096 \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
-    --copy-strategy batch \
     --min-measured-seconds 5
 ```
 
@@ -197,7 +193,6 @@ sudo "$NSYS_BIN" profile \
     --transfer-operation-count 4096 \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
-    --copy-strategy batch \
     --min-measured-seconds 5
 
 sudo chown "$(id -u):$(id -g)" "$METRICS_PREFIX.nsys-rep"
@@ -279,8 +274,7 @@ nsys export \
 
 更多 CLI 和指标定义见 [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)。
 
-### WorkLoop 与 legacy 的采集范围
+### WorkLoop 的采集范围
 
-默认 binary 的 Tree/Transfer 使用 CRC＋WorkLoop。采集前先检查 `resolved_config.transfer_implementation`。
-需要普通 copy 策略比较时显式加 `--btc-transfer-engine-async=false --enable-crc=false`，再使用 worker/strategy 参数。
-`models_py/bindings/cuda/test` 的 main staged baseline 保留为 legacy/test-only 依赖；其时间不能作为 WorkLoop owner 时间。
+Tree 和 Transfer 使用 CRC＋WorkLoop。采集前检查 `resolved_config.transfer_implementation`。
+独立的 `models_py/bindings/cuda/test` benchmark 测量 CUDA 拷贝原语，可用于比较 CRC 与 staged 拷贝开销。

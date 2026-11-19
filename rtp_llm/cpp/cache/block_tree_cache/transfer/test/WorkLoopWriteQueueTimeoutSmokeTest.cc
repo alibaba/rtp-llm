@@ -114,8 +114,7 @@ public:
     };
 
     explicit QueueSmokeEngine(const std::vector<GroupSetPtr>& groups):
-        PerRankBlockTransferEngine(
-            groups, true, DeviceHostCopyOptions{}, 1, 1, 1, kRequestCount, nullptr, 0, 1, true, diskConfig()),
+        PerRankBlockTransferEngine(groups, true, 1, 1, 1, kRequestCount, nullptr, 0, 1, diskConfig()),
         observations_(kBudgetCount * kRequestCount + 1) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
@@ -185,7 +184,7 @@ protected:
         groups_     = {makeTestGroupSet(0, topology, topology->groupTags(), {}, host_, disk_)};
         engine_     = std::make_shared<QueueSmokeEngine>(groups_);
         dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine_);
-        ASSERT_TRUE(engine_->asyncEnabled());
+
         ASSERT_EQ(engine_->transferWorkerCount(), 1u);
         ASSERT_NE(engine_->diskIOExecutor(), nullptr);
         ASSERT_EQ(engine_->diskIOExecutor()->config().write_thread_count, 1u);

@@ -65,26 +65,12 @@ SCORING_FUNC_SOFTMAX = 0
 SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 
-_TRUTHY_ENV_VALUES = ("yes", "true", "t", "1", "on")
-
 
 def _is_prefill_role(role_type: object) -> bool:
     """Accept both the production pybind enum and lightweight string configs."""
     if role_type == RoleType.PREFILL:
         return True
     return str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
-
-
-def _dsv4_fixed_pool_use_host_memory(
-    kv_cache_config: KVCacheConfig | None = None,
-) -> bool:
-    """Resolve DSV4 fixed-pool placement from parsed config or the legacy env."""
-    if kv_cache_config is not None:
-        return bool(kv_cache_config.dsv4_fixed_pool_use_memory)
-    raw = os.environ.get("DSV4_FIXED_POOL_USE_MEMORY")
-    if raw is None:
-        return False
-    return raw.strip().lower() in _TRUTHY_ENV_VALUES
 
 
 def _dsv4_pool_blocks(config_value: int | None, env_name: str) -> int:
@@ -698,9 +684,6 @@ class DeepSeekV4(DeepSeekV2):
             fp8_kv=attn_config.kv_cache_dtype == KvCacheDataType.FP8,
             head_dim=int(attn_config.size_per_head),
             indexer_head_dim=int(attn_config.indexer_head_dim),
-            fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(
-                kv_cache_config
-            ),
         )
 
         fixed_pool_blocks = _dsv4_pool_blocks(

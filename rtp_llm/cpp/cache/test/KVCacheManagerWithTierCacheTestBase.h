@@ -172,15 +172,13 @@ public:
                                              size_t                          device_disk_staging_block_count = 8):
         PerRankBlockTransferEngine(groups,
                                    enable_disk_cache,
-                                   {},
                                    device_disk_staging_block_count,
                                    enable_disk_cache ? 2 : 8,
                                    4,
                                    10000,
                                    nullptr,
                                    0,
-                                   4,
-                                   true) {}
+                                   4) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors      = task.descriptors();
@@ -1405,7 +1403,7 @@ protected:
         ASSERT_TRUE(manager_->init());
         ASSERT_NE(manager_->blockTreeCache(), nullptr);
         auto cache = manager_->blockTreeCache();
-        ASSERT_TRUE(cache->transfer_dispatcher_->per_rank_engine_->asyncEnabled());
+
         ASSERT_TRUE(cache->isHostCacheEnabled());
         ASSERT_EQ(cache->isDiskCacheEnabled(), GetParam() == TierLayout::HOST_DISK);
         ASSERT_NO_FATAL_FAILURE(expectDsv4TierTopology(manager_, cache_config_, GetParam()));
@@ -1415,7 +1413,7 @@ protected:
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DISK, 0.0);
         transfer_engine_ =
             std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), true, cache->isDiskCacheEnabled());
-        ASSERT_TRUE(transfer_engine_->asyncEnabled());
+
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, transfer_engine_);
     }
 

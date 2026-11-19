@@ -809,28 +809,6 @@ def collect_environment(
     return environment
 
 
-def query_copy_capabilities(binary: str, cuda_device: int) -> Dict[str, bool]:
-    try:
-        result = subprocess.run(
-            [binary, "capabilities", "--cuda-device", str(cuda_device)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-        )
-        capabilities = json.loads(result.stdout)
-        if (
-            not isinstance(capabilities, dict)
-            or type(capabilities.get("cuda_3d_batch")) is not bool
-        ):
-            raise ValueError("expected a boolean cuda_3d_batch capability")
-        return capabilities
-    except (OSError, subprocess.SubprocessError, ValueError) as error:
-        raise RuntimeError(
-            f"Failed to query native copy capabilities: {error}"
-        ) from error
-
-
 def load_profile_group_set_payloads(model_profile: str) -> Dict[str, int]:
     """Load group set payload bytes from the model profile JSON."""
     try:
@@ -861,7 +839,6 @@ def run_case(
     disk_root: Optional[str],
     profile_payloads: Optional[Dict[str, int]] = None,
     force_perf: bool = False,
-    copy_capabilities: Optional[Dict[str, bool]] = None,
 ) -> Dict:
     """Run a single benchmark case with all repetitions."""
     case_dir = os.path.join(output_dir, case.suite, case.name)
@@ -880,7 +857,7 @@ def run_case(
         "case": case.name,
         "suite": case.suite,
         "subcommand": case.subcommand,
-        "expected_transfer_implementation": case.transfer_implementation,
+        "expected_transfer_implementation": "workloop",
         "status": "unknown",
         "repetitions": [],
         "perf": {"status": "skipped"},
@@ -888,23 +865,6 @@ def run_case(
         "end_time": None,
         "process_timeout_seconds": process_timeout,
     }
-
-    if case.requires_cuda_3d_batch:
-        capabilities = (
-            copy_capabilities
-            if copy_capabilities is not None
-            else query_copy_capabilities(binary, cuda_device)
-        )
-        manifest["copy_capabilities"] = capabilities
-        if not capabilities["cuda_3d_batch"]:
-            manifest["status"] = "skipped_unsupported_platform"
-            manifest["skip_reason"] = (
-                "cuda-3d-batch requires a non-PPU CUDA 13 build/runtime and driver >= 13"
-            )
-            manifest["end_time"] = datetime.now().astimezone().isoformat()
-            with open(os.path.join(case_dir, "manifest.json"), "w") as target:
-                json.dump(manifest, target, indent=2)
-            return manifest
 
     # Check disk requirement
     if case.requires_disk and not disk_root:
@@ -1159,7 +1119,6 @@ def apply_task_pool_overrides(
                     case,
                     name=f"{case.name}_tp{task_pool_size}",
                     params=params,
-                    transfer_implementation=case.transfer_implementation,
                 )
             )
     return expanded_cases
@@ -1202,11 +1161,6 @@ def run_suite(
             sys.exit(1)
 
     cases = apply_task_pool_overrides(cases, task_pool_sizes)
-    copy_capabilities = (
-        query_copy_capabilities(binary, cuda_device)
-        if any(case.requires_cuda_3d_batch for case in cases)
-        else None
-    )
 
     print(f"Running {len(cases)} case(s) in suite '{suite}'")
     print(f"Output directory: {output_dir}")
@@ -1238,7 +1192,6 @@ def run_suite(
             disk_root=disk_root,
             profile_payloads=case_payloads,
             force_perf=force_perf,
-            copy_capabilities=copy_capabilities,
         )
         all_manifests.append(case_manifest)
         print(f"[{case_manifest['status']}]")

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include "rtp_llm/cpp/cache/block_tree_cache/benchmark/LegacyCopyBenchmarkSupport.h"
 #include <map>
 #include <memory>
 #include <string>
@@ -30,7 +29,6 @@ private:
         std::vector<const GroupInfo*>                 members;
         std::vector<DeviceBlockPoolPtr>               device_pools;
         GroupSetPtr                                   group_set;
-        std::shared_ptr<BenchmarkDeviceHostCopyStats> copy_stats;
         std::shared_ptr<PerRankBlockTransferEngine>   engine;
     };
 

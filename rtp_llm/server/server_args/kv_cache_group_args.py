@@ -113,7 +113,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_crc"),
         type=str2bool,
         default=True,
-        help="启用本地 HOST/DISK KV cache 传输的 CRC 校验，默认开启；仅在支持 CRC 的构建中生效。启动时配置。",
+        help="本地 HOST/DISK KV cache 要求开启 CRC 校验，并使用支持 CRC 的 CUDA13 构建。启动时配置。",
     )
     kv_cache_group.add_argument(
         "--reuse_cache",
@@ -680,12 +680,4 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=0,
         help="DSV4 HCA_STATE pool 单独 block 数。>0 时仅覆盖 HCA_STATE；"
         "不配置或配置为 0 时，HCA_STATE 跟随 DSV4_FIXED_POOL_BLOCKS 或通用池配置/自动计算 block 数。",
-    )
-    kv_cache_group.add_argument(
-        "--dsv4_fixed_pool_use_memory",
-        env_name="DSV4_FIXED_POOL_USE_MEMORY",
-        bind_to=(kv_cache_config, "dsv4_fixed_pool_use_memory"),
-        type=str2bool,
-        default=False,
-        help="DSV4 固定池（INDEXER_STATE/CSA_STATE/HCA_STATE/SWA_KV）是否使用 pinned CPU memory。False 表示继续使用 GPU memory。",
     )

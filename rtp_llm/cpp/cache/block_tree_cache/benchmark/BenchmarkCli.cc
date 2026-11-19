@@ -8,25 +8,14 @@ namespace rtp_llm::benchmark {
 namespace {
 void printUsage(const char* program) {
     std::cout << "Usage: " << program << " <tree|transfer> [options...]\n\n";
-    std::cout << "       " << program << " capabilities [--cuda-device=N]\n\n";
     BenchmarkOptions::printHelp();
     std::cout << "\nSubcommand help: " << program << " tree --help | transfer --help\n";
 }
 
 void validateTransferOptions(const TransferOptions& options) {
-    if (options.btc_transfer_engine_async && options.copy_strategy != "auto")
-        throw std::runtime_error("copy-strategy options require --btc-transfer-engine-async=false");
-    const bool device_route =
-        std::any_of(options.transfer_directions.begin(), options.transfer_directions.end(), [](const auto& direction) {
-            return direction == "d2h" || direction == "h2d" || direction == "disk2d";
-        });
-    if (options.enable_crc && options.copy_strategy != "auto")
-        throw std::runtime_error("copy-strategy requires --enable-crc=false");
-    if (options.btc_transfer_engine_async && device_route && !options.enable_crc)
-        throw std::runtime_error("WorkLoop benchmark Device fixtures require --enable-crc=true");
     if (options.transfer_worker_count == 0 || options.btc_crc_slot_count == 0)
         throw std::runtime_error("worker and CRC slot counts must be positive");
-    if (options.btc_transfer_engine_async && options.transfer_queue_max_size < options.transfer_worker_count)
+    if (options.transfer_queue_max_size < options.transfer_worker_count)
         throw std::runtime_error("WorkLoop queue budget Q must be >= worker count");
     if (options.group_set.empty() || options.transfer_directions.empty())
         throw std::runtime_error("transfer group set and directions must not be empty");
@@ -38,10 +27,6 @@ void validateTransferOptions(const TransferOptions& options) {
         throw std::runtime_error("--disk-io-mode must be direct or buffered");
     if (options.disk_access_pattern != "sequential" && options.disk_access_pattern != "random")
         throw std::runtime_error("--disk-access-pattern must be sequential or random");
-    if (options.copy_strategy != "auto" && options.copy_strategy != "batch" && options.copy_strategy != "cuda-3d-batch"
-        && options.copy_strategy != "staged-sm") {
-        throw std::runtime_error("--copy-strategy must be auto, batch, cuda-3d-batch or staged-sm");
-    }
 }
 
 }  // namespace
@@ -58,7 +43,7 @@ int runBenchmarkCli(int argc, char** argv, const std::function<bool(const Benchm
             printUsage(argv[0]);
             return 0;
         }
-        if (command.subcommand != "tree" && command.subcommand != "transfer" && command.subcommand != "capabilities") {
+        if (command.subcommand != "tree" && command.subcommand != "transfer") {
             throw std::runtime_error("Unknown subcommand: " + command.subcommand);
         }
         for (int index = 2; index < argc; ++index) {
@@ -82,9 +67,6 @@ int runBenchmarkCli(int argc, char** argv, const std::function<bool(const Benchm
         }
         if (argc > 2) {
             throw std::runtime_error("Unknown argument: " + std::string(argv[2]));
-        }
-        if (command.subcommand == "capabilities") {
-            return run(command) ? 0 : 1;
         }
         if (command.common.model_profile_path.empty()) {
             throw std::runtime_error("--model-profile is required");

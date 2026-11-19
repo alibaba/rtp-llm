@@ -64,8 +64,8 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
 // Shared by pre-allocation budgeting and WorkLoop construction.
 inline constexpr size_t kDefaultCrcSlotsPerWorkLoop = 8;
 
-// Shared by pre-allocation budgeting and the selected transfer implementation.
-size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop, bool async);
+// Shared by pre-allocation budgeting and WorkLoop construction.
+size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop);
 // Explicit GPU allocations for this rank's CRC services. No pools or CUDA
 // resources are created, and no capacity-dependent KV allocations are counted.
 size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheConfig& options);

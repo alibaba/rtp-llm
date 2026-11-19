@@ -6,8 +6,7 @@
 
 - driver 的 `--suite` 和 `--case` 默认均为 `all`；`--suite profile` 未指定 `--case` 时，会运行 registry 中全部 profile case，包括下面的 matrix 和 e2e 家族。
 - matrix/e2e 用于专项比较，但当前与基础 case 一同注册在 `PROFILE_CASES` 中，没有独立的专项 suite 或默认排除规则。只想跑某项实验时，用 `--case <完整名称>[,<完整名称>...]` 明确选择；该参数不支持通配符。
-- 当前 profile 共 109 个 case：1 个 Tree、20 个 mixed Transfer（含 6 个并发变体）、24 个 batch API matrix 和 64 个 e2e case。家族数量及全局名称唯一性由 `benchmark_driver_profile_test` 锁定，新增 case 时同步更新文档和测试。具体运行范围以本次 `suite_manifest.json` 为准，不依赖文档中的历史数量判定完整性。
-- 其中 28 个显式 `cuda-3d-batch` case 标记 `requires_cuda_3d_batch`：仅支持非 PPU CUDA 13 编译、13.x runtime 和 driver ≥ 13。driver 在测量前通过 native `capabilities` 查询；不支持的 case 保留在 manifest，记 `skipped_unsupported_platform` 及原因，不作为完成或真实 copy 失败。严格 suite 将其视为 incomplete，只有显式 `--allow-incomplete` 可允许带跳过成功退出。
+- 当前 profile 共 53 个 case：1 个 Tree、12 个 Transfer、8 个 batch API matrix 和 32 个 e2e case。家族数量和名称唯一性由 `benchmark_driver_profile_test` 核对。
 - 报告可只分析选定家族或子集，交代选择条件、完成/失败/跳过情况及未展示结果的位置即可，无需为每个注册 case 固定保留一个表格行。
 
 ## Smoke（2 个）
@@ -31,20 +30,11 @@ Smoke 只验证两个预期 case 均生成 completed manifest/result。Tree smok
 
 Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）为 `8000, 14000, 32000, 48000, 92000, 96000, 117000, 120000, 128000, 135000, 141000, 150000, 165000, 200000, 235000, 320000, 480000, 640000, 800000, 950000`，对应权重为 `2, 3, 5, 10, 5, 20, 5, 20, 5, 10, 5, 5, 3, 1, 1, 4, 3, 3, 2, 1`。每个 family 首次请求或抽样长度不大于当前 leaf 时生成 BASE；只有抽样长度更大时才生成 CONTINUATION。BASE 的计划前缀命中率从 `0, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 99%` 等概率抽样；CONTINUATION 直接继承父 path。正式 native result 把三组分布写入 resolved config，报告据此生成简短的文字摘要。
 
-### Device↔Host mixed（基础 case 与并发变体）
+### Device↔Host mixed（4 个）
 
-| Case | GroupSet | requested strategy |
-| --- | --- | --- |
-| `transfer_device_host_full_context_batch` | full_context | batch |
-| `transfer_device_host_full_context_cuda_3d_batch` | full_context | cuda-3d-batch |
-| `transfer_device_host_full_context_staged_sm` | full_context | staged-sm |
-| `transfer_device_host_swa_batch` | swa | batch |
-| `transfer_device_host_swa_cuda_3d_batch` | swa | cuda-3d-batch |
-| `transfer_device_host_swa_staged_sm` | swa | staged-sm |
-
-以上六个基础 case 都是 `d2h,h2d` mixed window、8-lane wave，每次同方向向 transfer engine 提交最多 8 个 descriptor。device descriptor 按 profile member 展开：默认 DSV4-Flash profile 的 full_context 为 3 pools/62 layer tiles，swa 为 3 pools/85 layer tiles。benchmark-only recorder 记录 measured window 实际命中的 Device↔Host copy strategy；显式策略必须严格命中，fallback 或 mixed 命中都会使 case 失败。这里的 `batch` 指 CUDA 1D batch，`cuda-3d-batch` 指 CUDA 3D batch；二者均不同于 transfer-engine descriptor batch。
-
-每个基础 case 还有一个 `_c64_b8_w8` 后缀的并发变体：transfer concurrency 为 64、descriptor batch 为 8。后缀只用于识别，实际 worker 数等参数以 registry 和结果中的 resolved config 为准（当前这些变体未单独覆盖 `transfer_worker_count`，使用默认值 1）。报告可把基础配置和并发变体并列比较，并列出实际配置。
+`transfer_device_host_{group_set}_crc` 与 `transfer_device_host_{group_set}_crc_c64_b8`
+覆盖 `full_context` 和 `swa` 的 `d2h,h2d` mixed window。两个并发值为 8 和 64，
+descriptor batch 均为 8。结果记录实际 owner 数和 CRC slot 数。
 
 ### Device↔Disk（4 个）
 
@@ -55,7 +45,7 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 | `transfer_device_disk_swa_direct` | swa | direct | auto（c×4） |
 | `transfer_device_disk_swa_buffered` | swa | buffered | 4096 blocks |
 
-方向为 `d2h,h2disk,disk2d`。device 和 host 使用可复用的 lane blocks，disk 分配完整 working set；每个 wave 先完成 Device→Host 和 Host→Disk，再读取相同 coordinate 的 Disk→Device。各方向按对应的批次上限提交；legacy 的磁盘读取按 staging 容量进一步切批。报告按方向展示 API 提交的实际 avg/max batch size。
+方向为 `d2h,h2disk,disk2d`。device 和 host 使用可复用的 lane blocks，disk 分配完整 working set；每个 wave 先完成 Device→Host 和 Host→Disk，再读取相同 coordinate 的 Disk→Device。各方向使用同一个批次上限。报告按方向展示 API 提交的实际 avg/max batch size。
 
 ### Host↔Disk（4 个）
 
@@ -73,26 +63,26 @@ Tree 的逻辑 block 固定覆盖 256 tokens。20 个请求长度桶（tokens）
 `_batch_api_matrix_cases()` 动态生成名称：
 
 ```text
-matrix_{label}_{direction}_{group_set}_{strategy}_c640_t{tasks}_d{descriptors}_batch_api
+matrix_{label}_{direction}_{group_set}_crc_c640_t{tasks}_d{descriptors}_batch_api
 ```
 
-固定 transfer concurrency 为 640；C 为每次提交 1 个 descriptor、对应 640 个 task，D 为每次提交 8 个 descriptor、对应 80 个 task。策略 `cuda_batch`/`cuda_3d_batch`/`staged_sm` × group set `full_context`/`swa` × 方向 `d2h`/`h2d` × C/D 两种提交粒度，共 24 个 case。这里的 task 数是命名中的提交划分，不是 worker 线程数。
+固定 transfer concurrency 为 640；C 为每次提交 1 个 descriptor、对应 640 个 task，D 为每次提交 8 个 descriptor、对应 80 个 task。按 `full_context`/`swa`、`d2h`/`h2d` 和 C/D 两种提交粒度展开，共 8 个 CRC case。这里的 task 数是命名中的提交划分，不是 worker 线程数。
 
-例如 `matrix_C_d2h_full_context_cuda_batch_c640_t640_d1_batch_api`。完整名称由循环拼接，源码中搜索 `_batch_api_matrix_cases` 可找到定义。
+例如 `matrix_C_d2h_full_context_crc_c640_t640_d1_batch_api`。完整名称由循环拼接，源码中搜索 `_batch_api_matrix_cases` 可找到定义。
 
-用于观察 transfer-engine API 提交粒度与底层 copy strategy 的影响。报告可以按方向/group set 组织 C/D 对照表或图，说明 concurrency、实际 descriptor batch 和策略，并区分单方向吞吐与 mixed 吞吐。不要求并入固定的 Device↔Host 表。
+用于观察 transfer-engine API 提交粒度对 WorkLoop 吞吐的影响。报告可以按方向/group set 组织 C/D 对照表或图，说明 concurrency、实际 descriptor batch，并区分单方向吞吐与 mixed 吞吐。不要求并入固定的 Device↔Host 表。
 
 ### E2E business matrix（单方向）
 
 `_e2e_business_cases()` 动态生成名称：
 
 ```text
-e2e_B_{direction}_{group_set}_{strategy}_u{upper}_l{lower}_n160_b8
+e2e_B_{direction}_{group_set}_{path}_u{upper}_l{lower}_n160_b8
 ```
 
-方向 `d2h`/`h2d` 各有 `cuda_batch`、`cuda_3d_batch`、`staged_sm` 三种策略；`h2disk`/`disk2d` 各使用 `direct`。每种组合展开 `full_context`/`swa`、上层业务并发 1/4、下层 worker 数 1/4，共 64 个 case。每个业务包含 160 个 descriptor，API descriptor batch 为 8，working set 为 640 blocks。driver 先按 profile payload 与最小字节数上调操作数，再向上对齐到 160 的整数倍，保证完整业务请求；case manifest 的 `resolved_transfer_operation_count` 记录送入 native 的值，native pilot 仍可继续上调，最终测量操作数以 result 为准。
+方向 `d2h`/`h2d` 标为 `crc`，`h2disk`/`disk2d` 标为 `direct`。每个方向展开 `full_context`/`swa`、上层业务并发 1/4、每方向 owner 数 1/4，共 32 个 case。每个业务包含 160 个 descriptor，API descriptor batch 为 8，working set 为 640 blocks。driver 先按 profile payload 与最小字节数上调操作数，再向上对齐到 160 的整数倍，保证完整业务请求；case manifest 的 `resolved_transfer_operation_count` 记录送入 native 的值，native pilot 仍可继续上调，最终测量操作数以 result 为准。
 
-用于观察业务并发和 transfer worker 并发的组合影响。报告可按方向、group set 和策略分别展示 2×2 并发矩阵，或仅展示与实验问题有关的组合。这里的 e2e 是 transfer 业务提交路径，不代表完整模型推理；不要解释为线上请求吞吐。
+用于观察业务并发和 transfer worker 并发的组合影响。报告可按方向和 group set 分别展示 2×2 并发矩阵，或仅展示与实验问题有关的组合。这里的 e2e 是 transfer 业务提交路径，不代表完整模型推理；不要解释为线上请求吞吐。
 
 ### 结果呈现与比较范围
 
@@ -127,16 +117,11 @@ e2e_B_{direction}_{group_set}_{strategy}_u{upper}_l{lower}_n160_b8
 | `mixed_throughput_bps` | 同一 measured window 内双方向成功字节数之和 / 墙钟时间 |
 | `direction.<dir>.throughput_bps` | 单方向吞吐 |
 | `logical_throughput_bytes_per_second` | 同 `mixed_throughput_bps` |
-| `requested_copy_strategy` / `actual_copy_strategy` | 请求与实际使用的传输策略 |
-| `requested_transfer_descriptor_batch_size` / `resolved_transfer_descriptor_batch_size` | transfer engine API 请求/解析后的 descriptor batch 大小；与 CUDA copy strategy 无关 |
+| `actual_copy_strategy` | Device 路径为 `crc`，纯 Host/Disk 路径为 `not-applicable` |
+| `requested_transfer_descriptor_batch_size` / `resolved_transfer_descriptor_batch_size` | transfer engine API 请求/解析后的 descriptor batch 大小 |
 | `descriptor_batch_size_avg/max` | measured window 内每次 `submit()` 携带的 descriptor 数量；另有 `direction.<dir>.*` 分方向值 |
 
 ## Transfer 实现与布局 provenance
 
-case 名称及计数保持原矩阵；`BenchmarkCase.transfer_implementation` 明确记录预期实现。
-默认 Tree/auto Transfer（含 smoke）使用 CRC＋WorkLoop；保留的 batch/staged-sm 和 worker/e2e 对比
-显式携带 `--btc-transfer-engine-async=false --enable-crc=false`，属于 legacy 比较。
-worker 参数不会出现在 WorkLoop case 中，CLI 拒绝把它当作 owner 配置。
-检查 manifest 的 `expected_transfer_implementation` 以及结果 `resolved_config` 的
-`transfer_implementation`、`btc_transfer_engine_async`、`enable_crc`、C/M/Q、owner/worker 与 staging。
-WorkLoop Device copy 报 `actual_copy_strategy=crc`，旧策略 lowest-api 统计仅用于 legacy。
+检查 manifest 的 `expected_transfer_implementation` 与结果的 `transfer_implementation` 均为
+`workloop`。结果还记录 CRC slot 数、批次上限、驻留队列和 staging 容量。

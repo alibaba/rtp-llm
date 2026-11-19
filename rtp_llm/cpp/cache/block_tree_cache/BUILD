@@ -279,8 +279,6 @@ cc_library(
         ":block_tree_cache_layout",
         ":transfer_common",
         ":transfer_work_loop",
-        "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy",
-        "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy:copy_options",
         "//rtp_llm/cpp/cache/events:kv_cache_event",
         ":block_tree_task_pool",
         ":crc_dump_writer",

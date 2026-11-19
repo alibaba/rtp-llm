@@ -193,8 +193,7 @@ class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
                                                 bool                            perform_successful_transfers = true,
-                                                bool                            enable_disk_cache            = false,
-                                                bool                            btc_transfer_engine_async    = true);
+                                                bool                            enable_disk_cache            = false);
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override;
 

@@ -72,7 +72,7 @@ private:
 class ControlledProducer final: public PerRankBlockTransferEngine {
 public:
     explicit ControlledProducer(Observation mode = Observation::NORMAL):
-        PerRankBlockTransferEngine({}, false, {}, 128, 1, 1, 8, nullptr, 0, 4, true), mode(mode) {}
+        PerRankBlockTransferEngine({}, false, 128, 1, 1, 8, nullptr, 0, 4), mode(mode) {}
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask batch) override {
         ++submissions;
         traces.push_back(batch.traceId());

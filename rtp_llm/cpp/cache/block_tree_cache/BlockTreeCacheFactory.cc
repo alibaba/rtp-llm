@@ -1,5 +1,4 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 
 #include <algorithm>
@@ -35,12 +34,17 @@
 namespace rtp_llm {
 namespace {
 
-bool hasDeviceRoute(const GroupSet& group, bool enable_disk_cache) {
-    return !group.devicePools().empty() && (group.hostPool() || (enable_disk_cache && group.diskPool()));
+bool hasRequiredCrcBackend(const KVCacheConfig& config) {
+    if (!config.enable_memory_cache && !config.enable_disk_cache)
+        return true;
+    if (!config.enable_crc || !CrcCopyWorkspace::available()) {
+        RTP_LLM_LOG_ERROR("BlockTree HOST/DISK cache requires ENABLE_CRC=1 and the CUDA13 CRC backend");
+        return false;
+    }
+    return true;
 }
 
-std::string workLoopCompatibility(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache) {
-    std::string reason;
+void validateTransferGroups(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache) {
     for (size_t index = 0; index < groups.size(); ++index) {
         const auto& group = groups[index];
         if (!group || group->groupSetId() != index || !group->topologyPtr() || group->groupTags().empty()
@@ -62,23 +66,9 @@ std::string workLoopCompatibility(const std::vector<GroupSetPtr>& groups, bool e
             && (pools.size() != group->groupTags().size()
                 || std::any_of(pools.begin(), pools.end(), [](const auto& pool) { return !pool; })))
             throw std::invalid_argument("invalid transfer member pools");
-        if (!hasDeviceRoute(*group, enable_disk_cache))
-            continue;
-        if (!group->crcEnabled()) {
-            reason = "Device route has no CRC layout";
-            continue;
-        }
-        const int device = pools.front()->deviceIndex();
-        if (device < 0 || std::any_of(pools.begin(), pools.end(), [device](const auto& pool) {
-                return pool->deviceIndex() != device;
-            }))
-            throw std::invalid_argument("CRC backings must reside on a single GPU per GroupSet");
-        if (!CrcCopyWorkspace::available())
-            throw std::invalid_argument("CRC Device routes require the CUDA13 backend");
-        // HostBlockPool's allocator guarantees pinned/registered storage.
-        (void)getDeviceHostCopyTiles(*group, std::vector<BlockIdxType>(pools.size(), 0));
+        if (!pools.empty() && (group->hostPool() || (enable_disk_cache && group->diskPool())) && !group->crcEnabled())
+            throw std::invalid_argument("WorkLoop Device transfers require a CRC layout");
     }
-    return reason;
 }
 
 constexpr size_t kCopyAlignment     = 16;
@@ -325,8 +315,9 @@ BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_conf
     if (!buildBlockTreeGroupMembers(cache_config, layout->group_members)) {
         return nullptr;
     }
-    const bool enable_crc = kv_cache_config.enable_crc && CrcCopyWorkspace::available()
-                            && (kv_cache_config.enable_memory_cache || kv_cache_config.enable_disk_cache);
+    if (!hasRequiredCrcBackend(kv_cache_config))
+        return nullptr;
+    const bool   enable_crc     = kv_cache_config.enable_memory_cache || kv_cache_config.enable_disk_cache;
     const size_t pool_alignment = kv_cache_config.enable_disk_cache && !kv_cache_config.disk_cache_buffered_io ?
                                       kDirectIOAlignment :
                                       kCopyAlignment;
@@ -431,14 +422,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                           disk_enabled);
         return nullptr;
     }
-    if (!kv_cache_config.enable_crc && (host_enabled || disk_enabled)) {
-        RTP_LLM_LOG_WARNING(
-            "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
-    }
-    if (kv_cache_config.enable_crc && (host_enabled || disk_enabled) && !CrcCopyWorkspace::available()) {
-        RTP_LLM_LOG_WARNING("CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
-                            "host/disk transfers use plain copies");
-    }
+    if (layout && !hasRequiredCrcBackend(kv_cache_config))
+        return nullptr;
     // HOST buffers are also used directly for disk I/O, so both pools share the disk alignment when needed.
     const size_t pool_alignment =
         disk_enabled && !kv_cache_config.disk_cache_buffered_io ? kDirectIOAlignment : kCopyAlignment;
@@ -680,13 +665,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                        config.host_cache_sync_timeout_ms;
     config.disk_cache_evict_max_pending_bytes =
         checkedSize(kv_cache_config.disk_cache_evict_max_pending_bytes, "disk_cache_evict_max_pending_bytes");
-    const auto fallback_reason = workLoopCompatibility(group_sets, disk_enabled);
-    const bool uses_workloop   = fallback_reason.empty();
-    RTP_LLM_LOG_INFO("BlockTree transfer: implementation=%s fallback_reason=%s",
-                     uses_workloop ? "workloop" : "legacy",
-                     uses_workloop ? "none" : fallback_reason.c_str());
-    if (uses_workloop
-        && (!transfer_queue_size || transfer_queue_size > std::numeric_limits<size_t>::max() / max_blocks_per_batch)) {
+    validateTransferGroups(group_sets, disk_enabled);
+    if (!transfer_queue_size || transfer_queue_size > std::numeric_limits<size_t>::max() / max_blocks_per_batch) {
         RTP_LLM_LOG_ERROR("WorkLoop transfer requires positive, nonoverflowing Q*M");
         return nullptr;
     }
@@ -696,14 +676,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             config.disk_cache_sync_timeout_ms;
     config.transfer_worker_count =
         checkedSize(kv_cache_config.block_tree_transfer_worker_count, "block_tree_transfer_worker_count");
-    if (uses_workloop && transfer_queue_size < config.transfer_worker_count) {
+    if (transfer_queue_size < config.transfer_worker_count) {
         RTP_LLM_LOG_ERROR("WorkLoop transfer queue capacity must be >= worker count: Q=%zu workers=%zu",
                           transfer_queue_size,
                           config.transfer_worker_count);
         return nullptr;
     }
-    if (uses_workloop
-        && config.transfer_worker_count > std::numeric_limits<size_t>::max() / (2 * kDefaultCrcSlotsPerWorkLoop)) {
+    if (config.transfer_worker_count > std::numeric_limits<size_t>::max() / (2 * kDefaultCrcSlotsPerWorkLoop)) {
         RTP_LLM_LOG_ERROR("transfer worker count overflows total CRC slot count");
         return nullptr;
     }
@@ -743,15 +722,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
     auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         kv_cache_config.enable_disk_cache,
-                                                                        DeviceHostCopyOptions{},
                                                                         config.device_disk_staging_block_count,
                                                                         config.max_descriptors_per_transfer_batch,
                                                                         config.transfer_worker_count,
                                                                         config.transfer_queue_max_size,
                                                                         cache_metrics_reporter,
                                                                         parallelism_config.world_rank,
-                                                                        kDefaultCrcSlotsPerWorkLoop,
-                                                                        uses_workloop);
+                                                                        kDefaultCrcSlotsPerWorkLoop);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(

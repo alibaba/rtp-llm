@@ -76,7 +76,8 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
                                 "invalid group set payload for tag=%s",
                                 tag.c_str());
         layout.payload_bytes += bytes;
-        enable_crc = enable_crc && config.topology().group(tag).policy.memory_placement == CacheMemoryPlacement::DEVICE;
+        if (enable_crc && config.topology().group(tag).policy.memory_placement != CacheMemoryPlacement::DEVICE)
+            throw std::invalid_argument("CRC transfer requires GPU-resident device pool: " + tag);
     }
     layout.crc_enabled   = enable_crc;
     layout.storage_bytes = enable_crc ? CrcCopyWorkspace::encodedBytes(layout.payload_bytes) : layout.payload_bytes;
@@ -87,10 +88,10 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
     return layout;
 }
 
-size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop, bool async) {
-    if (!workers || (async && !slots_per_loop))
+size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop) {
+    if (!workers || !slots_per_loop)
         throw std::invalid_argument("invalid CRC workspace count");
-    return checkedProduct(checkedProduct(2, workers), async ? slots_per_loop : 1);
+    return checkedProduct(checkedProduct(2, workers), slots_per_loop);
 }
 
 size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheConfig& options) {
@@ -99,14 +100,9 @@ size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheCon
         return 0;
     std::vector<std::vector<std::string>> members;
     RTP_LLM_CHECK_WITH_INFO(buildBlockTreeGroupMembers(config, members), "invalid BlockTree group aggregation");
-    bool   async       = true;
     size_t max_payload = 0, max_tiles = 0;
     for (const auto& tags : members) {
         const auto layout = computeBlockTreeBackingLayout(config, tags, true, 16);
-        if (!layout.crc_enabled) {
-            async = false;  // A plain device route makes the whole engine use legacy.
-            continue;
-        }
         size_t tiles = 0;
         for (const auto& tag : tags)
             for (const auto layer : config.layerIdsForGroup(tag)) {
@@ -120,8 +116,7 @@ size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheCon
         return 0;
     const size_t batch = positive(options.memory_cache_max_descriptors_per_transfer_batch, "transfer batch size");
     const auto count = crcTransferWorkspaceCount(positive(options.block_tree_transfer_worker_count, "transfer workers"),
-                                                 kDefaultCrcSlotsPerWorkLoop,
-                                                 async);
+                                                 kDefaultCrcSlotsPerWorkLoop);
     const auto usage = CrcCopyWorkspace::memoryUsage(batch, max_payload, checkedProduct(batch, max_tiles));
     return checkedProduct(count, usage.device_bytes);
 }

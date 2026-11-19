@@ -530,7 +530,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_eviction_policy", &KVCacheConfig::disk_eviction_policy)
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
-        .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
         .def_readwrite("kvcm_enable_vipserver", &KVCacheConfig::kvcm_enable_vipserver)
         .def_readwrite("kvcm_vipserver_domain", &KVCacheConfig::kvcm_vipserver_domain)
         .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
@@ -586,7 +585,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      22,
+                                      23,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -638,7 +637,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory_cache_max_descriptors_per_transfer_batch,
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
-                                      self.dsv4_fixed_pool_use_memory,
                                       self.block_tree_full_prefix_scan_interval_ms,
                                       self.block_tree_transfer_worker_count,
                                       self.block_tree_business_queue_max_size,
@@ -674,8 +672,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 constexpr size_t kPinnedHostFieldCount           = 64;
                 constexpr size_t kReserveRemovedFieldCount       = 63;
                 constexpr size_t kV6FieldCount                   = 62;
-                // Tuple sizes for versions 7 through 22, including the tag and version.
-                constexpr size_t kExtendedStateSizes[] = {69, 70, 72, 78, 80, 84, 88, 89, 90, 91, 92, 94, 95, 96, 82, 80};
+                // Tuple sizes for versions 7 through 23, including the tag and version.
+                constexpr size_t kExtendedStateSizes[] = {
+                    69, 70, 72, 78, 80, 84, 88, 89, 90, 91, 92, 94, 95, 96, 82, 80, 79};
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
                     || t[0].cast<std::string>() != "KVCacheConfig") {
                     throw std::runtime_error("invalid KVCacheConfig state");
@@ -691,7 +690,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const bool valid_reserve_removed_state = version == 5 && t.size() == kReserveRemovedFieldCount + 2;
                 const bool valid_v6_state              = version == 6 && t.size() == kV6FieldCount + 2;
                 const bool valid_extended_state =
-                    version >= 7 && version <= 22 && t.size() == kExtendedStateSizes[version - 7];
+                    version >= 7 && version <= 23 && t.size() == kExtendedStateSizes[version - 7];
                 if (!valid_legacy_state && !valid_write_sync_state && !valid_queue_write_sync_state
                     && !valid_pinned_host_state && !valid_reserve_removed_state && !valid_v6_state
                     && !valid_extended_state) {
@@ -699,29 +698,32 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
-                // Versions 21 and 22 omit earlier retired options.
-                // Only version 21 still has two abort-ratio slots in the compact layout.
+                // The compact layout starts at version 21. Version 22 drops the abort ratios.
                 const bool   compact_state       = version >= 21;
                 const size_t retired_abort_slots = version == 21 ? 2 : 0;
+                // Version 23 drops the fixed-pool placement flag from slot 53.
+                const auto field = [&](size_t index) { return t[index - (version >= 23 && index > 53 ? 1 : 0)]; };
                 if (version >= 11) {
-                    c.memory_cache_swa_block_ratio  = t[compact_state ? 72 : 78].cast<double>();
-                    c.dsv41_decoder_swa_pool_blocks = t[compact_state ? 73 : 79].cast<uint32_t>();
+                    c.memory_cache_swa_block_ratio  = field(compact_state ? 72 : 78).cast<double>();
+                    c.dsv41_decoder_swa_pool_blocks = field(compact_state ? 73 : 79).cast<uint32_t>();
                 }
                 if (version >= 12) {
-                    c.kvcm_task_timeout_ms                = t[compact_state ? 74 : 80].cast<int>();
-                    c.kv_cache_event_snapshot_interval_ms = t[compact_state ? 75 : 83].cast<int>();
+                    c.kvcm_task_timeout_ms                = field(compact_state ? 74 : 80).cast<int>();
+                    c.kv_cache_event_snapshot_interval_ms = field(compact_state ? 75 : 83).cast<int>();
                 }
                 if (version >= 14) {
-                    c.disk_cache_evict_timeout_ms = t[compact_state ? 76 : 88].cast<int64_t>();
+                    c.disk_cache_evict_timeout_ms = field(compact_state ? 76 : 88).cast<int64_t>();
                 }
                 if (version >= 17) {
-                    c.disk_cache_evict_max_pending_bytes = t[compact_state ? 77 + retired_abort_slots : 91].cast<int64_t>();
+                    c.disk_cache_evict_max_pending_bytes =
+                        field(compact_state ? 77 + retired_abort_slots : 91).cast<int64_t>();
                 }
                 if (version >= 19) {
-                    c.block_tree_task_pool_size = t[compact_state ? 78 + retired_abort_slots : 94].cast<int>();
+                    c.block_tree_task_pool_size = field(compact_state ? 78 + retired_abort_slots : 94).cast<int>();
                 }
                 if (version >= 20) {
-                    c.block_tree_frozen_force_release_timeout_ms = t[compact_state ? 79 + retired_abort_slots : 95].cast<int64_t>();
+                    c.block_tree_frozen_force_release_timeout_ms =
+                        field(compact_state ? 79 + retired_abort_slots : 95).cast<int64_t>();
                     if (c.block_tree_frozen_force_release_timeout_ms < 0
                         || c.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
                         throw std::runtime_error(
@@ -731,7 +733,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
                 // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
                 const auto value = [&](size_t index) {
-                    return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
+                    return field(index + 2 - (version >= 4 && index > 18 ? 1 : 0)
+                                 - (version >= 5 && index > 49 ? 1 : 0));
                 };
                 c.reuse_cache                  = value(0).cast<bool>();
                 c.multi_task_prompt            = value(1).cast<std::string>();
@@ -742,8 +745,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
                 if (version >= 9) {
                     c.reuse_cache_tail_blocks = t[10].cast<int>();
-                    c.linear_pool_blocks      = t[70].cast<uint32_t>();
-                    c.swa_pool_blocks         = t[71].cast<uint32_t>();
+                    c.linear_pool_blocks      = field(70).cast<uint32_t>();
+                    c.swa_pool_blocks         = field(71).cast<uint32_t>();
                     if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                         || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
                         || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
@@ -791,7 +794,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
                 c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();
                 c.dsv4_hca_state_pool_blocks                      = value(52).cast<uint32_t>();
-                c.dsv4_fixed_pool_use_memory                      = value(53).cast<bool>();
                 c.block_tree_full_prefix_scan_interval_ms         = value(54).cast<int64_t>();
                 if ((valid_legacy_state && t.size() == kQueueConfigFieldCount + 2) || valid_queue_write_sync_state
                     || valid_pinned_host_state || valid_reserve_removed_state || valid_v6_state
@@ -808,14 +810,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 // Legacy write-sync fields are intentionally ignored.
                 if (version >= 7) {
-                    c.kv_cache_event_publisher_type   = t[64].cast<std::string>();
-                    c.kv_cache_event_manager_endpoint = t[65].cast<std::string>();
-                    c.kv_cache_event_instance_group   = t[66].cast<std::string>();
-                    c.kv_cache_event_instance_id      = t[67].cast<std::string>();
-                    c.kv_cache_event_host_ip_port     = t[68].cast<std::string>();
+                    c.kv_cache_event_publisher_type   = field(64).cast<std::string>();
+                    c.kv_cache_event_manager_endpoint = field(65).cast<std::string>();
+                    c.kv_cache_event_instance_group   = field(66).cast<std::string>();
+                    c.kv_cache_event_instance_id      = field(67).cast<std::string>();
+                    c.kv_cache_event_host_ip_port     = field(68).cast<std::string>();
                 }
                 if (version >= 8) {
-                    c.enable_crc = t[69].cast<bool>();
+                    c.enable_crc = field(69).cast<bool>();
                 }
                 return c;
             }));

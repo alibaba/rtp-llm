@@ -474,6 +474,7 @@ class CacheConfigArgumentsTest(TestCase):
             ("kvcm_read_backend_type", "3"),
             ("kvcm_min_replica_count", "4"),
             ("btc_transfer_engine_async", "false"),
+            ("dsv4_fixed_pool_use_memory", "true"),
             ("btc_crc_slot_count", "3"),
             ("disk_cache_read_thread_count", "4"),
             ("disk_cache_write_thread_count", "6"),

@@ -720,7 +720,6 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         cache->groupSets(), cache->isDiskCacheEnabled(), staging_block_count);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
-    ASSERT_TRUE(engine->asyncEnabled());
 
     const auto    initial_device = snapshotDevicePools(manager_);
     const auto    initial_lower  = snapshotLowerPools(*cache, GetParam());

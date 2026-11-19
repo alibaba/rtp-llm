@@ -11,7 +11,6 @@ from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     HCA_KV_TAG,
     _make_dsv4_desc,
-    _use_host_pinned_memory,
     apply_dsv4_explicit_pool_blocks,
     resolve_dsv4_tokens_per_block,
 )
@@ -33,7 +32,6 @@ def build_v41_kv_cache_spec_descs(
     *,
     bounded_replay=False,
     draft=False,
-    fixed_pool_use_host_memory=False,
 ):
     """Declare byte-exact FP4 global/indexer and FP8 sliding-window pools.
 
@@ -65,9 +63,6 @@ def build_v41_kv_cache_spec_descs(
     reuse = CacheReusePolicyDesc()
     reuse.enable_prefix_reuse = False
     decoder_swa.reuse = reuse
-    if fixed_pool_use_host_memory:
-        for desc in (state, swa, decoder_swa):
-            _use_host_pinned_memory(desc)
     sources = set(source_layers)
     decoder_start = max(sources) + 1 if sources else 0
     descs = []
@@ -114,9 +109,6 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         int(attn.size_per_head),
         bounded_replay=bounded,
         draft=draft,
-        fixed_pool_use_host_memory=bool(
-            kv_cache_config and kv_cache_config.dsv4_fixed_pool_use_memory
-        ),
     )
     fixed_blocks = (
         int(kv_cache_config.dsv4_fixed_pool_blocks or 0) if kv_cache_config else 0

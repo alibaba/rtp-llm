@@ -114,7 +114,7 @@ private:
 };
 
 struct SmokeWorker {
-    SmokeWorker(size_t rank, bool async, const std::string& directory): rank(rank) {
+    SmokeWorker(size_t rank, const std::string& directory): rank(rank) {
         host = makeHostPool(kBytes, kBlocks, true);
         // This recovery fixture deliberately freezes the entire small pool.
         device       = makeTestDevicePool({{kBytes, 0}}, kBlocks, "timeout_device_rank_" + std::to_string(rank));
@@ -138,9 +138,7 @@ struct SmokeWorker {
             // for every block so this workload exercises deadlines, not rejection.
             groups,
             true,
-            DeviceHostCopyOptions{},
-            // Staging is split equally between load and evict; each lane needs
-            // a complete physical batch before handing its leases to real I/O.
+            // Leave space for two complete batches in the load staging pool.
             2 * kBlocksPerRequest,
             kBlocksPerRequest,
             1,
@@ -148,7 +146,6 @@ struct SmokeWorker {
             nullptr,
             rank,
             1,
-            async,
             config);
         dispatcher = std::make_shared<BlockTransferDispatcher>(engine);
         for (size_t i = 0; i < kBlocks; ++i) {
@@ -357,7 +354,7 @@ struct BusinessCompletion {
     Clock::time_point callback_time{};
 };
 
-class LocalTimeoutRecoverySmokeTest: public ::testing::TestWithParam<bool> {
+class LocalTimeoutRecoverySmokeTest: public ::testing::Test {
 protected:
     void SetUp() override {
         int device_count = 0;
@@ -366,8 +363,8 @@ protected:
         // Each rank uses small device/host/disk pools; no model weights are allocated.
         std::vector<std::string> addresses;
         for (size_t rank = 0; rank < 2; ++rank) {
-            workers_.push_back(std::make_unique<SmokeWorker>(rank, GetParam(), directory_.path));
-            ASSERT_EQ(workers_.back()->engine->asyncEnabled(), GetParam());
+            workers_.push_back(std::make_unique<SmokeWorker>(rank, directory_.path));
+
             servers_.push_back(std::make_unique<SmokeServer>(*workers_.back()));
             ASSERT_TRUE(servers_.back()->start());
             addresses.push_back(servers_.back()->address());
@@ -484,8 +481,7 @@ protected:
                 }
                 const auto state =
                     worker.dispatcher->taskRegistry().queryLocal(std::vector<uint64_t>{request.trace}).front();
-                std::cout << "native_timeout_evidence phase=" << phase
-                          << " engine=" << (GetParam() ? "workloop" : "legacy") << " trace=" << request.trace
+                std::cout << "native_timeout_evidence phase=" << phase << " engine=workloop trace=" << request.trace
                           << " request=" << request.request << " direction=" << (request.write ? "write" : "read")
                           << " caller_deadline_mono_us=" << monoUs(request.caller_deadline)
                           << " callback_mono_us=" << monoUs(request.callback_time) << " offsets=" << offset_set.str()
@@ -605,12 +601,12 @@ protected:
             }
     }
     void exercise(bool write) {
-        size_t queue_timeouts = 0, staging_queue_timeouts = 0, io_timeouts = 0, frozen_count = 0, released_count = 0;
+        size_t queue_timeouts = 0, io_timeouts = 0, frozen_count = 0, released_count = 0;
         // RPC-paced HOST->DISK writes normally reach the independent disk
         // executor before this owner's initial-plan queue can expire. Exercise
         // that queue separately in WorkLoopWriteQueueTimeoutSmokeTest with
         // concurrent local producers; retain the RPC/in-flight I/O checks here.
-        const bool require_rpc_queue_timeout = !(GetParam() && write);
+        const bool require_rpc_queue_timeout = !write;
         int64_t    round                     = 0;
         for (const int budget : {1, 2, 5, 10}) {
             SCOPED_TRACE(::testing::Message() << "timeout_ms=" << budget << " write=" << write);
@@ -666,43 +662,13 @@ protected:
                     // queues DISK -> DEVICE batches behind staging/I/O resources.
                     // Expiry in that FIFO is also a real queued, unsubmitted timeout.
                     const bool resource_queue_timeout =
-                        GetParam() && !write && message.find("transfer resource wait timed out") != std::string::npos;
-                    const bool staging_queue_timeout =
-                        !GetParam() && message.find("staging admission timed out") != std::string::npos;
+                        !write && message.find("transfer resource wait timed out") != std::string::npos;
+
                     if (done.result.status.code() == ErrorCode::DEADLINE_EXCEEDED
-                        && (message.find("WorkLoop queue") != std::string::npos
-                            || message.find("TE worker queue") != std::string::npos || resource_queue_timeout
-                            || staging_queue_timeout)) {
+                        && (message.find("WorkLoop queue") != std::string::npos || resource_queue_timeout)) {
                         EXPECT_TRUE(done.result.buffer_safe);
                         if (!done.result.buffer_safe)
                             continue;
-                        if (staging_queue_timeout) {
-                            // Legacy staging expiry happens before the affected
-                            // batch is submitted to the disk executor. Check the
-                            // physical blocks, not just the aggregate message.
-                            const size_t request            = static_cast<size_t>(done.request - first_request);
-                            size_t       unsubmitted_blocks = 0;
-                            bool         no_submitted_io    = true;
-                            for (size_t i = 0; i < kBlocksPerRequest; ++i) {
-                                if (done.result.blockError(i) != CacheCopyError::NOT_EXECUTED)
-                                    continue;
-                                ++unsubmitted_blocks;
-                                const auto offset = workers_[rank]->disk->blockOffset(
-                                    workers_[rank]->disks[request * kBlocksPerRequest + i]);
-                                const bool entered_io =
-                                    std::any_of(events.begin(), events.end(), [&](const auto& event) {
-                                        return event.write == write && event.offset == offset;
-                                    });
-                                EXPECT_FALSE(entered_io)
-                                    << "staging-expired block entered disk I/O: trace=" << done.trace
-                                    << " rank=" << rank << " block=" << i << " offset=" << offset;
-                                no_submitted_io = no_submitted_io && !entered_io;
-                            }
-                            EXPECT_GT(unsubmitted_blocks, 0u) << done.result.status.ToString();
-                            if (unsubmitted_blocks == 0 || !no_submitted_io)
-                                continue;
-                            ++staging_queue_timeouts;
-                        }
                         ++queue_timeouts;
                     }
                 }
@@ -746,17 +712,15 @@ protected:
             // All participating handlers and real I/O have settled before
             // diagnostics, including executions whose frozen holds released.
             dumpRoundEvidence("round_settled");
-            std::cout << "natural local timeout smoke: engine=" << (GetParam() ? "workloop" : "legacy")
+            std::cout << "natural local timeout smoke: engine=workloop"
                       << " direction=" << (write ? "write" : "read") << " timeout_ms=" << budget
-                      << " queue=" << queue_timeouts << " legacy_staging_queue=" << staging_queue_timeouts
-                      << " in_flight_io=" << io_timeouts << " frozen=" << frozen_count << " released=" << released_count
-                      << std::endl;
+                      << " queue=" << queue_timeouts << " in_flight_io=" << io_timeouts << " frozen=" << frozen_count
+                      << " released=" << released_count << std::endl;
             ASSERT_EQ(released_count, frozen_count) << "natural timeout left frozen tasks; see trace/query diagnostics";
             if ((!require_rpc_queue_timeout || queue_timeouts > 0) && io_timeouts > 0)
                 break;
         }
         RecordProperty("natural_queue_timeouts", static_cast<int>(queue_timeouts));
-        RecordProperty("legacy_staging_queue_timeouts", static_cast<int>(staging_queue_timeouts));
         RecordProperty("natural_io_timeouts", static_cast<int>(io_timeouts));
         RecordProperty("recovered_frozen_tasks", static_cast<int>(released_count));
         if (require_rpc_queue_timeout) {
@@ -786,14 +750,11 @@ protected:
     std::vector<EvidenceRequest>              round_evidence_;
 };
 
-TEST_P(LocalTimeoutRecoverySmokeTest, NaturalReadTimeoutsRecoverAndLongDeadlineSucceeds) {
+TEST_F(LocalTimeoutRecoverySmokeTest, NaturalReadTimeoutsRecoverAndLongDeadlineSucceeds) {
     exercise(false);
 }
-TEST_P(LocalTimeoutRecoverySmokeTest, NaturalWriteTimeoutsRecoverAndLongDeadlineSucceeds) {
+TEST_F(LocalTimeoutRecoverySmokeTest, NaturalWriteTimeoutsRecoverAndLongDeadlineSucceeds) {
     exercise(true);
 }
-INSTANTIATE_TEST_SUITE_P(Engines, LocalTimeoutRecoverySmokeTest, ::testing::Bool(), [](const auto& info) {
-    return info.param ? "WorkLoop" : "Legacy";
-});
 }  // namespace
 }  // namespace rtp_llm

@@ -1,28 +1,16 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <limits>
 #include <stdexcept>
 #include <thread>
 #include <utility>
 
-#include "autil/CommonMacros.h"
-
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-std::vector<GroupSetPtr> crcTransferGroups(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache) {
-    std::vector<GroupSetPtr> result;
-    for (const auto& group : groups) {
-        if (group && group->crcEnabled() && !group->devicePools().empty()
-            && (group->hostPool() || (enable_disk_cache && group->diskPool())))
-            result.push_back(group);
-    }
-    return result;
-}
 namespace {
 size_t checkedMultiply(size_t a, size_t b) {
     if (a && b > std::numeric_limits<size_t>::max() / a)
@@ -46,9 +34,8 @@ CrcCopyExecutor::CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
                                  size_t                          max_batch,
                                  size_t                          slots_per_device,
                                  int64_t                         world_rank,
-                                 std::shared_ptr<CrcDumpWriter>  dump_writer,
-                                 bool                            async):
-    direction_(direction), async_(async) {
+                                 std::shared_ptr<CrcDumpWriter>  dump_writer):
+    direction_(direction) {
     if (!CrcCopyWorkspace::available() || !max_batch || !slots_per_device)
         throw std::invalid_argument("CRC requires CUDA 13 and positive workspace limits");
     if (!dump_writer)
@@ -95,10 +82,9 @@ CrcCopyExecutor::CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
             slots.push_back(std::move(slot));
         }
         constexpr double mib = 1024.0 * 1024.0;
-        RTP_LLM_LOG_INFO("BlockTree CRC32C: device=%d async=%d batch=%zu payload=%zu slots_per_device_direction=%zu "
+        RTP_LLM_LOG_INFO("BlockTree CRC32C: device=%d batch=%zu payload=%zu slots_per_device_direction=%zu "
                          "device_total=%.2f MiB host_total=%.2f MiB",
                          device,
-                         async_,
                          max_batch,
                          shape.payload,
                          slots_per_device,
@@ -168,25 +154,15 @@ TransferResult CrcCopyExecutor::mapResult(CrcCopyState                       res
     return transfer_result;
 }
 
-CrcCopyItem CrcCopyExecutor::makeItem(const HostBufferView&     host,
-                                      const TransferDescriptor& descriptor,
-                                      const GroupSetPtr&        group,
-                                      bool                      borrow_descriptor) {
+CrcCopyItem
+CrcCopyExecutor::makeItem(const HostBufferView& host, const TransferDescriptor& descriptor, const GroupSetPtr& group) {
     CrcCopyItem item{host.base, group->payloadBytes(), host.capacity_bytes, {}};
     for (const auto& tile : getDeviceHostCopyTiles(*group, descriptor.blocksAt(Tier::DEVICE)))
         item.tiles.push_back({tile.buffer.addr, tile.host_offset, tile.buffer.size_bytes});
-    if (borrow_descriptor) {
-        // The caller retains descriptor storage through completion. finish()
-        // clears these captures before the stage callback can release it.
-        item.dump_metadata = [descriptor_ptr = &descriptor, group_owner = group] {
-            return CrcDumpWriter::dumpMetadata(*descriptor_ptr, *group_owner);
-        };
-    } else {
-        // The legacy synchronous path keeps independent item ownership.
-        item.dump_metadata = [descriptor, group_owner = group] {
-            return CrcDumpWriter::dumpMetadata(descriptor, *group_owner);
-        };
-    }
+    // The caller retains descriptor storage until finish() clears this capture.
+    item.dump_metadata = [descriptor_ptr = &descriptor, group_owner = group] {
+        return CrcDumpWriter::dumpMetadata(*descriptor_ptr, *group_owner);
+    };
     return item;
 }
 
@@ -203,7 +179,7 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>& hosts,
         done(std::move(result));
         return true;
     };
-    if (!accepting_ || !async_ || !group || hosts.empty() || hosts.size() != descriptors.size()) {
+    if (!accepting_ || !group || hosts.empty() || hosts.size() != descriptors.size()) {
         return reject();
     }
     const bool evict = direction_ == CrcCopyDirection::EVICT;
@@ -239,7 +215,7 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>& hosts,
         items.reserve(hosts.size());
         for (size_t i = 0; i < descriptors.size(); ++i) {
             const auto& descriptor = descriptors[i];
-            items.push_back(makeItem(hosts[i], descriptor, group, true));
+            items.push_back(makeItem(hosts[i], descriptor, group));
         }
         TransferResult invalid(TransferStatus::INVALID_ARGS);
         TransferResult failed(TransferStatus::DEVICE_IO_ERROR);
@@ -298,30 +274,11 @@ bool CrcCopyExecutor::poll() {
 }
 
 void CrcCopyExecutor::stopAdmission() {
-    if (async_) {
-        accepting_ = false;
-        return;
-    }
-    // TODO(legacy removal): remove this locked legacy admission branch.
-    std::lock_guard<std::mutex> lock(mutex_);
     accepting_ = false;
-    cv_.notify_all();
 }
 
 void CrcCopyExecutor::stopAndWaitForIo() {
     stopAdmission();
-    // TODO(legacy removal): remove this synchronous wait branch.
-    if (unlikely(!async_)) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [&] {
-            for (const auto& [device, slots] : slots_)
-                for (const auto& slot : slots)
-                    if (slot.updating)
-                        return false;
-            return true;
-        });
-        return;
-    }
     for (;;) {
         for (auto& [device, slots] : slots_)
             for (auto& slot : slots)

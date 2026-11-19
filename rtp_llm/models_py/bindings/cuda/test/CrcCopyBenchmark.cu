@@ -791,9 +791,9 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << "\",\"seed\":" << options.seed << ",\"source_commit\":\"" << provenance("CRC_BENCH_SOURCE_COMMIT")
        << "\",\"base_commit\":\"" << provenance("CRC_BENCH_BASE_COMMIT") << "\",\"binary_sha256\":\""
        << provenance("CRC_BENCH_BINARY_SHA256") << "\""
-       << ",\"measurement_layer\":\"copy_primitive\",\"main_staged_implementation\":\"legacy\""
+       << ",\"measurement_layer\":\"copy_primitive\",\"main_staged_implementation\":\"main_snapshot\""
        << ",\"shape_source\":\"CacheConfigCreator+DeviceBlockPoolConfigHelper\""
-       << ",\"staged_no_crc_source\":\"legacy StagedSmDeviceHostCopyStrategy with shared CopyTileKernel and direct HOST-segment DMA\""
+       << ",\"staged_no_crc_source\":\"execStagedMemoryCopy with shared CopyTileKernel and direct HOST-segment DMA\""
        << ",\"variants\":[\"integrated_crc\",\"copy1d_batch\",\"copy3d_batch\",\"staged_no_crc\",\"main_staged\"]"
        << ",\"exclude_1d_h2d\":" << (options.exclude1dH2d ? "true" : "false") << ",\"excluded_cases\":"
        << (options.exclude1dH2d ?
@@ -811,7 +811,7 @@ void metadata(std::ostream& os, const Options& options, const cudaDeviceProp& pr
        << ",\"measured_h2d_verified\":true"
        << ",\"correctness_only\":" << (options.correctnessOnly ? "true" : "false")
        << ",\"boundary\":\"prebuilt per-API inputs; complete synchronous calls including internal descriptors, checks, locks, metadata H2D, kernels, CPU pack/unpack for main_staged, data transfers, synchronization and CRC verdict\""
-       << ",\"production_source\":\"directly linked current workspace CrcCopyWorkspace and legacy DeviceHostCopyStrategy\""
+       << ",\"production_source\":\"directly linked CrcCopyWorkspace, execBatchedMemoryCopy and execStagedMemoryCopy\""
        << ",\"main_staged_source\":\"" << mainStagedSourceCommit() << "\""
        << ",\"model\":\"DeepSeek-V4-Flash-0731\",\"target_layers\":43,\"kv_cache_sharded\":true"
        << ",\"copy3d_stream\":\"independent Torch nondefault pooled stream\""

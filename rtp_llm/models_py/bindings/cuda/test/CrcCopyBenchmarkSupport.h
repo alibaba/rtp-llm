@@ -38,8 +38,8 @@ size_t        maximumLayoutTiles();
 size_t        maximumLayoutPayload();
 const char*   mainStagedSourceCommit();
 
-// Owns the actual production DeviceHostCopyPlan values without exposing their
-// transitive framework/Torch dependencies to the CUDA translation unit.
+// Keeps the copy tiles and their physical layout metadata behind a Torch-free
+// interface for the CUDA translation unit.
 class FrameworkCopyPlan {
 public:
     FrameworkCopyPlan(const std::vector<CrcCopyItem>& items, const Layout& layout);

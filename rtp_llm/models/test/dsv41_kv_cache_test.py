@@ -9,7 +9,6 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.deepseek_v41 import DeepSeekV41
-from rtp_llm.ops import CacheMemoryPlacement
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -86,7 +85,6 @@ class Dsv41KvCacheConfigTest(TestCase):
                     settings = KVCacheConfig()
                     settings.dsv4_fixed_pool_blocks = 64
                     settings.dsv41_decoder_swa_pool_blocks = 16
-                    settings.dsv4_fixed_pool_use_memory = True
                     DeepSeekV41._apply_kv_cache_config(config, settings)
                     for _ in range(2):
                         DeepSeekV41._post_build_model_config(config)
@@ -94,15 +92,9 @@ class Dsv41KvCacheConfigTest(TestCase):
                     self.assertEqual(capacity(by_tag["decoder_swa_kv"]), 16)
                     for tag in ("csa_state", "swa_kv", "decoder_swa_kv"):
                         if tag in by_tag:
-                            self.assertEqual(
-                                by_tag[tag].memory.placement,
-                                CacheMemoryPlacement.HOST_PINNED,
-                            )
-                            self.assertFalse(
-                                by_tag[tag].capacity.charge_to_paged_budget
-                            )
+                            self.assertIsNone(by_tag[tag].memory)
+                            self.assertTrue(by_tag[tag].capacity.charge_to_paged_budget)
                     settings.dsv41_decoder_swa_pool_blocks = 0
-                    settings.dsv4_fixed_pool_use_memory = False
                     DeepSeekV41._apply_kv_cache_config(config, settings)
                     self.assertEqual(
                         capacity(descriptors(config)["decoder_swa_kv"]), 64

@@ -1,4 +1,3 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -15,12 +14,8 @@
 #include <utility>
 #include <vector>
 
-#include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
-#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
@@ -31,26 +26,20 @@ namespace {
 
 TEST(PerRankBlockTransferEngineConfigTest, UsesWorkLoopAndEightCrcSlotsByDefault) {
     PerRankBlockTransferEngine engine(std::vector<GroupSetPtr>{});
-    EXPECT_TRUE(engine.asyncEnabled());
     EXPECT_EQ(engine.transferWorkerCount(), 2u);
     EXPECT_EQ(engine.crcSlotCount(), 8u);
 }
 
-TEST(PerRankBlockTransferEngineConfigTest, LegacyPreservesWorkerCount) {
+TEST(PerRankBlockTransferEngineConfigTest, UsesConfiguredWorkerCount) {
     for (const size_t workers : {4u, 7u}) {
-        PerRankBlockTransferEngine engine({}, false, {}, 4, 64, workers, 10000, nullptr, 0, 8, false);
-        EXPECT_FALSE(engine.asyncEnabled());
+        PerRankBlockTransferEngine engine({}, false, 4, 64, workers, 10000, nullptr, 0, 8);
         EXPECT_EQ(engine.transferWorkerCount(), workers);
     }
 }
 
-TEST(PerRankBlockTransferEngineConfigTest, BatchLimitIsAvailableForBothBackends) {
-    for (const bool async : {false, true}) {
-        SCOPED_TRACE(async);
-        PerRankBlockTransferEngine engine({}, false, {}, 128, 17, 2, 32, nullptr, 0, 2, async);
-        ASSERT_EQ(engine.asyncEnabled(), async);
-        EXPECT_EQ(engine.batchLimit(), 17u);
-    }
+TEST(PerRankBlockTransferEngineConfigTest, UsesConfiguredBatchLimit) {
+    PerRankBlockTransferEngine engine({}, false, 128, 17, 2, 32, nullptr, 0, 2);
+    EXPECT_EQ(engine.batchLimit(), 17u);
 }
 
 using block_transfer_engine_test::TempDirGuard;
@@ -82,9 +71,7 @@ GroupSetPtr makeHostDiskGroup(size_t                         group_set_id,
 }
 
 std::shared_ptr<PerRankBlockTransferEngine> makeEngine(std::vector<GroupSetPtr> groups) {
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(std::move(groups), true);
-    EXPECT_TRUE(engine->asyncEnabled());
-    return engine;
+    return std::make_shared<PerRankBlockTransferEngine>(std::move(groups), true);
 }
 
 class RecordingBatchDiskBlockIO: public StatusDiskBlockIO {
@@ -180,12 +167,11 @@ protected:
     GroupSetPtr                                 group_set_;
 };
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, DisabledDiskCacheSkipsDeviceDiskExecutor) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, DisabledDiskCacheDoesNotCreateDiskIOExecutor) {
     auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group_set_}, false, DeviceHostCopyOptions{}, 4, 8, 4, 10000, nullptr, 0, 8, false);
+        std::vector<GroupSetPtr>{group_set_}, false, 4, 8, 4, 10000, nullptr, 0, 8);
 
-    ASSERT_FALSE(engine->asyncEnabled());
-    EXPECT_EQ(engine->legacy_->device_disk_executor_, nullptr);
+    EXPECT_EQ(engine->diskIOExecutor(), nullptr);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
@@ -213,99 +199,14 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
     releasePoolBlock(*disk_pool_, disk_block);
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyReportsQueueWaitStageAndBacklogThroughMetricsReporter) {
-    startKmonServiceStatus(nullptr);
-    setKmonServiceServing(true);
-    struct StopTestMetrics {
-        ~StopTestMetrics() {
-            stopKmonServiceStatus();
-        }
-    } stop_test_metrics;
-
-    auto metrics_reporter       = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter);
-    auto engine                 = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set_},
-                                                               true,
-                                                               DeviceHostCopyOptions{},
-                                                               4,
-                                                               8,
-                                                               4,
-                                                               0,
-                                                               cache_metrics_reporter,
-                                                               0,
-                                                               8,
-                                                               false);
-
-    const BlockIdxType host_block = poolMalloc(*host_pool_);
-    const BlockIdxType disk_block = poolMalloc(*disk_pool_);
-    const auto         descriptor = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block);
-    ASSERT_TRUE(executeSucceeded(engine, descriptor));
-    engine->shutdown();
-    cache_metrics_reporter->flushStageMetrics();
-    const auto sizes = engine->queueSizes();
-    EXPECT_EQ(sizes.load, 0u);
-    EXPECT_EQ(sizes.background, 0u);
-    cache_metrics_reporter->reportQueueBacklog(sizes, "transfer");
-
-    auto* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
-    ASSERT_NE(transfer_metrics, nullptr);
-    EXPECT_EQ(transfer_metrics->transfer_stage_qps_metric->metric_data_->Size(), 3u);
-    kmonitor::MetricsTags tags("operation", "evict");
-    tags.AddTag("source_tier", "HOST");
-    tags.AddTag("target_tier", "DISK");
-    tags.AddTag("scope", "worker_task");
-    tags.AddTag("stage", "transfer_queue_wait");
-    tags.AddTag("success", "true");
-    tags.AddTag("transfer_rank", "0");
-    tags = kmonTagsWithServiceStatus(&tags);
-    auto* queue_wait = transfer_metrics->transfer_stage_qps_metric->DeclareMetric(&tags);
-    ASSERT_NE(queue_wait, nullptr);
-    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
-    queue_wait->Snapshot(&record, 1000);
-    EXPECT_TRUE(transfer_metrics->transfer_stage_qps_metric->UndeclareMetric(queue_wait));
-    ASSERT_EQ(record.Values().size(), 1u);
-    EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), 1);
-    EXPECT_EQ(transfer_metrics->task_queue_backlog_metric->metric_data_->Size(), 3u);
-
-    releasePoolBlock(*host_pool_, host_block);
-    releasePoolBlock(*disk_pool_, disk_block);
-}
-
-TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskExecutorReportsTaskPoolSubmissionRejection) {
-    BlockTreeTaskPool task_pool(1, 8, "HostDiskExecutorTest");
-    ASSERT_TRUE(task_pool.start());
-    task_pool.stopAdmission();
-    HostDiskTransferExecutor executor(task_pool, 16);
-
-    const BlockIdxType host_block = poolMalloc(*host_pool_);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    const BlockIdxType disk_block = poolMalloc(*disk_pool_);
-    ASSERT_NE(disk_block, NULL_BLOCK_IDX);
-    const HostBlockBuffer host_buffer = host_pool_->blockBuffer(host_block);
-    const HostBufferView  host{host_buffer.addr, host_buffer.payload_bytes, host_buffer.stride_bytes};
-    const auto            descriptor = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block);
-
-    auto context = executor.execute(makeTransferTask({descriptor}), {host}, {group_set_.get()});
-    context->waitDone();
-
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
-    EXPECT_EQ(context->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
-    EXPECT_NE(context->errorInfo().ToString().find("RESOURCE_EXHAUSTED"), std::string::npos);
-    releasePoolBlock(*host_pool_, host_block);
-    releasePoolBlock(*disk_pool_, disk_block);
-}
-
-TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyMaxBatchSizeSplitsOneLogicalBatch) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch) {
     auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io        = owned_io.get();
     auto  host_pool = makeHostPool(host_block_size_, 8);
     auto  disk_pool = makeDiskPool(host_block_size_, 8, temp_dir_.path, std::move(owned_io), "split_batch");
     auto  group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto  engine    = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 4, 2, 4, 10000, nullptr, 0, 8, false);
-    ASSERT_FALSE(engine->asyncEnabled());
+        std::vector<GroupSetPtr>{group}, true, 4, 2, 4, 10000, nullptr, 0, 8);
     std::vector<TransferDescriptor> descriptors;
     for (size_t index = 0; index < 5; ++index) {
         descriptors.push_back(
@@ -322,15 +223,14 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyMaxBatchSizeSplitsOneLogica
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{1, 2, 2}));
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyDefaultBatchSizeSplitsSeventeenDescriptorsIntoEightEightOne) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, BatchSizeEightSplitsSeventeenDescriptorsIntoEightEightOne) {
     auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
     auto* io        = owned_io.get();
     auto  host_pool = makeHostPool(host_block_size_, 17);
     auto  disk_pool = makeDiskPool(host_block_size_, 17, temp_dir_.path, std::move(owned_io), "default_batch");
     auto  group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
     auto  engine    = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, true, DeviceHostCopyOptions{}, 4, 8, 4, 10000, nullptr, 0, 8, false);
-    ASSERT_FALSE(engine->asyncEnabled());
+        std::vector<GroupSetPtr>{group}, true, 4, 8, 4, 10000, nullptr, 0, 8);
     std::vector<TransferDescriptor> descriptors;
     for (size_t index = 0; index < 17; ++index) {
         descriptors.push_back(
@@ -412,10 +312,9 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoPreservesAlignedS
     auto* direct_io = owned_io.get();
     auto  direct_disk =
         makeDiskPool(host_block_size_, 4, temp_dir_.path, std::move(owned_io), "host_disk_direct", false);
-    auto                     group = makeHostDiskGroup(0, host_pool_, direct_disk, host_block_size_);
-    BlockTreeTaskPool        task_pool(1, 8, "HostDiskExecutorDirectIoTest");
-    HostDiskTransferExecutor executor(task_pool, 16);
-    const size_t             stride = direct_disk->strideBytes();
+    auto         group  = makeHostDiskGroup(0, host_pool_, direct_disk, host_block_size_);
+    auto         engine = makeEngine({group});
+    const size_t stride = direct_disk->strideBytes();
     ASSERT_GT(stride, host_block_size_);
     EXPECT_FALSE(direct_io->bufferedIo());
 
@@ -429,22 +328,14 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoPreservesAlignedS
 
     const auto disk_block = poolMalloc(*direct_disk);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
-    ASSERT_TRUE(executor
-                    .executeBatch({HostBufferView{host_data, host_block_size_, stride}},
-                                  {TransferDescriptor::hostToDisk(0, host_block, disk_block)},
-                                  {group.get()})
-                    .ok());
+    ASSERT_TRUE(executeSucceeded(engine, TransferDescriptor::hostToDisk(0, host_block, disk_block)));
     EXPECT_EQ(direct_io->lastWriteBytes(), stride);
 
     const BlockIdxType dst_block = poolMalloc(*host_pool_);
     ASSERT_NE(dst_block, NULL_BLOCK_IDX);
     uint8_t* dst_data = static_cast<uint8_t*>(host_pool_->blockBuffer(dst_block).addr);
     std::memset(dst_data, 0xAB, stride);
-    ASSERT_TRUE(executor
-                    .executeBatch({HostBufferView{dst_data, host_block_size_, stride}},
-                                  {TransferDescriptor::diskToDevice(0, disk_block, {0})},
-                                  {group.get()})
-                    .ok());
+    ASSERT_EQ(direct_disk->read(disk_block, dst_data, stride), BlockIOStatus::OK);
     EXPECT_EQ(direct_io->lastReadBytes(), stride);
 
     for (size_t i = 0; i < host_block_size_; ++i) {

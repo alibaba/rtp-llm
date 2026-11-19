@@ -511,7 +511,6 @@ class GenerateConfigTest(TestCase):
         config.reserve_block_ratio = 7
         config.dsv4_fixed_pool_blocks = 512
         config.dsv4_hca_state_pool_blocks = 256
-        config.dsv4_fixed_pool_use_memory = True
         config.memory_cache_max_descriptors_per_transfer_batch = 17
         config.block_tree_full_prefix_scan_interval_ms = 5000
         config.block_tree_task_pool_size = 6
@@ -526,8 +525,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 80)
-        self.assertEqual(state[:2], ("KVCacheConfig", 22))
+        self.assertEqual(len(state), 79)
+        self.assertEqual(state[:2], ("KVCacheConfig", 23))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -538,7 +537,6 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.reserve_block_ratio, 7)
         self.assertEqual(restored.dsv4_fixed_pool_blocks, 512)
         self.assertEqual(restored.dsv4_hca_state_pool_blocks, 256)
-        self.assertTrue(restored.dsv4_fixed_pool_use_memory)
         self.assertEqual(restored.memory_cache_max_descriptors_per_transfer_batch, 17)
         self.assertEqual(restored.block_tree_full_prefix_scan_interval_ms, 5000)
         self.assertEqual(restored.block_tree_task_pool_size, 6)
@@ -563,8 +561,9 @@ class GenerateConfigTest(TestCase):
             return value
 
         # Legacy payloads do not carry fields appended after v6.
-        event_state = (*state[:64], *KVCacheConfig().__getstate__()[64:])
-        state = (state[0], 6, *state[2:64])
+        event_state = (*state[:63], *KVCacheConfig().__getstate__()[63:])
+        # Version 6 carried the retired host-placement flag at index 53.
+        state = (state[0], 6, *state[2:53], True, *state[53:63])
         self.assertEqual(restore(state).__getstate__(), event_state)
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)

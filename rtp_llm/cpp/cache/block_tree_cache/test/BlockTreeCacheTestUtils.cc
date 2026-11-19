@@ -66,15 +66,13 @@ ControlledPerRankBlockTransferEngine::ControlledPerRankBlockTransferEngine(const
                                std::any_of(groups.begin(),
                                            groups.end(),
                                            [](const GroupSetPtr& group) { return group->diskPool() != nullptr; }),
-                               {},
                                128,
                                8,
                                4,
                                10000,
                                nullptr,
                                0,
-                               4,
-                               true),
+                               4),
     action_(action),
     barrier_(std::move(barrier)) {}
 
@@ -509,20 +507,15 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
-    const bool async = std::all_of(group_sets.begin(), group_sets.end(), [](const auto& group) {
-        return group->devicePools().empty() || (!group->hostPool() && !group->diskPool()) || group->crcEnabled();
-    });
-    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
+    auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         config.enable_disk_cache,
-                                                                        DeviceHostCopyOptions{},
                                                                         config.device_disk_staging_block_count,
                                                                         config.max_descriptors_per_transfer_batch,
                                                                         config.transfer_worker_count,
                                                                         config.transfer_queue_max_size,
                                                                         cache_metrics_reporter,
                                                                         0,
-                                                                        kDefaultCrcSlotsPerWorkLoop,
-                                                                        async);
+                                                                        kDefaultCrcSlotsPerWorkLoop);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
@@ -780,10 +773,8 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
                                                                        bool perform_successful_transfers,
-                                                                       bool enable_disk_cache,
-                                                                       bool btc_transfer_engine_async):
-    PerRankBlockTransferEngine(
-        workLoopTestGroups(groups), enable_disk_cache, {}, 128, 8, 4, 10000, nullptr, 0, 4, btc_transfer_engine_async),
+                                                                       bool enable_disk_cache):
+    PerRankBlockTransferEngine(workLoopTestGroups(groups), enable_disk_cache, 128, 8, 4, 10000, nullptr, 0, 4),
     group_set_results_(groups.size()),
     perform_successful_transfers_(perform_successful_transfers) {}
 

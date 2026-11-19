@@ -737,7 +737,6 @@ class KVCacheConfig:
     disk_eviction_policy: str
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
-    dsv4_fixed_pool_use_memory: bool
     block_tree_full_prefix_scan_interval_ms: int
     block_tree_task_pool_size: int
     block_tree_transfer_worker_count: int

@@ -3,16 +3,11 @@
 #include <cstdlib>
 #include <new>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceDiskTransferExecutor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/HostDiskTransferExecutor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/TransferExecutor.h"
 
 // Fail one allocation on the calling thread, then allow error handling to proceed.
 // A separate test binary keeps this interposition out of unrelated GPU tests.
@@ -60,74 +55,8 @@ State state(const TransferTaskRegistry& registry, uint64_t trace) {
     return registry.queryLocal(std::vector<uint64_t>{trace}).front();
 }
 
-class SafeExecutor final: public TransferExecutor {
-public:
-    explicit SafeExecutor(BlockTreeTaskPool& pool): TransferExecutor(pool, 1, nullptr) {}
-    bool fail_diagnostics{false};
-    TransferResult
-    executeBatch(const std::vector<HostBufferView>&, DescriptorView, const std::vector<const GroupSet*>&) override {
-        TransferResult result(fail_diagnostics ? TransferStatus::DISK_IO_ERROR : TransferStatus::OK);
-        result.buffer_safe = true;
-        if (fail_diagnostics)
-            allocation_countdown = 0;
-        return result;
-    }
-};
-
-TEST(LocalBufferSafetyFailureTest, SafeFailureSurvivesDiagnosticAllocationFailure) {
-    BlockTreeTaskPool pool(1, 8, "safe_diagnostic");
-    ASSERT_TRUE(pool.start());
-    SafeExecutor executor(pool);
-    executor.fail_diagnostics = true;
-    TransferTaskRegistry registry;
-    TransferTask         task({TransferDescriptor::hostToDisk(0, 1, 1)}, 30s);
-    const auto           trace = task.traceId();
-    registerTask(registry, task);
-    const auto before  = injected_allocations.load();
-    auto       context = executor.execute(std::move(task), {HostBufferView{}}, {nullptr});
-    pool.waitForIdle();
-    ASSERT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_TRUE(context->result().buffer_safe);
-    EXPECT_GT(injected_allocations.load(), before);
-    EXPECT_EQ(state(registry, trace), State::BUFFER_SAFE);
-}
-
-TEST(LocalBufferSafetyFailureTest, LegacySubmissionAllocationFailuresNeverStrandProof) {
-    BlockTreeTaskPool pool(1, 8, "safe_submit");
-    ASSERT_TRUE(pool.start());
-    SafeExecutor executor(pool);
-    size_t       failures = 0;
-    for (int position = 0; position < 80; ++position) {
-        SCOPED_TRACE(position);
-        TransferTaskRegistry registry;
-        TransferTask         task({TransferDescriptor::hostToDisk(0, 1, 1)}, 30s);
-        if (position >= 40)
-            task.deadline_ = TransferTask::Clock::now() - 1ms;
-        const auto trace = task.traceId();
-        registerTask(registry, task);
-        std::vector<HostBufferView>           hosts(1);
-        std::vector<const GroupSet*>          groups(1, nullptr);
-        std::shared_ptr<TransferAsyncContext> context;
-        allocation_countdown = position % 40;
-        try {
-            context = executor.execute(std::move(task), std::move(hosts), std::move(groups));
-        } catch (const std::bad_alloc&) {
-            ++failures;
-        }
-        allocation_countdown = -1;
-        pool.waitForIdle();
-        EXPECT_EQ(state(registry, trace), State::BUFFER_SAFE);
-        if (context) {
-            EXPECT_TRUE(context->done());
-        }
-    }
-    EXPECT_GT(failures, 0u);
-}
-
 TEST(LocalBufferSafetyFailureTest, ExpiredDispatcherAllocationFailuresCloseRegisteredExecution) {
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{}, false, DeviceHostCopyOptions{}, 128, 1, 1, 8);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{}, false, 128, 1, 1, 8);
     BlockTransferDispatcher dispatcher(engine);
     for (int position = 0; position < 40; ++position) {
         SCOPED_TRACE(position);
@@ -145,7 +74,7 @@ TEST(LocalBufferSafetyFailureTest, ExpiredDispatcherAllocationFailuresCloseRegis
 }
 
 TEST(LocalBufferSafetyFailureTest, RealEnginePreparationFailurePublishesUnsubmittedProof) {
-    PerRankBlockTransferEngine engine({}, false, {}, 128, 1, 1, 8);
+    PerRankBlockTransferEngine engine({}, false, 128, 1, 1, 8);
     TransferTaskRegistry       registry;
     TransferTask               task({TransferDescriptor::hostToDisk(0, 1, 1)}, 30s);
     const auto                 trace = task.traceId();
@@ -159,90 +88,6 @@ TEST(LocalBufferSafetyFailureTest, RealEnginePreparationFailurePublishesUnsubmit
     }
     allocation_countdown = -1;
     EXPECT_TRUE(threw);
-    EXPECT_EQ(state(registry, trace), State::BUFFER_SAFE);
-}
-
-template<typename Base>
-class SafeStage final: public Base {
-public:
-    explicit SafeStage(BlockTreeTaskPool& pool): Base(pool, 1) {}
-    TransferResult
-    executeBatch(const std::vector<HostBufferView>&, DescriptorView, const std::vector<const GroupSet*>&) override {
-        return TransferResult::emptyAggregate();
-    }
-};
-
-GroupSetPtr stagingGroup() {
-    auto spec = std::make_shared<OpaqueKVCacheSpec>("allocation_safety");
-    spec->setLayout(4096, 1, 4096, 4096);
-    GroupBase group;
-    group.tag     = spec->tag;
-    group.spec    = spec;
-    group.policy  = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    auto topology = CacheTopology::create({group}, {{0, {group.tag}}});
-    auto result   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{}, nullptr, nullptr);
-    result->initialize(0, std::move(topology), {group.tag});
-    return result;
-}
-
-TEST(LocalBufferSafetyFailureTest, PartialDeviceDiskSubmissionStillJoinsAllAcceptedBatches) {
-    BlockTreeTaskPool pool(1, 8, "safe_partial");
-    ASSERT_TRUE(pool.start());
-    SafeStage<DeviceHostTransferExecutor> device(pool);
-    SafeStage<HostDiskTransferExecutor>   disk(pool);
-    auto                                  group = stagingGroup();
-    DeviceDiskTransferExecutor            executor(device, disk, {group}, 8, pool, 1, nullptr);
-    const auto                            before = injected_allocations.load();
-    for (int position = 0; position < 100; ++position) {
-        SCOPED_TRACE(position);
-        TransferTaskRegistry registry;
-        TransferTask         task({TransferDescriptor::diskToDevice(0, 1, {1}),
-                                   TransferDescriptor::diskToDevice(0, 2, {2}),
-                                   TransferDescriptor::diskToDevice(0, 3, {3})},
-                          30s);
-        const auto           trace = task.traceId();
-        registerTask(registry, task);
-        std::vector<const GroupSet*>          groups(3, group.get());
-        std::shared_ptr<TransferAsyncContext> context;
-        allocation_countdown = position;
-        try {
-            context = executor.execute(std::move(task), groups);
-        } catch (const std::bad_alloc&) {}
-        allocation_countdown = -1;
-        pool.waitForIdle();
-        EXPECT_EQ(state(registry, trace), State::BUFFER_SAFE);
-        if (context) {
-            EXPECT_TRUE(context->done());
-        }
-    }
-    EXPECT_GT(injected_allocations.load(), before);
-}
-
-TEST(LocalBufferSafetyFailureTest, CancelledStagingStillFinishesWhenErrorFormattingThrows) {
-    BlockTreeTaskPool                     pool(1, 8, "safe_cancel");
-    SafeStage<DeviceHostTransferExecutor> device(pool);
-    SafeStage<HostDiskTransferExecutor>   disk(pool);
-    auto                                  group = stagingGroup();
-    DeviceDiskTransferExecutor            executor(device, disk, {group}, 2, pool, 1, nullptr);
-    auto                                  held = executor.full_staging_pool_->tryMallocBatch(1);
-    ASSERT_TRUE(held);
-    TransferTaskRegistry registry;
-    TransferTask         task({TransferDescriptor::diskToDevice(0, 1, {1})}, 30s);
-    const auto           trace = task.traceId();
-    registerTask(registry, task);
-    auto context = executor.execute(std::move(task), {group.get()});
-    ASSERT_FALSE(context->done());
-    auto& waiter    = executor.full_staging_pool_->batch_waiters_.front();
-    auto  ready     = std::move(waiter.callback);
-    waiter.callback = [ready = std::move(ready)](auto leases) mutable {
-        allocation_countdown = 0;
-        ready(std::move(leases));
-        allocation_countdown = -1;
-    };
-    const auto before = injected_allocations.load();
-    executor.cancelPendingTransfers();
-    EXPECT_GT(injected_allocations.load(), before);
-    EXPECT_TRUE(context->done());
     EXPECT_EQ(state(registry, trace), State::BUFFER_SAFE);
 }
 

@@ -216,11 +216,8 @@ static void initializeBroadcastGroups(const std::vector<std::shared_ptr<FullGrou
 // Exercises real request conversion and rank-local dispatch without copying GPU data.
 class RecordingLocalTransferEngine final: public PerRankBlockTransferEngine {
 public:
-    explicit RecordingLocalTransferEngine(size_t       max_batch    = 2,
-                                          BlockIdxType failing_host = NULL_BLOCK_IDX,
-                                          bool         async        = true):
-        PerRankBlockTransferEngine({}, false, {}, 128, max_batch, 4, 10000, nullptr, 0, 8, async),
-        failing_host_(failing_host) {}
+    explicit RecordingLocalTransferEngine(size_t max_batch = 2, BlockIdxType failing_host = NULL_BLOCK_IDX):
+        PerRankBlockTransferEngine({}, false, 128, max_batch, 4, 10000, nullptr, 0, 8), failing_host_(failing_host) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors = task.descriptors();
@@ -246,9 +243,7 @@ private:
     BlockIdxType failing_host_;
 };
 
-class RequestLevelBroadcastTest: public ::testing::TestWithParam<bool> {};
-
-TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatchesInOriginalOrder) {
+TEST(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatchesInOriginalOrder) {
     auto first_group  = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
                                                       block_transfer_engine_test::makeHostPool(256, 8),
                                                       nullptr);
@@ -261,8 +256,8 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
     std::vector<std::shared_ptr<RecordingLocalTransferEngine>> engines;
     std::vector<MultiRankBlockTransferRpcConfig>               configs;
     for (size_t rank = 0; rank < 2; ++rank) {
-        auto engine = std::make_shared<RecordingLocalTransferEngine>(2, rank == 1 ? 3 : NULL_BLOCK_IDX, GetParam());
-        ASSERT_EQ(engine->asyncEnabled(), GetParam());
+        auto engine = std::make_shared<RecordingLocalTransferEngine>(2, rank == 1 ? 3 : NULL_BLOCK_IDX);
+
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
         config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
         config.groups           = groups;
@@ -273,7 +268,7 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto                    multi  = std::make_shared<MultiRankBlockTransferEngine>(groups, manager);
-    auto                    sender = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam());
+    auto                            sender = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX);
     BlockTransferDispatcher dispatcher(sender, multi);
     std::vector<TransferDescriptor> descriptors;
     const std::vector<size_t>       group_ids{0, 0, 0, 0, 1, 1, 1};
@@ -305,7 +300,7 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
     }
 }
 
-TEST_P(RequestLevelBroadcastTest, MixedDirectionsRejectBeforeBroadcast) {
+TEST(RequestLevelBroadcastTest, MixedDirectionsRejectBeforeBroadcast) {
     auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
                                                 block_transfer_engine_test::makeHostPool(256, 8),
                                                 nullptr);
@@ -318,8 +313,7 @@ TEST_P(RequestLevelBroadcastTest, MixedDirectionsRejectBeforeBroadcast) {
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto multi = std::make_shared<MultiRankBlockTransferEngine>(std::vector<GroupSetPtr>{group}, manager);
-    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam()),
-                                       multi);
+    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX), multi);
     std::vector<TransferDescriptor> descriptors;
     for (size_t i = 0; i < 5; ++i) {
         descriptors.push_back(TransferDescriptor::hostToDevice(0, 1, {1}));
@@ -338,7 +332,7 @@ TEST_P(RequestLevelBroadcastTest, MixedDirectionsRejectBeforeBroadcast) {
     EXPECT_TRUE(state->requests.empty());
 }
 
-TEST_P(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatchLimitsPerRank) {
+TEST(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatchLimitsPerRank) {
     block_transfer_engine_test::TempDirGuard temp("request_disk_store");
     auto                                     disk = block_transfer_engine_test::makeDiskPool(256, 8, temp.path);
     auto                                     group =
@@ -349,8 +343,8 @@ TEST_P(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatch
     std::vector<std::shared_ptr<RecordingLocalTransferEngine>> engines;
     std::vector<MultiRankBlockTransferRpcConfig>               configs;
     for (size_t rank = 0; rank < 2; ++rank) {
-        auto engine = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam());
-        ASSERT_EQ(engine->asyncEnabled(), GetParam());
+        auto engine = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX);
+
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state};
         config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);
         config.groups           = groups;
@@ -361,8 +355,7 @@ TEST_P(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatch
     auto                                                          manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto                    multi = std::make_shared<MultiRankBlockTransferEngine>(groups, manager);
-    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam()),
-                                       multi);
+    BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX), multi);
     std::vector<TransferDescriptor> descriptors;
     for (size_t i = 0; i < 5; ++i)
         descriptors.push_back(TransferDescriptor::diskToDevice(0, i + 1, {1}));
@@ -385,11 +378,6 @@ TEST_P(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatch
             EXPECT_EQ(engine->batches[index].size(), expected_sizes[index]);
     }
 }
-
-INSTANTIATE_TEST_SUITE_P(ExecutionBackends,
-                         RequestLevelBroadcastTest,
-                         ::testing::Bool(),
-                         [](const ::testing::TestParamInfo<bool>& info) { return info.param ? "WorkLoop" : "Legacy"; });
 
 TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFile) {
     using namespace block_transfer_engine_test;
@@ -425,19 +413,9 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
         DiskIOExecutorConfig io;
         io.read_thread_count  = 1;
         io.write_thread_count = 1;
-        auto engine           = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group},
-                                                                   true,
-                                                                   DeviceHostCopyOptions{},
-                                                                   2,
-                                                                   block_count,
-                                                                   1,
-                                                                   4,
-                                                                   nullptr,
-                                                                   rank,
-                                                                   1,
-                                                                   true,
-                                                                   io);
-        ASSERT_TRUE(engine->asyncEnabled());
+        auto engine           = std::make_shared<PerRankBlockTransferEngine>(
+            std::vector<GroupSetPtr>{group}, true, 2, block_count, 1, 4, nullptr, rank, 1, io);
+
         MultiRankBlockTransferRpcConfig config{true, MemoryOperationResponsePB::OK, grpc::Status::OK};
         config.groups           = {group};
         config.local_dispatcher = std::make_shared<BlockTransferDispatcher>(engine, nullptr);

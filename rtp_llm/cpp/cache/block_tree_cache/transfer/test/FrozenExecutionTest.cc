@@ -75,7 +75,7 @@ public:
     FrozenExecutionEngine(std::vector<GroupSetPtr>                          groups,
                           std::deque<std::shared_ptr<TransferAsyncContext>> contexts,
                           size_t                                            max_batch = 8):
-        PerRankBlockTransferEngine(std::move(groups), false, {}, 128, max_batch, 1, 32, nullptr, 0, 4, false),
+        PerRankBlockTransferEngine(std::move(groups), false, 128, max_batch, 1, 32, nullptr, 0, 4),
         contexts_(std::move(contexts)) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {

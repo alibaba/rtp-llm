@@ -111,17 +111,8 @@ public:
                                        bool                            succeed,
                                        bool                            pause_enabled   = true,
                                        size_t                          throw_on_submit = 0):
-        PerRankBlockTransferEngine(block_tree_cache_test::workLoopTestGroups(groups),
-                                   enable_disk_cache,
-                                   {},
-                                   128,
-                                   8,
-                                   4,
-                                   10000,
-                                   nullptr,
-                                   0,
-                                   4,
-                                   true),
+        PerRankBlockTransferEngine(
+            block_tree_cache_test::workLoopTestGroups(groups), enable_disk_cache, 128, 8, 4, 10000, nullptr, 0, 4),
         pause_enabled_(pause_enabled),
         throw_on_submit_(throw_on_submit),
         succeed_(succeed) {}
