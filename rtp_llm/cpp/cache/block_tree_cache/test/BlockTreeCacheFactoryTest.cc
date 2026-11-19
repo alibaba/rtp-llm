@@ -831,50 +831,6 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
     expectTargetGroupsBoundByTag(cache, allocator);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, FrozenAbortBoundsPropagateToHostAndDiskPools) {
-    for (const auto& [lower, upper] : {std::pair{0.0, 0.4}, {0.6, 0.85}}) {
-        SCOPED_TRACE(::testing::Message() << "lower=" << lower << " upper=" << upper);
-        const auto config    = makeSingleConfig();
-        auto       allocator = initAllocator<CoordinatorCacheManager>(config);
-        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_frozen_ratio");
-        KVCacheConfig                            kv_cache_config;
-        kv_cache_config.enable_memory_cache                       = true;
-        kv_cache_config.memory_cache_size_mb                      = 1;
-        kv_cache_config.enable_disk_cache                         = true;
-        kv_cache_config.disk_cache_size_mb                        = 1;
-        kv_cache_config.disk_cache_paths                          = disk_dir.path;
-        kv_cache_config.block_pool_frozen_abort_lower_ratio       = lower;
-        kv_cache_config.block_pool_frozen_abort_upper_ratio = upper;
-        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
-        ASSERT_NE(cache, nullptr);
-        ASSERT_EQ(cache->groupSets().size(), 1u);
-        const auto& group_set = cache->groupSets().front();
-        ASSERT_NE(group_set->hostPool(), nullptr);
-        ASSERT_NE(group_set->diskPool(), nullptr);
-
-        const std::array<std::shared_ptr<IBlockPool>, 2> pools{group_set->hostPool(), group_set->diskPool()};
-        for (const auto& pool : pools) {
-            SCOPED_TRACE(pool->poolName());
-            ASSERT_DOUBLE_EQ(pool->config_->frozen_block_abort_lower_ratio, lower);
-            ASSERT_DOUBLE_EQ(pool->config_->frozen_block_abort_upper_ratio, upper);
-            ASSERT_GE(pool->totalBlocksNum(), 10u);
-            // Freeze more than the default 30% so a missing configuration
-            // override cannot silently pass once the guard covers all tiers.
-            const auto blocks = pool->malloc((pool->totalBlocksNum() + 1) / 2);
-            ASSERT_TRUE(blocks.has_value());
-            for (const auto block : *blocks) {
-                pool->freezeBlock(block);
-            }
-            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), blocks->size());
-            for (const auto block : *blocks) {
-                EXPECT_ANY_THROW(pool->decTreeRef(block, BlockTreeRefType::FROZEN));
-            }
-            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), blocks->size());
-            EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum() - blocks->size());
-        }
-    }
-}
-
 TEST_F(BlockTreeCacheFactoryTest, RemoteResolverMatchesAllocatorForNonContiguousGlobalLayers) {
     {
         const auto    config    = makeHybridConfig();

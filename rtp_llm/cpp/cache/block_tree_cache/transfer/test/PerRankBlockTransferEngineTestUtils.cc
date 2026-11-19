@@ -159,8 +159,7 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
 
 DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
                                       size_t                                        usable_count,
-                                      const std::string&                            pool_name,
-                                      bool                                          disable_frozen_abort) {
+                                      const std::string&                            pool_name) {
     RTP_LLM_CHECK(!layer_bytes.empty());
     const size_t physical_block_count = usable_count + 1;
     auto         config               = std::make_shared<DeviceBlockPoolConfig>();
@@ -168,8 +167,6 @@ DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t
     config->pool_name                 = pool_name;
     config->physical_block_count      = physical_block_count;
     config->use_device_malloc_backing = true;
-    if (disable_frozen_abort)
-        config->frozen_block_abort_lower_ratio = 0.0;
 
     size_t offset = 0;
     for (const auto& [kv_bytes, scale_bytes] : layer_bytes) {
@@ -208,8 +205,6 @@ std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = "per_rank_transfer_engine_host";
     config->physical_block_count = usable_count + 1;
-    // Copy/lifetime fixtures may freeze the entire small pool; guard tests use their own configs.
-    config->frozen_block_abort_lower_ratio = 0.0;
     config->payload_bytes                  = payload_bytes;
     const size_t storage_bytes             = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
     config->stride_bytes                   = ((storage_bytes + 4095) / 4096) * 4096;
@@ -240,7 +235,6 @@ std::shared_ptr<DiskBlockPool> makeDiskPool(size_t                       payload
     config->pool_type                      = BlockPoolType::DISK;
     config->pool_name                      = pool_name;
     config->work_dir                       = work_dir;
-    config->frozen_block_abort_lower_ratio = 0.0;
     config->local_rank                     = 0;
     config->world_rank                     = 0;
     config->disk_size_bytes                = stride_bytes * (usable_count + 1);

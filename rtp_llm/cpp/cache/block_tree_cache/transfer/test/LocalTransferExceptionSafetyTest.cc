@@ -409,7 +409,6 @@ TEST(LocalBufferSafetyFailureTest, UniformUnknownKeepsTargetCustodyUntilExplicit
     config->pool_type                      = BlockPoolType::HOST;
     config->pool_name                      = "unknown_completion_delivery";
     config->physical_block_count           = 4;
-    config->frozen_block_abort_lower_ratio = 0.0;
     config->payload_bytes                  = 64;
     config->stride_bytes                   = 4096;
     config->alignment                      = 4096;

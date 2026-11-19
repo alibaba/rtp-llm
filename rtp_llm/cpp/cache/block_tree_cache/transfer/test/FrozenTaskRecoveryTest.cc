@@ -32,8 +32,6 @@ std::shared_ptr<RecoveryPool> makePool(size_t physical_block_count = 16) {
     config->pool_name                      = "frozen-recovery";
     config->pool_type                      = BlockPoolType::HOST;
     config->physical_block_count           = physical_block_count;
-    config->frozen_block_abort_lower_ratio = 0.0;
-    config->frozen_block_abort_upper_ratio = 0.0;
     return std::make_shared<RecoveryPool>(std::move(config));
 }
 

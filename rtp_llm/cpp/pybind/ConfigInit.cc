@@ -502,8 +502,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
         .def_readwrite("block_tree_frozen_force_release_timeout_ms",
                        &KVCacheConfig::block_tree_frozen_force_release_timeout_ms)
-        .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
-        .def_readwrite("block_pool_frozen_abort_upper_ratio", &KVCacheConfig::block_pool_frozen_abort_upper_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
                        &KVCacheConfig::block_tree_device_evict_low_watermark_ratio)
         .def_readwrite("block_tree_device_evict_high_watermark_ratio",
@@ -588,7 +586,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      21,
+                                      22,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -664,8 +662,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kvcm_task_timeout_ms,
                                       self.kv_cache_event_snapshot_interval_ms,
                                       self.disk_cache_evict_timeout_ms,
-                                      self.block_pool_frozen_abort_lower_ratio,
-                                      self.block_pool_frozen_abort_upper_ratio,
                                       self.disk_cache_evict_max_pending_bytes,
                                       self.block_tree_task_pool_size,
                                       self.block_tree_frozen_force_release_timeout_ms);
@@ -678,8 +674,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 constexpr size_t kPinnedHostFieldCount           = 64;
                 constexpr size_t kReserveRemovedFieldCount       = 63;
                 constexpr size_t kV6FieldCount                   = 62;
-                // Tuple sizes for versions 7 through 21, including the tag and version.
-                constexpr size_t kExtendedStateSizes[] = {69, 70, 72, 78, 80, 84, 88, 89, 90, 91, 92, 94, 95, 96, 82};
+                // Tuple sizes for versions 7 through 22, including the tag and version.
+                constexpr size_t kExtendedStateSizes[] = {69, 70, 72, 78, 80, 84, 88, 89, 90, 91, 92, 94, 95, 96, 82, 80};
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
                     || t[0].cast<std::string>() != "KVCacheConfig") {
                     throw std::runtime_error("invalid KVCacheConfig state");
@@ -695,7 +691,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const bool valid_reserve_removed_state = version == 5 && t.size() == kReserveRemovedFieldCount + 2;
                 const bool valid_v6_state              = version == 6 && t.size() == kV6FieldCount + 2;
                 const bool valid_extended_state =
-                    version >= 7 && version <= 21 && t.size() == kExtendedStateSizes[version - 7];
+                    version >= 7 && version <= 22 && t.size() == kExtendedStateSizes[version - 7];
                 if (!valid_legacy_state && !valid_write_sync_state && !valid_queue_write_sync_state
                     && !valid_pinned_host_state && !valid_reserve_removed_state && !valid_v6_state
                     && !valid_extended_state) {
@@ -703,8 +699,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
-                // Version 21 omits the retired options. Read only retained fields from older tuples.
-                const bool compact_state = version == 21;
+                // Versions 21 and 22 omit earlier retired options.
+                // Only version 21 still has two abort-ratio slots in the compact layout.
+                const bool   compact_state       = version >= 21;
+                const size_t retired_abort_slots = version == 21 ? 2 : 0;
                 if (version >= 11) {
                     c.memory_cache_swa_block_ratio  = t[compact_state ? 72 : 78].cast<double>();
                     c.dsv41_decoder_swa_pool_blocks = t[compact_state ? 73 : 79].cast<uint32_t>();
@@ -716,29 +714,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (version >= 14) {
                     c.disk_cache_evict_timeout_ms = t[compact_state ? 76 : 88].cast<int64_t>();
                 }
-                if (version >= 15) {
-                    c.block_pool_frozen_abort_lower_ratio = t[compact_state ? 77 : 89].cast<double>();
-                }
-                if (version >= 16) {
-                    c.block_pool_frozen_abort_upper_ratio = t[compact_state ? 78 : 90].cast<double>();
-                }
-                if (!std::isfinite(c.block_pool_frozen_abort_lower_ratio)
-                    || !std::isfinite(c.block_pool_frozen_abort_upper_ratio)
-                    || c.block_pool_frozen_abort_lower_ratio < 0.0
-                    || c.block_pool_frozen_abort_lower_ratio > c.block_pool_frozen_abort_upper_ratio
-                    || c.block_pool_frozen_abort_upper_ratio > 1.0) {
-                    throw std::runtime_error(
-                        "invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
-                        "0 <= lower <= upper <= 1");
-                }
                 if (version >= 17) {
-                    c.disk_cache_evict_max_pending_bytes = t[compact_state ? 79 : 91].cast<int64_t>();
+                    c.disk_cache_evict_max_pending_bytes = t[compact_state ? 77 + retired_abort_slots : 91].cast<int64_t>();
                 }
                 if (version >= 19) {
-                    c.block_tree_task_pool_size = t[compact_state ? 80 : 94].cast<int>();
+                    c.block_tree_task_pool_size = t[compact_state ? 78 + retired_abort_slots : 94].cast<int>();
                 }
                 if (version >= 20) {
-                    c.block_tree_frozen_force_release_timeout_ms = t[compact_state ? 81 : 95].cast<int64_t>();
+                    c.block_tree_frozen_force_release_timeout_ms = t[compact_state ? 79 + retired_abort_slots : 95].cast<int64_t>();
                     if (c.block_tree_frozen_force_release_timeout_ms < 0
                         || c.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
                         throw std::runtime_error(

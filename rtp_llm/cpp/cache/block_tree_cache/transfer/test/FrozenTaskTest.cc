@@ -29,7 +29,6 @@ std::shared_ptr<FrozenTestPool> makePool(std::string name) {
     config->pool_name                      = std::move(name);
     config->pool_type                      = BlockPoolType::HOST;
     config->physical_block_count           = 16;
-    config->frozen_block_abort_lower_ratio = 0.0;
     return std::make_shared<FrozenTestPool>(std::move(config));
 }
 

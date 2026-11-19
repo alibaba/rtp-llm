@@ -54,10 +54,9 @@ double snapshotMetric(kmonitor::MutableMetric* metric, const kmonitor::MetricsTa
     return std::stod(record.Values().front()->Value());
 }
 
-GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id         = 0,
-                                       bool   enable_crc           = false,
-                                       size_t device_block_count   = 1,
-                                       bool   disable_frozen_abort = false) {
+GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id       = 0,
+                                       bool   enable_crc         = false,
+                                       size_t device_block_count = 1) {
     using namespace block_transfer_engine_test;
 
     auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -68,8 +67,7 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id         = 0,
     const std::shared_ptr<const CacheTopology> topology     = makeTestTopology({group_config});
     DeviceBlockPoolPtr                         pool         = makeTestDevicePool({{kv_bytes, scale_bytes}},
                                                  device_block_count,
-                                                 "load_task_runner_" + std::to_string(group_set_id),
-                                                 disable_frozen_abort);
+                                                 "load_task_runner_" + std::to_string(group_set_id));
     auto                                       host_pool    = makeHostPool(kv_bytes, /*usable_count=*/2);
     auto                                       disk_pool    = makeDiskPool(kv_bytes,
                                   /*usable_count=*/2,
@@ -569,7 +567,7 @@ TEST(LoadTaskRunnerTest, SimultaneousCompletionsReportExactlyOneDirectionalWait)
 TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruption) {
     for (bool host_unknown : {false, true}) {
         for (bool host_first : {false, true}) {
-            const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0, false, 2, true)};
+            const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0, false, 2)};
             // Unknown completion now retains physical targets in the coordinator.
             auto       device_pool = group_sets.front()->devicePools().front();
             const auto host_target = block_transfer_engine_test::poolMalloc(*device_pool);

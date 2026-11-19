@@ -154,8 +154,6 @@ struct FMHAConfig {
 
 constexpr double kDefaultDeviceLowWatermarkRatio        = 0.82;
 constexpr double kDefaultDeviceHighWatermarkRatio       = 0.90;
-constexpr double kDefaultBlockPoolFrozenAbortLowerRatio = 0.30;
-constexpr double kDefaultBlockPoolFrozenAbortUpperRatio = 0.40;
 constexpr double kDefaultMemoryLowWatermarkRatio        = 0.90;
 constexpr double kDefaultMemoryHighWatermarkRatio       = 0.94;
 constexpr double kDefaultDiskLowWatermarkRatio          = 0.92;
@@ -183,8 +181,6 @@ struct KVCacheConfig {
     int64_t block_tree_business_queue_max_size = 10000;
     int64_t block_tree_transfer_queue_max_size = 10000;
     int64_t block_tree_frozen_force_release_timeout_ms   = 60000;
-    double  block_pool_frozen_abort_lower_ratio          = kDefaultBlockPoolFrozenAbortLowerRatio;
-    double  block_pool_frozen_abort_upper_ratio          = kDefaultBlockPoolFrozenAbortUpperRatio;
     double  block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
     double  block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
     double  block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;

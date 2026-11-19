@@ -479,6 +479,8 @@ class CacheConfigArgumentsTest(TestCase):
             ("disk_cache_write_thread_count", "6"),
             ("block_tree_frozen_recovery_interval_ms", "0"),
             ("block_tree_frozen_recovery_query_timeout_ms", "750"),
+            ("block_pool_frozen_abort_lower_ratio", "0.35"),
+            ("block_pool_frozen_abort_upper_ratio", "0.45"),
             ("block_tree_full_device_evict_low_watermark_ratio", "0.90"),
             ("block_tree_full_device_evict_high_watermark_ratio", "0.95"),
             ("block_tree_full_memory_evict_low_watermark_ratio", "0.94"),
@@ -532,69 +534,6 @@ class CacheConfigArgumentsTest(TestCase):
                     self.assertRaises(SystemExit),
                 ):
                     self.parse_cache_config(args, {name.upper(): value})
-
-    def test_block_pool_frozen_abort_range_defaults_environment_and_cli(self):
-        lower_env = "BLOCK_POOL_FROZEN_ABORT_LOWER_RATIO"
-        upper_env = "BLOCK_POOL_FROZEN_ABORT_UPPER_RATIO"
-        lower_option = "--block_pool_frozen_abort_lower_ratio"
-        upper_option = "--block_pool_frozen_abort_upper_ratio"
-        for args, env, lower, upper in (
-            ([], {}, 0.3, 0.4),
-            (None, {}, 0.3, 0.4),
-            ([], {lower_env: "0.35"}, 0.35, 0.4),
-            (None, {lower_env: "0.35"}, 0.35, 0.4),
-            ([], {upper_env: "0.8"}, 0.3, 0.8),
-            (None, {upper_env: "0.8"}, 0.3, 0.8),
-            ([], {lower_env: "0.45", upper_env: "0.8"}, 0.45, 0.8),
-            ([lower_option, "0.6"], {lower_env: "0.45", upper_env: "0.8"}, 0.6, 0.8),
-            ([upper_option, "0.7"], {upper_env: "0.8"}, 0.3, 0.7),
-            ([lower_option, "0"], {lower_env: "0.35"}, 0.0, 0.4),
-            ([lower_option, "1", upper_option, "1"], {}, 1.0, 1.0),
-            ([lower_option, "0", upper_option, "0"], {}, 0.0, 0.0),
-            ([lower_option, "0.4", upper_option, "0.4"], {}, 0.4, 0.4),
-        ):
-            with self.subTest(args=args, env=env):
-                config = self.parse_cache_config(args, env)
-                self.assertEqual(config.block_pool_frozen_abort_lower_ratio, lower)
-                self.assertEqual(config.block_pool_frozen_abort_upper_ratio, upper)
-                restored = pickle.loads(pickle.dumps(config))
-                self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, lower)
-                self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, upper)
-
-    def test_block_pool_frozen_abort_bounds_reject_invalid_cli_and_environment(self):
-        for name in (
-            "block_pool_frozen_abort_lower_ratio",
-            "block_pool_frozen_abort_upper_ratio",
-        ):
-            for value in ("-0.1", "1.1", "nan", "inf", "-inf", "invalid"):
-                with (
-                    self.subTest(name=name, value=value, source="cli"),
-                    self.assertRaises(SystemExit),
-                ):
-                    self.parse_cache_config([f"--{name}", value], {})
-                for args in (None, []):
-                    with (
-                        self.subTest(name=name, value=value, source="env", args=args),
-                        self.assertRaises(SystemExit),
-                    ):
-                        self.parse_cache_config(args, {name.upper(): value})
-
-    def test_setup_rejects_reversed_frozen_abort_bounds(self):
-        from rtp_llm.server.server_args.server_args import setup_args
-
-        for args, env in (
-            (["--block_pool_frozen_abort_lower_ratio", "0.45"], {}),
-            (["--block_pool_frozen_abort_upper_ratio", "0.2"], {}),
-            ([], {"BLOCK_POOL_FROZEN_ABORT_LOWER_RATIO": "0.45"}),
-            (None, {"BLOCK_POOL_FROZEN_ABORT_UPPER_RATIO": "0.2"}),
-        ):
-            with (
-                self.subTest(args=args, env=env),
-                patch.dict(os.environ, env, clear=True),
-                patch.object(sys, "argv", ["server"]),
-                self.assertRaises(SystemExit),
-            ):
-                setup_args(args)
 
     def test_crc_default_and_environment(self):
         for args in (None, []):

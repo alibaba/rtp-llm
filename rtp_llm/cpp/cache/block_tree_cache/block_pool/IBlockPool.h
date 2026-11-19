@@ -39,9 +39,6 @@ struct BlockPoolConfigBase {
     BlockPoolType pool_type{BlockPoolType::DEVICE};
     std::string   pool_name;
     size_t        physical_block_count{0};
-    // Sample once per process in [lower, upper); equal bounds fix the threshold, and lower=0 disables it.
-    double frozen_block_abort_lower_ratio{0.3};
-    double frozen_block_abort_upper_ratio{0.4};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
@@ -82,8 +79,7 @@ public:
     bool canReclaimCacheBlock(BlockIdxType block) const;
 
     // Add one FROZEN reference; the caller decides when to release its hold.
-    // abort_context is borrowed for this call and printed only on threshold abort.
-    void freezeBlock(BlockIdxType block, const char* abort_context = nullptr) noexcept;
+    void freezeBlock(BlockIdxType block) noexcept;
     bool isFrozen(BlockIdxType block) const;
 
     // Prepare, but do not acquire or release, one FROZEN reference per block.
@@ -186,7 +182,7 @@ private:
     bool          validBlockNoLock(BlockIdxType block) const;
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
-    void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index, const char* abort_context = nullptr);
+    void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
     void          releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept;
 
     size_t       totalBlocksNumNoLock() const;
@@ -196,7 +192,6 @@ private:
 
 private:
     std::shared_ptr<const BlockPoolConfigBase>                config_;
-    double                                                    effective_frozen_block_abort_ratio_{0.0};
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;

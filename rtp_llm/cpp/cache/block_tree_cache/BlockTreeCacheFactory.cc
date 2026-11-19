@@ -221,12 +221,7 @@ std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&
 }
 
 std::shared_ptr<HostBlockPool>
-createHostPool(const std::string& name,
-               const BackingLayout& layout,
-               size_t usable_blocks,
-               size_t alignment,
-               double frozen_abort_lower_ratio,
-               double frozen_abort_upper_ratio) {
+createHostPool(const std::string& name, const BackingLayout& layout, size_t usable_blocks, size_t alignment) {
     if (layout.payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
@@ -234,8 +229,6 @@ createHostPool(const std::string& name,
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = name;
     config->physical_block_count = usable_blocks + 1;
-    config->frozen_block_abort_lower_ratio = frozen_abort_lower_ratio;
-    config->frozen_block_abort_upper_ratio = frozen_abort_upper_ratio;
     config->payload_bytes        = layout.payload_bytes;
     config->stride_bytes         = layout.pool_stride;
     config->alignment            = alignment;
@@ -275,8 +268,6 @@ DiskBlockPoolPtr createDiskPool(const KVCacheConfig&                            
     config->physical_block_count = usable_blocks + 1;
     config->disk_size_bytes      = config->physical_block_count * config->stride_bytes;
     config->buffered_io          = kv_config.disk_cache_buffered_io;
-    config->frozen_block_abort_lower_ratio = kv_config.block_pool_frozen_abort_lower_ratio;
-    config->frozen_block_abort_upper_ratio = kv_config.block_pool_frozen_abort_upper_ratio;
     config->mount_guard          = guard;
     auto pool                              = std::make_shared<DiskBlockPool>(config);
     return pool->init() ? pool : nullptr;
@@ -570,12 +561,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                              (usable[group_set_id] + 1) * strides[group_set_id],
                              bytes,
                              kv_cache_config.memory_cache_swa_block_ratio);
-            host_pools[group_set_id] = createHostPool(pool_name,
-                                                      backing_layouts[group_set_id],
-                                                      usable[group_set_id],
-                                                      pool_alignment,
-                                                      kv_cache_config.block_pool_frozen_abort_lower_ratio,
-                                                      kv_cache_config.block_pool_frozen_abort_upper_ratio);
+            host_pools[group_set_id] =
+                createHostPool(pool_name, backing_layouts[group_set_id], usable[group_set_id], pool_alignment);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }

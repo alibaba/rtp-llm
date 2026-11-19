@@ -117,10 +117,7 @@ struct SmokeWorker {
     SmokeWorker(size_t rank, bool async, const std::string& directory): rank(rank) {
         host = makeHostPool(kBytes, kBlocks, true);
         // This recovery fixture deliberately freezes the entire small pool.
-        device       = makeTestDevicePool({{kBytes, 0}},
-                                    kBlocks,
-                                    "timeout_device_rank_" + std::to_string(rank),
-                                    /*disable_frozen_abort=*/true);
+        device       = makeTestDevicePool({{kBytes, 0}}, kBlocks, "timeout_device_rank_" + std::to_string(rank));
         auto storage = std::make_unique<ObservedPosixIO>();
         io           = storage.get();
         disk         = makeDiskPool(kBytes,
