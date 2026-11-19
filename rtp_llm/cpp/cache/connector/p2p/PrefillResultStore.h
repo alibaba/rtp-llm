@@ -37,6 +37,10 @@ public:
         torch::Tensor                        propose_hidden;
         std::vector<int32_t>                 position_ids;
         std::map<std::string, torch::Tensor> first_token_tensors;
+        int64_t                              frontend_context_token_num                  = 0;
+        int64_t                              frontend_context_token_num_with_cache       = 0;
+        int64_t                              frontend_context_execute_time_us            = 0;
+        int64_t                              frontend_context_execute_time_with_cache_us = 0;
         std::optional<PromptLogitsOutput>    prompt_logits;
     };
 

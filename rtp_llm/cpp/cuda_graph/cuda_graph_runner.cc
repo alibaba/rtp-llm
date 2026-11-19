@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
@@ -23,6 +24,15 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
+class ScopedCudaGraphWarmupForwardFlag {
+public:
+    ScopedCudaGraphWarmupForwardFlag() {
+        pushCudaGraphWarmupForwardFlag();
+    }
+    ~ScopedCudaGraphWarmupForwardFlag() {
+        popCudaGraphWarmupForwardFlag();
+    }
+};
 int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
     const size_t expansion =
         group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
@@ -518,6 +528,17 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // Collect a strided 2D D2D copy: copies src[0..rows, 0..cols] into dst[0..rows, 0..cols]
     // where src and dst may have different column strides (copySmallerIntoLarger semantics).
     // For 1D tensors, falls back to a contiguous D2D copy to avoid silent data loss.
+    // Every captured seed row is consumed by index_select, including dummy
+    // requests. A smaller prefill graph can have fewer TopK rows than the
+    // previous replay, so stale tail indices are not necessarily in bounds.
+    auto& seed_rows = py_model_inputs_.attention_inputs.mtp_indexer_seed_rows;
+    if (has_padded_rows && seed_rows.defined() && seed_rows.numel() > 0) {
+        seed_rows.slice(0, state.current_batch_size, selected_graph_batch_size).zero_();
+    }
+    tryAddD2DCopy(inputs.attention_inputs.mtp_indexer_seed_rows,
+                  py_model_inputs_.attention_inputs.mtp_indexer_seed_rows,
+                  state.current_batch_size * sizeof(int32_t));
+
     auto tryAddStridedD2DCopy = [&strided_d2d_copies, &d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() <= 0)
             return;
@@ -1678,6 +1699,7 @@ int CudaGraphRunner::getCurrentRealGraphSize(const CudaGraphState& state) const 
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_draft_extend  = role_ == CudaGraphRole::MTP_DRAFT_PREFILL;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     // GraphRunner owns the captured input object.  The Python FMHA factory
     // prepares only attention tags and cannot mark PLE/QSA side regions.
@@ -1686,9 +1708,10 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_cuda_graph = true;
 
     // input_lengths [batch_size, int32] (decode only)
-    inputs.attention_inputs.input_lengths        = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
-    inputs.attention_inputs.input_lengths        = inputs.attention_inputs.input_lengths.pin_memory();
-    inputs.attention_inputs.input_lengths_device = inputs.attention_inputs.input_lengths.cuda();
+    inputs.attention_inputs.input_lengths         = torch::full({int(max_bs_)}, num_tokens_per_bs_, options_cpu_int32_);
+    inputs.attention_inputs.input_lengths         = inputs.attention_inputs.input_lengths.pin_memory();
+    inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
+    inputs.attention_inputs.mtp_indexer_seed_rows = torch::zeros({int(max_bs_)}, options_cuda_int32_);
     // sequence_lengths [batch_size, int32] (decode only)
     // sequence_length should in pinned memory
     inputs.attention_inputs.sequence_lengths = torch::ones({int(max_bs_)}, options_cpu_int32_);
@@ -1952,7 +1975,8 @@ void CudaGraphRunner::initCapture() {
             // Distributed model implementations may rendezvous during this
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
-            ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            ScopedEnvFlag                    cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            ScopedCudaGraphWarmupForwardFlag forward_phase;
             initial_outputs = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj).cast<PyModelOutputs>();
             if (!py_after_warmup_method_.is_none()) {
                 py_after_warmup_method_(capture_mem_hold_.py_model_inputs_);
@@ -2007,8 +2031,8 @@ void CudaGraphRunner::replayGraph(int key) {
                                     is_target_verify_,
                                     exception.what());
                 if (metrics_reporter_) {
-                    metrics_reporter_->report(
-                        1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS, nullptr, true);
+                    reportKmonMetric(
+                        metrics_reporter_, 1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS);
                 }
                 cuda_graph::graphEmptyCache();
             });
@@ -2040,7 +2064,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // Run the same backend that will be captured for this exact key.  In
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
-        ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        ScopedEnvFlag                    cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        ScopedCudaGraphWarmupForwardFlag forward_phase;
         py_forward_method_(inputs, attn_pyobj);
         if (!py_after_warmup_method_.is_none()) {
             py_after_warmup_method_(inputs);
@@ -2143,6 +2168,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_draft_extend  = role_ == CudaGraphRole::MTP_DRAFT_PREFILL;
     inputs.attention_inputs.is_cuda_graph    = true;
     // Request-lane MTP draft prefill has fixed lanes per captured request,
     // while each graph key captures only its own request capacity.
@@ -2162,6 +2188,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.mtp_indexer_seed_rows =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.mtp_indexer_seed_rows.slice(0, 0, batch_size);
     inputs.attention_inputs.input_lengths_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_device.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =

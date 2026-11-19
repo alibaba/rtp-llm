@@ -616,8 +616,8 @@ decord==0.6.0 \
 deep-ep==2.1.0+a56d615 \
     --hash=sha256:76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-deep-gemm==2.8.0+122e18b.cu132 \
-    --hash=sha256:5d5afc1d58bb24f7c8a460f74e8dff39a99d7a6ebae35152cdcfd5f393ead080
+deep-gemm==2.8.0+6d6aaad.cu132 \
+    --hash=sha256:8ca0bce659a60b2a5c3459792b5eb4bcc46ed3b28b9b6bd94f278d670a7ffa7f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
@@ -634,18 +634,18 @@ exceptiongroup==1.3.0 \
     --hash=sha256:4d111e6e0c13d0644cad6ddaa7ed0261a0b36971f6d23e7ec9b4b9097da78a10 \
     --hash=sha256:b241f5885f560bc56a59ee63ca4c6a8bfa46ae4ad651af316d4e81817bb9fd88
     # via anyio
-fast-hadamard-transform==1.1.0+e7706fa.cu132.torch2.11.cxx11abitrue \
-    --hash=sha256:b57df45e19b1d7f86d142ebb266a9cba75041d12a72d61c676be954844295e25
+fast-hadamard-transform @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:9a8b91890cd002e4c38b57e7cc4a92d8635ed7253a08d721d988d0a043047eec
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-fast-safetensors==0.7.3+torch2.11.cu130 \
-    --hash=sha256:dd6aa7fe17acf6bfb3ea00dbfb934146b78d852ef3e0b1979dd0edb8bfaaf19a
+fast-safetensors==0.7.4.dev0+torch2.11.0.cu130.aone67401633 \
+    --hash=sha256:432c84b917088964e78864384d33580f6ad1e2beb706ef744b6bf6a80a9ef4fd
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r deps/requirements_base.txt
-fastsafetensors==0.1.20+ali \
-    --hash=sha256:04f3a2e8b082af33e7c78536d79db2e6ebb72debebc934fc90087b9b873db552
+fastsafetensors==0.3.4.dev20260908+ali.fuseshm.gfb2c381b.aone70048596 \
+    --hash=sha256:02f69129d1af0678201b96278d840d4ec68b19d6a7fadad413b182b735583d80
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 filelock==3.20.0 \
     --hash=sha256:339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2 \
@@ -658,8 +658,8 @@ filelock==3.20.0 \
 flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1 \
     --hash=sha256:a45ff2133f720c0042971de1f3a1c987176d19b7305e440abeb04c33a813fad0
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-flash-mla==1.0.0+9241ae3 \
-    --hash=sha256:67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f
+flash-mla==1.0.0+49e2000.cu132 \
+    --hash=sha256:ed9037a0f09ad5461c5cf04efd7770c8410831d473d83b4813512dc3fe8ac5ca
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 flashinfer-cubin==0.6.9+8c4f4dcf \
     --hash=sha256:6e4a9132f5096b7a6d7904a90efd90a90573c365e5250237bc37f1812ab15b9f

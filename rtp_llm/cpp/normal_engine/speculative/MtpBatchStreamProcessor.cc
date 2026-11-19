@@ -940,7 +940,8 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
 void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                                            GptModelInputs&     model_input,
                                                            TensorHolder&       host_holder) {
-    const size_t batch_size = stream_groups.size();
+    model_input.is_draft_extend = false;
+    const size_t batch_size     = stream_groups.size();
     if (batch_size == 0) {
         model_input.combo_tokens      = emptyInt32OnCuda({0});
         model_input.input_lengths     = emptyInt32OnCuda({0});
@@ -972,7 +973,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
             auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
             model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
             model_input.prefix_lengths   = model_input.sequence_lengths;
-            model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
+            model_input.input_lengths    = toCudaInt32(model_input.input_lengths, host_holder);
             if (device_positions) {
                 expandTargetVerifyPositionIds(stream_groups, model_input, model_input.prefix_lengths, 1);
             }
@@ -1134,7 +1135,8 @@ bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const Str
 void MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput(const StreamGroups& stream_groups,
                                                                  GptModelInputs&     model_input,
                                                                  TensorHolder&       host_holder) {
-    const size_t batch_size = stream_groups.size();
+    model_input.is_draft_extend = false;
+    const size_t batch_size     = stream_groups.size();
     if (batch_size == 0) {
         return;
     }
@@ -1189,6 +1191,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
                                                                const GptModelOutputs& model_output,
                                                                const SamplerOutput&   sampler_output,
                                                                TensorHolder&          host_holder) {
+    model_input.is_draft_extend   = false;
     const auto   all_streams      = stream_groups.allStreams();
     const size_t batch_size       = sampler_output.token_ids.size(0);
     const size_t stream_row_count = std::accumulate(
@@ -1353,6 +1356,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     const size_t                                 batch_size,
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
+    model_input.is_draft_extend = true;
     mtp::prepareDraftPrefillAfterVerify(model_input,
                                         model_output.all_hidden_states,
                                         speculative_sampler_output,

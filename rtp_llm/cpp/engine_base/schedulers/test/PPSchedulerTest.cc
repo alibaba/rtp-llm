@@ -15,6 +15,7 @@
 #include "kmonitor/client/common/MinMaxCalculator.h"
 #include "kmonitor/client/core/MetricsCollector.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 
 #define private public
 #define protected public
@@ -100,20 +101,20 @@ protected:
     }
 
     template<typename Scheduler = PPScheduler>
-    std::shared_ptr<Scheduler> createScheduler(size_t          max_generate_batch_size = 100,
-                                               RoleType        role                    = RoleType::PDFUSION,
-                                               SpeculativeType type                    = SP_TYPE_NONE,
-                                               bool            cp_enabled              = false,
-                                               int             chunk_size              = 0,
+    std::shared_ptr<Scheduler> createScheduler(size_t          max_generate_batch_size        = 100,
+                                               RoleType        role                           = RoleType::PDFUSION,
+                                               SpeculativeType type                           = SP_TYPE_NONE,
+                                               bool            cp_enabled                     = false,
+                                               int             chunk_size                     = 0,
                                                int64_t         max_batch_tokens_without_cache = 0) {
         ModelConfig model_config;
         model_config.max_seq_len                 = model_max_seq_len_;
         model_config.vocab_size                  = 128;
         model_config.special_tokens.eos_token_id = -1;
         RuntimeConfig runtime_config;
-        runtime_config.max_generate_batch_size                     = max_generate_batch_size;
-        runtime_config.fifo_scheduler_config.max_batch_tokens_size = model_max_seq_len_;
-        runtime_config.fifo_scheduler_config.prefill_chunk_size    = chunk_size;
+        runtime_config.max_generate_batch_size                              = max_generate_batch_size;
+        runtime_config.fifo_scheduler_config.max_batch_tokens_size          = model_max_seq_len_;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size             = chunk_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = max_batch_tokens_without_cache;
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role;
@@ -126,22 +127,18 @@ protected:
         SpeculativeExecutionConfig sp_config;
         sp_config.type              = type;
         sp_config.gen_num_per_cycle = 3;
-        return std::make_shared<Scheduler>(runtime_config,
-                                           model_config,
-                                           pd_sep_config,
-                                           parallelism_config,
-                                           sp_config,
-                                           cache_manager_);
+        return std::make_shared<Scheduler>(
+            runtime_config, model_config, pd_sep_config, parallelism_config, sp_config, cache_manager_);
     }
 
     template<typename Stream = NormalGenerateStream>
     std::shared_ptr<Stream> createStream(const std::vector<int>& input_tokens        = {1, 2, 3},
-                                   bool                    reuse_cache         = false,
-                                   bool                    enable_memory_cache = false,
-                                   int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {},
-                                   RoleType                role_type           = RoleType::PDFUSION,
-                                   int                     chunk_size          = 0) {
+                                         bool                    reuse_cache         = false,
+                                         bool                    enable_memory_cache = false,
+                                         int                     max_new_tokens      = 1,
+                                         const std::vector<int>& variable_num_beams  = {},
+                                         RoleType                role_type           = RoleType::PDFUSION,
+                                         int                     chunk_size          = 0) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
         resource_context.reuse_cache         = reuse_cache;
@@ -165,8 +162,7 @@ protected:
         generate_config->variable_num_beams  = variable_num_beams;
         query->input_ids                     = torch::tensor(input_tokens, torch::kInt32);
         query->generate_config               = generate_config;
-        auto stream =
-            std::make_shared<Stream>(query, model_config, runtime_config, resource_context, nullptr);
+        auto stream = std::make_shared<Stream>(query, model_config, runtime_config, resource_context, nullptr);
         return stream;
     }
 
@@ -268,6 +264,16 @@ TEST_F(PPSchedulerTest, CapacityBlockedWaitingStreamBacksOffBetweenPolls) {
 }
 
 TEST_F(PPSchedulerTest, AdmissionMetricsResetWhenReadyDecodeSkipsAdmission) {
+    autil::EnvGuard gate_scope("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE", "");
+    struct MetricsLifecycle {
+        MetricsLifecycle() {
+            startKmonServiceStatus(nullptr);
+            setKmonServiceServing(true);
+        }
+        ~MetricsLifecycle() {
+            stopKmonServiceStatus();
+        }
+    } metrics_lifecycle;
     auto monitor = std::make_shared<kmonitor::KMonitor>("pp_scheduler_metrics_test");
     monitor->SetServiceName("");
     /** Exercise ready-decode scheduling on PDFUSION; PREFILL rejects local multi-token requests. */
@@ -292,6 +298,7 @@ TEST_F(PPSchedulerTest, AdmissionMetricsResetWhenReadyDecodeSkipsAdmission) {
         for (const auto& [name, value] : expected) {
             kmonitor::MinMaxCalculator gauge;
             gauge.Add(value);
+            ASSERT_TRUE(values.count(name)) << name;
             EXPECT_EQ(values.at(name), gauge.ToString()) << name;
         }
         kmonitor::MinMaxCalculator zero;
@@ -333,7 +340,7 @@ TEST_F(PPSchedulerTest, AdmissionMetricsResetWhenReadyDecodeSkipsAdmission) {
 }
 
 TEST_F(PPSchedulerTest, DecodeTopUpCountsReadyAndInflightRequestsOnce) {
-    auto scheduler = createScheduler(3, RoleType::DECODE);
+    auto                           scheduler = createScheduler(3, RoleType::DECODE);
     std::vector<GenerateStreamPtr> streams;
     for (int i = 0; i < 4; ++i) {
         auto stream = createStream({1, 2, 3}, false, false, 8, {}, RoleType::DECODE);
@@ -478,12 +485,12 @@ TEST_F(PPSchedulerTest, AsyncLoadsRespectAdmissionCapacityAndReenterAfterInfligh
 }
 
 TEST_F(PPSchedulerTest, KvLimitCountsExistingAndNewOwnersOnce) {
-    auto scheduler = createScheduler(4);
+    auto scheduler                          = createScheduler(4);
     scheduler->max_inited_kv_cache_streams_ = 3;
-    auto existing = createStream({1, 2, 3});
-    auto first    = createStream({4, 5, 6});
-    auto second   = createStream({7, 8, 9});
-    auto waiting  = createStream({10, 11, 12});
+    auto existing                           = createStream({1, 2, 3});
+    auto first                              = createStream({4, 5, 6});
+    auto second                             = createStream({7, 8, 9});
+    auto waiting                            = createStream({10, 11, 12});
     ASSERT_TRUE(existing->initKVBlock().ok());
     ASSERT_GT(existing->curBlocksNum(), 0u);
     existing->reportEvent(StreamEvents::LoadInitiated);
@@ -521,7 +528,7 @@ TEST_F(PPSchedulerTest, AsyncLoadsRespectCurrentBatchLimitsAndExecutionMode) {
         {"remaining_budget", 3, 3, 7, false, true, false},
         {"execution_mode", 3, 3, 8192, false, false, true},
     };
-    int64_t                          loading_request_id = 0;
+    int64_t                           loading_request_id = 0;
     std::shared_ptr<LoadAsyncContext> loading_context;
     installReadinessAllocator([&](const MallocInfo& info) -> std::shared_ptr<AsyncContext> {
         return info.request_id == loading_request_id ? loading_context : nullptr;
@@ -529,7 +536,7 @@ TEST_F(PPSchedulerTest, AsyncLoadsRespectCurrentBatchLimitsAndExecutionMode) {
 
     for (const auto& budget : cases) {
         SCOPED_TRACE(budget.name);
-        auto scheduler = createScheduler(2, RoleType::PREFILL, SP_TYPE_NONE, budget.cp_enabled);
+        auto scheduler                    = createScheduler(2, RoleType::PREFILL, SP_TYPE_NONE, budget.cp_enabled);
         scheduler->max_batch_tokens_size_ = budget.token_limit;
         auto first  = createStream(std::vector<int>(budget.first_tokens, 1), true, false, 1, {}, RoleType::PREFILL);
         auto second = createStream(std::vector<int>(budget.second_tokens, 2),
@@ -538,8 +545,8 @@ TEST_F(PPSchedulerTest, AsyncLoadsRespectCurrentBatchLimitsAndExecutionMode) {
                                    budget.second_prefill_only ? 0 : 1,
                                    {},
                                    RoleType::PREFILL);
-        loading_request_id = first->streamId();
-        loading_context    = makeControlledAllocatorContext();
+        loading_request_id             = first->streamId();
+        loading_context                = makeControlledAllocatorContext();
         const auto malloc_calls_before = initial_malloc_calls_;
         ASSERT_TRUE(scheduler->enqueue(first).ok());
         ASSERT_TRUE(scheduler->enqueue(second).ok());
@@ -584,9 +591,9 @@ TEST_F(PPSchedulerTest, FullLengthPrefillOnlyRespectsTokenBudget) {
     for (const auto role : {RoleType::PDFUSION, RoleType::PREFILL}) {
         for (const size_t budget : {0, 7, 8, 9}) {
             SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(role) << ", budget=" << budget);
-            auto scheduler = createScheduler(2, role);
+            auto scheduler                    = createScheduler(2, role);
             scheduler->max_batch_tokens_size_ = budget;
-            auto stream = createStream(std::vector<int>(8, 1), false, false, 0, {}, role);
+            auto stream                       = createStream(std::vector<int>(8, 1), false, false, 0, {}, role);
             ASSERT_EQ(stream->inputLength(), stream->maxSeqLen());
             ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
@@ -618,10 +625,10 @@ TEST_F(PPSchedulerTest, PrefillTokenAndPaddingLimitsPreserveGenerationReserve) {
         for (const int second_length : {2, 4}) {
             for (const size_t budget : {7, 8, 9}) {
                 SCOPED_TRACE(testing::Message() << "max_new_tokens=" << max_new_tokens
-                                               << ", second_length=" << second_length << ", budget=" << budget);
-                auto scheduler = createScheduler(2);
+                                                << ", second_length=" << second_length << ", budget=" << budget);
+                auto scheduler                    = createScheduler(2);
                 scheduler->max_batch_tokens_size_ = budget;
-                auto first  = createStream(std::vector<int>(4, 1), false, false, max_new_tokens);
+                auto first                        = createStream(std::vector<int>(4, 1), false, false, max_new_tokens);
                 auto second = createStream(std::vector<int>(second_length, 2), false, false, max_new_tokens);
                 ASSERT_TRUE(scheduler->enqueue(first).ok());
                 ASSERT_TRUE(scheduler->enqueue(second).ok());
@@ -630,8 +637,9 @@ TEST_F(PPSchedulerTest, PrefillTokenAndPaddingLimitsPreserveGenerationReserve) {
                 ASSERT_TRUE(result.ok());
                 /** Both shapes need an eight-token rectangle; generation must also leave one token free. */
                 const bool both_fit = budget >= (max_new_tokens == 0 ? 8u : 9u);
-                EXPECT_EQ(result->streams, both_fit ? (std::list<GenerateStreamPtr>{first, second}) :
-                                                    (std::list<GenerateStreamPtr>{first}));
+                EXPECT_EQ(result->streams,
+                          both_fit ? (std::list<GenerateStreamPtr>{first, second}) :
+                                     (std::list<GenerateStreamPtr>{first}));
                 EXPECT_EQ(second->getStatus(), both_fit ? StreamState::RUNNING : StreamState::WAITING);
                 EXPECT_FALSE(first->hasError());
                 EXPECT_FALSE(second->hasError());
@@ -733,8 +741,8 @@ TEST_F(PPSchedulerTest, WaitingCleanupRunsWhenAdmissionIsDeferred) {
     for (const auto role : {RoleType::PDFUSION, RoleType::PREFILL, RoleType::DECODE}) {
         SCOPED_TRACE(static_cast<int>(role));
         /** P/PDFUSION defer admission for ready decode; D defers it when concurrency is full. */
-        auto scheduler = createScheduler(role == RoleType::DECODE ? 1 : 2, role);
-        auto ready     = createStream({1, 2, 3}, false, false, 8, {}, role);
+        auto scheduler                         = createScheduler(role == RoleType::DECODE ? 1 : 2, role);
+        auto ready                             = createStream({1, 2, 3}, false, false, 8, {}, role);
         ready->generateConfig()->pd_separation = role == RoleType::PREFILL;
         if (role == RoleType::DECODE) {
             ASSERT_TRUE(ready->initKVBlock().ok());
@@ -752,9 +760,9 @@ TEST_F(PPSchedulerTest, WaitingCleanupRunsWhenAdmissionIsDeferred) {
         ready->clearPPInflight();
 
         const int error_max_tokens = role == RoleType::DECODE ? 8 : 0;
-        auto expired   = createStream({5, 6, 7}, false, false, error_max_tokens, {}, role);
-        auto cancelled = createStream({8, 9, 10}, false, false, error_max_tokens, {}, role);
-        auto waiting   = createStream({11, 12, 13}, false, false, role == RoleType::DECODE ? 8 : 1, {}, role);
+        auto      expired          = createStream({5, 6, 7}, false, false, error_max_tokens, {}, role);
+        auto      cancelled        = createStream({8, 9, 10}, false, false, error_max_tokens, {}, role);
+        auto      waiting = createStream({11, 12, 13}, false, false, role == RoleType::DECODE ? 8 : 1, {}, role);
         /** Cleanup must release existing KV even for requests of the opposite execution mode. */
         for (const auto& stream : {expired, cancelled, waiting}) {
             ASSERT_TRUE(stream->initKVBlock().ok());
@@ -811,11 +819,10 @@ TEST_F(PPSchedulerTest, RejectsUnsupportedRequestsBeforeKvAdmissionEvenAtCapacit
     };
     installReadinessAllocator([](const MallocInfo&) { return std::shared_ptr<AsyncContext>{}; });
     for (const auto& request : cases) {
-        SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(request.role)
-                                       << ", capacity=" << request.capacity
-                                       << ", pd_separation=" << request.pd_separation);
-        auto scheduler = createScheduler(request.capacity, request.role);
-        auto stream    = createStream({1, 2, 3}, false, false, 2, {}, request.role);
+        SCOPED_TRACE(testing::Message() << "role=" << static_cast<int>(request.role) << ", capacity="
+                                        << request.capacity << ", pd_separation=" << request.pd_separation);
+        auto scheduler                                  = createScheduler(request.capacity, request.role);
+        auto stream                                     = createStream({1, 2, 3}, false, false, 2, {}, request.role);
         stream->generateConfig()->can_use_pd_separation = true;
         stream->generateConfig()->pd_separation         = request.pd_separation;
         ASSERT_TRUE(scheduler->enqueue(stream).ok());
@@ -1040,8 +1047,8 @@ TEST_F(PPSchedulerTest, ChunkPipelineParksDecodeCompletedDuringSelection) {
 }
 
 TEST_F(PPSchedulerTest, PdPrefillFinalChunkIsReapedWithoutEnteringPendingDecode) {
-    auto scheduler = createScheduler(100, RoleType::PREFILL, SP_TYPE_NONE, false, 4);
-    auto stream    = createStream({1, 2}, false, false, 8, {}, RoleType::PREFILL, 4);
+    auto scheduler                          = createScheduler(100, RoleType::PREFILL, SP_TYPE_NONE, false, 4);
+    auto stream                             = createStream({1, 2}, false, false, 8, {}, RoleType::PREFILL, 4);
     stream->generateConfig()->pd_separation = true;
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
@@ -1076,8 +1083,8 @@ TEST_F(PPSchedulerTest, PendingDecodeIsReapedWithoutGrowingKvOrBeingSelected) {
     decode->advanceChunk();
     context->advanceChunk();
     decode->update({torch::tensor({{3}}, torch::kInt32), 1}, false);
-    const auto blocks = decode->curBlocksNum();
-    auto inflight = scheduler->schedule();
+    const auto blocks   = decode->curBlocksNum();
+    auto       inflight = scheduler->schedule();
     ASSERT_TRUE(inflight.ok());
     EXPECT_EQ(inflight->streams, (std::list<GenerateStreamPtr>{context}));
     context->advanceChunk();
@@ -1151,9 +1158,9 @@ TEST_F(PPSchedulerTest, StopReleasesPendingDecodeAndRetainsInflightChunksUntilFi
 }
 
 TEST_F(PPSchedulerTest, ChunkAdmissionRetainsTheCommonCacheCompatibilityCheck) {
-    cache_config_ = test::makeSimpleHybridMhaCacheConfig(4, 21, 64, DataType::TYPE_FP16);
+    cache_config_                         = test::makeSimpleHybridMhaCacheConfig(4, 21, 64, DataType::TYPE_FP16);
     cache_config_.reuse_cache_tail_blocks = 2;
-    cache_manager_            = std::make_shared<KVCacheManager>(cache_config_);
+    cache_manager_                        = std::make_shared<KVCacheManager>(cache_config_);
     ASSERT_TRUE(cache_manager_->init());
     auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 128);
     auto stream    = createStream(std::vector<int>(193, 1), true, false, 8, {}, RoleType::PDFUSION, 128);
@@ -1338,13 +1345,13 @@ TEST_F(PPSchedulerTest, WaitingChunkIsGrantedAfterCacheReuseFinalizes) {
 }
 
 TEST_F(PPSchedulerTest, RejectedChunkRequestIsRetiredBeforeKvAdmission) {
-    auto scheduler         = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
-    auto input             = std::make_shared<GenerateInput>();
-    input->request_id      = next_request_id_++;
-    input->input_ids       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
-    input->generate_config = std::make_shared<GenerateConfig>();
+    auto scheduler                         = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 4);
+    auto input                             = std::make_shared<GenerateInput>();
+    input->request_id                      = next_request_id_++;
+    input->input_ids                       = torch::tensor({1, 2, 3, 4, 5}, torch::kInt32);
+    input->generate_config                 = std::make_shared<GenerateConfig>();
     input->generate_config->max_new_tokens = 8;
-    input->generate_config->return_logits = true;
+    input->generate_config->return_logits  = true;
     ModelConfig model;
     model.max_seq_len = 64;
     model.vocab_size  = 128;

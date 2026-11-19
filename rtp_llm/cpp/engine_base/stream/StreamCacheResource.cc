@@ -141,6 +141,10 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
     // StartLoad transfers newly computed Prefill KV; it does not create a Decode cache hit.
     // Preserve the reuse counters established by Decode cache lookup for every pool layout.
     stream->generateInput()->handoff_multimodal_lengths = payload.multimodal_lengths;
+    stream->mergePrefillFrontendContextMetricsWithoutLock(payload.frontend_context_token_num,
+                                                          payload.frontend_context_token_num_with_cache,
+                                                          payload.frontend_context_execute_time_us,
+                                                          payload.frontend_context_execute_time_with_cache_us);
     if (payload.has_first_token) {
         const auto output_tensor = [&](const char* name) {
             const auto it = payload.first_token_tensors.find(name);

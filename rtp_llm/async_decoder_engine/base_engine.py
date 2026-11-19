@@ -27,6 +27,9 @@ class BaseEngine:
     def _stop(self) -> None:
         raise NotImplementedError()
 
+    def set_serving(self, serving: bool) -> None:
+        """Update service-status metrics without stopping in-flight work."""
+
     def ready(self) -> bool:
         return self.started
 

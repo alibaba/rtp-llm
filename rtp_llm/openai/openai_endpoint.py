@@ -3,7 +3,7 @@ import itertools
 import json
 import logging
 from functools import partial
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 from fastapi import Request
 
@@ -53,6 +53,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import extract_request_headers
+from rtp_llm.utils.base_model_datatypes import FrontendMetricFrame
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -682,23 +683,49 @@ class OpenaiEndpoint(object):
         return self.render_chat(chat_request)
 
     async def chat_completion_async(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        frontend_metric_tags: Optional[Dict[str, str]] = None,
+        frontend_metric_observer: Optional[Callable[[Any], None]] = None,
     ) -> CompleteResponseAsyncGenerator:
         rendered_input = await self.render_chat_async(chat_request)
         return self._chat_completion_from_inputs(
-            request_id, chat_request, raw_request, rendered_input
+            request_id,
+            chat_request,
+            raw_request,
+            rendered_input,
+            frontend_metric_tags,
+            frontend_metric_observer,
         )
 
     def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        frontend_metric_tags: Optional[Dict[str, str]] = None,
+        frontend_metric_observer: Optional[Callable[[Any], None]] = None,
     ) -> CompleteResponseAsyncGenerator:
         rendered_input = self.render_chat(chat_request)
         return self._chat_completion_from_inputs(
-            request_id, chat_request, raw_request, rendered_input
+            request_id,
+            chat_request,
+            raw_request,
+            rendered_input,
+            frontend_metric_tags,
+            frontend_metric_observer,
         )
 
     def _chat_completion_from_inputs(
-        self, request_id, chat_request, raw_request, rendered_input
+        self,
+        request_id,
+        chat_request,
+        raw_request,
+        rendered_input,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
     ):
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
@@ -763,6 +790,8 @@ class OpenaiEndpoint(object):
                 if rendered_input.v41_inputs is not None
                 else {}
             ),
+            frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=frontend_metric_observer,
         )
 
         return self._complete_stream_response(
@@ -841,7 +870,13 @@ class OpenaiEndpoint(object):
         return resp
 
     async def batch_chat_completion(
-        self, base_request_id: int, batch_request, *, request_ids: Optional[List[int]] = None
+        self,
+        base_request_id: int,
+        batch_request,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
+        *,
+        request_ids: Optional[List[int]] = None,
     ) -> list:
         inputs = []
         all_configs = []
@@ -855,6 +890,31 @@ class OpenaiEndpoint(object):
                 request_ids[i] if request_ids is not None else base_request_id + i, chat_request
             )
             generate_config.is_streaming = False
+            if frontend_metric_observer is not None:
+                # Keep aux-free terminal batches on the native zero-copy path.
+                gen_input.generate_config = generate_config.model_copy(
+                    update={"frontend_metric_streaming": True}
+                )
+                context_batch_size = (
+                    1
+                    if generate_config.has_num_beams()
+                    else max(generate_config.num_return_sequences, 1)
+                )
+
+                def raw_metric_observer(
+                    output, attempt, unit_id=i, context_size=context_batch_size
+                ):
+                    frontend_metric_observer(
+                        FrontendMetricFrame.from_output(
+                            output,
+                            attempt=attempt,
+                            context_batch_size=context_size,
+                            unit_id=unit_id,
+                        )
+                    )
+
+                gen_input.frontend_metric_observer = raw_metric_observer
+            gen_input.frontend_metric_tags = dict(frontend_metric_tags or {})
             inputs.append(gen_input)
             all_configs.append(generate_config)
 

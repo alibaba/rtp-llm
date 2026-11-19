@@ -58,12 +58,23 @@ def prepare_fp4_weight_scale_for_deepgemm(
     """
     if scale.dtype == torch.int32:
         return scale
-    if scale.dtype != torch.float8_e8m0fnu:
-        raise TypeError(f"expected FP4 UE8M0 scale, got {scale.dtype}")
+    if scale.dtype not in (torch.float8_e8m0fnu, torch.float32):
+        raise TypeError(f"expected FP4 UE8M0 or float32 scale, got {scale.dtype}")
 
     import deep_gemm
 
+    expected_shape = (mn, (k + FP4_BLOCK - 1) // FP4_BLOCK)
+    if num_groups is not None:
+        expected_shape = (num_groups, *expected_shape)
+    if tuple(scale.shape) != expected_shape:
+        raise ValueError(f"FP4 scale shape {tuple(scale.shape)} != {expected_shape}")
     scale_fp32 = scale.float()
+    if scale.dtype == torch.float32:
+        mantissa, exponent = torch.frexp(scale_fp32)
+        if not bool(((mantissa == 0.5) & (exponent >= -126) & (exponent <= 128)).all()):
+            raise ValueError(
+                "FP4 float32 scales must be positive powers of two representable in UE8M0"
+            )
     if num_groups is None:
         return deep_gemm.transform_sf_into_required_layout(
             scale_fp32, mn, k, (1, FP4_BLOCK)
@@ -71,6 +82,126 @@ def prepare_fp4_weight_scale_for_deepgemm(
     return deep_gemm.transform_sf_into_required_layout(
         scale_fp32, mn, k, (1, FP4_BLOCK), num_groups
     )
+
+
+def prepare_fp8_weight_scale_for_deepgemm(
+    scale: torch.Tensor,
+    mn: int,
+    k: int,
+    num_groups: Optional[int] = None,
+) -> torch.Tensor:
+    """Convert FP8 128x128 per-block scales to DeepGEMM's packed layout."""
+    if scale.dtype == torch.int32:
+        return scale
+    if scale.dtype not in (torch.float8_e8m0fnu, torch.float32):
+        raise TypeError(
+            f"expected FP8 per-block scale or packed int32, got {scale.dtype}"
+        )
+
+    import deep_gemm
+
+    if scale.dim() < 2:
+        raise ValueError(
+            f"FP8 per-block scale must have at least 2 dims, got shape={tuple(scale.shape)}"
+        )
+    expected_m_blocks = (mn + FP8_BLOCK - 1) // FP8_BLOCK
+    expected_k_blocks = (k + FP8_BLOCK - 1) // FP8_BLOCK
+    if tuple(scale.shape[-2:]) != (expected_m_blocks, expected_k_blocks):
+        raise ValueError(
+            "FP8 mega_moe weight scale must be 128x128 per-block or already "
+            f"packed int32. Got shape={tuple(scale.shape)}, expected trailing "
+            f"dims=({expected_m_blocks}, {expected_k_blocks}) for mn={mn}, k={k}."
+        )
+
+    scale_fp32 = scale.float()
+    if num_groups is None:
+        return deep_gemm.transform_sf_into_required_layout(
+            scale_fp32, mn, k, (FP8_BLOCK, FP8_BLOCK)
+        )
+    return deep_gemm.transform_sf_into_required_layout(
+        scale_fp32, mn, k, (FP8_BLOCK, FP8_BLOCK), num_groups
+    )
+
+
+def quantize_moe_weight_to_fp4_ue8m0(
+    weight: torch.Tensor,
+    block_size: int = FP4_BLOCK,
+):
+    """Quantize a stacked MoE weight ``[E, N, K]`` (BF16/FP16/FP32) to FP4
+    + UE8M0 scale for load-time and runtime MegaMoE weight preparation.
+
+    Returns:
+        packed: int8 ``[E, N, K // 2]``
+        sf    : float32 ``[E, N, K // block_size]``
+    """
+    from deep_gemm.utils import per_token_cast_to_fp4
+
+    assert weight.dim() == 3, f"expected 3D, got {tuple(weight.shape)}"
+    E, N, K = weight.shape
+    assert K % block_size == 0, f"K={K} not divisible by block_size={block_size}"
+    device = weight.device
+
+    packed = torch.empty((E, N, K // 2), dtype=torch.int8, device=device)
+    sf = torch.empty((E, N, K // block_size), dtype=torch.float32, device=device)
+    for i in range(E):
+        packed_i, sf_i = per_token_cast_to_fp4(
+            weight[i], use_ue8m0=True, gran_k=block_size
+        )
+        packed[i].copy_(packed_i)
+        sf[i].copy_(sf_i)
+    return packed, sf
+
+
+def convert_fp8_moe_to_fp4_ue8m0(
+    weight_fp8: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: int = FP4_BLOCK,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert stacked FP8 weights using raw per-row or 128x128 block scales.
+
+    Accepts either layout flattened as well. Packed DeepGEMM scale tensors
+    are not raw scale values and must not enter this conversion.
+    """
+    assert weight_fp8.dim() == 3, f"expected 3D, got {tuple(weight_fp8.shape)}"
+    E, N, K = weight_fp8.shape
+    if K % FP8_BLOCK != 0:
+        raise ValueError(
+            f"FP8 MoE K dimension must be divisible by {FP8_BLOCK}, got {K}"
+        )
+    if not torch.is_floating_point(weight_scale):
+        raise ValueError(
+            "MegaMoE FP8 conversion requires raw floating-point checkpoint scales"
+        )
+    k_blocks = K // FP8_BLOCK
+    n_blocks = (N + FP8_BLOCK - 1) // FP8_BLOCK
+    if weight_scale.numel() == E * N * k_blocks:
+        scales = weight_scale.reshape(E, N, k_blocks)
+        per_row = True
+    elif weight_scale.numel() == E * n_blocks * k_blocks:
+        scales = weight_scale.reshape(E, n_blocks, k_blocks)
+        per_row = False
+    else:
+        raise ValueError(
+            f"Cannot interpret scale shape {tuple(weight_scale.shape)} "
+            f"for weight shape {tuple(weight_fp8.shape)}"
+        )
+    # Dequantize one expert at a time. Holding all experts as FP32 and BF16
+    # while their FP8 originals remain live can exhaust startup GPU memory.
+    packed = torch.empty((E, N, K // 2), dtype=torch.int8, device=weight_fp8.device)
+    sf = torch.empty(
+        (E, N, K // block_size), dtype=torch.float32, device=weight_fp8.device
+    )
+    for expert in range(E):
+        scale = scales[expert].float()
+        if not per_row:
+            scale = scale.repeat_interleave(FP8_BLOCK, dim=0)[:N]
+        weight = weight_fp8[expert].float().reshape(N, k_blocks, FP8_BLOCK)
+        weight = (weight * scale.unsqueeze(-1)).reshape(1, N, K).to(torch.bfloat16)
+        packed_i, sf_i = quantize_moe_weight_to_fp4_ue8m0(weight, block_size)
+        packed[expert].copy_(packed_i[0])
+        sf[expert].copy_(sf_i[0])
+        del weight, scale, packed_i, sf_i
+    return packed, sf
 
 
 def dequantize_fp4_weight(
@@ -151,8 +282,11 @@ def per_token_cast_to_fp8_packed_ue8m0(
 __all__ = [
     "FP4_BLOCK",
     "FP8_BLOCK",
+    "convert_fp8_moe_to_fp4_ue8m0",
+    "quantize_moe_weight_to_fp4_ue8m0",
     "dequantize_fp4_weight",
     "dequantize_fp8_weight",
     "per_token_cast_to_fp8_packed_ue8m0",
     "prepare_fp4_weight_scale_for_deepgemm",
+    "prepare_fp8_weight_scale_for_deepgemm",
 ]

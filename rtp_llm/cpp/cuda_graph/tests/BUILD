@@ -16,6 +16,9 @@ load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
         }),
         deps = [
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            # Standalone binaries need ExecOps state and its CUDA implementations.
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
             "//rtp_llm/cpp/utils:torch_cuda_oom",
             "@com_google_googletest//:gtest_main",
         ] + torch_deps(),

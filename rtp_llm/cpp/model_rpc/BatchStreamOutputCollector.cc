@@ -4,6 +4,12 @@
 namespace rtp_llm {
 
 ErrorInfo BatchStreamOutputCollector::add(GenerateOutputs output) {
+    frontend_sp_tpot_samples_.insert(frontend_sp_tpot_samples_.end(),
+                                     output.frontend_sp_tpot_samples.begin(),
+                                     output.frontend_sp_tpot_samples.end());
+    if (output.frontend_metric_only) {
+        return ErrorInfo::OkStatus();
+    }
     if (output.generate_outputs.empty()) {
         return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "batch item produced an empty output");
     }
@@ -61,6 +67,7 @@ GenerateOutputs BatchStreamOutputCollector::finish() {
             output.aux_info.softmax_probs = torch::cat(softmax_probs_[i], -1);
         }
     }
+    output_.frontend_sp_tpot_samples = std::move(frontend_sp_tpot_samples_);
     return std::move(output_);
 }
 

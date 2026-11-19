@@ -520,3 +520,9 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "kmonitor_metric_reporter_test",
+    srcs = ["kmonitor_metric_reporter_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

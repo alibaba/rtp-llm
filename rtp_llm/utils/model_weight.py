@@ -105,6 +105,10 @@ def pad(ts: List[torch.Tensor], align_size: int, dim: int):
         raise Exception("unknown padding dim: " + str(dim))
 
     z = torch.zeros(pad_shape, device=ts[0].device).to(ts[0].dtype)
+    if ts[0].dtype == torch.float8_e8m0fnu:
+        return torch.cat((ts[0].view(torch.uint8), z.view(torch.uint8)), dim).view(
+            ts[0].dtype
+        )
     return torch.cat((ts[0], z), dim).to(ts[0].device).contiguous()
 
 
@@ -559,7 +563,7 @@ def get_sp_tensor_blocked(
     _kv_rank = tp_rank // (tp // _kv_tp)
     ks = sp_neg1(t[:, q_hidden : q_hidden + kv_hidden], _kv_tp, _kv_rank)
     vs = sp_neg1(t[:, q_hidden + kv_hidden :], _kv_tp, _kv_rank)
-    return torch.concat([qs, ks, vs], dim=1).contiguous()
+    return concat_1([qs, ks, vs])
 
 
 def sp_head_s_gemm_a8_block(t: torch.Tensor, **kwargs: Any) -> torch.Tensor:
@@ -1053,7 +1057,7 @@ def sp_0_w13(
     w1, w3 = torch.chunk(t, 2, dim=0)
     w1 = sp_0(w1, ffn_tp_size, ffn_tp_rank, **kwargs)
     w3 = sp_0(w3, ffn_tp_size, ffn_tp_rank, **kwargs)
-    return torch.concat([w1, w3], dim=0)
+    return concat_0([w1, w3])
 
 
 def convert_gate_up_proj_(ts: List[torch.Tensor]) -> torch.Tensor:

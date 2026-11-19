@@ -61,8 +61,11 @@ class MegaMoeRouter(Fp8Fp4Router):
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        super().check_conditions(checker, config)
-        checker.check(config.ep_size > 1)
+        if getattr(config, "mega_moe_policy", None) is None:
+            super().check_conditions(checker, config)
+            checker.check(config.ep_size > 1)
+        else:
+            checker.check(config.ep_size >= 1)
 
     @property
     def supports_gate_pack(self) -> bool:

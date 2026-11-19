@@ -66,6 +66,8 @@ HiddenStateCapturePublisher::HiddenStateCapturePublisher(int64_t                
     model_dtype_(model_dtype),
     owner_(owner),
     metrics_reporter_(owner ? std::move(metrics_reporter) : nullptr) {
+    capture_enabled_metric_ = registerKmonStatusMetric(metrics_reporter_, "rtp_llm_hidden_state_capture_enabled");
+    capture_broken_metric_  = registerKmonStatusMetric(metrics_reporter_, "rtp_llm_hidden_state_capture_broken");
     initialize(local_rank);
 }
 
@@ -237,6 +239,8 @@ void HiddenStateCapturePublisher::recordCaptureStatus() {
     collector.has_capture_status = true;
     collector.capture_enabled    = capture_enabled_.load(std::memory_order_acquire) ? 1 : 0;
     collector.capture_broken     = broken ? 1 : 0;
+    updateKmonStatusMetric(capture_enabled_metric_, collector.capture_enabled);
+    updateKmonStatusMetric(capture_broken_metric_, collector.capture_broken);
     reportMetrics(collector);
 }
 
@@ -570,7 +574,7 @@ torch::Tensor HiddenStateCapturePublisher::publish(torch::Tensor        packed_h
     if (owner_) {
         try {
             std::optional<ProfilingScope> gil_scope(std::in_place, "hidden_state_capture.gil_acquire");
-            py::gil_scoped_acquire gil;
+            py::gil_scoped_acquire        gil;
             gil_scope.reset();
 
             perform(FailureStage::STORE,

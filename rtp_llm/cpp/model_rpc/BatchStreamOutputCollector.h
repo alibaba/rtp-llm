@@ -21,6 +21,7 @@ public:
 private:
     std::optional<int>                       logits_index_;
     std::vector<std::optional<torch::Tensor>> selected_logits_;
+    std::vector<std::pair<uint64_t, double>>  frontend_sp_tpot_samples_;
     GenerateOutputs                         output_;
     std::vector<std::vector<torch::Tensor>>   tokens_;
     std::vector<std::vector<torch::Tensor>>   softmax_probs_;

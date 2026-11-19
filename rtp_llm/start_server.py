@@ -115,12 +115,15 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    service_draining=None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None)
+        start_backend_server(
+            global_controller, py_env_configs, None, service_draining=service_draining
+        )
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -137,7 +140,13 @@ def start_backend_server_impl(
     try:
         backend_process = torch.multiprocessing.Process(
             target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer, os.getpid()),
+            args=(
+                global_controller,
+                py_env_configs,
+                pipe_writer,
+                os.getpid(),
+                service_draining,
+            ),
             name="backend_manager",
         )
         backend_process.start()
@@ -239,6 +248,7 @@ def start_dash_sc_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    service_draining=None,
 ):
     from rtp_llm.start_dash_sc_server import start_dash_sc_server
 
@@ -272,6 +282,7 @@ def start_dash_sc_server_impl(
                 py_env_configs,
                 pipe_writer,
                 bind_barrier,
+                service_draining,
             ),
             name=f"dash_sc_server_{local_rank}_{server_id}",
         )
@@ -336,6 +347,7 @@ def start_dash_sc_server_impl(
 def start_vit_server_impl(
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    service_draining=None,
 ):
     """
     启动 VIT 服务器
@@ -410,6 +422,7 @@ def start_vit_server_impl(
                     True,  # is_proxy_mode (proxy 模式下的 worker 进程)
                     worker_rdma_port,
                 ),
+                kwargs={"service_draining": service_draining},
                 name=f"vit_worker_{i}",
             )
             worker_processes.append(process)
@@ -434,6 +447,7 @@ def start_vit_server_impl(
                 external_http_port,  # http_port
                 worker_http_addresses,  # worker_http_addresses
             ),
+            kwargs={"service_draining": service_draining},
             name="vit_proxy",
         )
         proxy_process.start()
@@ -463,6 +477,7 @@ def start_vit_server_impl(
                 http_port,  # http_port
                 False,  # is_proxy_mode (standalone 模式，需要记录 QPS)
             ),
+            kwargs={"service_draining": service_draining},
             name="vit_server",
         )
         process.start()
@@ -499,6 +514,7 @@ def start_frontend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    service_draining=None,
 ):
     from rtp_llm.start_frontend_server import start_frontend_server
 
@@ -525,6 +541,7 @@ def start_frontend_server_impl(
                     i,
                     global_controller,
                     py_env_configs,
+                    service_draining,
                 ),
                 name=f"frontend_server_{i}",
             )
@@ -663,8 +680,10 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     _sync_server_shutdown_timeout(py_env_configs)
 
+    service_draining = multiprocessing.Event()
     # Create process manager with config values
     process_manager = ProcessManager(
+        service_draining=service_draining,
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
         frontend_pre_stop_drain_seconds=(
@@ -702,7 +721,7 @@ def start_server(py_env_configs: PyEnvConfigs):
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
             logging.info("start vit server")
-            start_vit_server_impl(py_env_configs, process_manager)
+            start_vit_server_impl(py_env_configs, process_manager, service_draining)
 
         if (
             py_env_configs.role_config.role_type != RoleType.FRONTEND
@@ -711,19 +730,19 @@ def start_server(py_env_configs: PyEnvConfigs):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, service_draining
             )
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             # vit has its own frontend server
             logging.info("start frontend server")
             start_frontend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, service_draining
             )
 
             logging.info("start dash_sc server")
             start_dash_sc_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, service_draining
             )
 
         # Start parallel health checks and wait; the bound is total (shared deadline across checks).
