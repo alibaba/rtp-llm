@@ -3,7 +3,7 @@
 import json
 import os
 import unittest
-from types import SimpleNamespace
+from types import FunctionType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -137,9 +137,13 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                     )
             with patch.dict(os.environ):
                 os.environ.pop("RTP_NVFP4_HYBRID_MOE", None)
-                self.assertIs(registry.get_strategy(config_for(model_recipe=None)), baseline)
                 self.assertIs(
-                    registry.get_strategy(config_for(model_recipe=None, decode_b12x_max_rows=16)),
+                    registry.get_strategy(config_for(model_recipe=None)), baseline
+                )
+                self.assertIs(
+                    registry.get_strategy(
+                        config_for(model_recipe=None, decode_b12x_max_rows=16)
+                    ),
                     baseline,
                 )
                 config = config_for(model_recipe=QWEN4_FP8_NVFP4_RECIPE)
@@ -262,8 +266,98 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                 pools.append(adapter.workspace_pool)
         self.assertIsNot(pools[0], pools[1])
 
+    def test_static_launcher_is_cached_and_rejects_unknown_bindings(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
+            _static_launcher,
+        )
+
+        def launch(*, mode="nvfp4"):
+            return _FORCED_BACKEND, mode
+
+        bound = _static_launcher(launch)
+        self.assertIs(bound, _static_launcher(launch))
+        self.assertEqual(bound(), ("static", "nvfp4"))
+        self.assertEqual(launch(), ("dynamic", "nvfp4"))
+        unknown = FunctionType(launch.__code__, {"__builtins__": __builtins__})
+        with self.assertRaisesRegex(RuntimeError, "Unbound FlashInfer global"):
+            _static_launcher(unknown)
+        decorated = FunctionType(launch.__code__, launch.__globals__)
+        _static_launcher(decorated)
+        decorated.unknown_policy = True
+        with self.assertRaisesRegex(RuntimeError, "Unrecognized"):
+            _static_launcher(decorated)
+
+        def wrapper():
+            return launch()
+
+        with self.assertRaisesRegex(RuntimeError, "Unrecognized"):
+            _static_launcher(wrapper)
+
+    def test_adapter_keeps_nonuniform_swizzled_scale_bytes(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
+            B12xNvfp4MoE,
+        )
+
+        def launch(**kwargs):
+            return _FORCED_BACKEND
+
+        experts, hidden, intermediate = 4, 256, 256
+        values = []
+
+        def convert(value, *, m, k, num_groups, sf_vec_size):
+            # Assert the adapter passes the physical packed bytes unchanged.
+            packed = values[len(seen)]
+            self.assertTrue(
+                torch.equal(value.view(torch.uint8), packed.view(torch.uint8))
+            )
+            result = value.view(num_groups, m // 128, k // 64, 32, 4, 4).permute(
+                3, 4, 1, 5, 2, 0
+            )
+            self.assertEqual(result.data_ptr(), value.data_ptr())
+            self.assertEqual(
+                tuple(result.shape), (32, 4, m // 128, 4, k // 64, num_groups)
+            )
+            self.assertFalse(result.is_contiguous())
+            seen.append(result)
+            return result
+
+        for rows, cols in ((2 * intermediate, hidden), (hidden, intermediate)):
+            _, packed = B12xNvfp4GpuTest.swizzled_scales(experts, rows, cols, 9, "cpu")
+            values.append(packed)
+        scales = [
+            torch.ones(()),
+            values[0],
+            torch.ones(experts),
+            torch.ones(()),
+            values[1],
+            torch.ones(experts),
+        ]
+        seen = []
+        dispatch = SimpleNamespace(
+            launch_sm120_static_moe=launch, _get_weight_views=lambda **kw: kw
+        )
+        with patch.object(B12xNvfp4MoE, "_runtime", return_value=(convert, dispatch)):
+            B12xNvfp4MoE(
+                torch.zeros(experts, 2 * intermediate, hidden // 16, dtype=torch.int64),
+                torch.zeros(experts, hidden, intermediate // 16, dtype=torch.int64),
+                scales,
+                0,
+                object(),
+                2,
+            )
+        self.assertEqual(len(seen), 2)
+
     def test_tuning_defaults_do_not_apply_qwen_tactics_to_other_models(self):
+        for timeout in (-1, True, 1.5, 2**31):
+            with self.assertRaisesRegex(ValueError, "decode_lsa_timeout_ms"):
+                ModelOptFp4Config(
+                    bits=4,
+                    group_size=16,
+                    is_quanted=False,
+                    decode_lsa_timeout_ms=timeout,
+                )
         config = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
+        self.assertEqual(config.decode_lsa_timeout_ms, 0)
         self.assertEqual(decode_tuning(config), (0, None))
         config.decode_cutlass_profile_ids = [13, 37]
         self.assertEqual(decode_tuning(config), (0, [13, 37]))
@@ -345,13 +439,16 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         alpha = torch.ones(experts, device=device)
         inverse_act_scale = torch.ones((), device=device)
         if nonuniform:
+
             def fill_codes(weight, offset):
                 expert = torch.arange(weight.shape[0], device=device)[:, None, None]
                 row = torch.arange(weight.shape[1], device=device)[None, :, None]
                 column = torch.arange(weight.shape[2], device=device)[None, None, :]
                 weight.zero_()
                 for lane in range(16):
-                    codes = (expert + 2 * row + column + row // intermediate + lane + offset) % 5 + 1
+                    codes = (
+                        expert + 2 * row + column + row // intermediate + lane + offset
+                    ) % 5 + 1
                     weight.bitwise_or_(codes << (4 * lane))
 
             fill_codes(w1, 0)
@@ -374,12 +471,47 @@ class B12xNvfp4GpuTest(unittest.TestCase):
     def test_remote_routes_and_workspace_reuse_in_eager_and_graph(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
             B12xNvfp4MoE,
+            _static_launcher,
+        )
+
+        self.assertTrue(
+            B12xNvfp4MoE.is_available(),
+            "Pinned runtime is mandatory for this GPU target",
+        )
+        _, dispatch = B12xNvfp4MoE._runtime()
+        launch = _static_launcher(dispatch.launch_sm120_static_moe)
+        original_backend = dispatch._FORCED_BACKEND
+        static = Mock(wraps=launch.__globals__["_get_static_kernel"])
+        forbidden = Mock(
+            side_effect=AssertionError(
+                "static workspace must not launch a micro backend"
+            )
+        )
+        with patch.dict(
+            launch.__globals__,
+            {
+                "_get_static_kernel": static,
+                "_get_micro_kernel": forbidden,
+                "_get_direct_micro_kernel": forbidden,
+            },
+        ):
+            for ep_rank in (0, 1):
+                for rows in (1, 2, 4, 8, 16):
+                    with self.subTest(ep_rank=ep_rank, rows=rows):
+                        before = static.call_count
+                        self.check_remote_routes(ep_rank, rows)
+                        self.assertGreater(static.call_count, before)
+                        forbidden.assert_not_called()
+                        self.assertEqual(dispatch._FORCED_BACKEND, original_backend)
+
+    def check_remote_routes(self, ep_rank, rows):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
+            B12xNvfp4MoE,
         )
 
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
         device = torch.device("cuda", torch.cuda.current_device())
         experts, hidden, intermediate, top_k = 4, 256, 256, 2
-        rows = 4
         w1, w2, scales = self.packed_weights(
             experts, hidden, intermediate, device, nonuniform=True
         )
@@ -394,7 +526,7 @@ class B12xNvfp4GpuTest(unittest.TestCase):
                 experts, hidden, intermediate, offset, device
             )
             scales[1], scales[4] = packed1, packed2
-            layer = B12xNvfp4MoE(w1, w2, scales, 1, model, top_k)
+            layer = B12xNvfp4MoE(w1, w2, scales, ep_rank, model, top_k)
             layer_scales.append(list(scales))
             convert, _ = layer._runtime()
             for logical, packed in ((logical1, packed1), (logical2, packed2)):
@@ -422,13 +554,17 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         for layer in adapters:
             layer.launch = poison_output(layer.launch)
         x = (
-            torch.arange(rows * hidden, device=device).view(rows, hidden)
-            .remainder(53).add(7).div(256).to(torch.bfloat16)
+            torch.arange(rows * hidden, device=device)
+            .view(rows, hidden)
+            .remainder(53)
+            .add(7)
+            .div(256)
+            .to(torch.bfloat16)
         )
-        local_ids = torch.tensor([4, 5], dtype=torch.int32, device=device).repeat(
-            rows, 1
-        )
-        remote_ids = local_ids - experts
+        local_ids = torch.tensor(
+            [ep_rank * experts, ep_rank * experts + 1], dtype=torch.int32, device=device
+        ).repeat(rows, 1)
+        remote_ids = local_ids + (experts if ep_rank == 0 else -experts)
         mixed_ids = local_ids.clone()
         mixed_ids[::2].copy_(remote_ids[::2])
         mixed_slots = local_ids.clone()
@@ -437,6 +573,7 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         routing_weights = torch.full((rows, top_k), 0.5, device=device)
         expected_local = adapter(x, routes, routing_weights)
         second_expected = second_layer(x, routes, routing_weights)
+
         def cutlass_reference(selected, quant_scales):
             from flashinfer import ActivationType
             from flashinfer.fused_moe import cutlass_fused_moe
@@ -453,7 +590,7 @@ class B12xNvfp4GpuTest(unittest.TestCase):
                 tp_size=1,
                 tp_rank=0,
                 ep_size=2,
-                ep_rank=1,
+                ep_rank=ep_rank,
                 activation_type=ActivationType.Swiglu,
                 enable_pdl=False,
             )
@@ -463,13 +600,18 @@ class B12xNvfp4GpuTest(unittest.TestCase):
             (expected_local, second_expected), layer_scales
         ):
             torch.testing.assert_close(
-                expected, cutlass_reference(local_ids, quant_scales), atol=0.01, rtol=0.02
+                expected,
+                cutlass_reference(local_ids, quant_scales),
+                atol=0.01,
+                rtol=0.02,
             )
         routes.copy_(mixed_slots)
         expected_mixed_slots = adapter(x, routes, routing_weights)
         torch.testing.assert_close(
-            expected_mixed_slots, cutlass_reference(mixed_slots, layer_scales[0]),
-            atol=0.01, rtol=0.02,
+            expected_mixed_slots,
+            cutlass_reference(mixed_slots, layer_scales[0]),
+            atol=0.01,
+            rtol=0.02,
         )
         self.assertTrue(torch.isfinite(second_expected).all().item())
         self.assertFalse(torch.equal(expected_local, second_expected))
