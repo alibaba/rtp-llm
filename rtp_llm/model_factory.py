@@ -86,7 +86,7 @@ class ModelFactory:
         )
         model_type = model_config.model_type
         model_cls = ModelFactory.get_model_cls(model_type)
-        if model_type in ("deepseek_v4", "deepseek_v4_mtp"):
+        if model_type in ("deepseek_v4", "deepseek_v4_mtp", "deepseek_v4_dspark"):
             from rtp_llm.models.deepseek_v4 import configure_ppu_scheduler
 
             configure_ppu_scheduler(
@@ -187,7 +187,11 @@ class ModelFactory:
             model_cls = ModelFactory.get_model_cls(propose_model_config.model_type)
             # propose model's max seq len must be equal to score model's max seq len
             propose_model_config.max_seq_len = model_config.max_seq_len
-            if propose_model_config.model_type in ("deepseek_v4", "deepseek_v4_mtp"):
+            if propose_model_config.model_type in (
+                "deepseek_v4",
+                "deepseek_v4_mtp",
+                "deepseek_v4_dspark",
+            ):
                 from rtp_llm.models.deepseek_v4 import configure_ppu_scheduler
 
                 configure_ppu_scheduler(

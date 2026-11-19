@@ -260,9 +260,9 @@ class PpuFP4Indexer(IndexerFP8):
         q_producer_stream=None,
         decode_streams=None,
     ):
-        if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4):
+        if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4, 5, 6):
             raise ValueError(
-                "FP4 Indexer requires Decode or MTP1/MTP2/MTP3 verify queries"
+                "FP4 Indexer requires Decode or a 1..6 row verify block"
             )
         if x.shape[1] == 1:
             return self._forward_decode_step(
