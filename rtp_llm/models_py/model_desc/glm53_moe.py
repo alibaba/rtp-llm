@@ -4,13 +4,12 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
+from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import (
     MlaCPParallelismView,
     glm53_moe_enabled,
-    mla_cp_enabled,
-    shared_expert_local_enabled,
 )
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather
@@ -41,7 +40,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.glm53.norm import Glm53RMSResNorm as RMSResNorm
 from rtp_llm.models_py.modules.hybrid.glm53_mla_attention import MlaAttention
-from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
+from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig, RoleType
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
@@ -58,18 +57,6 @@ except ImportError:
     CudaFp8GEMMLinear = None
     fused_add_rmsnorm_fp8_quant = None
     fused_add_rmsnorm_fp8_quant_with_bf16_output = None
-
-
-_GLM53_SHARED_STREAMS: dict[torch.device, torch.cuda.Stream] = {}
-
-
-class _FusedSharedExpertSentinel(nn.Module):
-    """Marker for a shared expert folded into a MegaMoE kernel."""
-
-    accepts_fp8_input = False
-
-    def forward(self, *args, **kwargs):
-        raise RuntimeError("shared expert is fused into MegaMoE")
 
 
 def _shared_expert_swiglu_limit(config: ModelConfig) -> float:
@@ -100,40 +87,13 @@ class GenericMoeLayer(nn.Module):
         self.num_experts = config.eplb_config.phy_exp_num(config.expert_num)
         self.top_k = config.moe_k
 
-        # GLM5 CP prefill changes the rank-local token count when a reused long
-        # request is mixed with short requests (666 -> 697 rows in the
-        # reproducer).  NVJet's BF16 GEMM changes its K-reduction at that M
-        # boundary, and one-ULP router-logit drift can flip the last top-k
-        # expert.  Decode does not use this padding path.
-        is_decode_role = False
-        try:
-            from rtp_llm.ops import RoleType
-
-            is_decode_role = (
-                getattr(parallelism_config, "role_type", None) == RoleType.DECODE
-            )
-        except Exception:
-            pass
-        cp_prefill_enabled = False
-        cp_config = getattr(parallelism_config, "prefill_cp_config", None)
-        if not is_decode_role and cp_config is not None:
-            try:
-                cp_prefill_enabled = bool(cp_config.is_enabled())
-            except Exception:
-                pass
-        default_gate_chunk_rows = (
-            8192
-            if getattr(config, "model_type", "") == "glm_5" and cp_prefill_enabled
-            else 0
+        is_decode_role = parallelism_config.role_type == RoleType.DECODE
+        cp_prefill_enabled = (
+            not is_decode_role and parallelism_config.prefill_cp_config.is_enabled()
         )
-        self.gate_chunk_rows = int(
-            os.environ.get("GLM5_MOE_GATE_CHUNK_ROWS", str(default_gate_chunk_rows))
+        self.gate_chunk_rows = (
+            8192 if config.model_type == "glm_5" and cp_prefill_enabled else 0
         )
-        if self.gate_chunk_rows < 0:
-            raise ValueError(
-                "GLM5_MOE_GATE_CHUNK_ROWS must be non-negative, got "
-                f"{self.gate_chunk_rows}"
-            )
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -159,128 +119,37 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
-        self.add_shared_expert = config.moe_style == 2
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         self.ep_size = parallelism_config.ep_size
         # CP already supplies disjoint tokens. The ordinary GLM TP path supplies
         # replicated tokens to EP. GLM53's FP32 router can process local rows
         # while preserving the original GEMM shapes at shard boundaries.
+        policy = getattr(config, "mega_moe_policy", None)
+        adapter = MoEConfigAdapter(
+            config,
+            parallelism_config,
+            moe_config,
+            quant_config=quant_config,
+            enable_cuda_graph=enable_cuda_graph,
+            layer_id=layer_idx,
+            max_generate_batch_size=max_generate_batch_size,
+            mega_moe_policy=policy,
+        )
+        shared_expert_gate_weight = weights.get(W.shared_expert_gate)
+        adapter.has_shared_expert_gate = shared_expert_gate_weight is not None
+        self.fused_moe = FusedMoeFactory().create_fused_moe(adapter, weights)
+        self.requires_ep_sync = policy is not None
         self.routed_tp_size = (
             parallelism_config.get_attn_tp_size()
-            if glm53_moe_enabled(config)
-            and moe_config.moe_strategy
-            in ("mega_moe", "mega_moe_fp8", "mega_moe_fp8_se")
+            if policy is not None
             and self.ep_size > 1
             and not cp_prefill_enabled
             and not is_decode_role
-            and os.environ.get("GLM53_MOE_TP_TOKEN_SHARD", "1") == "1"
             else 1
         )
         self.routed_tp_rank = parallelism_config.tp_rank
-        self.route_local_tokens = glm53_moe_enabled(config) and self.routed_tp_size > 1
-
-        self.shared_expert_local = (
-            self.add_shared_expert
-            and shared_expert_local_enabled(
-                config.model_type,
-                getattr(parallelism_config, "role_type", None),
-                is_glm53_mtp=getattr(config, "is_glm53_mtp", False),
-            )
-        )
-        if self.shared_expert_local and (
-            self.routed_tp_size <= 1 or self.ep_size <= 1 or self.gate_chunk_rows != 0
-        ):
-            raise ValueError(
-                "Local shared experts require GLM53 TP token sharding, EP and native router"
-            )
-        shared_expert_gate_weight = weights.get(W.shared_expert_gate, None)
-        is_ep_mode = self.ep_size > 1
-        use_ep_shared_allreduce_at_init = (
-            self.add_shared_expert
-            and self.ffn_tp_size > 1
-            and is_ep_mode
-            and not self.shared_expert_local
-        )
-        fused_shared_strategies = (
-            "mega_moe_se",
-            "mega_moe_fused",
-            "mega_moe_fp8_se",
-        )
-        self._use_mega_moe_fused_shared = (
-            moe_config.moe_strategy in fused_shared_strategies
-        )
-        if self._use_mega_moe_fused_shared:
-            if not self.add_shared_expert:
-                raise ValueError(
-                    f"moe_strategy={moe_config.moe_strategy} requires shared experts"
-                )
-            if shared_expert_gate_weight is not None:
-                raise ValueError(
-                    f"moe_strategy={moe_config.moe_strategy} does not support "
-                    "shared_expert_gate"
-                )
-            if use_ep_shared_allreduce_at_init:
-                raise ValueError(
-                    f"moe_strategy={moe_config.moe_strategy} does not support EP "
-                    "shared-expert all-reduce with ffn_tp_size > 1"
-                )
-
-        if moe_config.moe_strategy in (
-            "mega_moe",
-            "mega_moe_se",
-            "mega_moe_fp8",
-            "mega_moe_fp8_se",
-            "mega_moe_fused",
-        ):
-            if moe_config.moe_strategy == "mega_moe_se":
-                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_se_wrapper import (
-                    MegaMoeSEWrapper,
-                )
-
-                wrapper_cls = MegaMoeSEWrapper
-            elif moe_config.moe_strategy == "mega_moe_fused":
-                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fused_wrapper import (
-                    MegaMoeFusedWrapper,
-                )
-
-                wrapper_cls = MegaMoeFusedWrapper
-            elif moe_config.moe_strategy == "mega_moe_fp8_se":
-                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se_wrapper import (
-                    MegaMoeFp8SEWrapper,
-                )
-
-                wrapper_cls = MegaMoeFp8SEWrapper
-            elif moe_config.moe_strategy == "mega_moe_fp8":
-                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_wrapper import (
-                    MegaMoeFp8Wrapper,
-                )
-
-                wrapper_cls = MegaMoeFp8Wrapper
-            else:
-                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
-                    MegaMoeWrapper,
-                )
-
-                wrapper_cls = MegaMoeWrapper
-
-            self.fused_moe = wrapper_cls(
-                config,
-                parallelism_config,
-                weights,
-                moe_config,
-                layer_idx=layer_idx,
-                max_generate_batch_size=max_generate_batch_size,
-            )
-        else:
-            config_adapter = MoEConfigAdapter(
-                model_config=config,
-                parallelism_config=parallelism_config,
-                moe_config=moe_config,
-                quant_config=quant_config,
-                enable_cuda_graph=enable_cuda_graph,
-            )
-            self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
-
+        self.route_local_tokens = self.routed_tp_size > 1
+        self.shared_expert_local = bool(policy and policy.replicate_shared_weights)
         self.w1 = weights.get(W.moe_w1, None)
         self.w2 = weights.get(W.moe_w2, None)
         if self.w1 is not None:
@@ -291,20 +160,16 @@ class GenericMoeLayer(nn.Module):
             raise ValueError(
                 "Cannot determine num_local_experts: no w1 weight and fused_moe has no expert_num"
             )
-        if self.add_shared_expert:
-            if self._use_mega_moe_fused_shared:
-                self.shared_expert = _FusedSharedExpertSentinel()
-            else:
-                self.shared_expert = DenseMLP(
-                    config.activation_type,
-                    parallelism_config,
-                    weights,
-                    quant_config,
-                    hw_kernel_config=hw_kernel_config,
-                    swiglu_limit=_shared_expert_swiglu_limit(config),
-                )
-        else:
-            self.shared_expert = None
+        self.shared_expert = None
+        if config.moe_style == 2 and not self.fused_moe.includes_shared_expert:
+            self.shared_expert = DenseMLP(
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
+                swiglu_limit=_shared_expert_swiglu_limit(config),
+            )
         if shared_expert_gate_weight is not None:
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
                 weights, W.shared_expert_gate, None, None, config
@@ -314,24 +179,6 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
-        self._shared_expert_stream = None
-        if (
-            config.model_type == "glm5_3_flash"
-            and is_decode_role
-            and self.ffn_tp_size == 1
-            and self.ep_size > 1
-            and self.shared_expert is not None
-            and self.shared_expert_gate is None
-            and not self._use_mega_moe_fused_shared
-            and os.environ.get("GLM53_MOE_SHARED_OVERLAP", "0") == "1"
-        ):
-            device = self.shared_expert.up_proj.weight.device
-            if device.type == "cuda":
-                if device not in _GLM53_SHARED_STREAMS:
-                    _GLM53_SHARED_STREAMS[device] = torch.cuda.Stream(device=device)
-                self._shared_expert_stream = _GLM53_SHARED_STREAMS[device]
-
-        # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
         self.group_topk = GroupTopK() if self.correction_bias is not None else None
 
@@ -339,6 +186,7 @@ class GenericMoeLayer(nn.Module):
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
 
+        clone.requires_ep_sync = self.requires_ep_sync
         clone.config = self.config
         clone.parallelism_config = self.parallelism_config
         clone.hidden_dim = self.hidden_dim
@@ -349,14 +197,13 @@ class GenericMoeLayer(nn.Module):
         clone.gate = self.gate
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
-        if hasattr(self.fused_moe, "clone_for_cuda_graph"):
+        if self.fused_moe.supports_cuda_graph_clone:
             clone.fused_moe = self.fused_moe.clone_for_cuda_graph()
         else:
             clone.fused_moe = self.fused_moe
         clone.w1 = self.w1
         clone.w2 = self.w2
         clone.num_local_experts = self.num_local_experts
-        clone.add_shared_expert = self.add_shared_expert
         clone.ffn_tp_size = self.ffn_tp_size
         clone.ep_size = self.ep_size
         clone.routed_tp_size = self.routed_tp_size
@@ -364,33 +211,11 @@ class GenericMoeLayer(nn.Module):
         clone.route_local_tokens = self.route_local_tokens
         clone.shared_expert_local = self.shared_expert_local
         clone.shared_expert = self.shared_expert
-        clone._shared_expert_stream = getattr(self, "_shared_expert_stream", None)
         clone.shared_expert_gate = self.shared_expert_gate
         clone.sigmoid_gate_scale_add = self.sigmoid_gate_scale_add
         clone.correction_bias = self.correction_bias
         clone.group_topk = self.group_topk
-        clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
-
-    def _start_shared_overlap(self, hidden_states, x_fp8=None, x_scale=None):
-        stream = getattr(self, "_shared_expert_stream", None)
-        if stream is None or hidden_states.shape[0] > 64:
-            return None
-        main = torch.cuda.current_stream(hidden_states.device)
-        stream.wait_stream(main)
-        if not torch.cuda.is_current_stream_capturing():
-            for tensor in (hidden_states, x_fp8, x_scale):
-                if tensor is not None:
-                    tensor.record_stream(stream)
-        with torch.cuda.stream(stream):
-            return self.shared_expert(hidden_states, x_fp8=x_fp8, x_scale=x_scale)
-
-    def _finish_shared_overlap(self, output):
-        main = torch.cuda.current_stream(output.device)
-        main.wait_stream(self._shared_expert_stream)
-        if not torch.cuda.is_current_stream_capturing():
-            output.record_stream(main)
-        return output
 
     def forward_prepacked(
         self,
@@ -401,27 +226,35 @@ class GenericMoeLayer(nn.Module):
         """Consume router/quant resources already prepared by GLM5 CMP."""
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
-        shared = self._start_shared_overlap(hidden_states)
         experts_output = self.fused_moe.forward_prepacked(hidden_states)
-        if self._use_mega_moe_fused_shared:
+        if self.shared_expert is None:
             return experts_output
-        if shared is not None:
-            return experts_output + self._finish_shared_overlap(shared)
         return experts_output + self.shared_expert(hidden_states)
 
     def prepare_fused_mhc_inputs(self, hidden_states):
         if (
-            os.environ.get("GLM53_MHC_PACK_FUSION", "1") != "1"
-            or self.routed_tp_size != 1
+            self.routed_tp_size != 1
             or self.ep_size <= 1
             or self.gate_chunk_rows != 0
             or self.correction_bias is None
             or self.fake_balance_expert is not None
-            or not self._use_mega_moe_fused_shared
-            or not hasattr(self.fused_moe, "prepare_fused_mhc_inputs")
+            or not self.fused_moe.includes_shared_expert
+            or self.fused_moe.strategy_name != "mega_moe_fp8_se"
+            or self.parallelism_config.role_type != RoleType.DECODE
         ):
             return None
-        return self.fused_moe.prepare_fused_mhc_inputs(hidden_states)
+        tokens = hidden_states.shape[0]
+        if (
+            hidden_states.ndim != 2
+            or tokens not in (48, 192, 240, 288)
+            or hidden_states.shape[1] != 4096
+            or hidden_states.dtype != torch.bfloat16
+        ):
+            return None
+        views = self.fused_moe.fused_experts.shared_input_views(tokens)
+        if views is None or views["x_fp8"].device != hidden_states.device:
+            return None
+        return dict(views, owner=self.fused_moe, tokens=tokens)
 
     def forward(
         self,
@@ -560,13 +393,6 @@ class GenericMoeLayer(nn.Module):
             and is_ep_mode
             and not self.shared_expert_local
         )
-        use_mega_moe_fused_shared = (
-            self.shared_expert is not None
-            and self.shared_expert_gate is None
-            and not use_ep_shared_allreduce
-            and self._use_mega_moe_fused_shared
-        )
-
         routed_hidden, routed_weights, routed_ids = (
             routing_hidden,
             topk_weights,
@@ -580,10 +406,9 @@ class GenericMoeLayer(nn.Module):
                 self.routed_tp_rank,
                 self.routed_tp_size,
             )
-        shared_expert_output = self._start_shared_overlap(hidden_states, x_fp8, x_scale)
         if prepacked_mega is not None:
-            experts_output = self.fused_moe.forward_prepacked(
-                routed_hidden, prepacked_mega
+            experts_output = self.fused_moe.fused_experts.forward_prepacked_shared(
+                routed_hidden
             )
         else:
             experts_output = self.fused_moe(
@@ -595,7 +420,7 @@ class GenericMoeLayer(nn.Module):
         if self.shared_expert_local:
             # Full FP8 shared weights consume exactly the routed branch's local
             # rows. A fused shared expert is already included by EP combine.
-            if not use_mega_moe_fused_shared:
+            if self.shared_expert is not None:
                 shared_output = self.shared_expert(routed_hidden, skip_allreduce=True)
                 if self.shared_expert_gate is not None:
                     shared_output = (
@@ -618,8 +443,6 @@ class GenericMoeLayer(nn.Module):
             experts_output = gather_routed_tokens(
                 experts_output, num_tokens, lambda x: all_gather(x, group=Group.TP)
             )
-        if use_mega_moe_fused_shared:
-            return experts_output
         if self.shared_expert is not None:
             if sequence_parallel_layout is not None and local_router:
                 # The routed branch has already dispatched local tokens to EP.
@@ -628,15 +451,12 @@ class GenericMoeLayer(nn.Module):
                 hidden_states = all_gather_trim(
                     hidden_states, sequence_parallel_layout.logical_tokens, Group.TP
                 )
-            if shared_expert_output is None:
-                shared_expert_output = self.shared_expert(
-                    hidden_states,
-                    x_fp8=x_fp8,
-                    x_scale=x_scale,
-                    skip_allreduce=use_ep_shared_allreduce,
-                )
-            else:
-                shared_expert_output = self._finish_shared_overlap(shared_expert_output)
+            shared_expert_output = self.shared_expert(
+                hidden_states,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+                skip_allreduce=use_ep_shared_allreduce,
+            )
             if use_ep_shared_allreduce:
                 # EP mode: routed expert output is already complete
                 # (EP combine via all_to_all / all_gather aggregated across ranks).
@@ -705,7 +525,7 @@ class GenericMoeDecoderLayer(nn.Module):
         self._drain_pinned_mla_before_moe = (
             os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
             and layer_idx in config.moe_layer_index
-            and str(moe_config.moe_strategy).startswith("mega_moe")
+            and moe_config.moe_strategy in MEGA_MOE_STRATEGIES
         )
 
         # Get quant_config from model_config
@@ -715,11 +535,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 config.attn_config,
                 (
                     MlaCPParallelismView(parallelism_config)
-                    if mla_cp_enabled(
-                        config.model_type,
-                        parallelism_config.role_type,
-                        is_glm53_mtp=getattr(config, "is_glm53_mtp", False),
-                    )
+                    if config.prefill_mla_cp
                     else parallelism_config
                 ),
                 weights,

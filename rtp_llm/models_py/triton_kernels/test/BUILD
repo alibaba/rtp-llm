@@ -11,7 +11,7 @@ py_test(
     deps = [
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",
-        "//rtp_llm/models_py/triton_kernels:glm53_kda",
+        "//rtp_llm/models_py/triton_kernels:kda_fp32_state",
         "//rtp_llm/models_py/triton_kernels:sparse_mla",
         ":numpy",
         ":packaging",
@@ -29,7 +29,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:causal_conv1d",
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",
-        "//rtp_llm/models_py/triton_kernels:glm53_kda",
+        "//rtp_llm/models_py/triton_kernels:kda_fp32_state",
         "//rtp_llm/models_py/triton_kernels:sparse_mla",
         ":numpy",
         ":packaging",

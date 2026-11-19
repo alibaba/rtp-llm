@@ -764,9 +764,9 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                         .propose_tokens_gpu           = std::move(propose_tokens_gpu),
                         .last_hidden_states_gpu       = sp_output_buffer->hidden_states,
                         .draft_all_probs_gpu          = sp_output_buffer->all_probs,
+                        .mtp_indexer_topk_gpu         = std::move(indexer_seed_gpu),
                         .previous_seq_len_upper_bound = generate_stream->seqLength(),
                         .next_seq_len_upper_bound     = generate_stream->seqLength(),
-                        .mtp_indexer_topk_gpu         = std::move(indexer_seed_gpu),
                     });
                 } else if (indexer_seed_gpu.defined()) {
                     auto state                 = generate_stream->getMtpAsyncDeviceState();

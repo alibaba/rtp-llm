@@ -1,6 +1,5 @@
 """Unified dense MLP implementation supporting multiple activation types."""
 
-import os
 from typing import Dict, Optional, Type
 
 import torch
@@ -40,26 +39,8 @@ class ClampedSiluAndMul(nn.Module):
     def __init__(self, limit: float):
         super().__init__()
         self.limit = limit
-        self._prefill_fusion = None
-        if (
-            torch.cuda.is_available()
-            and torch.version.hip is None
-            and os.environ.get("GLM53_PREFILL_FUSED_CLAMPED_SWIGLU", "0") == "1"
-        ):
-            from rtp_llm.models_py.triton_kernels.common.clamped_swiglu import (
-                clamped_swiglu,
-            )
-
-            self._prefill_fusion = clamped_swiglu
 
     def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
-        if self._prefill_fusion is not None:
-            from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
-
-            if metadata_cache() is not None:
-                fused = self._prefill_fusion(gate_up, self.limit)
-                if fused is not None:
-                    return fused
         gate, up = gate_up.chunk(2, dim=-1)
         return F.silu(gate.clamp(max=self.limit)) * up.clamp(-self.limit, self.limit)
 
@@ -163,7 +144,10 @@ class DenseMLP(nn.Module):
     def accepts_fp8_input(self) -> bool:
         return self.is_gated and (
             callable(getattr(self.up_proj, "forward_quantized", None))
-            or (CudaFp8GEMMLinear is not None and isinstance(self.up_proj, CudaFp8GEMMLinear))
+            or (
+                CudaFp8GEMMLinear is not None
+                and isinstance(self.up_proj, CudaFp8GEMMLinear)
+            )
         )
 
     def forward(
@@ -188,8 +172,10 @@ class DenseMLP(nn.Module):
         else:
             up = self.up_proj(x)
         output = None
-        if self.is_gated and not self.clamp_swiglu and getattr(
-            self.down_proj, "supports_fused_silu_quant", False
+        if (
+            self.is_gated
+            and not self.clamp_swiglu
+            and getattr(self.down_proj, "supports_fused_silu_quant", False)
         ):
             output = self.down_proj.forward_silu_and_mul_quantized(up)
         if output is not None:

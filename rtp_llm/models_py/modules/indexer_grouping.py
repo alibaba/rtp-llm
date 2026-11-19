@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import torch
+
 from rtp_llm.models_py.triton_kernels.common.host_math import ceil_div
 
 try:
@@ -66,10 +66,6 @@ if _TRITON_AVAILABLE:
         tl.store(output_ptr + row * output_stride + cols, output, mask=mask)
 
 
-def _fused_group_expansion_enabled() -> bool:
-    return os.environ.get("GLM53_INDEXER_GROUP_FUSED", "1") != "0"
-
-
 def fused_expand_indexer_groups_with_tail(
     group_indices: torch.Tensor,
     raw_sequence_lengths: torch.Tensor,
@@ -84,7 +80,6 @@ def fused_expand_indexer_groups_with_tail(
 
     if (
         not _TRITON_AVAILABLE
-        or not _fused_group_expansion_enabled()
         or not group_indices.is_cuda
         or group_indices.dim() != 2
         or group_size <= 1

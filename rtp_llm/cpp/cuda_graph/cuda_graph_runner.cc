@@ -2137,12 +2137,16 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
-        // sync before capture
+        CudaGraphStreamLife stream_life(capture_stream_);
+        auto                prepare_stream = py::getattr(py_instance_, "prepare_cuda_graph_stream", py::none());
+        if (!prepare_stream.is_none()) {
+            prepare_stream();
+        }
+        // Finish eager warmup and any stream-local initialization before capture or replay.
         cuda_graph::graphDeviceSynchronize();
 
-        CudaGraphStreamLife stream_life(capture_stream_);
-        auto&               graph               = graph_instances_[key].graph_;
-        std::string         output_dot_filename = "";
+        auto&       graph               = graph_instances_[key].graph_;
+        std::string output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
             graph.enable_debug_mode();
             std::string key_type_str = std::string(key_type);

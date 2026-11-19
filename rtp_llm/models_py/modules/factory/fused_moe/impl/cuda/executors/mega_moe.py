@@ -504,16 +504,28 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         if override is not None:
             return clamp_token_counts(override, max_tokens_per_rank)
-        get_block_m = getattr(deep_gemm, "get_block_m_for_mega_moe", None)
+        block_m_query = (
+            "get_block_m_for_mega_moe_fp8"
+            if self._fp8_routed
+            else "get_block_m_for_mega_moe"
+        )
+        get_block_m = getattr(deep_gemm, block_m_query, None)
         block_m_resolver = None
         if callable(get_block_m):
+            # DeepGEMM dispatches on the allocated (aligned) ring capacity.
+            capacity = getattr(
+                getattr(self, "_mega_buf", None),
+                "num_max_tokens_per_rank",
+                max_tokens_per_rank,
+            )
+            recipe = () if self._fp8_routed else (_MMA_TYPE,)
             block_m_resolver = lambda tokens: get_block_m(
                 cfg.ep_size,
                 cfg.n_routed_experts,
-                max_tokens_per_rank,
+                capacity,
                 tokens,
                 cfg.n_activated_experts,
-                _MMA_TYPE,
+                *recipe,
             )
         return generate_mega_moe_jit_token_counts(
             num_ranks=cfg.ep_size,
@@ -727,14 +739,23 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     def _stage_kernel_inputs(self, tokens: int, *, inputs_prepacked: bool) -> None:
         """Recipe hook for shared-expert activation scales."""
 
-    def _forward_impl(self, x, weights, indices, *, inputs_prepacked: bool):
+    def _forward_impl(
+        self,
+        x,
+        weights,
+        indices,
+        *,
+        inputs_prepacked: bool,
+        shared_scales_prepacked: bool = False,
+    ):
         tokens = int(x.size(0))
         self._validate_capacity(tokens)
         if not inputs_prepacked:
             if weights is None or indices is None:
                 raise ValueError("weights and indices are required before packing")
             self._pack_inputs(x, weights, indices, tokens)
-        self._stage_kernel_inputs(tokens, inputs_prepacked=inputs_prepacked)
+        if not shared_scales_prepacked:
+            self._stage_kernel_inputs(tokens, inputs_prepacked=inputs_prepacked)
         # Zero-token EP ranks must still enter the collective as expert hosts.
         # Skipping a rank loses remote expert contributions and hangs its peers.
         y = self._mega_y[:tokens]

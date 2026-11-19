@@ -12,7 +12,7 @@ from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
 from rtp_llm.models_py.triton_kernels.fla.block import (
     store_ssm_state_to_block_map_kernel,
 )
-from rtp_llm.models_py.triton_kernels.glm53_kda.chunk import chunk_kda
+from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk import chunk_kda
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (
     _fused_rope_qk_had_k_kernel,
 )

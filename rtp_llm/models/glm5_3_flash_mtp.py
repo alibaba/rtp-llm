@@ -9,7 +9,6 @@ import torch
 
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
-from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
@@ -18,6 +17,7 @@ from rtp_llm.models.glm5_3_flash import (
     Glm53Flash,
     _configure_glm53_mtp_attention_layout,
     parse_glm53_flash_config,
+    replicate_prefill_shared_weights,
 )
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose, zeros
@@ -64,20 +64,9 @@ class Glm53FlashMtpWeight(DeepSeekV2Weight):
         return load_config
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
-        from rtp_llm.models.glm53_prefill_parallel import shared_expert_local_enabled
-
         weights = super()._get_hf_ffn_layer_weight_info(layer_id)
-        if layer_id in self.moe_layer_index_ and shared_expert_local_enabled(
-            self.model_config.model_type,
-            self.role_type,
-            is_glm53_mtp=getattr(self.model_config, "is_glm53_mtp", False),
-        ):
-            for weight in weights:
-                if isinstance(weight, FfnWeight):
-                    weight.config.replicate_for_prefill_tokens = True
-                    for atomic in weight.sub_weights.values():
-                        if isinstance(atomic, FfnAtomicWeight):
-                            atomic.config.replicate_for_prefill_tokens = True
+        if layer_id in self.moe_layer_index_:
+            replicate_prefill_shared_weights(weights, self.model_config.mega_moe_policy)
         return weights
 
     def _process_meta(self, meta_dict, weight_keys):
@@ -106,13 +95,7 @@ class Glm53FlashMtpWeight(DeepSeekV2Weight):
 
     def _get_hf_layer_weight_info(self, layer_id: int):
         weights = super()._get_hf_layer_weight_info(layer_id)
-        from rtp_llm.models.glm53_prefill_parallel import mla_cp_enabled
-
-        if mla_cp_enabled(
-            self.model_config.model_type,
-            self.role_type,
-            is_glm53_mtp=getattr(self.model_config, "is_glm53_mtp", False),
-        ):
+        if self.model_config.prefill_mla_cp:
             for weight in weights:
                 if (
                     isinstance(weight, MlaAttnAtomicWeight)
@@ -237,7 +220,7 @@ class Glm53FlashMtp(Glm53Flash):
             raise ValueError("GLM-5.3-Flash expects one checkpoint draft layer")
         config.mtp_layer_offset = config.num_layers
         config.num_layers = count
-        config.model_type = "glm_5_mtp"
+        config.model_type = "glm5_3_flash_mtp"
         config.moe_layer_index = [0]
         config.is_mtp = True
         _configure_glm53_mtp_attention_layout(config, text, count)
@@ -262,5 +245,4 @@ class Glm53FlashMtp(Glm53Flash):
         return Glm53FlashMtpWeight
 
 
-register_model("glm_5_mtp", Glm53FlashMtp)
 register_model("glm5_3_flash_mtp", Glm53FlashMtp)

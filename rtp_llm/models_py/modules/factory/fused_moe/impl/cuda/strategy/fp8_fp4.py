@@ -74,7 +74,10 @@ class CudaMegaMoeStrategy(_CudaFp8Fp4Strategy):
         if cls.requires_shared:
             checker.check(config.n_shared_experts > 0)
             checker.check(not config.has_shared_expert_gate)
-            checker.check(config.parallelism_config.get_ffn_tp_size() == 1)
+            checker.check(
+                config.parallelism_config.get_ffn_tp_size() == 1
+                or policy.replicate_shared_weights
+            )
 
     @classmethod
     def get_executor_class(cls) -> Type:

@@ -610,13 +610,18 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                      && draft_config.num_layers == 1 && draft_config.attn_config.indexer_topk > 0
                                      && propose_step_ >= 3;
     }
-    mtp_indexer_topk_ = glm53_draft ? draft_config.attn_config.sparse_attention_topk : draft_config.attn_config.indexer_topk;
-    const bool draft_uses_mega_moe =
-        params.moe_config.moe_strategy.rfind("mega_moe", 0) == 0
-        || propose_params->getEngineInitParams().moe_config.moe_strategy.rfind("mega_moe", 0) == 0;
-    mtp_indexer_graph_choice_world_sync_ = glm53_draft && mtp_indexer_share_enabled_ && draft_uses_mega_moe
-                                           && params.parallelism_config.ep_size > 1
-                                           && params.parallelism_config.world_size > 1;
+    mtp_indexer_topk_ =
+        glm53_draft ? draft_config.attn_config.sparse_attention_topk : draft_config.attn_config.indexer_topk;
+    bool uses_ep_collectives = false;
+    if (glm53_draft && mtp_indexer_share_enabled_) {
+        py::gil_scoped_acquire gil;
+        const auto             requires_ep_sync = [](const py::object& model) {
+            return !model.is_none() && py::getattr(model, "requires_ep_sync", py::bool_(false)).cast<bool>();
+        };
+        uses_ep_collectives = requires_ep_sync(params.py_model) || requires_ep_sync(params.py_sp_model);
+    }
+    mtp_indexer_graph_choice_world_sync_ =
+        uses_ep_collectives && params.parallelism_config.ep_size > 1 && params.parallelism_config.world_size > 1;
     if (mtp_indexer_graph_choice_world_sync_) {
         RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.ep_size == params.parallelism_config.world_size,
                                 "GLM53 MegaMoE MTP indexer sharing requires EP == WORLD");
@@ -920,7 +925,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 }
                 auto prefill_params = model_params;
                 if (glm53_draft) {
-                    prefill_params.mtp_indexer_role = mtp_indexer_share_enabled_ ? MtpIndexerRole::SEED : MtpIndexerRole::NORMAL;
+                    prefill_params.mtp_indexer_role =
+                        mtp_indexer_share_enabled_ ? MtpIndexerRole::SEED : MtpIndexerRole::NORMAL;
                 }
                 sp_prefill_draft_model_.reset(
                     new PyWrappedModel(prefill_params,
@@ -3209,7 +3215,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             seed_rows.reserve(batch_size);
             for (const auto& stream : all_streams) {
                 const auto& seed = stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
-                if (!seed.defined() || !seed.is_cuda() || seed.scalar_type() != torch::kInt32 || seed.numel() != mtp_indexer_topk_) {
+                if (!seed.defined() || !seed.is_cuda() || seed.scalar_type() != torch::kInt32
+                    || seed.numel() != mtp_indexer_topk_) {
                     all_seeded = false;
                     break;
                 }

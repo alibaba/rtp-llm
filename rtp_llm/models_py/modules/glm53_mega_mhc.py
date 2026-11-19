@@ -1,26 +1,19 @@
-"""SM100 MegaMHC; Fn uses TF32. GLM53_MEGA_MHC=0 restores FP32 HC."""
+"""Use the packaged SM100 MegaMHC kernel for its validated input shapes."""
 
 import functools
 import importlib.util
 import logging
-import os
 import pathlib
 
 import torch
 
-_ENABLED = os.environ.get("GLM53_MEGA_MHC", "1") == "1"
+# The validated HC reduction uses 96 SMs.
+_NUM_SMS = 96
 
 
 @functools.lru_cache(maxsize=1)
 def _get_library():
-    # These optional JIT assets are distributed with the runtime overlay, not
-    # every RTP installation. Missing/incompatible assets keep the HC fallback.
-    root = pathlib.Path(
-        os.environ.get(
-            "GLM53_MEGA_MHC_LIBRARY_DIR",
-            str(pathlib.Path(__file__).parents[2] / "libs/mega_mhc_isolated"),
-        )
-    )
+    root = pathlib.Path(__file__).parents[2] / "libs/mega_mhc_isolated"
     required = (
         "csrc/jit_kernels/impls/sm100_mega_mhc.hpp",
         "include/deep_jit/utils/parser.hpp",
@@ -29,46 +22,52 @@ def _get_library():
     if len(binaries) != 1 or not all((root / name).is_file() for name in required):
         logging.info("GLM53 MegaMHC unavailable at %s; using ordinary HC", root)
         return None
-    sms = int(os.environ.get("GLM53_MEGA_MHC_SMS", "96"))
-    if (
-        not 1
-        <= sms
-        <= torch.cuda.get_device_properties(
-            torch.cuda.current_device()
-        ).multi_processor_count
-    ):
-        raise ValueError("GLM53_MEGA_MHC_SMS exceeds the device SM count")
     try:
         spec = importlib.util.spec_from_file_location("mhc_isolated", binaries[0])
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        for op in ("mega_mhc", "prepare_mega_mhc_stream"):
+            if not callable(getattr(module, op, None)):
+                raise AttributeError(f"missing {op}")
         module.init(str(root))
-        module.set_num_sms(sms)
-        module.set_pdl(os.environ.get("GLM53_DG_PDL", "1") == "1")
+        module.set_num_sms(_NUM_SMS)
+        module.set_pdl(True)
     except (ImportError, OSError, RuntimeError, AttributeError) as error:
         logging.warning(
             "GLM53 MegaMHC extension unavailable; using ordinary HC: %s", error
         )
         return None
     logging.info(
-        "GLM53 isolated MegaMHC initialized, SMs=%d, library=%s", sms, binaries[0]
+        "GLM53 isolated MegaMHC initialized, SMs=%d, library=%s", _NUM_SMS, binaries[0]
     )
     return module
+
+
+def prepare_mega_mhc_stream():
+    """Initialize stream-local barriers only if eager warmup selected MegaMHC."""
+    if _get_library.cache_info().currsize:
+        library = _get_library()
+        if library is not None:
+            library.prepare_mega_mhc_stream()
 
 
 def can_use_mega_mhc(x, residual, post, comb, unit, norm):
     """Guard all fixed ABI assumptions before using the optional SM100 kernel."""
     if not (
-        _ENABLED
-        and x.is_cuda
+        x.is_cuda
         and x.dtype == torch.bfloat16
         and x.ndim == 2
         and x.shape[0] in (48, 192, 240, 288)
         and x.shape[1] == 4096
-        and torch.cuda.get_device_capability(x.device) == (10, 0)
         and unit.hc_mult == 4
         and unit.dim == 4096
     ):
+        return False
+    device = torch.cuda.get_device_properties(x.device)
+    if (device.major, device.minor) != (
+        10,
+        0,
+    ) or device.multi_processor_count < _NUM_SMS:
         return False
     rows = x.shape[0]
     tensors = (

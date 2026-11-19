@@ -230,7 +230,17 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                         loader = SimpleNamespace(get_load_config=lambda: config)
                         model = object.__new__(model_type)
                         model.moe_config = SimpleNamespace(moe_strategy=strategy)
-                        with patch.object(
+                        model.model_config = SimpleNamespace()
+                        model.parallelism_config = SimpleNamespace()
+                        with patch(
+                            "rtp_llm.models.glm5_3_flash.use_dedicated_mla_cp",
+                            return_value=False,
+                        ), patch(
+                            "rtp_llm.models.glm5_3_flash.resolve_moe_policy",
+                            return_value=(
+                                object() if strategy.startswith("mega_moe") else None
+                            ),
+                        ), patch.object(
                             BaseModel, "create_model_loader", return_value=loader
                         ) as base:
                             self.assertIs(model.create_model_loader(), loader)
@@ -268,9 +278,11 @@ class TestGlm53Fp8Requant(unittest.TestCase):
         import deep_gemm
 
         from rtp_llm.models_py.kernels.cuda import fp8_kernel as exported_fp8
-        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8 import GLM5MegaMoEFP8
-        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se import (
-            GLM5MegaMoEFP8SE,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+            MegaMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
         )
 
         # Validate the actual loader and model consumers up to the foreign
@@ -300,11 +312,16 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                     self.assertEqual(
                         loaded_s2.dtype, torch.float32 if expect_raw else torch.int32
                     )
-                    cls = GLM5MegaMoEFP8SE if shared else GLM5MegaMoEFP8
+                    cls = MegaMoeSEExecutor if shared else MegaMoeExecutor
                     module = object.__new__(cls)
                     torch.nn.Module.__init__(module)
                     module.cfg = SimpleNamespace(
-                        n_local_experts=2, dim=512, moe_inter_dim=128, layer_id=0
+                        mega_moe_policy=SimpleNamespace(preserve_fp32_scales=True),
+                        moe_strategy="mega_moe_fp8_se",
+                        n_local_experts=2,
+                        dim=512,
+                        moe_inter_dim=128,
+                        layer_id=0,
                     )
                     with patch.object(module, "_setup_buffer_and_warmup"), patch.object(
                         deep_gemm,
@@ -345,10 +362,15 @@ class TestGlm53Fp8Requant(unittest.TestCase):
             if shared:
                 # A raw shared-expert input may bypass the generic loader.
                 # Its owned converter must still preserve FP32 intermediates.
-                module = object.__new__(GLM5MegaMoEFP8SE)
+                module = object.__new__(MegaMoeSEExecutor)
                 torch.nn.Module.__init__(module)
                 module.cfg = SimpleNamespace(
-                    n_local_experts=2, dim=512, moe_inter_dim=128, layer_id=0
+                    mega_moe_policy=SimpleNamespace(preserve_fp32_scales=True),
+                    moe_strategy="mega_moe_fp8_se",
+                    n_local_experts=2,
+                    dim=512,
+                    moe_inter_dim=128,
+                    layer_id=0,
                 )
                 with patch.object(module, "_setup_buffer_and_warmup"), patch.object(
                     deep_gemm,
@@ -366,13 +388,16 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                 self.assert_packed(actual_s2, refs2, 512, 128)
 
     def test_shared_expert_rejects_missing_foreign_backend(self):
-        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se import (
-            GLM5MegaMoEFP8SE,
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se import (
+            MegaMoeSEExecutor,
         )
 
-        module = object.__new__(GLM5MegaMoEFP8SE)
+        module = object.__new__(MegaMoeSEExecutor)
         torch.nn.Module.__init__(module)
-        module.cfg = SimpleNamespace()
+        module.cfg = SimpleNamespace(
+            mega_moe_policy=SimpleNamespace(preserve_fp32_scales=True),
+            moe_strategy="mega_moe_fp8_se",
+        )
         with patch.dict("sys.modules", {"deep_gemm": SimpleNamespace()}):
             with self.assertRaisesRegex(
                 RuntimeError, "requires DeepGEMM shared-expert support"

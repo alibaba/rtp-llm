@@ -36,6 +36,12 @@ def setup_prepared_mega_moe(executor, weights):
     max_seq_len = int(model.max_seq_len or 0)
     capacity = max(max_seq_len, 128) if max_seq_len > 0 else 8192
     gen_num_per_cycle = int(model.gen_num_per_cycle or 0)
+    chunk_options = {}
+    if policy.prefill_chunk_tokens is not None:
+        chunk_options = dict(
+            chunking_enabled=policy.prefill_chunk_tokens > 0,
+            chunk_tokens=policy.prefill_chunk_tokens,
+        )
     cfg.max_tokens_per_rank = resolve_moe_max_tokens_per_rank(
         max_seq_len=max_seq_len,
         current_max_tokens_per_rank=capacity,
@@ -44,6 +50,7 @@ def setup_prepared_mega_moe(executor, weights):
         is_decode_role=executor._is_decode_role,
         is_speculative=gen_num_per_cycle > 0,
         gen_num_per_cycle=gen_num_per_cycle,
+        **chunk_options,
     )
     if parallelism.role_type == RoleType.PDFUSION:
         # Only prefill can be chunked. Colocated decode/verify must fit the
@@ -52,6 +59,17 @@ def setup_prepared_mega_moe(executor, weights):
             cfg.max_tokens_per_rank,
             int(cfg.moe_config.ll_num_max_token or 0),
             max(int(cfg.max_generate_batch_size), 1) * max(gen_num_per_cycle + 1, 1),
+        )
+    if executor._fp8_routed and policy.prefill_chunk_tokens is not None:
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.fp8_capacity import (
+            fp8_capacity,
+        )
+
+        cfg.max_tokens_per_rank = fp8_capacity(
+            cfg.max_tokens_per_rank,
+            cfg.n_routed_experts,
+            cfg.ep_size,
+            cfg.n_activated_experts,
         )
     cfg.warmup_include_capacity = True
 
@@ -83,7 +101,7 @@ def setup_prepared_mega_moe(executor, weights):
         )
     del w1, s1, w2, s2
     if executor.includes_shared_expert:
-        if parallelism.get_ffn_tp_size() != 1:
+        if parallelism.get_ffn_tp_size() != 1 and not policy.replicate_shared_weights:
             raise ValueError("MegaMoE shared experts require full weights on each rank")
         if weights.get(W.shared_expert_gate) is not None:
             raise ValueError("Fused MegaMoE does not support shared_expert_gate")

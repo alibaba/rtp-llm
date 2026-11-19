@@ -1,9 +1,14 @@
+from typing import TYPE_CHECKING
+
 import torch
 import triton
 import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 @triton.jit(do_not_specialize=["block_map_stride_b"])
@@ -227,6 +232,30 @@ def store_ssm_state_to_block_map_kernel(
             BLOCK_V,
             CONV_STRIDE_TOKEN,
         )
+
+
+def store_kda_chunk_states(
+    intermediate: torch.Tensor | None,
+    final: torch.Tensor | None,
+    cache: torch.Tensor | None,
+    inputs: "PyAttentionInputs",
+    page_size: int,
+    chunk_size: int,
+) -> None:
+    if cache is None or final is None:
+        return
+    if intermediate is None:
+        intermediate = final.unsqueeze(0).unsqueeze(0)
+    store_ssm_state_to_block_map(
+        intermediate.float(),
+        final.float(),
+        inputs.prefix_lengths_device,
+        inputs.cu_seqlens_device,
+        inputs.kv_cache_kernel_block_id_device,
+        cache,
+        page_size,
+        chunk_size=chunk_size,
+    )
 
 
 def store_ssm_state_to_block_map(

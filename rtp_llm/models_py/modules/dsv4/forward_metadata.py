@@ -1,6 +1,5 @@
 """Metadata shared only within one model forward, never across engine steps."""
 
-import os
 from contextvars import ContextVar
 from functools import wraps
 
@@ -8,7 +7,6 @@ _FORWARD_METADATA = ContextVar("glm53_forward_metadata", default=None)
 _TOKENWISE_ROUTER = ContextVar("glm53_tokenwise_router", default=False)
 _BATCH_INVARIANT_MHC = ContextVar("glm53_batch_invariant_mhc", default=False)
 _SCORE_WORKSPACE_MB = 8192
-_SCORE_WORKSPACE_DEMAND = os.environ.get("GLM53_DEMAND_SCORE_BUDGET", "0") == "1"
 
 
 def metadata_cache():
@@ -31,10 +29,7 @@ def score_workspace_fits(device, required_bytes):
     if cache is None:
         return False
     device = torch.device(device)
-    bound = cache.get(
-        ("indexer_score_budget", device),
-        cache.get(("indexer_score_budget_lower", device), 0),
-    )
+    bound = cache.get(("indexer_score_budget", device), 0)
     return 0 < required_bytes <= bound
 
 
@@ -122,15 +117,7 @@ def scoped_forward_metadata(function):
             # work: cudaMemGetInfo can otherwise stall the CPU mid-layer.
             with torch.profiler.record_function("glm53.forward_workspace_budget"):
                 device = torch.device("cuda", torch.cuda.current_device())
-                if _SCORE_WORKSPACE_DEMAND:
-                    # free >= 0, so this is a lower bound on the original
-                    # min(cap, (free + reusable) // 2). It expires this forward.
-                    reusable = _reusable_allocator_bytes(device)
-                    metadata_cache()[("indexer_score_budget_lower", device)] = min(
-                        _SCORE_WORKSPACE_MB << 20, reusable // 2
-                    )
-                else:
-                    score_workspace_budget(device)
+                score_workspace_budget(device)
             return function(self, inputs, *args, **kwargs)
         finally:
             # Also release metadata on exceptions and when the same inputs object
@@ -234,10 +221,9 @@ def cached_indexer_prefill(function):
 
 def cached_prefill_prefix_summary(prefix, host=None):
     """Read immutable prefix metadata once at the start of this forward."""
-    import os
 
     cache = metadata_cache()
-    if cache is None or os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") == "0":
+    if cache is None:
         return None
     key = ("prefill_prefix_host", tensor_key(prefix))
     if key not in cache:
@@ -257,12 +243,11 @@ def cached_prefill_prefix_summary(prefix, host=None):
 
 def cached_kda_chunk_indices(cu, chunk_size):
     """Build KDA's logical chunk map from this forward's CPU boundaries."""
-    import os
 
     import torch
 
     cache = metadata_cache()
-    if cache is None or os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") == "0":
+    if cache is None:
         return None
     cu_key = tensor_key(cu)
     boundaries = cache.get(("prefill_cu_host", cu_key))
@@ -287,13 +272,12 @@ def cached_kda_chunk_indices(cu, chunk_size):
 
 def cached_indexer_host_lengths(cu, prefix, input_lengths, ratio, device):
     """Share logical length geometry without caching physical pool mappings."""
-    import os
     from itertools import accumulate
 
     import torch
 
     cache = metadata_cache()
-    if cache is None or os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") == "0":
+    if cache is None:
         return None
     if cu.numel() != prefix.numel() + 1 or input_lengths.numel() != prefix.numel():
         return None
@@ -338,27 +322,9 @@ def cached_indexer_host_lengths(cu, prefix, input_lengths, ratio, device):
 
 
 def indexer_varlen_bounds(req_ids, positions, counts, cu_keys, ratio, device):
-    """Reuse immutable logical bounds across layers within one GLM53 prefill."""
-    import os
-
+    """Compute window bounds in concatenated compressed-key coordinates."""
     import torch
 
-    cache = (
-        metadata_cache()
-        if os.environ.get("GLM53_INDEXER_SHARED_BOUNDS", "0") == "1"
-        else None
-    )
-    sources = (req_ids, positions, counts, cu_keys)
-    key = None
-    if cache is not None:
-        key = (
-            "indexer_varlen_bounds",
-            tuple(tensor_key(tensor) for tensor in sources),
-            ratio,
-            str(device),
-        )
-        if key in cache:
-            return cache[key][1]
     positions_d = positions.to(device=device, dtype=torch.int32).contiguous()
     req_id_long = req_ids.to(device=device, dtype=torch.int64)
     count_per_token = counts.to(torch.int64).index_select(0, req_id_long)
@@ -373,9 +339,4 @@ def indexer_varlen_bounds(req_ids, positions, counts, cu_keys, ratio, device):
         .contiguous()
     )
     cu_per_token = offsets.to(torch.int32).contiguous()
-    result = positions_d, ks, ke, cu_per_token
-    if cache is not None:
-        # Keep source tensors alive too: a later layer must not reuse a freed
-        # allocation's address for different metadata during this forward.
-        cache[key] = sources, result
-    return result
+    return positions_d, ks, ke, cu_per_token

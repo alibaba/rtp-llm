@@ -14,6 +14,7 @@ py_test(
 
 py_test(
     name = "glm53_native_all_gather_test",
+    tags = ["glm53_contract"],
     srcs = ["glm53_native_all_gather_test.py"],
     deps = [
         "//rtp_llm:testlib",

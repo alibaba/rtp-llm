@@ -67,14 +67,22 @@ def prepare_shared_expert_weights(
             )
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
+        requant_options = (
+            {"dequant_dtype": torch.float32}
+            if getattr(
+                getattr(cfg, "mega_moe_policy", None), "preserve_fp32_scales", False
+            )
+            else {}
+        )
+
         for weight, scale in ((w1, s1), (w2, s2)):
             expected = tuple((size + 127) // 128 for size in weight.shape)
             if tuple(scale.shape) != expected:
                 raise ValueError(
                     f"shared FP8 scale shape must be {expected}, got {tuple(scale.shape)}"
                 )
-        w1, sf1 = requant_weight_ue8m0(w1.contiguous(), s1)
-        w2, sf2 = requant_weight_ue8m0(w2.contiguous(), s2)
+        w1, sf1 = requant_weight_ue8m0(w1.contiguous(), s1, **requant_options)
+        w2, sf2 = requant_weight_ue8m0(w2.contiguous(), s2, **requant_options)
     else:
         sf1 = prepare_fp8_weight_scale_for_deepgemm(s1, 2 * intermediate, cfg.dim)
         sf2 = prepare_fp8_weight_scale_for_deepgemm(s2, cfg.dim, intermediate)

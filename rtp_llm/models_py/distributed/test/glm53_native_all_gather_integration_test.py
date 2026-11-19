@@ -75,22 +75,13 @@ def _worker(rank, store):
                     clear=True,
                 )
             )
-            stack.enter_context(
-                patch.dict(
-                    os.environ,
-                    {
-                        "GLM53_PREFILL_AG_GEMM": "1",
-                        "GLM53_PREFILL_GEMM_RS": "0",
-                        "GLM53_PREFILL_STABLE_RS": "0",
-                        "GLM53_COLLECTIVE_MAX_TOKENS": "4096",
-                    },
-                )
-            )
             token = forward_metadata._FORWARD_METADATA.set({})
             stack.callback(forward_metadata._FORWARD_METADATA.reset, token)
             # Exercise the actual startup topology agreement and communicator
             # once. No model loading and no fabricated multicast capability.
-            glm.configure_glm53_collective_gemm(group, 128, pc, enable_cuda_graph=False)
+            glm.configure_glm53_collective_gemm(
+                group, 128, pc, enable_cuda_graph=False, max_batch_tokens=4096
+            )
             owner = glm._STATE.native_all_gather
             if owner is None or owner.communicator.disabled:
                 raise RuntimeError(
@@ -100,6 +91,30 @@ def _worker(rank, store):
             communicator = owner.communicator
             assert isinstance(communicator, symm_mem.TorchSymmMemCommunicator)
             assert symm_mem.get_symm_mem_communicator() is None
+
+            with patch.object(
+                glm, "_ordered_reduce_scatter", wraps=glm._ordered_reduce_scatter
+            ) as ordered:
+                for rows in (0, 3, 8, 259, 4099):
+                    data = torch.arange(
+                        rows * 128, device=device, dtype=torch.float32
+                    ).view(rows, 128)
+                    partials = [
+                        ((data.remainder(37) - 18) * scale + shift).bfloat16()
+                        for scale, shift in ((1.01, 0.125), (-0.87, 0.25))
+                    ]
+                    expected = torch.zeros_like(data)
+                    for source in partials:
+                        expected.add_(source)
+                    shard = (rows + 1) // 2
+                    padded = partials[rank].new_zeros((2 * shard, 128))
+                    padded[:rows].copy_(expected)
+                    calls = ordered.call_count
+                    actual = glm.reduce_scatter_glm53(partials[rank])
+                    _assert_exact(actual, padded.narrow(0, rank * shard, shard))
+                    assert ordered.call_count == calls + int(
+                        glm._STATE.reduce_partials is None or 2 * shard > 4096
+                    )
 
             with (
                 patch.object(owner, "gather", wraps=owner.gather) as native,

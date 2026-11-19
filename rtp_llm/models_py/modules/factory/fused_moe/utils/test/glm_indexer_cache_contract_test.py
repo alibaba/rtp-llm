@@ -56,6 +56,29 @@ def _inputs(page, device):
 
 
 class GlmIndexerCacheContractTest(unittest.TestCase):
+    def test_window_topk_handles_ties_negative_infinity_and_short_rows(self):
+        from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+            select_stable_window_topk,
+        )
+
+        scores = torch.full((4, 600), float("-inf"))
+        scores[0, 1:560] = 1.0
+        scores[1, :511] = 99.0
+        starts = torch.tensor([1, 511, 17, 3], dtype=torch.int32)
+        ends = torch.tensor([560, 512, 17, 5], dtype=torch.int32)
+        for k in (3, 512, 700):
+            out = torch.empty(4, k, dtype=torch.int32)
+            native = mock.Mock(
+                side_effect=AssertionError("unexpected native call on CPU")
+            )
+            select_stable_window_topk(scores, starts, ends, out, native)
+            expected = torch.full_like(out, -1)
+            for row, count in enumerate((559, 1, 0, 2)):
+                valid = min(count, k)
+                expected[row, :valid] = torch.arange(valid)
+            torch.testing.assert_close(out, expected)
+            native.assert_not_called()
+
     def test_flat_and_pitched_views_alias_the_original_storage(self):
         for page in (16, 32, 64):
             storage, pool, *_ = _inputs(page, "cpu")
@@ -114,6 +137,27 @@ class GlmIndexerCacheContractTest(unittest.TestCase):
 
 
 class GlmIndexerCacheGpuTest(unittest.TestCase):
+    def test_native_window_topk_matches_stable_fallback_membership(self):
+        from rtp_llm.models_py.modules.dsv4.indexer_topk import (
+            select_stable_window_topk,
+        )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        scores = torch.ones(3, 3200, device="cuda")
+        scores[0, 17::3] = 2
+        scores[1, 10:13] = torch.tensor([4.0, 1.0, -float("inf")], device="cuda")
+        starts = torch.tensor([7, 10, 100], dtype=torch.int32, device="cuda")
+        ends = torch.tensor([3199, 13, 100], dtype=torch.int32, device="cuda")
+        for k in (512, 1024, 2048):
+            native = torch.empty(3, k, dtype=torch.int32, device="cuda")
+            fallback = torch.empty_like(native)
+            select_stable_window_topk(
+                scores, starts, ends, native, rtp_llm_ops.topk_v3_tie_break
+            )
+            select_stable_window_topk(scores, starts, ends, fallback)
+            torch.testing.assert_close(native.sort().values, fallback.sort().values)
+            torch.testing.assert_close(native[1:], fallback[1:])
+
     def test_strided_small_page_and_legacy_kernels_match_reference(self):
         self.assertTrue(torch.cuda.is_available())
         for page in (16, 32):

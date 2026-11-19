@@ -1155,7 +1155,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 flashinfer_sparse_supported,
             )
 
-            if self.bf16_backend != "auto" or flashinfer_sparse_supported(q.device):
+            if flashinfer_sparse_supported(q.device):
                 return self._forward_sparse(q, kv, global_indices)
 
         from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
