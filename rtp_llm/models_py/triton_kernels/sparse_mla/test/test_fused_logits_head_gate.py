@@ -4,6 +4,7 @@ import json
 import os
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -24,6 +25,43 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
 
 
 class TestFusedLogitsHeadGate(unittest.TestCase):
+
+    def test_packed_indexer_projection(self):
+        for rows in (1, 17, 257):
+            with self.subTest(rows=rows):
+                x = torch.randn(rows, 6144, device="cuda", dtype=torch.bfloat16)
+                weight = torch.randn(160, 6144, device="cuda", dtype=torch.bfloat16)
+                projected = nn.functional.linear(x, weight)
+                key, gate = projected.split((128, 32), -1)
+                reference = (x.double() @ weight.double().T).bfloat16()
+                torch.testing.assert_close(projected, reference, rtol=0.008, atol=0.002)
+                norm = SimpleNamespace(
+                    weight=torch.randn_like(weight[0, :128]),
+                    beta=torch.randn_like(weight[0, :128]),
+                    variance_epsilon=1e-6,
+                )
+                expected = nn.functional.layer_norm(
+                    key.float(), (128,), norm.weight.float(), norm.beta.float(), 1e-6
+                ).bfloat16()
+                torch.testing.assert_close(
+                    head_gate_module.normalize_projected_key(key, norm),
+                    expected,
+                    rtol=0.008,
+                    atol=0.001,
+                )
+                gate_out = torch.empty_like(gate, dtype=torch.float32)
+                normalized = head_gate_module.normalize_projected_key(key, norm, gate_out)
+                torch.testing.assert_close(normalized, expected, rtol=0.008, atol=0.001)
+                torch.testing.assert_close(gate_out, gate.float(), rtol=0, atol=0)
+                qs = torch.rand(rows, 32, 1, device="cuda")
+                expected_gate = gate.float().unsqueeze(-1) * qs * 128**-0.5 * 32**-0.5
+                torch.testing.assert_close(
+                    head_gate_module.scale_projected_gate(
+                        gate, qs, 128**-0.5, 32**-0.5
+                    ),
+                    expected_gate,
+                )
+
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available():

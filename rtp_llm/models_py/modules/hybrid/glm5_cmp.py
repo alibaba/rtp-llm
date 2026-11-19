@@ -235,8 +235,11 @@ class Glm5Cmp:
         q_b_projection = get_weight_and_scale_from_linear(self.self_attn.q_b_proj)
         output_projection = get_weight_and_scale_from_linear(self.self_attn.o_proj)
         if self.has_indexer:
-            indexer_k_projection = get_weight_and_scale_from_linear(
-                self.self_attn.indexer.wk
+            indexer = self.self_attn.indexer
+            indexer_k_projection = (
+                get_weight_and_scale_from_linear(indexer.wk)
+                if getattr(indexer, "packed_index_weight", None) is None
+                else None
             )
             indexer_q_projection = get_weight_and_scale_from_linear(
                 self.self_attn.indexer.wq_b
@@ -558,7 +561,8 @@ class Glm5Cmp:
             hidden_states.device
         )
         indexer = attention.indexer
-        if self._packed_head_gate_weight is None:
+        packed_index = indexer.packed_index_weight is not None
+        if not packed_index and self._packed_head_gate_weight is None:
             if _is_capturing():
                 raise RuntimeError("warm up head-gate weight packing before capture")
             # Pack the FP32 Head-Gate projection weight once for the CUDA
@@ -570,7 +574,6 @@ class Glm5Cmp:
         if indexer_cache.dtype != torch.uint8:
             indexer_cache = indexer_cache.view(torch.uint8)
         indexer_cache = indexer_cache.view(-1, 64, 1, 132)
-        indexer_k_weight, indexer_k_scale = self._indexer_k_projection
         indexer_q_weight, indexer_q_scale = self._indexer_q_projection
         # At long KV, paged Indexer scoring is heavy enough that overlapping it
         # with both main-query projections slows the critical path.
@@ -632,9 +635,14 @@ class Glm5Cmp:
                 self.input_layernorm.weight.data,
                 out=(residual_out, norm_out, hidden_fp8, hidden_scale),
                 epsilon=float(self.input_layernorm.variance_epsilon),
-                head_gate=gate_output,
-                notify_event=events.norm_to_indexer_k,
+                head_gate=None if packed_index else gate_output,
+                notify_event=None if packed_index else events.norm_to_indexer_k,
             )
+            if packed_index:
+                normalized_k, _ = indexer._project_normalized_index_k(
+                    norm_out, gate_out=gate_output
+                )
+                events.norm_to_indexer_k.record()
 
             # Run Q/KV-A projection and the independent Head-Gate linear
             # together; gate_output is raw Linear(norm), before Q-scale folding.
@@ -644,9 +652,9 @@ class Glm5Cmp:
                 qkv_weight,
                 qkv_scale,
                 out=projected,
-                head_gate_norm=norm_out,
+                head_gate_norm=None if packed_index else norm_out,
                 head_gate_weight=self._packed_head_gate_weight,
-                gate_output=gate_output,
+                gate_output=None if packed_index else gate_output,
             )
             # Split Q/KV-A, RMSNorm and quantize Q/latent-KV, apply K-PE RoPE,
             # and write the latent KV plus K-PE into the paged MLA cache.
@@ -710,19 +718,26 @@ class Glm5Cmp:
                 events.norm_to_indexer_k.wait()
                 # Project Indexer-K, apply LayerNorm + RoPE + Hadamard + FP8
                 # quantization, and write K plus its scale to the paged cache.
-                ops.indexer_k_cache(
-                    hidden_fp8,
-                    hidden_scale,
-                    indexer_k_weight,
-                    indexer_k_scale,
-                    indexer.k_norm.weight.data,
-                    indexer.k_norm.beta.data,
-                    implementation._cos_sin_cache,
-                    params.positions_d,
-                    params.slot_mapping,
-                    indexer_cache,
-                    epsilon=float(indexer.k_norm.variance_epsilon),
-                )
+                if packed_index:
+                    key = indexer.indexer_op.fused_rope_hadamard_k(
+                        normalized_k, params.positions_d
+                    )
+                    indexer.indexer_op.quant_k_only(key, kv_cache, params.slot_mapping)
+                else:
+                    indexer_k_weight, indexer_k_scale = self._indexer_k_projection
+                    ops.indexer_k_cache(
+                        hidden_fp8,
+                        hidden_scale,
+                        indexer_k_weight,
+                        indexer_k_scale,
+                        indexer.k_norm.weight.data,
+                        indexer.k_norm.beta.data,
+                        implementation._cos_sin_cache,
+                        params.positions_d,
+                        params.slot_mapping,
+                        indexer_cache,
+                        epsilon=float(indexer.k_norm.variance_epsilon),
+                    )
                 events.indexer_q_to_score.wait()
                 if serialize_score_after_q_path:
                     events.q_path_complete.wait()

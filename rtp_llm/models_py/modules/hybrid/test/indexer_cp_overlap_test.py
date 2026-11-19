@@ -36,12 +36,16 @@ class IndexerCPOverlapTest(unittest.TestCase):
                 fused_rope_quant_q=lambda q, p: transform("q_quant", (q, None)),
             )
             obj = NS(
+                packed_index_weight=None,
                 wk=projection("k_projection", xs),
                 wq_b=projection("q_projection", qs),
                 k_norm=lambda k: transform("k_norm", k),
                 indexer_op=op,
                 index_n_heads=2,
                 index_head_dim=2,
+            )
+            obj._project_normalized_index_k = (
+                Indexer._project_normalized_index_k.__get__(obj)
             )
             cp = NS(
                 full_rope_pos_ids=None,
@@ -75,6 +79,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
 
     def run_protocol(self, fused=True, fail=None, early=False):
         calls = []
+        gate = object()
         compute = NS(
             wait_event=lambda e: calls.append("join_ready"),
             wait_stream=lambda s: calls.append("failure_join"),
@@ -100,7 +105,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
         def fused_call(*args, cache_key):
             step("fused_qk")
             cache_key(NS(), NS(), NS(), NS())
-            return NS(), NS()
+            return NS(), NS(), gate
 
         def quant(query, key, cache, slots, restore, cache_key):
             cache_key(key, cache, slots, restore)
@@ -108,6 +113,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
             return NS(), NS()
 
         def weights(*args):
+            self.assertIs(args[-1], gate)
             step("weights")
             return NS()
 
@@ -129,7 +135,7 @@ class IndexerCPOverlapTest(unittest.TestCase):
             use_hadamard=True,
             _prefill_cp_fused_quant_enabled=lambda: fused,
             _fused_forward_prefill_cp_early_k=fused_call,
-            _get_q_k_bf16=lambda *args: (NS(), NS()),
+            _get_q_k_bf16=lambda *args: (NS(), NS(), gate),
             _get_logits_head_gate=weights,
             _compute_topk=topk,
         )

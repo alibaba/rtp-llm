@@ -75,22 +75,27 @@ class IndexerProloguePrefetchTest(unittest.TestCase):
 
         def projection(*args, **kwargs):
             step("key_projection")
-            return key
+            return key, gate
+
+        gate = object()
+
+        def score_weights(x, q_scale, projected_gate):
+            self.assertIs(projected_gate, gate)
+            step("gate")
 
         def prepare(*args, **kwargs):
             step("history")
             return buffers
 
         obj = NS(
-            wk=projection,
-            k_norm=lambda x: x,
+            _project_normalized_index_k=projection,
             wq_b=lambda *a, **k: torch.zeros(2, 128),
             index_n_heads=1,
             use_hadamard=True,
             index_head_dim=128,
             _is_sparse_prefill_cp=lambda a: True,
             _prefill_cp_fused_quant_enabled=lambda: True,
-            _get_logits_head_gate=lambda *a: step("gate"),
+            _get_logits_head_gate=score_weights,
             _compute_topk=lambda *a, **kw: step("topk"),
             indexer_op=NS(
                 index_head_dim=128,

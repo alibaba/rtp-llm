@@ -257,7 +257,7 @@ class MlaAttention(nn.Module):
             and CudaMxfp8Linear is not None
             and self.indexer is not None
             and self.accepts_mxfp8_input
-            and isinstance(self.indexer.wk, CudaMxfp8Linear)
+            and isinstance(getattr(self.indexer, "wk", None), CudaMxfp8Linear)
         )
         self._reuse_mxfp8_q_c_quant = bool(
             mxfp8_quant_act_packed is not None

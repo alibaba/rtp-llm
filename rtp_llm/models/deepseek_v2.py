@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
 from rtp_llm.model_loader.ffn_weight import (
@@ -21,6 +22,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
 )
+from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import (
@@ -44,6 +46,23 @@ from rtp_llm.utils.model_weight import (
     yarn_get_mscale,
     zeros,
 )
+
+
+def pack_indexer_weight(tensors):
+    wk, scales, gate = tensors
+    rows, cols = wk.shape
+    if scales.shape != ((rows + 127) // 128, (cols + 127) // 128):
+        raise ValueError(
+            f"Unexpected indexer scale shape {scales.shape} for {wk.shape}"
+        )
+    expanded = scales.float().repeat_interleave(128, 0).repeat_interleave(128, 1)
+    return torch.cat((wk.float() * expanded[:rows, :cols], gate.float()), dim=0)
+
+
+class PackedIndexerWeight(AtomicWeight):
+    def _load_raw_tensor(self, tensor_source, layer_id, device, load_config):
+        weights = super()._load_raw_tensor(tensor_source, layer_id, device, load_config)
+        return {self.name: weights[self.name].to(torch.bfloat16)}
 
 
 class DeepSeekV2Weight(ModelDeployWeightInfo):
@@ -186,6 +205,57 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
         # GLM-5.2 shared DSA layers do not have indexer weights; they reuse
         # top-k indices computed by the latest full layer.
         if dsa_layer_has_indexer(self.model_config, layer_id):
+            if (
+                getattr(self.model_config, "model_type", None) in ("glm_5", "glm_5_mtp")
+                and getattr(self.model_config, "indexer_types", None)
+                and self.model_config.attn_config.indexer_head_dim == 128
+                and type(self._quant_config) is Fp8BlockWiseQuantConfig
+                and self._quant_config.is_quanted()
+            ):
+                scale_fmt = self._quant_config.scale_fmt
+                prefix = "model.layers.{i}.self_attn.indexer."
+                mla_layer_weights.append(
+                    PackedIndexerWeight(
+                        W.mla_indexer_k_gate_w,
+                        [
+                            CkptWeightInfo(prefix + "wk.weight"),
+                            CkptWeightInfo(
+                                prefix
+                                + "wk"
+                                + PerBlockFp8Weight._get_scale_suffix(scale_fmt)
+                            ),
+                            CkptWeightInfo(prefix + "weights_proj.weight"),
+                        ],
+                        pack_indexer_weight,
+                        data_type=torch.float32,
+                    )
+                )
+            else:
+                mla_layer_weights.extend(
+                    [
+                        MlaAttnAtomicWeight(
+                            W.mla_indexer_k_w,
+                            [
+                                CkptWeightInfo(
+                                    "model.layers.{i}.self_attn.indexer.wk.weight",
+                                    identity,
+                                )
+                            ],
+                            transpose,
+                        ),
+                        AtomicWeight(
+                            W.mla_indexer_weights_proj_w,
+                            [
+                                CkptWeightInfo(
+                                    "model.layers.{i}.self_attn.indexer.weights_proj.weight",
+                                    identity,
+                                )
+                            ],
+                            transpose,
+                            data_type=torch.float32,
+                        ),
+                    ]
+                )
             mla_layer_weights.extend(
                 [
                     MlaAttnAtomicWeight(
@@ -194,15 +264,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             CkptWeightInfo(
                                 "model.layers.{i}.self_attn.indexer.wq_b.weight",
                                 identity,
-                            )
-                        ],
-                        transpose,
-                    ),
-                    MlaAttnAtomicWeight(
-                        W.mla_indexer_k_w,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.self_attn.indexer.wk.weight", identity
                             )
                         ],
                         transpose,
@@ -226,17 +287,6 @@ class DeepSeekV2Weight(ModelDeployWeightInfo):
                             )
                         ],
                         identity,
-                    ),
-                    AtomicWeight(
-                        W.mla_indexer_weights_proj_w,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.self_attn.indexer.weights_proj.weight",
-                                identity,
-                            )
-                        ],
-                        transpose,
-                        data_type=torch.float32,
                     ),
                 ]
             )

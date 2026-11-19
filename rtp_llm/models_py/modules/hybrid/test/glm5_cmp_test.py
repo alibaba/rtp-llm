@@ -126,6 +126,27 @@ def test_cmp_constructor_does_not_load_runtime() -> None:
     prepare_router_weight.assert_not_called()
 
 
+def test_cmp_initializes_with_packed_bf16_indexer() -> None:
+    projection = SimpleNamespace(weight=torch.empty(1), weight_scales=torch.empty(1))
+    cmp = object.__new__(bridge.Glm5Cmp)
+    cmp.ops = None
+    cmp._is_moe_layer = False
+    cmp.self_attn = SimpleNamespace(
+        has_indexer=True,
+        indexer=SimpleNamespace(
+            packed_index_weight=torch.empty(160, 64), wq_b=projection
+        ),
+        fused_qkv_a_proj=projection,
+        q_b_proj=projection,
+        o_proj=projection,
+    )
+    ops = object()
+    cmp._initialize_for_cmp(ops)
+    assert cmp.ops is ops
+    assert cmp._indexer_k_projection is None
+    assert cmp._indexer_q_projection[0] is projection.weight
+
+
 def _selection_cmp(*, has_indexer: bool, reuses_indexer: bool, is_moe_layer: bool):
     cmp = object.__new__(bridge.Glm5Cmp)
     cmp._disabled_reason = None
@@ -288,6 +309,7 @@ def test_fused_shared_expert_is_not_added_twice() -> None:
     shared_expert = Mock(side_effect=AssertionError("shared expert ran twice"))
     layer = SimpleNamespace(
         fake_balance_expert=None,
+        _cmp_moe_streams=None,
         fused_moe=SimpleNamespace(forward_prepacked=Mock(return_value=expected)),
         _use_mega_moe_fused_shared=True,
         shared_expert=shared_expert,
