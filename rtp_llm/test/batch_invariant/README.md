@@ -1,10 +1,11 @@
 # Qwen batch-invariant inference
 
 The startup switch is `RTP_BATCH_INVARIANT=1`. An unset variable or `0`
-selects the regular engine paths. Use NVIDIA L20D (SM103),
-`DP_SIZE=EP_SIZE=PP_SIZE=1`, the official BF16 checkpoint, BF16 KV cache,
-64-token pages, CUDA eager and ordinary text generation. Dynamic batching
-continues to run with the switch enabled.
+selects the regular engine paths. Use NVIDIA L20D (SM103), the official BF16
+checkpoint, BF16 KV cache, 64-token pages, CUDA eager and ordinary text
+generation. Dynamic batching continues to run with the switch enabled.
+The table below uses `DP_SIZE=EP_SIZE=PP_SIZE=1`. The single-node EP4
+configurations have their own commands below.
 
 | Checkpoint | RTP model type | TP |
 | --- | --- | --- |
@@ -521,3 +522,101 @@ The first CUDA failure is on line 73 of
 The tensor format's regular linear uses E4M3 weights with a scalar FP32 scale,
 and `CutlassExpertsFp8` uses one FP32 weight scale per expert. Official
 prequantized checkpoints remain service-unverified in this round.
+
+## Single-node EP4 on L20D
+
+Use four L20D GPUs, PP1, CUDA eager, BF16 KV cache and 64-token pages.
+Hybrid checkpoints use FP32 SSM state. Add `RTP_BATCH_INVARIANT=1` to
+enable the mode. `FP8_PER_BLOCK` quantizes the BF16 checkpoint at load time.
+
+| Checkpoint | Tested revision | Format | TP/DP/EP | Local experts |
+| --- | --- | --- | --- | --- |
+| Qwen3-30B-A3B | `ad44e777bcd18fa416d9da3bd8f70d33ebb85d39` | BF16 | 1/4/4 | 32 of 128 |
+| Qwen3.6-35B-A3B | `995ad96eacd98c81ed38be0c5b274b04031597b0` | BF16, FP8_PER_BLOCK | 1/4/4 | 64 of 256 |
+| Qwen3.5-397B-A17B | `7cad2bae11cb49ca79f7d6a0954de2e2756f4e27` | BF16, FP8_PER_BLOCK | 4/1/4 | 128 of 512 |
+
+DP4 uses the existing padded all-gather on `Group.STAGE` and sums the
+expert contributions in FP32 in group rank order. TP4 reduces the routed
+and gated shared partials once each on `Group.TP`. FP8 keeps the native W8A8
+projections and expert GEMMs. [vLLM ordered reduce-scatter](https://github.com/vllm-project/vllm/blob/df763962fc61f8d0047e89aa39079efe0e70e678/vllm/model_executor/determinism/batch_invariant.py#L1192)
+
+### Reproduce the EP4 checks
+
+Build and install the CUDA13 wheel as above. Run the server in a fresh
+directory for each budget and run the client from that directory so it
+can read `logs/batch_schedule.*.log`. This example uses 35B FP8. For BF16
+set `precision=(--act_type bf16)`. For 30B set `model_type=qwen_3_moe`.
+For 397B set `TP_SIZE=4 DP_SIZE=1` and use just the first RPC address.
+
+```bash
+checkpoint=/path/to/Qwen3.6-35B-A3B
+model_type=qwen35_moe
+precision=(--quantization FP8_PER_BLOCK)
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export WORLD_SIZE=4 LOCAL_WORLD_SIZE=4 TP_SIZE=1 DP_SIZE=4 EP_SIZE=4 PP_SIZE=1
+export WORLD_RANK=0 LOCAL_RANK=0 ROLE_TYPE=PDFUSION LOG_PATH=logs
+export RTP_LLM_RECORD_DECODE_SAMPLE_RATE=1
+budget=0
+mode=1
+RTP_BATCH_INVARIANT="$mode" python3 -m rtp_llm.start_server \
+    --checkpoint_path "$checkpoint" --tokenizer_path "$checkpoint" \
+    --model_type "$model_type" "${precision[@]}" \
+    --max_seq_len 1024 --kv_cache_mem_mb 4096 --prefill_chunk_size "$budget" \
+    --worker_info_port_num 32 --start_port 22680
+```
+
+```bash
+reference="$work/ep4-solo.npz"  # Use a distinct path for each combination.
+addresses=(--dp-addresses 127.0.0.1:22681 127.0.0.1:22713 127.0.0.1:22745 127.0.0.1:22777)
+# For TP4 use addresses=(--address 127.0.0.1:22681).
+python3 "$tests/service_test.py" --checkpoint "$checkpoint" "${addresses[@]}" \
+    --save "$reference" --save-cases rpc-arrays
+# Restart with budget=192 in a fresh run directory.
+python3 "$tests/service_test.py" --checkpoint "$checkpoint" "${addresses[@]}" \
+    --chunked --reference "$reference" --save-cases rpc-arrays
+# For an eight-step greedy check use budget=0 and the rank-0 address.
+python3 "$tests/service_test.py" --checkpoint "$checkpoint" \
+    --address 127.0.0.1:22681 --greedy-logits --save greedy.npz
+```
+
+For the ordinary EP baseline use `mode=0`. For 35B FP8 DP4 also pass
+`--moe_strategy fp8_per_block_pure_dp`. The other cases use `auto`.
+For DP4, `--cross-dp-only` runs the budget-0 solo and cross-rank cases.
+The client checks local mixing, prompt grants and overlapping rank-1
+prefill/decode forwards by RPC ID, recorded rank, forward step and clock
+interval. `--save-cases` saves the compared arrays.
+
+The four-rank operator test checks uneven and zero token counts, top-k
+distributed across ranks and the FP8 256/257-token boundary.
+
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+python3 -m torch.distributed.run --standalone --nproc-per-node=4 "$tests/ep_test.py"
+python3 -m torch.distributed.run --standalone --nproc-per-node=4 "$tests/ep_test.py" --fp8
+python3 -m torch.distributed.run --standalone --nproc-per-node=4 "$tests/ep_test.py" --tp
+python3 -m torch.distributed.run --standalone --nproc-per-node=4 "$tests/ep_test.py" --tp --fp8
+```
+
+### EP4 validation
+
+The runtime at `958133f47e` was verified on four L20D SM103 GPUs. Each
+comparison counts differences in token IDs, raw FP32 logits, full FP32
+logprobs and selected-token logprobs, in that order. The 193-token target
+ran for four fixed steps with 11- and 321-token local neighbors at budget
+0, and with an 11-token neighbor at budget 192. DP4 also moved the target
+from rank 0 to rank 2 while rank 1 served one and three real requests,
+respectively, in the target's recorded prefill and decode rounds.
+
+| Model and format | Local mixing and chunking | DP4 live peer load | BI-off vs `9b610cd6db`, 8 greedy steps |
+| --- | --- | --- | --- |
+| 30B BF16 | 0/0/0/0 | 0/0/0/0 | 0/0/0/0 |
+| 35B BF16 | 0/0/0/0 | 0/0/0/0 | 0/0/0/0 |
+| 35B FP8 | 0/0/0/0 | 0/0/0/0 | 0/0/0/0 |
+| 397B BF16 | 0/0/0/0 | DP1 | 0/0/0/0 |
+| 397B FP8 | 0/0/0/0 | DP1 | 0/0/0/0 |
+
+The two ordinary BF16 DP4 launches selected `DeepepNormalRouterNoQuant`.
+The bundled DeepEP build failed in legacy `get_dispatch_layout` on SM103.
+With [DeepEP 2.1.0+a56d615](https://github.com/deepseek-ai/DeepEP/commit/a56d6156febcd9976e55adc85b5155bfac9f28f8)
+rebuilt with `TORCH_CUDA_ARCH_LIST=10.3`, both revisions returned finite
+FP32 logits and matched bit for bit.

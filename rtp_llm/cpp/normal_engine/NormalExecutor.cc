@@ -7,6 +7,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <memory>
 #include <string>
@@ -25,6 +26,11 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+int64_t monotonicTimeUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -424,7 +430,20 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
                 }
             }
         }
+        // These eager DP/EP ranks enter the same sequence of MoE collectives.
+        // Count every forward, including fake-only and unsampled batches, so
+        // the recorder's per-rank filtering cannot shift the ordinal.
+        const bool align_dp_forward = execution_recorder.enabled() && !is_propose_ && use_all_gather_
+                                      && parallelism_config_.tp_size == 1 && parallelism_config_.pp_size == 1
+                                      && parallelism_config_.dp_size > 1
+                                      && parallelism_config_.dp_size == parallelism_config_.ep_size
+                                      && parallelism_config_.local_world_size == parallelism_config_.world_size;
+        const int64_t forward_step     = align_dp_forward ? ++dp_forward_step_ : 0;
+        const int64_t forward_start_us = recorded_batch && forward_step ? monotonicTimeUs() : 0;
         model_output                        = std::move(model_->forward(model_input));
+        if (forward_start_us) {
+            recorded_batch->setDpForward(parallelism_config_.dp_rank, forward_step, forward_start_us, monotonicTimeUs());
+        }
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (expert_balancer_) {

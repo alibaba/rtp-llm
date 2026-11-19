@@ -92,6 +92,23 @@ class BatchInvariantConfigTest(unittest.TestCase):
             model.quant_config = Fp8BlockWiseQuantConfig(group_size=64)
             with self.assertRaisesRegex(ValueError, "FP8_PER_BLOCK with 128x128"):
                 configure_batch_invariant_model(engine, model)
+            parallel = engine.parallelism_config
+            parallel.world_size = parallel.local_world_size = 4
+            parallel.dp_size = parallel.ep_size = 4
+            engine.moe_config.use_all_gather = False
+            engine.moe_config.use_deepep_moe = True
+            model.quant_config = Fp8BlockWiseQuantConfig()
+            configure_batch_invariant_model(engine, model)
+            self.assertEqual(engine.moe_config.moe_strategy, "fp8_per_block_pure_dp")
+            self.assertTrue(engine.moe_config.use_all_gather)
+            self.assertFalse(engine.moe_config.use_deepep_moe)
+            model.quant_config = None
+            engine.moe_config.moe_strategy = "auto"
+            configure_batch_invariant_model(engine, model)
+            self.assertEqual(engine.moe_config.moe_strategy, "no_quant_pure_dp")
+            engine.moe_config.moe_strategy = "auto"
+            parallel.world_size = parallel.local_world_size = 1
+            parallel.dp_size = parallel.ep_size = 1
             model.quant_config = None
             model.num_layers = 60
             model.hidden_size = 4096
@@ -103,14 +120,16 @@ class BatchInvariantConfigTest(unittest.TestCase):
                 ValueError, "Qwen3.5-397B-A17B requires .*TP_SIZE=4"
             ):
                 configure_batch_invariant_model(engine, model)
-            parallel = engine.parallelism_config
             parallel.world_size = parallel.local_world_size = parallel.tp_size = 4
             parallel.ffn_tp_size = 4
             configure_batch_invariant_model(engine, model)
+            parallel.ep_size = 4
+            configure_batch_invariant_model(engine, model)
             model.quant_config = Fp8BlockWiseQuantConfig()
             configure_batch_invariant_model(engine, model)
-            parallel.ep_size = 4
-            with self.assertRaisesRegex(ValueError, "DP_SIZE=EP_SIZE=PP_SIZE=1"):
+            self.assertEqual(engine.moe_config.moe_strategy, "auto")
+            parallel.ep_size = 2
+            with self.assertRaisesRegex(ValueError, "DP_SIZE=1/EP_SIZE=4"):
                 configure_batch_invariant_model(engine, model)
             parallel.ep_size = 1
             parallel.prefill_cp_config.method = CPRotateMethod.PREFILL_CP
@@ -175,6 +194,18 @@ class BatchInvariantConfigTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "TP_SIZE=1"):
                         configure_batch_invariant_model(engine, model)
                     engine.parallelism_config.tp_size = 1
+                    engine.parallelism_config.world_size = 4
+                    engine.parallelism_config.local_world_size = 4
+                    engine.parallelism_config.dp_size = 4
+                    engine.parallelism_config.ep_size = 4
+                    if model_type == "qwen_3_moe":
+                        configure_batch_invariant_model(engine, model)
+                        self.assertEqual(
+                            engine.moe_config.moe_strategy, "no_quant_pure_dp"
+                        )
+                    else:
+                        with self.assertRaisesRegex(ValueError, "DP_SIZE=EP_SIZE=1"):
+                            configure_batch_invariant_model(engine, model)
                     attn.kv_head_num = 2
                     with self.assertRaisesRegex(
                         ValueError, "requires one of these architectures"

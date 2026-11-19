@@ -105,6 +105,7 @@ private:
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
     bool enable_detail_log_       = false;
+    int64_t dp_forward_step_      = 0;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;
