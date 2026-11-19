@@ -9,7 +9,7 @@ import json
 import math
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import patch
 
 import torch
 import xgrammar as xgr
@@ -17,12 +17,12 @@ from fastapi.testclient import TestClient
 
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
+    PyEnvConfigs,
     PyMiscellaneousConfig,
     RenderConfig,
     VitConfig,
 )
 from rtp_llm.frontend.frontend_app import FrontendApp
-from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
@@ -229,19 +229,23 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
             self.backend,
         )
         self.assertIsInstance(endpoint.chat_renderer, KimiK3Renderer)
-        frontend = FrontendServer.__new__(FrontendServer)
+        env = PyEnvConfigs()
+        env.server_config.ip = "127.0.0.1"
+        env.server_config.server_port = 0
+        env.server_config.frontend_metrics_enable = False
+        env.model_args.model_type = model
+        with (
+            patch("rtp_llm.frontend.frontend_server.AccessLogger"),
+            patch("rtp_llm.frontend.frontend_server.kmonitor.init"),
+            patch(
+                "rtp_llm.frontend.frontend_server.get_global_controller",
+                return_value=Controller(),
+            ),
+        ):
+            frontend = FrontendServer(0, 0, env)
         frontend._openai_endpoint = endpoint
-        frontend._request_metrics = FrontendRequestMetrics()
         frontend._frontend_worker = SimpleNamespace(
             is_streaming=lambda request: bool(request.get("stream", False))
-        )
-        frontend._global_controller = Controller()
-        frontend._access_logger = Mock()
-        frontend.rank_id = frontend.server_id = "0"
-        frontend.is_embedding = False
-        frontend.py_env_configs = SimpleNamespace(
-            server_config=SimpleNamespace(ip="127.0.0.1", server_port=0),
-            model_args=SimpleNamespace(model_type=model),
         )
         owner = FrontendApp.__new__(FrontendApp)
         owner.frontend_server = frontend

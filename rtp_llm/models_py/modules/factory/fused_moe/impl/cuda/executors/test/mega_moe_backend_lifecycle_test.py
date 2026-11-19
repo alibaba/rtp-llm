@@ -44,12 +44,14 @@ CHUNK_MODULE = "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunke
 
 class MegaMoeLifecycleTest(unittest.TestCase):
     def setUp(self):
-        vendor_patch = patch.dict(
-            sys.modules,
-            {"deep_gemm": SimpleNamespace(get_block_m_for_mega_moe_fp8=Mock())},
-        )
-        vendor_patch.start()
-        self.addCleanup(vendor_patch.stop)
+        if "deep_gemm" in sys.modules:
+            self.addCleanup(
+                sys.modules.__setitem__, "deep_gemm", sys.modules["deep_gemm"]
+            )
+        else:
+            self.addCleanup(sys.modules.pop, "deep_gemm", None)
+        # Preserve runtime modules loaded lazily during each test.
+        sys.modules["deep_gemm"] = SimpleNamespace(get_block_m_for_mega_moe_fp8=Mock())
 
     def test_routed_arena_is_cached_per_collective_group(self):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe import buffer
@@ -326,13 +328,14 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                 with patch(
                     CHUNK_MODULE + ".synchronize_moe_chunk_tokens",
                     return_value=7,
-                ), patch.object(
+                ) as synchronize, patch.object(
                     model, "forward", side_effect=lambda x, *args: x + 1
                 ) as forward:
                     result = self.fused_moe(model)(
                         hidden, torch.ones(3, 2), torch.zeros(3, 2, dtype=torch.int64)
                     )
                 torch.testing.assert_close(result, hidden + 1)
+                synchronize.assert_called_once_with(hidden.size(0), hidden.device)
                 self.assertEqual(
                     [call.args[0].size(0) for call in forward.call_args_list],
                     [2, 1, 0, 0],

@@ -1,6 +1,7 @@
 """Exercise the common executor with each DeepGEMM recipe and model policy."""
 
 import os
+import sys
 import unittest
 import weakref
 from contextlib import ExitStack
@@ -48,6 +49,15 @@ class RecordingPacker:
 
 
 class CommonMegaMoeExecutionTest(unittest.TestCase):
+    def setUp(self):
+        if "deep_gemm" in sys.modules:
+            self.addCleanup(
+                sys.modules.__setitem__, "deep_gemm", sys.modules["deep_gemm"]
+            )
+        else:
+            self.addCleanup(sys.modules.pop, "deep_gemm", None)
+        sys.modules["deep_gemm"] = SimpleNamespace(get_block_m_for_mega_moe_fp8=Mock())
+
     def executor(self, recipe="mega_moe", *, prepared=True):
         cfg = SimpleNamespace(
             layer_id=3,
@@ -249,7 +259,9 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
             stack.enter_context(
                 patch("torch.cuda.is_current_stream_capturing", return_value=False)
             )
-            stack.enter_context(patch("deep_gemm.get_num_sms", return_value=132))
+            stack.enter_context(
+                patch("deep_gemm.get_num_sms", return_value=132, create=True)
+            )
             stack.enter_context(
                 patch("torch.distributed.is_initialized", return_value=False)
             )
@@ -332,7 +344,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
         with patch(
             PACKAGE + ".mega_moe.prepare_fp4_weight_scale_for_deepgemm", new=prepare
         ), patch(
-            "deep_gemm.transform_weights_for_mega_moe", new=transform
+            "deep_gemm.transform_weights_for_mega_moe", new=transform, create=True
         ), patch.object(
             executor, "_setup_buffer_and_warmup", new=allocate
         ):
@@ -358,6 +370,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
         ) as requant, patch(
             "deep_gemm.transform_weights_for_mega_moe",
             side_effect=lambda l1, l2: (l1, l2),
+            create=True,
         ), patch.object(
             prepared, "_setup_buffer_and_warmup"
         ):
@@ -401,9 +414,9 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
                 PACKAGE + ".mega_moe.prepare_fp4_weight_scale_for_deepgemm",
                 side_effect=lambda t, *args: t,
             ), patch(
-                "deep_gemm.transform_weights_for_mega_moe", side_effect=transform
-            ), patch(
-                "deep_gemm.mega._transpose_sf_for_utccp", side_effect=lambda t: t
+                "deep_gemm.transform_weights_for_mega_moe",
+                side_effect=transform,
+                create=True,
             ), patch.object(
                 executor, "_setup_buffer_and_warmup"
             ):
