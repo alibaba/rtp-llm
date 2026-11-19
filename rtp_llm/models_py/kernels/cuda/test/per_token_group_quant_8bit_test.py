@@ -8,11 +8,11 @@ import triton.language as tl
 from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_fp8_v2,
@@ -271,6 +271,32 @@ def sglang_per_token_group_quant_8bit(
         per_token_group_quant_fp8(x, x_q, x_s, group_size, eps, fp8_min, fp8_max, False)
 
     return x_q, x_s
+
+
+class PackedScaleLayoutTest(TestCase):
+    def test_ue8m0_storage(self):
+        for batch, rows, groups in itertools.product(
+            ((), (2,)), (0, 1, 4, 5, 17), (0, 1, 4, 5, 8)
+        ):
+            with self.subTest(batch=batch, rows=rows, groups=groups):
+                shape = (*batch, rows, 128 * groups)
+                scales = create_per_token_group_quant_fp8_output_scale(
+                    shape, "cpu", 128, True, True, True
+                )
+                packed_k = (groups + 3) // 4
+                padded_rows = (rows + 3) // 4 * 4
+                backing = torch.empty((*batch, packed_k, padded_rows), dtype=torch.int)
+                expected = backing.transpose(-1, -2)[..., :rows, :]
+                self.assertEqual(scales.shape, expected.shape)
+                self.assertEqual(scales.stride(), expected.stride())
+                self.assertEqual(scales.dtype, expected.dtype)
+                self.assertEqual(scales.storage_offset(), 0)
+                self.assertEqual(scales.untyped_storage().nbytes(), backing.nbytes)
+                if backing.numel():
+                    other = create_per_token_group_quant_fp8_output_scale(
+                        shape, "cpu", 128, True, True, True
+                    )
+                    self.assertNotEqual(scales.data_ptr(), other.data_ptr())
 
 
 class PerTokenGroupQuantTest(TestCase):

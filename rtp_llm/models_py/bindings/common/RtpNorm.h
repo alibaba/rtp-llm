@@ -13,6 +13,5 @@ void fused_add_layernorm_quant_fp8(at::Tensor& input,
                                    double      eps);
 void fused_bias_add(at::Tensor& input, at::Tensor& bias);
 void fused_bias_gelu(at::Tensor& input, at::Tensor& bias);
-void fused_bias_gelu_quant_fp8(
-    at::Tensor& input, at::Tensor& bias, at::Tensor& output, at::Tensor& scales, bool add_bias = true);
+void fused_bias_gelu_quant_fp8(at::Tensor& input, at::Tensor& bias, at::Tensor& output, at::Tensor& scales);
 }  // namespace torch_ext

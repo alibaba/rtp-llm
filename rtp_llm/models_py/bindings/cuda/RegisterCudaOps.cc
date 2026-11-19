@@ -4,10 +4,6 @@
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/common/CpuTpStatus.h"
 
-#if defined(ENABLE_FP8_SM120)
-#include "rtp_llm/models_py/bindings/cuda/cutlass/cutlass_kernels/fp8_blockwise_sm120/cutlass_scaled_mm_blockwise_sm120_fp8.h"
-#endif
-
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
 #endif
@@ -72,19 +68,6 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
                   py::arg("input_global_scale"),
                   py::arg("mask"),
                   py::arg("use_silu_and_mul"));
-#endif
-
-#if defined(ENABLE_FP8_SM120)
-    rtp_ops_m.def("has_cutlass_scaled_mm_blockwise_sm120_fp8", &has_cutlass_scaled_mm_blockwise_sm120_fp8);
-    rtp_ops_m.def("cutlass_scaled_mm_blockwise_sm120_fp8",
-                  &cutlass_scaled_mm_blockwise_sm120_fp8,
-                  py::arg("D"),
-                  py::arg("A"),
-                  py::arg("B"),
-                  py::arg("A_sf"),
-                  py::arg("B_sf"),
-                  py::arg("bias")     = std::nullopt,
-                  py::arg("use_gelu") = false);
 #endif
 
     rtp_ops_m.def("moe_pre_reorder",

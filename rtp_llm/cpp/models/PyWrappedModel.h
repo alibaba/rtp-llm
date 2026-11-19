@@ -89,15 +89,24 @@ public:
                    MtpIndexerRole            mtp_indexer_role             = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
-    // The embedding executor verifies the model and handler agree on pooled rows.
-    void usePooledEmbeddingForward() {
-        py_forward_method_ = py_model_.attr("forward_pooled_embedding");
+    bool usePooledEmbeddingForward(const py::object& handler) {
+        // Graph replay produces full token rows. Its scorer must use the full-output contract.
+        if (enable_cuda_graph_ || !py::hasattr(handler, "score_pooled_rows")
+            || !py::hasattr(py_model_, "get_pooled_embedding_forward")) {
+            return false;
+        }
+        auto forward = py_model_.attr("get_pooled_embedding_forward")(handler);
+        if (forward.is_none()) {
+            return false;
+        }
+        py_forward_method_ = std::move(forward);
+        return true;
     }
 
-    GptModelOutputs            forward(const GptModelInputs& inputs) override;
-    PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
-    void                       releaseBuffers() override;
-    py::object&                getPyModel() {
+    GptModelOutputs       forward(const GptModelInputs& inputs) override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    void                  releaseBuffers() override;
+    py::object&           getPyModel() {
         return py_model_;
     }
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;

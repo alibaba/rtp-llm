@@ -11,9 +11,8 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
-from rtp_llm.models_py.utils.arch import is_sm12x
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops import HWKernelConfig
-from rtp_llm.utils.sm120_fp8_backend import resolve_sm120_fp8_backend
 
 
 class CudaFp8GEMMLinear(LinearBase):
@@ -25,20 +24,6 @@ class CudaFp8GEMMLinear(LinearBase):
     supports_fused_bias_gelu_quant = True
     supports_prequantized_activation = True
     fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
-
-    @classmethod
-    def _is_fp8_per_block_candidate(
-        cls,
-        quant_config: object,
-        weight: torch.Tensor,
-        weight_scales: Optional[torch.Tensor],
-    ) -> bool:
-        return (
-            weight_scales is not None
-            and quant_config is not None
-            and weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
-            and quant_config.get_method() == "FP8_PER_BLOCK"
-        )
 
     @classmethod
     def can_handle(
@@ -56,9 +41,7 @@ class CudaFp8GEMMLinear(LinearBase):
             return False
         method = quant_config.get_method()
         if method == "FP8_PER_BLOCK":
-            return not (
-                is_sm12x(weight.device) and resolve_sm120_fp8_backend() == "cutlass"
-            )
+            return True
         # MODELOPT_FP4 hybrid: attention/non-MoE atomic weights are stored as FP8
         # per-block; FP4-only weights have weight_scale_2/input_scale set, so they
         # still go to the FP4 dispatch path.
@@ -71,28 +54,6 @@ class CudaFp8GEMMLinear(LinearBase):
         ):
             return True
         return False
-
-    @classmethod
-    def rejection_reason(
-        cls,
-        quant_config: object,
-        weight: torch.Tensor,
-        weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional["HWKernelConfig"] = None,
-        weight_scale_2: Optional[torch.Tensor] = None,
-        input_scale: Optional[torch.Tensor] = None,
-    ) -> Optional[str]:
-        if (
-            not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales)
-            or not is_sm12x(weight.device)
-            or resolve_sm120_fp8_backend() != "cutlass"
-        ):
-            return None
-        from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
-
-        return CudaFp8VllmBlockwiseLinear.rejection_reason(
-            quant_config, weight, weight_scales
-        )
 
     @torch.inference_mode()
     def __init__(
@@ -134,6 +95,15 @@ class CudaFp8GEMMLinear(LinearBase):
         self.cached_scales = getattr(self._deepgemm_linear, "cached_scales", None)
         self.cached_scales_max_len = getattr(
             self._deepgemm_linear, "cached_scales_max_len", 0
+        )
+
+    @property
+    def supports_output_rows(self) -> bool:
+        # A change in M must stay on the validated blockwise DeepGEMM path.
+        return (
+            self._flashinfer_linear is None
+            and self.scale_ue8m0
+            and is_sm120(self.weight.device)
         )
 
     def _create_flashinfer_backend(

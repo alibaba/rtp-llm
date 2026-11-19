@@ -11,7 +11,6 @@ cc_library(
     ]),
     deps = [
         "//rtp_llm/cpp/engine_base:engine_base",
-        "//rtp_llm/cpp/engine_base:embedding_id_range",
         "//rtp_llm/cpp/engine_base:executor",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base:worker_status_info",

@@ -481,6 +481,17 @@ class DenseSiluQuantProductionRouteSM120Test(unittest.TestCase):
     def _activation(self, gate_up):
         return self.activation(gate_up)
 
+    def test_output_rows_require_sm120_ue8m0_and_a_single_backend(self):
+        linear = self._linear()
+        self.assertEqual(
+            linear.supports_output_rows,
+            torch.cuda.get_device_capability(linear.weight.device) == (12, 0),
+        )
+        with patch.object(linear, "scale_ue8m0", False):
+            self.assertFalse(linear.supports_output_rows)
+        with patch.object(linear, "_flashinfer_linear", torch.nn.Identity()):
+            self.assertFalse(linear.supports_output_rows)
+
     def test_factory_wrapper_real_gpu_forward(self):
         for with_bias in (False, True):
             linear = self._linear(with_bias=with_bias)

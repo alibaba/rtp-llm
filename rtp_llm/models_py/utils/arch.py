@@ -73,7 +73,7 @@ def is_sm12x(device_id: Optional[Union[int, torch.device]] = None) -> bool:
 
 
 def is_sm120(device_id: Optional[Union[int, torch.device]] = None) -> bool:
-    """Exact SM 12.0 devices supported by the current SM120 kernels."""
+    """SM 12.0 consumer Blackwell devices."""
     if not is_cuda() or _is_explicit_non_cuda_device(device_id):
         return False
     return get_sm(device_id) == (12, 0)

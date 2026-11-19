@@ -132,6 +132,62 @@ class EmbeddingLookupOpTest(TestCase):
         expected[text_rows] += self.weight[input_ids[text_rows].long()] * 0.5
         torch.testing.assert_close(output, expected)
 
+    def test_embedding_bert_masked_visual_ids_preserve_valid_type_embeddings(self):
+        input_ids = torch.tensor(
+            [1, -1, -3, 2147483647, -2147483648, 999999, -1, 4],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        token_type_ids = torch.tensor(
+            [1, -1, -3, 2, 2147483647, -2147483648, 1, 0],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        position_ids = torch.arange(8, dtype=torch.int32, device=self.device)
+        mask = torch.tensor(
+            [1, 0, 0, 0, 0, 0, 0, 1], dtype=torch.int32, device=self.device
+        )
+        safe_type_ids = torch.tensor(
+            [1, 0, 0, 0, 0, 0, 1, 0], dtype=torch.long, device=self.device
+        )
+        text_rows = mask.bool()
+
+        for dtype in (torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                weight = self.weight.to(dtype)
+                position_table = (
+                    torch.arange(8, dtype=torch.float32, device=self.device)
+                    .unsqueeze(1)
+                    .expand(-1, 32)
+                    / 32
+                ).to(dtype)
+                token_type_table = (
+                    torch.tensor([[0.125], [0.875]], dtype=dtype, device=self.device)
+                    .expand(-1, 32)
+                    .contiguous()
+                )
+                output = torch.empty((8, 32), dtype=dtype, device=self.device)
+
+                rtp_llm_ops.embedding_bert(
+                    output,
+                    input_ids,
+                    weight,
+                    position_ids,
+                    position_table,
+                    token_type_ids,
+                    token_type_table,
+                    0.5,
+                    mask,
+                )
+
+                expected = position_table + token_type_table[safe_type_ids]
+                expected[text_rows] = (
+                    weight[input_ids[text_rows].long()] * 0.5
+                    + position_table[text_rows]
+                    + token_type_table[token_type_ids[text_rows].long()]
+                )
+                torch.testing.assert_close(output, expected, rtol=0, atol=0)
+
 
 if __name__ == "__main__":
     main()

@@ -1,7 +1,6 @@
 #include "ATen/ops/ones.h"
 #include "c10/core/ScalarType.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
-#include "rtp_llm/cpp/engine_base/EmbeddingIdRange.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingExecutor.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -79,10 +78,8 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     std::vector<std::string> handler_args;
     {
         py::gil_scoped_acquire acquire;
-        pooled_output_ = py::hasattr(handler_, "score_pooled_rows")
-                         && py::getattr(params.py_model, "supports_pooled_embedding", py::bool_(false)).cast<bool>();
+        pooled_output_ = model->usePooledEmbeddingForward(handler_);
         if (pooled_output_) {
-            model->usePooledEmbeddingForward();
             RTP_LLM_LOG_INFO("embedding executor enabled pooled token rows for scoring");
         }
         device_output_handler_ = py::hasattr(handler_, "extend_forward_on_device");
@@ -152,9 +149,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     std::vector<torch::Tensor> gathered_input_embeddings;
     std::vector<int>           gathered_input_embeddings_locs;
     merged_text_mask.resize(token_num, 1);
-    const int input_vocab_size = model_config_.input_vocab_size ? static_cast<int>(model_config_.input_vocab_size) :
-                                                                  static_cast<int>(model_config_.vocab_size);
-    const int type_vocab_size  = static_cast<int>(model_config_.type_vocab_size);
     for (auto& stream : streams) {
         int         length     = stream->inputLength();
         int         batchSize  = stream->batchSize();
@@ -169,10 +163,9 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                 new_locs.push_back(mm_locs_data[i] + token_idx);
             }
             const auto text_token_mask = mm_feature.value().text_tokens_mask;
-            RETURN_IF_STATUS_ERROR(validateTextTokensMaskLength(stream->streamId(),
-                                                                text_token_mask.data_ptr<int>(),
-                                                                static_cast<int>(text_token_mask.numel()),
-                                                                length));
+            if (text_token_mask.numel() != length) {
+                return absl::InvalidArgumentError("text_tokens_mask length does not match input length");
+            }
             memcpy(merged_text_mask.data() + token_idx,
                    text_token_mask.data_ptr<int>(),
                    text_token_mask.numel() * sizeof(int));
@@ -187,20 +180,6 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
         memcpy(merged_token_type_ids + (int)token_idx,
                stream->embeddingInput()->token_type_ids.data_ptr(),
                length * sizeof(int32_t));
-        // VisionBert uses -1 as an image-row token-type sentinel. The embedding
-        // kernel still reads the token-type table for masked rows before those
-        // rows are replaced by projected features, so normalize only masked
-        // rows to a safe table index and preserve all text-row validation.
-        normalizeMaskedTokenTypeIds(
-            merged_token_type_ids + token_idx, merged_text_mask.data() + token_idx, length, length);
-        RETURN_IF_STATUS_ERROR(validateEmbeddingIdRanges(stream->streamId(),
-                                                         merged_tokens + token_idx,
-                                                         merged_token_type_ids + token_idx,
-                                                         merged_text_mask.data() + token_idx,
-                                                         length,
-                                                         length,
-                                                         input_vocab_size,
-                                                         type_vocab_size));
         memcpy(input_lengths + (int)batch_idx,
                stream->embeddingInput()->input_lengths.data_ptr(),
                stream->batchSize() * sizeof(int32_t));
@@ -269,8 +248,12 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
         return tensor.defined() && tensor.is_cuda() ? tensor.cpu() : tensor;
     };
     ModelRequest model_request;
-    model_request.generate_batch_size  = 0;
-    model_request.context_batch_size   = model_input.input_lengths.size(0);
+    model_request.generate_batch_size = 0;
+    model_request.context_batch_size  = model_input.input_lengths.size(0);
+    if (pooled_output_) {
+        // The compact scorer consumes only the encoder output.
+        return model_request;
+    }
     model_request.combo_tokens         = to_cpu(model_input.combo_tokens);
     model_request.combo_position_ids   = to_cpu(model_input.combo_position_ids);
     model_request.combo_token_type_ids = to_cpu(model_input.combo_tokens_type_ids);
