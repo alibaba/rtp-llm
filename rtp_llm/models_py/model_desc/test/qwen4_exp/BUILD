@@ -111,6 +111,13 @@ models_py_test(
     deps = _FIXTURE_DEPS,
 )
 
+models_py_test(
+    name = "step_metadata_test",
+    src = "step_metadata_test.py",
+    gpu = "L20_CU13",
+    deps = _FIXTURE_DEPS,
+)
+
 test_suite(
     name = "qwen4_runtime",
     tests = [
@@ -123,6 +130,7 @@ test_suite(
         ":qsa_graph_test",
         ":qsa_mtp_test",
         ":qsa_wiring_test",
+        ":step_metadata_test",
         ":wiring_test",
     ],
 )

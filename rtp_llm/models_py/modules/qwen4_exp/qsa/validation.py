@@ -9,6 +9,7 @@ class DeviceChecks:
         self._flags = []
         self._offsets = []
         self.verified = False
+        self.prefill_metadata_readonly = False
 
     def add(self, invalid, message, error_type=RuntimeError):
         self.add_flags(invalid, [message], error_type)

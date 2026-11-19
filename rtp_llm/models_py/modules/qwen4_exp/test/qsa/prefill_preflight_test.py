@@ -77,6 +77,31 @@ class PrefillPreflightTest(unittest.TestCase):
         for impl, *_ in entries:
             self.assertIsNone(getattr(impl, "_model_prefill_geometry", None))
 
+    def test_only_matching_model_receipt_allows_shared_prefill_checks(self):
+        entry = self.fixture()
+        impl, cache, bases, lengths = entry
+
+        def validate():
+            checks = DeviceChecks()
+            fmha_validation._validate_main_paged_geometry(
+                impl,
+                cache,
+                impl.attn_inputs.kv_cache_kernel_block_id_device,
+                bases,
+                lengths,
+                cache.device,
+                checks=checks,
+            )
+            checks.verify()
+            return checks.prefill_metadata_readonly
+
+        self.assertFalse(validate())
+        with main_geometry_preflight([entry]):
+            self.assertTrue(validate())
+            lengths.fill_(3)
+            self.assertFalse(validate())
+        self.assertFalse(validate())
+
     def test_decode_reuses_only_accepted_geometry_once_in_the_same_transaction(self):
         impl, cache, bases, lengths = self.fixture()
         impl.is_target_verify = True
