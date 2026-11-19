@@ -53,7 +53,7 @@ public class LBStatusConsistencyService implements MasterElectService {
     public void init() {
         log.info("start init LBStatusConsistencyService.");
         try {
-            localHostIp = InetAddress.getLocalHost().getHostAddress();
+            localHostIp = resolveLocalIp(environment);
         } catch (UnknownHostException e) {
             throw new RuntimeException(e);
         }
@@ -167,5 +167,12 @@ public class LBStatusConsistencyService implements MasterElectService {
             return null;
         }
         return masterHostIp + ":" + serverPort;
+    }
+
+    /**
+     * Resolves the local address during construction, before subclass fields initialize.
+     */
+    protected String resolveLocalIp(Environment environment) throws UnknownHostException {
+        return InetAddress.getLocalHost().getHostAddress();
     }
 }
