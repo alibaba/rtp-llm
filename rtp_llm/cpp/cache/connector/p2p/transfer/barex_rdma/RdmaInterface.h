@@ -12,6 +12,10 @@
 #include <functional>
 #include <map>
 
+namespace kmonitor {
+class MetricsReporter;
+}
+
 namespace rtp_llm {
 namespace transfer {
 namespace barex_rdma {
@@ -62,10 +66,11 @@ public:
 };
 
 std::shared_ptr<IRdmaMemoryManager> createRdmaMemoryManager();
-std::shared_ptr<IRdmaClient> createRdmaClient(const std::shared_ptr<IRdmaMemoryManager>& memory_manager,
-                                              int                                        io_thread_count,
-                                              int                                        worker_thread_count       = 0,
-                                              uint32_t                                   rdma_connections_per_host = 8);
+std::shared_ptr<IRdmaClient>        createRdmaClient(const std::shared_ptr<IRdmaMemoryManager>&        memory_manager,
+                                                     const std::shared_ptr<kmonitor::MetricsReporter>& metrics_reporter,
+                                                     int                                               io_thread_count,
+                                                     int                                               worker_thread_count = 0,
+                                                     uint32_t rdma_connections_per_host = 8);
 std::shared_ptr<IRdmaServer> createRdmaServer(const std::shared_ptr<IRdmaMemoryManager>& memory_manager,
                                               uint32_t                                   listen_port,
                                               int                                        io_thread_count,
