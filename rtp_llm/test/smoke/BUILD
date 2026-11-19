@@ -2,14 +2,6 @@ load(":defs.bzl", "custom_smoke_test", "smoke_test")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 package(default_visibility = ["//visibility:public"])
 
-test_suite(
-    name = "smoke_cache_timeout_recovery",
-    tests = [
-        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:kvcm_timeout_recovery_smoke_test",
-    ],
-    tags = ["manual"],
-)
-
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their
 # own smoke/ children through smoke.__path__ without duplicating runner srcs.
