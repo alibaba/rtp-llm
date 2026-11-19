@@ -637,7 +637,7 @@ def _native_pd_latency_model_fingerprint(
         if execution_geometry_enabled or execution_cache_source_enabled:
             raise ValueError("unified prefill does not use execution geometry")
         values["navi_latency_mode"] = (
-            "unified_native_prefill_capacity19_prior_cache_v5"
+            "unified_native_prefill_capacity19_live_requests_v6"
             if capacity_split_prediction
             else "unified_native_prefill_admission_v1"
         )
@@ -4109,6 +4109,14 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             ),
         )
 
+    def _is_finished_pp_request(self, request) -> bool:
+        # Native retains finished requests until asynchronous KV cleanup ends.
+        # They no longer occupy a scheduler slot or have remaining execution work.
+        if not self._pp_capacity_unified or request is None:
+            return False
+        is_finished = getattr(request, "is_finished", None)
+        return callable(is_finished) and bool(is_finished())
+
     def _refresh_workload_contributions(
         self, scheduler, request_ids, inflight_scheduled_tokens
     ) -> None:
@@ -4127,7 +4135,9 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             if previous is not None:
                 self._workload_aggregate.apply(previous, -1)
             request = scheduler.requests.get(request_id)
-            if request is None:
+            if request is None or (
+                self._pp_capacity_unified and self._is_finished_pp_request(request)
+            ):
                 continue
             contribution = self._make_workload_contribution(
                 request, inflight_scheduled_tokens.get(request_id, 0)
@@ -4223,6 +4233,10 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                     self._audit_native_request_state(
                         request, "running" if running_now else "waiting"
                     )
+            if self._pp_capacity_unified and self._is_finished_pp_request(
+                scheduler.requests.get(request_id)
+            ):
+                return
             contribution = self._workload_contributions.get(request_id)
             uses_running_capacity = (
                 running_now or running_capacity_slot_count < max_running_request_count
@@ -4271,7 +4285,14 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         requests = getattr(scheduler, "requests", {})
         if not isinstance(requests, dict):
             requests = {}
-        if set(self._workload_contributions) != set(requests):
+        workload_request_ids = set(requests)
+        if self._pp_capacity_unified:
+            workload_request_ids = {
+                request_id
+                for request_id, request in requests.items()
+                if not self._is_finished_pp_request(request)
+            }
+        if set(self._workload_contributions) != workload_request_ids:
             logger.warning(
                 "rebuilding NaviSched vLLM workload state: tracked=%d actual=%d",
                 len(self._workload_contributions),
@@ -4280,7 +4301,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             self._workload_contributions.clear()
             self._workload_aggregate = _WorkloadAggregate()
             self._refresh_workload_contributions(
-                scheduler, requests.keys(), inflight_scheduled_tokens
+                scheduler, workload_request_ids, inflight_scheduled_tokens
             )
         try:
             running = tuple(scheduler.running)
