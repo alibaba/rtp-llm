@@ -293,7 +293,7 @@ P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBro
         }
         return std::shared_ptr<P2PBroadcastClient::Result>{};
     };
-    while (!result->done()) {
+    while (!result->done() && !result->firstError().error.hasError()) {
         result->checkDone();
         // Store expiry also makes is_cancelled() true. Classify the deadline
         // first, and sample it again after the callback in case it crossed the
@@ -345,6 +345,9 @@ P2PSchedulerPrefillRead::waitForBroadcastCompletion(const std::shared_ptr<P2PBro
         if (!cancel_result) {
             cancel_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
         }
+    } else if (!cancel_result && result->firstError().error.hasError()) {
+        // Fence sibling workers while preserving the original transfer error.
+        (void)cancel_workers();
     }
     return cancel_result;
 }

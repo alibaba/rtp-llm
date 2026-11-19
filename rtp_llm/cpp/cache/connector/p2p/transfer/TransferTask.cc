@@ -87,7 +87,7 @@ void TransferTask::removeCancelCallback(size_t id) {
 
 bool TransferTask::startTransfer() {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (done_ || cancel_requested_) {
+    if (done_ || cancel_requested_ || error_code_ != TransferErrorCode::OK) {
         return false;
     }
     ++in_flight_;

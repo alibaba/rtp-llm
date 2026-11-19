@@ -340,14 +340,22 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
     }
 
     struct BatchTransferState {
-        std::atomic<size_t> completed_count{0};
+        // Keep one reference until dispatch is sealed, including inline callbacks.
+        std::atomic<size_t> pending{1};
         std::atomic<bool> any_failed{false};
-        size_t total_batches{0};
     };
     auto shared_state = std::make_shared<BatchTransferState>();
-    shared_state->total_batches = batch_count;
+    auto finish = [shared_state, guardedRun] {
+        if (shared_state->pending.fetch_sub(1) == 1) {
+            const bool failed = shared_state->any_failed.load();
+            guardedRun(!failed, failed ? TransferErrorCode::RDMA_FAILED : TransferErrorCode::OK, "");
+        }
+    };
 
     for (size_t i = 0; i < batch_count; ++i) {
+        if (shared_state->any_failed.load()) {
+            break;
+        }
         size_t start_idx = i * per_connection_block_count_;
         size_t end_idx = std::min(start_idx + per_connection_block_count_, total_blocks);
         std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>> batch(
@@ -356,21 +364,20 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
 
         int64_t batch_posted_us = currentTimeUs();
 
+        shared_state->pending.fetch_add(1);
         conn->read(
             batch,
-            [ctx, guardedRun, shared_state, completed_count, unique_key, i, batch_count, batch_posted_us](
+            [ctx, finish, shared_state, completed_count, unique_key, i, batch_count, batch_posted_us](
                 TransferErrorCode ec, const std::string& message) {
                 const bool success = ec == TransferErrorCode::OK;
                 ctx->recordTransferError(ec,
                                          "RDMA key=" + unique_key + " batch=" + std::to_string(i) + "/"
                                              + std::to_string(batch_count) + ": " + message);
-                int64_t cb_latency_us = currentTimeUs() - batch_posted_us;
                 if (!success) {
                     shared_state->any_failed.store(true);
                 }
-                size_t prev_completed = shared_state->completed_count.fetch_add(1);
-                size_t done_now = prev_completed + 1;
-                completed_count->store(done_now);
+                int64_t cb_latency_us = currentTimeUs() - batch_posted_us;
+                const size_t done_now = completed_count->fetch_add(1) + 1;
 
                 RTP_LLM_LOG_DEBUG("transferViaRdma callback, unique_key=%s, batch_idx=%zu/%zu, "
                                   "success=%d, cb_latency_us=%ld, completed=%zu/%zu",
@@ -382,17 +389,12 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
                                   done_now,
                                   batch_count);
 
-                if (done_now == shared_state->total_batches) {
-                    if (shared_state->any_failed.load()) {
-                        guardedRun(false, TransferErrorCode::RDMA_FAILED, "");
-                    } else {
-                        guardedRun(true);
-                    }
-                }
+                finish();
             },
             ctx->getDeadlineMs(),
-            [ctx] { return ctx->isCancelled(); });
+            [ctx, shared_state] { return ctx->isCancelled() || shared_state->any_failed.load(); });
     }
+    finish();
 }
 
 void RdmaTransferService::transferDeadlineCheckProc() {

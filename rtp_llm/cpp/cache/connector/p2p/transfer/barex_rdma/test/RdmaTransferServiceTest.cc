@@ -206,8 +206,13 @@ public:
               RdmaReadCallback cb,
               uint64_t,
               std::function<bool()> is_cancelled) override {
+        const int call = read_calls_.fetch_add(1) + 1;
         if (is_cancelled && is_cancelled()) {
             cb(TransferErrorCode::CANCELLED, "mock RDMA read cancelled before submission");
+            return;
+        }
+        if (call == fail_inline_on_call_) {
+            cb(TransferErrorCode::RDMA_FAILED, "mock inline RDMA failure");
             return;
         }
         std::lock_guard<std::mutex> lock(mu_);
@@ -251,6 +256,8 @@ public:
     }
 
     std::atomic<int> close_count_{0};
+    std::atomic<int> read_calls_{0};
+    int fail_inline_on_call_ = -1;
 
 private:
     const bool                    flush_on_close_;
@@ -589,7 +596,7 @@ TEST_F(RdmaTransferServiceTest, B3_ExpiredRecvTaskIsRejectedBeforeRead) {
 
     ASSERT_TRUE(closure->waitFor(kWait));
     EXPECT_EQ(resp.error_code(), ::rdma_transfer::RDMA_TRANSFER_CONTEXT_TIMEOUT);
-    EXPECT_NE(resp.error_message().find("expired in the Decode worker queue"), std::string::npos);
+    EXPECT_NE(resp.error_message().find("matched RDMA transfer expired before worker enqueue"), std::string::npos);
 }
 
 TEST_F(RdmaTransferServiceTest, B4_WatchdogRepliesBeforePhysicalCallbackButTaskRemainsInflight) {
@@ -1168,5 +1175,39 @@ TEST(RdmaReadFirstCauseTest, LaterIndexFailureSurvivesWatchdogAndCancellationUnt
     EXPECT_EQ(task->errorCode(), TransferErrorCode::RDMA_FAILED);
     EXPECT_EQ(task->errorMessage(), first_message);
     EXPECT_EQ(response.error_message(), first_message);
+}
+
+TEST(RdmaReadFirstCauseTest, InlineFailureSkipsUnsentBatchesAndDrainsEarlierRead) {
+    auto store = std::make_shared<TransferTaskStore>();
+    auto client = std::make_shared<HangingRdmaClient>();
+    client->conn_->fail_inline_on_call_ = 2;
+    RdmaTransferService service(store, client);
+    service.per_connection_block_count_ = 1;
+    char source[3][64]{};
+    char target[3][64]{};
+    const auto deadline = currentTimeMs() + 60000;
+    auto blocks = makeKvBlocks(1, target[0], 64);
+    for (int i = 1; i < 3; ++i) {
+        blocks.emplace(i + 1, makeKvBlocks(i + 1, target[i], 64).at(i + 1));
+    }
+    auto task = store->addTask("inline-error", std::move(blocks), deadline);
+    ASSERT_NE(task, nullptr);
+    auto request = makeRequest("inline-error", deadline);
+    for (int i = 0; i < 3; ++i) {
+        addRdmaBlock(request, i + 1, source[i], 64);
+    }
+    ::rdma_transfer::RdmaLayerBlockTransferResponse response;
+    MockRpcController controller;
+    BlockingClosure closure;
+    auto context = std::make_shared<RdmaTaskContext>(&controller, &request, &response, &closure, nullptr);
+    context->setTask(task);
+    service.transferViaRdma(context);
+    EXPECT_EQ(client->conn_->read_calls_.load(), 2);
+    EXPECT_FALSE(closure.waitFor(std::chrono::milliseconds(0)));
+    EXPECT_FALSE(task->done());
+    client->conn_->completeAll(true);
+    EXPECT_TRUE(closure.waitFor(std::chrono::milliseconds(0)));
+    EXPECT_TRUE(task->done());
+    EXPECT_EQ(response.error_code(), ::rdma_transfer::RDMA_TRANSFER_RDMA_FAILED);
 }
 }  // namespace rtp_llm::transfer::barex_rdma

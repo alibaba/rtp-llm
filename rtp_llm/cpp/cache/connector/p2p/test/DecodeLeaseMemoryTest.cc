@@ -344,7 +344,8 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
 
     context->cancel(client_);
     ASSERT_TRUE(waitUntil([&] { return context->done(); }));
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+    // The Decode context publishes the local cancellation before the worker replies.
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CANCELLED);
     // Simulate the cancelled stream dropping its request reference. Only the
     // production async context may now keep the block alive.
     request_a.reset();

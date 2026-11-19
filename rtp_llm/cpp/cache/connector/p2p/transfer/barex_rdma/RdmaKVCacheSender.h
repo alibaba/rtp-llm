@@ -50,7 +50,8 @@ private:
                       uint32_t                                                                       port,
                       const std::shared_ptr<::rdma_transfer::RdmaLayerBlockTransferRequest>&        transfer_request,
                       std::function<void(TransferErrorCode, const std::string&)>          callback,
-                      int64_t                                                                        deadline_ms);
+                      int64_t                                                                        deadline_ms,
+                      const std::function<bool()>&                                                   is_cancelled);
 
 private:
     std::shared_ptr<TcpClient>   tcp_client_;
