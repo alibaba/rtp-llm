@@ -2,6 +2,8 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Iterable, Optional, Union
 
+from .emb_interval_metrics import EmbLatencyMetric, EmbOutcomeMetric
+
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
 QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
@@ -219,9 +221,6 @@ class GaugeMetrics(Enum):
     VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
 
     VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
-    VIT_REMOTE_EMB_CLIENT_CREATE_RT_METRIC = (
-        "py_rtp_vit_remote_embedding_cache_client_create_rt_ms"
-    )
     # Enqueue to worker start; canceled-before-start work has no observation.
     VIT_REMOTE_EMB_QUEUE_WAIT_METRIC = "py_rtp_vit_remote_embedding_cache_queue_wait_ms"
     # Logical object bytes for completed SDK calls and bytes / SDK wall time.
@@ -343,11 +342,30 @@ class MetricReporter(object):
         if not self._inited:
             self._inited = True
             for metric in AccMetrics if acc_metrics is None else acc_metrics:
-                self._matic_map[metric.value] = self._kmon.register_acc_metric(
-                    metric.value, tags or {}
-                )
+                if metric is AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC:
+                    backend = self._kmon.register_custom_metric(
+                        EmbOutcomeMetric(metric.value, tags or {})
+                    )
+                elif metric in (
+                    AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC,
+                    AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC,
+                ):
+                    # Emitted from the same stage samples as latency.
+                    continue
+                else:
+                    backend = self._kmon.register_acc_metric(metric.value, tags or {})
+                self._matic_map[metric.value] = backend
 
             for metric in GaugeMetrics if gauge_metrics is None else gauge_metrics:
-                self._matic_map[metric.value] = self._kmon.register_gauge_metric(
-                    metric.value, tags or {}
-                )
+                if metric in (
+                    GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC,
+                ):
+                    backend = self._kmon.register_custom_metric(
+                        EmbLatencyMetric(metric.value, tags or {})
+                    )
+                else:
+                    backend = self._kmon.register_gauge_metric(metric.value, tags or {})
+                self._matic_map[metric.value] = backend

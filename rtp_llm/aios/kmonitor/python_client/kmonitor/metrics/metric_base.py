@@ -3,7 +3,8 @@ from typing import Dict, List
 
 
 class MetricDataPoint(object):
-    def __init__(self, value: float, tags: Dict[str, str]):
+    def __init__(self, value: float, tags: Dict[str, str], metric_name=None):
+        self.metric_name = metric_name
         self.value = value
         self.tags = tags
 

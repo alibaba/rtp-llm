@@ -439,21 +439,11 @@ class MMRemoteEmbeddingCache:
             _log_error(
                 "MM_EMB_REMOTE_METRIC_INIT_ERROR", error, operation="metric_init"
             )
-        started = time.perf_counter()
         outcome = "success"
         try:
             return factory()
-        except _TIMEOUT_ERRORS as error:
-            outcome = "timeout"
-            _log_error(
-                "MM_EMB_REMOTE_CLIENT_CREATE_ERROR",
-                error,
-                operation="client_create",
-                transport=transport,
-            )
-            raise
         except Exception as error:
-            outcome = "error"
+            outcome = "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
             _log_error(
                 "MM_EMB_REMOTE_CLIENT_CREATE_ERROR",
                 error,
@@ -462,20 +452,15 @@ class MMRemoteEmbeddingCache:
             )
             raise
         finally:
-            cls._report_outcome("client_create", outcome)
-            tags = {"transport": transport, "status": outcome}
             cls._report_metric(
-                AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC, 1, tags
+                AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC,
+                1,
+                {"transport": transport},
             )
             cls._report_metric(
                 AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC,
                 int(outcome != "success"),
                 {"transport": transport},
-            )
-            cls._report_metric(
-                GaugeMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_RT_METRIC,
-                (time.perf_counter() - started) * 1000,
-                tags,
             )
 
     def report_result_accepted(self, origin, output):
@@ -612,19 +597,10 @@ class MMRemoteEmbeddingCache:
                 if operation == "write" and outcome == "skipped" and stage == "transfer"
                 else stage
             )
-            cls._report_outcome(operation + "_stage", outcome, stage=metric_stage)
-            tags = {"operation": operation, "stage": metric_stage}
-            outcome_tags = dict(tags, status=outcome)
             cls._report_metric(
-                AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC, 1, outcome_tags
-            )
-            cls._report_metric(
-                GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC, elapsed_ms, outcome_tags
-            )
-            cls._report_metric(
-                AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC,
-                int(outcome not in ("success", "skipped")),
-                tags,
+                GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                elapsed_ms,
+                {"operation": operation, "stage": metric_stage, "status": outcome},
             )
             if stage == "transfer" and outcome != "skipped":
                 tags = {"operation": operation}
@@ -652,12 +628,11 @@ class MMRemoteEmbeddingCache:
         # One completed call has exactly one outcome. Miss is a successful
         # lookup; non-executed work is skipped, never a transport failure.
         status = outcome if outcome in ("success", "skipped") else "error"
-        for label in ("total", "success", "error", "skipped"):
-            cls._report_metric(
-                AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC,
-                int(label == "total" or label == status),
-                {"operation": operation, "stage": stage, "status": label},
-            )
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC,
+            1,
+            {"operation": operation, "stage": stage, "status": status},
+        )
 
     def _report_skip(self, operation, reason, *, report_outcome=True):
         if report_outcome and operation in ("read", "write"):
@@ -965,8 +940,7 @@ class MMRemoteEmbeddingCache:
                 # No embedding storage needs to stay live during network IO.
                 plan.tensors.clear()
                 failure_stage = "client_acquire"
-                with self._observe_stage("write", "client_acquire"):
-                    client = self._get_client()
+                client = self._get_client()
                 api_started = time.perf_counter()
                 failure_stage = "transfer"
                 with self._observe_stage("write", "transfer", buffer.numel()):
@@ -1125,8 +1099,7 @@ class MMRemoteEmbeddingCache:
             if time.monotonic() >= deadline:
                 raise TimeoutError("remote embedding queue deadline expired")
             timing["stage"] = "client_acquire"
-            with self._observe_stage("read", "client_acquire"):
-                client = self._get_client()
+            client = self._get_client()
             try:
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
@@ -1156,8 +1129,7 @@ class MMRemoteEmbeddingCache:
             slot = None
             try:
                 timing["stage"] = "client_acquire"
-                with self._observe_stage("read", "client_acquire"):
-                    client = self._get_client()
+                client = self._get_client()
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
                 # unpack_object can return CPU views. Keep the result independent
