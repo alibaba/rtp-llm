@@ -105,12 +105,7 @@ public:
                                        grpc::ServerContext*                         server_context = nullptr);
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
-                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
-                                                         bool                                         hash_features);
-    ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
-                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
-        return getMultimodalFeatures(input_ids, mm_inputs, hash_embedding_features_);
-    }
+                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs);
 };
 
 }  // namespace rtp_llm

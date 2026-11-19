@@ -376,7 +376,6 @@ class TRTLLMFMHAv2PrefillOp:
             )
             fmha_input = (q, kv)
             input_layout = "CONTIGUOUS_Q_KV"
-
         o = trtllm_fmha_v2_prefill(
             qkv=fmha_input,
             input_layout=input_layout,
