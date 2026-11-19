@@ -22,8 +22,8 @@ struct RdmaConfig {
     int64_t slot_gc_timeout_ms = 60 * 1000;
     // Larger outputs are split across slots.
     int64_t max_slot_bytes = 1024L * 1024 * 1024;
-    // Aggregate payload accepted from one multimodal receipt. Matches the total RDMA memory pool.
-    int64_t max_receipt_bytes = 8L * 1024 * 1024 * 1024;
+    // Maximum receipt payload on the reader and aggregate registered lease bytes per exporter.
+    int64_t max_receipt_bytes = 16L * 1024 * 1024 * 1024;
 };
 
 }  // namespace rtp_llm

@@ -312,7 +312,7 @@ class MMRdmaConfig:
         self.read_provider_count: int = 4
         self.slot_gc_timeout_ms: int = 60 * 1000
         self.max_slot_bytes: int = 1024 * 1024 * 1024
-        self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
+        self.max_receipt_bytes: int = 16 * 1024 * 1024 * 1024
 
 
 class MMControlConfig:

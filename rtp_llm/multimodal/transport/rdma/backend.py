@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import TYPE_CHECKING, Dict, List
 
 import torch
@@ -9,10 +10,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
-from rtp_llm.multimodal.transport.base import (
-    MMOutputResult,
-    MMTransportBackend,
-)
+from rtp_llm.multimodal.transport.base import MMOutputResult, MMTransportBackend
 
 if TYPE_CHECKING:
     from rtp_llm.ops import MMRdmaExporter
@@ -30,6 +28,10 @@ class RdmaOutputBackend(MMTransportBackend):
 
     @classmethod
     def create(cls, rdma_config, local_device_id: int = 0) -> "RdmaOutputBackend":
+        # Barex reads this independent process-wide limit when its pool is initialized.
+        os.environ.setdefault(
+            "ARPC_RDMA_MEMPOOL_GPU_MAX_TOTAL_BYTES", str(rdma_config.max_receipt_bytes)
+        )
         from rtp_llm import ops
 
         ops.ensure_rdma_ops_loaded()
@@ -42,7 +44,9 @@ class RdmaOutputBackend(MMTransportBackend):
         self, request: MultimodalInputsPB, res: MMEmbeddingRes
     ) -> MMOutputResult:
         if not request.support_rdma:
-            raise RuntimeError("RDMA transport was selected but the client did not advertise RDMA support")
+            raise RuntimeError(
+                "RDMA transport was selected but the client did not advertise RDMA support"
+            )
         if not res.embeddings:
             raise RuntimeError("RDMA transport received no multimodal embeddings")
         if not res.embeddings[0].is_cuda:
@@ -75,13 +79,17 @@ class RdmaOutputBackend(MMTransportBackend):
                 if not slot.rdma_descriptor.lease_id:
                     raise ValueError("RDMA descriptor has no release handle")
                 slots.append(slot)
-            except Exception as error:  # noqa: BLE001 - parse remaining release handles first
+            except (
+                Exception
+            ) as error:  # noqa: BLE001 - parse remaining release handles first
                 if parse_error is None:
                     parse_error = error
 
         if parse_error is not None:
             self._roll_back(slots)
-            raise RuntimeError(f"invalid RDMA descriptor: {parse_error}") from parse_error
+            raise RuntimeError(
+                f"invalid RDMA descriptor: {parse_error}"
+            ) from parse_error
 
         receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
         role_bytes: Dict[int, int] = {}

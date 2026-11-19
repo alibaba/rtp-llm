@@ -499,8 +499,8 @@ def init_vit_group_args(parser, vit_config):
         env_name="MM_RDMA_MAX_RECEIPT_BYTES",
         bind_to=(rdma_config, "max_receipt_bytes"),
         type=_positive_int,
-        default=8 * 1024 * 1024 * 1024,
-        help="LLM 侧单个 RDMA receipt 的总载荷上限，默认 8GiB，与 RDMA 总显存池大小一致",
+        default=rdma_config.max_receipt_bytes,
+        help="ViT 单个 exporter 未释放缓冲区的总字节上限，同时限制 LLM 单个 RDMA receipt 的载荷，默认 16 GiB",
     )
     vit_group.add_argument(
         "--gpu_batch_wait_ms",
