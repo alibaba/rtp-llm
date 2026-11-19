@@ -26,6 +26,12 @@ template<typename Client, typename Trace>
 struct HasLateReadSafety<Client, Trace, std::void_t<decltype(&Client::QueryReadBufferSafety),
                                                    decltype(&Trace::read_execution_id)>>: std::true_type {};
 
+template<typename Client, typename = void>
+struct HasDiscardReadRecovery: std::false_type {};
+
+template<typename Client>
+struct HasDiscardReadRecovery<Client, std::void_t<decltype(&Client::DiscardReadRecovery)>>: std::true_type {};
+
 }  // namespace detail
 
 template<typename Trace, typename Client = kv_cache_manager::TransferClient>
@@ -42,6 +48,12 @@ bool querySdkReadBufferSafety(Client& client, const std::string& trace_id, int64
     if constexpr (detail::HasLateReadSafety<Client, kv_cache_manager::TransferTraceInfo>::value)
         return client.QueryReadBufferSafety(trace_id, deadline_ms);
     return false;
+}
+
+template<typename Client>
+void discardSdkReadRecovery(Client& client, const std::string& trace_id) {
+    if constexpr (detail::HasDiscardReadRecovery<Client>::value)
+        client.DiscardReadRecovery(trace_id);
 }
 
 template<typename Client>

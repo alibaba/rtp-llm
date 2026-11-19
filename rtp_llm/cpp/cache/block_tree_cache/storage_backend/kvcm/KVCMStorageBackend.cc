@@ -1528,14 +1528,19 @@ public:
         return *read_registry_;
     }
 
-    TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const {
+    TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id,
+                                                   Clock::time_point completion_deadline) const {
         using State = TransferTaskRegistry::State;
         const auto state = read_registry_->queryAndBlockMissing(std::vector<std::string>{trace_id}).front();
         if (state != State::RUNNING || !client_wrapper_ || parallelism_config_.role_type == RoleType::DECODE ||
             kv_cache_config_.block_tree_frozen_recovery_interval_ms == 0)
             return state;
-        const auto deadline = Clock::now() +
-            std::chrono::milliseconds(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms);
+        const auto now = Clock::now();
+        const auto local_deadline =
+            now + std::chrono::milliseconds(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms);
+        const auto deadline = std::min(completion_deadline, local_deadline);
+        if (deadline <= now)
+            return state;
         const auto deadline_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count();
         try {
@@ -1558,6 +1563,12 @@ public:
         if (result == TransferTaskRegistry::ForgetResult::INVALID) {
             RTP_LLM_LOG_WARNING("KVCM READ completion forget rejected rank=%ld trace=%s reason=empty_trace",
                                 static_cast<long>(parallelism_config_.world_rank), trace_id.c_str());
+        } else if (result == TransferTaskRegistry::ForgetResult::RUNNING && client_wrapper_) {
+            try {
+                client_wrapper_->discardReadRecovery(trace_id);
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("KVCM READ recovery discard failed trace=%s", trace_id.c_str());
+            }
         }
         return result;
     }
@@ -3105,8 +3116,9 @@ const TransferTaskRegistry& KVCMStorageBackend::taskRegistry() const {
     return impl_->taskRegistry();
 }
 
-TransferTaskRegistry::State KVCMStorageBackend::queryReadCompletion(const std::string& trace_id) const {
-    return impl_->queryReadCompletion(trace_id);
+TransferTaskRegistry::State KVCMStorageBackend::queryReadCompletion(const std::string& trace_id,
+                                                                  Clock::time_point completion_deadline) const {
+    return impl_->queryReadCompletion(trace_id, completion_deadline);
 }
 
 TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id) {

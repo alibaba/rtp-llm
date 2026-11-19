@@ -678,6 +678,12 @@ bool ClientWrapper::queryReadBufferSafety(const std::string& trace_id, int64_t d
     return !transfer_clients_.empty() && querySdkReadBufferSafety(*transfer_clients_.front(), trace_id, deadline_ms);
 }
 
+void ClientWrapper::discardReadRecovery(const std::string& trace_id) {
+    std::shared_lock lock(transfer_mutex_);
+    if (!transfer_clients_.empty())
+        discardSdkReadRecovery(*transfer_clients_.front(), trace_id);
+}
+
 std::pair<bool, kv_cache_manager::UriStrVec>
 ClientWrapper::saveKvCachesForTag(const std::string&                                          tag,
                                   const kv_cache_manager::UriStrVec&                          uri_str_vec,
