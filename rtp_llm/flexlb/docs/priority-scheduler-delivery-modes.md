@@ -107,7 +107,10 @@ sequenceDiagram
 The decision policy and dispatcher answer different questions. The global queue
 owns ordering and one authoritative placement/commit per request. Its planning
 frontier is bounded by admitted work and planner concurrency: it does not collect a
-logical group and never waits to fill one. After placement, the selected
+logical group and never waits to fill one. Each decision round commits the plans
+that already finished back to back, then refills every freed planner slot in one
+ranking pass; completions arriving during a round join the next one. After
+placement, the selected
 Prefill endpoint is the sole decision-group owner. `SINGLE` forms a one-request
 group. `FIXED_WINDOW` collects up to
 `scheduler.decision.maxRequests` locally selected requests and waits at most

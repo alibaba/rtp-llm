@@ -130,6 +130,55 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void readyResultBatchCommitsBeforeOneSharedBackfillRound() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, 3)) {
+            CountDownLatch firstCommitting = new CountDownLatch(1);
+            CountDownLatch finishFirst = new CountDownLatch(1);
+            // Counted when new planning work was claimed between the commits
+            // of one buffered batch instead of after the whole batch.
+            var claimedDuringBatch = new AtomicInteger();
+            f.onAdmission = id -> {
+                if (id == 1L) {
+                    firstCommitting.countDown();
+                    await(finishFirst);
+                } else if (id == 2L || id == 3L) {
+                    // Runs on the decision thread: inFlight only changes
+                    // there, so this observes the batch/claim interleaving
+                    // without racing planner-thread selections.
+                    if (f.inFlightRequestIds().contains(5L)) {
+                        claimedDuringBatch.incrementAndGet();
+                    }
+                }
+            };
+            f.onSelection = id -> {
+                if (id == 2L || id == 3L) {
+                    // R2 and R3 publish only while the decision thread is
+                    // committing R1, so their results buffer together.
+                    await(firstCommitting);
+                }
+            };
+            try {
+                f.submit(1, "b");
+                f.submit(2, "b");
+                f.submit(3, "b");
+                await(firstCommitting);
+                awaitCondition(() -> f.bufferedPlanCount() == 2);
+                // R4 fills the slot R1 releases mid-round; R5 may only be
+                // claimed after the buffered R2 and R3 are both committed.
+                f.submit(4, "b");
+                f.submit(5, "b");
+                finishFirst.countDown();
+                awaitCondition(() -> f.admitted.size() == 5);
+                assertEquals(0, claimedDuringBatch.get(),
+                        "new work must not be claimed between the commits of"
+                                + " one buffered result batch");
+            } finally {
+                finishFirst.countDown();
+            }
+        }
+    }
+
+    @Test
     void slowPlannerDoesNotBlockOtherResultsOrRefillingItsPeersSlot() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             CountDownLatch started = new CountDownLatch(1);
@@ -629,7 +678,7 @@ class GlobalQueueProgressTest {
     }
 
     private static final class Fixture implements AutoCloseable {
-        private final FlexlbConfig config = twoPlannerConfig();
+        private final FlexlbConfig config;
         private final PlacementAvailability availability = new PlacementAvailability();
         private final AtomicInteger aSlots = new AtomicInteger();
         private final Map<Long, RouteAdmission> routes = new ConcurrentHashMap<>();
@@ -647,10 +696,10 @@ class GlobalQueueProgressTest {
         private final DefaultRouter router;
         private final RoleType role;
 
-        private static FlexlbConfig twoPlannerConfig() {
+        private static FlexlbConfig plannerConfig(int plannerThreads) {
             FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
             var runtime = spy(config.getInternalRuntime());
-            when(runtime.getQueuePlannerThreads()).thenReturn(2);
+            when(runtime.getQueuePlannerThreads()).thenReturn(plannerThreads);
             when(config.getInternalRuntime()).thenReturn(runtime);
             return config;
         }
@@ -659,17 +708,27 @@ class GlobalQueueProgressTest {
             this(role, false);
         }
 
+        private Fixture(RoleType role, int plannerThreads) {
+            this(role, false, false, null, plannerThreads);
+        }
+
         private Fixture(RoleType role, boolean preempt) {
-            this(role, preempt, false);
+            this(role, preempt, false, null, 2);
         }
 
         private Fixture(RoleType role, boolean preempt, boolean prefillCostOrder) {
-            this(role, preempt, prefillCostOrder, null);
+            this(role, preempt, prefillCostOrder, null, 2);
         }
 
         private Fixture(RoleType role, boolean preempt, boolean prefillCostOrder,
                 PrefillQueueSheddingConfig sheddingConfig) {
+            this(role, preempt, prefillCostOrder, sheddingConfig, 2);
+        }
+
+        private Fixture(RoleType role, boolean preempt, boolean prefillCostOrder,
+                PrefillQueueSheddingConfig sheddingConfig, int plannerThreads) {
             this.role = role;
+            this.config = plannerConfig(plannerThreads);
             SchedulingTestConfig.useFifoQueue(config);
             config.queueScheduler().setPrefillQueueShedding(sheddingConfig);
             if (preempt) {
@@ -746,6 +805,10 @@ class GlobalQueueProgressTest {
         }
 
         private boolean hasBufferedPlan() {
+            return bufferedPlanCount() > 0;
+        }
+
+        private int bufferedPlanCount() {
             // Observe the handoff under its lock to make the regression independent
             // of thread timing, without adding a hook to production code.
             Object queue = ReflectionTestUtils.getField(scheduler, "globalQueue");
@@ -755,10 +818,19 @@ class GlobalQueueProgressTest {
             try {
                 var completed = (Queue<?>) ReflectionTestUtils
                         .getField(queue, "completedPlans");
-                return !completed.isEmpty();
+                return completed.size();
             } finally {
                 lock.unlock();
             }
+        }
+
+        private List<Long> inFlightRequestIds() {
+            // Called from the decision thread, which is the only writer of
+            // inFlight, so no lock is needed to read a consistent view.
+            Object queue = ReflectionTestUtils.getField(scheduler, "globalQueue");
+            var inFlight = (Set<?>) ReflectionTestUtils.getField(queue, "inFlight");
+            return inFlight.stream().map(GlobalQueueEntry.class::cast)
+                    .map(entry -> entry.context.getRequestId()).sorted().toList();
         }
 
         private void release(String group) {

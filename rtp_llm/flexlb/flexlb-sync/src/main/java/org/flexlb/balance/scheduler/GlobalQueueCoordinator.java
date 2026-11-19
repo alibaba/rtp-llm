@@ -238,11 +238,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private void runDecisionLoop() {
         try {
             while (!closed.get()) {
-                Plan completed = pollCompletedPlan();
-                if (completed != null) {
+                // Commit every plan that finished before this round began, then
+                // backfill all freed slots in one ranking pass. A lone completion
+                // still backfills immediately because the batch drains first.
+                for (Plan completed : drainCompletedPlans()) {
                     processCompletedPlan(completed);
                 }
-                // Reuse released slots even when other completed plans are buffered.
                 claimPlanningSlots().forEach(this::submitPlan);
                 awaitIfNoWork();
             }
@@ -256,10 +257,16 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
-    private Plan pollCompletedPlan() {
+    /** Plans that finished before this round began; later arrivals are the next round's batch. */
+    private List<Plan> drainCompletedPlans() {
         lock.lock();
         try {
-            return completedPlans.pollFirst();
+            if (completedPlans.isEmpty()) {
+                return List.of();
+            }
+            List<Plan> ready = new ArrayList<>(completedPlans);
+            completedPlans.clear();
+            return ready;
         } finally {
             lock.unlock();
         }
