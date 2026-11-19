@@ -24,7 +24,8 @@ For each FA3 env:
          because the open-source PyFlashinfer RoPE path is not true Qwen3.5 MRoPE.
 
 PPU_FA3_DECODE_ADAPTIVE_SPLITS=1 enables tuning for eager, single-request
-decode with Qwen3.5-9B TP=1 attention geometry and 64K to 256K KV tokens.
+decode with 16 query heads, 4 KV heads, head dimension 256, 256-token pages,
+and 64K to 256K KV tokens. Qwen3.5-4B and Qwen3.5-9B use this geometry at TP=1.
 
 Requires: flash_attn_3 whl installed (PPU-adapted build).
 """
