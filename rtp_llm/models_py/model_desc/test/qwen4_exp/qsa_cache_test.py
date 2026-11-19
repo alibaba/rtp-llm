@@ -218,7 +218,9 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                 }
             ),
         )
-        actual, second = plan(other)
+        with patch.object(torch, "zeros_like", wraps=torch.zeros_like) as allocate_cu:
+            actual, second = plan(other)
+        allocate_cu.assert_not_called()
         # This fixture has no position pool. Its separate logical RoPE check
         # must remain even after the six read-only CU/page flags are accepted.
         self.assertEqual(len(first._checks) - len(second._checks), 6)
@@ -228,10 +230,22 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             actual.state_pool.data_ptr(), expected.state_pool.data_ptr()
         )
         torch.testing.assert_close(actual.visible_lengths, expected.visible_lengths)
+        torch.testing.assert_close(actual.cu_seqlens, expected.cu_seqlens)
         other.main_inputs.combo_position_ids.add_(1)
         with self.assertRaisesRegex(ValueError, "logical cache positions"):
             plan(other)
         other.main_inputs.combo_position_ids.sub_(1)
+        smaller_kv = replace(
+            other,
+            indexer_kv_cache=SimpleNamespace(
+                **{
+                    **vars(other.indexer_kv_cache),
+                    "kv_cache_base": self.kv_base[:1].clone(),
+                }
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "out-of-range physical block"):
+            plan(smaller_kv)
         smaller = replace(
             other,
             indexer_state_cache=SimpleNamespace(
@@ -247,6 +261,10 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         with self.assertRaisesRegex(RuntimeError, "cu_seqlens do not match"):
             plan(context)
         context.main_inputs.cu_seqlens_device[0] = 0
+        context.main_inputs.cu_kv_seqlens_device[0] = 1
+        with self.assertRaisesRegex(RuntimeError, "cu_kv_seqlens do not match"):
+            plan(context)
+        context.main_inputs.cu_kv_seqlens_device[0] = 0
         context.indexer_state_inputs.kv_cache_block_id_device[0, 2] = 0
         with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
             plan(context)
