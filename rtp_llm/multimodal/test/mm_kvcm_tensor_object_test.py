@@ -48,6 +48,23 @@ class TensorObjectTest(unittest.TestCase):
             seen, [("read", "decode_header", "success"), ("read", "checksum", "error")]
         )
 
+    def test_pack_into_reused_buffer_matches_zero_initialized_wire_bytes(self):
+        value = (
+            torch.arange(7, dtype=torch.uint8),
+            torch.empty(0, dtype=torch.uint8),
+            torch.arange(6, dtype=torch.int32)[::2],
+            torch.empty(0, dtype=torch.uint8),
+        )
+        plan = plan_object(value)
+        expected = pack_object(plan)
+        dirty = torch.full((plan.nbytes + 8,), 0xA7, dtype=torch.uint8)
+        packed = pack_object(plan, out=dirty)
+        self.assertEqual(packed.data_ptr(), dirty.data_ptr())
+        self.assertTrue(torch.equal(packed, expected))
+        self.assertEqual(dirty[plan.nbytes:].tolist(), [0xA7] * 8)
+        for restored, original in zip(unpack_object(packed), value):
+            self.assertTrue(torch.equal(restored, original))
+
     def test_plan_releases_tensor_without_cyclic_gc(self):
         was_enabled = gc.isenabled()
         gc.disable()
