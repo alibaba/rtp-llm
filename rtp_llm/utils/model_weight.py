@@ -1494,6 +1494,7 @@ class W:
     v4_dspark_main_proj_s = "v4.dspark.main_proj.scale"
 
     # Model-agnostic DSpARK globals.
+    dspark_context_kv_w = "dspark_context_kv.weight"
     dspark_fc_w = "dspark_fc.weight"
     dspark_hidden_norm_gamma = "dspark_hidden_norm.gamma"
     dspark_markov_w1 = "dspark_markov_w1.weight"
@@ -1687,6 +1688,7 @@ class W:
         v4_dspark_main_norm: sp_id,
         v4_dspark_main_proj_w: sp_id,
         v4_dspark_main_proj_s: sp_id,
+        dspark_context_kv_w: sp_id,
         dspark_fc_w: sp_id,
         dspark_hidden_norm_gamma: sp_id,
         dspark_markov_w1: sp_id,

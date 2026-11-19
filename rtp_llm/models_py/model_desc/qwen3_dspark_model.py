@@ -1,20 +1,27 @@
 """Qwen3 DSpark backbone on the shared DSpark proposer contract."""
 
+from collections.abc import Mapping
 from typing import Any
 
 import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.device.device_type import is_hip
+from rtp_llm.device.device_type import is_hip, is_ppu
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_group_tags_for_layers,
+    select_attention_inputs_for_layer,
+)
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.models_py.modules import LinearFactory, RMSNorm
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
-from rtp_llm.models_py.speculative.dspark_proposer_mixin import DSparkProposerMixin
+from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
+    DSparkProposerMixin,
+    map_context_rows,
+)
 from rtp_llm.ops import ParallelismConfig, check_rope_cache, get_rope_cache_once
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -23,6 +30,41 @@ from rtp_llm.utils.model_weight import W
 class _RopePositions:
     def __init__(self, positions: torch.Tensor) -> None:
         self.positions_d = positions
+
+
+class _PpuDraftAttention:
+    """Keep one graph-stable FA3 schedule per distinct proposal mask."""
+
+    def __init__(self, configs, inputs, windows):
+        from rtp_llm.models_py.modules.factory.attention.ppu_impl.fa3_mha import (
+            FA3PrefillPagedImpl,
+        )
+
+        if not FA3PrefillPagedImpl.support(configs, inputs):
+            raise RuntimeError(
+                "native PPU DSpark proposals require paged FA3; check the attention "
+                "layout and PPU_USE_FA3_PREFILL/PPU_USE_FA3_VERIFY settings"
+            )
+        self.plans = {
+            window: FA3PrefillPagedImpl(
+                configs,
+                inputs,
+                causal=window is not None,
+                window_size=(-1, -1) if window is None else (window - 1, 0),
+            )
+            for window in dict.fromkeys(windows)
+        }
+        self.layers = tuple(self.plans[window] for window in windows)
+
+    def forward(self, qkv, kv_cache, layer_idx):
+        return self.layers[layer_idx].forward(qkv, kv_cache, layer_idx)
+
+    def support_cuda_graph(self):
+        return True
+
+    def prepare_cuda_graph(self, inputs):
+        for plan in self.plans.values():
+            plan.prepare_cuda_graph(inputs)
 
 
 def _apply_non_interleaved_rope(
@@ -124,9 +166,9 @@ def _write_rocm_paged_kv_cache(
             value_rows
         )
     else:
-        value_physical = cache.view(
-            cache.shape[0], 2, kv_heads, head_dim, page_size
-        )[:, 1]
+        value_physical = cache.view(cache.shape[0], 2, kv_heads, head_dim, page_size)[
+            :, 1
+        ]
         value_physical[pages, :, :, slots] = value_rows
 
 
@@ -175,6 +217,8 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         quant_config=None,
         fmha_config=None,
         py_hw_kernel_config=None,
+        *,
+        commit_only: bool = False,
     ) -> None:
         if quant_config is not None:
             raise NotImplementedError("Qwen3 DSpark quantization is not supported")
@@ -186,7 +230,9 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             quant_config=quant_config,
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
+            build_decoder_layers=not commit_only,
         )
+        self._commit_only = commit_only
         proposal_width = int(config.gen_num_per_cycle)
         query_width = proposal_width + int(not config.dspark_sample_from_anchor)
         self.init_dspark_proposer(
@@ -210,25 +256,40 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
             eps=config.layernorm_eps,
         )
 
-        heads = self.attn_configs.head_num
-        kv_heads = self.attn_configs.kv_head_num
-        head_dim = self.attn_configs.size_per_head
-        q_cols = heads * head_dim
-        context_kv_weights = []
-        self.context_k_norms = nn.ModuleList()
-        for layer_weights in weights.weights[: self.layer_num]:
-            qkv = layer_weights[W.attn_qkv_w]
-            context_kv_weights.append(qkv[:, q_cols:])
-            self.context_k_norms.append(
-                RMSNorm(layer_weights[W.k_ln_gamma], eps=config.layernorm_eps)
+        layer_weights = weights.weights[: self.layer_num]
+        self.context_k_norms = nn.ModuleList(
+            RMSNorm(layer[W.k_ln_gamma], eps=config.layernorm_eps)
+            for layer in layer_weights
+        )
+        context_kv = weights.get_global_weight_or_none(W.dspark_context_kv_w)
+        if context_kv is None:
+            q_cols = self.attn_configs.head_num * self.attn_configs.size_per_head
+            context_kv = torch.cat(
+                [layer[W.attn_qkv_w][:, q_cols:] for layer in layer_weights], dim=1
             )
         self.context_kv_projection = LinearFactory.create_linear(
-            torch.cat(context_kv_weights, dim=1),
+            context_kv,
             None,
             None,
             None,
             py_hw_kernel_config,
         )
+
+        if (
+            config.dspark_layer_windows
+            and any(config.dspark_layer_windows)
+            and not is_ppu()
+        ):
+            raise NotImplementedError(
+                "native DSpark sliding proposal attention currently requires PPU FA3"
+            )
+        if (
+            parallelism_config.prefill_cp_config.is_enabled()
+            and parallelism_config.prefill_cp_config.kv_cache_sharded
+        ):
+            raise NotImplementedError(
+                "Qwen3 DSpark CP commit requires replicated prompt KV caches"
+            )
 
         if is_hip():
             self.context_rope = _TorchMhaRotaryEmbeddingOp(self.attn_configs)
@@ -241,6 +302,65 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
 
     def cuda_graph_input_hidden_size(self) -> int:
         return self._dspark_aux_feature_dim
+
+    @staticmethod
+    def prepare_commit_fmha_impl(inputs, is_cuda_graph=False):
+        # COMMIT projects verified features into KV; it never issues a query.
+        return None
+
+    def prepare_fmha_impl(
+        self, inputs, is_cuda_graph=False, cuda_graph_selection_mode=None
+    ):
+        # A CP prefill worker only seeds the draft's KV, never proposes a block.
+        if self.parallelism_config.prefill_cp_config.is_enabled():
+            return None
+        if is_ppu() and self.config.dspark_layer_windows is not None:
+            attention = inputs.attention_inputs
+            windows = self.config.dspark_layer_windows
+            if isinstance(attention, Mapping):
+                # The graph runner refreshes each dict entry with that tag's
+                # block table. The GLM target's indexer table is not draft KV.
+                return {
+                    tag: _PpuDraftAttention(self.attn_configs, attention[tag], windows)
+                    for tag in get_group_tags_for_layers(
+                        self.kv_cache, range(self.layer_num)
+                    )
+                }
+            return _PpuDraftAttention(self.attn_configs, attention, windows)
+        return super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
+
+    def map_commit_rows(self, starts, lengths, committed_ends, row_count, inputs):
+        if not self.parallelism_config.prefill_cp_config.is_enabled():
+            return super().map_commit_rows(
+                starts, lengths, committed_ends, row_count, inputs
+            )
+        info = self.dspark_attention_inputs(inputs).context_parallel_info
+        if info is None or info.prefill_qkv_padding_mask_cpu is None:
+            raise RuntimeError(
+                "DSpark CP commit requires host row restoration metadata"
+            )
+        # restore maps global padded order to rank-major order from all_gather.
+        # Construct the unpadded index on the CPU where CP produces the plan.
+        mask = info.prefill_qkv_padding_mask_cpu
+        if mask.numel() != self.parallelism_config.tp_size * row_count:
+            raise ValueError(
+                "DSpark commit feature rows do not match CP padding metadata"
+            )
+        order = info.prefill_qkv_restore_indice_cpu[mask == 1].to(
+            device=starts.device, dtype=torch.long, non_blocking=True
+        )
+        global_lengths = info.prefill_actual_input_lengths_cpu.to(
+            device=starts.device, dtype=torch.long, non_blocking=True
+        )
+        req, positions = map_context_rows(
+            global_lengths.cumsum(0) - global_lengths,
+            global_lengths,
+            committed_ends,
+            order.numel(),
+        )
+        return req, positions, order
 
     def combine_hidden_states(self, features: torch.Tensor) -> torch.Tensor:
         return self.fc(features)
@@ -274,7 +394,15 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
         inputs: PyModelInputs,
         commit_ctx: Any = None,
     ) -> None:
-        del committed_ends, commit_ctx
+        del committed_ends
+        if commit_ctx is not None:
+            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+            # All prompt ranks own every KV head. Project the local 5H features
+            # down to H before exchanging rows, then drop padding in global order.
+            main_x = all_gather(main_x.contiguous(), group=Group.TP).index_select(
+                0, commit_ctx
+            )
         table = self._block_table(inputs)
         page_size = self.attn_configs.kernel_tokens_per_block
         positions = context_positions.long()
@@ -397,6 +525,10 @@ class Qwen3DSparkModel(DSparkProposerMixin, Qwen3Model):
                 1,
             )
             return self.dspark_empty_outputs(batch, device)
+        if self._commit_only:
+            raise RuntimeError(
+                "a dedicated DSpark prefill worker cannot propose tokens"
+            )
         return self.run_propose_step(inputs, fmha_impl, device)
 
     @torch.inference_mode()

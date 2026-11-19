@@ -89,6 +89,8 @@ class Qwen3Model(GptModelBase):
         quant_config: Optional[object] = None,
         fmha_config=None,
         py_hw_kernel_config=None,
+        *,
+        build_decoder_layers: bool = True,
     ):
         super().__init__(
             config,
@@ -102,6 +104,9 @@ class Qwen3Model(GptModelBase):
         self.embed_tokens = Embedding(
             config, parallelism_config, weights.get_global_weight(W.embedding)
         )
+        if not build_decoder_layers:
+            self._disable_capture_context()
+            return
         self.layers = nn.ModuleList(
             [
                 Qwen3DecoderLayer(

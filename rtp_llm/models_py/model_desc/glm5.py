@@ -9,7 +9,10 @@ from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import is_ppu
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.model_desc.block_map import get_layer_caches_for_groups
+from rtp_llm.models_py.model_desc.block_map import (
+    get_layer_caches_for_groups,
+    get_primary_attention_inputs,
+)
 from rtp_llm.models_py.model_desc.cp_mtp_hidden_handoff import CpMtpHiddenHandoff
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoeModel
 from rtp_llm.models_py.model_desc.hidden_state_capture import CaptureContext
@@ -649,6 +652,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
         *,
         force_reuse_topk_indices: bool = False,
         capture: Optional[CaptureContext] = None,
+        aux_layer_ids: frozenset[int] = frozenset(),
     ) -> DecodeLayerOutput:
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
@@ -702,6 +706,8 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                 )
                 hidden_states, residual = result.hidden_states, result.residual
                 prev_topk_indices = result.topk_indices
+                if idx in aux_layer_ids:
+                    self.capture_aux_hidden(idx, hidden_states, residual)
                 if capture is not None:
                     capture.capture_layer(idx, hidden_states, residual)
             return DecodeLayerOutput(hidden_states, residual, prev_topk_indices)
@@ -742,7 +748,11 @@ class Glm5MoeModel(Glm5ModelBase):
         self, hidden_states: torch.Tensor, residual: torch.Tensor | None
     ) -> torch.Tensor:
         hidden_states = super()._capture_canonical_final(hidden_states, residual)
-        self.capture_cp_mtp_hidden(hidden_states)
+        self.capture_cp_mtp_hidden(
+            self._mtp_target_hidden_states
+            if self._mtp_aux_capture_layer_ids
+            else hidden_states
+        )
         return hidden_states
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
@@ -755,8 +765,20 @@ class Glm5MoeModel(Glm5ModelBase):
         }:
             raise RuntimeError("GLM5 requires default and indexer_kv attention routes")
         capture = self.capture_context(inputs.capture_hidden_states)
-        result = self._forward_decoder_layers(hidden_states, fmha_impl, capture=capture)
-        return capture.finalize(result.hidden_states, result.residual)
+        aux_layers = self._mtp_aux_capture_layer_id_set
+        if aux_layers:
+            self.begin_aux_hidden_capture(
+                hidden_states, get_primary_attention_inputs(inputs).is_target_verify
+            )
+        result = self._forward_decoder_layers(
+            hidden_states, fmha_impl, capture=capture, aux_layer_ids=aux_layers
+        )
+        if aux_layers:
+            self.finish_aux_hidden_capture()
+        outputs = capture.finalize(result.hidden_states, result.residual)
+        if aux_layers:
+            outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
+        return outputs
 
 
 __all__ = [

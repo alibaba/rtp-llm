@@ -1,6 +1,8 @@
 """Full-slot MXFP4 expert execution for PPU DeepEP low-latency payloads."""
 
 import torch
+
+from rtp_llm.models_py.utils.memory import tensor_spans_overlap
 from rtp_llm.models_py.kernels.ppu.jit.ppu_mxfp4_moe import silu_mul_masked_mxfp4
 
 
@@ -26,23 +28,6 @@ def full_slot_mxfp4_views(payload, scales):
             "Grouped MXFP4 requires packed uint8 and mn-major uint16 scales"
         )
     return payload, scales
-
-
-def tensor_spans_overlap(a, b):
-    """Conservative byte-span overlap, including holes in strided views."""
-    if a.device != b.device or not a.numel() or not b.numel():
-        return False
-
-    def span(tensor):
-        start = tensor.data_ptr()
-        last = sum(
-            (size - 1) * stride for size, stride in zip(tensor.shape, tensor.stride())
-        )
-        return start, start + (last + 1) * tensor.element_size()
-
-    a0, a1 = span(a)
-    b0, b1 = span(b)
-    return a0 < b1 and b0 < a1
 
 
 def _decode_tile_configs(gemm_tile, experts, hidden, inter, expected_m):

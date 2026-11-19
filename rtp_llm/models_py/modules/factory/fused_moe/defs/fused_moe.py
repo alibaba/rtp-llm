@@ -84,6 +84,8 @@ class ExpertForwardPayload:
     expert_ids_are_local: bool = False
     router_context: object | None = None
     gate_payload: Optional[ExpertGatePayload] = None
+    # Optional writable destination supplied by the router for the final GEMM.
+    expert_output_buffer: Optional[torch.Tensor] = None
 
 
 @dataclass

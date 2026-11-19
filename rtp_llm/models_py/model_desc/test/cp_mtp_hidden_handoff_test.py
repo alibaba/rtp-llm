@@ -64,6 +64,16 @@ class CpMtpHiddenHandoffTest(unittest.TestCase):
         model.initialize(_resource())
         self.assertEqual(model.get_mtp_target_hidden_states(-1).shape[0], 0)
 
+    def test_dspark_empty_and_populated_handoffs_have_same_feature_width(self):
+        model = _Model()
+        model.config.capture_aux_hidden_layer_ids = [1, 20, 38, 56, 75]
+        model.initialize(_resource())
+        self.assertEqual(model.get_mtp_target_hidden_states(-1).shape, (0, 20))
+        local = torch.arange(60).view(3, 20).float()
+        model.capture_cp_mtp_hidden(local)
+        self.assertIs(model.get_mtp_target_hidden_states(-1), local)
+        torch.testing.assert_close(model.get_mtp_target_hidden_states(2), local[:2])
+
 
 if __name__ == "__main__":
     unittest.main()

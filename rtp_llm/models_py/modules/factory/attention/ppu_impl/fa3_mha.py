@@ -356,7 +356,9 @@ class FA3PrefillPagedAttnOp:
     FA3 kvcache API.
     """
 
-    def __init__(self, attn_configs, attn_inputs):
+    def __init__(self, attn_configs, attn_inputs, *, causal=True, window_size=(-1, -1)):
+        self.causal = causal
+        self.window_size = window_size
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
@@ -404,7 +406,8 @@ class FA3PrefillPagedAttnOp:
             qkv_dtype=qkv_dtype,
             cu_seqlens_q=cu_seqlens_q,
             page_size=self.seq_size_per_block,
-            causal=True,
+            causal=self.causal,
+            window_size=self.window_size,
             num_splits=0,
             pack_gqa=False,
         )
@@ -592,7 +595,8 @@ class FA3PrefillPagedAttnOp:
             page_table=params.block_table,
             cu_seqlens_q=params.cu_seqlens_q,
             softmax_scale=self.softmax_scale,
-            causal=True,
+            causal=self.causal,
+            window_size=self.window_size,
             max_seqlen_q=params.max_seqlen_q,
             max_seqlen_k=params.max_seqlen_k,
             scheduler_metadata=params.scheduler_metadata,
@@ -799,7 +803,15 @@ class FA3PrefillPagedImpl:
     # The shared factory probes this capability before calling the constructor.
     accepts_fmha_config = False
 
-    def __init__(self, attn_configs, attn_inputs, parallelism_config=None):
+    def __init__(
+        self,
+        attn_configs,
+        attn_inputs,
+        parallelism_config=None,
+        *,
+        causal=True,
+        window_size=(-1, -1),
+    ):
         from rtp_llm.models_py.modules.factory.attention import common
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
             MhaRotaryEmbeddingOp,
@@ -816,7 +828,9 @@ class FA3PrefillPagedImpl:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
-        self.fmha_impl = FA3PrefillPagedAttnOp(attn_configs, attn_inputs)
+        self.fmha_impl = FA3PrefillPagedAttnOp(
+            attn_configs, attn_inputs, causal=causal, window_size=window_size
+        )
         # MRoPE (Qwen3.5) shares the same graph-safe PpuMRopeOp as decode;
         # other rope styles keep the standard MhaRotaryEmbeddingOp.
         _style = attn_configs.rope_config.style

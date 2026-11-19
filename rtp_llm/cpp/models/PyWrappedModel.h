@@ -148,6 +148,7 @@ private:
     const rtp_llm::ExecProperties                   device_props_;
     const MtpIndexerRole                            mtp_indexer_role_;
     const DSparkModelRole                           dspark_model_role_;
+    const char*                                     prepare_fmha_method_name_ = "prepare_fmha_impl";
     const bool                                      track_cache_store_completion_;
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
@@ -374,6 +375,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
+    if (dspark_model_role_ == DSparkModelRole::COMMIT && py::hasattr(py_model_, "prepare_commit_fmha_impl")) {
+        prepare_fmha_method_name_ = "prepare_commit_fmha_impl";
+    }
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.
@@ -478,7 +482,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
         auto graph_runner =
-            std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
+            std::make_unique<CudaGraphRunner>(
+                graph_params, py_instance, forward_method, params.metrics_reporter, prepare_fmha_method_name_);
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
@@ -648,12 +653,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // rejected at executor construction).
         //
         // Row count identifies global versus rank-local hidden input. The
-        // model capability only resolves the small-input case where those
-        // counts happen to be equal.
+        // producer capability and the DSpark COMMIT role resolve the short
+        // suffix case where a rank's padded count equals the global count.
+        const bool prefer_local_hidden_states = has_mtp_hidden_buffer_ || dspark_model_role_ == DSparkModelRole::COMMIT;
         context_parallel_processor_ = ContextParallelProcessorFactory::create(
-            ProcessorType::ZIG_ZAG, params.parallelism_config, has_mtp_hidden_buffer_);
+            ProcessorType::ZIG_ZAG, params.parallelism_config, prefer_local_hidden_states);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy, prefer_local_hidden_states=%d.",
-                         static_cast<int>(has_mtp_hidden_buffer_));
+                         static_cast<int>(prefer_local_hidden_states));
     }
 
     if (!params.hidden_state_capture_layer_ids.empty()) {

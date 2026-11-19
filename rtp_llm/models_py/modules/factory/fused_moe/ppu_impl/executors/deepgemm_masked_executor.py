@@ -625,11 +625,13 @@ class DeepGemmFp8MaskedExecutor(FusedMoeExpertExecutor):
             )
             dispose_tensor(gateup_output)
 
-            down_output = torch.empty(
-                (self._num_experts, max_tokens, self._hidden_size),
-                device=device,
-                dtype=torch.bfloat16,
-            )
+            down_output = payload.expert_output_buffer
+            if down_output is None:
+                down_output = torch.empty(
+                    (self._num_experts, max_tokens, self._hidden_size),
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
             m_grouped_fp8_gemm_nt_masked(
                 (down_q, down_scale),
                 (self._w2, self._w2_scale),

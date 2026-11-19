@@ -144,7 +144,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                         load_ops.assert_not_called()
                         initialize.assert_not_called()
 
-    def make_capture_model(self, layer_ids):
+    def make_capture_model(self, layer_ids, aux_layers=()):
         class FinalNorm(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -160,7 +160,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             hidden_size=4,
             layernorm_eps=1e-6,
             hidden_state_capture_layer_ids=layer_ids,
-            capture_aux_hidden_layer_ids=[],
+            capture_aux_hidden_layer_ids=list(aux_layers),
         )
         embedding = nn.Embedding(8, 4)
         with torch.no_grad():
@@ -183,6 +183,33 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 self.assertTrue(
                     self.make_capture_model(layer_ids).supports_hidden_state_capture
                 )
+
+    @torch.inference_mode()
+    def test_dspark_cp_hands_off_post_residual_features_and_preserves_final_output(
+        self,
+    ):
+        model = self.make_capture_model([], [0, 1])
+        model._cp_mtp_handoff_enabled = True
+        pointers = []
+        for verify, token_ids in ((True, [0, 1]), (False, [2]), (True, [3])):
+            inputs = SimpleNamespace(
+                input_ids=torch.tensor(token_ids),
+                capture_hidden_states=False,
+                attention_inputs={"default": SimpleNamespace(is_target_verify=verify)},
+            )
+            embedded = model.embed_tokens(inputs.input_ids)
+            with patch(
+                "rtp_llm.models_py.model_desc.glm5.should_enable_glm5_cmp",
+                return_value=False,
+            ):
+                out = model(inputs, {"default": object(), "indexer_kv": object()})
+            expected = torch.cat((embedded + 2, embedded + 6), dim=-1)
+            torch.testing.assert_close(out.hidden_states, (embedded + 6) / 2)
+            torch.testing.assert_close(out.mtp_target_hidden_states, expected)
+            torch.testing.assert_close(model.get_mtp_target_hidden_states(-1), expected)
+            pointers.append(out.mtp_target_hidden_states.data_ptr())
+        self.assertEqual(pointers[0], pointers[2])
+        self.assertNotEqual(pointers[0], pointers[1])
 
     def test_capture_preserves_layer_order_final_norm_and_cp_mtp_hidden(self):
         model = self.make_capture_model([1, 0])

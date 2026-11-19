@@ -9,7 +9,13 @@ import torch
 
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import ModelDict, ensure_model_registered
-from rtp_llm.models.qwen_3_dspark import Qwen3DSpark, dspark_offset_d2t_to_absolute
+from rtp_llm.models.qwen_3_dspark import (
+    Qwen3DSpark,
+    Qwen3DSparkWeight,
+    dspark_offset_d2t_to_absolute,
+)
+from rtp_llm.models.qwen_v3 import QWenV3Weight
+from rtp_llm.ops import RoleType
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3Model
 from rtp_llm.models_py.model_desc.qwen3_dspark_model import (
@@ -19,9 +25,36 @@ from rtp_llm.models_py.model_desc.qwen3_dspark_model import (
 )
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import device_metadata_tensor
 from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.utils.model_weight import W, WeightStyle, merge_qkv_hf
 
 
 class Qwen3DSparkRegistrationTest(unittest.TestCase):
+    def test_native_draft_reuses_target_tokenizer_and_eos(self) -> None:
+        target = SimpleNamespace(eos_token_id=154820)
+        config = SimpleNamespace(
+            special_tokens=SimpleNamespace(eos_token_id=-1),
+            enable_output_vocab_pruning=False,
+            generate_env_config=None,
+        )
+        with patch.object(Qwen3DSpark, "load_tokenizer", side_effect=AssertionError):
+            model = Qwen3DSpark(
+                model_config=config,
+                parallelism_config=None,
+                hw_kernel_config=None,
+                kv_cache_config=SimpleNamespace(
+                    multi_task_prompt=False, multi_task_prompt_str=""
+                ),
+                fmha_config=None,
+                moe_config=None,
+                max_generate_batch_size=1,
+                load_method=None,
+                vit_config=None,
+                merge_lora=False,
+                shared_tokenizer=target,
+            )
+        self.assertIs(model.tokenizer, target)
+        self.assertEqual(config.special_tokens.eos_token_id, target.eos_token_id)
+
     def test_torch_rope_matches_qwen_reference_and_preserves_tail(self) -> None:
         positions = torch.tensor([0, 1, 7], dtype=torch.int32)
         rope_dim = 4
@@ -91,9 +124,7 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
             page_size,
             vector_size,
         )[:, 0]
-        value_physical = cache.view(
-            block_count, 2, kv_heads, head_dim, page_size
-        )[:, 1]
+        value_physical = cache.view(block_count, 2, kv_heads, head_dim, page_size)[:, 1]
         actual_key = key_physical[pages, :, :, slots, :].reshape_as(key)
         actual_value = value_physical[pages, :, :, slots]
         torch.testing.assert_close(actual_key, key)
@@ -160,6 +191,170 @@ class Qwen3DSparkRegistrationTest(unittest.TestCase):
         self.assertEqual(config.dspark_markov_rank, 32)
         self.assertTrue(ensure_model_registered("qwen_3_dspark"))
         self.assertEqual(ModelDict.get_ft_model_type_by_config(raw), "qwen_3_dspark")
+
+    def test_native_draft_graph_refreshes_only_its_own_cache_tag(self):
+        draft, target = PyAttentionInputs(), PyAttentionInputs()
+        tag = SimpleNamespace(tag="draft")
+        model = SimpleNamespace(
+            parallelism_config=SimpleNamespace(
+                prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+            ),
+            config=SimpleNamespace(dspark_layer_windows=(2048, None)),
+            kv_cache=SimpleNamespace(get_layer_cache_groups=lambda i: [tag]),
+            attn_configs=object(),
+            layer_num=2,
+        )
+        package = "rtp_llm.models_py.model_desc.qwen3_dspark_model"
+        with patch(package + ".is_ppu", return_value=True), patch(
+            package + "._PpuDraftAttention", side_effect=lambda cfg, inputs, w: inputs
+        ):
+            plans = Qwen3DSparkModel.prepare_fmha_impl(
+                model,
+                SimpleNamespace(attention_inputs={"indexer": target, "draft": draft}),
+            )
+            self.assertEqual(plans, {"draft": draft})
+            single = Qwen3DSparkModel.prepare_fmha_impl(
+                model, SimpleNamespace(attention_inputs=draft)
+            )
+            self.assertIs(single, draft)
+
+    def test_native_glm_draft_uses_post_layer_indices_and_target_vocab_weights(
+        self,
+    ):
+        raw = {
+            "architectures": ["Qwen3DSparkModel"],
+            "hidden_size": 128,
+            "intermediate_size": 256,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "num_hidden_layers": 5,
+            "vocab_size": 1024,
+            "dflash_config": {"target_layer_ids": [1, 20, 38, 56, 75]},
+            "dspark_config": {"markov_rank": 32, "mask_token_id": 1000},
+            "layer_types": ["sliding_attention"] * 4 + ["full_attention"],
+            "sliding_window": 2048,
+        }
+        with tempfile.TemporaryDirectory() as path:
+            Path(path, "config.json").write_text(json.dumps(raw))
+            config = Qwen3DSpark._create_config(path)
+            config.ckpt_path = path
+            self.assertEqual(
+                ModelDict.get_ft_model_type_by_config(raw), "qwen_3_dspark"
+            )
+            self.assertEqual(config.dspark_target_layer_ids, [1, 20, 38, 56, 75])
+            self.assertEqual(
+                config.dspark_layer_windows, (2048, 2048, 2048, 2048, None)
+            )
+            self.assertTrue(config.dspark_sample_from_anchor)
+            self.assertEqual(config.dspark_noise_token_id, 1000)
+            self.assertEqual(config.dspark_markov_rank, 32)
+            owner = SimpleNamespace(model_config=config)
+            self.assertEqual(
+                Qwen3DSpark.speculative_weight_alias_names(owner, config),
+                (W.embedding, W.lm_head),
+            )
+            # Native drafts always use the target, even if an exporter writes
+            # its own tables or omits an LM head tied to its embedding.
+            config.tie_word_embeddings = True
+            Path(path, "model.safetensors.index.json").write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            "embed_tokens.weight": "shard",
+                            "lm_head.weight": "shard",
+                        }
+                    }
+                )
+            )
+            self.assertEqual(
+                Qwen3DSpark.speculative_weight_alias_names(owner, config),
+                (W.embedding, W.lm_head),
+            )
+            raw["is_causal"] = True
+            Path(path, "config.json").write_text(json.dumps(raw))
+            with self.assertRaisesRegex(NotImplementedError, "is_causal"):
+                Qwen3DSpark._create_config(path)
+            config.input_vocab_size -= 1
+            with self.assertRaisesRegex(ValueError, "input vocabulary"):
+                Qwen3DSpark.speculative_weight_alias_names(owner, config)
+
+    def test_native_prefill_omits_proposal_only_weights_but_decode_keeps_them(self):
+        layer = [W.attn_qkv_w, W.k_ln_gamma, W.attn_o_w, W.ffn_w1]
+        tables = [
+            W.embedding,
+            W.lm_head,
+            W.dspark_fc_w,
+            W.dspark_hidden_norm_gamma,
+            W.dspark_markov_w1,
+        ]
+        for role, tp, want_layer, want_tables in (
+            (RoleType.PREFILL, 1, [W.k_ln_gamma], tables[:4] + [W.dspark_context_kv_w]),
+            (RoleType.PREFILL, 2, layer[:2], tables[:4]),
+            (RoleType.DECODE, 1, layer, tables),
+        ):
+            desc = Qwen3DSparkWeight.__new__(Qwen3DSparkWeight)
+            desc.model_config = SimpleNamespace(dspark_layer_windows=(16, None))
+            desc.role_type, desc.tp_size, desc.weight_style = role, tp, WeightStyle.NONE
+            desc.transformer_prefix = "model."
+            info = SimpleNamespace(
+                layer_weights=[
+                    [SimpleNamespace(name=n) for n in layer] for _ in range(2)
+                ],
+                weights=[SimpleNamespace(name=n) for n in tables],
+            )
+            with patch.object(QWenV3Weight, "get_weight_info", return_value=info):
+                loaded = desc.get_weight_info()
+            self.assertEqual([x.name for x in loaded.layer_weights[0]], want_layer)
+            self.assertEqual([x.name for x in loaded.weights], want_tables)
+            if W.dspark_context_kv_w in want_tables:
+                packed = loaded.weights[-1]
+                self.assertEqual(
+                    [w.tensor_name(None) for w in packed.weights],
+                    [
+                        f"model.layers.{i}.self_attn.{kv}_proj.weight"
+                        for i in range(2)
+                        for kv in ("k", "v")
+                    ],
+                )
+                # Packed projection must write the same per-layer K/V as the
+                # proposal layout, including both the layer and K/V order.
+                q = torch.arange(16).reshape(4, 4).float()
+                kv = [torch.arange(8).reshape(2, 4).float() + 10 * i for i in range(4)]
+                ref = torch.cat(
+                    [
+                        merge_qkv_hf([q, *kv[2 * i : 2 * i + 2]])[:, 4:]
+                        for i in range(2)
+                    ],
+                    dim=1,
+                )
+                torch.testing.assert_close(packed.process_fun(kv), ref, rtol=0, atol=0)
+
+    def test_batched_cp_commit_restores_real_rows_and_independent_chunk_offsets(self):
+        info = SimpleNamespace(
+            prefill_qkv_padding_mask_cpu=torch.tensor([1, 1, 1, 0, 1, 1, 0, 0]),
+            prefill_qkv_restore_indice_cpu=torch.tensor([0, 4, 5, 1, 2, 6, 7, 3]),
+            prefill_actual_input_lengths_cpu=torch.tensor([3, 2]),
+        )
+        model = SimpleNamespace(
+            parallelism_config=SimpleNamespace(
+                tp_size=2, prefill_cp_config=SimpleNamespace(is_enabled=lambda: True)
+            ),
+            dspark_attention_inputs=lambda _: SimpleNamespace(
+                context_parallel_info=info
+            ),
+        )
+        req, positions, order = Qwen3DSparkModel.map_commit_rows(
+            model,
+            torch.tensor([0, 2]),
+            torch.tensor([2, 2]),
+            torch.tensor([13, 23]),
+            4,
+            object(),
+        )
+        rank_major = torch.tensor([10, -1, 21, -1, 11, 12, 22, -1])
+        self.assertEqual(req.tolist(), [0, 0, 0, 1, 1])
+        self.assertEqual(positions.tolist(), [10, 11, 12, 21, 22])
+        self.assertEqual(rank_major.index_select(0, order).tolist(), positions.tolist())
 
     def test_speculators_config_normalizes_vocab_and_layer_contract(self) -> None:
         raw = {

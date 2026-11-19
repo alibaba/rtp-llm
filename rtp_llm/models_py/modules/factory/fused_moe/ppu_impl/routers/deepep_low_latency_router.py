@@ -23,6 +23,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_la
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.models_py.utils.memory import tensor_spans_overlap
 
 
 class PpuDeepEpLowLatencyRouterNoQuant(DeepEpLowLatencyRouter):
@@ -160,8 +161,8 @@ class PpuDeepEpLowLatencyRouterFp8PerBlock(DeepEpLowLatencyRouter):
     """BF16 DeepEP low-latency dispatch for FP8 per-block checkpoints.
 
     The PPU deep_ep low-latency buffer dispatches BF16 activations; the FP8
-    masked executor quantizes per-128-group after dispatch. This router only
-    adapts the eligibility checks and payload validation for FP8 models.
+    masked executor quantizes per-128-group after dispatch and can write its
+    final output directly into a disjoint DeepEP combine slot.
     """
 
     QUANT_METHOD = "FP8_PER_BLOCK"
@@ -181,6 +182,7 @@ class PpuDeepEpLowLatencyRouterFp8PerBlock(DeepEpLowLatencyRouter):
     ) -> None:
         super().__init__(config, quant_config)
         self._use_fp8_dispatch = False
+        self._combine_slot: Optional[torch.Tensor] = None
 
     def prepare(
         self,
@@ -230,4 +232,31 @@ class PpuDeepEpLowLatencyRouterFp8PerBlock(DeepEpLowLatencyRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        return self._normal_prepare(dispatch_args, tp_topk_weights)
+        payload = self._normal_prepare(dispatch_args, tp_topk_weights)
+        get_slot = getattr(self._buffer, "get_next_low_latency_combine_buffer", None)
+        if get_slot is not None:
+            slot = get_slot(self._handle)
+            x = payload.expert_x
+            meta = payload.expert_tokens_meta
+            counts = meta.expert_num_tokens if meta is not None else None
+            # The slot belongs to this dispatch handle. Some DeepEP builds use
+            # overlapping arenas; in that case keep the regular combine path.
+            if (
+                isinstance(slot, torch.Tensor)
+                and counts is not None
+                and slot.shape == x.shape
+                and slot.dtype == x.dtype
+                and slot.device == x.device
+                and slot.is_contiguous()
+                and not tensor_spans_overlap(slot, x)
+                and not tensor_spans_overlap(slot, counts)
+            ):
+                payload.expert_output_buffer = self._combine_slot = slot
+        return payload
+
+    def _normal_finalize(self, combine_args: dict[str, Any]) -> torch.Tensor:
+        combine_args["zero_copy"] = combine_args["x"] is self._combine_slot
+        try:
+            return super()._normal_finalize(combine_args)
+        finally:
+            self._combine_slot = None

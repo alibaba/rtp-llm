@@ -87,6 +87,7 @@ class BaseModel(object):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        shared_tokenizer: Optional[BaseTokenizer] = None,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -128,7 +129,11 @@ class BaseModel(object):
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
-        self.load_tokenizer()
+        if shared_tokenizer is None:
+            self.load_tokenizer()
+        else:
+            self.tokenizer = shared_tokenizer
+            self._fill_tokenizer_special_tokens()
         self._finalize_output_vocab_config()
 
         if (
@@ -309,6 +314,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        shared_tokenizer: Optional[BaseTokenizer] = None,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -337,6 +343,11 @@ class BaseModel(object):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            **(
+                {"shared_tokenizer": shared_tokenizer}
+                if shared_tokenizer is not None
+                else {}
+            ),
         )
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(

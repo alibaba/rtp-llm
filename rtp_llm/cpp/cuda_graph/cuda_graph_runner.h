@@ -51,7 +51,8 @@ public:
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
                     const char*                                forward_method_name = "forward",
-                    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter    = nullptr):
+                    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter    = nullptr,
+                    const char*                                prepare_method_name = "prepare_fmha_impl"):
         GraphBase(std::move(py_instance)),
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
@@ -125,7 +126,7 @@ public:
                                     && max_seq_len_ <= max_index && max_bs_ <= max_index / num_tokens_per_bs_
                                     && (isGenerationPrefillCudaGraph() || max_bs_ <= max_index / max_seq_len_),
                                 "CUDA graph capacities exceed int32 token/padding indexing limits");
-        py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
+        py_attn_pyobj_method_ = py_instance_.attr(prepare_method_name);
         py_forward_method_    = py_instance_.attr(forward_method_name);
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);

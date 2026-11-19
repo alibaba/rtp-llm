@@ -4,7 +4,7 @@ import torch
 
 
 class CpMtpHiddenHandoff:
-    """Keep GLM's normalized rank-local output before C++ CP gathers last rows."""
+    """Keep rank-local draft features before C++ CP gathers generation rows."""
 
     def initialize(self, init_resource) -> bool:
         initialized = super().initialize(init_resource)
@@ -20,8 +20,9 @@ class CpMtpHiddenHandoff:
             reference = next(iter(self.weight.global_weights.values()))
             # Publish capability during construction, without reserving a full
             # max-sequence buffer. Forward retains its own output tensor.
+            aux_layers = getattr(self.config, "capture_aux_hidden_layer_ids", None) or ()
             self._cp_mtp_hidden = torch.empty(
-                (0, int(self.config.hidden_size)),
+                (0, int(self.config.hidden_size) * max(1, len(aux_layers))),
                 dtype=reference.dtype,
                 device=reference.device,
             )

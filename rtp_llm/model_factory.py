@@ -226,6 +226,15 @@ class ModelFactory:
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
+                # Native DSpark consumes target token IDs. Its tokenizer path is
+                # the target checkpoint and parser selection belongs to the target.
+                shared_tokenizer=(
+                    target_model.tokenizer
+                    if sp_type == SpeculativeType.DSPARK
+                    and propose_model_config.dspark_layer_windows is not None
+                    and target_model is not None
+                    else None
+                ),
             )
             aliased_local_bytes = 0
             for name in alias_names:

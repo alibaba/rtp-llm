@@ -661,6 +661,26 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         # ordinary CP input processor must not apply the shuffle a second time.
         self.assertTrue(torch.equal(hidden, rank_local_hidden))
 
+    def test_dspark_two_token_cp8_commit_preserves_each_ranks_features(self):
+        tokens = torch.tensor([101, 202], dtype=torch.int32)
+        restored = {}
+        for rank in range(8):
+            # Target forward has already returned two padded rows on every rank.
+            local = torch.tensor([[float(tokens[rank]) if rank < 2 else 0.0], [0.0]])
+            _, _, hidden, global_rows = cp_test.handle_inputs_with_hidden(
+                tokens,
+                torch.tensor([2], dtype=torch.int32),
+                torch.empty(0, dtype=torch.int32),
+                local,
+                rank,
+                8,
+                prefer_local_hidden_states=True,
+            )
+            for j, idx in enumerate(global_rows.tolist()):
+                if idx < len(tokens):
+                    restored[idx] = hidden[j, 0].item()
+        self.assertEqual(restored, {0: 101.0, 1: 202.0})
+
     def test_configured_local_hidden_is_not_split_when_row_counts_are_ambiguous(self):
         # Only the ambiguous equal-row-count case needs a model preference.
         total_tokens = torch.tensor([10, 11], dtype=torch.int32)

@@ -134,6 +134,7 @@ class ModelConfig(CppModelConfig):
         "dspark_target_layer_ids",
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
+        "dspark_layer_windows",
         "capture_aux_hidden_layer_ids",
         "mtp_layer_offset",
         "normalize_lm_head_weight",
@@ -705,6 +706,9 @@ class ModelConfig(CppModelConfig):
         self.dspark_target_layer_ids: Optional[list[int]] = None
         self.dspark_markov_rank: Optional[int] = None
         self.dspark_sample_from_anchor: bool = True
+        # Native draft: None per full (bidirectional) layer, positive causal
+        # window per sliding layer. The legacy Speculators layout leaves this unset.
+        self.dspark_layer_windows: Optional[tuple[Optional[int], ...]] = None
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.mtp_layer_offset: int = 0
