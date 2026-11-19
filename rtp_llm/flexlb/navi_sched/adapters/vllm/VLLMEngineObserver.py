@@ -862,6 +862,12 @@ class _ObservedWorkload:
     prior_cache_forecasts: tuple[_AdmissionPriorCacheForecast, ...] = field(
         default=(), compare=False, repr=False
     )
+    native_prefill_phases: tuple[tuple[str, _PrefillWorkloadSlice], ...] = field(
+        default=(), compare=False, repr=False
+    )
+    native_prefill_phase_observed_time_ns: int = field(
+        default=0, compare=False, repr=False
+    )
 
     def valid(self) -> bool:
         return (
@@ -3913,6 +3919,10 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 workload,
                 native_handoff_batch_ids=native_handoff_batch_ids,
                 prior_cache_forecasts=tuple(prior_cache_forecasts),
+                native_prefill_phases=base.native_prefill_phases,
+                native_prefill_phase_observed_time_ns=(
+                    base.native_prefill_phase_observed_time_ns
+                ),
                 waiting_request_ids=tuple(
                     sorted(
                         set(base.waiting_request_ids or ())
@@ -4256,7 +4266,41 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             cache_lookup=contribution.cache_lookup,
         )
 
-    def _partition_prefill_workload(self, scheduler, *, prior_cache_forecasts=None):
+    def _native_prefill_wait_phase(self, request):
+        if request is None:
+            return "request_not_registered"
+        status = getattr(request, "status", None)
+        status_name = str(getattr(status, "name", status))
+        if status_name == "RUNNING":
+            return "native_running"
+        if status_name == "PREEMPTED":
+            return "preempted"
+        state = self._native_v6d_request_audit(request)
+        if status_name == "WAITING_FOR_REMOTE_KVS" or state.get(
+            "native_v6d_load_inflight"
+        ):
+            return "kv_loading"
+        if state.get("native_v6d_lookup_skipped"):
+            return "lookup_skipped_waiting"
+        if state.get("native_v6d_match_future_done") is False:
+            return "query_pending"
+        if state.get("native_v6d_match_future_done") is True and not state.get(
+            "native_v6d_match_latency_recorded"
+        ):
+            return "query_ready_not_consumed"
+        if state.get("native_v6d_match_latency_recorded"):
+            return "query_consumed_waiting"
+        if state.get("native_v6d_state_present") and state.get(
+            "native_v6d_match_generation"
+        ) == 0:
+            return "query_not_started"
+        if self._native_cache_lookup_complete(request):
+            return "cache_known_waiting"
+        return "waiting_cache_state_unknown"
+
+    def _partition_prefill_workload(
+        self, scheduler, *, prior_cache_forecasts=None, native_prefill_phases=None
+    ):
         try:
             running = tuple(scheduler.running)
         except (AttributeError, TypeError):
@@ -4302,6 +4346,15 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 prior_cache_forecasts.append(
                     self._admission_cache_forecast(contribution, uses_running_capacity)
                 )
+            if native_prefill_phases is not None and contribution is not None:
+                phase = self._native_prefill_wait_phase(
+                    scheduler.requests.get(request_id)
+                )
+                phase_workload = native_prefill_phases.get(phase)
+                if phase_workload is None:
+                    phase_workload = _PrefillWorkloadSliceAggregate()
+                    native_prefill_phases[phase] = phase_workload
+                phase_workload.apply(contribution)
             if contribution is not None:
                 if running_now:
                     scheduler_running.apply(contribution)
@@ -4406,6 +4459,11 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             if request is not None:
                 waiting_request_ids.add(self._navi_request_id(request))
         prior_cache_forecasts = []
+        native_prefill_phases = (
+            {}
+            if self._pp_capacity_unified and self._native_request_state_audit_enabled
+            else None
+        )
         (
             max_running_request_count,
             running_capacity_slot_count,
@@ -4418,6 +4476,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             prior_cache_forecasts=(
                 prior_cache_forecasts if self._pp_capacity_unified else None
             ),
+            native_prefill_phases=native_prefill_phases,
         )
         workload = self._workload_aggregate.snapshot(
             running_request_count,
@@ -4439,6 +4498,13 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             workload,
             waiting_request_ids=tuple(sorted(waiting_request_ids)),
             prior_cache_forecasts=tuple(prior_cache_forecasts),
+            native_prefill_phases=tuple(
+                (phase, aggregate.snapshot())
+                for phase, aggregate in sorted((native_prefill_phases or {}).items())
+            ),
+            native_prefill_phase_observed_time_ns=(
+                time.perf_counter_ns() if native_prefill_phases is not None else 0
+            ),
         )
 
     def _audit_stalled_running_requests(
@@ -4699,6 +4765,49 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 pending.append(state)
         return pending
 
+    def _audit_native_prefill_workload(self, workload, report_event_time_us, reason):
+        # Use the same stored contributions as the published snapshot. Native's
+        # current token cursor can already include planned KV loads or in-flight
+        # compute, so reconstructing contributions from that cursor is ambiguous.
+        try:
+            fields = (
+                "request_count",
+                "context_tokens",
+                "compute_tokens",
+                "compute_token_square_sum",
+                "context_compute_token_product_sum",
+            )
+            phases = {
+                phase: {name: getattr(part, name) for name in fields}
+                for phase, part in workload.native_prefill_phases
+            }
+            reported = dict(zip(fields, (
+                workload.remaining_prefill_request_count,
+                workload.remaining_prefill_context_tokens,
+                workload.remaining_prefill_tokens,
+                workload.remaining_prefill_token_square_sum,
+                workload.context_remaining_prefill_token_product_sum,
+            )))
+            unclassified = {
+                name: reported[name] - sum(part[name] for part in phases.values())
+                for name in fields
+            }
+            self.on_request_lifecycle_event({
+                "event": "native_prefill_workload_phases",
+                "event_time_us": time.time_ns() // 1000,
+                "report_event_time_us": report_event_time_us,
+                "observed_perf_ns": workload.native_prefill_phase_observed_time_ns,
+                "reason": reason,
+                "phases": phases,
+                "reported_prefill": reported,
+                # Prepared batches can be included in the report before Native
+                # registers their requests; keep those contributions explicit.
+                "unclassified_prefill": unclassified,
+                "phase_totals_match_report": not any(unclassified.values()),
+            })
+        except Exception:
+            logger.exception("failed to audit published Native prefill phases")
+
     def _report_workload_locked(
         self, workload, reason, admitted_state=None, timing=None
     ) -> bool:
@@ -4740,8 +4849,9 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             report_options["record_timing"] = True
             timing.mark("prepare_report")
         try:
+            report_event_time_us = time.time_ns() // 1000
             reported = self._bridge.report_workload(
-                time.time_ns() // 1000,
+                report_event_time_us,
                 workload.batch_count,
                 workload.request_count,
                 workload.remaining_prefill_request_count,
@@ -4807,6 +4917,8 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         with self._prepared_workload_lock:
             for batch_id in workload.native_handoff_batch_ids:
                 self._native_handoff_batches.pop(batch_id, None)
+        if workload.native_prefill_phase_observed_time_ns:
+            self._audit_native_prefill_workload(workload, report_event_time_us, reason)
         logger.debug(
             "[navi-vllm-workload] reason=%s batches=%d requests=%d "
             "prefill_requests=%d running_total=%d running_prefill=%d "
