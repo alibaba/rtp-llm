@@ -79,7 +79,11 @@ cc_test(
     ]),
     visibility = ["//visibility:public"],
     args = select({
-        "@//:using_ppu": ["--gtest_filter=MtpExecutorTest.testMultiBatchDecode"],
+        "@//:using_ppu": [
+            "--gtest_filter=MtpExecutorTest.testMultiBatchDecode:" +
+            "MtpExecutorTest.testDSparkDraft*:MtpExecutorTest.testDSparkMixed*:" +
+            "MtpExecutorTest.testDSparkReducedVocab*",
+        ],
         "//conditions:default": [],
     }),
     data = [],

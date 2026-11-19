@@ -2279,12 +2279,10 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
                                              const torch::Tensor& base_logits,
                                              const torch::Tensor& anchors) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dspark_draft_sample)");
-    const auto batch_size = static_cast<int64_t>(stream_groups.size());
-    auto       temperature_cpu =
-        torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
-    auto*           temperatures         = temperature_cpu.data_ptr<float>();
+    const auto      batch_size = static_cast<int64_t>(stream_groups.size());
+    torch::Tensor   temperature_cpu;
+    float*          temperatures         = nullptr;
     int64_t         row                  = 0;
-    bool            all_argmax           = true;
     constexpr float kMinDraftTemperature = 1.0e-6f;
     for (const auto& stream : stream_groups.allStreams()) {
         // DSpARK admission is configuration-defined. needTilingForSampling()
@@ -2307,11 +2305,20 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         const bool stochastic = config->stochastic();
         // At exactly zero temperature we can also propose a deterministic token.
         // The verifier still applies the *target* request's sampling parameters.
-        all_argmax &= (!stochastic || config->temperature == 0.0f);
-        temperatures[row++] = stochastic ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
+        if (!temperatures && stochastic && config->temperature > 0.0f) {
+            temperature_cpu =
+                torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
+            temperatures = temperature_cpu.data_ptr<float>();
+            // Earlier rows were all greedy (or zero temperature).
+            std::fill_n(temperatures, row, kMinDraftTemperature);
+        }
+        if (temperatures) {
+            temperatures[row] = stochastic ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
+        }
+        ++row;
     }
     torch::Tensor temperature;
-    if (!all_argmax) {
+    if (temperature_cpu.defined()) {
         buffer_holder_.hold_host(temperature_cpu);
         temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
     }

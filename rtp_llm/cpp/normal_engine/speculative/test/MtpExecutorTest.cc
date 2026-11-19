@@ -2469,9 +2469,10 @@ TEST_F(MtpExecutorTest, testDSparkMixedGreedyAndStochasticBatchRetainsExactQ) {
     random->generateConfig()->temperature = 0.5f;
     StreamGroups groups({greedy, random});
     auto         options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
-    auto         logits  = torch::arange(2 * gamma * vocab_size, options).reshape({2 * gamma, vocab_size});
-    auto         anchors = torch::zeros({2}, options.dtype(torch::kInt32));
-    auto         out     = components.executor->sampleDSparkDraft(groups, logits, anchors);
+    auto         logits  = torch::tensor(
+        {{3.f, 0.f, 2.f, 1.f}, {0.f, 1.f, 2.f, 4.f}, {2.f, 3.f, 0.f, 1.f}, {0.f, 2.f, 5.f, 1.f}}, options);
+    auto anchors = torch::zeros({2}, options.dtype(torch::kInt32));
+    auto out     = components.executor->sampleDSparkDraft(groups, logits, anchors);
     ASSERT_FALSE(out.token_ids_are_point_mass);
     auto    ordered = groups.allStreams();
     int64_t row     = 0;

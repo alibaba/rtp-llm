@@ -54,6 +54,30 @@ class PromptTemplateReuseTest(TestCase):
         self.assertEqual(left._build_prompt(request("three")), "THREE")
         self.assertEqual(left.compilations, 2)
 
+    def test_cached_template_uses_tools_and_template_kwargs_from_each_request(self):
+        renderer = ReasoningToolBaseRenderer.__new__(ReasoningToolBaseRenderer)
+        renderer.chat_template = "{{ tools[0].function.name if tools else '-' }}:{{ mode | default('plain') }}"
+        renderer._prompt_template_cache = None
+        messages = [ChatMessage(role=RoleEnum.user, content="same")]
+        plain = ChatCompletionRequest(messages=messages)
+        with_tool = ChatCompletionRequest(
+            messages=messages,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "description": "Look up",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+            chat_template_kwargs={"mode": "tools"},
+        )
+        self.assertEqual(renderer._build_prompt(with_tool), "lookup:tools")
+        self.assertEqual(renderer._build_prompt(plain), "-:plain")
+        self.assertEqual(renderer._build_prompt(with_tool), "lookup:tools")
+
 
 class ProcessReasoningAndToolCallsTest(IsolatedAsyncioTestCase):
     """Test _process_reasoning_and_tool_calls method."""
