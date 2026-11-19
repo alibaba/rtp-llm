@@ -80,8 +80,11 @@ tokens 与一个槽位，防止并发超发和旧端点复用。重复上报同�
 
 成功响应在 `FlexlbServerStatusPB.prefill_chunk=11` 返回预约身份和截止时间，
 物理地址及 `engine_index` 仍沿用已有路由字段。Frontend 拿到预约后直接向 P
-发送请求，不调用 `EnqueueBatch`。无可用 Chunk 使用显式 fallback 状态 8600，
-由 SDK 沿用原请求 deadline 走 NORMAL；这不改变其他业务拒绝的终止语义。
+发送请求，不调用 `EnqueueBatch`。无可用 Chunk 时返回内部 `BLOCKED(PREFILL)`，
+请求保留在 Master 的既有 placement 等待队列，不向 SDK 返回 8600。新 Chunk 上报
+触发容量唤醒后重新选址；等待不占用 Chunk 额度，也不保留本次选址的其他角色资源。
+请求只注册一次，排队、唤醒和重试均沿用原始 deadline；到期或取消由既有生命周期逻辑
+清理，不能因新 Chunk 到达再次下发。显式配置的全局 fallback 与其他业务拒绝保持原语义。
 
 Master 的余额不持久化。主备切换后重新接收 P 的上报，可能对同一 Chunk 再次
 授予额度；P 必须用有界积压承接，并由 scheduler 的实际 step 硬预算限制计算。

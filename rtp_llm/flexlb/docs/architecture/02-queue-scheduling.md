@@ -264,3 +264,5 @@ WorkerStatus 的 `dispatch_immediate=true` 表示引擎空闲，可立即派发�
 请求本身仍须未超时。可用空闲 grant 优先于忙碌 grant，同类继续按剩余容量和
 截止时间选择。字段缺省 false 兼容旧引擎。预留仍按 epoch/chunk ID 扣减，
 重复状态不补充容量；有效期结束后必须等待引擎发布新 chunk ID。
+Chunk 容量不足或 lease 不允许接流时，Chunk 请求进入既有 PREFILL placement 等待路径，
+由新容量通知唤醒；不返回 SDK fallback，也不重置请求原始截止时间。

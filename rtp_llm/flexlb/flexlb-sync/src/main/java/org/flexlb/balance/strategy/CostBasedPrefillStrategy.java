@@ -921,8 +921,8 @@ public class CostBasedPrefillStrategy {
                 throw failure;
             }
         }
-        // The SDK interprets 8600 as an explicit request to use NORMAL fallback.
-        return PlacementResult.rejected(Response.error(StrategyErrorType.PREFILL_CHUNK_FALLBACK));
+        // Keep the request in the existing placement queue until a new grant arrives or its deadline expires.
+        return PlacementResult.blocked(RoleType.PREFILL);
     }
 
     private SelectedRole buildSelectedRole(PrefillEndpoint ep,

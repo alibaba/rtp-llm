@@ -26,6 +26,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -134,18 +135,14 @@ class PrefillChunkSelectionTest {
             selected.takeUnpublishedChunkRefund();
         }
         report(endpoint, 150L, 1, dispatchDeadline, 3L);
-        var fallback = select(prepared);
-        assertEquals(PlacementResult.Status.REJECTED, fallback.status());
-        assertEquals(8600, fallback.failure().getCode());
+        assertWaitingForChunk(select(prepared));
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void expiredGrantReturnsExplicitFallback(boolean prepared) {
+    void expiredGrantWaitsForNewChunk(boolean prepared) {
         publish("10.0.0.1", 500L, 3, System.currentTimeMillis() - 1L);
-        var fallback = select(prepared);
-        assertEquals(PlacementResult.Status.REJECTED, fallback.status());
-        assertEquals(8600, fallback.failure().getCode());
+        assertWaitingForChunk(select(prepared));
     }
 
     @ParameterizedTest
@@ -158,9 +155,9 @@ class PrefillChunkSelectionTest {
         try (SelectedRole alreadyReserved = select(prepared).value()) {
             assertNotNull(alreadyReserved);
             changeLease(worker, false);
-            assertEquals(PlacementResult.Status.REJECTED, select(prepared).status());
+            assertWaitingForChunk(select(prepared));
             report(endpoint, 500L, 3, dispatchDeadline, 4L, 3L, leaseVersion, true, leaseVersion);
-            assertEquals(PlacementResult.Status.REJECTED, select(prepared).status());
+            assertWaitingForChunk(select(prepared));
             assertNotNull(alreadyReserved.serverStatus().getPrefillChunk());
         }
         assertEquals(Long.MAX_VALUE, remaining(endpoint), "closing a previous reservation must not unfreeze capacity");
@@ -176,12 +173,48 @@ class PrefillChunkSelectionTest {
         changeLease(worker, false);
         long next = changeLease(worker, true);
         report(endpoint, 500L, 3, dispatchDeadline, 4L, 2L, next, true, first);
-        assertEquals(PlacementResult.Status.REJECTED, select(prepared).status());
+        assertWaitingForChunk(select(prepared));
         report(endpoint, 500L, 3, dispatchDeadline, 5L, 3L, next, true, next);
         try (SelectedRole selected = select(prepared).value()) {
             assertNotNull(selected);
             assertEquals(next, selected.serverStatus().getPrefillChunk().leaseVersion());
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void waitingRequestUsesNewGrantWithoutResettingItsTimeout(boolean prepared) {
+        PrefillEndpoint endpoint = publish("10.0.0.1", 99L, 1, dispatchDeadline);
+        long requestedAt = context.getRequest().getRequestTimeMs();
+        long timeout = context.getRequest().getGenerateTimeout();
+        assertWaitingForChunk(select(prepared));
+        report(endpoint, 500L, 1, dispatchDeadline, 3L, 2L, 0L, false, 0L);
+        try (SelectedRole selected = select(prepared).value()) {
+            assertNotNull(selected);
+            assertEquals(2L, selected.serverStatus().getPrefillChunk().chunkId());
+            assertEquals(requestedAt, context.getRequest().getRequestTimeMs());
+            assertEquals(timeout, context.getRequest().getGenerateTimeout());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repeatedAttemptsCannotUseChunkBeyondOriginalRequestDeadline(boolean prepared) {
+        PrefillEndpoint endpoint = publish("10.0.0.1", 500L, 1, dispatchDeadline);
+        context.getRequest().setRequestTimeMs(System.currentTimeMillis() - 59_000L);
+        long requestedAt = context.getRequest().getRequestTimeMs();
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertWaitingForChunk(select(prepared));
+            assertEquals(requestedAt, context.getRequest().getRequestTimeMs());
+            assertEquals(500L, remaining(endpoint));
+        }
+    }
+
+    private void assertWaitingForChunk(PlacementResult<SelectedRole, RoleType> result) {
+        assertEquals(PlacementResult.Status.BLOCKED, result.status());
+        assertEquals(RoleType.PREFILL, result.blocker());
+        assertNull(result.failure(), "waiting must not produce an SDK fallback response");
+        assertNull(result.value(), "waiting must not retain a selected endpoint or chunk reservation");
     }
 
     private long changeLease(WorkerStatus worker, boolean enabled) {
