@@ -13,6 +13,7 @@ from .._prefill_stream import prefill_stream_is_capturing
 def _try_publish_with_tokens(
     shared, logits, visible, rows, bounds, target, block, count
 ):
+    """Return whether publication is handled and any selected token indices."""
     from . import _v41_prefill_candidates as pool
     from . import _v41_prefill_topk as topk
 
@@ -20,7 +21,7 @@ def _try_publish_with_tokens(
     if retained is not None:
         first = bisect_left(retained, rows.start)
         if first == len(retained) or retained[first] >= rows.stop:
-            return False, None
+            return True, None
     candidates = shared["candidates"]
     cache = shared.get("prefill_candidate_mask")
     flags = (
@@ -171,9 +172,9 @@ def try_select_batched(
         count = min(attn.index_topk, logits.shape[1])
         if count != target.shape[1]:
             target = target[:, :count]
-        published, selected = False, None
+        publication_handled, selected = False, None
         if publishing:
-            published, selected = _try_publish_with_tokens(
+            publication_handled, selected = _try_publish_with_tokens(
                 shared,
                 logits,
                 visible,
@@ -183,10 +184,18 @@ def try_select_batched(
                 candidate_size,
                 candidate_blocks,
             )
-        if publishing and not published:
+        if selected is None:
+            selected = topk.try_select_tokens(
+                logits, visible, count, bounds=bounds, out=target
+            )
+        use_torch_topk = selected is None
+        if use_torch_topk:
+            # Native selectors mask at load. Share this fill with publication
+            # when the token selector requires torch.topk.
             _mask_tail_kernel[(logits.shape[0],)](
                 logits, visible, logits.shape[1], logits.stride(0), 256
             )
+        if publishing and not publication_handled:
             _apply_prefill_candidates(
                 shared,
                 logits,
@@ -195,17 +204,9 @@ def try_select_batched(
                 candidate_size,
                 candidate_blocks,
                 True,
+                mask_tail=not use_torch_topk,
             )
-        if selected is None:
-            selected = topk.try_select_tokens(
-                logits, visible, count, bounds=bounds, out=target
-            )
-        if selected is None:
-            # Native K512 consumes ends; torch.topk and publication read tails.
-            if not publishing:
-                _mask_tail_kernel[(logits.shape[0],)](
-                    logits, visible, logits.shape[1], logits.stride(0), 256
-                )
+        if use_torch_topk:
             scores, selected = logits.topk(count, dim=-1)
             selected = torch.where(scores.isfinite(), selected, -1).int()
         if selected is not target:

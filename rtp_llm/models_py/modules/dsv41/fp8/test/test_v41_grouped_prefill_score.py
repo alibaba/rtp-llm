@@ -2008,17 +2008,17 @@ class GroupedScoreCudaTest(unittest.TestCase):
     "requires the grouped-score CUDA test environment",
 )
 class GroupedTailSelectionTest(unittest.TestCase):
-    def _logits(self, width, *, strided=False, ties=False):
+    def _logits(self, width, *, strided=False, ties=False, dtype=torch.float32):
         ends = torch.tensor(
             [0, 1, min(511, width), min(512, width), width] * 2,
             device="cuda",
             dtype=torch.int32,
         )
-        backing = torch.full((len(ends), width + 17), 123.0, device="cuda")
+        backing = torch.full((len(ends), width + 17), 123.0, device="cuda", dtype=dtype)
         logits = (
             backing[:, :width]
             if strided
-            else torch.empty(len(ends), width, device="cuda")
+            else torch.empty(len(ends), width, device="cuda", dtype=dtype)
         )
         values = torch.arange(width, device="cuda", dtype=torch.float32)
         if ties:
@@ -2095,11 +2095,12 @@ class GroupedTailSelectionTest(unittest.TestCase):
         original_apply = attention._apply_prefill_candidates
         published = []
 
-        def apply(*args):
-            tail = torch.arange(width, device="cuda")[None] >= ends[:, None]
-            self.assertTrue(torch.isneginf(args[1][tail]).all().item())
+        def apply(*args, mask_tail=False):
+            if not mask_tail:
+                tail = torch.arange(width, device="cuda")[None] >= ends[:, None]
+                self.assertTrue(torch.isneginf(args[1][tail]).all().item())
             published.append(True)
-            return original_apply(*args)
+            return original_apply(*args, mask_tail=mask_tail)
 
         native = topk.try_select_tokens
         original_pool = pool.select_candidates
@@ -2252,23 +2253,69 @@ class GroupedTailSelectionTest(unittest.TestCase):
                     expected = torch.where(values.isfinite(), ids, -1).int()
                     self.assertTrue(torch.equal(actual, expected))
 
-    def test_publication_receives_masked_logits_and_keeps_candidates_exact(self):
+    def test_publication_masks_at_load_and_keeps_candidates_exact(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as attention
 
-        for fallback in (None, "forced"):
-            logits, clean, ends, _ = self._logits(8193, strided=True)
-            actual, shared = self._select(
-                logits, ends, publish=True, candidates=True, fallback=fallback
-            )
-            expected_shared = {"candidates": torch.full_like(shared["candidates"], -99)}
-            attention._apply_prefill_candidates(
-                expected_shared, clean, ends, slice(0, len(ends)), 8, 32, True
-            )
-            self.assertTrue(
-                torch.equal(shared["candidates"], expected_shared["candidates"])
-            )
-            self.assertTrue(torch.equal(logits, clean))
-            self._assert_contract(actual, clean, ends)
+        for width, dtype in (
+            (8193, torch.float32),
+            (8193, torch.bfloat16),
+            (257, torch.float32),
+        ):
+            with self.subTest(width=width, dtype=dtype):
+                logits, clean, ends, _ = self._logits(width, strided=True, dtype=dtype)
+                before = logits.contiguous().view(torch.uint8).clone()
+                actual, shared = self._select(
+                    logits, ends, publish=True, candidates=True
+                )
+                self.assertEqual(self.last_calls["legacy_publication"], 1)
+                expected_shared = {
+                    "candidates": torch.full_like(shared["candidates"], -99)
+                }
+                attention._apply_prefill_candidates(
+                    expected_shared, clean, ends, slice(0, len(ends)), 8, 32, True
+                )
+                self.assertTrue(
+                    torch.equal(shared["candidates"], expected_shared["candidates"])
+                )
+                if width >= 512:
+                    self.assertTrue(
+                        torch.equal(logits.contiguous().view(torch.uint8), before)
+                    )
+                else:
+                    self.assertTrue(torch.equal(logits, clean))
+                self._assert_contract(actual, clean, ends, ties=dtype == torch.bfloat16)
+
+    def test_ced_skip_still_masks_for_torch_token_topk(self):
+        logits, clean, ends, _ = self._logits(8193, strided=True)
+        actual, shared = self._select(
+            logits,
+            ends,
+            publish=True,
+            candidates=True,
+            fuse=True,
+            retained=(),
+            fallback="forced",
+        )
+        self.assertEqual(self.last_calls["legacy_publication"], 0)
+        self.assertTrue((shared["candidates"] == -99).all().item())
+        self.assertTrue(torch.equal(logits, clean))
+        self._assert_contract(actual, clean, ends)
+
+    @patch.dict(os.environ, {"DSV41_PREFILL_CANDIDATE_FLAGS_MAX_BYTES": "0"})
+    def test_candidate_bitmap_rejection_masks_after_native_token_topk(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as attention
+
+        logits, clean, ends, _ = self._logits(8193, strided=True)
+        actual, shared = self._select(
+            logits, ends, publish=True, candidates=True, fuse=True
+        )
+        self.assertEqual(self.last_calls["selector"], 1)
+        self.assertEqual(self.last_calls["raw_attempts"], 0)
+        self.assertEqual(self.last_calls["legacy_publication"], 1)
+        self.assertTrue(torch.equal(logits, clean))
+        expected = attention.select_candidate_blocks(clean, ends, 8, 32)
+        self.assertTrue(torch.equal(shared["candidates"], expected))
+        self._assert_contract(actual, clean, ends)
 
     def test_nonpublishing_candidate_table_does_not_force_mask(self):
         for candidates, publish in ((True, False), (False, True)):
@@ -2346,6 +2393,7 @@ class GroupedTailSelectionTest(unittest.TestCase):
         for case in ("ced_skip", "pool_reject", "out", "bounds", "forced"):
             with self.subTest(case=case):
                 logits, clean, ends, _ = self._logits(32769, strided=True)
+                before = logits.contiguous().view(torch.uint8).clone()
                 kwargs = dict(
                     fuse=True,
                     publish=True,
@@ -2357,7 +2405,9 @@ class GroupedTailSelectionTest(unittest.TestCase):
                 if case in ("out", "bounds", "forced"):
                     kwargs["fallback"] = case
                 actual, shared = self._select(logits, ends, **kwargs)
-                self.assertEqual(self.last_calls["legacy_publication"], 1)
+                self.assertEqual(
+                    self.last_calls["legacy_publication"], int(case != "ced_skip")
+                )
                 if case == "pool_reject":
                     self.assertEqual(
                         (
@@ -2383,7 +2433,12 @@ class GroupedTailSelectionTest(unittest.TestCase):
                         (0, 0),
                     )
                 self._assert_contract(actual, clean, ends)
-                self.assertTrue(torch.equal(logits, clean))
+                if case in ("ced_skip", "pool_reject"):
+                    self.assertTrue(
+                        torch.equal(logits.contiguous().view(torch.uint8), before)
+                    )
+                else:
+                    self.assertTrue(torch.equal(logits, clean))
                 if case != "ced_skip":
                     expected = {
                         "candidates": torch.full_like(shared["candidates"], -99)
