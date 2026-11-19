@@ -183,22 +183,23 @@ TransferCompletionQuery::query(const TransferCompletionIdentity& execution, int 
         const bool completed = rpc->done() || (wait_timeout > 0 && rpc->waitDone(wait_timeout, false));
         if (!completed)
             result.error = "completion query deadline exceeded";
-        for (const auto& snapshot : rpc->rankSnapshots()) {
-            auto& row = result.ranks.at(snapshot.rank);
-            row.cq_received = snapshot.cq_received;
-            row.cq_ok = snapshot.cq_ok;
-            row.grpc_code = snapshot.grpc_code;
-            if (!snapshot.cq_received || !snapshot.cq_ok || !snapshot.grpc_code) {
-                row.error = snapshot.dispatch_error.empty() ? "completion query has no successful CQ event" :
-                                                              snapshot.dispatch_error;
-            } else if (*snapshot.grpc_code != grpc::StatusCode::OK) {
-                row.error = snapshot.grpc_message.empty() ? "completion query RPC failed" : snapshot.grpc_message;
-            } else if (!snapshot.response) {
-                row.error = "completion query response is unavailable";
-            } else {
-                decodeResponse(*snapshot.response, key, row);
+        rpc->forEachRankResponse([&](size_t rank, bool received, const auto* worker, const std::string& dispatch_error) {
+            auto& row = result.ranks.at(rank);
+            row.cq_received = received;
+            row.cq_ok = worker != nullptr;
+            if (!worker) {
+                row.error = dispatch_error.empty() ? "completion query has no successful CQ event" : dispatch_error;
+                return;
             }
-        }
+            row.grpc_code = worker->status.error_code();
+            if (!worker->status.ok()) {
+                row.error = worker->status.error_message();
+                if (row.error.empty())
+                    row.error = "completion query RPC failed";
+            } else {
+                decodeResponse(worker->response, key, row);
+            }
+        });
         if (remainingTimeout(deadline) == 0) {
             result.error = "completion query deadline exceeded";
         }

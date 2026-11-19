@@ -22,8 +22,6 @@
 
 namespace rtp_llm {
 
-enum class BroadcastDispatchState { NOT_SUBMITTED, POSSIBLY_SUBMITTED, SUBMITTED };
-
 inline bool isGrpcConnectFailure(const grpc::Status& status) {
     if (status.error_code() != grpc::StatusCode::UNAVAILABLE) {
         return false;
@@ -50,18 +48,6 @@ public:
         int                                  timeout_ms{0};
     };
 
-    struct RankSnapshot {
-        size_t                 rank{0};
-        std::string            server_address;
-        BroadcastDispatchState dispatch_state{BroadcastDispatchState::NOT_SUBMITTED};
-        std::string            dispatch_error;
-        bool                   cq_received{false};
-        bool                   cq_ok{false};
-        std::optional<int>     grpc_code;
-        std::string            grpc_message;
-        std::optional<ResponsePB> response;
-    };
-
 public:
     explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts,
                              std::optional<int64_t>                                request_id = std::nullopt,
@@ -70,7 +56,6 @@ public:
         worker_contexts_(worker_rpc_contexts),
         finished_(worker_rpc_contexts.size(), false),
         rpc_succeeded_(worker_rpc_contexts.size(), false),
-        dispatch_states_(worker_rpc_contexts.size(), BroadcastDispatchState::NOT_SUBMITTED),
         dispatch_errors_(worker_rpc_contexts.size()),
         cq_received_(worker_rpc_contexts.size(), false),
         cq_ok_(worker_rpc_contexts.size(), false),
@@ -160,40 +145,21 @@ public:
         return responses;
     }
 
-    std::vector<RankSnapshot> rankSnapshots() const {
-        std::lock_guard<std::mutex> lock(wait_done_mutex_);
-        std::vector<RankSnapshot> snapshots;
-        snapshots.reserve(worker_contexts_.size());
-        for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
-            RankSnapshot snapshot;
-            snapshot.rank           = rank;
-            snapshot.server_address = worker_contexts_[rank]->server_addr;
-            snapshot.dispatch_state = dispatch_states_[rank];
-            snapshot.dispatch_error = dispatch_errors_[rank];
-            snapshot.cq_received    = cq_received_[rank];
-            snapshot.cq_ok          = cq_ok_[rank];
-            // A CQ event ends gRPC's writes. An unsuccessful CQ event does not
-            // provide a valid RPC status or application response.
-            if (snapshot.cq_received && snapshot.cq_ok) {
-                snapshot.grpc_code    = worker_contexts_[rank]->status.error_code();
-                snapshot.grpc_message = worker_contexts_[rank]->status.error_message();
-                snapshot.response     = worker_contexts_[rank]->response;
-            }
-            snapshots.push_back(std::move(snapshot));
+    size_t rankCount() const {
+        return worker_contexts_.size();
+    }
+
+    template<typename Visitor>
+    void forEachRankResponse(Visitor&& visit) const {
+        std::unique_lock<std::mutex> lock(wait_done_mutex_);
+        const auto received = cq_received_;
+        const auto ok = cq_ok_;
+        const auto dispatch_errors = dispatch_errors_;
+        lock.unlock();
+        for (size_t rank = 0; rank < rankCount(); ++rank) {
+            const WorkerRpcContext* rpc = received[rank] && ok[rank] ? worker_contexts_[rank].get() : nullptr;
+            visit(rank, received[rank], rpc, dispatch_errors[rank]);
         }
-        return snapshots;
-    }
-
-    void markDispatchStarted(size_t rank) {
-        std::lock_guard<std::mutex> lock(wait_done_mutex_);
-        dispatch_states_.at(rank) = BroadcastDispatchState::POSSIBLY_SUBMITTED;
-        logTransferRpcEvent("rpc_dispatch_begin", rank);
-    }
-
-    void markSubmitted(size_t rank) {
-        std::lock_guard<std::mutex> lock(wait_done_mutex_);
-        dispatch_states_.at(rank) = BroadcastDispatchState::SUBMITTED;
-        logTransferRpcEvent("rpc_submitted", rank);
     }
 
     // Coordinator-local monotonic timestamps; no cross-host clock subtraction.
@@ -216,9 +182,6 @@ public:
     }
 
 private:
-    // Called under wait_done_mutex_. Only local-cache transfer RPCs are logged;
-    // completion-query polling must not generate one line per poll. These are
-    // client observations, not proof that the worker admitted or finished I/O.
     void logTransferRpcEvent(const char* event, size_t rank, bool cq_received = false,
                              bool cq_ok = false, const char* dispatch_error = nullptr) const noexcept {
         if constexpr (std::is_same_v<RequestPB, FunctionRequestPB>) {
@@ -259,7 +222,6 @@ private:
             if (rank < worker_contexts_.size() && cq_received && !cq_received_[rank]) {
                 cq_received_[rank]    = true;
                 cq_ok_[rank]          = cq_event_ok;
-                dispatch_states_[rank] = BroadcastDispatchState::SUBMITTED;
                 // Log even a late CQ event after aggregate dispatch failure.
                 logTransferRpcEvent("rpc_cq_received", rank, true, cq_event_ok);
             }
@@ -383,7 +345,6 @@ private:
     std::vector<std::shared_ptr<WorkerRpcContext>> worker_contexts_;
     std::vector<bool>                              finished_;
     std::vector<bool>                              rpc_succeeded_;
-    std::vector<BroadcastDispatchState>             dispatch_states_;
     std::vector<std::string>                        dispatch_errors_;
     std::vector<bool>                               cq_received_;
     std::vector<bool>                               cq_ok_;
@@ -492,14 +453,14 @@ public:
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx = result->worker_contexts_.at(rank);
             try {
-                result->markDispatchStarted(rank);
+                result->logTransferRpcEvent("rpc_dispatch_begin", rank);
                 auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
                 if (!reader) {
                     throw std::runtime_error("broadcast rpc call returned null reader");
                 }
                 reader->Finish(&ctx->response, &ctx->status, tags[rank].get());
                 (void)tags[rank].release();
-                result->markSubmitted(rank);
+                result->logTransferRpcEvent("rpc_submitted", rank);
             } catch (const std::exception& error) {
                 if (fatal_on_error) {
                     RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());

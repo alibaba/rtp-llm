@@ -215,36 +215,38 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
         const bool completed = rpc->done() || (wait_timeout > 0 && rpc->waitDone(wait_timeout, false));
         if (!completed)
             result.error = "completion forget deadline exceeded";
-        for (const auto& snapshot : rpc->rankSnapshots()) {
+        rpc->forEachRankResponse([&](size_t rank, bool received, const auto* worker, const std::string& dispatch_error) {
             const TransferCompletionForgetResponsePB* response = nullptr;
             std::string rank_error;
-            if (!snapshot.cq_received || !snapshot.cq_ok || !snapshot.grpc_code)
-                rank_error = snapshot.dispatch_error.empty() ? "completion forget has no successful CQ event" :
-                                                               snapshot.dispatch_error;
-            else if (*snapshot.grpc_code != grpc::StatusCode::OK)
-                rank_error = snapshot.grpc_message.empty() ? "completion forget RPC failed" : snapshot.grpc_message;
-            else if (!snapshot.response || !snapshot.response->has_completion_forget())
+            if (!worker)
+                rank_error = dispatch_error.empty() ? "completion forget has no successful CQ event" : dispatch_error;
+            else if (!worker->status.ok()) {
+                rank_error = worker->status.error_message();
+                if (rank_error.empty())
+                    rank_error = "completion forget RPC failed";
+            } else if (!worker->response.has_completion_forget())
                 rank_error = "missing completion forget response";
             else {
-                response = &snapshot.response->completion_forget();
+                response = &worker->response.completion_forget();
                 if (response->worker_case() != TransferCompletionForgetResponsePB::kRank
-                    || response->rank() != snapshot.rank)
+                    || response->rank() != rank)
                     rank_error = "completion forget worker rank mismatch";
                 else if (static_cast<size_t>(response->entries_size()) != valid_indices.size())
                     rank_error = "completion forget key count mismatch";
             }
             for (size_t wire_index = 0; wire_index < valid_indices.size(); ++wire_index) {
                 const auto index = valid_indices[wire_index];
-                auto& row = result.entries[index].ranks.at(snapshot.rank);
-                row.cq_received = snapshot.cq_received;
-                row.cq_ok = snapshot.cq_ok;
-                row.grpc_code = snapshot.grpc_code;
+                auto& row = result.entries[index].ranks.at(rank);
+                row.cq_received = received;
+                row.cq_ok = worker != nullptr;
+                if (worker)
+                    row.grpc_code = worker->status.error_code();
                 if (!rank_error.empty())
                     row.error = rank_error;
                 else
                     decodeEntry(response->entries(wire_index), traces[index], row);
             }
-        }
+        });
         const bool within_deadline = completed && remainingTimeout(deadline) > 0;
         if (!within_deadline)
             result.error = "completion forget deadline exceeded";

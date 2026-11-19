@@ -184,18 +184,16 @@ private:
     }
 
     void aggregateRankResults(TransferResult& result) const {
-        const auto snapshots = broadcast_result_->rankSnapshots();
-        if (snapshots.size() != worker_count_) {
+        if (broadcast_result_->rankCount() != worker_count_) {
             result.merge({ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer response count mismatch"),
                           CacheCopyError::RPC_FAILED});
         }
         result.expandBlockErrors(block_count_);
-        for (const auto& snapshot : snapshots) {
-            if (!snapshot.cq_received || !snapshot.cq_ok || !snapshot.grpc_code
-                || *snapshot.grpc_code != grpc::StatusCode::OK || !snapshot.response) {
-                continue;
+        broadcast_result_->forEachRankResponse([&](size_t rank, bool, const auto* rpc, const std::string&) {
+            if (!rpc || !rpc->status.ok()) {
+                return;
             }
-            const auto& response = *snapshot.response;
+            const auto& response = rpc->response;
             TransferResult rank_result{
                 ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid transfer response"),
                 CacheCopyError::RPC_FAILED};
@@ -226,10 +224,10 @@ private:
             if (!rank_result.ok()) {
                 rank_result.status =
                     ErrorInfo(rank_result.status.code(),
-                              "rank=" + std::to_string(snapshot.rank) + " {" + rank_result.status.ToString() + "}");
+                              "rank=" + std::to_string(rank) + " {" + rank_result.status.ToString() + "}");
             }
             result.merge(std::move(rank_result));
-        }
+        });
     }
 
     bool publish(TransferResult result, TransferResult published_result) {
