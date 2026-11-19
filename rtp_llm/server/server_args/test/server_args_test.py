@@ -479,6 +479,12 @@ class CacheConfigArgumentsTest(TestCase):
             ("disk_cache_write_thread_count", "6", 16),
             ("block_tree_frozen_recovery_interval_ms", "0", 1000),
             ("block_tree_frozen_recovery_query_timeout_ms", "750", 1000),
+            ("block_tree_full_device_evict_low_watermark_ratio", "0.90", -1.0),
+            ("block_tree_full_device_evict_high_watermark_ratio", "0.95", -1.0),
+            ("block_tree_full_memory_evict_low_watermark_ratio", "0.94", -1.0),
+            ("block_tree_full_memory_evict_high_watermark_ratio", "0.97", -1.0),
+            ("block_tree_full_disk_evict_low_watermark_ratio", "0.96", -1.0),
+            ("block_tree_full_disk_evict_high_watermark_ratio", "0.98", -1.0),
         )
         env = {name.upper(): value for name, value, _ in options}
         for args in (None, []):

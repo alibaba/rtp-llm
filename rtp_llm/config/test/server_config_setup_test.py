@@ -288,7 +288,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
         self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
 
-    def test_full_watermarks_env_cli_and_worker_pickle(self):
+    def test_full_watermark_overrides_survive_worker_pickle(self):
         import pickle
 
         values = {
@@ -299,26 +299,14 @@ class GenerateConfigTest(TestCase):
             "block_tree_full_disk_evict_low_watermark_ratio": 0.96,
             "block_tree_full_disk_evict_high_watermark_ratio": 0.98,
         }
-        env = {name.upper(): str(value) for name, value in values.items()}
-        with patch.dict("os.environ", _jit_env(**env), clear=True):
-            config = setup_args([]).kv_cache_config
-            # Spawned backend and rank workers must keep the FULL overrides.
-            for _ in range(2):
-                config = pickle.loads(pickle.dumps(config))
-                for name, value in values.items():
-                    self.assertEqual(getattr(config, name), value)
-            self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.82)
-            self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.90)
-            config = setup_args(
-                ["--block_tree_full_device_evict_high_watermark_ratio", "0.96"]
-            ).kv_cache_config
-            self.assertEqual(
-                config.block_tree_full_device_evict_high_watermark_ratio, 0.96
-            )
-        with patch.dict("os.environ", _jit_env(), clear=True):
-            config = setup_args([]).kv_cache_config
-            for name in values:
-                self.assertEqual(getattr(config, name), -1.0)
+        config = PyEnvConfigs().kv_cache_config
+        for name, value in values.items():
+            setattr(config, name, value)
+        # Spawned backend and rank workers must keep explicitly set overrides.
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            for name, value in values.items():
+                self.assertEqual(getattr(config, name), value)
 
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
