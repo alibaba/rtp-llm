@@ -1,0 +1,1861 @@
+diff --git a/atom/model_ops/attentions/qwen4_exp_attn.py b/atom/model_ops/attentions/qwen4_exp_attn.py
+index f47d817..c3677e8 100644
+--- a/atom/model_ops/attentions/qwen4_exp_attn.py
++++ b/atom/model_ops/attentions/qwen4_exp_attn.py
+@@ -76,6 +76,20 @@ class Qwen4ExpQSAMetadata:
+     host_lens: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+     context_slots: torch.Tensor | None = None
+ 
++    # RTP plugin can place index keys in an independently transferred pool.
++    index_block_tables: torch.Tensor | None = None
++    index_slot_mapping: torch.Tensor | None = None
++    index_compressed_slot_mapping: torch.Tensor | None = None
++    raw_index_block_tables: torch.Tensor | None = None
++    raw_index_slot_mapping: torch.Tensor | None = None
++    state_page_size: int = 0
++    state_read_pages: torch.Tensor | None = None
++    state_candidate_pages: torch.Tensor | None = None
++    position_block_tables: torch.Tensor | None = None
++    position_slot_mapping: torch.Tensor | None = None
++    position_read_pages: torch.Tensor | None = None
++    position_candidate_pages: torch.Tensor | None = None
++
+     def for_tokens(self, num_tokens: int) -> "Qwen4ExpQSAMetadata":
+         """Draft step zero uses real rows, without the target graph's padding."""
+         if self.slot_mapping.numel() == num_tokens:
+@@ -84,6 +98,22 @@ class Qwen4ExpQSAMetadata:
+             self,
+             slot_mapping=self.slot_mapping[:num_tokens],
+             compressed_slot_mapping=self.compressed_slot_mapping[:num_tokens],
++            position_slot_mapping=(
++                None if self.position_slot_mapping is None
++                else self.position_slot_mapping[:num_tokens]
++            ),
++            index_slot_mapping=(
++                None if self.index_slot_mapping is None
++                else self.index_slot_mapping[:num_tokens]
++            ),
++            index_compressed_slot_mapping=(
++                None if self.index_compressed_slot_mapping is None
++                else self.index_compressed_slot_mapping[:num_tokens]
++            ),
++            raw_index_slot_mapping=(
++                None if self.raw_index_slot_mapping is None
++                else self.raw_index_slot_mapping[:num_tokens]
++            ),
+             token_to_req=self.token_to_req[:num_tokens],
+             logical_positions=self.logical_positions[:num_tokens],
+         )
+@@ -100,6 +130,8 @@ class Qwen4ExpPLEMetadata:
+     has_initial_state: torch.Tensor  # [reqs] bool
+     conv_state: torch.Tensor  # [slots, channels, state_len] short-conv pool
+     num_accepted_tokens: torch.Tensor | None = None
++    ngram_indices_in: torch.Tensor | None = None
++    ngram_indices_out: torch.Tensor | None = None
+ 
+ 
+ class Qwen4ExpBackend(GDNAttentionBackend):
+diff --git a/atom/model_ops/qwen4_exp/ops/ple.py b/atom/model_ops/qwen4_exp/ops/ple.py
+index f45d811..b3cdcd2 100644
+--- a/atom/model_ops/qwen4_exp/ops/ple.py
++++ b/atom/model_ops/qwen4_exp/ops/ple.py
+@@ -484,6 +484,7 @@ def _conv(
+     D: tl.constexpr,
+     SS0: tl.constexpr,
+     SS1: tl.constexpr,
++    SS2: tl.constexpr,
+     IS: tl.constexpr,
+     OS: tl.constexpr,
+     SPEC: tl.constexpr,
+@@ -514,7 +515,7 @@ def _conv(
+         x = tl.load(X + pos * C + c, valid & (pos >= start), 0).to(tl.float32)
+         s_pos = (K - 1) * D + pos - start
+         s = tl.load(
+-            S + src * SS0 + c * SS1 + offset + s_pos,
++            S + src * SS0 + c * SS1 + (offset + s_pos) * SS2,
+             valid & has & (pos < start) & (s_pos >= 0),
+             0,
+         ).to(tl.float32)
+@@ -540,6 +541,7 @@ def _update(
+     CAPACITY: tl.constexpr,
+     SS0: tl.constexpr,
+     SS1: tl.constexpr,
++    SS2: tl.constexpr,
+     IS: tl.constexpr,
+     OS: tl.constexpr,
+     SPEC: tl.constexpr,
+@@ -558,14 +560,14 @@ def _update(
+     x = tl.load(X + pos * C + c[:, None], valid & (pos >= start) & (pos < end), 0)
+     old_pos = L + pos - start
+     old = tl.load(
+-        S + src * SS0 + c[:, None] * SS1 + offset + old_pos,
++        S + src * SS0 + c[:, None] * SS1 + (offset + old_pos) * SS2,
+         valid & has & (pos < start) & (old_pos >= 0),
+         0,
+     )
+     # Each program owns whole histories for its channels: all old entries
+     # are loaded before stores, including when src == dst.
+     value = tl.where(pos >= start, x, old)
+-    tl.store(S + dst * SS0 + c[:, None] * SS1 + j[None, :], value, valid)
++    tl.store(S + dst * SS0 + c[:, None] * SS1 + j[None, :] * SS2, value, valid)
+ 
+ 
+ def dilated_causal_conv1d(
+@@ -594,8 +596,8 @@ def dilated_causal_conv1d(
+     requests = state_indices_out.numel()
+     if inputs.ndim != 2 or inputs.shape[1] != channels or dilation < 1:
+         raise ValueError("invalid dilated convolution input geometry")
+-    if state.shape[1] != channels or state.shape[2] < history or state.stride(2) != 1:
+-        raise ValueError("state must contain a contiguous history per channel")
++    if state.shape[1] != channels or state.shape[2] < history:
++        raise ValueError("state has invalid channel/history dimensions")
+     if query_start_loc.numel() != requests + 1:
+         raise ValueError("query_start_loc must have requests + 1 entries")
+     inputs, weight = inputs.contiguous(), weight.contiguous()
+@@ -617,6 +619,7 @@ def dilated_causal_conv1d(
+         dilation,
+         state.stride(0),
+         state.stride(1),
++        state.stride(2),
+         state_indices_in.stride(0),
+         state_indices_out.stride(0),
+         num_accepted_tokens is not None,
+@@ -638,6 +641,7 @@ def dilated_causal_conv1d(
+             capacity,
+             state.stride(0),
+             state.stride(1),
++            state.stride(2),
+             state_indices_in.stride(0),
+             state_indices_out.stride(0),
+             num_accepted_tokens is not None,
+diff --git a/atom/model_ops/qwen4_exp/ops/qsa.py b/atom/model_ops/qwen4_exp/ops/qsa.py
+index 663171a..84ca32a 100644
+--- a/atom/model_ops/qwen4_exp/ops/qsa.py
++++ b/atom/model_ops/qwen4_exp/ops/qsa.py
+@@ -132,10 +132,13 @@ def _qsa_store_rows_fp8_kernel(
+     scale_ptr,
+     slots_ptr,
+     values_ptr,
++    stride_cache_page,
+     stride_cache_slot,
+     stride_cache_head,
++    stride_scale_page,
+     stride_scale_slot,
+     stride_scale_head,
++    page_size,
+     stride_value_row,
+     stride_value_head,
+     second_cache_ptr,
+@@ -160,8 +163,10 @@ def _qsa_store_rows_fp8_kernel(
+     if not valid:
+         return
+     slot = slot.to(tl.int64)
+-    cache_offset = slot * stride_cache_slot + head * stride_cache_head + dims
+-    scale_offset = slot * stride_scale_slot + head * stride_scale_head
++    page = slot // page_size
++    row_in_page = slot % page_size
++    cache_offset = page * stride_cache_page + row_in_page * stride_cache_slot + head * stride_cache_head + dims
++    scale_offset = page * stride_scale_page + row_in_page * stride_scale_slot + head * stride_scale_head
+     x = tl.load(
+         values_ptr + row * stride_value_row + head * stride_value_head + dims,
+         mask=dims < HEAD_DIM,
+@@ -274,8 +279,6 @@ def qsa_store_quantized_rows(
+         raise ValueError("slots or heads disagree with the cache")
+     if values.stride(-1) != 1 or cache.stride(-1) != 1:
+         raise ValueError("quantized QSA rows must be contiguous in the head dim")
+-    flat = cache.view(cache.shape[0] * cache.shape[1], heads, cache.shape[3])
+-    flat_scale = scale.view(scale.shape[0] * scale.shape[1], *scale.shape[2:])
+     if fmt == _FMT_FP8:
+         if cache.shape[3] != head_dim:
+             raise ValueError("values and FP8 cache disagree on head_dim")
+@@ -288,23 +291,26 @@ def qsa_store_quantized_rows(
+         ):
+             raise ValueError("the second FP8 tensor must mirror the first")
+         _qsa_store_rows_fp8_kernel[(rows, heads)](
+-            flat,
+-            flat_scale,
++            cache,
++            scale,
+             slots,
+             values,
+-            flat.stride(0),
+-            flat.stride(1),
+-            flat_scale.stride(0),
+-            flat_scale.stride(1),
++            cache.stride(0),
++            cache.stride(1),
++            cache.stride(2),
++            scale.stride(0),
++            scale.stride(1),
++            scale.stride(2),
++            cache.shape[1],
+             values.stride(0),
+             values.stride(1),
+-            second_cache if second else flat,
+-            second_scale if second else flat_scale,
++            second_cache if second else cache,
++            second_scale if second else scale,
+             second_values if second else values,
+             second_values.stride(0) if second else 0,
+             second_values.stride(1) if second else 0,
+             rows,
+-            flat.shape[0],
++            cache.shape[0] * cache.shape[1],
+             HEAD_DIM=head_dim,
+             BLOCK_D=triton.next_power_of_2(head_dim),
+             FP8_MAX_C=FP8_MAX,
+@@ -312,6 +318,8 @@ def qsa_store_quantized_rows(
+             num_warps=4,
+         )
+         return
++    flat = cache.view(cache.shape[0] * cache.shape[1], heads, cache.shape[3])
++    flat_scale = scale.view(scale.shape[0] * scale.shape[1], *scale.shape[2:])
+     if second_cache is not None:
+         raise ValueError("only the FP8 writer takes a second tensor")
+     if cache.shape[3] * 2 != head_dim or head_dim % FP4_GROUP:
+@@ -661,7 +669,8 @@ def _qsa_store_rows_kernel(
+     cache_ptr,
+     slots_ptr,
+     values_ptr,
+-    stride_cache_slot,
++    stride_cache_page,
++    stride_cache_token,
+     stride_cache_head,
+     stride_cache_dim,
+     stride_value_row,
+@@ -669,6 +678,7 @@ def _qsa_store_rows_kernel(
+     stride_value_dim,
+     num_rows,
+     num_slots,
++    PAGE_SIZE: tl.constexpr,
+     NUM_HEADS: tl.constexpr,
+     HEAD_DIM: tl.constexpr,
+     BLOCK_D: tl.constexpr,
+@@ -694,7 +704,8 @@ def _qsa_store_rows_kernel(
+         cache_ptr
+         # A physical slot times the per-slot stride overflows int32 well
+         # inside a normal pool size, so widen before multiplying.
+-        + slot.to(tl.int64) * stride_cache_slot
++        + (slot.to(tl.int64) // PAGE_SIZE) * stride_cache_page
++        + (slot % PAGE_SIZE) * stride_cache_token
+         + head * stride_cache_head
+         + dims * stride_cache_dim,
+         values,
+@@ -725,20 +736,21 @@ def qsa_store_rows(
+     if slots.shape[0] < rows:
+         raise ValueError("slot mapping is shorter than the value rows")
+ 
+-    flat = cache.view(cache.shape[0] * cache.shape[1], cache.shape[2], cache.shape[3])
+     head_dim = values.shape[2]
+     _qsa_store_rows_kernel[(rows, values.shape[1])](
+-        flat,
++        cache,
+         slots,
+         values,
+-        flat.stride(0),
+-        flat.stride(1),
+-        flat.stride(2),
++        cache.stride(0),
++        cache.stride(1),
++        cache.stride(2),
++        cache.stride(3),
+         values.stride(0),
+         values.stride(1),
+         values.stride(2),
+         rows,
+-        flat.shape[0],
++        cache.shape[0] * cache.shape[1],
++        PAGE_SIZE=cache.shape[1],
+         NUM_HEADS=values.shape[1],
+         HEAD_DIM=head_dim,
+         BLOCK_D=triton.next_power_of_2(head_dim),
+@@ -945,6 +957,319 @@ def qsa_compress_groups(
+     return pooled, first_positions
+ 
+ 
++@triton.jit
++def _qsa_compress_state_ring_kernel(
++    raw_ptr,
++    state_ptr,
++    table_ptr,
++    read_pages_ptr,
++    request_ptr,
++    position_ptr,
++    compressed_ptr,
++    pooled_ptr,
++    first_ptr,
++    coordinates_ptr,
++    position_cache_ptr,
++    position_table_ptr,
++    position_read_pages_ptr,
++    coordinate_stride_row,
++    coordinate_stride_axis,
++    pos_cache_stride_page,
++    pos_cache_stride_row,
++    pos_table_stride_request,
++    pos_table_stride_page,
++    pos_table_width,
++    pos_pages,
++    raw_stride_row,
++    raw_stride_dim,
++    state_stride_page,
++    state_stride_row,
++    table_stride_request,
++    table_stride_page,
++    pooled_stride_row,
++    first_stride_row,
++    rows,
++    pages,
++    TABLE_WIDTH: tl.constexpr,
++    PAGE_SIZE: tl.constexpr,
++    RING_ROWS: tl.constexpr,
++    RATIO: tl.constexpr,
++    HEAD_DIM: tl.constexpr,
++    BLOCK_D: tl.constexpr,
++    ROPE_OFFSET: tl.constexpr,
++    SPEC: tl.constexpr,
++    HAS_COORDINATES: tl.constexpr,
++):
++    row = tl.program_id(0)
++    dims = tl.arange(0, BLOCK_D)
++    request = tl.load(request_ptr + row)
++    end = tl.load(position_ptr + row)
++    slot = tl.load(compressed_ptr + row)
++    valid = (row < rows) & (slot >= 0) & (end >= RATIO - 1)
++    first = end - RATIO + 1
++    accumulator = tl.zeros((BLOCK_D,), tl.float32)
++    if valid:
++        for offset in tl.static_range(RATIO):
++            source_pos = first + offset
++            source_row = row - (RATIO - 1 - offset)
++            in_batch = source_row >= 0
++            if in_batch:
++                source_request = tl.load(request_ptr + source_row)
++                source_logical = tl.load(position_ptr + source_row)
++                in_batch = (source_request == request) & (source_logical == source_pos)
++            value = tl.zeros((BLOCK_D,), tl.float32)
++            if in_batch:
++                value = tl.load(
++                    raw_ptr + source_row * raw_stride_row + dims * raw_stride_dim,
++                    dims < HEAD_DIM, 0,
++                ).to(tl.float32)
++            else:
++                if SPEC:
++                    page = tl.load(read_pages_ptr + request)
++                else:
++                    logical_page = source_pos // PAGE_SIZE
++                    page = tl.load(
++                        table_ptr + request * table_stride_request
++                        + tl.minimum(logical_page, TABLE_WIDTH - 1) * table_stride_page,
++                        logical_page < TABLE_WIDTH, -1,
++                    )
++                value = tl.load(
++                    state_ptr + tl.maximum(page, 0).to(tl.int64) * state_stride_page
++                    + (source_pos % RING_ROWS) * state_stride_row + dims,
++                    (page >= 0) & (page < pages) & (dims < HEAD_DIM), 0,
++                ).to(tl.float32)
++            accumulator += value
++    tl.store(pooled_ptr + row * pooled_stride_row + dims,
++             accumulator / RATIO, (row < rows) & (dims < HEAD_DIM))
++    axis = tl.arange(0, 4)
++    if HAS_COORDINATES:
++        coordinates = tl.full((4,), 0, tl.int64)
++        if valid:
++            source_row = row - RATIO + 1
++            in_batch = source_row >= 0
++            if in_batch:
++                in_batch = ((tl.load(request_ptr + source_row) == request)
++                            & (tl.load(position_ptr + source_row) == first))
++            if in_batch:
++                coordinates = tl.load(
++                    coordinates_ptr + source_row * coordinate_stride_row
++                    + axis * coordinate_stride_axis, axis < 3, 0,
++                ).to(tl.int64)
++            else:
++                if SPEC:
++                    pos_page = tl.load(position_read_pages_ptr + request)
++                else:
++                    logical_page = first // PAGE_SIZE
++                    pos_page = tl.load(
++                        position_table_ptr + request * pos_table_stride_request
++                        + logical_page * pos_table_stride_page,
++                        logical_page < pos_table_width, -1,
++                    )
++                coordinates = tl.load(
++                    position_cache_ptr + tl.maximum(pos_page, 0).to(tl.int64)
++                    * pos_cache_stride_page + (first % RING_ROWS)
++                    * pos_cache_stride_row + axis,
++                    (pos_page > 0) & (pos_page < pos_pages) & (axis < 3), 0,
++                ).to(tl.int64)
++        tl.store(first_ptr + row * first_stride_row + axis, coordinates, axis < 3)
++    else:
++        tl.store(first_ptr + row * first_stride_row + axis,
++                 tl.where(valid, first + ROPE_OFFSET, 0), axis < 3)
++
++
++@triton.jit
++def _qsa_commit_state_ring_kernel(
++    state_ptr,
++    slots_ptr,
++    raw_ptr,
++    request_ptr,
++    position_ptr,
++    state_stride_page,
++    state_stride_row,
++    raw_stride_row,
++    raw_stride_dim,
++    rows,
++    RING_ROWS: tl.constexpr,
++    HEAD_DIM: tl.constexpr,
++    BLOCK_D: tl.constexpr,
++):
++    row = tl.program_id(0)
++    slot = tl.load(slots_ptr + row)
++    request = tl.load(request_ptr + row)
++    position = tl.load(position_ptr + row)
++    live = (row < rows) & (slot >= 0) & (position >= 0)
++    # A long prefill writes only the final occurrence of each ring offset in
++    # each logical page. Every slot therefore has exactly one writer.
++    later = row + RING_ROWS
++    if later < rows:
++        later_request = tl.load(request_ptr + later)
++        later_position = tl.load(position_ptr + later)
++        if (later_request == request) & (later_position == position + RING_ROWS):
++            later_slot = tl.load(slots_ptr + later)
++            if later_slot == slot:
++                live = False
++    if live:
++        dims = tl.arange(0, BLOCK_D)
++        value = tl.load(raw_ptr + row * raw_stride_row + dims * raw_stride_dim,
++                        dims < HEAD_DIM, 0)
++        page = slot // RING_ROWS
++        offset = slot % RING_ROWS
++        tl.store(state_ptr + page.to(tl.int64) * state_stride_page
++                 + offset * state_stride_row + dims, value, dims < HEAD_DIM)
++
++
++@triton.jit
++def _qsa_commit_spec_state_ring_kernel(
++    state_ptr,
++    source_ptr,
++    candidate_pages_ptr,
++    raw_ptr,
++    position_ptr,
++    state_stride_page,
++    state_stride_row,
++    source_stride_request,
++    source_stride_row,
++    raw_stride_row,
++    raw_stride_dim,
++    QUERY: tl.constexpr,
++    RING_ROWS: tl.constexpr,
++    HEAD_DIM: tl.constexpr,
++    BLOCK_D: tl.constexpr,
++):
++    request = tl.program_id(0)
++    candidate = tl.program_id(1)
++    page = tl.load(candidate_pages_ptr + request * QUERY + candidate)
++    end = tl.load(position_ptr + request * QUERY + candidate)
++    start = tl.load(position_ptr + request * QUERY)
++    ring = tl.arange(0, RING_ROWS)
++    positions = end - RING_ROWS + 1 + ring
++    dims = tl.arange(0, BLOCK_D)
++    from_batch = positions >= start
++    raw_rows = request * QUERY + positions - start
++    current = tl.load(
++        raw_ptr + raw_rows[:, None] * raw_stride_row + dims[None, :] * raw_stride_dim,
++        (page > 0) & (end >= 0) & from_batch[:, None] & (dims[None, :] < HEAD_DIM),
++        0,
++    )
++    previous = tl.load(
++        source_ptr + request * source_stride_request
++        + (positions % RING_ROWS)[:, None] * source_stride_row + dims[None, :],
++        (page > 0) & (end >= 0) & (~from_batch)[:, None]
++        & (positions[:, None] >= 0) & (dims[None, :] < HEAD_DIM),
++        0,
++    )
++    tl.store(
++        state_ptr + page.to(tl.int64) * state_stride_page
++        + (positions % RING_ROWS)[:, None] * state_stride_row + dims[None, :],
++        tl.where(from_batch[:, None], current, previous),
++        (page > 0) & (end >= 0) & (positions[:, None] >= 0)
++        & (dims[None, :] < HEAD_DIM),
++    )
++
++
++def qsa_compress_state_ring(
++    raw_keys: torch.Tensor,
++    state_cache: torch.Tensor,
++    state_table: torch.Tensor,
++    state_slots: torch.Tensor,
++    token_to_request: torch.Tensor,
++    logical_positions: torch.Tensor,
++    compressed_slots: torch.Tensor,
++    compress_ratio: int,
++    page_size: int,
++    rope_position_offset: int = 0,
++    state_read_pages: torch.Tensor | None = None,
++    state_candidate_pages: torch.Tensor | None = None,
++    *,
++    positions: torch.Tensor | None = None,
++    position_cache: torch.Tensor | None = None,
++    position_table: torch.Tensor | None = None,
++    position_slots: torch.Tensor | None = None,
++    position_read_pages: torch.Tensor | None = None,
++    position_candidate_pages: torch.Tensor | None = None,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Read incomplete groups from the native FP32 state ring, then commit it."""
++    if raw_keys.ndim != 3 or raw_keys.shape[1] != 1:
++        raise ValueError("QSA raw keys must be [rows, 1, head_dim]")
++    if state_cache.ndim != 4 or state_cache.dtype != torch.float32:
++        raise ValueError("QSA indexer_state must be a FP32 paged ring")
++    rows, _, head_dim = raw_keys.shape
++    ring_rows = int(state_cache.shape[1])
++    if ring_rows < compress_ratio or ring_rows % compress_ratio:
++        raise ValueError("QSA state ring must contain complete compression groups")
++    pooled = torch.empty_like(raw_keys)
++    first_positions = torch.empty((rows, 3), dtype=torch.int64, device=raw_keys.device)
++    speculative = state_candidate_pages is not None
++    if speculative:
++        if state_read_pages is None or state_candidate_pages.ndim != 2:
++            raise ValueError("QSA target verify needs source and candidate state pages")
++        requests, query_len = state_candidate_pages.shape
++        if rows != requests * query_len or state_read_pages.numel() != requests:
++            raise ValueError("QSA target state pages do not match verify tokens")
++    has_coordinates = position_cache is not None
++    if has_coordinates and (
++        positions is None or positions.shape != (rows, 1, 3)
++        or position_table is None or position_slots is None
++        or position_cache.shape[1:] != (ring_rows, 1, 3)
++        or position_cache.stride(-1) != 1
++        or (speculative and (position_read_pages is None
++                             or position_candidate_pages is None))
++    ):
++        raise ValueError("QSA MRoPE state needs coordinates and its own page mappings")
++    if rows:
++        _qsa_compress_state_ring_kernel[(rows,)](
++            raw_keys, state_cache, state_table,
++            state_read_pages if speculative else state_table,
++            token_to_request,
++            logical_positions, compressed_slots, pooled, first_positions,
++            positions if has_coordinates else raw_keys,
++            position_cache if has_coordinates else state_cache,
++            position_table if has_coordinates else state_table,
++            position_read_pages if has_coordinates and speculative else state_table,
++            positions.stride(0) if has_coordinates else 0,
++            positions.stride(2) if has_coordinates else 0,
++            position_cache.stride(0) if has_coordinates else 0,
++            position_cache.stride(1) if has_coordinates else 0,
++            position_table.stride(0) if has_coordinates else 0,
++            position_table.stride(1) if has_coordinates else 0,
++            position_table.shape[1] if has_coordinates else 0,
++            position_cache.shape[0] if has_coordinates else 0,
++            raw_keys.stride(0), raw_keys.stride(2),
++            state_cache.stride(0), state_cache.stride(1),
++            state_table.stride(0), state_table.stride(1),
++            pooled.stride(0), first_positions.stride(0), rows,
++            state_cache.shape[0], TABLE_WIDTH=_table_width_bucket(state_table.shape[1]),
++            PAGE_SIZE=page_size, RING_ROWS=ring_rows, RATIO=compress_ratio,
++            HEAD_DIM=head_dim, BLOCK_D=triton.next_power_of_2(head_dim),
++            ROPE_OFFSET=rope_position_offset, SPEC=speculative,
++            HAS_COORDINATES=has_coordinates, num_warps=4,
++        )
++        def commit(values, cache, slots, read_pages, candidate_pages):
++            width = values.shape[-1]
++            if speculative:
++                source = cache.index_select(0, read_pages.to(torch.int64))
++                _qsa_commit_spec_state_ring_kernel[(requests, query_len)](
++                    cache, source, candidate_pages, values,
++                    logical_positions, cache.stride(0), cache.stride(1),
++                    source.stride(0), source.stride(1), values.stride(0),
++                    values.stride(2), query_len, ring_rows, width,
++                    triton.next_power_of_2(width), num_warps=4,
++                )
++            else:
++                _qsa_commit_state_ring_kernel[(rows,)](
++                    cache, slots, values, token_to_request,
++                    logical_positions, cache.stride(0), cache.stride(1),
++                    values.stride(0), values.stride(2), rows,
++                    RING_ROWS=ring_rows, HEAD_DIM=width,
++                    BLOCK_D=triton.next_power_of_2(width), num_warps=4,
++                )
++
++        commit(raw_keys, state_cache, state_slots, state_read_pages, state_candidate_pages)
++        if has_coordinates:
++            commit(positions, position_cache, position_slots, position_read_pages, position_candidate_pages)
++    return pooled, first_positions
++
++
+ @triton.jit
+ def _load_q_row(q_ptr, token, head, stride_q_token, stride_q_head, dims, mask):
+     return tl.load(
+diff --git a/atom/model_ops/qwen4_exp/ple_layer.py b/atom/model_ops/qwen4_exp/ple_layer.py
+index 333404e..ce66cc8 100644
+--- a/atom/model_ops/qwen4_exp/ple_layer.py
++++ b/atom/model_ops/qwen4_exp/ple_layer.py
+@@ -704,8 +704,8 @@ class Qwen4ExpPLELayer(nn.Module):
+             input_ids,
+             metadata.query_start_loc,
+             metadata.ngram_state,
+-            metadata.state_indices_in,
+-            metadata.state_indices_out,
++            metadata.ngram_indices_in if metadata.ngram_indices_in is not None else metadata.state_indices_in,
++            metadata.ngram_indices_out if metadata.ngram_indices_out is not None else metadata.state_indices_out,
+             metadata.has_initial_state,
+             self.ple_embedding.eos_token_id,
+             history_width=self.ple_embedding.ngram_size - 1,
+diff --git a/atom/model_ops/qwen4_exp/qsa_attention.py b/atom/model_ops/qwen4_exp/qsa_attention.py
+index 5c2d6c4..87b675f 100644
+--- a/atom/model_ops/qwen4_exp/qsa_attention.py
++++ b/atom/model_ops/qwen4_exp/qsa_attention.py
+@@ -59,6 +59,7 @@ from atom.model_ops.qwen4_exp.ops.qsa import (
+     qsa_compress_groups,
+     qsa_expand_block_indices,
+     qsa_select_paged_groups,
++    qsa_compress_state_ring,
+     qsa_select_paged_tokens,
+     qsa_sparse_paged_gqa,
+     qsa_store_quantized_rows,
+@@ -481,35 +482,65 @@ class Qwen4ExpAttention(nn.Module):
+         depends only on its own query, so the result is the same.
+         """
+         index_q, raw_key = self.indexer.project_qk(hidden_states, positions)
+-        qsa_store_rows(self.raw_key_cache, qsa.slot_mapping, raw_key)
+-        if self.rope_position_cache is not None:
+-            qsa_store_rows(
+-                self.rope_position_cache,
+-                qsa.slot_mapping,
+-                canonical_rope_positions(positions[..., : hidden_states.shape[0]]),
+-            )
+-
+-        pooled, first_positions = qsa_compress_groups(
+-            self.raw_key_cache,
+-            qsa.block_tables,
+-            qsa.token_to_req,
+-            qsa.logical_positions,
+-            qsa.compressed_slot_mapping,
+-            self.indexer.compress_ratio,
+-            position_cache=self.rope_position_cache,
+-            # Draft RoPE is one ahead of its logical cache slots.
+-            rope_position_offset=int(get_forward_context().context.is_draft),
++        index_slots = (
++            qsa.raw_index_slot_mapping
++            if qsa.raw_index_slot_mapping is not None
++            else qsa.slot_mapping
++        )
++        compressed_slots = (
++            qsa.index_compressed_slot_mapping
++            if qsa.index_compressed_slot_mapping is not None
++            else qsa.compressed_slot_mapping
+         )
++        raw_blocks = (
++            qsa.raw_index_block_tables
++            if qsa.raw_index_block_tables is not None
++            else qsa.block_tables
++        )
++        index_blocks = qsa.index_block_tables if qsa.index_block_tables is not None else qsa.block_tables
++        if qsa.raw_index_slot_mapping is not None and self.raw_key_cache.dtype == torch.float32:
++            pooled, first_positions = qsa_compress_state_ring(
++                raw_key, self.raw_key_cache, raw_blocks, index_slots,
++                qsa.token_to_req, qsa.logical_positions, compressed_slots,
++                self.indexer.compress_ratio, qsa.state_page_size,
++                rope_position_offset=int(get_forward_context().context.is_draft),
++                state_read_pages=qsa.state_read_pages,
++                state_candidate_pages=qsa.state_candidate_pages,
++                positions=(
++                    canonical_rope_positions(positions[..., : hidden_states.shape[0]])
++                    if self.rope_position_cache is not None else None
++                ),
++                position_cache=self.rope_position_cache,
++                position_table=qsa.position_block_tables,
++                position_slots=qsa.position_slot_mapping,
++                position_read_pages=qsa.position_read_pages,
++                position_candidate_pages=qsa.position_candidate_pages,
++            )
++        else:
++            qsa_store_rows(self.raw_key_cache, index_slots, raw_key)
++            if self.rope_position_cache is not None:
++                qsa_store_rows(
++                    self.rope_position_cache,
++                    index_slots,
++                    canonical_rope_positions(positions[..., : hidden_states.shape[0]]),
++                )
++            pooled, first_positions = qsa_compress_groups(
++                self.raw_key_cache, raw_blocks, qsa.token_to_req,
++                qsa.logical_positions, compressed_slots,
++                self.indexer.compress_ratio,
++                position_cache=self.rope_position_cache,
++                rope_position_offset=int(get_forward_context().context.is_draft),
++            )
+         normalized = self.indexer.normalize_compressed_keys(pooled, first_positions)
+         if self.compressed_key_scale is None:
+             qsa_store_rows(
+-                self.compressed_key_cache, qsa.compressed_slot_mapping, normalized
++                self.compressed_key_cache, compressed_slots, normalized
+             )
+         else:
+             qsa_store_quantized_rows(
+                 self.compressed_key_cache,
+                 self.compressed_key_scale,
+-                qsa.compressed_slot_mapping,
++                compressed_slots,
+                 normalized,
+             )
+ 
+@@ -518,7 +549,7 @@ class Qwen4ExpAttention(nn.Module):
+             return qsa_select_paged_tokens(
+                 index_q,
+                 self.compressed_key_cache,
+-                qsa.block_tables,
++                index_blocks,
+                 qsa.token_to_req,
+                 qsa.logical_positions,
+                 qsa.seq_lens,
+@@ -532,7 +563,7 @@ class Qwen4ExpAttention(nn.Module):
+         groups, width = qsa_select_paged_groups(
+             index_q[local],
+             self.compressed_key_cache,
+-            qsa.block_tables,
++            index_blocks,
+             qsa.token_to_req[local],
+             qsa.logical_positions[local],
+             qsa.seq_lens,
+@@ -646,8 +677,13 @@ class Qwen4ExpAttention(nn.Module):
+         if qsa.context_slots is None:
+             k, v = key.contiguous(), value.contiguous()
+         else:
+-            k = self.k_cache.flatten(0, 1).index_select(0, qsa.context_slots)
+-            v = self.v_cache.flatten(0, 1).index_select(0, qsa.context_slots)
++            # Native RTP pages interleave K and V. Flattening those strided
++            # cache views would materialize the entire pool for each prefill.
++            page_size = self.k_cache.shape[1]
++            pages = qsa.context_slots // page_size
++            offsets = qsa.context_slots % page_size
++            k = self.k_cache[pages, offsets]
++            v = self.v_cache[pages, offsets]
+         # The expansion drops columns no row can reach (short contexts select
+         # every complete block, then the tail, left-aligned), so padding with -1
+         # keeps each row's layout. The kernel does not validate it: a malformed
+@@ -687,6 +723,12 @@ class Qwen4ExpAttention(nn.Module):
+             block_tables=torch.arange(pages, device=device, dtype=torch.int32)[None],
+             seq_lens=torch.tensor([tokens], device=device, dtype=torch.int32),
+             max_seq_len=tokens,
++            # Serving metadata gained these optional native cache mappings.
++            # Synthetic profiling does not own paged RTP cache regions.
++            raw_index_slot_mapping=None,
++            index_compressed_slot_mapping=None,
++            raw_index_block_tables=None,
++            index_block_tables=None,
+         )
+         names = (
+             "k_cache",
+diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
+index a37685b..43f2dec 100644
+--- a/atom/plugin/rtpllm/models/qwen4_exp.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp.py
+@@ -6,12 +6,19 @@ import inspect
+ import json
+ import logging
+ import os
++from contextlib import contextmanager
+ from types import SimpleNamespace
+ 
+ import torch
+ from rtp_llm.config.model_config import ModelConfig, ssm_state_dtype_str_to_data_type
+-from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
+-from rtp_llm.ops import CacheTailPolicyDesc, DataType, HybridAttentionType, KVCacheSpecType, LinearStateLayout
++from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import build_qwen4_exp_kv_cache_spec_descs
++from rtp_llm.ops import (
++    CacheTailPolicyDesc,
++    DataType,
++    HybridAttentionType,
++    LinearStateLayout,
++    KVCacheSpecType,
++)
+ from rtp_llm.ops.compute_ops import PyModelOutputs
+ from rtp_llm.utils.model_weight import W
+ 
+@@ -23,6 +30,11 @@ from atom.plugin.rtpllm.models.qwen3_5 import (
+ 
+ logger = logging.getLogger("atom.plugin.rtpllm.models")
+ 
++# The GDN state is much larger than QSA/PLE state. One checkpoint per 1024
++# prompt tokens lets the prefix cache serve common 6K/7K prefixes without
++# retaining every 64-token state page of a long request.
++GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS = 16
++
+ 
+ class _Qwen4ExpAttnPyObj(_ATOMAttnPyObj):
+     # Graph replay refreshes and consumes device block tables only. The host
+@@ -77,54 +89,6 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+             initialize_runtime(self)
+         return initialized
+ 
+-    def copy_plugin_cache_blocks(self, mapping: torch.Tensor, tags: list[str]) -> None:
+-        """Mirror RTP's tagged block relocations into QSA and PLE side pools.
+-
+-        RTP invokes this before eager forward *and* graph replay. A prefix hit
+-        keeps the same physical block; only copy-on-write relocations appear
+-        in ``mapping``. The RTP-owned KV/GDN pools are copied separately.
+-        """
+-        if mapping.device.type != "cpu" or mapping.ndim != 2 or mapping.shape[1] != 3:
+-            raise ValueError("plugin cache copy requires a CPU int32 [N,3] mapping")
+-        if mapping.dtype != torch.int32:
+-            raise ValueError("plugin cache copy requires int32 block IDs")
+-        if not mapping.numel():
+-            return
+-        side_pools: dict[str, list[torch.Tensor]] = {"full": [], "linear": []}
+-        qsa_layers = [
+-            module
+-            for module in self._rtp_layer_maps[1].values()
+-            if getattr(module, "is_qsa_attention", False)
+-        ]
+-        if qsa_layers:
+-            self._rtp_forward_context_cls._bind_qsa_caches(
+-                self, qsa_layers, int(self.kv_cache.get_seq_size_per_block("full"))
+-            )
+-            for module in qsa_layers:
+-                side_pools["full"].extend(
+-                    (module.raw_key_cache, module.compressed_key_cache)
+-                )
+-                if module.rope_position_cache is not None:
+-                    side_pools["full"].append(module.rope_position_cache)
+-        self._rtp_forward_context_cls._bind_ple_caches(
+-            self, self.model, self._rtp_layer_maps[0]
+-        )
+-        if hasattr(self, "_rtp_ple_ngram"):
+-            side_pools["linear"].extend((self._rtp_ple_ngram, self._rtp_ple_conv))
+-        copies = mapping.tolist()
+-        # Validate the entire mapping before touching any side pool. RTP may
+-        # chain copies, so the second pass must still preserve row order.
+-        for row, src, dst in copies:
+-            if row < 0 or row >= len(tags):
+-                raise ValueError(f"plugin cache copy has invalid tag row {row}")
+-            for pool in side_pools.get(tags[row], ()):
+-                if src < 0 or dst < 0 or src >= pool.shape[0] or dst >= pool.shape[0]:
+-                    raise ValueError("plugin cache copy has out-of-range block ID")
+-        for row, src, dst in copies:
+-            for pool in side_pools.get(tags[row], ()):
+-                if src != dst:
+-                    pool[dst].copy_(pool[src])
+-
+     def prepare_fmha_impl(self, inputs, is_cuda_graph: bool = False):
+         tagged = inputs.attention_inputs
+         if not isinstance(tagged, dict):
+@@ -193,8 +157,12 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+             for name, dtype in (
+                 ("qsa_positions_i64", torch.int64),
+                 ("qsa_slots_i64", torch.int64),
++                ("qsa_index_slots_i64", torch.int64),
++                ("qsa_raw_slots_i64", torch.int64),
+                 ("qwen4_has_initial", torch.bool),
+                 ("qsa_compressed_slots", torch.int64),
++                ("qsa_index_compressed_slots", torch.int64),
++                ("qsa_raw_compressed_slots", torch.int64),
+             ):
+                 graph_buffers[name] = torch.empty(
+                     num_tokens, device=device, dtype=dtype
+@@ -209,6 +177,37 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+                 device=device,
+                 dtype=torch.int32,
+             )
++            graph_buffers["index_physical_block_table_i32"] = torch.empty_like(
++                graph_buffers["physical_block_table_i32"]
++            )
++            graph_buffers["raw_physical_block_table_i32"] = torch.empty_like(
++                graph_buffers["physical_block_table_i32"]
++            )
++            state_requests = graph_buffers["block_table_i32"].shape[0]
++            graph_buffers["qsa_state_read_slots_i32"] = torch.empty(
++                state_requests, mtp_tokens_per_request, device=device, dtype=torch.int32
++            )
++            graph_buffers["qsa_state_write_slots_i32"] = torch.empty_like(
++                graph_buffers["qsa_state_read_slots_i32"]
++            )
++            graph_buffers["qsa_state_invalid_live_rows"] = torch.empty(
++                (state_requests + 127) // 128, device=device, dtype=torch.int32
++            )
++            if any(module.rope_position_cache is not None for module in qsa_layers):
++                for name in (
++                    "raw_physical_block_table_i32",
++                    "qsa_raw_slots_i64",
++                    "qsa_state_read_slots_i32",
++                    "qsa_state_write_slots_i32",
++                    "qsa_state_invalid_live_rows",
++                ):
++                    graph_buffers["position_" + name] = torch.empty_like(graph_buffers[name])
++            graph_buffers["ple_previous_state_slots_i32"] = torch.empty(
++                max_batch, device=device, dtype=torch.int32
++            )
++            graph_buffers["ple_ngram_previous_state_slots_i32"] = torch.empty(
++                max_batch, device=device, dtype=torch.int32
++            )
+ 
+         # The same draft runtime is wrapped by both the Q-token draft-prefill
+         # graph and the one-token draft-decode graph. Never replace the decode
+@@ -272,6 +271,20 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+             mtp_buffers["target_accepted_tokens"] = torch.ones(
+                 max_batch, device=device, dtype=torch.int32
+             )
++            # Each state pool captures a kernel that writes target-verify
++            # read/write page IDs. Keep its output separate from the linear
++            # state and every other pool: their physical page IDs diverge
++            # after prefix reuse.
++            for tag in ("ple_conv_state", "ple_ngram_ctx"):
++                mtp_buffers[f"{tag}_target_read_slots_i32"] = torch.empty_like(
++                    mtp_buffers["target_read_slots_i32"]
++                )
++                mtp_buffers[f"{tag}_target_write_slots_i32"] = torch.empty_like(
++                    mtp_buffers["target_write_slots_i32"]
++                )
++                mtp_buffers[f"{tag}_target_invalid_live_rows"] = torch.empty_like(
++                    mtp_buffers["target_invalid_live_rows"]
++                )
+         self._cg_mtp_meta_bufs = mtp_buffers
+         from atom.plugin.rtpllm.utils.split_ssm_storage import warm_buffers
+         warm_buffers(self)
+@@ -290,6 +303,43 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+             return buffers
+         return getattr(self, "_cg_meta_bufs", None)
+ 
++    @contextmanager
++    def _publish_pd_cache_layers(self, tagged):
++        """Publish completed layers while later prefill layers are computing."""
++        publications = {}
++        if isinstance(tagged, dict):
++            for tag, attn_inputs in tagged.items():
++                plan = getattr(attn_inputs, "cache_store_inputs", None)
++                if plan is None:
++                    continue
++                writer = getattr(attn_inputs, "cache_store_writer", None)
++                if writer is None:
++                    raise RuntimeError(f"Qwen4Exp PD cache writer missing for {tag}")
++                publications[tag] = (plan, writer)
++
++        handles = []
++        try:
++            if publications:
++                for layer_idx, layer in enumerate(self.model.model.layers):
++
++                    def publish(_module, _inputs, _output, layer_idx=layer_idx):
++                        # write() records an event on the current compute stream
++                        # and retains the cache pages until transfer completes.
++                        # The layer has queued all QSA/GDN/PLE state updates here.
++                        for cache in self.kv_cache.get_layer_cache_groups(layer_idx):
++                            publication = publications.get(str(cache.tag))
++                            if publication is not None:
++                                plan, writer = publication
++                                writer.write(plan, cache)
++
++                    handles.append(layer.register_forward_hook(publish))
++            yield
++        finally:
++            # Do not leave request plans or hooks on decode/graph forwards,
++            # including when a layer or cache publication raises.
++            for handle in handles:
++                handle.remove()
++
+     def forward(self, inputs, fmha_impl=None):
+         tagged = inputs.attention_inputs
+         if isinstance(tagged, dict):
+@@ -314,7 +364,10 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+             inputs.attention_inputs.is_cuda_graph = True
+         from atom.config import use_custom_atom_config
+ 
+-        with use_custom_atom_config(self.model.atom_config):
++        with (
++            use_custom_atom_config(self.model.atom_config),
++            self._publish_pd_cache_layers(tagged),
++        ):
+             if bool(
+                 getattr(
+                     getattr(
+@@ -676,13 +729,24 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
+ 
+     @classmethod
+     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+-        model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(
+-            model_config.hybrid_attention_config.hybrid_attention_types,
+-            KVCacheSpecType.MHA,
++        with open(os.path.join(model_config.ckpt_path, "config.json"), encoding="utf-8") as file:
++            text = json.load(file)["text_config"]
++        block = int(model_config.attn_config.tokens_per_block)
++        ratio = int(text["indexer_compress_ratio"])
++        index_dim = int(text["indexer_head_dim"])
++        if block <= 0 or ratio <= 0 or block % ratio:
++            raise ValueError("Qwen4Exp index cache needs ratio-aligned block size")
++        descs = build_qwen4_exp_kv_cache_spec_descs(
++            model_config,
++            [] if model_config.is_mtp else [i - 1 for i in text.get("ple_layer_ids", [])],
++            int(text.get("ple_conv_kernel_size", 0)),
++            int(text.get("ngram_size", 0)),
++            index_dim,
++            ratio,
+         )
+-        # Retain sparse GDN checkpoints at 1024-token intervals for 64-token
+-        # blocks, matching the existing RTP prefix-cache policy.
+-        for layer in model_config.kv_cache_spec_descs:
++        # The GDN state packs FP32 recurrence data into BF16 byte storage.
++        # Global FP8 KV mode applies to MHA pages only.
++        for layer in descs:
+             for desc in layer:
+                 if desc.cache_type == KVCacheSpecType.LINEAR:
+                     desc.dtype = DataType.TYPE_BF16
+@@ -693,13 +757,13 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
+                     ):
+                         desc.linear_state_layout = LinearStateLayout.SPLIT_EXPORT
+                     tail = desc.tail or CacheTailPolicyDesc()
+-                    tail.prefix_checkpoint_stride_blocks = 16
++                    tail.prefix_checkpoint_stride_blocks = GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
+                     desc.tail = tail
+-
++        model_config.kv_cache_spec_descs = descs
+ 
+     @classmethod
+     def _apply_kv_cache_config(cls, model_config: ModelConfig, kv_cache_config) -> None:
+-        """Budget QSA/PLE side state before RTP sizes its paged cache pools."""
++        """Validate native QSA/PLE cache geometry before RTP sizes its pools."""
+         with open(
+             os.path.join(model_config.ckpt_path, "config.json"), encoding="utf-8"
+         ) as file:
+@@ -717,7 +781,6 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
+         )
+         if len(layer_types) != model_config.num_layers:
+             raise ValueError("Qwen4Exp QSA layer count differs from RTP model layers")
+-        full_layers = sum(layer == "full_attention" for layer in layer_types)
+         if block_size <= 0 or ratio <= 0 or block_size % ratio or index_dim <= 0:
+             raise ValueError(
+                 "Qwen4Exp QSA cache requires positive, ratio-aligned block geometry"
+@@ -726,46 +789,12 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
+             kv_cache_config, "multi_task_prompt_str", None
+         ):
+             raise ValueError("Qwen4Exp RTP plugin does not support cached task prompts")
+-        # RTP's plugin block-copy callback must accompany reuse_cache so QSA/PLE
+-        # side pools follow copy-on-write relocations.
+         model_config.atom_qwen4_exp_prefix_cache_enabled = bool(
+             kv_cache_config.reuse_cache
+         )
+ 
+-        # _bind_qsa_caches allocates both BF16 arrays for *every* FULL block
+-        # on this rank: [block, 1, dim] and [block/ratio, 1, dim].
+-        qsa_bytes = full_layers * (block_size + block_size // ratio) * index_dim * 2
+-
+-        # _ple_metadata allocates one n-gram and one convolution window for
+-        # every LINEAR state slot. Both pools are also outside RTP's KV pool.
+-        ple_layer_ids = [] if model_config.is_mtp else text.get("ple_layer_ids", [])
+-        if len(ple_layer_ids) > 1:
+-            raise ValueError("Qwen4Exp RTP plugin currently supports one PLE layer")
+-        ple_bytes = 0
+-        if ple_layer_ids:
+-            ngram_size = int(text["ngram_size"])
+-            conv_state_len = (int(text["ple_conv_kernel_size"]) - 1) * ngram_size
+-            hc_hidden_size = int(text["hidden_size"]) * int(text["hc_count"])
+-            if ngram_size < 2 or conv_state_len < 0 or hc_hidden_size <= 0:
+-                raise ValueError("Qwen4Exp PLE cache geometry is invalid")
+-            ple_bytes = (ngram_size - 1) * 8 + (
+-                hc_hidden_size
+-                * conv_state_len
+-                * torch.empty((), dtype=model_config.compute_dtype).element_size()
+-            )
+-        # QSA needs the three-axis RoPE position of every image token when
+-        # compressing index keys. This side cache follows RTP's physical blocks.
+-        rope_bytes = (
+-            full_layers
+-            * block_size
+-            * 3
+-            * torch.empty((), dtype=torch.int64).element_size()
+-            if model_config.mm_model_config.is_multimodal
+-            else 0
+-        )
+-        model_config.auxiliary_paged_cache_bytes_per_block = (
+-            qsa_bytes + ple_bytes + rope_bytes
+-        )
++        # Side state is now allocated and budgeted by RTP's tagged pools.
++        model_config.auxiliary_paged_cache_bytes_per_block = 0
+ 
+     def _create_python_model(self):
+         from atom.model_loader.loader import WeightsMapper, load_model_in_plugin_mode
+@@ -986,6 +1015,20 @@ class _ATOMQwen4ExpMTPRuntime(_ATOMQwen4ExpRuntime):
+                 hc = self.model(
+                     input_ids, rope_positions + 1, hc_input, inputs_embeds=draft_embeds
+                 )
++        # The one-layer MTP draft has its own cache model ID. The decode
++        # worker loads these pages independently from the target-model pages.
++        draft_inputs_by_tag = tagged if isinstance(tagged, dict) else {"full": tagged}
++        for tag, draft_inputs in draft_inputs_by_tag.items():
++            plan = getattr(draft_inputs, "cache_store_inputs", None)
++            if plan is None:
++                continue
++            writer = getattr(draft_inputs, "cache_store_writer", None)
++            if writer is None:
++                raise RuntimeError(f"Qwen4Exp MTP PD cache writer is missing for {tag}")
++            for layer_idx in range(len(self.model.model.layers)):
++                for cache in self.kv_cache.get_layer_cache_groups(layer_idx):
++                    if str(cache.tag) == tag:
++                        writer.write(plan, cache)
+         hc = hc.flatten(1)
+         mixed = self.model._head_input(hc)
+         return PyModelOutputs(mixed, hc)
+diff --git a/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py b/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py
+index 8642f10..f0473f8 100644
+--- a/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp_mtp_hooks.py
+@@ -57,6 +57,7 @@ def _write_ple_conv_candidates(
+     HISTORY: tl.constexpr,
+     STATE_SLOT_STRIDE: tl.constexpr,
+     STATE_CHANNEL_STRIDE: tl.constexpr,
++    STATE_HISTORY_STRIDE: tl.constexpr,
+     IN_STRIDE: tl.constexpr,
+     SLOT_ROW_STRIDE: tl.constexpr,
+     SLOT_COL_STRIDE: tl.constexpr,
+@@ -77,8 +78,7 @@ def _write_ple_conv_candidates(
+             State
+             + src * STATE_SLOT_STRIDE
+             + c[:, None] * STATE_CHANNEL_STRIDE
+-            + HISTORY
+-            + position,
++            + (HISTORY + position) * STATE_HISTORY_STRIDE,
+             valid & has & (position < 0),
+             0,
+         )
+@@ -91,7 +91,7 @@ def _write_ple_conv_candidates(
+             State
+             + dst * STATE_SLOT_STRIDE
+             + c[:, None] * STATE_CHANNEL_STRIDE
+-            + j[None, :],
++            + j[None, :] * STATE_HISTORY_STRIDE,
+             tl.where(position >= 0, token, old),
+             valid,
+         )
+@@ -152,6 +152,9 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
+     spec_slots = getattr(ple_metadata, "rtp_spec_state_indices", None)
+     if spec_slots is None:
+         return Qwen4ExpDecoderLayer._apply_ple(self, hidden_states, input_ids)
++    ngram_spec_slots = getattr(ple_metadata, "rtp_ngram_spec_state_indices", None)
++    if ngram_spec_slots is None or ngram_spec_slots.shape != spec_slots.shape:
++        raise ValueError("Qwen4Exp RTP MTP ngram candidate slots are missing")
+ 
+     # The input block can alias the first output block. Compute the full
+     # contribution once, then write shorter snapshots in descending order so
+@@ -170,8 +173,8 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
+         input_ids,
+         ple_metadata.query_start_loc,
+         ple_metadata.ngram_state,
+-        ple_metadata.state_indices_in,
+-        ple_metadata.state_indices_out,
++        ple_metadata.ngram_indices_in,
++        ple_metadata.ngram_indices_out,
+         ple_metadata.has_initial_state,
+         ple.ple_embedding.eos_token_id,
+         history_width=width,
+@@ -181,25 +184,16 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
+         hidden_states, input_ids, ple_metadata.query_start_loc, ngram_context
+     )
+     normalized = ple._apply_norm(ple.norm_conv, gated).flatten(-2).contiguous()
+-    conv_output = ple._short_conv(
+-        normalized,
+-        ple_metadata.query_start_loc,
+-        ple_metadata.conv_state,
+-        ple_metadata.state_indices_in,
+-        ple_metadata.state_indices_out,
+-        ple_metadata.has_initial_state,
+-        ple_metadata.num_accepted_tokens,
+-    )
+     if batch_size:
+         _write_ple_ngram_candidates[(batch_size,)](
+             input_ids,
+             ngram_context,
+             ple_metadata.ngram_state,
+-            spec_slots,
++            ngram_spec_slots,
+             ple_metadata.ngram_state.stride(0),
+             ple_metadata.ngram_state.stride(1),
+-            spec_slots.stride(0),
+-            spec_slots.stride(1),
++            ngram_spec_slots.stride(0),
++            ngram_spec_slots.stride(1),
+             query_len,
+             width,
+             triton.next_power_of_2(width),
+@@ -218,12 +212,24 @@ def _rtp_apply_ple(self: Qwen4ExpDecoderLayer, hidden_states, input_ids):
+             history,
+             ple_metadata.conv_state.stride(0),
+             ple_metadata.conv_state.stride(1),
++            ple_metadata.conv_state.stride(2),
+             ple_metadata.state_indices_in.stride(0),
+             spec_slots.stride(0),
+             spec_slots.stride(1),
+             32,
+             triton.next_power_of_2(history),
+         )
++    # The final output slot may alias the source slot. Snapshot candidate
++    # histories before the convolution commits its final state in-place.
++    conv_output = ple._short_conv(
++        normalized,
++        ple_metadata.query_start_loc,
++        ple_metadata.conv_state,
++        ple_metadata.state_indices_in,
++        ple_metadata.state_indices_out,
++        ple_metadata.has_initial_state,
++        ple_metadata.num_accepted_tokens,
++    )
+     return hidden_states + gated.flatten(-2) + conv_output
+ 
+ 
+diff --git a/atom/plugin/rtpllm/utils/forward_context.py b/atom/plugin/rtpllm/utils/forward_context.py
+index f721fa7..b8081bb 100644
+--- a/atom/plugin/rtpllm/utils/forward_context.py
++++ b/atom/plugin/rtpllm/utils/forward_context.py
+@@ -45,6 +45,14 @@ from atom.utils.forward_context import (
+ )
+ 
+ 
++def _primary_layer_cache(kv_cache: Any, layer_num: int, tag: str):
++    """Keep legacy single-region models while selecting tagged hybrid pools."""
++    groups = kv_cache.get_layer_cache_groups(layer_num)
++    if len(groups) == 1:
++        return groups[0]
++    return kv_cache.get_layer_cache(layer_num, tag)
++
++
+ @dataclass
+ class AiterFlashAttentionPhaseMetadata:
+     max_query_len: int
+@@ -1520,7 +1528,7 @@ class RTPForwardContext:
+ 
+         # Build GDN cache views from RTP LayerKVCache flat buffers.
+         for layer_num, gdn_layer in gdn_layer_map.items():
+-            layer_cache = runtime.kv_cache.get_layer_cache(layer_num)
++            layer_cache = _primary_layer_cache(runtime.kv_cache, layer_num, "linear")
+             kv_cache_base = getattr(layer_cache, "kv_cache_base", None)
+             if kv_cache_base is None:
+                 raise ValueError(f"Layer {layer_num} kv_cache_base is missing.")
+@@ -1587,7 +1595,7 @@ class RTPForwardContext:
+             if layer_key in cache_tensors:
+                 continue
+ 
+-            layer_cache = runtime.kv_cache.get_layer_cache(layer_num)
++            layer_cache = _primary_layer_cache(runtime.kv_cache, layer_num, "full")
+             kv_cache_base = getattr(layer_cache, "kv_cache_base", None)
+             if kv_cache_base is None:
+                 raise ValueError(
+@@ -1649,7 +1657,12 @@ class RTPForwardContext:
+             | set(mla_layer_map.keys())
+         )
+         for layer_num in all_layer_nums:
+-            layer_cache = runtime.kv_cache.get_layer_cache(layer_num)
++            if layer_num in gdn_layer_map:
++                layer_cache = _primary_layer_cache(runtime.kv_cache, layer_num, "linear")
++            elif layer_num in full_attn_layer_map:
++                layer_cache = _primary_layer_cache(runtime.kv_cache, layer_num, "full")
++            else:
++                layer_cache = runtime.kv_cache.get_layer_cache(layer_num)
+             kv_cache_base = getattr(layer_cache, "kv_cache_base", None)
+             if kv_cache_base is None:
+                 signature.append((int(layer_num), None))
+diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+index 17573c6..11ddc49 100644
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -46,6 +46,7 @@ def _qsa_graph_slots_kernel(
+     table_stride_col,
+     table_cols: tl.constexpr,
+     block_size: tl.constexpr,
++    slot_page_size: tl.constexpr,
+     ratio: tl.constexpr,
+     tile: tl.constexpr,
+ ):
+@@ -59,7 +60,7 @@ def _qsa_graph_slots_kernel(
+         live & (position >= 0),
+         -1,
+     )
+-    slot = tl.where(page >= 0, page * block_size + position % block_size, -1)
++    slot = tl.where(page >= 0, page * slot_page_size + position % slot_page_size, -1)
+     compressed = tl.where(
+         (slot >= 0) & ((position + 1) % ratio == 0), slot // ratio, -1
+     )
+@@ -376,7 +377,7 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+         linear_config = getattr(model_config, "linear_attention_config", None)
+         if not enabled() and getattr(linear_config, "ssm_state_dtype", None) == DataType.TYPE_FP32:
+             for layer_num, layer in layer_maps[0].items():
+-                raw = runtime.kv_cache.get_layer_cache(layer_num).kv_cache_base
++                raw = runtime.kv_cache.get_layer_cache(layer_num, "linear").kv_cache_base
+                 base = raw.reshape(raw.shape[0], -1)
+                 if base.dtype != torch.bfloat16 or not base.is_contiguous():
+                     raise ValueError(
+@@ -515,26 +516,89 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+             raise ValueError("Qwen4Exp full-attention physical block table is empty")
+         return table
+ 
++    @classmethod
++    def _qsa_state_slots(cls, tag, prefix, runtime, inputs, logical, query_starts,
++                         page_size, ratio, graph_buffers):
++        tagged = inputs.attention_inputs_by_tag[tag]
++        if int(runtime.kv_cache.get_seq_size_per_block(tag)) != page_size:
++            raise ValueError(f"{tag} and full cache page sizes differ")
++        buffers = None
++        verify = getattr(tagged, "is_target_verify", False)
++        if graph_buffers is not None:
++            buffers = dict(graph_buffers)
++            buffers["physical_block_table_i32"] = buffers[prefix + "raw_physical_block_table_i32"]
++            if verify:
++                for key, name in (("target_read_slots_i32", "read_slots_i32"),
++                                  ("target_write_slots_i32", "write_slots_i32"),
++                                  ("target_invalid_live_rows", "invalid_live_rows")):
++                    buffers[key] = buffers[prefix + "qsa_state_" + name]
++        blocks = cls._resolve_qsa_block_table(
++            tagged, page_size, int(runtime.kv_cache.get_kernel_seq_size_per_block(tag)), buffers
++        )
++        read = candidates = None
++        if verify:
++            meta = cls._build_gdn_metadata(tagged, seq_size_per_block=page_size,
++                                           num_tokens=logical.numel(), cg_bufs=buffers)
++            read = meta.spec_state_indices_in_tensor[:, 0]
++            candidates = meta.spec_state_indices_tensor
++            pages = candidates.reshape(-1).to(torch.int64)
++            slots = torch.where(pages > 0, pages * (2 * ratio) + logical.remainder(2 * ratio), -1)
++        elif buffers is not None:
++            slots = buffers[prefix + "qsa_raw_slots_i64"][:logical.numel()]
++            _qsa_graph_slots_kernel[(triton.cdiv(slots.numel(), 128),)](
++                blocks, logical, buffers["seq_id_i32"], slots,
++                buffers["qsa_raw_compressed_slots"], slots.numel(),
++                blocks.stride(0), blocks.stride(1), blocks.shape[1], page_size, 2 * ratio, ratio, 128,
++            )
++        else:
++            slots = cls._build_slot_mapping(positions=logical, query_start_loc=query_starts,
++                                            block_table=blocks, seq_size_per_block=page_size)
++            slots = torch.where(slots >= 0, (slots // page_size) * (2 * ratio) + logical.remainder(2 * ratio), slots)
++        return blocks, slots, read, candidates
++
+     @staticmethod
+     def _bind_qsa_caches(runtime: Any, qsa_layers: list[Any], block_size: int) -> None:
+         from rtp_llm.models_py.modules.factory.attention.common import (
+             reshape_paged_kv_cache,
+         )
+ 
++        cfg = runtime._rtp_model_config
++        has_positions = not cfg.is_mtp and cfg.mm_model_config.is_multimodal
+         for module in qsa_layers:
+             ratio = int(module.indexer.compress_ratio)
+             if block_size <= 0 or ratio <= 0 or block_size % ratio:
+                 raise ValueError(
+                     f"QSA block size {block_size} must be divisible by compression ratio {ratio}"
+                 )
+-            layer_cache = runtime.kv_cache.get_layer_cache(module.layer_num)
++            layer_cache = runtime.kv_cache.get_layer_cache(module.layer_num, "full")
+             raw = layer_cache.kv_cache_base
+             if raw is None:
+                 raise ValueError(f"QSA layer {module.layer_num} has no RTP KV cache")
+-            if raw.dtype != torch.bfloat16:
+-                raise ValueError("QSA RTP KV cache requires BF16 storage")
++            is_fp8 = raw.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
++            if raw.dtype != torch.bfloat16 and not is_fp8:
++                raise ValueError("QSA RTP KV cache requires BF16 or FP8 storage")
++            scale = layer_cache.kv_scale_base
++            if is_fp8 and (scale is None or scale.numel() == 0):
++                raise ValueError("QSA FP8 KV cache requires per-token FP32 scales")
+             num_blocks = int(raw.shape[0])
+-            signature = (raw.data_ptr(), num_blocks, block_size, str(raw.dtype))
++            index_base = runtime.kv_cache.get_layer_cache(module.layer_num, "indexer_kv").kv_cache_base
++            raw_base = runtime.kv_cache.get_layer_cache(module.layer_num, "indexer_state").kv_cache_base
++            if index_base is None or index_base.dtype != torch.uint8 or index_base.ndim != 2:
++                raise ValueError("QSA indexer_kv pool is missing or has invalid storage")
++            if raw_base is None or raw_base.dtype != torch.float32 or raw_base.ndim != 2:
++                raise ValueError("QSA indexer_state pool is missing or has invalid storage")
++            index_blocks = int(index_base.shape[0])
++            position_base = None
++            if has_positions:
++                position_base = runtime.kv_cache.get_layer_cache(
++                    module.layer_num, "indexer_rope_positions"
++                ).kv_cache_base
++                if (position_base is None or position_base.dtype != torch.int32
++                        or position_base.ndim != 2 or position_base.size(1) < 2 * ratio * 3):
++                    raise ValueError("invalid indexer_rope_positions pool")
++            signature = (raw.data_ptr(), num_blocks, block_size, str(raw.dtype),
++                         scale.data_ptr() if is_fp8 else 0, index_base.data_ptr(), raw_base.data_ptr(),
++                         position_base.data_ptr() if has_positions else 0)
+             if getattr(module, "_rtp_qsa_cache_signature", None) == signature:
+                 continue
+             # The QSA module is already TP-sharded; RTP allocates this layer's
+@@ -559,46 +623,31 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+             )
+             key = token_major[:, 0]
+             value = token_major[:, 1]
++            k_scale = v_scale = None
++            if is_fp8:
++                if scale.dtype != torch.float32 or scale.numel() != num_blocks * 2 * block_size * stored_heads:
++                    raise ValueError("QSA FP8 KV scale layout does not match RTP cache")
++                token_scale = scale.view(num_blocks, 2, block_size, stored_heads)
++                k_scale, v_scale = token_scale[:, 0], token_scale[:, 1]
+             device = raw.device
+             index_dim = int(module.indexer.index_head_dim)
++            state_rows = 2 * ratio
++            state_bytes = state_rows * index_dim * 4
++            compressed_bytes = block_size // ratio * index_dim * 2
++            if raw_base.shape[1] * raw_base.element_size() < state_bytes or index_base.shape[1] < compressed_bytes:
++                raise ValueError("QSA side pool row is too small")
+             side = (
+-                torch.zeros(
+-                    (num_blocks, block_size, 1, index_dim),
+-                    device=device,
+-                    dtype=raw.dtype,
+-                ),
+-                torch.zeros(
+-                    (
+-                        num_blocks,
+-                        block_size // ratio,
+-                        1,
+-                        index_dim,
+-                    ),
+-                    device=device,
+-                    dtype=raw.dtype,
++                raw_base[:, :state_rows * index_dim].reshape(
++                    raw_base.shape[0], state_rows, 1, index_dim
+                 ),
++                index_base[:, :compressed_bytes]
++                .view(torch.bfloat16).reshape(index_blocks, block_size // ratio, 1, index_dim),
+             )
+-            model_config = getattr(runtime, "_rtp_model_config", None)
+-            has_vision = bool(
+-                getattr(
+-                    getattr(model_config, "mm_model_config", None),
+-                    "is_multimodal",
+-                    False,
+-                )
++            rope_positions = None if position_base is None else position_base[:, :state_rows * 3].view(
++                position_base.size(0), state_rows, 1, 3
+             )
+-            rope_positions = (
+-                torch.zeros(
+-                    (num_blocks, block_size, 1, 3),
+-                    device=device,
+-                    dtype=torch.int64,
+-                )
+-                if has_vision
+-                else None
+-            )
+-            if has_vision:
+-                module.bind_caches(key, value, *side, rope_positions)
+-            else:
+-                module.bind_caches(key, value, *side)
++            module.bind_caches(key, value, *side, rope_position_cache=rope_positions,
++                               k_scale_cache=k_scale, v_scale_cache=v_scale)
+             module._rtp_qsa_cache_signature = signature
+ 
+     @staticmethod
+@@ -613,41 +662,67 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+         ple = ple_layers[0]
+         if not gdn_layers:
+             raise ValueError("PLE requires a GDN layer cache")
+-        raw = runtime.kv_cache.get_layer_cache(min(gdn_layers)).kv_cache_base
+-        slots = int(raw.shape[0])
+-        signature = (raw.data_ptr(), slots, ple.hc_hidden_size, ple.conv_state_len)
++        ple_layer = next(
++            idx for idx, layer in enumerate(model.model.layers) if layer.ple is not None
++        )
++        conv_raw = runtime.kv_cache.get_layer_cache(ple_layer, "ple_conv_state").kv_cache_base
++        ngram_raw = runtime.kv_cache.get_layer_cache(ple_layer, "ple_ngram_ctx").kv_cache_base
++        if conv_raw is None or ngram_raw is None:
++            raise ValueError("PLE state pools are missing")
++        conv_slots = int(conv_raw.shape[0])
++        ngram_slots = int(ngram_raw.shape[0])
++        signature = (conv_raw.data_ptr(), ngram_raw.data_ptr(), conv_slots,
++                     ngram_slots, ple.hc_hidden_size, ple.conv_state_len)
+         if getattr(runtime, "_rtp_ple_cache_signature", None) != signature:
+             if torch.cuda.is_current_stream_capturing():
+                 raise RuntimeError(
+                     "Qwen4Exp PLE caches must be bound before Graph capture"
+                 )
+-            runtime._rtp_ple_ngram = torch.full(
+-                (slots, ple.ple_embedding.ngram_size - 1),
+-                int(model.config.eos_token_id),
+-                device=raw.device,
+-                dtype=torch.int64,
+-            )
+-            runtime._rtp_ple_conv = torch.zeros(
+-                (slots, ple.hc_hidden_size, ple.conv_state_len),
+-                device=raw.device,
+-                dtype=model.atom_config.torch_dtype,
++            from rtp_llm.models_py.utils.cache_payload_view import (
++                CachePayloadGeometry, payload_view,
+             )
++            ngram_width = ple.ple_embedding.ngram_size - 1
++            runtime._rtp_ple_ngram = payload_view(
++                ngram_raw,
++                CachePayloadGeometry(torch.int64, torch.int64, ngram_width, 1),
++                "PLE ngram context",
++            ).squeeze(-1)
++            runtime._rtp_ple_conv = payload_view(
++                conv_raw,
++                CachePayloadGeometry(torch.bfloat16, torch.bfloat16,
++                                     ple.conv_state_len, ple.hc_hidden_size),
++                "PLE convolution state",
++            ).transpose(1, 2)
++            runtime._rtp_ple_ngram.fill_(int(model.config.eos_token_id))
++            runtime._rtp_ple_conv.zero_()
+             runtime._rtp_ple_cache_signature = signature
+         return ple
+ 
+     @classmethod
+     def _ple_metadata(
+-        cls, runtime: Any, model: Any, attn_metadata: Any, gdn_layers: dict[int, Any]
++        cls,
++        runtime: Any,
++        model: Any,
++        attn_metadata: Any,
++        gdn_layers: dict[int, Any],
++        ple_state_metadata: GDNAttentionMetadata | None = None,
++        ngram_state_metadata: GDNAttentionMetadata | None = None,
+     ) -> Qwen4ExpPLEMetadata | None:
+         ple = cls._bind_ple_caches(runtime, model, gdn_layers)
+         if ple is None:
+             return None
+-        gdn = attn_metadata.gdn_metadata
++        gdn = ple_state_metadata
+         if gdn is None or (
+             gdn.non_spec_state_indices_tensor is None
+             and gdn.spec_state_indices_tensor is None
+         ):
+             raise ValueError("PLE requires GDN state-slot metadata")
++        ngram = ngram_state_metadata
++        if ngram is None or (
++            ngram.non_spec_state_indices_tensor is None
++            and ngram.spec_state_indices_tensor is None
++        ):
++            raise ValueError("PLE requires ngram state-slot metadata")
+         spec_indices = (
+             gdn.spec_state_indices_tensor
+             if getattr(gdn, "rtp_target_verify_block_map", None) is not None
+@@ -656,9 +731,13 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+         if spec_indices is not None:
+             indices = spec_indices[:, -1]
+             input_indices = gdn.spec_state_indices_in_tensor[:, 0]
++            ngram_indices = ngram.spec_state_indices_tensor[:, -1]
++            ngram_input_indices = ngram.spec_state_indices_in_tensor[:, 0]
+         else:
+             indices = gdn.non_spec_state_indices_tensor
+             input_indices = gdn.non_spec_state_indices_in_tensor
++            ngram_indices = ngram.non_spec_state_indices_tensor
++            ngram_input_indices = ngram.non_spec_state_indices_in_tensor
+         has_initial = gdn.has_initial_state
+         if has_initial is None:
+             if torch.cuda.is_current_stream_capturing():
+@@ -681,10 +760,15 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+             state_indices_out=indices,
+             has_initial_state=has_initial,
+             conv_state=runtime._rtp_ple_conv,
++            ngram_indices_in=ngram_input_indices,
++            ngram_indices_out=ngram_indices,
+         )
+         # RTP-only per-candidate slots are deliberately not part of the
+         # framework-neutral Qwen4ExpPLEMetadata dataclass.
+         metadata.rtp_spec_state_indices = spec_indices
++        metadata.rtp_ngram_spec_state_indices = (
++            ngram.spec_state_indices_tensor if spec_indices is not None else None
++        )
+         return metadata
+ 
+     @classmethod
+@@ -794,6 +878,23 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+             full_blocks = cls._resolve_qsa_block_table(
+                 full_inputs, full_block_size, kernel_block_size, graph_buffers
+             )
++            index_inputs = getattr(inputs, "attention_inputs_by_tag", {}).get("indexer_kv")
++            if index_inputs is None:
++                raise ValueError("Qwen4Exp requires RTP's indexer_kv cache tag")
++            index_graph_buffers = graph_buffers
++            if graph_buffers is not None:
++                index_graph_buffers = dict(graph_buffers)
++                index_graph_buffers["physical_block_table_i32"] = graph_buffers[
++                    "index_physical_block_table_i32"
++                ]
++            index_blocks = cls._resolve_qsa_block_table(
++                index_inputs,
++                int(runtime.kv_cache.get_seq_size_per_block("indexer_kv")),
++                int(runtime.kv_cache.get_kernel_seq_size_per_block("indexer_kv")),
++                index_graph_buffers,
++            )
++            if int(runtime.kv_cache.get_seq_size_per_block("indexer_kv")) != full_block_size:
++                raise ValueError("QSA indexer_kv and full cache page sizes differ")
+             if in_capture:
+                 if graph_buffers is None:
+                     raise RuntimeError("Qwen4Exp Graph requires prewarmed QSA buffers")
+@@ -810,6 +911,24 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                     full_blocks.stride(1),
+                     full_blocks.shape[1],
+                     full_block_size,
++                    full_block_size,
++                    ratio,
++                    128,
++                )
++                index_slots = graph_buffers["qsa_index_slots_i64"][: slots.numel()]
++                index_compressed = graph_buffers["qsa_index_compressed_slots"][: slots.numel()]
++                _qsa_graph_slots_kernel[(triton.cdiv(slots.numel(), 128),)](
++                    index_blocks,
++                    positions,
++                    graph_buffers["seq_id_i32"][: slots.numel()],
++                    index_slots,
++                    index_compressed,
++                    slots.numel(),
++                    index_blocks.stride(0),
++                    index_blocks.stride(1),
++                    index_blocks.shape[1],
++                    full_block_size,
++                    full_block_size,
+                     ratio,
+                     128,
+                 )
+@@ -830,6 +949,24 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                     ratio,
+                     compressed,
+                 )
++                index_slots = cls._build_slot_mapping(
++                    positions=positions.reshape(-1),
++                    query_start_loc=plugin.rtp_cu_seqlens_q,
++                    block_table=index_blocks,
++                    seq_size_per_block=full_block_size,
++                )
++                index_compressed = torch.empty_like(index_slots)
++                qsa_compressed_slots(index_slots, logical, ratio, index_compressed)
++            state_args = (runtime, inputs, logical, plugin.rtp_cu_seqlens_q,
++                          full_block_size, ratio, graph_buffers)
++            raw_blocks, raw_slots, state_read_pages, state_candidate_pages = cls._qsa_state_slots(
++                "indexer_state", "", *state_args
++            )
++            position_blocks = position_slots = position_read = position_candidates = None
++            if qsa_layers[0].rope_position_cache is not None:
++                position_blocks, position_slots, position_read, position_candidates = cls._qsa_state_slots(
++                    "indexer_rope_positions", "position_", *state_args
++                )
+             host_lens = context_slots = None
+             if (
+                 os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
+@@ -858,8 +995,6 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                         pages = full_blocks[requests, tokens // full_block_size].to(torch.int64)
+                         context_slots = pages * full_block_size + tokens % full_block_size
+             metadata.qsa_metadata = Qwen4ExpQSAMetadata(
+-                host_lens=host_lens,
+-                context_slots=context_slots,
+                 block_tables=full_blocks,
+                 slot_mapping=slots,
+                 compressed_slot_mapping=compressed,
+@@ -872,12 +1007,74 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                 logical_positions=logical,
+                 seq_lens=metadata.context_lens,
+                 max_seq_len=int(metadata.max_seqlen_k),
++                index_block_tables=index_blocks,
++                index_slot_mapping=index_slots,
++                index_compressed_slot_mapping=index_compressed,
++                raw_index_block_tables=raw_blocks,
++                raw_index_slot_mapping=raw_slots,
++                state_page_size=int(runtime.kv_cache.get_seq_size_per_block("indexer_state")),
++                position_block_tables=position_blocks,
++                position_slot_mapping=position_slots,
++                position_read_pages=position_read,
++                position_candidate_pages=position_candidates,
++                state_read_pages=state_read_pages,
++                state_candidate_pages=state_candidate_pages,
++                host_lens=host_lens,
++                context_slots=context_slots,
+             )
++            tagged_inputs = getattr(inputs, "attention_inputs_by_tag", {})
++            ple_inputs = tagged_inputs.get("ple_conv_state")
++            ngram_inputs = tagged_inputs.get("ple_ngram_ctx")
++            ple_state_metadata = ngram_state_metadata = None
++            for tag, tagged, buffer_key in (
++                ("ple_conv_state", ple_inputs, "ple_previous_state_slots_i32"),
++                ("ple_ngram_ctx", ngram_inputs, "ple_ngram_previous_state_slots_i32"),
++            ):
++                if tagged is None:
++                    raise ValueError(f"Qwen4Exp requires RTP's {tag} cache tag")
++                tagged_buffers = graph_buffers
++                if graph_buffers is not None:
++                    tagged_buffers = dict(graph_buffers)
++                    tagged_buffers["previous_state_slots_i32"] = graph_buffers[buffer_key]
++                    if getattr(tagged, "is_target_verify", False):
++                        for name in (
++                            "target_read_slots_i32",
++                            "target_write_slots_i32",
++                            "target_invalid_live_rows",
++                        ):
++                            tagged_buffers[name] = graph_buffers[f"{tag}_{name}"]
++                state_metadata = cls._build_gdn_metadata(
++                    tagged,
++                    seq_size_per_block=int(runtime.kv_cache.get_seq_size_per_block(tag)),
++                    num_tokens=int(logical.numel()),
++                    cg_bufs=tagged_buffers,
++                )
++                if tag == "ple_conv_state":
++                    ple_state_metadata = state_metadata
++                else:
++                    ngram_state_metadata = state_metadata
+             metadata.ple_metadata = cls._ple_metadata(
+-                runtime, model, metadata, resolved_layer_maps[0]
++                runtime, model, metadata, resolved_layer_maps[0],
++                ple_state_metadata, ngram_state_metadata,
+             )
+             if metadata.ple_metadata is not None and gdn_metadata is not None:
+-                metadata.ple_metadata.rtp_checkpoint_targets = (
+-                    gdn_metadata.ssm_checkpoints
+-                )
++                ple_checkpoints = None
++                if (
++                    getattr(runtime._rtp_model_config, "atom_qwen4_exp_prefix_cache_enabled", False)
++                    and ple_state_metadata is not None
++                    and ple_state_metadata.num_prefills
++                ):
++                    ple_checkpoints = {
++                        "conv": cls._prefill_state_checkpoints(
++                            ple_inputs, ple_state_metadata,
++                            int(runtime.kv_cache.get_seq_size_per_block("ple_conv_state")),
++                            int(runtime.kv_cache.get_kernel_seq_size_per_block("ple_conv_state")),
++                        ),
++                        "ngram": cls._prefill_state_checkpoints(
++                            ngram_inputs, ngram_state_metadata,
++                            int(runtime.kv_cache.get_seq_size_per_block("ple_ngram_ctx")),
++                            int(runtime.kv_cache.get_kernel_seq_size_per_block("ple_ngram_ctx")),
++                        ),
++                    }
++                metadata.ple_metadata.rtp_checkpoint_targets = ple_checkpoints
+             yield
+diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_prefix_cache.py b/atom/plugin/rtpllm/utils/qwen4_exp_prefix_cache.py
+index db73537..01fde85 100644
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_prefix_cache.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_prefix_cache.py
+@@ -21,9 +21,12 @@ def _write_ple_checkpoints_kernel(
+     ngram,
+     conv,
+     starts,
+-    rows,
+-    slots,
+-    offsets,
++    conv_rows,
++    conv_slots,
++    conv_offsets,
++    ngram_rows,
++    ngram_slots,
++    ngram_offsets,
+     ids_stride,
+     norm_stride_token,
+     norm_stride_channel,
+@@ -35,41 +38,47 @@ def _write_ple_checkpoints_kernel(
+     CHANNELS: tl.constexpr,
+     NGRAM: tl.constexpr,
+     HISTORY: tl.constexpr,
++    N_CONV: tl.constexpr,
++    N_NGRAM: tl.constexpr,
+     BLOCK: tl.constexpr,
+     WINDOW: tl.constexpr,
+ ):
+     target = tl.program_id(0)
+     channel_block = tl.program_id(1)
+-    row = tl.load(rows + target)
+-    slot = tl.load(slots + target)
+-    end = tl.load(starts + row) + tl.load(offsets + target)
+-    if channel_block == 0:
++    if channel_block == 0 and target < N_NGRAM:
++        ngram_row = tl.load(ngram_rows + target)
++        ngram_slot = tl.load(ngram_slots + target)
++        ngram_end = tl.load(starts + ngram_row) + tl.load(ngram_offsets + target)
+         positions = tl.arange(0, WINDOW)
+         tokens = tl.load(
+-            ids + (end - NGRAM + positions) * ids_stride, positions < NGRAM, 0
++            ids + (ngram_end - NGRAM + positions) * ids_stride, positions < NGRAM, 0
+         )
+         tl.store(
+-            ngram + slot * ngram_stride_slot + positions * ngram_stride_pos,
++            ngram + ngram_slot * ngram_stride_slot + positions * ngram_stride_pos,
+             tokens,
+             positions < NGRAM,
+         )
+-    channels = channel_block * BLOCK + tl.arange(0, BLOCK)
+-    history = tl.arange(0, WINDOW)
+-    values = tl.load(
+-        normalized
+-        + (end - HISTORY + history[None, :]) * norm_stride_token
+-        + channels[:, None] * norm_stride_channel,
+-        (channels[:, None] < CHANNELS) & (history[None, :] < HISTORY),
+-        0,
+-    )
+-    tl.store(
+-        conv
+-        + slot * conv_stride_slot
+-        + channels[:, None] * conv_stride_channel
+-        + history[None, :] * conv_stride_pos,
+-        values,
+-        (channels[:, None] < CHANNELS) & (history[None, :] < HISTORY),
+-    )
++    if target < N_CONV:
++        conv_row = tl.load(conv_rows + target)
++        conv_slot = tl.load(conv_slots + target)
++        conv_end = tl.load(starts + conv_row) + tl.load(conv_offsets + target)
++        channels = channel_block * BLOCK + tl.arange(0, BLOCK)
++        history = tl.arange(0, WINDOW)
++        values = tl.load(
++            normalized
++            + (conv_end - HISTORY + history[None, :]) * norm_stride_token
++            + channels[:, None] * norm_stride_channel,
++            (channels[:, None] < CHANNELS) & (history[None, :] < HISTORY),
++            0,
++        )
++        tl.store(
++            conv
++            + conv_slot * conv_stride_slot
++            + channels[:, None] * conv_stride_channel
++            + history[None, :] * conv_stride_pos,
++            values,
++            (channels[:, None] < CHANNELS) & (history[None, :] < HISTORY),
++        )
+ 
+ 
+ def write_ple_checkpoints(
+@@ -83,6 +92,16 @@ def write_ple_checkpoints(
+     targets = getattr(metadata, "rtp_checkpoint_targets", None)
+     if targets is None:
+         return
++    conv_targets = targets["conv"]
++    ngram_targets = targets["ngram"]
++    conv_count = 0 if conv_targets is None else conv_targets["rows"].numel()
++    ngram_count = 0 if ngram_targets is None else ngram_targets["rows"].numel()
++    if not max(conv_count, ngram_count):
++        return
++    if conv_targets is None:
++        conv_targets = ngram_targets
++    if ngram_targets is None:
++        ngram_targets = conv_targets
+     ngram = metadata.ngram_state
+     conv = metadata.conv_state
+     width = int(history_width)
+@@ -97,16 +116,19 @@ def write_ple_checkpoints(
+     if ngram.shape[1] < width or conv.shape[2] < history:
+         raise ValueError("PLE checkpoint pool is narrower than model history")
+     _write_ple_checkpoints_kernel[
+-        (targets["rows"].numel(), triton.cdiv(normalized.shape[1], 32))
++        (max(conv_count, ngram_count), triton.cdiv(normalized.shape[1], 32))
+     ](
+         input_ids.reshape(-1),
+         normalized,
+         ngram,
+         conv,
+         metadata.query_start_loc,
+-        targets["rows"],
+-        targets["slots"],
+-        targets["offs"],
++        conv_targets["rows"],
++        conv_targets["slots"],
++        conv_targets["offs"],
++        ngram_targets["rows"],
++        ngram_targets["slots"],
++        ngram_targets["offs"],
+         input_ids.stride(0),
+         normalized.stride(0),
+         normalized.stride(1),
+@@ -118,6 +140,8 @@ def write_ple_checkpoints(
+         normalized.shape[1],
+         width,
+         history,
++        conv_count,
++        ngram_count,
+         32,
+         triton.next_power_of_2(max(width, history)),
+     )
