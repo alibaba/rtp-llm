@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <limits>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -437,12 +438,15 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
         attn_inputs.kv_cache_kernel_block_id.defined() && attn_inputs.kv_cache_kernel_block_id.numel() > 0 ?
             attn_inputs.kv_cache_kernel_block_id :
             attn_inputs.kv_cache_block_id;
+    const int64_t page_capacity = block_table_host.defined() ? block_table_host.numel() : 0;
     FlashInferMlaAttnParams::fillParams(prefix_lengths_host,
                                         sequence_lengths_host,
                                         input_lengths_host,
                                         block_table_host,
                                         seq_size_per_block,
-                                        forbid_realloc);
+                                        forbid_realloc,
+                                        page_capacity);
+    captured_page_capacity_ = page_capacity;
 
     // Step 2: Fill IndexerParams-specific parameters
     bool is_prefill = attn_inputs.is_prefill;
@@ -541,10 +545,12 @@ void SparseMlaParams::fillMultiTokenDecodeParams(torch::Tensor input_lengths_d,
                                 && prefix_lengths_d.numel() == input_lengths_d.numel()
                                 && block_table_d.size(0) == input_lengths_d.numel(),
                             "multi-token decode metadata shapes are inconsistent");
-    const int batch_size    = static_cast<int>(input_lengths_d.numel());
-    const int page_capacity = static_cast<int>(block_table_d.numel());
+    const int  batch_size    = static_cast<int>(input_lengths_d.numel());
+    const auto page_capacity = block_table_d.numel();
+    RTP_LLM_CHECK_WITH_INFO(page_capacity <= std::numeric_limits<int>::max(), "MLA page capacity exceeds int32 range");
     FlashInferMlaAttnParams::ensureTensorSize(batch_size, total_tokens, page_capacity, 0, batch_size * 4);
     ensureTensorSize(batch_size, total_tokens);
+    captured_page_capacity_          = page_capacity;
     multi_token_decode_total_tokens_ = total_tokens;
     // The replay kernel uses these shapes as its active capacities. Repeated
     // eager calls may reuse allocations from a larger preceding batch.
@@ -595,7 +601,7 @@ void SparseMlaParams::fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_le
                             "multi-token decode metadata shapes/devices are inconsistent");
     RTP_LLM_CHECK_WITH_INFO(kvlen_d.defined() && batch_indice_d.defined() && page_indice_d.defined()
                                 && batch_size <= cap_batch && total_tokens <= cap_tokens
-                                && static_cast<int64_t>(batch_size) * max_blocks_per_batch <= page_indice_d.numel(),
+                                && kv_cache_block_id_device.numel() <= captured_page_capacity_,
                             "multi-token decode metadata exceeds captured capacity");
 
     cudaStream_t stream = GET_CURRENT_STREAM();

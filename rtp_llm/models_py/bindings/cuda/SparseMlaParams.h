@@ -9,6 +9,9 @@ namespace rtp_llm {
 
 class SparseMlaParams: public FlashInferMlaAttnParams {
 private:
+    // Host initialization exposes only valid pages. Replay can consume every slot in the captured block table.
+    int64_t captured_page_capacity_ = 0;
+
     // SparseMlaParams-specific buffers (separate from base class buf_h/buf_d)
     torch::Tensor buf_h_i32_;  // HOST buffer for SparseMlaParams int32 tensors
     torch::Tensor buf_d_i32_;  // DEVICE buffer for SparseMlaParams int32 tensors
