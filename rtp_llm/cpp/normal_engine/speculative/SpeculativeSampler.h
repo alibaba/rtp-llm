@@ -39,12 +39,16 @@ public:
     // Default: no draft-to-target vocab mapping (execMappingDraft2Target
     // no-ops on an undefined map). Keeps main's ctor contract for tests.
     FastTopKSampler() = default;
-    explicit FastTopKSampler(torch::Tensor d2t_map): d2t_map_(std::move(d2t_map)) {}
+    explicit FastTopKSampler(torch::Tensor d2t_map, bool atom_decode = false):
+        atom_decode_(atom_decode), d2t_map_(std::move(d2t_map)) {}
     virtual ~FastTopKSampler() {}
 
     virtual FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1);
+    FastTopKSamplerOutput forwardDecode(const torch::Tensor& logits);
 
 private:
+    FastTopKSamplerOutput topOne(const torch::Tensor& logits, torch::Tensor tokens);
+    bool atom_decode_ = false;
     torch::Tensor d2t_map_;
 };
 

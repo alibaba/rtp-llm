@@ -37,6 +37,10 @@
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#if USING_ROCM
+#include "rtp_llm/models_py/bindings/rocm/speculative_sampling/AtomDraftArgmax.h"
+#endif
+
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 
@@ -598,7 +602,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             && py_instance.attr("supports_mtp_draft_loop_graph").cast<bool>()
             && py::str(py_instance.attr("__class__").attr("__module__")).cast<std::string>().rfind("atom.", 0) == 0) {
             graph_runner->configureMtpDraftLoop(
-                params.sp_config.gen_num_per_cycle - 1, [this](const torch::Tensor& hidden) {
+                params.sp_config.gen_num_per_cycle - 1, [this, pd_decode = params.parallelism_config.role_type == RoleType::DECODE](const torch::Tensor& hidden) {
                     // This branch's computeLogits already includes TP gather and FP32 promotion.
                     auto logits = computeLogits(hidden);
                     if (description_.output_vocab_size > 0) {
@@ -608,7 +612,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                     // are exact in either logit dtype; assembling the proposals
                     // promotes them with the first proposal's FP32 distribution.
                     logits = logits.to(torch::kFloat32);
-                    auto tokens = torch::argmax(logits, -1, true);
+                    auto tokens = pd_decode ? atomDecodeDraftArgmax(logits) : torch::argmax(logits, -1, true);
                     auto probs  = torch::zeros_like(logits).scatter_(-1, tokens, 1.0);
                     execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
                     return std::make_pair(tokens.to(torch::kInt32).reshape({tokens.size(0)}), probs);

@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#if USING_ROCM
+#include "rtp_llm/models_py/bindings/rocm/speculative_sampling/AtomDraftArgmax.h"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -10,12 +13,26 @@
 namespace rtp_llm {
 namespace speculative {
 
+FastTopKSamplerOutput FastTopKSampler::topOne(const torch::Tensor& logits, torch::Tensor tokens) {
+    auto probs = torch::zeros_like(logits).scatter_(-1, tokens, 1.0);
+    execMappingDraft2Target({tokens, d2t_map_, static_cast<int>(tokens.size(0)), 0, 1});
+    return {std::move(probs), std::move(tokens)};
+}
+
+FastTopKSamplerOutput FastTopKSampler::forwardDecode(const torch::Tensor& logits) {
+#if USING_ROCM
+    if (atom_decode_) {
+        return topOne(logits, atomDecodeDraftArgmax(logits));
+    }
+#endif
+    return forward(logits);
+}
+
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
 
     if (top_k == 1) {
-        output.token_ids = torch::argmax(logits, -1, true);
-        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
+        return topOne(logits, torch::argmax(logits, -1, true));
     } else {
         auto draft_probs = torch::softmax(logits, -1);
         output.token_ids = std::get<1>(torch::topk(draft_probs, top_k, -1));

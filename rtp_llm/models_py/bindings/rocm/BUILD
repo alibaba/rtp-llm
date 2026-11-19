@@ -82,10 +82,12 @@ cc_library(
 cc_library(
     name = "speculative_sampling",
     srcs = [
-        "speculative_sampling/sampling.cu"
+        "speculative_sampling/sampling.cu",
+        "speculative_sampling/AtomDraftArgmax.cu",
     ],
     hdrs = [
         "speculative_sampling/utils.cuh",
+        "speculative_sampling/AtomDraftArgmax.h",
         "speculative_sampling/vec_dtypes.cuh"
     ],
     deps = torch_deps(),

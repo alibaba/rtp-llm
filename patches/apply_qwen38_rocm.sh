@@ -22,3 +22,4 @@ for feature in ssm_state_compaction request_state_pool; do
     "$python" "$root/atom/$feature/apply.py" --verify-only
 done
 apply_atom_overlay main_0189b3506/native_pd_cache
+apply_atom_overlay main_0189b3506/pd_single_verify_moe

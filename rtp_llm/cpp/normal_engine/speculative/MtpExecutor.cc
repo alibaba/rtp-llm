@@ -1001,7 +1001,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_block_draft_) {
-        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+        fast_topk_sampler_.reset(new speculative::FastTopKSampler(
+            d2t_map_, role_type_ == RoleType::DECODE && params.model_config_.model_type == "atom_qwen4_exp"));
     }
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
@@ -2051,7 +2052,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // Tail is commit-only; the proposal lives and dies inside one
             // round, so no bookkeeping/PD channel carries it anymore.
         } else {
-            auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
+            auto fast_topk_sampler_output          = fast_topk_sampler_->forwardDecode(draft_prefill_model_output.logits);
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
@@ -3401,7 +3402,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
 
         // sample
-        auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
+        auto fast_topk_sampler_output = fast_topk_sampler_->forwardDecode(draft_decode_model_output.logits);
         auto draft_probs              = fast_topk_sampler_output.all_probs;
         auto draft_probs_reshape      = draft_probs.reshape({(int)batch_size, 1, -1});
         auto draft_token_ids          = fast_topk_sampler_output.token_ids;
