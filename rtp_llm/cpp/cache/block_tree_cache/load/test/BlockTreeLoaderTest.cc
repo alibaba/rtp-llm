@@ -34,7 +34,6 @@ using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
-using block_tree_cache_test::reserveEvictionSourceForTest;
 
 TEST(BlockTreeLoaderTest, LocalOnlyCompletionKeepsOriginalCommitReadiness) {
     for (const bool enabled : {false, true}) {
@@ -2133,11 +2132,11 @@ TEST(BlockTreeLoaderTest, ReplacedLoadCannotChangeNewEvictionState) {
             std::optional<TransferDescriptor> next;
             {
                 std::lock_guard<std::mutex> lock(env->cache->mutex_);
-                next = evictor.chooseVictim(0, Tier::DEVICE);
-                ASSERT_TRUE(next);
+                auto prepared = evictor.chooseAndReserveVictims(0, Tier::DEVICE, 1);
+                ASSERT_EQ(prepared.descriptors.size(), 1u);
+                next = std::move(prepared.descriptors.front());
                 next->target_blocks = {env->groups[0]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT)};
                 ASSERT_FALSE(isNullBlockIdx(next->target_blocks.front()));
-                reserveEvictionSourceForTest(evictor, *next);
             }
             if (completion == 0) {
                 EXPECT_TRUE(owner->abortPending());
@@ -2189,12 +2188,12 @@ TEST(BlockTreeLoaderTest, NonOwnerPrefixDoesNotPublishOwnerDeviceSuffix) {
             ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*env->cache, 0, Tier::HOST));
             Peer::waitForTaskPoolIdleForTest(*env->cache);
             std::lock_guard<std::mutex> lock(env->cache->mutex_);
-            eviction = env->cache->evictor_.chooseVictim(0, Tier::HOST);
-            ASSERT_TRUE(eviction);
+            auto prepared = env->cache->evictor_.chooseAndReserveVictims(0, Tier::HOST, 1);
+            ASSERT_EQ(prepared.descriptors.size(), 1u);
+            eviction = std::move(prepared.descriptors.front());
             ASSERT_EQ(eviction->node->cache_key, env->keys.front());
             eviction->target_blocks = {env->groups[0]->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT)};
             ASSERT_FALSE(isNullBlockIdx(eviction->target_blocks.front()));
-            reserveEvictionSourceForTest(env->cache->evictor_, *eviction);
         } else {
             pending = env->cache->match({env->keys.front()}).async_context;
             ASSERT_NE(pending, nullptr);

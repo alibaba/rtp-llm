@@ -2,9 +2,14 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
+#include <stdexcept>
+#include <type_traits>
+#include <unordered_set>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace {
@@ -444,6 +449,415 @@ TEST(EvictionHeapTest, EmptyOrderedTraversalVisitsNoEntries) {
         ++visits;
     }
     EXPECT_EQ(visits, 0u);
+}
+
+static_assert(!std::is_copy_constructible_v<EvictionHeap::RejectedPrefixScope>);
+static_assert(!std::is_move_constructible_v<EvictionHeap::RejectedPrefixScope>);
+static_assert(std::is_nothrow_destructible_v<EvictionHeap::RejectedPrefixScope>);
+
+TEST(EvictionHeapTest, RejectedPrefixVisitsMixedRejectionsOnceIncludingTerminalLookup) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+    std::vector<std::unique_ptr<TreeNode>> nodes;
+    for (uint64_t rank = 1; rank <= 5; ++rank) {
+        nodes.emplace_back(makeNode(rank));
+        heap.upsert(nodes.back().get(), makeMeta(rank, rank, rank));
+    }
+    const std::unordered_set<TreeNode*> held{nodes[0].get(), nodes[2].get(), nodes[4].get()};
+    std::unordered_set<TreeNode*> rejected;
+    size_t visits = 0;
+    {
+        EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+        const auto qualify = [&](TreeNode* node) {
+            ++visits;
+            if (held.count(node) != 0) {
+                rejected.insert(node);
+                return false;
+            }
+            return true;
+        };
+        auto selected = prefix.best(qualify);
+        ASSERT_TRUE(selected.has_value());
+        EXPECT_EQ(selected->node, nodes[1].get());
+        heap.erase(selected->node);
+        selected = prefix.best(qualify);
+        ASSERT_TRUE(selected.has_value());
+        EXPECT_EQ(selected->node, nodes[3].get());
+        heap.erase(selected->node);
+        EXPECT_FALSE(prefix.best(qualify).has_value());
+        EXPECT_EQ(visits, 5u);
+        EXPECT_FALSE(prefix.best(qualify).has_value());
+        EXPECT_EQ(visits, 5u);
+        EXPECT_EQ(heap.size(), 3u);
+        EXPECT_EQ(heap.best([](TreeNode*) { return true; })->node, nodes[0].get());
+    }
+    EXPECT_FALSE(heap.isSkippingRejectedPrefix());
+    rejected.clear();
+    EvictionHeap::RejectedPrefixScope next(heap, rejected);
+    EXPECT_EQ(next.best([](TreeNode*) { return true; })->node, nodes[0].get());
+}
+
+TEST(EvictionHeapTest, RejectedPrefixShrinksForPromotedAndReorderedCandidates) {
+    for (const auto policy : {EvictionPolicy::LRU, EvictionPolicy::LFU, EvictionPolicy::FIFO}) {
+        for (const bool update_only : {false, true}) {
+            SCOPED_TRACE(static_cast<int>(policy));
+            SCOPED_TRACE(update_only);
+            EvictionHeap heap(policy);
+            auto first = std::unique_ptr<TreeNode>(makeNode(10));
+            auto boundary = std::unique_ptr<TreeNode>(makeNode(20));
+            auto selected = std::unique_ptr<TreeNode>(makeNode(30));
+            auto later = std::unique_ptr<TreeNode>(makeNode(40));
+            auto promoted = std::unique_ptr<TreeNode>(makeNode(5));
+            for (auto* node : {first.get(), boundary.get(), selected.get(), later.get()}) {
+                const auto rank = static_cast<uint64_t>(node->cache_key);
+                heap.upsert(node, makeMeta(rank, rank, rank));
+            }
+            std::unordered_set<TreeNode*> rejected{first.get(), boundary.get()};
+            EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+            size_t visits = 0;
+            const auto qualify = [&](TreeNode* node) {
+                ++visits;
+                return rejected.count(node) == 0;
+            };
+            EXPECT_EQ(prefix.best(qualify)->node, selected.get());
+            heap.erase(selected.get());
+            heap.upsert(promoted.get(), makeMeta(5, 5, 5));
+            visits = 0;
+            EXPECT_EQ(prefix.best(qualify)->node, promoted.get());
+            EXPECT_EQ(visits, 1u);
+            heap.erase(promoted.get());
+            EXPECT_EQ(prefix.best(qualify)->node, later.get());
+            // The previous lookup rebuilt a fence at rank 20. A live candidate
+            // entering that prefix must outrank the remaining rank-40 suffix.
+            if (update_only) {
+                EXPECT_TRUE(heap.updateIfPresent(later.get(), makeMeta(15, 15, 15)));
+            } else {
+                heap.upsert(later.get(), makeMeta(15, 15, 15));
+            }
+            visits = 0;
+            EXPECT_EQ(prefix.best(qualify)->node, later.get());
+            // Rank 10 remains proved rejected; resume at the newly ranked node.
+            EXPECT_EQ(visits, 1u);
+        }
+    }
+}
+
+TEST(EvictionHeapTest, RejectedPrefixKeepsEarliestOfSequentialUpdates) {
+    for (const auto policy : {EvictionPolicy::LRU, EvictionPolicy::LFU, EvictionPolicy::FIFO}) {
+        for (const bool earlier_first : {false, true}) {
+            for (const bool update_only : {false, true}) {
+                SCOPED_TRACE(static_cast<int>(policy));
+                SCOPED_TRACE(earlier_first);
+                SCOPED_TRACE(update_only);
+                EvictionHeap heap(policy);
+                std::vector<std::unique_ptr<TreeNode>> nodes;
+                for (const uint64_t rank : {10u, 20u, 30u, 100u, 200u, 300u}) {
+                    nodes.emplace_back(makeNode(rank));
+                    heap.upsert(nodes.back().get(), makeMeta(rank, rank, rank));
+                }
+                std::unordered_set<TreeNode*> rejected{nodes[0].get(), nodes[1].get(), nodes[2].get()};
+                EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+                size_t visits = 0;
+                const auto qualify = [&](TreeNode* node) {
+                    ++visits;
+                    return rejected.count(node) == 0;
+                };
+                EXPECT_EQ(prefix.best(qualify)->node, nodes[3].get());
+                const auto change_rank = [&](size_t index, uint64_t rank) {
+                    if (update_only) {
+                        EXPECT_TRUE(heap.updateIfPresent(nodes[index].get(), makeMeta(rank, rank, rank)));
+                    } else {
+                        heap.upsert(nodes[index].get(), makeMeta(rank, rank, rank));
+                    }
+                };
+                if (earlier_first) {
+                    change_rank(4, 15);
+                    change_rank(3, 25);
+                } else {
+                    change_rank(3, 25);
+                    change_rank(4, 15);
+                }
+                change_rank(5, 27);
+                visits = 0;
+                EXPECT_EQ(prefix.best(qualify)->node, nodes[4].get());
+                EXPECT_EQ(visits, 1u);
+                heap.erase(nodes[4].get());
+                visits = 0;
+                EXPECT_EQ(prefix.best(qualify)->node, nodes[3].get());
+                EXPECT_EQ(visits, 2u);  // rank 20, then the rank-25 candidate.
+                heap.erase(nodes[3].get());
+                visits = 0;
+                EXPECT_EQ(prefix.best(qualify)->node, nodes[5].get());
+                EXPECT_EQ(visits, 1u);
+                heap.erase(nodes[5].get());
+                visits = 0;
+                EXPECT_FALSE(prefix.best(qualify).has_value());
+                EXPECT_EQ(visits, 1u);  // Only rank 30 remains beyond the proof.
+            }
+        }
+    }
+}
+
+TEST(EvictionHeapTest, RejectedPrefixRechecksHeldAdmissionsAndBoundaryChanges) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+    auto first = std::unique_ptr<TreeNode>(makeNode(10));
+    auto middle = std::unique_ptr<TreeNode>(makeNode(20));
+    auto boundary = std::unique_ptr<TreeNode>(makeNode(30));
+    auto selected = std::unique_ptr<TreeNode>(makeNode(50));
+    auto later = std::unique_ptr<TreeNode>(makeNode(60));
+    auto held_admission = std::unique_ptr<TreeNode>(makeNode(25));
+    auto earlier = std::unique_ptr<TreeNode>(makeNode(15));
+    auto next = std::unique_ptr<TreeNode>(makeNode(7));
+    auto head = std::unique_ptr<TreeNode>(makeNode(4));
+    for (auto* node : {first.get(), middle.get(), boundary.get(), selected.get(), later.get()}) {
+        const auto rank = static_cast<uint64_t>(node->cache_key);
+        heap.upsert(node, makeMeta(rank, rank, rank));
+    }
+    std::unordered_set<TreeNode*> held{first.get(), middle.get(), boundary.get(), held_admission.get()};
+    std::unordered_set<TreeNode*> rejected;
+    size_t visits = 0;
+    {
+        EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+        const auto qualify = [&](TreeNode* node) {
+            ++visits;
+            if (rejected.count(node) != 0) {
+                return false;
+            }
+            if (held.count(node) != 0) {
+                rejected.insert(node);
+                return false;
+            }
+            return true;
+        };
+        EXPECT_EQ(prefix.best(qualify)->node, selected.get());
+        heap.erase(selected.get());
+        heap.upsert(held_admission.get(), makeMeta(25, 25, 25));
+        heap.upsert(earlier.get(), makeMeta(15, 15, 15));
+        visits = 0;
+        EXPECT_EQ(prefix.best(qualify)->node, earlier.get());
+        EXPECT_EQ(visits, 1u);
+        heap.erase(earlier.get());
+        visits = 0;
+        EXPECT_EQ(prefix.best(qualify)->node, later.get());
+        EXPECT_EQ(visits, 4u);  // rank 20, newly held 25, rank 30, and rank 60.
+        EXPECT_EQ(rejected.count(held_admission.get()), 1u);
+        heap.erase(boundary.get());
+        held.erase(boundary.get());
+        boundary.reset();
+        heap.erase(later.get());
+        EXPECT_TRUE(heap.updateIfPresent(held_admission.get(), makeMeta(5, 5, 5)));
+        heap.upsert(next.get(), makeMeta(7, 7, 7));
+        visits = 0;
+        EXPECT_EQ(prefix.best(qualify)->node, next.get());
+        EXPECT_EQ(visits, 2u);  // The deleted boundary requires rebuilding once.
+        heap.erase(next.get());
+        // A request release does not revoke this batch's rejection identity.
+        held.erase(held_admission.get());
+        EXPECT_TRUE(heap.updateIfPresent(held_admission.get(), makeMeta(15, 15, 15)));
+        heap.upsert(head.get(), makeMeta(4, 4, 4));
+        visits = 0;
+        EXPECT_EQ(prefix.best(qualify)->node, head.get());
+        EXPECT_EQ(visits, 1u);
+        heap.erase(head.get());
+        visits = 0;
+        EXPECT_FALSE(prefix.best(qualify).has_value());
+        EXPECT_EQ(visits, 3u);
+    }
+    rejected.clear();
+    EvictionHeap::RejectedPrefixScope next_batch(heap, rejected);
+    const auto retry = [&](TreeNode* node) {
+        if (held.count(node) != 0) {
+            rejected.insert(node);
+            return false;
+        }
+        return true;
+    };
+    EXPECT_EQ(next_batch.best(retry)->node, held_admission.get());
+}
+
+TEST(EvictionHeapTest, RejectedPrefixShrinksUsingCacheKeyWithinPolicyTies) {
+    for (const auto policy : {EvictionPolicy::LRU, EvictionPolicy::LFU, EvictionPolicy::FIFO}) {
+        SCOPED_TRACE(static_cast<int>(policy));
+        EvictionHeap heap(policy);
+        std::vector<std::unique_ptr<TreeNode>> nodes;
+        for (const CacheKeyType key : {10, 20, 30, 40}) {
+            nodes.emplace_back(makeNode(key));
+            heap.upsert(nodes.back().get(), makeMeta(7, 7, 7));
+        }
+        std::unordered_set<TreeNode*> rejected{nodes[0].get(), nodes[1].get(), nodes[2].get()};
+        EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+        size_t visits = 0;
+        const auto qualify = [&](TreeNode* node) {
+            ++visits;
+            return rejected.count(node) == 0;
+        };
+        EXPECT_EQ(prefix.best(qualify)->node, nodes[3].get());
+        nodes[3]->cache_key = 25;
+        EXPECT_TRUE(heap.updateIfPresent(nodes[3].get(), makeMeta(7, 7, 7)));
+        visits = 0;
+        EXPECT_EQ(prefix.best(qualify)->node, nodes[3].get());
+        EXPECT_EQ(visits, 1u);
+    }
+}
+
+TEST(EvictionHeapTest, RejectedPrefixRebuildsAfterRemovedBoundaryAndRejectedReordering) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+    auto first = std::unique_ptr<TreeNode>(makeNode(1));
+    auto boundary = std::unique_ptr<TreeNode>(makeNode(2));
+    auto selected = std::unique_ptr<TreeNode>(makeNode(3));
+    auto later = std::unique_ptr<TreeNode>(makeNode(4));
+    for (auto* node : {first.get(), boundary.get(), selected.get(), later.get()}) {
+        const auto rank = static_cast<uint64_t>(node->cache_key);
+        heap.upsert(node, makeMeta(rank, rank, rank));
+    }
+    std::unordered_set<TreeNode*> rejected{first.get(), boundary.get()};
+    EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+    size_t visits = 0;
+    const auto qualify = [&](TreeNode* node) {
+        ++visits;
+        return rejected.count(node) == 0;
+    };
+    EXPECT_EQ(prefix.best(qualify)->node, selected.get());
+    heap.erase(boundary.get());
+    boundary.reset();
+    heap.erase(selected.get());
+    selected.reset();
+    // Deleting the boundary invalidates its pointer tie-breaker before destroy.
+    // The surviving rejected node is rechecked while rebuilding the certificate.
+    EXPECT_TRUE(heap.updateIfPresent(first.get(), makeMeta(0, 0, 0)));
+    visits = 0;
+    EXPECT_EQ(prefix.best(qualify)->node, later.get());
+    EXPECT_EQ(visits, 2u);
+}
+
+TEST(EvictionHeapTest, RejectedPrefixUsesFullComparatorForPointerTies) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+    std::vector<std::unique_ptr<TreeNode>> nodes;
+    for (size_t i = 0; i < 4; ++i) {
+        nodes.emplace_back(makeNode(7));
+        heap.upsert(nodes.back().get(), makeMeta(10, 10, 10));
+    }
+    std::vector<TreeNode*> order;
+    for (const auto& entry : heap) {
+        order.push_back(entry.node);
+    }
+    std::unordered_set<TreeNode*> rejected{order[0], order[1]};
+    EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+    size_t visits = 0;
+    const auto qualify = [&](TreeNode* node) {
+        ++visits;
+        return rejected.count(node) == 0;
+    };
+    EXPECT_EQ(prefix.best(qualify)->node, order[2]);
+    heap.erase(order[2]);
+    EXPECT_EQ(prefix.best(qualify)->node, order[3]);
+    EXPECT_EQ(visits, 4u);
+}
+
+TEST(EvictionHeapTest, RejectedPrefixKeepsBatchPointerIdentityOnAddressReuse) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+    std::optional<TreeNode> storage;
+    storage.emplace();
+    TreeNode* original = &*storage;
+    original->cache_key = 1;
+    auto other = std::unique_ptr<TreeNode>(makeNode(2));
+    heap.upsert(original, makeMeta(1, 1, 1));
+    heap.upsert(other.get(), makeMeta(2, 2, 2));
+    std::unordered_set<TreeNode*> rejected{original};
+    {
+        EvictionHeap::RejectedPrefixScope prefix(heap, rejected);
+        const auto qualify = [&](TreeNode* node) { return rejected.count(node) == 0; };
+        EXPECT_EQ(prefix.best(qualify)->node, other.get());
+        heap.erase(original);
+        storage.reset();
+        storage.emplace();
+        TreeNode* replacement = &*storage;
+        ASSERT_EQ(replacement, original);
+        replacement->cache_key = 3;
+        heap.upsert(replacement, makeMeta(0, 0, 0));
+        // Ordinary cached selection would reject the same reused address too.
+        EXPECT_EQ(heap.best(qualify)->node, other.get());
+        EXPECT_EQ(prefix.best(qualify)->node, other.get());
+        heap.erase(replacement);
+    }
+    EXPECT_FALSE(heap.isSkippingRejectedPrefix());
+}
+
+struct AssertionExceptionGuard {
+    bool old = StaticConfig::user_ft_core_dump_on_exception;
+    AssertionExceptionGuard() {
+        StaticConfig::user_ft_core_dump_on_exception = false;
+    }
+    ~AssertionExceptionGuard() {
+        StaticConfig::user_ft_core_dump_on_exception = old;
+    }
+};
+
+TEST(EvictionHeapTest, RejectedPrefixRejectsOverlapButAllowsIndependentHeaps) {
+    AssertionExceptionGuard guard;
+    EvictionHeap first(EvictionPolicy::LRU);
+    EvictionHeap second(EvictionPolicy::LRU);
+    auto node = std::unique_ptr<TreeNode>(makeNode(1));
+    first.upsert(node.get(), makeMeta(1, 1, 1));
+    second.upsert(node.get(), makeMeta(1, 1, 1));
+    std::unordered_set<TreeNode*> rejected{node.get()};
+    const auto independent_rejections = rejected;
+    {
+        EvictionHeap::RejectedPrefixScope outer(first, rejected);
+        EXPECT_ANY_THROW({ EvictionHeap::RejectedPrefixScope nested(first, rejected); });
+        EvictionHeap::RejectedPrefixScope independent(second, independent_rejections);
+        EXPECT_EQ(first.rejectedPrefixFor(rejected, true), &outer);
+        EXPECT_EQ(second.rejectedPrefixFor(independent_rejections, true), &independent);
+        EXPECT_ANY_THROW(second.rejectedPrefixFor(rejected, true));
+        const auto qualify = [&](TreeNode* candidate) { return rejected.count(candidate) == 0; };
+        const auto qualify_independently = [&](TreeNode* candidate) {
+            return independent_rejections.count(candidate) == 0;
+        };
+        EXPECT_FALSE(outer.best(qualify).has_value());
+        EXPECT_FALSE(independent.best(qualify_independently).has_value());
+        EXPECT_EQ(first.best([](TreeNode*) { return true; })->node, node.get());
+        EXPECT_EQ(second.best([](TreeNode*) { return true; })->node, node.get());
+    }
+    EXPECT_FALSE(first.isSkippingRejectedPrefix());
+    EXPECT_FALSE(second.isSkippingRejectedPrefix());
+}
+
+TEST(EvictionHeapTest, RejectedPrefixRejectsDifferentBatchWithIdenticalRejections) {
+    AssertionExceptionGuard guard;
+    EvictionHeap             heap(EvictionPolicy::LRU);
+    EvictionHeap             other_heap(EvictionPolicy::LRU);
+    auto                     oldest = std::unique_ptr<TreeNode>(makeNode(1));
+    auto                     next   = std::unique_ptr<TreeNode>(makeNode(2));
+    heap.upsert(oldest.get(), makeMeta(1, 1, 1));
+    heap.upsert(next.get(), makeMeta(2, 2, 2));
+    std::unordered_set<TreeNode*> rejected{oldest.get()};
+    const auto                    other_batch = rejected;
+
+    {
+        EvictionHeap::RejectedPrefixScope scope(heap, rejected);
+        auto*                             active = heap.rejectedPrefixFor(rejected, true);
+        ASSERT_EQ(active, &scope);
+        const auto qualify = [&](TreeNode* candidate) { return rejected.count(candidate) == 0; };
+        const auto first = active->best(qualify);
+        ASSERT_TRUE(first.has_value());
+        EXPECT_EQ(first->node, next.get());
+
+        EXPECT_ANY_THROW(heap.rejectedPrefixFor(other_batch, true));
+        EXPECT_ANY_THROW(heap.rejectedPrefixFor(other_batch, false));
+        EXPECT_ANY_THROW(other_heap.rejectedPrefixFor(rejected, true));
+
+        std::vector<TreeNode*> visited;
+        const auto resumed = active->best([&](TreeNode* candidate) {
+            visited.push_back(candidate);
+            return qualify(candidate);
+        });
+        ASSERT_TRUE(resumed.has_value());
+        EXPECT_EQ(resumed->node, next.get());
+        EXPECT_EQ(visited, std::vector<TreeNode*>{next.get()});
+    }
+    EXPECT_EQ(heap.rejectedPrefixFor(other_batch, false), nullptr);
+    const auto fresh = heap.best([](TreeNode*) { return true; });
+    ASSERT_TRUE(fresh.has_value());
+    EXPECT_EQ(fresh->node, oldest.get());
 }
 
 }  // namespace
