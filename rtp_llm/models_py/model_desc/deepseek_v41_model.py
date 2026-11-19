@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.dsv41.engram_distributed import (
     EngramRuntime,
 )
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
+from rtp_llm.ops import RoleType
 
 
 class _V41ImageEmbedding(torch.nn.Module):
@@ -62,6 +63,25 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._image_plan = None
         self._engram_forward_active = False
         self._engram_cpu_runtime = None
+
+    def initialize_prefill_cp_collectives(self, device: torch.device) -> None:
+        """Reserve the target's symmetric workspace before KV cache sizing."""
+        parallelism = self.parallelism_config
+        if (
+            parallelism.role_type != RoleType.PREFILL
+            or self._prefill_cp_size != 4
+            # Torch 2.11 sequences CUDA symmetric-memory rendezvous globally.
+            # Keep the histories identical before Engram or Mega MoE setup.
+            or parallelism.world_size != 4
+        ):
+            return
+        from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+            initialize_prefill_cp_collectives,
+        )
+
+        initialize_prefill_cp_collectives(
+            self, device, cp_rank=int(parallelism.tp_rank)
+        )
 
     @property
     def _engram_hash_state(self):

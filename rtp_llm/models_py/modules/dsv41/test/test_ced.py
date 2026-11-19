@@ -107,6 +107,7 @@ def _swa_owner(bounded):
         "_prefill_chunk_meta",
         "_forward_prefill",
         "_prefill_produce",
+        "_prefill_produce_source",
         "_prefill_query",
     }
     methods = [
@@ -811,6 +812,154 @@ class CedCreationTest(_SingleThreadTest):
         self.assertFalse(_CED._supported_model(model))
 
 
+class CedTransportDispatchTest(unittest.TestCase):
+    def test_one_rank_denial_keeps_the_entire_group_off_the_symmetric_backend(self):
+        import torch.distributed._symmetric_memory as symmetric_memory
+
+        ranks = tuple(str(rank) for rank in range(4))
+        reachable = set(ranks)
+        available = [("node", rank, reachable, True) for rank in ranks]
+        cases = (
+            (
+                "cp_rank_mismatch",
+                [[("node", "0", reachable, False), *available[1:]]],
+                0,
+                0,
+            ),
+            ("missing_op", [available[:3] + [("node", "3", reachable, False)]], 0, 0),
+            (
+                "old_copy_runtime",
+                [[("node", "0", reachable, False), *available[1:]]],
+                0,
+                0,
+            ),
+            (
+                "missing_peer",
+                [available[:3] + [("node", "3", reachable - {"2"}, True)]],
+                0,
+                0,
+            ),
+            ("allocation_denied", [available, [True, False, True, True]], 1, 0),
+            (
+                "no_multicast",
+                [available, [True] * 4, [True, False, True, True]],
+                1,
+                1,
+            ),
+        )
+        for reason, votes, expected_allocations, expected_rendezvous in cases:
+            cp_rank = 1 if reason == "cp_rank_mismatch" else 0
+            with self.subTest(reason=reason), ExitStack() as stack:
+                runtime = mock.Mock()
+                runtime.cudaDriverGetVersion.return_value = (0, 13020)
+                runtime.cudaRuntimeGetVersion.return_value = (
+                    0,
+                    12080 if reason == "old_copy_runtime" else 13020,
+                )
+                runtime.cudaMemcpyFlags.cudaMemcpyFlagPreferOverlapWithCompute = 1
+                stack.enter_context(
+                    mock.patch.dict(
+                        sys.modules,
+                        {"cuda.bindings": types.SimpleNamespace(runtime=runtime)},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        torch.cuda,
+                        "get_device_properties",
+                        side_effect=lambda device: types.SimpleNamespace(
+                            uuid=str(
+                                device.index
+                                if isinstance(device, torch.device)
+                                else device
+                            ),
+                            major=10,
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(torch.cuda, "device_count", return_value=4)
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        torch.cuda, "can_device_access_peer", return_value=True
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        torch.ops,
+                        "symm_mem",
+                        types.SimpleNamespace(
+                            multimem_all_gather_out=object(),
+                            one_shot_all_reduce_copy_out=object(),
+                        ),
+                    )
+                )
+                agreement = stack.enter_context(
+                    mock.patch.object(_CED._cp_collectives, "_all", side_effect=votes)
+                )
+                allocate = stack.enter_context(
+                    mock.patch.object(symmetric_memory, "empty", return_value=object())
+                )
+                rendezvous = stack.enter_context(
+                    mock.patch.object(
+                        symmetric_memory,
+                        "rendezvous",
+                        return_value=types.SimpleNamespace(multicast_ptr=1),
+                    )
+                )
+                workspace = _CED._cp_collectives._initialize(
+                    types.SimpleNamespace(group_name="tp", rank=lambda: 0),
+                    torch.device("cuda", 0),
+                    cp_rank=cp_rank,
+                )
+                self.assertIsNone(workspace)
+                self.assertEqual(agreement.call_count, len(votes))
+                self.assertEqual(
+                    agreement.call_args_list[0].args[1][1:],
+                    ("0", reachable, cp_rank == 0 and reason != "old_copy_runtime"),
+                )
+                self.assertEqual(allocate.call_count, expected_allocations)
+                self.assertEqual(rendezvous.call_count, expected_rendezvous)
+
+    def test_peer_transport_keeps_rank_order_and_transposes_restore(self):
+        matrix = ((0, 2, 0, 0), (0, 0, 0, 0), (0, 1, 0, 0), (0, 0, 0, 0))
+        group = object()
+        exchange = _CED._RowExchange(
+            original_rows=2,
+            compact_rows=3,
+            send_indices=torch.empty(0, dtype=torch.long),
+            receive_positions=torch.tensor([2, 0, 1]),
+            send_sizes=matrix[1],
+            receive_sizes=tuple(row[1] for row in matrix),
+            group=group,
+            splits_matrix=matrix,
+        )
+        directions = []
+
+        def transport(received, value, actual_group, actual_matrix, *, rows, transpose):
+            send = value.index_select(0, rows)
+            self.assertIs(actual_group, group)
+            self.assertIs(actual_matrix, matrix)
+            directions.append(transpose)
+            if transpose:
+                self.assertEqual(received.numel(), 0)
+                self.assertEqual(send.tolist(), [5, 6, 7])
+            else:
+                self.assertEqual(send.numel(), 0)
+                received.copy_(torch.tensor([5, 6, 7]))
+            return True
+
+        with mock.patch.object(
+            _CED._cp_collectives, "try_all_to_all_into", side_effect=transport
+        ), mock.patch.object(torch.distributed, "all_to_all_single") as fallback:
+            compact = exchange.compact(torch.tensor([0, 0]))
+            self.assertEqual(compact.tolist(), [6, 7, 5])
+            self.assertEqual(exchange.restore(compact).tolist(), [0, 0])
+        self.assertEqual(directions, [False, True])
+        fallback.assert_not_called()
+
+
 class CedBatchedBoundedReplayTest(_SingleThreadTest):
     # Only admission's CUDA/process-group checks are mocked. Layout and every
     # payload transformation execute the production CPU tensor implementation.
@@ -853,10 +1002,46 @@ class CedBatchedBoundedReplayTest(_SingleThreadTest):
             plans.append(plan)
         return plans, ranks, info
 
+    def test_b4_reuse95k_routes_last_128_rows_from_rank_zero(self):
+        plans, _, _ = self.plans((5120,) * 4, (97280,) * 4)
+        matrix = ((128, 128, 128, 128), (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0))
+        for rank, plan in enumerate(plans):
+            exchange = plan.exchange
+            self.assertEqual(exchange.splits_matrix, matrix)
+            self.assertEqual(exchange.send_sizes, matrix[rank])
+            self.assertEqual(exchange.receive_sizes, (128, 0, 0, 0))
+
     def test_b1_b2_b32_create_actual_per_request_tail_and_keep_write_geometry(self):
         for lengths, prefixes in self.cases():
             with self.subTest(lengths=lengths, prefixes=prefixes):
-                plans, _, _ = self.plans(lengths, prefixes)
+                plans, source_rows, info = self.plans(lengths, prefixes)
+                global_rows = torch.full_like(info.prefill_qkv_padding_mask, -1)
+                global_rows[info.prefill_qkv_padding_mask.bool()] = torch.arange(
+                    sum(lengths), dtype=global_rows.dtype
+                )
+                original_owner = {
+                    position: rank
+                    for rank, rows in enumerate(source_rows)
+                    for position in global_rows[rows].tolist()
+                    if position >= 0
+                }
+                compact_rows = [
+                    _batch_compact_oracle(
+                        torch.arange(1, sum(lengths) + 1), lengths, rank
+                    )
+                    for rank in range(4)
+                ]
+                matrix = [[0] * 4 for _ in range(4)]
+                for destination, rows in enumerate(compact_rows):
+                    for position in rows.tolist():
+                        if position:
+                            matrix[original_owner[position - 1]][destination] += 1
+                matrix = tuple(tuple(row) for row in matrix)
+                for rank, plan in enumerate(plans):
+                    self.assertEqual(plan.exchange.splits_matrix, matrix)
+                    self.assertEqual(
+                        plan.exchange.receive_sizes, tuple(row[rank] for row in matrix)
+                    )
                 starts = tuple(max(0, n - 128) for n in lengths)
                 selected, absolute, request_ids, offset = [], [], [], 0
                 for req, (length, prefix) in enumerate(zip(lengths, prefixes)):
@@ -1541,6 +1726,16 @@ class CedHostLayoutTest(_SingleThreadTest):
                         self.assertIsNotNone(actual)
                         self.assert_layout_equal(reference, actual)
                         context, exchange, groups = actual
+                        self.assertEqual(
+                            exchange.splits_matrix, reference[1].splits_matrix
+                        )
+                        self.assertEqual(
+                            exchange.send_sizes, exchange.splits_matrix[rank]
+                        )
+                        self.assertEqual(
+                            exchange.receive_sizes,
+                            tuple(row[rank] for row in exchange.splits_matrix),
+                        )
                         owner = exchange._layout_host_buffer.data_ptr()
                         for value in (
                             exchange.send_indices,

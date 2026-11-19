@@ -1094,8 +1094,9 @@ def forward_prefill(
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
 
-    # Decode and target verify have already been dispatched separately. Scope
-    # mHC stream setup to this prefill so variable batches share it across layers.
+    # Share mHC stream setup across the prefill layers and use the target's
+    # registered CP workspace only on the eager stream.
+    from rtp_llm.models_py.modules.dsv41._cp_collectives import prefill_cp_collectives
     from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prefill_mhc_stream
 
     with (
@@ -1107,7 +1108,7 @@ def forward_prefill(
         )
         if input_ids.is_cuda
         else nullcontext()
-    ):
+    ) as eager, prefill_cp_collectives(v4, input_ids.device, eager):
         hidden = forward_layers(
             v4,
             kv_cache,

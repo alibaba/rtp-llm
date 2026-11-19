@@ -4,9 +4,15 @@ import bisect
 import random
 import types
 import unittest
+from contextlib import ExitStack, contextmanager
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.distributed import collective_torch
+from rtp_llm.models_py.modules.dsv41 import _cp_collectives
+from rtp_llm.models_py.modules.dsv41 import cp as cp_runtime
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_cp_async
 from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as STREAM
 
 
@@ -47,6 +53,193 @@ def _case(lengths):
 
 
 class CPSourceCohortPlanCPU(unittest.TestCase):
+    def test_single_group_lease_survives_early_and_consumer_exceptions(self):
+        x = torch.arange(4, dtype=torch.bfloat16).view(2, 2)
+        weight = torch.ones((4, 2), dtype=x.dtype)
+        cp = types.SimpleNamespace(
+            cp_size=4, cp_rank=2, chunk_length=2, unpad_restore=torch.arange(8)
+        )
+        window = torch.empty(32, dtype=x.dtype)
+        events = []
+
+        @contextmanager
+        def borrow(reference, group, *, numel, dtype):
+            self.assertIs(reference, x)
+            self.assertIs(group, collective_torch.Group.TP)
+            self.assertEqual(numel, window.numel())
+            self.assertEqual(dtype, window.dtype)
+            events.append("borrow")
+            try:
+                yield window
+            finally:
+                events.append("release")
+
+        def gather(region, send, group):
+            self.assertIs(group, collective_torch.Group.TP)
+            self.assertEqual(region.data_ptr(), window.data_ptr())
+            self.assertEqual(send.data_ptr(), window.view(8, 4)[4:6].data_ptr())
+            torch.testing.assert_close(send, x @ weight.T)
+            events.append("direct")
+
+        def launch(device, fn, inputs=()):
+            fn()
+            pending = _v41_cp_async.Pending(None, None)
+            pending.wait = lambda: events.append("join")
+            return pending
+
+        for fail_before_consume in (True, False):
+            events.clear()
+            with (
+                self.subTest(fail_before_consume=fail_before_consume),
+                patch.object(STREAM, "prefill_stream_is_capturing", return_value=False),
+                patch.object(_v41_cp_async, "launch", side_effect=launch),
+                patch.object(
+                    _cp_collectives, "projected_gather_buffer", side_effect=borrow
+                ),
+                patch.object(_cp_collectives, "gather_inplace", side_effect=gather),
+                patch.object(STREAM, "_gather_prefill_x_cohort") as fallback,
+                self.assertRaisesRegex(RuntimeError, "injected"),
+                ExitStack() as resources,
+            ):
+                tiles = STREAM._prefill_projected_x_cohorts(
+                    x,
+                    cp,
+                    [(0, 2, 0, 8)],
+                    [weight],
+                    direct_map=True,
+                    resources=resources,
+                )
+                resources.callback(tiles.close)
+                if not fail_before_consume:
+                    start, tile, rows, _ = next(tiles)
+                    self.assertEqual((start, rows), (0, 8))
+                    self.assertEqual(tile.data_ptr(), window.data_ptr())
+                    events.append("consume")
+                raise RuntimeError("injected")
+            fallback.assert_not_called()
+            expected = ["borrow", "direct"]
+            if not fail_before_consume:
+                expected += ["join", "consume"]
+            self.assertEqual(events, expected + ["join", "release"])
+
+    def test_multiple_communication_groups_never_borrow_the_window(self):
+        x = torch.arange(8, dtype=torch.bfloat16).view(4, 2)
+        weight = torch.ones((4, 2), dtype=x.dtype)
+        cp = types.SimpleNamespace(
+            cp_size=4, cp_rank=0, chunk_length=4, unpad_restore=torch.arange(16)
+        )
+        cohorts = [(0, 2, 0, 8), (2, 4, 8, 16)]
+
+        def gather(send, _, gathered):
+            for shard in gathered.chunk(4)[1:]:
+                shard.copy_(send)
+
+        with (
+            patch.object(STREAM, "_CP_SOURCE_RECEIVE_BYTES", 64),
+            patch.object(STREAM, "prefill_stream_is_capturing", return_value=False),
+            patch.object(_cp_collectives, "projected_gather_buffer") as borrow,
+            patch.object(
+                STREAM, "_gather_prefill_x_cohort", side_effect=gather
+            ) as fallback,
+            ExitStack() as resources,
+        ):
+            tiles = STREAM._prefill_projected_x_cohorts(
+                x, cp, cohorts, [weight], direct_map=True, resources=resources
+            )
+            results = list(tiles)
+        borrow.assert_not_called()
+        self.assertEqual(fallback.call_count, 2)
+        self.assertEqual(
+            [(start, rows) for start, _, rows, _ in results], [(0, 8), (8, 8)]
+        )
+        for i, (_, tile, _, _) in enumerate(results):
+            expected = (x[i * 2 : (i + 1) * 2] @ weight.T).repeat(4, 1)
+            torch.testing.assert_close(tile, expected)
+
+    def test_prefill_gather_handoff_on_collective_and_nccl_paths(self):
+        events = []
+        producer = types.SimpleNamespace(wait_stream=lambda _: events.append("join"))
+        comm = types.SimpleNamespace(
+            wait_stream=lambda _: events.append("producer_ready")
+        )
+        out, group = object(), object()
+        source = types.SimpleNamespace(device="cuda:0")
+
+        @contextmanager
+        def use_stream(stream):
+            self.assertIs(stream, comm)
+            events.append("enter_comm")
+            yield
+            events.append("leave_comm")
+
+        def launch_fast(dst, send, operation_group):
+            self.assertIs(dst, out)
+            self.assertIs(send, source)
+            self.assertIs(operation_group, group)
+            events.append("attempt")
+            return fast_path
+
+        def launch_nccl(dst, send, *, group):
+            self.assertIs(dst, out)
+            self.assertIs(send, source)
+            events.append("nccl")
+
+        for fast_path in (True, False):
+            with self.subTest(fast_path=fast_path):
+                events.clear()
+                with (
+                    patch.object(collective_torch, "_get_group", return_value=group),
+                    patch.object(torch.cuda, "current_stream", return_value=producer),
+                    patch.object(torch.cuda, "stream", side_effect=use_stream),
+                    patch.object(STREAM, "_get_cp_comm_stream", return_value=comm),
+                    patch.object(
+                        STREAM, "try_all_gather_into", side_effect=launch_fast
+                    ),
+                    patch.object(
+                        torch.distributed,
+                        "all_gather_into_tensor",
+                        side_effect=launch_nccl,
+                    ),
+                ):
+                    STREAM._gather_prefill_x_cohort(source, None, out)
+                expected = ["producer_ready", "enter_comm", "attempt"]
+                if not fast_path:
+                    expected.append("nccl")
+                self.assertEqual(events, expected + ["leave_comm", "join"])
+
+    def test_last_hidden_keeps_unique_rank_ownership_with_or_without_provider(self):
+        context = types.SimpleNamespace(
+            cp_size=4,
+            input_lengths_global=torch.tensor([1, 2]),
+            prefix_lengths=torch.tensor([10, 20]),
+            req_id_per_token=torch.tensor([0, 1, 1]),
+            global_positions=torch.tensor([10, 20, 21]),
+            local_is_real=torch.tensor([True, True, False]),
+        )
+        local = torch.tensor([[5.0], [11.0], [19.0]])
+        gathered = torch.tensor(
+            [[5.0], [0.0], [0.0], [23.0], [0.0], [0.0], [0.0], [0.0]]
+        )
+
+        for use_provider in (True, False):
+            with self.subTest(use_provider=use_provider):
+                with (
+                    patch.object(
+                        cp_runtime,
+                        "try_all_gather",
+                        return_value=gathered if use_provider else None,
+                    ) as provider,
+                    patch.object(
+                        cp_runtime, "all_gather", return_value=gathered
+                    ) as fallback,
+                ):
+                    actual = cp_runtime.cp_gather_last_by_request(local, context)
+                torch.testing.assert_close(
+                    provider.call_args.args[0], torch.tensor([[5.0], [0.0]])
+                )
+                torch.testing.assert_close(actual, torch.tensor([[5.0], [23.0]]))
+                self.assertEqual(fallback.call_count, int(not use_provider))
+
     def test_other_cp_sizes_keep_global_order(self):
         lengths = (1, 129, 65537, 131071, 10000000)
         for cp_size in (2, 8):
