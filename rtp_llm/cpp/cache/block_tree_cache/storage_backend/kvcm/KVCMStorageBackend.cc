@@ -10,7 +10,6 @@
 #include <tuple>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <limits>
 #include <list>
 #include <iterator>
@@ -21,7 +20,6 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <unistd.h>
@@ -51,7 +49,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr std::array<const char*, 5> kQuarantineReasons{
+constexpr std::array<const char*, 5> kCompletionUnknownReasons{
     "sdk_timeout", "rpc_timeout", "rpc_error", "invalid_response", "sdk_error"};
 
 int64_t elapsedTimeUs(Clock::time_point start) {
@@ -165,7 +163,7 @@ public:
                 try {
                     std::rethrow_exception(failure);
                 } catch (const StorageOperationCompletionUnknown& error) {
-                    diagnostics->failure_reason = kQuarantineReasons.at(static_cast<size_t>(error.reason()));
+                    diagnostics->failure_reason = kCompletionUnknownReasons.at(static_cast<size_t>(error.reason()));
                     if (rpc_result) {
                         for (const auto& snapshot : rpc_result->rankSnapshots()) {
                             if (snapshot.rank >= diagnostics->ranks.size())
@@ -339,12 +337,6 @@ public:
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
-        const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
-        if (!quarantine_abort_ratio.has_value()) {
-            RTP_LLM_LOG_ERROR("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO must be a finite number in [0, 1]");
-            return false;
-        }
-        quarantine_abort_ratio_ = *quarantine_abort_ratio;
         if (parallelism_config_.tp_rank == 0 && parallelism_config_.tp_size > 1 && !broadcast_manager_) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM rank 0 requires a broadcast manager for tp_size=%ld",
                               parallelism_config_.tp_size);
@@ -533,11 +525,6 @@ public:
                          tp_rank,
                          parallelism_config_.tp_size,
                          group_policy_->debugString().c_str());
-        RTP_LLM_LOG_INFO("BlockTree KVCM quarantine guard, tp_rank=%ld abort_ratio=%.6f total_device_blocks=%zu",
-                         tp_rank,
-                         quarantine_abort_ratio_,
-                         total_device_block_count_);
-        reportQuarantineMetrics(/*generation=*/0, /*lease_count=*/0, /*block_count=*/0, {});
         return true;
     }
 
@@ -1398,60 +1385,6 @@ public:
         }
     }
 
-    void reportQuarantineEvent(bool is_write, StorageQuarantineReason reason, size_t block_count) const noexcept {
-        RtpLLMRemoteCacheQuarantineEventMetricsCollector collector;
-        collector.op          = is_write ? "write" : "read";
-        collector.block_count = static_cast<int64_t>(block_count);
-        switch (reason) {
-            case StorageQuarantineReason::SDK_TIMEOUT:
-                collector.reason = "sdk_timeout";
-                break;
-            case StorageQuarantineReason::RPC_TIMEOUT:
-                collector.reason = "rpc_timeout";
-                break;
-            case StorageQuarantineReason::RPC_ERROR:
-                collector.reason = "rpc_error";
-                break;
-            case StorageQuarantineReason::INVALID_RESPONSE:
-                collector.reason = "invalid_response";
-                break;
-            case StorageQuarantineReason::SDK_ERROR:
-                collector.reason = "sdk_error";
-                break;
-        }
-        reportRemoteMetrics<RtpLLMRemoteCacheQuarantineMetrics>(collector);
-    }
-
-    void reportQuarantineState(uint64_t                          generation,
-                               size_t                            task_count,
-                               size_t                            block_count,
-                               const StorageQuarantineBreakdown& breakdown) noexcept {
-        reportQuarantineMetrics(generation, task_count, block_count, breakdown);
-        if (task_count > 0 && parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0
-            && total_device_block_count_ > 0) {
-            // Block counters retain per-task pins; capacity and the aggregate
-            // quarantine ratio count physical FROZEN blocks, as BTC does.
-            size_t                                     frozen_block_count = 0;
-            std::unordered_set<const DeviceBlockPool*> counted_pools;
-            for (const auto& [tag, pool] : pools_by_tag_) {
-                if (counted_pools.insert(pool.get()).second) {
-                    frozen_block_count += pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
-                }
-            }
-            const long double threshold = static_cast<long double>(total_device_block_count_) * quarantine_abort_ratio_;
-            if (static_cast<long double>(frozen_block_count) > threshold) {
-                RTP_LLM_LOG_ERROR("KVCM quarantined block capacity exceeded on rank 0; aborting process: "
-                                  "frozen_blocks=%zu total_device_blocks=%zu abort_ratio=%.6f "
-                                  "threshold_blocks=%.3Lf",
-                                  frozen_block_count,
-                                  total_device_block_count_,
-                                  quarantine_abort_ratio_,
-                                  threshold);
-                std::abort();
-            }
-        }
-    }
-
 private:
     int resolveQueryType(int query_type) const {
         return query_type == 0 ? default_query_type_ : query_type;
@@ -1718,12 +1651,9 @@ private:
         });
         registration_tags_.clear();
         pools_by_tag_.clear();
-        total_device_block_count_ = 0;
         std::vector<kvcm::ClientWrapper::PoolRegistration>  registrations;
         std::vector<std::string>                            registration_tags;
         std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag;
-        std::unordered_set<const DeviceBlockPool*>          unique_pools;
-        size_t                                              total_device_block_count = 0;
         registrations.reserve(ordered_groups.size());
         registration_tags.reserve(ordered_groups.size());
         pools_by_tag.reserve(ordered_groups.size());
@@ -1733,14 +1663,6 @@ private:
             if (!pool->getBaseAddress() || pool->getTotalSizeBytes() == 0) {
                 RTP_LLM_LOG_ERROR("KVCM group %d has no valid registration span", group_id);
                 return {};
-            }
-            if (unique_pools.emplace(pool.get()).second) {
-                const size_t block_count = pool->totalBlocksNum();
-                if (block_count > std::numeric_limits<size_t>::max() - total_device_block_count) {
-                    RTP_LLM_LOG_ERROR("KVCM total device block capacity overflow");
-                    return {};
-                }
-                total_device_block_count += block_count;
             }
             bool use_gdr = false;
 #if USING_CUDA
@@ -1793,9 +1715,8 @@ private:
             registration_tags.push_back(tag);
             registrations.push_back(std::move(registration));
         }
-        pools_by_tag_             = std::move(pools_by_tag);
-        registration_tags_        = std::move(registration_tags);
-        total_device_block_count_ = total_device_block_count;
+        pools_by_tag_      = std::move(pools_by_tag);
+        registration_tags_ = std::move(registration_tags);
         return registrations;
     }
 
@@ -1980,83 +1901,6 @@ private:
             // Telemetry must not change the transfer outcome or mask an I/O
             // exception while a scope guard is unwinding.
             RTP_LLM_LOG_ERROR("failed to report KVCM remote cache metrics");
-        }
-    }
-
-    void reportQuarantineMetrics(uint64_t                          generation,
-                                 size_t                            lease_count,
-                                 size_t                            block_count,
-                                 const StorageQuarantineBreakdown& breakdown) const noexcept {
-        if (!metrics_reporter_) {
-            return;
-        }
-        // Reporting may call into external metric backends. Serialize it
-        // independently from quarantine state updates, and discard snapshots
-        // superseded by a later state transition.
-        std::lock_guard<std::mutex> lock(quarantine_metrics_mutex_);
-        if (quarantine_metrics_reported_ && generation <= last_quarantine_metrics_generation_) {
-            return;
-        }
-        try {
-            size_t frozen_block_count = 0;
-            // Startup/shutdown still publish an empty quarantine snapshot.
-            if (lease_count > 0 && parallelism_config_.tp_rank == 0 && total_device_block_count_ > 0) {
-                std::unordered_set<const DeviceBlockPool*> counted_pools;
-                for (const auto& [tag, pool] : pools_by_tag_) {
-                    if (counted_pools.insert(pool.get()).second) {
-                        frozen_block_count += pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
-                    }
-                }
-            }
-            const auto report = [this, frozen_block_count](const StorageQuarantineCounts& counts,
-                                                           const kmonitor::MetricsTags*   tags,
-                                                           bool                           physical_ratio = false) {
-                RtpLLMRemoteCacheQuarantineMetricsCollector collector;
-                collector.quarantined_lease_count = static_cast<int64_t>(counts.task_count);
-                collector.quarantined_block_count = static_cast<int64_t>(counts.block_count);
-                if (parallelism_config_.tp_rank == 0 && total_device_block_count_ > 0) {
-                    const size_t ratio_block_count = physical_ratio ? frozen_block_count : counts.block_count;
-                    collector.quarantined_block_ratio =
-                        static_cast<double>(ratio_block_count) / static_cast<double>(total_device_block_count_);
-                }
-                metrics_reporter_
-                    ->report<RtpLLMRemoteCacheQuarantineMetrics, RtpLLMRemoteCacheQuarantineMetricsCollector>(
-                        tags, &collector);
-            };
-            const auto report_bucket = [&report](const char*                    op,
-                                                 const char*                    reason,
-                                                 const StorageQuarantineCounts& counts,
-                                                 bool                           physical_ratio = false) {
-                kmonitor::MetricsTags tags("op", op);
-                tags.AddTag("reason", reason);
-                report(counts, &tags, physical_ratio);
-            };
-            // Totals use physical blocks; op/reason breakdowns retain task-pin attribution.
-            report({lease_count, block_count}, nullptr, /*physical_ratio=*/true);
-            report_bucket("total", "total", {lease_count, block_count}, /*physical_ratio=*/true);
-            std::array<StorageQuarantineCounts, 5> reason_totals{};
-            for (size_t op = 0; op < breakdown.size(); ++op) {
-                const char*             operation = op == 0 ? "read" : "write";
-                StorageQuarantineCounts operation_total;
-                for (size_t reason = 0; reason < breakdown[op].size(); ++reason) {
-                    const auto& counts = breakdown[op][reason];
-                    operation_total.task_count += counts.task_count;
-                    operation_total.block_count += counts.block_count;
-                    reason_totals[reason].task_count += counts.task_count;
-                    reason_totals[reason].block_count += counts.block_count;
-                    report_bucket(operation, kQuarantineReasons[reason], counts);
-                }
-                report_bucket(operation, "total", operation_total);
-            }
-            for (size_t reason = 0; reason < reason_totals.size(); ++reason) {
-                report_bucket("total", kQuarantineReasons[reason], reason_totals[reason]);
-            }
-            quarantine_metrics_reported_        = true;
-            last_quarantine_metrics_generation_ = generation;
-        } catch (...) {
-            // Keep the same generation eligible for a later retry.
-            quarantine_metrics_reported_ = false;
-            RTP_LLM_LOG_ERROR("failed to report KVCM quarantine metrics");
         }
     }
 
@@ -2394,11 +2238,6 @@ private:
     const bool                                          gdr_enabled_;
     std::vector<std::string>                            registration_tags_;
     std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
-    size_t                                              total_device_block_count_{0};
-    double                                              quarantine_abort_ratio_{0.0};
-    mutable std::mutex                                  quarantine_metrics_mutex_;
-    mutable bool                                        quarantine_metrics_reported_{false};
-    mutable uint64_t                                    last_quarantine_metrics_generation_{0};
     // Preserve KVCM's operation-local, one-based request
     // order. Abort and finish share a sequence because both call FinishWrite.
     std::atomic<uint64_t> match_trace_sequence_{1};
@@ -2513,17 +2352,6 @@ void KVCMStorageBackend::shutdownImpl() noexcept {
 
 void KVCMStorageBackend::onRemoteCacheSkipped(const char* stage) noexcept {
     impl_->reportRemoteCacheSkipped(stage);
-}
-
-void KVCMStorageBackend::onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept {
-    impl_->reportQuarantineEvent(is_write, reason, block_count);
-}
-
-void KVCMStorageBackend::onQuarantineChanged(uint64_t                          generation,
-                                             size_t                            task_count,
-                                             size_t                            block_count,
-                                             const StorageQuarantineBreakdown& breakdown) noexcept {
-    impl_->reportQuarantineState(generation, task_count, block_count, breakdown);
 }
 
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {

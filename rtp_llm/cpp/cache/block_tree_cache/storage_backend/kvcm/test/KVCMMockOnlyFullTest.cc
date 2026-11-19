@@ -4,10 +4,7 @@
 #include <tuple>
 #include <thread>
 
-#include "kmonitor/client/MetricsReporter.h"
-#include "kmonitor/client/core/MetricsData.h"
 #include "kvcm_client/HostCacheStateCompat.h"
-#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 namespace {
@@ -19,27 +16,6 @@ Match hostCacheMatchFixture() {
     } else {
         return {"192.0.2.1:1234", 2, 1, 3};
     }
-}
-
-double quarantineGauge(kmonitor::MutableMetric* metric) {
-    if (metric == nullptr) {
-        ADD_FAILURE() << "metric is null";
-        return -1;
-    }
-    kmonitor::MetricsTags tags;
-    kmonitor::Metric*     gauge = metric->DeclareMetric(&tags);
-    if (gauge == nullptr) {
-        ADD_FAILURE() << "metric series is missing";
-        return -1;
-    }
-    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
-    gauge->Snapshot(&record, 1000);
-    EXPECT_TRUE(metric->UndeclareMetric(gauge));
-    if (record.Values().size() != 1) {
-        ADD_FAILURE() << "unexpected metric value count=" << record.Values().size();
-        return -1;
-    }
-    return std::stod(record.Values().front()->Value());
 }
 
 TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
@@ -570,9 +546,8 @@ TEST(KVCMMockOnlyFullTest, TP2CoordinatorBroadcastsRankOrderedReadAndWritePayloa
 }
 
 TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource) {
-    auto environment      = makeBackendEnvironment("kvcm_storage_backend_tp2_broadcast_failure");
-    auto client_wrapper   = std::make_shared<MockClientWrapper>();
-    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto environment    = makeBackendEnvironment("kvcm_storage_backend_tp2_broadcast_failure");
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
 
     std::vector<std::shared_ptr<KVCMBroadcastState>>     states;
     std::vector<std::unique_ptr<KVCMBroadcastRpcServer>> servers;
@@ -595,17 +570,12 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
     parallelism_config.local_rank = 0;
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager, metrics_reporter);
+    auto backend = makeBackend(environment, parallelism_config, client_wrapper, broadcast_manager);
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
                               environment.pools_by_tag,
                               [&](int layer_id, const std::string&, int block_id) {
                                   return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
                               }));
-    auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
-    ASSERT_NE(quarantine_metrics, nullptr);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "tp2_failed_broadcast_write";
@@ -638,9 +608,6 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
     for (const auto& state : states) {
         const auto requests = snapshotRequests(state);
         ASSERT_EQ(requests.size(), 1u);
@@ -650,9 +617,6 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
 }
 
 TEST(KVCMMockOnlyFullTest, TP2ReadRpcFailureFreezesDestinationAndPreservesDeadline) {

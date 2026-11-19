@@ -3,20 +3,16 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <csignal>
 #include <condition_variable>
 #include <cstdint>
 #include <unistd.h>
 
-#include "kmonitor/client/MetricsReporter.h"
-#include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
-#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -289,27 +285,6 @@ TEST(KVCMLocalTest, Dsv41PublisherUsesEffectiveBackendFullSpecMerge) {
     }
 }
 
-double snapshotGauge(kmonitor::MutableMetric* metric) {
-    if (metric == nullptr) {
-        ADD_FAILURE() << "metric is null";
-        return -1;
-    }
-    kmonitor::MetricsTags tags;
-    kmonitor::Metric*     gauge = metric->DeclareMetric(&tags);
-    if (gauge == nullptr) {
-        ADD_FAILURE() << "metric series is missing";
-        return -1;
-    }
-    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
-    gauge->Snapshot(&record, 1000);
-    EXPECT_TRUE(metric->UndeclareMetric(gauge));
-    if (record.Values().size() != 1) {
-        ADD_FAILURE() << "unexpected metric value count=" << record.Values().size();
-        return -1;
-    }
-    return std::stod(record.Values().front()->Value());
-}
-
 kvcm::KVCMConfigPtr makeLocalConfig() {
     auto location_infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
     auto location_groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
@@ -425,16 +400,6 @@ TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     EXPECT_ANY_THROW(backend->init(nullptr, {}, resolver));
     EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {}, resolver));
     EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {{"default", nullptr}}, resolver));
-}
-
-TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {
-    autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "invalid");
-    auto            environment    = makeBackendEnvironment("kvcm_storage_backend_invalid_quarantine_ratio");
-    auto            client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
-    EXPECT_FALSE(initSingleRank(*backend.backend, environment));
 }
 
 TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
@@ -958,27 +923,14 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
 }
 
 TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
-    autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.125");
-    auto            environment      = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
-    auto            client_wrapper   = std::make_shared<MockClientWrapper>();
-    auto            metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto environment    = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    auto backend = makeBackend(environment,
-                               singleRankConfig(),
-                               client_wrapper,
-                               nullptr,
-                               metrics_reporter,
-                               /*gdr_enabled=*/false);
+    auto backend =
+        makeBackend(environment, singleRankConfig(), client_wrapper, nullptr, nullptr, /*gdr_enabled=*/false);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
-    ASSERT_NE(quarantine_metrics, nullptr);
-    for (int period = 0; period < 3; ++period) {
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
-    }
 
     kv_cache_manager::Locations locations{
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
@@ -1021,62 +973,12 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
 
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
-    // Healthy I/O must leave the reported quarantine stocks unchanged.
-    for (int period = 0; period < 3; ++period) {
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
-    }
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
 
     backend.backend->shutdown();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    for (int period = 0; period < 3; ++period) {
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-        EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
-    }
-}
-
-TEST(KVCMLocalTest, RankZeroAbortsWhenQuarantinedBlocksExceedConfiguredRatio) {
-    // CUDA needs a fresh process rather than the default fork-only death-test child.
-    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-    ASSERT_EXIT(
-        ([]() {
-            (void)dup2(STDERR_FILENO, STDOUT_FILENO);
-            if (!initLogger()) {
-                _exit(5);
-            }
-            autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.1");
-            auto            environment    = makeBackendEnvironment("kvcm_storage_backend_quarantine_abort");
-            auto            client_wrapper = std::make_shared<MockClientWrapper>();
-
-            EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-            auto backend = makeBackend(environment,
-                                       singleRankConfig(),
-                                       client_wrapper,
-                                       nullptr,
-                                       nullptr,
-                                       /*gdr_enabled=*/false);
-            if (!initSingleRank(*backend.backend, environment)) {
-                _exit(2);
-            }
-
-            kv_cache_manager::Locations locations{
-                kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
-            EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
-            auto observation = match(*backend.backend, makeStorageRequest(environment));
-            if (!observation.success || observation.match_meta == nullptr) {
-                _exit(3);
-            }
-
-            client_wrapper->load_status = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
-            (void)readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
-            _exit(4);
-        }()),
-        ::testing::KilledBySignal(SIGABRT),
-        "KVCM quarantined block capacity exceeded on rank 0");
 }
 
 }  // namespace

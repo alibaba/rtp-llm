@@ -5,7 +5,6 @@
 
 #include <condition_variable>
 #include <chrono>
-#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -49,16 +48,9 @@ enum class StorageQuarantineReason {
     SDK_ERROR,
 };
 
-struct StorageQuarantineCounts {
-    size_t task_count{0};
-    size_t block_count{0};
-};
-using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 5>, 2>;
-
 // Describes who protects local targets after UNKNOWN, not whether I/O is safe.
-// Protected completion ownership always takes precedence over this marker.
 enum class StorageLocalTargetProtection {
-    LEGACY,            // StorageBackend retains its existing freeze behavior.
+    LEGACY,            // StorageBackend hands its pins off to the block pool's FROZEN references.
     TARGETS_HELD,      // The backend already owns protection for every local target.
     NO_LOCAL_TARGETS,  // The operation only reads local sources.
 };
@@ -87,9 +79,7 @@ private:
     StorageLocalTargetProtection local_target_protection_;
 };
 
-// The transport reported an explicit timeout. Buffer ownership is still
-// unknown, so this remains a completion-unknown failure for quarantine while
-// allowing callers to preserve the timeout error code.
+// An explicit timeout with unknown buffer safety preserves the timeout error code.
 class StorageOperationTimeout: public StorageOperationCompletionUnknown {
 public:
     using StorageOperationCompletionUnknown::StorageOperationCompletionUnknown;
@@ -239,8 +229,6 @@ protected:
     }
     virtual void shutdownImpl() noexcept {}
     virtual void onRemoteCacheSkipped(const char*) noexcept {}
-    virtual void onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
-    virtual void onQuarantineChanged(uint64_t, size_t, size_t, const StorageQuarantineBreakdown&) noexcept {}
 
 private:
     enum class Lifecycle {
@@ -269,10 +257,6 @@ private:
                                       bool                                                     run_inline = false,
                                       std::optional<StorageBackendExecutor::Clock::time_point> io_deadline = std::nullopt);
     void                     taskFinished();
-    void                     quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
-                                            bool                                                             is_write,
-                                            StorageQuarantineReason                                          reason,
-                                            StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY);
     std::shared_ptr<const CacheTopology>           topology_;
     std::atomic<bool>                              remote_cache_enabled_{true};
     PoolsByTag                                     pools_by_tag_;
@@ -289,12 +273,6 @@ private:
     std::condition_variable lifecycle_cv_;
     Lifecycle               lifecycle_{Lifecycle::CREATED};
     size_t                  in_flight_{0};
-
-    std::mutex quarantine_mutex_;
-    // Count quarantined operations; frozen capacity is read from the pools.
-    size_t                     quarantined_task_count_{0};
-    uint64_t                   quarantine_generation_{0};
-    StorageQuarantineBreakdown quarantined_breakdown_{};
 
     friend class LoadAsyncContext;
 };

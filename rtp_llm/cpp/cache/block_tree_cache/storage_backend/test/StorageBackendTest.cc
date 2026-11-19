@@ -441,19 +441,13 @@ private:
     std::atomic<bool>       shutdown_called_{false};
 };
 
-class QuarantineObservingBackend: public TestBackend {
+class CallbackBackend: public TestBackend {
 public:
     using TestBackend::TestBackend;
 
     std::function<void()>                                                       read_action;
     std::function<void()>                                                       write_action;
     std::function<bool(const StorageRequest&, WriteCompletion, WritePinFilter)> start_write_action;
-    size_t                                                                      quarantine_events{0};
-    bool                                                                        last_quarantine_is_write{false};
-    StorageQuarantineReason last_quarantine_reason{StorageQuarantineReason::RPC_ERROR};
-    size_t                  last_quarantine_blocks{0};
-    size_t                  quarantined_tasks{0};
-    size_t                  quarantined_blocks{0};
 
 protected:
     void readImpl(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) override {
@@ -476,21 +470,6 @@ protected:
         if (start_write_action)
             return start_write_action(request, std::move(done), std::move(retain_pins));
         return StorageBackend::startWriteImpl(request, std::move(done), std::move(retain_pins));
-    }
-
-    void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override {
-        ++quarantine_events;
-        last_quarantine_is_write = is_write;
-        last_quarantine_reason   = reason;
-        last_quarantine_blocks   = block_count;
-    }
-
-    void onQuarantineChanged(uint64_t,
-                             size_t task_count,
-                             size_t block_count,
-                             const StorageQuarantineBreakdown&) noexcept override {
-        quarantined_tasks  = task_count;
-        quarantined_blocks = block_count;
     }
 };
 
@@ -536,9 +515,9 @@ StorageRequest makeRequest(BlockIdxType block, size_t key_count = 1) {
     return {std::make_shared<CacheKeysType>(std::move(keys)), std::move(handles)};
 }
 
-class DeferredReadBackend: public QuarantineObservingBackend {
+class DeferredReadBackend: public CallbackBackend {
 public:
-    using QuarantineObservingBackend::QuarantineObservingBackend;
+    using CallbackBackend::CallbackBackend;
     bool immediate{false};
     ~DeferredReadBackend() override {
         complete();
@@ -595,8 +574,8 @@ TEST(StorageBackendTest, ExpiredReadsAndWritesSettleWithoutIoOnFullSharedQueue) 
         auto       pool  = std::make_shared<TestBlockPool>();
         const auto block = pool->malloc().value();
         pool->incRef(block);
-        auto                       executor = makeStorageBackendExecutor(1, 1);
-        QuarantineObservingBackend backend(true, executor);
+        auto            executor = makeStorageBackendExecutor(1, 1);
+        CallbackBackend backend(true, executor);
         ASSERT_TRUE(initBackend(backend, pool));
 
         std::promise<void>                     release;
@@ -645,7 +624,6 @@ TEST(StorageBackendTest, ExpiredReadsAndWritesSettleWithoutIoOnFullSharedQueue) 
         EXPECT_EQ(queued.get(), ErrorCode::DEADLINE_EXCEEDED);
         EXPECT_EQ(backend.readCalls(), 0u);
         EXPECT_EQ(backend.writeHandleCount(), 0u);
-        EXPECT_EQ(backend.quarantine_events, 0u);
         EXPECT_EQ(pool->refCount(block), 1u);
         EXPECT_FALSE(pool->isFrozen(block));
         pool->decRef(block);
@@ -730,7 +708,6 @@ TEST(StorageBackendTest, ReadCompletionSettlesOnceAndPreservesIsolation) {
         EXPECT_EQ(callbacks->load(), 1u);
         EXPECT_EQ(pool->isFrozen(block), unknown);
         EXPECT_EQ(pool->refCount(block), unknown ? 2u : 1u);
-        EXPECT_EQ(backend.quarantine_events, unknown ? 1u : 0u);
         pool->decRef(block);
     }
 }
@@ -739,8 +716,8 @@ TEST(StorageBackendTest, WriteMaskReleasesOnlyUnusedTaskPinsBeforeCompletion) {
     auto       pool   = std::make_shared<TestBlockPool>();
     const auto blocks = pool->malloc(3).value();
     pool->incRef(blocks);
-    auto                       executor = std::make_shared<HoldingExecutor>();
-    QuarantineObservingBackend backend(true, executor);
+    auto            executor = std::make_shared<HoldingExecutor>();
+    CallbackBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     auto                                   other_task = backend.prepareWrite(makeRequest(blocks[2]));
     std::function<void()>                  complete;
@@ -790,8 +767,8 @@ TEST(StorageBackendTest, WriteMaskDistinguishesEqualBlockIdsInDifferentPools) {
     ASSERT_EQ(first, second);
     first_pool->incRef(first);
     second_pool->incRef(second);
-    auto                       executor = std::make_shared<HoldingExecutor>();
-    QuarantineObservingBackend backend(true, executor);
+    auto            executor = std::make_shared<HoldingExecutor>();
+    CallbackBackend backend(true, executor);
     ASSERT_TRUE(backend.init(
         makeSharedPoolTopology(),
         {{"group_0", first_pool}, {"group_1", second_pool}},
@@ -814,12 +791,12 @@ TEST(StorageBackendTest, WriteMaskDistinguishesEqualBlockIdsInDifferentPools) {
     second_pool->decRef(second);
 }
 
-TEST(StorageBackendTest, WriteMaskQuarantinesOnlyRetainedSourcePinsPermanently) {
+TEST(StorageBackendTest, UnknownMaskedWriteFreezesOnlyRetainedSources) {
     auto       pool   = std::make_shared<TestBlockPool>();
     const auto blocks = pool->malloc(2).value();
     pool->incRef(blocks);
-    auto                       executor = std::make_shared<HoldingExecutor>();
-    QuarantineObservingBackend backend(true, executor);
+    auto            executor = std::make_shared<HoldingExecutor>();
+    CallbackBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     block_tree_cache_detail::ScopeRollback drain([&] { backend.shutdown(); });
     backend.start_write_action = [&](const StorageRequest&, auto, auto retain_pins) -> bool {
@@ -834,7 +811,6 @@ TEST(StorageBackendTest, WriteMaskQuarantinesOnlyRetainedSourcePinsPermanently) 
     EXPECT_EQ(pool->refCount(blocks[1]), 2u);
     EXPECT_FALSE(pool->isFrozen(blocks[0]));
     EXPECT_TRUE(pool->isFrozen(blocks[1]));
-    EXPECT_EQ(backend.last_quarantine_blocks, 1u);
     backend.shutdown();
     EXPECT_EQ(pool->refCount(blocks[0]), 1u);
     EXPECT_EQ(pool->refCount(blocks[1]), 2u);
@@ -849,8 +825,8 @@ TEST(StorageBackendTest, WriteMaskReleaseIgnoresCapacityNotificationExceptions) 
     auto       pool   = std::make_shared<TestBlockPool>();
     const auto blocks = pool->malloc(2).value();
     pool->incRef(blocks);
-    auto                       executor = std::make_shared<HoldingExecutor>();
-    QuarantineObservingBackend backend(true, executor);
+    auto            executor = std::make_shared<HoldingExecutor>();
+    CallbackBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     size_t notifications = 0;
     pool->setCapacityChangeCallback([&] {
@@ -873,7 +849,6 @@ TEST(StorageBackendTest, WriteMaskReleaseIgnoresCapacityNotificationExceptions) 
     EXPECT_EQ(notifications, 1u);
     EXPECT_FALSE(pool->isAllocated(blocks[0]));
     EXPECT_EQ(pool->refCount(blocks[1]), 1u);
-    EXPECT_EQ(backend.quarantine_events, 0u);
     backend.shutdown();
     reset_callback.run();
     pool->decRef(blocks[1]);
@@ -1397,14 +1372,13 @@ TEST(StorageBackendTest, DisableDoesNotCancelAlreadyAdmittedPayload) {
     auto       pool  = std::make_shared<TestBlockPool>();
     const auto block = pool->malloc().value();
     pool->incRef(block);
-    auto                       executor = std::make_shared<HoldingExecutor>();
-    QuarantineObservingBackend backend(true, executor);
+    auto            executor = std::make_shared<HoldingExecutor>();
+    CallbackBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     backend.write_action = [&] { backend.setRemoteCacheEnabled(false); };
     EXPECT_TRUE(backend.write(backend.prepareWrite(makeRequest(block))));
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_FALSE(backend.remoteCacheEnabled());
-    EXPECT_EQ(backend.quarantine_events, 0u);
     EXPECT_EQ(pool->refCount(block), 1u);
     backend.shutdown();
     pool->decRef(block);
@@ -1805,7 +1779,7 @@ TEST(StorageBackendTest, UnknownReadFreezesBeforeCallbackAndReleasesTaskState) {
         auto block = pool->malloc().value();
         pool->incRef(block);
         auto                       executor = std::make_shared<HoldingExecutor>();
-        QuarantineObservingBackend backend(/*init_result=*/true, executor);
+        CallbackBackend backend(/*init_result=*/true, executor);
         ASSERT_TRUE(initBackend(backend, pool));
         const bool timeout =
             reason == StorageQuarantineReason::SDK_TIMEOUT || reason == StorageQuarantineReason::RPC_TIMEOUT;
@@ -1831,17 +1805,8 @@ TEST(StorageBackendTest, UnknownReadFreezesBeforeCallbackAndReleasesTaskState) {
         EXPECT_TRUE(completed);
         EXPECT_TRUE(request_keys.expired());
         EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-        EXPECT_EQ(backend.quarantine_events, 1u);
-        EXPECT_FALSE(backend.last_quarantine_is_write);
-        EXPECT_EQ(backend.last_quarantine_reason, reason);
-        EXPECT_EQ(backend.last_quarantine_blocks, 1u);
-        EXPECT_EQ(backend.quarantined_tasks, 1u);
-        EXPECT_EQ(backend.quarantined_blocks, 1u);
-
         pool->decRef(block);
         backend.shutdown();
-        EXPECT_EQ(backend.quarantined_tasks, 0u);
-        EXPECT_EQ(backend.quarantined_blocks, 0u);
         EXPECT_TRUE(pool->isAllocated(block));
         EXPECT_TRUE(pool->isFrozen(block));
         EXPECT_EQ(pool->refCount(block), 1u);
@@ -1859,7 +1824,7 @@ TEST(StorageBackendTest, HeldReadTargetsSkipLegacyFreezeAndPreserveUnknownResult
         pool->incRef(untouched);
         auto executor = std::make_shared<HoldingExecutor>();
         executor->setDuplicate(true);
-        QuarantineObservingBackend backend(true, executor);
+        CallbackBackend backend(true, executor);
         ASSERT_TRUE(initBackend(backend, pool));
         const auto reason   = timeout ? StorageQuarantineReason::RPC_TIMEOUT : StorageQuarantineReason::RPC_ERROR;
         backend.read_action = [pool, target, reason, timeout] {
@@ -1889,14 +1854,6 @@ TEST(StorageBackendTest, HeldReadTargetsSkipLegacyFreezeAndPreserveUnknownResult
         EXPECT_EQ(callbacks, 1u);
         EXPECT_TRUE(request_keys.expired());
         EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-        EXPECT_EQ(backend.quarantine_events, 1u);
-        EXPECT_FALSE(backend.last_quarantine_is_write);
-        EXPECT_EQ(backend.last_quarantine_reason, reason);
-        // The per-operation diagnostic records both request pins. Capacity
-        // accounting includes only the one physical target held FROZEN.
-        EXPECT_EQ(backend.last_quarantine_blocks, 2u);
-        EXPECT_EQ(backend.quarantined_tasks, 1u);
-        EXPECT_EQ(backend.quarantined_blocks, 1u);
         backend.shutdown();
         EXPECT_EQ(pool->treeRefCount(target), 1u);
         pool->decRef(target);
@@ -1906,7 +1863,7 @@ TEST(StorageBackendTest, HeldReadTargetsSkipLegacyFreezeAndPreserveUnknownResult
     }
 }
 
-TEST(StorageBackendTest, UnknownWriteWithoutLocalTargetsReleasesPinsButStillCountsFailure) {
+TEST(StorageBackendTest, UnknownWriteWithoutLocalTargetsReleasesPins) {
     for (const bool timeout : {false, true}) {
         SCOPED_TRACE(timeout);
         auto       pool  = std::make_shared<TestBlockPool>();
@@ -1914,7 +1871,7 @@ TEST(StorageBackendTest, UnknownWriteWithoutLocalTargetsReleasesPinsButStillCoun
         pool->incRef(block);
         auto executor = std::make_shared<HoldingExecutor>();
         executor->setDuplicate(true);
-        QuarantineObservingBackend backend(true, executor);
+        CallbackBackend backend(true, executor);
         ASSERT_TRUE(initBackend(backend, pool));
         const auto reason    = timeout ? StorageQuarantineReason::RPC_TIMEOUT : StorageQuarantineReason::RPC_ERROR;
         backend.write_action = [reason, timeout] {
@@ -1935,14 +1892,6 @@ TEST(StorageBackendTest, UnknownWriteWithoutLocalTargetsReleasesPinsButStillCoun
         EXPECT_FALSE(pool->isFrozen(block));
         EXPECT_EQ(pool->treeRefCount(block), 0u);
         EXPECT_EQ(pool->refCount(block), 1u);
-        EXPECT_EQ(backend.quarantine_events, 1u);
-        EXPECT_TRUE(backend.last_quarantine_is_write);
-        EXPECT_EQ(backend.last_quarantine_reason, reason);
-        EXPECT_EQ(backend.last_quarantine_blocks, 1u);
-        EXPECT_EQ(backend.quarantined_tasks, 1u);
-        // Failure diagnostics count the request pin, but this explicit
-        // no-target disposition consumes no physical frozen capacity.
-        EXPECT_EQ(backend.quarantined_blocks, 0u);
         EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
         backend.shutdown();
         pool->decRef(block);
@@ -1954,8 +1903,8 @@ TEST(StorageBackendTest, RepeatedUnknownWritesKeepFrozenReferencesAcrossShutdown
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
     pool->incRef(block);
-    auto                       executor = std::make_shared<HoldingExecutor>();
-    QuarantineObservingBackend backend(/*init_result=*/true, executor);
+    auto            executor = std::make_shared<HoldingExecutor>();
+    CallbackBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     backend.write_action = [] {
         throw StorageOperationCompletionUnknown("write completion unknown", StorageQuarantineReason::RPC_ERROR);
@@ -1972,28 +1921,17 @@ TEST(StorageBackendTest, RepeatedUnknownWritesKeepFrozenReferencesAcrossShutdown
         EXPECT_EQ(pool->refCount(block), 2u);
         EXPECT_EQ(pool->treeRefCount(block), task_index);
         EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-        EXPECT_EQ(backend.quarantine_events, task_index);
-        EXPECT_TRUE(backend.last_quarantine_is_write);
-        EXPECT_EQ(backend.last_quarantine_blocks, 1u);
-        EXPECT_EQ(backend.quarantined_tasks, task_index);
-        EXPECT_EQ(backend.quarantined_blocks, 1u);
     }
     const auto next_block = pool->malloc().value();
     pool->incRef(next_block);
     ASSERT_TRUE(backend.write(backend.prepareWrite(makeRequest(next_block))));
     ASSERT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
-    EXPECT_EQ(backend.quarantine_events, 3u);
-    EXPECT_EQ(backend.last_quarantine_blocks, 1u);
-    EXPECT_EQ(backend.quarantined_tasks, 3u);
-    EXPECT_EQ(backend.quarantined_blocks, 2u);
     // An independent BTC operation acquires its own hold on the same block
     // without changing the number of physical frozen blocks.
     pool->freezeBlock(block);
     EXPECT_EQ(pool->treeRefCount(block), 3u);
     backend.shutdown();
-    EXPECT_EQ(backend.quarantined_tasks, 0u);
-    EXPECT_EQ(backend.quarantined_blocks, 0u);
     EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_EQ(pool->treeRefCount(block), 3u);
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 2u);
@@ -2014,7 +1952,7 @@ TEST(StorageBackendTest, UnknownReadFreezesAllPoolsBeforeReleasingAnyPinWithoutC
     second->incRef(second_block);
     auto executor = std::make_shared<HoldingExecutor>();
     executor->setDuplicate(true);
-    QuarantineObservingBackend backend(/*init_result=*/true, executor);
+    CallbackBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(backend.init(
         makeSharedPoolTopology(), {{"group_0", first}, {"group_1", second}}, [](int layer, const auto&, int) {
             return std::vector<BlockInfo>{{false, layer, 0, reinterpret_cast<void*>(1), 16}};
@@ -2043,8 +1981,6 @@ TEST(StorageBackendTest, UnknownReadFreezesAllPoolsBeforeReleasingAnyPinWithoutC
     backend.read(std::move(request), nullptr, {});
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(freeze_calls, 2u);
-    EXPECT_EQ(backend.quarantine_events, 1u);
-    EXPECT_EQ(backend.quarantined_blocks, 2u);
     EXPECT_TRUE(keys.expired());
 
     StorageRequest repeated_request;
@@ -2053,10 +1989,6 @@ TEST(StorageBackendTest, UnknownReadFreezesAllPoolsBeforeReleasingAnyPinWithoutC
     backend.read(std::move(repeated_request), nullptr, {});
     EXPECT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(freeze_calls, 2u);
-    EXPECT_EQ(backend.quarantine_events, 2u);
-    EXPECT_EQ(backend.last_quarantine_blocks, 1u);
-    EXPECT_EQ(backend.quarantined_tasks, 2u);
-    EXPECT_EQ(backend.quarantined_blocks, 2u);
     // The second UNKNOWN read acquires a second hold on first_block only.
     EXPECT_EQ(first->treeRefCount(first_block), 2u);
     EXPECT_EQ(second->treeRefCount(second_block), 1u);
@@ -2077,8 +2009,8 @@ TEST(StorageBackendTest, CompletedReadAndWriteFailuresReleasePinsWithoutFreezing
     auto pool  = std::make_shared<TestBlockPool>();
     auto block = pool->malloc().value();
     pool->incRef(block);
-    auto                       executor = std::make_shared<HoldingExecutor>();
-    QuarantineObservingBackend backend(/*init_result=*/true, executor);
+    auto            executor = std::make_shared<HoldingExecutor>();
+    CallbackBackend backend(/*init_result=*/true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     backend.failNextRead();
     bool completed = false;
@@ -2095,7 +2027,6 @@ TEST(StorageBackendTest, CompletedReadAndWriteFailuresReleasePinsWithoutFreezing
     EXPECT_FALSE(pool->isFrozen(block));
     EXPECT_EQ(pool->refCount(block), 1u);
     EXPECT_EQ(pool->treeRefCount(block), 0u);
-    EXPECT_EQ(backend.quarantine_events, 0u);
     backend.shutdown();
     pool->decRef(block);
     EXPECT_FALSE(pool->isAllocated(block));

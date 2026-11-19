@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <cuda_runtime.h>
 
 namespace rtp_llm {
@@ -59,12 +58,10 @@ TEST(KVCMSafetyTest, LocalSdkResultPermanentlyProtectsUnknownCompletion) {
         const bool unknown = code != kv_cache_manager::ER_OK;
         EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), unknown ? 2u : 1u);
-        EXPECT_EQ(backend->quarantined_task_count_, unknown ? 1u : 0u);
         backend->shutdown();
         EXPECT_TRUE(keys.expired());
         EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), unknown ? 2u : 1u);
-        EXPECT_EQ(backend->quarantined_task_count_, 0u);
     }
 }
 
@@ -428,18 +425,6 @@ TEST(KVCMSafetyTest, UnknownWriteCompensationFailurePreservesFrozenProtection) {
     }
 }
 
-TEST(KVCMSafetyTest, QuarantineAbortRatioParsingRejectsInvalidValues) {
-    const std::string name = "RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO";
-    for (const auto& value : {"-1", "1.1", "nan", "inf", "oops", "0.2x", "1e999"}) {
-        autil::EnvGuard guard(name, value);
-        EXPECT_FALSE(remoteCacheQuarantineAbortRatio().has_value()) << value;
-    }
-    for (const auto& value : {"", "0", "0.25", "1"}) {
-        autil::EnvGuard guard(name, value);
-        EXPECT_TRUE(remoteCacheQuarantineAbortRatio().has_value()) << value;
-    }
-}
-
 TEST(KVCMSafetyTest, LocalSdkExceptionPermanentlyProtectsDestination) {
     auto environment = makeBackendEnvironment("kvcm_safety_local_exception");
     auto wrapper     = std::make_shared<MockClientWrapper>();
@@ -482,44 +467,6 @@ TEST(KVCMSafetyTest, AttemptedNormalFinishWriteIsNeverCompensatedAfterThrow) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
-}
-
-TEST(KVCMSafetyTest, QuarantineThresholdIsDisabledByDefaultAndUsesStrictGreaterComparison) {
-    for (const auto* value : {"0", "0.125"}) {
-        autil::EnvGuard guard("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", value);
-        auto            environment = makeBackendEnvironment("kvcm_safety_abort_threshold");
-        auto            wrapper     = std::make_shared<MockClientWrapper>();
-        EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-        EXPECT_CALL(*wrapper, shutdown()).Times(1);
-        auto backend = makeBackend(environment, singleRankConfig(), wrapper);
-        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-        const size_t total = environment.device_pool->totalBlocksNum();
-        if (std::string(value) == "0") {
-            backend->onQuarantineChanged(1, 1, total * 2, {});
-        } else {
-            environment.device_pool->freezeBlock(environment.block_id);
-            // Logical task pins can exceed capacity while one physical block is frozen.
-            backend->onQuarantineChanged(1, 1, total * 2, {});
-            EXPECT_DEATH(
-                {
-                    const auto next = environment.device_pool->malloc().value();
-                    environment.device_pool->incRef(next);
-                    environment.device_pool->freezeBlock(next);
-                    backend->onQuarantineChanged(2, 2, total * 2, {});
-                },
-                "");
-        }
-    }
-    autil::EnvGuard guard("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0.01");
-    auto            environment = makeBackendEnvironment("kvcm_safety_nonowner_abort");
-    auto            wrapper     = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
-    EXPECT_CALL(*wrapper, shutdown()).Times(1);
-    auto rank1    = safetyTp2();
-    rank1.tp_rank = 1;
-    auto backend  = makeBackend(environment, rank1, wrapper);
-    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    backend->onQuarantineChanged(1, 1, environment.device_pool->totalBlocksNum() * 2, {});
 }
 
 }  // namespace

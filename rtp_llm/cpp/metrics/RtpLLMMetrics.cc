@@ -37,7 +37,6 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheControlMetrics);
 
@@ -1007,32 +1006,6 @@ void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          t
         RTP_REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
         RTP_REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
     }
-}
-
-bool RtpLLMRemoteCacheQuarantineMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    // Stocks are updated only on transitions; STATUS retains them across collection periods.
-    REGISTER_STATUS_MUTABLE_METRIC(quarantined_lease_count_metric, "rtp_llm_remote_cache_quarantined_lease_count");
-    REGISTER_STATUS_MUTABLE_METRIC(quarantined_block_count_metric, "rtp_llm_remote_cache_quarantined_block_count");
-    REGISTER_STATUS_MUTABLE_METRIC(quarantined_block_ratio_metric, "rtp_llm_remote_cache_quarantined_block_ratio");
-    REGISTER_QPS_MUTABLE_METRIC(quarantine_qps_metric, "rtp_llm_remote_cache_quarantine_qps");
-    REGISTER_QPS_MUTABLE_METRIC(quarantine_block_qps_metric, "rtp_llm_remote_cache_quarantine_block_qps");
-    return true;
-}
-
-void RtpLLMRemoteCacheQuarantineMetrics::report(const kmonitor::MetricsTags*                 tags,
-                                                RtpLLMRemoteCacheQuarantineMetricsCollector* collector) {
-    RTP_REPORT_MUTABLE_METRIC(quarantined_lease_count_metric, collector->quarantined_lease_count);
-    RTP_REPORT_MUTABLE_METRIC(quarantined_block_count_metric, collector->quarantined_block_count);
-    RTP_REPORT_MUTABLE_METRIC(quarantined_block_ratio_metric, collector->quarantined_block_ratio);
-}
-
-void RtpLLMRemoteCacheQuarantineMetrics::report(const kmonitor::MetricsTags*                      tags,
-                                                RtpLLMRemoteCacheQuarantineEventMetricsCollector* collector) {
-    kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
-    event_tags.AddTag("op", collector->op);
-    event_tags.AddTag("reason", collector->reason);
-    reportKmonMetric(quarantine_qps_metric, &event_tags, 1);
-    reportKmonMetric(quarantine_block_qps_metric, &event_tags, collector->block_count);
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {

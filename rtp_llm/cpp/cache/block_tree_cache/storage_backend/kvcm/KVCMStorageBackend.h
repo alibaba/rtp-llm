@@ -92,11 +92,6 @@ protected:
     bool startWriteImpl(const StorageRequest& request, WriteCompletion done, WritePinFilter retain_pins) override;
     void shutdownImpl() noexcept override;
     void onRemoteCacheSkipped(const char* stage) noexcept override;
-    void onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept override;
-    void onQuarantineChanged(uint64_t                          generation,
-                             size_t                            task_count,
-                             size_t                            block_count,
-                             const StorageQuarantineBreakdown& breakdown) noexcept override;
 
 private:
     class Impl;

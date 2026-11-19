@@ -54,8 +54,12 @@ struct StorageTaskState {
     std::vector<Pin>  pins;
     std::once_flag    finish_once;
     std::atomic<bool> completion_started{false};
-    void              finish() {
-        std::call_once(finish_once, [this] {
+    void              finish(bool freeze_pins = false) {
+        std::call_once(finish_once, [this, freeze_pins] {
+            if (freeze_pins) {
+                for (const Pin& pin : pins)
+                    pin.pool->freezeBlock(pin.block);
+            }
             for (const Pin& pin : pins) {
                 if (pin.release)
                     pin.release();
@@ -315,62 +319,12 @@ void StorageBackend::shutdown() {
     }
     executor->shutdown();
     shutdownImpl();
-    uint64_t quarantine_generation;
-    {
-        std::lock_guard<std::mutex> lock(quarantine_mutex_);
-        quarantined_task_count_ = 0;
-        quarantined_breakdown_  = {};
-        quarantine_generation   = ++quarantine_generation_;
-    }
-    onQuarantineChanged(quarantine_generation, /*task_count=*/0, /*block_count=*/0, {});
     // FROZEN references remain until the block pools are destroyed.
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         lifecycle_ = Lifecycle::STOPPED;
     }
     lifecycle_cv_.notify_all();
-}
-
-void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
-                                    bool                                                             is_write,
-                                    StorageQuarantineReason                                          reason,
-                                    StorageLocalTargetProtection local_target_protection) {
-    if (!state) {
-        return;
-    }
-    const size_t pinned_block_count = state->pins.size();
-    if (local_target_protection == StorageLocalTargetProtection::LEGACY) {
-        for (const auto& pin : state->pins) {
-            pin.pool->freezeBlock(pin.block);
-        }
-    }
-    state->finish();
-    size_t                     task_count;
-    size_t                     block_count;
-    uint64_t                   generation;
-    StorageQuarantineBreakdown breakdown;
-    {
-        std::lock_guard<std::mutex> lock(quarantine_mutex_);
-        task_count  = ++quarantined_task_count_;
-        block_count = 0;
-        // init() guarantees distinct pools. Count physical frozen capacity,
-        // including blocks shared by multiple quarantined operations, only once.
-        for (const auto& [tag, pool] : pools_by_tag_) {
-            block_count += pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
-        }
-        auto& counts = quarantined_breakdown_[is_write ? 1 : 0][static_cast<size_t>(reason)];
-        ++counts.task_count;
-        counts.block_count += pinned_block_count;
-        breakdown  = quarantined_breakdown_;
-        generation = ++quarantine_generation_;
-    }
-    RTP_LLM_LOG_WARNING("quarantine storage request after transfer completion became unknown: tasks=%zu blocks=%zu",
-                        task_count,
-                        block_count);
-    // Count each operation even if its state snapshot is superseded, and before
-    // onQuarantineChanged may abort due to the configured capacity limit.
-    onQuarantined(is_write, reason, pinned_block_count);
-    onQuarantineChanged(generation, task_count, block_count, breakdown);
 }
 
 std::shared_ptr<storage_backend_detail::StorageTaskState>
@@ -536,8 +490,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                     Task result, bool) mutable {
                     block_tree_cache_detail::ScopeRollback retire(std::move(finished));
                     storage_backend_detail::invokeCallback(this, [&] {
-                        std::optional<StorageQuarantineReason> quarantine_reason;
-                        auto local_target_protection = StorageLocalTargetProtection::LEGACY;
+                        bool freeze_pins = false;
                         if (error.ok()) {
                             try {
                                 std::optional<TransferStageTimer> complete;
@@ -558,13 +511,11 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                             } catch (const StorageDeadlineExceeded& exception) {
                                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                             } catch (const StorageOperationTimeout& exception) {
-                                local_target_protection = exception.localTargetProtection();
-                                error                   = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
-                                quarantine_reason       = exception.reason();
+                                freeze_pins = exception.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                                error       = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                             } catch (const StorageOperationCompletionUnknown& exception) {
-                                local_target_protection = exception.localTargetProtection();
-                                error                   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
-                                quarantine_reason       = exception.reason();
+                                freeze_pins = exception.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
+                                error       = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                             } catch (const StorageOperationBufferSafeFailure& exception) {
                                 error =
                                     ErrorInfo(state->request.transfer_task->expired() ? ErrorCode::DEADLINE_EXCEEDED :
@@ -578,11 +529,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                             io.finish(error.ok());
                         }
                         auto settle = stageValue("read_settle", state->request, "read", state->trace_id);
-                        if (quarantine_reason) {
-                            quarantineTask(state, /*is_write=*/false, *quarantine_reason, local_target_protection);
-                        } else {
-                            state->finish();
-                        }
+                        state->finish(freeze_pins);
                         settle.finish(true);
                         const bool success = error.ok();
                         if (done) {
@@ -664,9 +611,8 @@ bool StorageBackend::write(StorageWriteTask task) {
                                     WriteResult result, bool on_worker) mutable {
                 block_tree_cache_detail::ScopeRollback retire(std::move(finished));
                 storage_backend_detail::invokeCallback(this, [&] {
-                    bool                                   success = false;
-                    std::optional<StorageQuarantineReason> quarantine_reason;
-                    auto local_target_protection = StorageLocalTargetProtection::LEGACY;
+                    bool success     = false;
+                    bool freeze_pins = false;
                     if (run) {
                         try {
                             std::optional<TransferStageTimer> complete;
@@ -684,12 +630,10 @@ bool StorageBackend::write(StorageWriteTask task) {
                                 result(on_worker);
                             success = !state->request.transfer_task->expired();
                         } catch (const StorageOperationTimeout& error) {
-                            quarantine_reason       = error.reason();
-                            local_target_protection = error.localTargetProtection();
+                            freeze_pins = error.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
                             RTP_LLM_LOG_WARNING("StorageBackend write timed out: %s", error.what());
                         } catch (const StorageOperationCompletionUnknown& error) {
-                            quarantine_reason       = error.reason();
-                            local_target_protection = error.localTargetProtection();
+                            freeze_pins = error.localTargetProtection() == StorageLocalTargetProtection::LEGACY;
                             RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown: %s", error.what());
                         } catch (const StorageOperationBufferSafeFailure& error) {
                             RTP_LLM_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());
@@ -701,11 +645,7 @@ bool StorageBackend::write(StorageWriteTask task) {
                         io.finish(success);
                     }
                     auto settle = stageValue("write_settle", state->request, "write", state->trace_id);
-                    if (quarantine_reason) {
-                        quarantineTask(state, /*is_write=*/true, *quarantine_reason, local_target_protection);
-                    } else {
-                        state->finish();
-                    }
+                    state->finish(freeze_pins);
                     settle.finish(true);
                     total.finish(success);
                 });
