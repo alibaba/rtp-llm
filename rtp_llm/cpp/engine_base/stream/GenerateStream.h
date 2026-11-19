@@ -484,6 +484,11 @@ public:
         return seqLength() - inputLength();
     }
 
+    size_t outputTokenLenSnapshot() const {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        return outputTokenLen();
+    }
+
     // DashScope exposes logprobs only after the first think-close token. The
     // close token itself is still reasoning; any remaining textual delimiter
     // tokens already belong to the content-logprob suffix.

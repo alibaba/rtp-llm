@@ -58,8 +58,13 @@ def _extension_identity():
             raise RuntimeError(f"native Mega-mHC requires {BUILD_RECEIPT_ENV}")
         receipt = json.loads(Path(receipt_path).read_text())
         root = Path(module.__file__).resolve().parent.parent
+        reviewed_copy_block_trial = (
+            os.environ.get("RTP_V41_PPU_MEGAMOE_E448_COPY_BLOCKS") == "4"
+            and receipt.get("source_pin") == "3a635699e5d5cd53b62d21f6e4d39e3bf01a61be"
+            and digest == "4bc8f9b35419b5315b00cc80ba91c16573ff33470a811cb6da115c9f93e3599e"
+        )
         if (
-            receipt.get("source_pin") != REVIEWED_NATIVE_SOURCE
+            (receipt.get("source_pin") != REVIEWED_NATIVE_SOURCE and not reviewed_copy_block_trial)
             or Path(receipt["installed"]).resolve() != root
             or receipt.get("evidence") != "BUILT_WHEEL_FILE_INSPECTION_ONLY_NO_KERNEL_EXECUTION"
         ):

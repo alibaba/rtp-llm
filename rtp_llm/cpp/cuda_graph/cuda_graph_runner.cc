@@ -1315,7 +1315,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
 
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inputs,
                                         CudaGraphState&                     state,
-                                        const AttentionInputMetadataParams* metadata) {
+                                        const AttentionInputMetadataParams* metadata,
+                                        const std::function<void()>&        before_replay) {
     c10::InferenceMode inference_guard(true);
     PyModelOutputs     outputs;
 
@@ -1348,6 +1349,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
         prepareInputData(inputs, state);
     }
     checkGraphInputStable(inputs, instance.mem_hold_.py_model_inputs_);
+    if (before_replay) {
+        before_replay();
+    }
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
@@ -1401,6 +1405,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
         }
         if (instance.mem_hold_.logits_.defined()) {
             outputs.logits = instance.mem_hold_.logits_.slice(0, 0, state.seq_len_sum);
+        }
+        const auto& draft_tokens = instance.mem_hold_.dspark_draft_tokens_;
+        if (draft_tokens.defined() && draft_tokens.size(0) == state.current_batch_size
+            && state.seq_len_sum == state.current_batch_size * num_tokens_per_bs_) {
+            outputs.dspark_draft_tokens = draft_tokens;
         }
     }
     const auto& impl = instance.mem_hold_.attn_pyobj_;
@@ -2286,13 +2295,25 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
+    const auto run_forward = [&] {
+        auto outputs = py_forward_method_(inputs, attn_pyobj).cast<PyModelOutputs>();
+        if (dspark_proposal_sampler_) {
+            outputs.dspark_draft_tokens = dspark_proposal_sampler_(inputs.input_ids, outputs.logits);
+        }
+        return outputs;
+    };
     try {
         // Run the same backend that will be captured for this exact key.  In
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-        py_forward_method_(inputs, attn_pyobj);
-        py_forward_method_(inputs, attn_pyobj);
+        if (dspark_proposal_sampler_) {
+            run_forward();
+            run_forward();
+        } else {
+            py_forward_method_(inputs, attn_pyobj);
+            py_forward_method_(inputs, attn_pyobj);
+        }
     } catch (...) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d; draining submitted GPU work before rethrow", key_type, key);
         // A backend can submit work and then throw. Inputs and attention
@@ -2346,13 +2367,13 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                outputs = run_forward();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            graph_instances_[key].mem_hold_.dspark_draft_tokens_ = outputs.dspark_draft_tokens;
             if (outputs.logits.defined()) {
                 RTP_LLM_CHECK_WITH_INFO(!is_prefill_cuda_graph_mode_ && outputs.logits.is_cuda()
                                             && outputs.logits.dim() == 2

@@ -36,11 +36,12 @@ sampler using each request's real sampling parameters.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Optional, Tuple
 
 import torch
 
-from rtp_llm.device.device_type import is_cuda
+from rtp_llm.device.device_type import is_cuda, is_ppu
 
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
@@ -90,7 +91,12 @@ def map_context_rows(
     if batch_size == 0:
         raise ValueError("cannot map non-empty DSpark context without requests")
 
-    if device.type == "cuda" and is_cuda():
+    ppu_fixed_bucket = (
+        row_count == 32 and batch_size == 8
+        and os.environ.get("RTP_V41_PPU_FUSED_DSPARK_CONTEXT_ROWS") == "1"
+        and is_ppu()
+    )
+    if device.type == "cuda" and (is_cuda() or ppu_fixed_bucket):
         from rtp_llm.models_py.speculative._dspark_prepare_triton import (
             try_map_context_rows,
         )

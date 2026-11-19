@@ -14,6 +14,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -83,10 +84,17 @@ public:
                    bool                      use_spec_decoding            = false,
                    DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
                    bool                      allow_cuda_graph             = true,
-                   bool                      track_cache_store_completion = false);
+                   bool                      track_cache_store_completion = false,
+                   DSparkProposalGraphSampler dspark_proposal_sampler = {});
     ~PyWrappedModel();
 
     GptModelOutputs      forward(const GptModelInputs& inputs) override;
+#if USE_PPU
+    GptModelOutputs      forwardProposalAfterInputPreparation(const GptModelInputs&        inputs,
+                                                             const std::function<void()>& wait_for_kv,
+                                                             bool                        identity_lm_rows,
+                                                             bool                        use_captured_sampler);
+#endif
     const torch::Tensor& proposalLogitsBuffer() const {
         return proposal_logits_buffer_;
     }
@@ -130,7 +138,11 @@ public:
 private:
     friend struct test::PyWrappedModelTestPeer;
 
-    GptModelOutputs forwardImpl(const GptModelInputs& inputs, bool private_draft_stage);
+    GptModelOutputs forwardImpl(const GptModelInputs&         inputs,
+                                bool                          private_draft_stage,
+                                const std::function<void()>&  wait_for_kv = {},
+                                bool                         identity_lm_rows = false,
+                                bool                         use_captured_sampler = false);
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
 private:
@@ -146,7 +158,8 @@ private:
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1,
-                                                          torch::Tensor         graph_logits = torch::Tensor());
+                                                          torch::Tensor         graph_logits = torch::Tensor(),
+                                                          bool                  identity_lm_rows = false);
     // Compact context rows prepared once by input gathering.
     torch::Tensor customOutputIndexes(const GptModelInputs& inputs);
     void          initializeCustomOutput();
@@ -165,7 +178,8 @@ private:
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
                                       bool                  skip_final_layernorm = false,
-                                      torch::Tensor         graph_logits = torch::Tensor());
+                                      torch::Tensor         graph_logits = torch::Tensor(),
+                                      bool                  identity_lm_rows = false);
     // CP gather-last-hidden exit: `hidden` is already the lm_output_indexes-selected,
     // post-final-layernorm rows produced by handleOutputsLastHidden, so this runs
     // lm_head directly (no index_select, no final layernorm — matching the existing
@@ -254,7 +268,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
                                       bool                      allow_cuda_graph,
-                                      bool                      track_cache_store_completion):
+                                      bool                      track_cache_store_completion,
+                                      DSparkProposalGraphSampler dspark_proposal_sampler):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -442,6 +457,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         // Create GraphParams from individual config fields
         GraphParams graph_params;
+        graph_params.dspark_proposal_sampler = std::move(dspark_proposal_sampler);
         graph_params.expert_token_counts          = expert_balancer_.stable_expert_token_counts();
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;

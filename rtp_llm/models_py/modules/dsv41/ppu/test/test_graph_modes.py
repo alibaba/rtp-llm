@@ -116,11 +116,16 @@ class SourceBoundaries(unittest.TestCase):
         tree = ast.parse((PUBLIC / "rtp_llm/tools/v41/launch.py").read_text())
         selected = ast.Module(body=[
             node for node in tree.body if isinstance(node, ast.FunctionDef)
-            and node.name in {"preset_env", "bounded_prefill_wait_timeout_ms"}
+            and node.name in {
+                "preset_env", "bounded_prefill_wait_timeout_ms", "positive_integer", "decode_capture_batches",
+            }
         ], type_ignores=[])
         namespace = dict(os=os, json=json, V41RuntimeConfig=runtime.V41RuntimeConfig,
                          PPU_STRATEGY=runtime.PPU_STRATEGY, env_bool=runtime.env_bool,
                          MEGAMOE_DSPARK_ASYNC_FLAGS=runtime.MEGAMOE_DSPARK_ASYNC_FLAGS,
+                         DSPARK_DECODE_DEFAULTS=runtime.DSPARK_DECODE_DEFAULTS,
+                         DSPARK_OVERLAP_ENV=runtime.DSPARK_OVERLAP_ENV,
+                         DSPARK_OVERLAP_FLAGS=runtime.DSPARK_OVERLAP_FLAGS,
                          DEFAULT_PREFILL_WAIT_TIMEOUT_MS=1800000, MAX_PREFILL_WAIT_TIMEOUT_MS=86400000)
         exec(compile(selected, "launch.py", "exec"), namespace)
         preset = namespace["preset_env"]
@@ -152,6 +157,35 @@ class SourceBoundaries(unittest.TestCase):
         )
         self.assertEqual(runtime.V41RuntimeConfig.from_env(env).speculative, "DSPARK")
         self.assertEqual(env["RTP_LLM_MTP_ASYNC_PREPARE"], "0")
+        overlap = preset(
+            "decode", "/weights", shared_decode_graph=True, dspark_gamma=3,
+            parent={"RTP_V41_PPU_MOE_BACKEND": "megamoe"},
+        )
+        self.assertEqual(overlap[runtime.DSPARK_OVERLAP_ENV], "1")
+        self.assertEqual(
+            {key: overlap[key] for key in runtime.DSPARK_OVERLAP_FLAGS},
+            runtime.DSPARK_OVERLAP_FLAGS,
+        )
+        self.assertEqual(
+            {key: overlap[key] for key in runtime.DSPARK_DECODE_DEFAULTS},
+            runtime.DSPARK_DECODE_DEFAULTS,
+        )
+        self.assertNotIn(runtime.DSPARK_SIMULATED_ACCEPT_ENV, overlap)
+        opt_out = preset(
+            "decode", "/weights", shared_decode_graph=True, dspark_gamma=3,
+            parent={"RTP_V41_PPU_MOE_BACKEND": "megamoe",
+                    "RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER": "0"},
+        )
+        self.assertEqual(opt_out["RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER"], "0")
+        self.assertEqual(runtime.V41RuntimeConfig.from_env(overlap).speculative, "DSPARK")
+        for key, value in (
+            (runtime.DSPARK_OVERLAP_ENV, "0"),
+            ("RTP_LLM_MTP_ASYNC_PREPARE", "1"),
+            ("RTP_LLM_DEVICE_INPUT", "0"),
+            ("RTP_V41_PPU_DSPARK_JOINT_KV_PUBLISH", "0"),
+        ):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                runtime.V41RuntimeConfig.from_env({**overlap, key: value})
 
     def test_fixed_ep_forward_has_no_dynamic_host_sizes(self):
         src = DRIVER.parents[1] / "graph_moe.py"

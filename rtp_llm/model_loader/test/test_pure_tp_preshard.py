@@ -116,6 +116,23 @@ def _legacy(weight, tensors):
 
 
 class LoadConfigExpertMappingTest(unittest.TestCase):
+    @patch.dict("os.environ", {"RTP_EPLB_EXPERT_PLACEMENT": "sail_trivial"})
+    def test_sail_appends_replicas_before_the_ep_split(self):
+        mapping = LoadConfig.create_redundant_expert(2, 384, 448, 8, 1)
+        layout = list(range(384)) + list(range(64))
+        self.assertEqual(mapping, [layout, layout])
+        self.assertIsNot(mapping[0], mapping[1])
+        self.assertEqual(mapping[0][7 * 56 :], list(range(8, 64)))
+        self.assertEqual(
+            LoadConfig.create_redundant_expert(1, 128, 128, 8, 1),
+            [list(range(128))],
+        )
+        with patch("builtins.open", mock_open(read_data=json.dumps([layout[::-1]]))):
+            self.assertEqual(
+                LoadConfig.create_redundant_expert(1, 384, 448, 8, 1, "custom.json"),
+                [layout[::-1]],
+            )
+
     def test_zero_redundancy_uses_identity_mapping(self):
         for ep_size, num_nodes in ((1, 4), (1, 1), (16, 4)):
             with self.subTest(ep_size=ep_size, num_nodes=num_nodes):

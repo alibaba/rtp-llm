@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -45,11 +46,30 @@ def _decode_kernels():
         with_engram = tl.load(engram_mask + row, active, False)
         tl.store(engram + row, tl.load(engram + row, with_engram, 0) + 1, with_engram)
 
-    return triton, metadata_kernel, counters_kernel
+    @triton.jit
+    def stage_private_draft_rows(
+        requests, positions, ends, active, req_out, pos_out, raw_out, valid_out, count,
+        window: tl.constexpr, limit: tl.constexpr,
+    ):
+        row = tl.arange(0, 32)
+        request = tl.load(requests + row)
+        position = tl.load(positions + row)
+        safe = tl.minimum(tl.maximum(request, 0), 7)
+        end = tl.load(ends + safe)
+        live = (request >= 0) & (request < 8) & tl.load(active + safe) & (position >= 0)
+        live = live & (position >= end - window) & (position < end) & (position < limit)
+        position = tl.minimum(tl.maximum(position, 0), limit - 1)
+        tl.store(req_out + row, safe.to(tl.int64))
+        tl.store(pos_out + row, position.to(tl.int64))
+        tl.store(raw_out + row, tl.where(live, position, -1).to(tl.int64))
+        tl.store(valid_out + row, live)
+        tl.store(count, tl.sum(live.to(tl.int32), 0).to(tl.int64))
+
+    return triton, metadata_kernel, counters_kernel, stage_private_draft_rows
 
 
 def update_decode_metadata(source, metadata, live_count, *, last_position, plus_one):
-    triton, kernel, _ = _decode_kernels()
+    triton, kernel, _, _ = _decode_kernels()
     block = 32
     kernel[(triton.cdiv(metadata.batch_size, block),)](
         source, metadata.request_ids, live_count, metadata.positions, metadata.valid_mask,
@@ -59,11 +79,41 @@ def update_decode_metadata(source, metadata, live_count, *, last_position, plus_
 
 
 def increment_decode_counters(layers, moe, engram, engram_mask):
-    triton, _, kernel = _decode_kernels()
+    triton, _, kernel, _ = _decode_kernels()
     block = 32
     kernel[(triton.cdiv(layers.numel(), block),)](
         layers, moe, engram, engram_mask, layers.numel(), block, num_warps=1,
     )
+
+
+def try_stage_private_draft_rows(requests, positions, ends, active, *, window, max_seq_len):
+    """Stage rows emitted by the private B8/Q4 request mapper in one launch."""
+    if os.environ.get("RTP_V41_PPU_FUSED_DSPARK_COMMIT_METADATA") != "1":
+        return None
+    from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+    if not requests.is_cuda or not is_ppu():
+        return None
+    layout = (
+        (requests, (32,), torch.int32), (positions, (32,), torch.int32),
+        (ends, (8,), torch.int32), (active, (8,), torch.bool),
+    )
+    if any(
+        tensor.shape != shape or tensor.dtype != dtype
+        or tensor.device != requests.device or not tensor.is_contiguous()
+        for tensor, shape, dtype in layout
+    ):
+        return None
+    try:
+        _, _, _, kernel = _decode_kernels()
+    except ImportError:
+        return None
+    req, pos, raw = (torch.empty_like(positions, dtype=torch.int64) for _ in range(3))
+    valid = torch.empty_like(positions, dtype=torch.bool)
+    count = torch.empty((), device=positions.device, dtype=torch.int64)
+    kernel[(1,)](requests, positions, ends, active, req, pos, raw, valid, count,
+                 window, max_seq_len, num_warps=1)
+    return req, pos, raw, valid, count
 
 
 @lru_cache(maxsize=1)

@@ -5,9 +5,11 @@ documented constants), so the dequantized workspace rows and index layout are
 checked end-to-end without calling the codec under test for the expectations.
 """
 
+import os
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -16,6 +18,80 @@ from rtp_llm.models_py.modules.dsv41.ppu import _quant, attention, indexer, kv_c
 KV_DIM = 512
 WINDOW = 128
 COMBINED_WIDTH = 640
+
+
+class BF16SparseProviderTest(unittest.TestCase):
+    def setUp(self):
+        self.cache = attention._BF16_SPARSE_PROVIDERS.copy()
+        attention._BF16_SPARSE_PROVIDERS.clear()
+        self.receipt = "/tmp/explicit-bf16-receipt.json"
+        self.env = patch.dict(os.environ, {attention.BF16_SPARSE_PROVIDER_RECEIPT: self.receipt})
+        self.env.start()
+        self.native = Mock()
+        self.loader = Mock(return_value=SimpleNamespace(native=self.native))
+        self.modules = patch.dict(
+            sys.modules,
+            {"rtp_llm.models_py.modules.dsv41.ppu.local_prefill_attention_provider":
+             SimpleNamespace(load_provider=self.loader)},
+        )
+        self.modules.start()
+
+    def tearDown(self):
+        self.modules.stop()
+        self.env.stop()
+        attention._BF16_SPARSE_PROVIDERS.clear()
+        attention._BF16_SPARSE_PROVIDERS.update(self.cache)
+
+    def test_explicit_receipt_revalidates_warmed_provider(self):
+        q = torch.zeros(1, 64, KV_DIM)
+        self.assertIs(attention._bf16_sparse_native(q), self.native)
+        self.assertIs(attention._bf16_sparse_native(q), self.native)
+        self.assertEqual(self.loader.call_count, 2)
+        self.loader.assert_called_with(self.receipt)
+
+    def test_unset_receipt_keeps_default_lazy_dispatch(self):
+        with patch.dict(os.environ, {attention.BF16_SPARSE_PROVIDER_RECEIPT: ""}):
+            with patch.dict(sys.modules, {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=self.native)}):
+                self.assertIs(attention._bf16_sparse_native(torch.zeros(1)), self.native)
+        self.loader.assert_not_called()
+
+    def test_cold_capture_rejects_before_provider_import(self):
+        with patch.object(torch.cuda, "is_current_stream_capturing", return_value=True):
+            with self.assertRaisesRegex(RuntimeError, "eager warmup"):
+                attention._bf16_sparse_native(SimpleNamespace(is_cuda=True))
+        self.loader.assert_not_called()
+
+    def test_warm_capture_revalidates_same_native_binding(self):
+        attention._bf16_sparse_native(torch.zeros(1))
+        with patch.object(torch.cuda, "is_current_stream_capturing", return_value=True):
+            self.assertIs(attention._bf16_sparse_native(SimpleNamespace(is_cuda=True)), self.native)
+        self.assertEqual(self.loader.call_count, 2)
+
+    def test_replaced_native_binding_requires_recapture(self):
+        attention._bf16_sparse_native(torch.zeros(1))
+        self.loader.return_value = SimpleNamespace(native=Mock())
+        with self.assertRaisesRegex(RuntimeError, "recapture"):
+            attention._bf16_sparse_native(torch.zeros(1))
+
+    def test_receipt_failure_during_capture_propagates(self):
+        attention._bf16_sparse_native(torch.zeros(1))
+        self.loader.side_effect = ValueError("receipt mismatch")
+        with patch.object(torch.cuda, "is_current_stream_capturing", return_value=True):
+            with self.assertRaisesRegex(ValueError, "receipt mismatch"):
+                attention._bf16_sparse_native(SimpleNamespace(is_cuda=True))
+        self.native.assert_not_called()
+
+    def test_native_failure_is_terminal_without_default_retry(self):
+        self.native.side_effect = RuntimeError("native BF16 failure")
+        fallback = Mock()
+        with patch.dict(sys.modules, {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=fallback)}):
+            with self.assertRaisesRegex(RuntimeError, "native BF16 failure"):
+                attention.flash_mla_sparse_fwd_ppu(
+                    torch.zeros(1, 64, KV_DIM), torch.zeros(1, 1, KV_DIM),
+                    torch.zeros(1, 1, 128, dtype=torch.int32), 1.0,
+                )
+        self.native.assert_called_once()
+        fallback.assert_not_called()
 
 
 class ImportCleanlinessTest(unittest.TestCase):

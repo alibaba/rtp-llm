@@ -397,6 +397,8 @@ struct PyModelOutputs {
     // computed from pre-norm proposal hidden. The sampler adds the Markov term.
     // Explicit output ownership lets CUDA graph replay return current values.
     torch::Tensor dspark_confidence_hidden_logits;
+    // Produced by the native Proposal capture tail when that sampler is present.
+    torch::Tensor dspark_draft_tokens;
 
     PyModelOutputs() = default;
 

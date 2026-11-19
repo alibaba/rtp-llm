@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -76,7 +77,8 @@ public:
         position_id_len_factor_(graph_params.position_id_len_factor),
         metrics_reporter_(std::move(metrics_reporter)),
         generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
-        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id) {
+        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id),
+        dspark_proposal_sampler_(graph_params.dspark_proposal_sampler) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -187,8 +189,10 @@ public:
     void replayPrefill(int seq_len);
     int  getCurrentRealGraphSize(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
-    PyModelOutputs
-         forward(const PyModelInputs& inputs, CudaGraphState& state, const AttentionInputMetadataParams* metadata);
+    PyModelOutputs forward(const PyModelInputs&                inputs,
+                           CudaGraphState&                     state,
+                           const AttentionInputMetadataParams* metadata,
+                           const std::function<void()>&        before_replay = {});
     void initCapture() override;
 
     bool captureSessionMayBeDirty() const override {
@@ -292,6 +296,7 @@ private:
     int                                        engram_window_size_{0};
     int                                        generation_prefill_cuda_graph_max_requests_{0};
     int                                        generation_prefill_cuda_graph_pad_token_id_{0};
+    DSparkProposalGraphSampler                 dspark_proposal_sampler_;
     torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
     mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
     static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =

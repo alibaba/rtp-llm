@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from functools import lru_cache
 from types import SimpleNamespace
 
@@ -10,6 +11,11 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
+from rtp_llm.models_py.modules.dsv41.ppu.overlap_resources import (
+    OverlapResources,
+    record_stream,
+    stream_key,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.topk import (
     native_topk_op as _verify_topk_op,
     select_tokens,
@@ -25,6 +31,85 @@ _SPARSE_INDEXER_ENV = "RTP_V41_PPU_GRAPH_SPARSE_INDEXER"
 _VERIFY_FUSED_INDEXER_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER"
 _VERIFY_FUSED_TOPK_ENV = "RTP_V41_PPU_VERIFY_FUSED_INDEXER_TOPK"
 _VERIFY_COMPACT_TOPK_ENV = "RTP_V41_PPU_VERIFY_COMPACT_TOPK"
+_VERIFY_CANDIDATE_OVERLAP_ENV = "RTP_V41_PPU_VERIFY_CANDIDATE_OVERLAP"
+_VERIFY_JOURNAL_OVERLAP_ENV = "RTP_V41_PPU_VERIFY_INDEXER_JOURNAL_OVERLAP"
+_CANDIDATE_OVERLAP_PLAN = "verify_candidate_overlap_plan"
+_CANDIDATE_OVERLAP_PENDING = "verify_candidate_overlap_pending"
+_JOURNAL_OVERLAP_PLAN = "verify_indexer_journal_overlap_plan"
+
+
+@contextmanager
+def verify_candidate_overlap(impl, shared):
+    """Bind the side stream used by dense Verify Indexer scoring and selection."""
+    candidate_overlap = os.environ.get(_VERIFY_CANDIDATE_OVERLAP_ENV) == "1"
+    journal_overlap = os.environ.get(_VERIFY_JOURNAL_OVERLAP_ENV) == "1"
+    if (
+        not (candidate_overlap or journal_overlap)
+        or not _quant.is_ppu()
+        or getattr(impl, "mode", None) != "dense"
+        or (impl.batch_size, impl.width) != (8, 4)
+        or not impl.visible_indexer
+        or getattr(impl, "packed_attention", None) is None
+    ):
+        yield
+        return
+    capturing = torch.cuda.is_current_stream_capturing()
+    warmup = not capturing and os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+    if not (capturing or warmup):
+        yield
+        return
+
+    caller = torch.cuda.current_stream(impl.device)
+    key = stream_key(caller)
+    plans = getattr(impl, "_verify_candidate_overlap_plans", None)
+    plan = None if plans is None else plans.get(key)
+    if plan is None and warmup:
+        plan = OverlapResources(impl.device, name="Verify Indexer")
+        plan.bind_caller(caller)
+        if plans is None:
+            plans = impl._verify_candidate_overlap_plans = {}
+        plans[key] = plan
+    if plan is None:
+        yield
+        return
+
+    if candidate_overlap:
+        shared[_CANDIDATE_OVERLAP_PLAN] = plan
+    if journal_overlap:
+        shared[_JOURNAL_OVERLAP_PLAN] = plan
+    try:
+        yield
+    finally:
+        # A capture with no consumer, or an exception during its forward,
+        # still needs to join the submitted work before closing the Graph.
+        _wait_verify_candidates(shared)
+        shared.pop(_CANDIDATE_OVERLAP_PLAN, None)
+        shared.pop(_JOURNAL_OVERLAP_PLAN, None)
+
+
+def _wait_verify_candidates(shared):
+    pending = shared.pop(_CANDIDATE_OVERLAP_PENDING, None)
+    if pending is not None:
+        pending.wait_done(pending.caller)
+
+
+def _publish_verify_candidates(tiles, visible, block_size, topk_blocks, shared):
+    plan = shared.get(_CANDIDATE_OVERLAP_PLAN)
+    if plan is None:
+        return _candidate_tiles(tiles, visible, block_size, topk_blocks)
+
+    with plan.submission():
+        plan.fork(plan.caller)
+        shared[_CANDIDATE_OVERLAP_PENDING] = plan
+        try:
+            with torch.cuda.stream(plan.side_stream):
+                record_stream(tiles, plan.side_stream)
+                record_stream(visible, plan.side_stream)
+                result = _candidate_tiles(tiles, visible, block_size, topk_blocks)
+                record_stream(result, plan.caller)
+        finally:
+            plan.record_done()
+        return result
 
 
 def indexer_scores(
@@ -1101,6 +1186,67 @@ def _select_verify_compact_topk(
     return output
 
 
+@contextmanager
+def _verify_tentative_scores(
+    query, weights, *, cache, source_layer, ratio, positions, valid_mask,
+    first, tail_width, quantized_query, reducer, shared,
+):
+    """Fork the read-only journal scorer before the committed-prefix provider."""
+    from rtp_llm.models_py.modules.dsv41.ppu.graph_attention import score_indexer_entries
+
+    plan = None if shared is None else shared.get(_JOURNAL_OVERLAP_PLAN)
+    if plan is not None:
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
+
+        if type(cache) is not VerifyGraphJournal or _CANDIDATE_OVERLAP_PENDING in shared:
+            plan = None
+
+    def make_entries():
+        offsets = torch.arange(tail_width, dtype=torch.int64, device=query.device)
+        return first[:, None] + offsets
+
+    def score(entries):
+        return score_indexer_entries(
+            query, weights, cache=cache, source_layer=source_layer, ratio=ratio,
+            positions=positions, valid_mask=valid_mask, entries=entries,
+            quantized_query=quantized_query, score_reducer=reducer,
+        )
+
+    if plan is None:
+        yield lambda: score(make_entries())
+        return
+
+    entries_key = ("verify_indexer_tail_entries", id(cache), ratio, tail_width)
+    entries = shared.get(entries_key)
+    if entries is None:
+        entries = shared[entries_key] = make_entries()
+
+    key = source_layer, _INDEXER_POOL
+    native = cache.native_cache
+    table_tag = native._table_tag(*key)
+    journal_inputs = (
+        cache.row_tables[table_tag], native.pool(*key), cache.payloads[key],
+        cache.generations[key], cache.requests, cache.starts, cache.prefixes, cache.valid,
+    )
+
+    def score_on_side():
+        with torch.cuda.stream(plan.side_stream):
+            record_stream(
+                (query, weights, positions, valid_mask, entries, quantized_query, journal_inputs),
+                plan.side_stream,
+            )
+            tentative = score(entries)
+            record_stream(tentative, plan.caller)
+            return tentative
+
+    with plan.submission():
+        plan.fork(plan.caller)
+        try:
+            yield score_on_side
+        finally:
+            plan.join(plan.caller)
+
+
 def _select_verify_sparse_indices(
     query, head_weights, *, cache, source_layer, ratio, positions, valid_mask,
     topk, candidate_block_size, candidates, candidate_active, candidate_inactive_limit, shared,
@@ -1112,8 +1258,6 @@ def _select_verify_sparse_indices(
         or os.environ.get(_SPARSE_INDEXER_ENV, "1") == "0"
     ):
         return None
-    from rtp_llm.models_py.modules.dsv41.ppu.graph_attention import score_indexer_entries
-
     requests = cache.prefixes.numel()
     if requests == 0 or query.shape[0] % requests:
         return None
@@ -1136,19 +1280,19 @@ def _select_verify_sparse_indices(
     )
     quantized_query = _quant.quantize_indexer_q(query)
     weights = head_weights.to(torch.bfloat16).contiguous()
-    scored = _sparse_candidate_scores(
-        query, weights, paged_cache, source_layer, ratio, first, valid_mask,
-        topk, candidate_block_size, candidates, candidate_active, candidate_inactive_limit,
-        shared, quantized_query, max_compact_width=_MAX_SPARSE_BLOCKS * candidate_block_size,
-    )
-    if scored is None:
-        return None
-    offsets = torch.arange(tail_width, dtype=torch.int64, device=query.device)
-    tentative = score_indexer_entries(
+    with _verify_tentative_scores(
         query, weights, cache=cache, source_layer=source_layer, ratio=ratio,
-        positions=positions, valid_mask=valid_mask, entries=first[:, None] + offsets,
-        quantized_query=quantized_query, score_reducer=verify_indexer_head_reduce,
-    )
+        positions=positions, valid_mask=valid_mask, first=first, tail_width=tail_width,
+        quantized_query=quantized_query, reducer=verify_indexer_head_reduce, shared=shared,
+    ) as score_tentative:
+        scored = _sparse_candidate_scores(
+            query, weights, paged_cache, source_layer, ratio, first, valid_mask,
+            topk, candidate_block_size, candidates, candidate_active, candidate_inactive_limit,
+            shared, quantized_query, max_compact_width=_MAX_SPARSE_BLOCKS * candidate_block_size,
+        )
+        if scored is None:
+            return None
+        tentative = score_tentative()
     allowed = _cached_candidate_flags(candidates, scored.capacity, candidate_block_size, shared)
     return _select_verify_compact_topk(
         scored, first, tentative, visible, valid_mask, allowed, candidate_active, topk,
@@ -1326,8 +1470,6 @@ def _verify_score_tiles(
     candidate_inactive_limit=None, topk=None,
 ):
     """Score the paged prefix and write the journal scores into their native tiles."""
-    from rtp_llm.models_py.modules.dsv41.ppu.graph_attention import score_indexer_entries
-
     native = cache.native_cache
     prefix_key = ("verify_indexer_prefix", id(cache), ratio)
     if shared is not None and prefix_key in shared:
@@ -1354,31 +1496,31 @@ def _verify_score_tiles(
         quantized_query = _quant.quantize_indexer_q(query)
         head_weights = head_weights.to(torch.bfloat16).contiguous()
         reducer = verify_indexer_head_reduce
-    tiles = None
-    if (fused and candidates is not None and candidate_inactive_limit is not None
-            and topk in (512, 1024, 2048)
-            and os.environ.get(_SPARSE_INDEXER_ENV, "1") != "0"):
-        tiles = _verify_sparse_score_tiles(
-            query, head_weights, cache=paged_cache, source_layer=source_layer, ratio=ratio,
-            visible=first_tentative, valid_mask=valid_mask, topk=topk,
-            candidate_block_size=candidate_block_size, candidates=candidates,
-            candidate_active=candidate_active, inactive_limit=candidate_inactive_limit,
-            shared=shared, quantized_query=quantized_query,
-        )
-    if tiles is None:
-        tiles = list(_indexer_score_tiles(
-            query, head_weights, cache=paged_cache, source_layer=source_layer, ratio=ratio,
-            visible=first_tentative, valid_mask=valid_mask, fused_tiles=fused,
-            candidates=candidates, candidate_active=candidate_active,
-            candidate_block_size=candidate_block_size, candidate_flags_cache=shared,
-            quantized_query=quantized_query, tile_metadata_cache=shared,
-        ))
-    offsets = torch.arange(tail_width, dtype=torch.int64, device=query.device)
-    tentative = score_indexer_entries(
+    with _verify_tentative_scores(
         query, head_weights, cache=cache, source_layer=source_layer, ratio=ratio,
-        positions=positions, valid_mask=valid_mask, entries=first_tentative[:, None] + offsets,
-        quantized_query=quantized_query, score_reducer=reducer,
-    )
+        positions=positions, valid_mask=valid_mask, first=first_tentative, tail_width=tail_width,
+        quantized_query=quantized_query, reducer=reducer, shared=shared,
+    ) as score_tentative:
+        tiles = None
+        if (fused and candidates is not None and candidate_inactive_limit is not None
+                and topk in (512, 1024, 2048)
+                and os.environ.get(_SPARSE_INDEXER_ENV, "1") != "0"):
+            tiles = _verify_sparse_score_tiles(
+                query, head_weights, cache=paged_cache, source_layer=source_layer, ratio=ratio,
+                visible=first_tentative, valid_mask=valid_mask, topk=topk,
+                candidate_block_size=candidate_block_size, candidates=candidates,
+                candidate_active=candidate_active, inactive_limit=candidate_inactive_limit,
+                shared=shared, quantized_query=quantized_query,
+            )
+        if tiles is None:
+            tiles = list(_indexer_score_tiles(
+                query, head_weights, cache=paged_cache, source_layer=source_layer, ratio=ratio,
+                visible=first_tentative, valid_mask=valid_mask, fused_tiles=fused,
+                candidates=candidates, candidate_active=candidate_active,
+                candidate_block_size=candidate_block_size, candidate_flags_cache=shared,
+                quantized_query=quantized_query, tile_metadata_cache=shared,
+            ))
+        tentative = score_tentative()
     if fused:
         # Committed tile writes already set every column at and beyond the
         # first tentative key to -inf. Only the journal's short tail can
@@ -1425,6 +1567,9 @@ def select_verify_indices(
     candidate_active=None, shared, candidate_inactive_limit=None,
 ):
     """Select native TopK from the journal-aware Verify score domain."""
+    if candidates is not None:
+        # Join before either the fast consumer or its exact fallback reads the IDs.
+        _wait_verify_candidates(shared)
     if (
         not query.is_cuda or topk not in (512, 1024, 2048)
         or ratio not in (1, 2)
@@ -1457,8 +1602,8 @@ def select_verify_indices(
     if candidate_topk_blocks > 0:
         # Keep the legacy candidate torch.topk order on equal block scores.
         candidate_tiles = [(logits, lengths, False) for logits, lengths, _ in tiles]
-        published = _candidate_tiles(
-            candidate_tiles, visible, candidate_block_size, candidate_topk_blocks,
+        published = _publish_verify_candidates(
+            candidate_tiles, visible, candidate_block_size, candidate_topk_blocks, shared,
         )
     # shared is required here, so _verify_score_tiles used the explicit
     # BF16-rounding Verify reducer for every journal score.

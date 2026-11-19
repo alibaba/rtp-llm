@@ -5,10 +5,12 @@ This plan owns only stream ordering and its capture-external resources.
 It does not establish that concurrent MegaMoE makes progress on WORLD8.
 """
 
+import os
 import threading
 
 import torch
 
+from rtp_llm.config.v41_runtime import env_bool
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
     enabled as optimization_enabled,
@@ -61,6 +63,7 @@ class VerifyMoEOverlap:
             for layer in range(target_layers)
         }
         self._resources = OverlapResources(self.device, name="Verify MoE overlap")
+        self._routed_on_caller = env_bool(os.environ, "RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER")
         self._lock = self._resources.lock
         self._python_calls = self._forks = self._joins = 0
         self._initial_signature = self.storage_signature()
@@ -193,6 +196,13 @@ class VerifyMoEOverlap:
         return combine_routed_and_shared(routed, shared).reshape(shape)
 
     def _enqueue_branches(self, owner, flat, state, expert_load, caller):
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import enabled, compact_routes_enabled
+
+        compact = compact_routes_enabled(self.engine)
+        route_options = {
+            "routed_count": state.routed_rows_device[owner.layer_id],
+            "route_valid_mask": state.metadata.valid_mask,
+        } if compact else {}
         forked, failure = False, None
         try:
             self._python_calls += 1
@@ -202,13 +212,19 @@ class VerifyMoEOverlap:
             # Register the side read before either callback can raise. Stream
             # dependencies order execution; allocator ownership is separate.
             record_stream(flat, self.side_stream)
-            # Match SGLang's enqueue order: shared work can start before the
-            # full-residency routed pipeline is submitted on the side stream.
-            shared = owner.shared_expert(flat, allow_quant=False)
-            with torch.cuda.stream(self.side_stream):
+            # Keep the fork/join, with the EP branch optionally on the
+            # caller's execution path and the local shared expert on the side.
+            if self._routed_on_caller:
+                shared_stream, routed_stream = self.side_stream, caller
+            else:
+                shared_stream, routed_stream = caller, self.side_stream
+            with torch.cuda.stream(shared_stream):
+                shared = owner.shared_expert(flat, allow_quant=False)
+            with torch.cuda.stream(routed_stream):
                 ids, weights = owner.gate(
                     flat, graph_routes=(state.metadata.valid_mask, state.routed_rows_device[owner.layer_id]),
                     allow_top3_graph_routes=False,
+                    **({"compact_graph_routes": True} if compact else {}),
                 )
                 # Preserve the original gate-success counter boundary: a
                 # router exception must not count an attempted MegaMoE call.
@@ -216,11 +232,11 @@ class VerifyMoEOverlap:
                     state.moe_calls[owner.layer_id].add_(1)
                 routed = self.engine.forward_shared_graph(
                     flat, ids, weights, layer_id=owner.layer_id, expert_load=expert_load,
-                    fused_expert_load=False,
+                    fused_expert_load=enabled("STATS"),
+                    **route_options,
                 )
-                # The result is allocated on side but its addition or tuple
-                # consumer runs on caller, potentially after this frame dies.
-                record_stream(routed, caller)
+            # The side result is consumed on caller after the join.
+            record_stream(shared if self._routed_on_caller else routed, caller)
         except BaseException as error:
             failure = error
             raise

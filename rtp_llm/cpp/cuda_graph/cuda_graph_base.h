@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 namespace rtp_llm {
@@ -37,6 +38,8 @@ struct CudaGraphState {
     int                              captured_backend_batch_size{0};
     GenerationPrefillCudaGraphStatus generation_prefill_status{GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
 };
+
+using DSparkProposalGraphSampler = std::function<torch::Tensor(const torch::Tensor&, const torch::Tensor&)>;
 
 struct GraphParams {
     bool             enable_cuda_graph            = false;
@@ -79,6 +82,7 @@ struct GraphParams {
 
     // Shared by eager forwards and every graph bucket; owned by the monitor.
     torch::Tensor expert_token_counts;
+    DSparkProposalGraphSampler dspark_proposal_sampler;
 };
 
 class GraphBase {

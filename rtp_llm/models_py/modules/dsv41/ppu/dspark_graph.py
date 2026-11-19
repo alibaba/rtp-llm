@@ -618,9 +618,12 @@ class _PrivateDraftCommitReceipt:
         if any(last_accepted // pool.span >= pool.table.shape[1] for pool in self.cache.pools.values()):
             raise RuntimeError("accepted private Draft KV row has no live page")
 
-    def check_joint_publication(self, bases, last_accepted):
+    def check_joint_replay(self):
         self._check_replay()
         self._check_native_bindings()
+
+    def check_joint_publication(self, bases, last_accepted):
+        self.check_joint_replay()
         self._check_capacity(bases, last_accepted)
 
     def joint_publication_inputs(self, bases, last_accepted):

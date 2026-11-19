@@ -15,6 +15,41 @@ MEGAMOE_DSPARK_ASYNC_FLAGS = (
     "RTP_LLM_MTP_ASYNC_PREPARE",
     "RTP_LLM_MTP_ASYNC_DEVICE_STATE",
 )
+DSPARK_OVERLAP_ENV = "RTP_V41_PPU_DSPARK_OVERLAP_SCHEDULER"
+DSPARK_SIMULATED_ACCEPT_ENV = "RTP_V41_PPU_DSPARK_SIMULATED_ACCEPT_LEN"
+DSPARK_OVERLAP_FLAGS = {
+    "RTP_LLM_STREAM_ASYNC": "1",
+    "RTP_LLM_DEVICE_INPUT": "1",
+    "RTP_LLM_DROP_BROAD_SYNC": "1",
+    "RTP_LLM_MTP_ASYNC_PREPARE": "0",
+    "RTP_LLM_MTP_ASYNC_DEVICE_STATE": "0",
+    "RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV": "1",
+    "RTP_V41_PPU_DSPARK_JOINT_KV_PUBLISH": "1",
+    "RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE": "1",
+}
+DSPARK_DECODE_DEFAULTS = {
+    "ENGINE_CPU_AFFINITY": "auto",
+    "RTP_V41_PPU_DSPARK_EARLY_DRAFT_COMMIT_PREPARE": "1",
+    "RTP_V41_PPU_DSPARK_EARLY_PUBLICATION_WAKE": "1",
+    "RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE": "1",
+    "RTP_V41_PPU_DSPARK_FOLD_PROPOSAL_SAMPLER": "1",
+    "RTP_V41_PPU_DSPARK_GPU_VERIFY_RECEIPT": "1",
+    "RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE": "1",
+    "RTP_V41_PPU_DSPARK_PREPARE_GRAPH_BEFORE_PUBLICATION": "1",
+    "RTP_V41_PPU_DSPARK_PREPARE_JOINT_PUBLICATION": "1",
+    "RTP_V41_PPU_DSPARK_PREPARE_PROPOSAL_DURING_PUBLICATION": "1",
+    "RTP_V41_PPU_DSPARK_PROPOSAL_SAMPLER_GRAPH_LOGITS": "1",
+    "RTP_V41_PPU_DSPARK_PUBLISH_ON_ENGINE": "1",
+    "RTP_V41_PPU_DSPARK_REUSE_GREEDY_TEMPERATURE": "1",
+    "RTP_V41_PPU_FUSED_DSPARK_COMMIT_METADATA": "1",
+    "RTP_V41_PPU_FUSED_DSPARK_CONTEXT_ROWS": "1",
+    "RTP_V41_PPU_VERIFY_CANDIDATE_OVERLAP": "1",
+    "RTP_V41_PPU_VERIFY_DEFERRED_STAGE": "1",
+    "RTP_V41_PPU_VERIFY_DIRECT_JOURNAL": "1",
+    "RTP_V41_PPU_VERIFY_INDEXER_JOURNAL_OVERLAP": "1",
+    "RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER": "1",
+    "RTP_V41_PPU_VERIFY_SHARED_MLA_SCHEDULE": "1",
+}
 
 
 def enum_name(value) -> str:
@@ -141,11 +176,22 @@ class V41RuntimeConfig:
             errors.append("PPU Graph requires DP8 DECODE with MegaMoE/W4A4")
         if self.speculative not in ("NONE", "DSPARK"):
             errors.append("PPU speculative execution supports DSpark or NONE")
-        if self.speculative == "DSPARK" and self.cuda_graph and self.moe_backend == "megamoe":
-            if self.dspark_verify_mode != "dense" or (
-                env is not None
-                and any(env_bool(env, flag) for flag in MEGAMOE_DSPARK_ASYNC_FLAGS)
-            ):
+        megamoe_dspark = self.speculative == "DSPARK" and self.cuda_graph and self.moe_backend == "megamoe"
+        overlap = env is not None and env_bool(env, DSPARK_OVERLAP_ENV)
+        simulated_accept = env.get(DSPARK_SIMULATED_ACCEPT_ENV, "0") if env is not None else "0"
+        if simulated_accept not in ("0", "3.25") or (simulated_accept == "3.25" and not overlap):
+            errors.append("DSpARK benchmark acceptance requires scheduler overlap and a simulated length of 3.25")
+        if overlap and (
+            not megamoe_dspark or self.role != "DECODE" or self.physical_tp != 1
+            or self.dspark_verify_mode != "dense"
+            or env[DSPARK_OVERLAP_ENV] != "1"
+            or any(env.get(key, "0") != value for key, value in DSPARK_OVERLAP_FLAGS.items())
+        ):
+            errors.append("PPU DSpARK scheduler overlap requires the TP1 dense MegaMoE decode Graph with joint KV publication")
+        if megamoe_dspark and not overlap:
+            if self.dspark_verify_mode != "dense" or (env is not None and any(
+                env_bool(env, flag) for flag in MEGAMOE_DSPARK_ASYNC_FLAGS
+            )):
                 errors.append("PPU MegaMoE DSpARK Graph requires synchronous dense verification")
         if self.eplb not in ("NONE", "STATS", "EPLB", "ALL"):
             errors.append("EPLB mode must be NONE, STATS, EPLB or ALL")

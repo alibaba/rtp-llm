@@ -19,6 +19,7 @@ GRAPH_PACKED_ATTENTION_ENV = "RTP_V41_PPU_GRAPH_PACKED_ATTENTION"
 VERIFY_PACKED_ATTENTION_ENV = "RTP_V41_PPU_VERIFY_PACKED_ATTENTION"
 GRAPH_VISIBLE_INDEXER_ENV = "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER"
 GRAPH_SHARED_MLA_METADATA_ENV = "RTP_V41_PPU_GRAPH_SHARED_MLA_METADATA"
+VERIFY_DIRECT_JOURNAL_ENV = "RTP_V41_PPU_VERIFY_DIRECT_JOURNAL"
 _PACKED_WIDTHS = {"swa_kv": 528, "global_kv_1": 288, "global_kv_2": 288}
 
 
@@ -91,12 +92,28 @@ def _tail_copy_kernels():
         else:
             tl.store(backup + offset, tl.load(page + offset, offset < size, other=0), offset < size)
 
-    return triton, backup_and_stage, restore_tail, stage_tail, copy_reserved_pages
+    @triton.jit
+    def exchange_reserved_pages(pages, backups, payloads, sizes, RESTORE: tl.constexpr, BLOCK: tl.constexpr):
+        page_id = tl.program_id(0)
+        offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        live = offset < tl.load(sizes + page_id)
+        page = tl.load(pages + page_id).to(tl.pointer_type(tl.uint8))
+        backup = tl.load(backups + page_id).to(tl.pointer_type(tl.uint8))
+        payload = tl.load(payloads + page_id).to(tl.pointer_type(tl.uint8))
+        old = tl.load(page + offset, live, 0)
+        if RESTORE:
+            tl.store(payload + offset, old, live)
+            tl.store(page + offset, tl.load(backup + offset, live, 0), live)
+        else:
+            tl.store(backup + offset, old, live)
+            tl.store(page + offset, tl.load(payload + offset, live, 0), live)
+
+    return triton, backup_and_stage, restore_tail, stage_tail, copy_reserved_pages, exchange_reserved_pages
 
 
 @contextmanager
 def _fused_tail_copies(pages, payloads):
-    triton, stage, restore, _, _ = _tail_copy_kernels()
+    triton, stage, restore, _, _, _ = _tail_copy_kernels()
     backups = [torch.empty_like(page) for page in pages]
     paired = len(pages) == 2
     page1, payload1, backup1 = (pages[1], payloads[1], backups[1]) if paired else (None, None, None)
@@ -129,6 +146,8 @@ def _packed_metadata_kernel():
         SPAN: tl.constexpr, ENTRIES: tl.constexpr, WIDTH: tl.constexpr,
         RATIO: tl.constexpr, GLOBAL: tl.constexpr, ROWS: tl.constexpr,
         VERIFY_LAG: tl.constexpr, BLOCK: tl.constexpr,
+        STAGE_PAGE0=None, STAGE_PAYLOAD0=None, STAGE_PAGE1=None, STAGE_PAYLOAD1=None,
+        STAGE_WIDTH0: tl.constexpr = 0, STAGE_WIDTH1: tl.constexpr = 0,
     ):
         row = tl.program_id(0)
         segment = tl.program_id(1)
@@ -195,6 +214,12 @@ def _packed_metadata_kernel():
                     write_slots + row,
                     tl.where(writable, write_block * ENTRIES + position % ENTRIES, -1),
                 )
+        if STAGE_WIDTH0:
+            value0 = tl.load(STAGE_PAYLOAD0 + row * STAGE_WIDTH0 + column, column < STAGE_WIDTH0, other=0)
+            tl.store(STAGE_PAGE0 + row * STAGE_WIDTH0 + column, value0, column < STAGE_WIDTH0)
+        if STAGE_WIDTH1:
+            value1 = tl.load(STAGE_PAYLOAD1 + row * STAGE_WIDTH1 + column, column < STAGE_WIDTH1, other=0)
+            tl.store(STAGE_PAGE1 + row * STAGE_WIDTH1 + column, value1, column < STAGE_WIDTH1)
 
     return triton, packed_slots_and_lengths
 
@@ -226,6 +251,7 @@ class GraphPackedAttention:
         self.swa_domains = {}
         self._tail_transaction_active = False
         self._tail_transaction = None
+        self._direct_journal = None
         for owner, tag in cache.geometry.pool_keys():
             if tag not in _PACKED_WIDTHS:
                 continue
@@ -256,6 +282,23 @@ class GraphPackedAttention:
                     sizes=torch.tensor([p.numel() for p in pages], dtype=torch.int32, device=cache.device),
                     max_size=max(p.numel() for p in pages),
                 )
+                if optimization_env_value(VERIFY_DIRECT_JOURNAL_ENV, "0") == "1":
+                    from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
+
+                    # The B32 publication descriptor proves that the full
+                    # native pool ranges do not alias (not just block zero).
+                    if (
+                        type(journal) is VerifyGraphJournal
+                        and journal._batched_publication is not None
+                    ):
+                        private = journal.payloads
+                        self._direct_journal = SimpleNamespace(
+                            private=private,
+                            mapped={**private, **dict(zip(self.views, pages))},
+                            payload_ptrs=torch.tensor(
+                                [p.data_ptr() for p in payloads], dtype=torch.int64, device=cache.device,
+                            ),
+                        )
 
     @contextmanager
     def verify_tail_transaction(self):
@@ -266,21 +309,34 @@ class GraphPackedAttention:
             return
         if self._tail_transaction_active:
             raise RuntimeError("packed Verify journal transaction is already active")
-        triton, _, _, _, copy = _tail_copy_kernels()
+        triton, _, _, _, copy, exchange = _tail_copy_kernels()
         grid = (len(transaction.pages), triton.cdiv(transaction.max_size, 1024))
-        copy[grid](transaction.page_ptrs, transaction.backup_ptrs, transaction.sizes, False, 1024)
+        direct = getattr(self, "_direct_journal", None)
+        if direct is None:
+            copy[grid](transaction.page_ptrs, transaction.backup_ptrs, transaction.sizes, False, 1024)
+        else:
+            if self.journal.payloads is not direct.private:
+                raise RuntimeError("Verify journal payload ownership changed")
+            exchange[grid](transaction.page_ptrs, transaction.backup_ptrs,
+                           direct.payload_ptrs, transaction.sizes, False, 1024)
+            self.journal.payloads = direct.mapped
         self._tail_transaction_active = True
         try:
             yield
         finally:
             try:
-                copy[grid](transaction.page_ptrs, transaction.backup_ptrs, transaction.sizes, True, 1024)
+                if direct is None:
+                    copy[grid](transaction.page_ptrs, transaction.backup_ptrs, transaction.sizes, True, 1024)
+                else:
+                    self.journal.payloads = direct.private
+                    exchange[grid](transaction.page_ptrs, transaction.backup_ptrs,
+                                   direct.payload_ptrs, transaction.sizes, True, 1024)
             finally:
                 self._tail_transaction_active = False
 
     def _native_indices(
         self, owner, tag, positions, valid, width, *, selected=None, ratio=1,
-        write_slots=None, shared=None,
+        write_slots=None, shared=None, stage=None, verify_generations=None,
     ):
         cache = self.cache
         if (
@@ -327,33 +383,47 @@ class GraphPackedAttention:
             if shared is not None:
                 shared[prefix] = lengths
         triton, kernel = _packed_metadata_kernel()
-        kernel[(rows, triton.cdiv(width, 128))](
+        block = 1024 if stage is not None else 128
+        options = {}
+        if stage is not None:
+            pages, payloads = stage
+            if not self._tail_transaction_active or not _can_fuse_tail_copies(pages, payloads):
+                raise RuntimeError("fused Verify staging requires an active disjoint journal transaction")
+            options = dict(STAGE_PAGE0=pages[0], STAGE_PAYLOAD0=payloads[0],
+                           STAGE_WIDTH0=pages[0].shape[1])
+            if len(pages) == 2:
+                options.update(STAGE_PAGE1=pages[1], STAGE_PAYLOAD1=payloads[1],
+                               STAGE_WIDTH1=pages[1].shape[1])
+        kernel[(rows, triton.cdiv(width, block))](
             positions, valid, selected, table, slots, length_output, write_slots,
             None if journal is None else journal.requests,
             None if journal is None else journal.starts,
             None if journal is None else journal.prefixes,
-            None if journal is None else journal.generations[owner, tag],
+            (None if journal is None else journal.generations[owner, tag])
+            if verify_generations is None else verify_generations,
             positions.stride(0), valid.stride(0),
             0 if selected is None else selected.stride(0),
             0 if selected is None else selected.stride(1),
             table.stride(0), table.stride(1), table.shape[1],
             cache.pool(owner, tag).shape[0], cache.spans[domain], cache.entries[domain],
             width, ratio, selected is not None, rows, int(selected is not None and ratio == 2),
-            128, num_warps=4,
+            block, num_warps=4, **options,
         )
         return slots, lengths
 
-    def _swa_metadata(self, layer_id, positions, valid, shared):
+    def _swa_metadata(self, layer_id, positions, valid, shared, *, stage=None, verify_slots=None):
         journal = self.journal
         key = (
             "packed_swa", id(positions), id(valid), self.swa_domains[layer_id],
-            None if journal is None else layer_id,
+            layer_id if journal is not None and verify_slots is None else None,
+            id(verify_slots) if verify_slots is not None else None,
         )
-        if key not in shared:
+        if key not in shared or stage is not None:
             width = self.offsets.numel()
             writes = None if journal is not None else torch.empty_like(positions, dtype=torch.int64)
             indices = self._native_indices(
                 layer_id, "swa_kv", positions, valid, width, write_slots=writes, shared=shared,
+                stage=stage, verify_generations=verify_slots,
             )
             if indices is None:
                 if journal is not None:
@@ -370,8 +440,10 @@ class GraphPackedAttention:
             shared[key] = (*indices, writes)
         return shared[key]
 
-    def _swa_indices(self, layer_id, positions, valid, shared):
-        slots, lengths, _ = self._swa_metadata(layer_id, positions, valid, shared)
+    def _swa_indices(self, layer_id, positions, valid, shared, *, stage=None, verify_slots=None):
+        slots, lengths, _ = self._swa_metadata(
+            layer_id, positions, valid, shared, stage=stage, verify_slots=verify_slots,
+        )
         return slots, lengths
 
     def swa_write_slots(self, layer_id, positions, valid, shared):
@@ -397,8 +469,11 @@ class GraphPackedAttention:
         return shared[key]
 
     @contextmanager
-    def _stage_verify_tail(self, keys):
+    def _stage_verify_tail(self, keys, *, already_staged=False):
         if self.journal is None:
+            yield
+            return
+        if getattr(self, "_direct_journal", None) is not None and self._tail_transaction_active:
             yield
             return
         # The framework never allocates block 0 to a live request. The
@@ -409,7 +484,10 @@ class GraphPackedAttention:
         if getattr(self, "_tail_transaction_active", False):
             if not _can_fuse_tail_copies(pages, payloads):
                 raise RuntimeError("packed Verify journal storage changed inside transaction")
-            triton, _, _, stage, _ = _tail_copy_kernels()
+            if already_staged:
+                yield
+                return
+            triton, _, _, stage, _, _ = _tail_copy_kernels()
             size0 = pages[0].numel()
             size1 = pages[1].numel() if len(pages) == 2 else 0
             stage[(len(pages), triton.cdiv(max(size0, size1), 1024))](
@@ -432,9 +510,8 @@ class GraphPackedAttention:
                 page.copy_(backup)
 
     def forward(self, attn, q, selected, metadata, shared, *, mask_output=True, share_scheduler=False,
-                mega=None, mega_phase="decode"):
+                mega=None, mega_phase="decode", verify_slots=None):
         positions, valid = metadata.positions, metadata.valid_mask
-        swa_indices, swa_lengths = self._swa_indices(attn.layer_id, positions, valid, shared)
         keys = [(attn.layer_id, "swa_kv")]
         global_view = global_indices = global_lengths = None
         if selected is not None:
@@ -442,6 +519,23 @@ class GraphPackedAttention:
             tag = "global_kv_2" if ratio == 2 else "global_kv_1"
             keys.append((source, tag))
             global_view = self.views[source, tag]
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import enabled as fusion_enabled
+
+        stage = None
+        active = getattr(self, "_tail_transaction_active", False)
+        direct = active and getattr(self, "_direct_journal", None) is not None
+        if fusion_enabled("JOURNAL") and active and not direct:
+            pages = [self.views[key][0, :self.journal.rows, 0] for key in keys]
+            payloads = [self.journal.payloads[key] for key in keys]
+            stage = pages, payloads
+        if stage is None:
+            swa_indices, swa_lengths = self._swa_indices(
+                attn.layer_id, positions, valid, shared, **({"verify_slots": verify_slots}
+                if direct and verify_slots is not None else {}),
+            )
+        else:
+            swa_indices, swa_lengths = self._swa_indices(attn.layer_id, positions, valid, shared, stage=stage)
+        if selected is not None:
             global_indices, global_lengths = self._global_indices(
                 source, attn.index_source_layer_id, tag, ratio, selected,
                 positions, valid, shared,
@@ -477,12 +571,12 @@ class GraphPackedAttention:
             from rtp_llm.models_py.modules.dsv41.ppu.mega_attention import PPUMegaAttention
 
             options = {"shared": scheduler_cache} if type(mega) is PPUMegaAttention else {}
-            with self._stage_verify_tail(keys):
+            with self._stage_verify_tail(keys, **({"already_staged": True} if stage is not None else {})):
                 return mega.decode(
                     q, plan, positions, packed_q=True,
                     mask_output=mask_output, phase=mega_phase, **options,
                 )
-        with self._stage_verify_tail(keys):
+        with self._stage_verify_tail(keys, **({"already_staged": True} if stage is not None else {})):
             return packed_decode(
                 q, plan, softmax_scale=attn.geometry.sm_scale(), attn_sink=attn.attn_sink,
                 mask_output=mask_output, scheduler_cache=scheduler_cache,

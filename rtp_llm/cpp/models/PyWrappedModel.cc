@@ -727,7 +727,8 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                                                       const GptModelInputs& inputs,
                                                       bool                  skip_final_layernorm,
                                                       size_t                num_valid_tokens,
-                                                      torch::Tensor         graph_logits) {
+                                                      torch::Tensor         graph_logits,
+                                                      bool                  identity_lm_rows) {
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens.size(0);
     return forwardPostLayers(hidden_states,
@@ -739,7 +740,8 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              inputs,
                              torch::Tensor(),
                              skip_final_layernorm,
-                             graph_logits);
+                             graph_logits,
+                             identity_lm_rows);
 }
 
 torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) {
@@ -1189,7 +1191,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     return forwardImpl(inputs, /*private_draft_stage=*/false);
 }
 
-GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool private_draft_stage) {
+#if USE_PPU
+GptModelOutputs PyWrappedModel::forwardProposalAfterInputPreparation(const GptModelInputs&        inputs,
+                                                                    const std::function<void()>& wait_for_kv,
+                                                                    bool                        identity_lm_rows,
+                                                                    bool                        use_captured_sampler) {
+    RTP_LLM_CHECK(dspark_model_role_ == DSparkModelRole::PROPOSE);
+    return forwardImpl(inputs, /*private_draft_stage=*/false, wait_for_kv, identity_lm_rows, use_captured_sampler);
+}
+#endif
+
+GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs&        inputs,
+                                            bool                         private_draft_stage,
+                                            const std::function<void()>& wait_for_kv,
+                                            bool                         identity_lm_rows,
+                                            bool                         use_captured_sampler) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
 
     // Establish the cleanup guard before touching inputs: both the performance
@@ -1243,6 +1259,9 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool p
         const bool has_multimodal_features =
             inputs.multimodal_features.has_value() && !inputs.multimodal_features->empty();
         if (int(device_props_.enable_layer_micro_batch) && supports_micro_batch_ && !has_multimodal_features) {
+            if (wait_for_kv) {
+                wait_for_kv();
+            }
             return finalize_outputs(forwardMicroBatched(inputs, capture_hidden_states));
         }
         PyContextParallelParams cp_params;
@@ -1412,6 +1431,9 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool p
                     graph_state.generation_prefill_status;
         }
         if (!native_graph_work_available) {
+            if (wait_for_kv) {
+                wait_for_kv();
+            }
             if (auto* cuda_runner = dynamic_cast<CudaGraphRunner*>(graph_runner)) {
                 cuda_runner->discardPreparedAttentionInputs();
             }
@@ -1430,17 +1452,29 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool p
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
+            std::function<void()> before_replay;
+            if (wait_for_kv) {
+                before_replay = [&wait_for_kv] {
+                    // Publication runs on a worker that also enters Python.
+                    py::gil_scoped_release release;
+                    wait_for_kv();
+                };
+            }
             auto forward_graph                           = [&]() {
 #if USING_CUDA
                 if (auto* cuda_runner = dynamic_cast<CudaGraphRunner*>(graph_runner)) {
                     return cuda_runner->forward(py_model_inputs,
                                                 graph_state,
                                                 pending_attention_metadata_.cu_seqlens ? &pending_attention_metadata_ :
-                                                                                         nullptr);
+                                                                                         nullptr,
+                                                before_replay);
                 }
                 invokeBuildAttentionInputMetadata(pending_attention_metadata_,
                                                   cuda_graph::graphGetCurrentStream().stream());
 #endif
+                if (before_replay) {
+                    before_replay();
+                }
                 return graph_runner->forward(py_model_inputs, graph_state);
             };
             if (const auto index = selectDSparkGraphIndex(py_model_inputs.attention_inputs)) {
@@ -1467,6 +1501,9 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool p
             }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
+            if (wait_for_kv) {
+                wait_for_kv();
+            }
 #if USING_CUDA
             // Shape/backend eligibility is decided after building the inputs.
             // An eager fallback must materialize the same metadata first.
@@ -1524,12 +1561,22 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool p
         };
         if (dspark_model_role_ != DSparkModelRole::NONE) {
             if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
+                if (use_captured_sampler && py_model_outputs.dspark_draft_tokens.defined()) {
+                    RTP_LLM_PROFILE_SCOPE("py_model.forward(captured_dspark_proposal_sampler)");
+                    GptModelOutputs outputs;
+                    // Verify input assembly takes ownership before the next
+                    // Proposal can overwrite this capture-owned result.
+                    outputs.dspark_draft_tokens = py_model_outputs.dspark_draft_tokens;
+                    outputs.logits = py_model_outputs.logits;
+                    return finalize_outputs(std::move(outputs));
+                }
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
                 return finalize_outputs(
                     attach_mtp_target_hidden_states(
-                        callForwardPostLayers(hidden_states, inputs, true, -1, py_model_outputs.logits)));
+                        callForwardPostLayers(
+                            hidden_states, inputs, true, -1, py_model_outputs.logits, identity_lm_rows)));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -1691,7 +1738,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   const GptModelInputs& inputs,
                                                   torch::Tensor         merged_eagle3_hidden,
                                                   bool                  skip_final_layernorm,
-                                                  torch::Tensor         graph_logits) {
+                                                  torch::Tensor         graph_logits,
+                                                  bool                  identity_lm_rows) {
     DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayers");
     if (enable_sp && device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(sp_all_gather)");
@@ -1773,13 +1821,21 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
         printTorchTensorData(lm_output_indexes, "lm_output_indexes");
 
-        buffer_holder_.hold_host(lm_output_indexes);
-        auto lm_output_indexes_device = lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true);
-
+        const bool select_rows = has_context_request && !need_all_logits;
+        const bool full_graph_rows = identity_lm_rows && graph_logits.defined() && select_rows
+                                     && hidden.is_contiguous() && lm_output_indexes.numel() == hidden.size(0);
+        torch::Tensor lm_indices;
         torch::Tensor last_hidden;
-        if (has_context_request && !need_all_logits) {
+        if ((select_rows || need_all_logits) && !full_graph_rows) {
+            buffer_holder_.hold_host(lm_output_indexes);
+            lm_indices = lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true).to(torch::kLong);
+        }
+        if (full_graph_rows) {
+            // Keep round ownership while the capture reuses its hidden buffer.
+            last_hidden = hidden.clone();
+        } else if (select_rows) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
-            last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+            last_hidden = torch::index_select(hidden, 0, lm_indices);
         } else {
             last_hidden = hidden;
         }
@@ -1811,9 +1867,36 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                     static_cast<int>(graph_logits.scalar_type()),
                                     static_cast<int>(dspark_model_role_));
             // Preserve the sampler's FP32 API and ownership across replays.
-            if (has_context_request && !need_all_logits) {
-                logits = torch::index_select(graph_logits, 0, lm_output_indexes_device.to(torch::kLong))
-                             .to(torch::kFloat32);
+            if (select_rows) {
+#if USE_PPU && USING_CUDA
+                static const bool use_proposal_sampler_graph = [] {
+                    const auto* value = std::getenv("RTP_V41_PPU_DSPARK_PROPOSAL_SAMPLER_GRAPH_LOGITS");
+                    return value != nullptr && std::strcmp(value, "1") == 0;
+                }();
+                if (use_proposal_sampler_graph && dspark_model_role_ == DSparkModelRole::PROPOSE
+                    && device_props_.tp_size == 1 && !inputs.warmup && !inputs.is_fake_stream
+                    && graph_logits.scalar_type() == torch::kFloat32 && proposal_logits_buffer_.defined()
+                    && graph_logits.device() == proposal_logits_buffer_.device()
+                    && graph_logits.size(1) == proposal_logits_buffer_.size(1)
+                    && lm_output_indexes.numel() <= proposal_logits_buffer_.size(0)
+                    && (description_.output_vocab_size == 0
+                        || description_.output_vocab_size == static_cast<size_t>(graph_logits.size(1)))) {
+                    RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(proposal_sampler_graph_logits)");
+                    // Match the eager Proposal output address used by the
+                    // existing greedy sampler graph. Keep FP32 row selection.
+                    logits = proposal_logits_buffer_.narrow(0, 0, lm_output_indexes.numel());
+                    if (full_graph_rows) {
+                        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(proposal_identity_logits)");
+                        logits.copy_(graph_logits, /*non_blocking=*/true);
+                    } else {
+                        at::index_select_out(logits, graph_logits, 0, lm_indices);
+                    }
+                } else
+#endif
+                {
+                    logits = full_graph_rows ? graph_logits.to(torch::kFloat32, false, true) :
+                                               torch::index_select(graph_logits, 0, lm_indices).to(torch::kFloat32);
+                }
             } else {
                 logits = graph_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true);
             }
@@ -1871,7 +1954,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
             outputs.all_logits = logits;
-            outputs.logits     = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+            outputs.logits     = torch::index_select(logits, 0, lm_indices);
         } else if (merged_eagle3_hidden.defined()) {
             outputs.all_hidden_states = merged_eagle3_hidden;
         }

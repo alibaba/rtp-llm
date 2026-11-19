@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <future>
 #include <deque>
 #include <list>
 #include <map>
@@ -48,6 +49,8 @@ public:
                          int32_t                                        kv_cache_group_num = 1);
 
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
+    void flushDeferredPpuOutput();
+    void configurePpuBookkeepingWorker(std::function<void()> setup);
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
         model_ = std::move(model);
@@ -156,7 +159,9 @@ protected:
     void            debugCheckLinearBlockMapAtKernelRead(const GptModelInputs& model_input,
                                                          const StreamGroups&   stream_groups) const;
     void            broadcastPostRejectionInputs(GptModelInputs& model_input);
-    GptModelOutputs runDSparkProposeForward(GptModelInputs& model_input);
+    GptModelOutputs runDSparkProposeForward(GptModelInputs&              model_input,
+                                           const std::function<void()>& wait_for_kv,
+                                           bool                         use_captured_sampler);
     // Pre-norm hidden projection [B*gamma,1], FP32. Undefined in off mode.
     SamplerOutput sampleDSparkDraft(const StreamGroups&  stream_groups,
                                     const torch::Tensor& base_logits,
@@ -176,7 +181,8 @@ protected:
                                        const StreamGroups&                              stream_groups,
                                        const MtpBatchStreamProcessor::DSparkRoundState& round_state,
                                        SamplerOutput&                                   draft_sampler_output,
-                                       int64_t&                                         model_forward_us);
+                                       int64_t&                                         model_forward_us,
+                                       const std::function<void()>&                     wait_for_kv = {});
     GptModelOutputs  runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
          buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -210,7 +216,9 @@ protected:
                                       std::shared_ptr<torch::Event>                rejection_event,
                                       std::shared_ptr<torch::Event>                draft_event,
                                       const torch::Tensor&                         engram_anchor,
-                                      torch::Tensor&                               engram_output);
+                                      torch::Tensor&                               engram_output,
+                                      std::function<std::shared_ptr<torch::Event>()>  deferred_verify = {},
+                                      int                                            simulated_accept_len = 0);
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -247,6 +255,7 @@ protected:
     // Env-gated stream-async switch. Default off unless
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
+    bool usePpuOverlapScheduler() const;
 
     // Device-state feature gates. Defaults stay off; each consumer keeps its
     // own runtime guard before taking an async path.
@@ -272,7 +281,9 @@ protected:
                                      std::shared_ptr<torch::Event>                rejection_event,
                                      std::shared_ptr<torch::Event>                draft_event,
                                      const torch::Tensor&                         engram_anchor,
-                                     torch::Tensor&                               engram_output);
+                                     torch::Tensor&                               engram_output,
+                                     std::function<std::shared_ptr<torch::Event>()>  deferred_verify = {},
+                                     int                                            simulated_accept_len = 0);
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -286,7 +297,7 @@ protected:
                                                   int64_t              batch_size,
                                                   int64_t              verify_width);
 
-    void releaseAllModelBuffers();
+    void releaseAllModelBuffers(const ModelBase* prepared_proposal = nullptr);
 
 private:
     static torch::Tensor snapshotMutableHostInput(const torch::Tensor& tensor, TensorHolder& holder);
@@ -413,6 +424,9 @@ private:
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
+    std::shared_future<std::shared_ptr<torch::Event>> ppu_verify_publication_;
+    std::function<void()> deferred_ppu_publication_;
+    std::function<void()> deferred_ppu_output_;
 
     torch::Stream             dspark_cache_store_sync_stream_;
     torch::Tensor             dspark_cache_store_status_;

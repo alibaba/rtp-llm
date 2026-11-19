@@ -638,7 +638,8 @@ class PPUSharedGate(nn.Module):
             finite_domain_qualified=optimization_enabled(MEGA_GATE_FINITE_DOMAIN),
         )
 
-    def forward(self, hidden, *, image_rows=None, graph_routes=None, allow_top3_graph_routes=False):
+    def forward(self, hidden, *, image_rows=None, graph_routes=None, allow_top3_graph_routes=False,
+                compact_graph_routes=False):
         state = getattr(self.runtime, "current", None)
         if (
             state is not None and not getattr(state, "idle", False)
@@ -671,6 +672,7 @@ class PPUSharedGate(nn.Module):
                 router_bias_vl=self.bias_vl if image_rows is not None else None,
                 graph_routes=graph_routes,
                 valid_mask=valid_mask,
+                **({"compact_graph_routes": True} if compact_graph_routes else {}),
             )
             if result is not None:
                 return result
@@ -752,6 +754,10 @@ class PPUSharedMoE(nn.Module):
         if getattr(state, "is_graph", False):
             real = state.metadata.valid_mask
             routed_rows = state.routed_rows_device[self.layer_id]
+            from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import compact_routes_enabled
+
+            compact = state.grouped_moe is None and compact_routes_enabled(self.ops.moe_engine)
+            route_options = {"routed_count": routed_rows, "route_valid_mask": real} if compact else {}
             ordinary = _ordinary_decode_graph(runtime)
             verify = _verify_packed_attention_graph(state) and state.grouped_moe is None
             proposal = _proposal_exact_ops(state)
@@ -777,6 +783,7 @@ class PPUSharedMoE(nn.Module):
                     flat,
                     graph_routes=(real, routed_rows),
                     allow_top3_graph_routes=proposal,
+                    **({"compact_graph_routes": True} if compact else {}),
                 )
             else:
                 ids, weights = pad_topk_for_dispatch(*self.gate(flat))
@@ -794,6 +801,7 @@ class PPUSharedMoE(nn.Module):
                     layer_id=self.layer_id,
                     expert_load=expert_load,
                     fused_expert_load=ordinary,
+                    **route_options,
                 )
             else:
                 physical = engine._map_expert_ids(ids, weights, self.layer_id)
@@ -931,6 +939,12 @@ class PPUSharedEngram(nn.Module):
         state = getattr(self, "_graph_state", None)
         if state is not None:
             fused_mask = getattr(state, "bulk_counters", False)
+            from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import enabled as fusion_enabled
+
+            fused_mask = fused_mask or (
+                getattr(state, "is_graph", False) and getattr(state, "verify", False)
+                and fusion_enabled("ENGRAM")
+            )
             if not (fused_mask or getattr(state, "bulk_verify_counters", False)):
                 state.engram_calls[self.layer_id].add_(1)
             embedded = state.engram.lookup(

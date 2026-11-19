@@ -223,12 +223,20 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
         if not defer_index_norm:
             index = _normalize_graph_value(index, attn.index_k_norm, g.norm_eps)
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
+    joint_slots = None
     if compressed is None:
         raw = (
             verify_positions[3] if verify_positions is not None
             else torch.where(commit, entry_positions, -1)
         )
-        main_slots = cache.slots(layer_id, tag, raw)
+        if verify_rope:
+            from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import try_joint_journal_slots
+
+            joint_slots = try_joint_journal_slots(cache, layer_id, tag, raw)
+        if joint_slots is None:
+            main_slots = cache.slots(layer_id, tag, raw)
+        else:
+            main_slots, index_slots = joint_slots
     _store_graph_compressed_key(
         attn, cache, tag, main_slots, latent, rope, fused_graph=fused_graph, verify_rope=verify_rope
     )
@@ -236,7 +244,7 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
         index = F.linear(latent, attn.index_wk.weight)
         if not defer_index_norm:
             index = _normalize_graph_value(index, attn.index_k_norm, g.norm_eps)
-    if compressed is None:
+    if compressed is None and joint_slots is None:
         index_slots = cache.slots(layer_id, "indexer_kv", raw)
     index_stored = False
     if defer_index_norm:
@@ -493,12 +501,22 @@ def forward_graph_attention(attn, x, state):
         else:
             selected = state.shared[attn.index_source_layer_id]
     if mega is not None:
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import (
+            supports_mask_quant, masked_output_projection,
+        )
+
+        fuse_mask = verify and supports_mask_quant(attn.wo_b, valid)
         projected = packed.forward(
             attn, q, selected, state.metadata, state.shared,
             mega=mega, mega_phase="verify" if verify else "decode",
+            mask_output=not fuse_mask,
+            **({"verify_slots": swa_slots} if verify_packed and norm_stored
+               and getattr(packed, "_direct_journal", None) is not None else {}),
         )
         if projected is not None:
             state.attention_calls["mega_attention"] += 1
+            if fuse_mask:
+                return masked_output_projection(attn.wo_b, projected, valid).reshape(shape)
             return attn.wo_b(projected.flatten(1)).reshape(shape)
         # Metadata rejection occurred before the fused native call. Restore
         # ordinary head order and apply the Q RoPE omitted above exactly once.

@@ -1,6 +1,7 @@
 import enum
 import json
 import logging
+import os
 from typing import Any, List, Optional, Union
 
 import torch
@@ -146,6 +147,7 @@ class LoadConfig(BaseModel):
         layer_num = layer_num
 
         phy2log: List[List[int]] = []
+        placement = os.environ.get("RTP_EPLB_EXPERT_PLACEMENT", "rtp")
 
         if phy2log_path:
             with open(phy2log_path, "r") as f:
@@ -158,8 +160,18 @@ class LoadConfig(BaseModel):
                     len(phy2log[0]) == phy_exp_num,
                     f"phy2log[0] len {len(phy2log[0])} != phy_exp_num {phy_exp_num}",
                 )
+        elif placement not in ("rtp", "sail_trivial"):
+            raise ValueError(f"unknown RTP_EPLB_EXPERT_PLACEMENT: {placement!r}")
         elif redundant_expert == 0:
             phy2log = [list(range(expert_num)) for _ in range(layer_num)]
+        elif placement == "sail_trivial":
+            if redundant_expert > expert_num:
+                raise ValueError("Sail placement requires at most one replica per logical expert")
+            # Sail appends replicas of the first R experts before the EP split.
+            phy2log = [
+                list(range(expert_num)) + list(range(redundant_expert))
+                for _ in range(layer_num)
+            ]
         elif redundant_expert % ep_size == 0:
             rank_per_node = ep_size // num_nodes
             redundant_expert_per_ep = redundant_expert // ep_size

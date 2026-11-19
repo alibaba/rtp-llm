@@ -246,6 +246,7 @@ def _execute_gate(
     ep_rank,
     operation,
     valid_mask=None,
+    compact_graph_routes=False,
 ):
     """Dispatch after admission; errors propagate, including device finite checks."""
     rows = hidden.shape[0]
@@ -275,7 +276,7 @@ def _execute_gate(
         image_token_mask=image_rows,
         out=(ids, weights),
     )
-    if graph_routes is not None:
+    if graph_routes is not None and not compact_graph_routes:
         ids, weights = _pack_dispatch(ids, weights, valid, graph_routes[1])
     return ids, weights
 
@@ -387,8 +388,11 @@ class PPUMegaGate:
         graph_routes=None,
         ep_rank=0,
         valid_mask=None,
+        compact_graph_routes=False,
     ):
         if not self.enabled or not self.finite_domain_qualified:
+            return None
+        if type(compact_graph_routes) is not bool or (compact_graph_routes and graph_routes is None):
             return None
         if phase not in ("prefill", "decode", "verify", "proposal") or type(is_graph) is not bool:
             return None
@@ -429,7 +433,7 @@ class PPUMegaGate:
         signature = (
             hidden.device, phase, rows, router_weight.shape[0], top_k, router_bias is not None,
             image_rows is not None, graph_routes is not None,
-            valid_mask is not None, stream,
+            valid_mask is not None, stream, compact_graph_routes,
         )
         if capturing and signature not in self._warmed:
             return None
@@ -456,6 +460,7 @@ class PPUMegaGate:
             ep_rank=ep_rank,
             operation=operation,
             valid_mask=valid_mask,
+            compact_graph_routes=compact_graph_routes,
         )
         if is_graph and not capturing:
             self._warmed.add(signature)

@@ -16,6 +16,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from rtp_llm.config.v41_runtime import (
+    DSPARK_OVERLAP_ENV,
+    DSPARK_OVERLAP_FLAGS,
     MEGAMOE_DSPARK_ASYNC_FLAGS,
     V41RuntimeConfig,
     select_v41_backend,
@@ -203,8 +205,9 @@ class IntegrationTest(unittest.TestCase):
             self.assertEqual(env["GEN_NUM_PER_CIRCLE"], "3")
             if role == "decode":
                 self.assertEqual(env["ENABLE_CUDA_GRAPH"], "1")
-                for key in MEGAMOE_DSPARK_ASYNC_FLAGS:
-                    self.assertEqual(env[key], "0")
+                self.assertEqual(env[DSPARK_OVERLAP_ENV], "1")
+                for key, value in DSPARK_OVERLAP_FLAGS.items():
+                    self.assertEqual(env[key], value)
 
     def test_encoder_recovery_is_explicit_and_requires_bounded_decoder_replay(self):
         with self.assertRaisesRegex(ValueError, "requires --ced-mode bounded"):
@@ -588,7 +591,10 @@ class IntegrationTest(unittest.TestCase):
             V41RuntimeConfig.from_env(env)
 
     def test_megamoe_dspark_graph_uses_synchronous_dense_verify(self):
-        parent = {"RTP_V41_PPU_MOE_BACKEND": "megamoe"}
+        parent = {
+            "RTP_V41_PPU_MOE_BACKEND": "megamoe",
+            DSPARK_OVERLAP_ENV: "0",
+        }
         parent.update(dict.fromkeys(MEGAMOE_DSPARK_ASYNC_FLAGS, "1"))
         parent["GENERATION_PREFILL_CAPTURE_CONFIG"] = "512"
         options = dict(shared_decode_graph=True, dspark_gamma=3, parent=parent)

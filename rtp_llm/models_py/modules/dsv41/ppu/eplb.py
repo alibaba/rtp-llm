@@ -4,9 +4,12 @@ No planning, statistics lifetime or shuffle policy lives here. Communication
 views borrow executor allocations, including their per-expert layout padding.
 """
 
+import logging
 import math
 import os
 import struct
+from contextlib import contextmanager
+from functools import lru_cache
 
 from rtp_llm.eplb.runtime import EplbLayer
 
@@ -88,6 +91,81 @@ def scalar_identity(value):
     return struct.pack("!d", float(value)).hex()
 
 
+@lru_cache(maxsize=1)
+def _sail_dynamic_remap():
+    import torch
+
+    @torch.compile(fullgraph=True, dynamic=False)
+    def remap(ids, mapping, counts, slot=None):
+        logical = ids.clamp_min(0)
+        if slot is None:
+            slot = torch.randint(0, 65536, ids.shape, dtype=torch.int32, device=ids.device)
+        physical = mapping[logical, slot % counts[logical]]
+        return torch.where(ids >= 0, physical, -1).to(ids.dtype)
+
+    return remap
+
+
+@contextmanager
+def batch_sail_replica_draws(engine, mode, rows, device):
+    """Generate independent draws for the same dense E448 replica policy once per replay."""
+    if (
+        os.environ.get("RTP_V41_PPU_SAIL_BATCHED_REPLICA_RNG", "1") != "1"
+        or mode != "dense" or rows != 32
+        or (engine.num_routed_experts, engine.num_physical_experts, engine.ep_size) != (384, 448, 8)
+        or len(engine._eplb_layers) != 40
+        or not all(hasattr(layer, "map_sail_draws") for layer in engine._eplb_layers.values())
+    ):
+        yield
+        return
+
+    import torch
+
+    bank = torch.randint(0, 65536, (40, rows, 6), dtype=torch.int32, device=device)
+    previous = engine._sail_replica_draws
+    engine._sail_replica_draws = dict(zip(sorted(engine._eplb_layers), bank.unbind(0)))
+    try:
+        yield
+    finally:
+        engine._sail_replica_draws = previous
+
+
+def _configure_sail_dynamic(layer):
+    """Match Sail's single-node candidate pruning and random replica choice."""
+    import torch
+
+    if (layer.num_logical_experts, layer.num_physical_experts, layer.num_local_experts) != (384, 448, 56):
+        raise ValueError("Sail dynamic replica benchmark requires target 384+64 experts on EP8")
+    expected = torch.arange(448, dtype=torch.int32) % 384
+    if not torch.equal(layer.physical_to_logical.cpu(), expected):
+        raise ValueError("Sail dynamic replica benchmark requires the Sail trivial physical map")
+    first = torch.arange(384, dtype=torch.int32)
+    other = first + 384
+    has_replica = first < 64
+    local_first = first // 56 == layer.ep_rank
+    local_other = has_replica & (other // 56 == layer.ep_rank)
+    has_remote_choice = has_replica & ~local_first & ~local_other
+    mapping = torch.stack((torch.where(local_other, other, first),
+                           torch.where(has_remote_choice, other, -1)), dim=1)
+    device = layer.logical_to_physical.device
+    mapping = mapping.to(device)
+    counts = (1 + has_remote_choice.to(torch.int32)).to(device)
+    remap = _sail_dynamic_remap()
+
+    def map_ids(ids, draws=None):
+        if draws is not None and (draws.shape != ids.shape or draws.device != ids.device):
+            draws = None
+        return remap(ids, mapping, counts, draws)
+
+    layer.map_ids = layer.map_sail_draws = map_ids
+    layer._fuse_sail_replica_routes = (
+        os.environ.get("RTP_V41_PPU_SAIL_FUSED_BALANCED_REPLICA_ROUTES", "1") == "1"
+    )
+    if layer.layer_id == 0:
+        logging.info("V4.1 Sail replica benchmark EP rank=%d physical=448 local=56 remote_choices=%d",
+                     layer.ep_rank, int(has_remote_choice.sum()))
+
+
 def bind_layer(engine, layer_id, mapping, counts, *, raw_tensors=()):
     """Freeze raw AND processed consumers before RuntimeExpertBalancer/Graph."""
     processed = engine._processed_weights(layer_id, mapping.device)
@@ -138,6 +216,12 @@ def bind_layer(engine, layer_id, mapping, counts, *, raw_tensors=()):
         engine.num_routed_experts, engine.num_physical_experts,
     ):
         raise ValueError("loader maps differ from executor logical/physical geometry")
+    if (os.environ.get("RTP_V41_PPU_SAIL_DYNAMIC_REPLICAS") == "1"
+            and layer.num_physical_experts > layer.num_logical_experts):
+        if (os.environ.get("EPLB_MODE", "NONE").upper() != "NONE"
+                or engine.backend != "megamoe"):
+            raise ValueError("Sail dynamic replica benchmark requires static MegaMoE placement")
+        _configure_sail_dynamic(layer)
     engine._eplb_inventory[layer_id] = tuple(inventory)
     engine._eplb_invariants[layer_id] = invariants
     engine._eplb_layers[layer_id] = layer

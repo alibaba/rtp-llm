@@ -486,12 +486,32 @@ class PPUMegaAttention:
         else:
             common = self._common(self._query(q, packed_q), positions, plan.valid_mask)
         extra = plan.global_indices
+        decode_options = self.backend.decode_kwargs
+        if (
+            phase == "verify" and shared is not None and q.shape[0] == 32
+            and self.heads == 64 and plan.swa_lengths is not None
+            and optimization_env_value("RTP_V41_PPU_VERIFY_SHARED_MLA_SCHEDULE", "0") == "1"
+            and readonly_decode_positions(self)
+            and "_schedule" in inspect.signature(self.backend.decode).parameters
+            and torch.cuda.get_device_properties(self.device).multi_processor_count == 39
+        ):
+            lengths = plan.swa_lengths, plan.global_lengths
+            key = ("mega_verify_schedule", id(lengths[0]), id(lengths[1]),
+                   plan.swa_indices.shape[-1], 0 if extra is None else extra.shape[-1])
+            entry = shared.get(key)
+            reuse = entry is not None
+            if entry is None:
+                entry = (*lengths, torch.empty(4096, dtype=torch.int32, device=q.device))
+                shared[key] = entry
+            if entry[0] is not lengths[0] or entry[1] is not lengths[1]:
+                raise RuntimeError("MegaAttention scheduler sources changed inside the Verify Graph")
+            decode_options = {**decode_options, "_schedule": entry[2], "_reuse_schedule": reuse}
         data, scale, _ = self.backend.decode(
             **common, k_cache=plan.swa_cache,
             indices_in_kvcache=plan.swa_indices.view(q.shape[0], -1),
             topk_length=plan.swa_lengths, extra_k_cache=plan.global_cache,
             extra_indices_in_kvcache=None if extra is None else extra.view(q.shape[0], -1),
-            extra_topk_length=plan.global_lengths, **self.backend.decode_kwargs,
+            extra_topk_length=plan.global_lengths, **decode_options,
         )
         return self._project_output(data, scale, q.shape[0], plan.valid_mask if mask_output else None)
 

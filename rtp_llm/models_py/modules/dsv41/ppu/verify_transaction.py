@@ -183,6 +183,12 @@ class _QueuedGraphVerifyReceipt:
     capture_batch: int
     window_width: int
 
+    def device_result(self, stream):
+        self.ready.wait(stream)
+        result = self.device_buffers[0]
+        result.record_stream(stream)
+        return result
+
     def read(self) -> tuple[int, VerifyLayout, list[int], list[list[int]]]:
         self.ready.synchronize()
         data = self.host.tolist()

@@ -91,6 +91,7 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/transformer.py",
     "modules/dsv41/ppu/block.py",
     "modules/dsv41/ppu/decode_mhc.py",
+    "modules/dsv41/ppu/decode_fusions.py",
     "modules/dsv41/ppu/layers.py",
     "modules/dsv41/ppu/ptpc_norm.py",
     "modules/dsv41/ppu/ptpc_norm_quant.py",

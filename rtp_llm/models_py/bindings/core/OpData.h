@@ -154,6 +154,7 @@ struct GptModelOutputs {
     // means the returned output depends on the existing post-model collective
     // on every rank. A consumer must still complete its output stream.
     bool context_kv_has_rank_completion_dependency = false;
+    torch::Tensor dspark_draft_tokens;
 };
 
 struct CopyParams {

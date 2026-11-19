@@ -84,6 +84,7 @@ public:
     bool       uses_device_metadata_{false};
     bool       uses_physical_block_tables_{false};
     at::Tensor decoder_layer_hidden_states_;
+    at::Tensor dspark_draft_tokens_;
     // Retain the graph's actual output allocation, avoiding an in-graph
     // vocabulary-sized copy. Consumers receive independent round storage.
     at::Tensor logits_;

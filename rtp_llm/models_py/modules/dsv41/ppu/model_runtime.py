@@ -869,15 +869,46 @@ class SharedNativeRuntime:
         )
         draft_inputs = receipt.joint_inputs_if_covered(last_possible)
         if target_inputs is not None and draft_inputs is not None:
-            prepared = prepare_verify_pair(target_inputs, draft_inputs, prefixes, tx.layout.prefixes)
+            prepared = prepare_verify_pair(target_inputs, draft_inputs, prefixes)
             if prepared is not None:
                 tx.prepared_joint_publication = (receipt, prefixes, prepared)
 
     def try_finish_speculative_forward_with_private_draft(self, draft, request_ids, prefixes, accepted_rows):
         """Publish two private journals from the same host-approved row counts."""
-        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_publish_verify_pair
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
+            prepare_verify_pair, try_publish_verify_pair,
+        )
         from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyTransaction
 
+        pending = self.pending_verify
+        prepared_early = None
+        device_receipt = os.environ.get("RTP_V41_PPU_DSPARK_GPU_VERIFY_RECEIPT") == "1"
+        if (
+            (device_receipt or os.environ.get("RTP_V41_PPU_DSPARK_PREFLIGHT_JOINT_PUBLICATION") == "1")
+            and isinstance(pending, _DeferredGraphVerify)
+            and pending.joint_checks is not None
+            and prefixes.is_cuda
+            and request_ids.device.type == "cpu"
+            and torch.equal(request_ids, pending.request_ids)
+        ):
+            # Pool and table descriptors exist before the replay receipt is ready.
+            # Prepare them on the publication worker while Verify still runs.
+            # The receipt and accepted position checks below authorize the write.
+            receipt = draft.private_draft_commit_receipt(tuple(request_ids.tolist()))
+            target_inputs = pending.impl.cache.joint_publication_inputs(
+                pending.cache, -1, checks=pending.joint_checks,
+            )
+            draft_inputs = receipt.joint_inputs_if_covered(-1)
+            if target_inputs is not None and draft_inputs is not None:
+                prepared = prepare_verify_pair(target_inputs, draft_inputs, prefixes)
+                if prepared is not None:
+                    if device_receipt and self._try_publish_queued_verify_pair(
+                        draft, pending, receipt, prepared, request_ids, accepted_rows,
+                    ):
+                        return True
+                    prepared_early = (receipt, prefixes, prepared)
+
+        self.prepare_speculative_forward_completion()
         tx = self.pending_verify
         if (
             not isinstance(tx, SharedVerifyTransaction)
@@ -904,8 +935,9 @@ class SharedNativeRuntime:
             )
             receipt = draft.private_draft_commit_receipt(tx.request_ids)
             published = False
-            if tx.prepared_joint_publication is not None:
-                prepared_receipt, prepared_prefixes, prepared = tx.prepared_joint_publication
+            prepared_publication = prepared_early or tx.prepared_joint_publication
+            if prepared_publication is not None:
+                prepared_receipt, prepared_prefixes, prepared = prepared_publication
                 if (
                     receipt is prepared_receipt
                     and prefixes.data_ptr() == prepared_prefixes.data_ptr()
@@ -915,7 +947,13 @@ class SharedNativeRuntime:
                     and prefixes.stride() == prepared_prefixes.stride()
                 ):
                     receipt.check_joint_publication(bases, last_accepted)
-                    published = prepared.publish(counts)
+                    # The early descriptor was built before the accepted end was
+                    # available; the live target table must still cover that end.
+                    target_covers = prepared_early is None or tx.graph_journal.joint_publication_inputs(
+                        tx.cache, last_accepted, checks=tx.joint_binding_checks,
+                    ) is not None
+                    if target_covers:
+                        published = prepared.publish(counts, bases)
             if not published:
                 target_inputs = tx.graph_journal.joint_publication_inputs(
                     tx.cache, last_accepted, checks=tx.joint_binding_checks,
@@ -935,6 +973,51 @@ class SharedNativeRuntime:
         receipt.closed = True
         tx.abort()
         self.pending_verify = None
+        draft.abort_private_draft_commit()
+        return True
+
+    def _try_publish_queued_verify_pair(self, draft, pending, receipt, prepared, request_ids, accepted_rows):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import VerifyPublicationReceipt
+
+        replay = pending.receipt
+        if (
+            (replay.batch, replay.capture_batch, replay.rows, pending.impl.width) != (8, 8, 32, 4)
+            or self.policy.max_rollback_tokens < 4
+            or any(
+                value.device.type != "cpu" or value.shape != (8,)
+                or value.dtype not in (torch.int32, torch.int64)
+                for value in (request_ids, accepted_rows)
+            )
+            or len(set(request_ids.tolist())) != 8
+        ):
+            return False
+        counts = tuple(accepted_rows.tolist())
+        if any(not 0 <= count <= 4 for count in counts):
+            return False
+        engram_width = 0
+        if pending.cache.geometry.engram_enabled():
+            engram_width = pending.cache.geometry.engram_max_ngram_size
+            if not (0 < engram_width == replay.window_width <= 16
+                    and pending.windows.shape == (32, engram_width)):
+                return False
+        receipt.check_joint_replay()
+        target_limit = min(live.shape[1] * pending.cache.pools[key].span
+                           for key, _, live in pending.joint_checks)
+        draft_limit = min(pool.table.shape[1] * pool.span for pool in receipt.cache.pools.values())
+        verify = VerifyPublicationReceipt(
+            replay, pending.bindings, pending.impl.staged_completion,
+            min(pending.impl.cache.max_seq_len, receipt.journal.max_seq_len),
+            min(target_limit, draft_limit), engram_width,
+        )
+        if not prepared.publish(counts, replay_check=verify):
+            return False
+        # The publication status event follows both receipts and validates the
+        # generation. No separate blocking receipt read or transaction is needed.
+        pending.impl.staged_completion = int(replay.host[0])
+        pending.impl.armed_verify = None
+        self.calls += 1
+        self.pending_verify = None
+        receipt.closed = True
         draft.abort_private_draft_commit()
         return True
 

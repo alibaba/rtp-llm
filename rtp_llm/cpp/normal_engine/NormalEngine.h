@@ -90,6 +90,7 @@ private:
         int64_t end_ns = 0;
         int64_t fresh_tokens = 0;
         int64_t emitted_tokens = 0;
+        int64_t cumulative_output_tokens = 0;
         uint64_t batch_identity = 0;
         int batch = 0;
         int context_batch = 0;

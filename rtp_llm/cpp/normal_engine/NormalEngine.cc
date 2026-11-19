@@ -24,6 +24,7 @@
 #include <c10/core/InferenceMode.h>
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -827,6 +828,26 @@ void NormalEngine::loop() {
         // OpenMP may restore the initial affinity on the thread's first ATen CPU operation.
         (void)at::get_num_threads();
         bindEngineThreadToCpu(engine_cpu_id_, parallelism_config.world_rank);
+#if USE_PPU
+        if (const auto* raw = std::getenv("RTP_V41_PPU_DSPARK_PUBLICATION_CPU_OFFSET")) {
+            const auto* end = raw + std::strlen(raw);
+            int offset = 0;
+            const auto parsed = std::from_chars(raw, end, offset);
+            if (parsed.ec == std::errc{} && parsed.ptr == end && offset > 0
+                && offset <= std::numeric_limits<int>::max() - engine_cpu_id_) {
+                if (auto* mtp = dynamic_cast<MtpExecutor*>(executor_.get())) {
+                    mtp->configurePpuBookkeepingWorker(
+                        [cpu = engine_cpu_id_ + offset, rank = parallelism_config.world_rank] {
+                            (void)at::get_num_threads();
+                            bindEngineThreadToCpu(cpu, rank);
+                            RTP_LLM_LOG_INFO("[ppu-dspark-commit] bookkeeping worker affinity requested cpu=%d", cpu);
+                        });
+                }
+            } else {
+                RTP_LLM_LOG_WARNING("[ppu-dspark-commit] invalid positive publication CPU offset: %s", raw);
+            }
+        }
+#endif
     }
 #endif
     const bool follow_root = cpu_tp_shutdown_ && !ppu_loop_stop_ && parallelism_config.tp_rank != 0;
@@ -850,6 +871,9 @@ void NormalEngine::loop() {
             RTP_LLM_LOG_INFO("normal engine follower received ordered CPU TP shutdown");
             break;
         }
+    }
+    if (auto* mtp = dynamic_cast<MtpExecutor*>(executor_.get())) {
+        mtp->flushDeferredPpuOutput();
     }
     if (cpu_tp_shutdown_ && !ppu_loop_stop_ && parallelism_config.tp_rank == 0) {
         CpuTpBroadcaster::instance().sendShutdown();
@@ -1008,6 +1032,10 @@ void NormalEngine::flushReferencePerfSteps() {
 
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
+    auto* mtp = isDSpark() ? dynamic_cast<MtpExecutor*>(executor_.get()) : nullptr;
+    if (pause_ && mtp) {
+        mtp->flushDeferredPpuOutput();
+    }
     while (pause_ && running_) {
         // Stop must reach the existing step boundary even if the engine is paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1027,6 +1055,9 @@ absl::Status NormalEngine::step() try {
         // TP collectives and FFN-disaggregate alignment both require empty batches to enter process().
         if (shouldEarlyReturnEmptyBatch(
                 streams.empty(), parallelism_config.tp_size, ffn_disaggregate_config.enable_ffn_disaggregate)) {
+            if (mtp) {
+                mtp->flushDeferredPpuOutput();
+            }
             return absl::OkStatus();
         }
     }
@@ -1050,6 +1081,10 @@ absl::Status NormalEngine::step() try {
 
     ReferencePerfStep perf_step;
     const bool capture_perf = !reference_perf_dir_.empty();
+    static const bool ppu_dspark_overlap = [] {
+        const auto* value = std::getenv("RTP_V41_PPU_DSPARK_OVERLAP_SCHEDULER");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
     if (capture_perf) {
         perf_step.index = ++reference_perf_index_;
         for (const auto& stream : streams) {
@@ -1064,7 +1099,8 @@ absl::Status NormalEngine::step() try {
             perf_step.prefix_max = std::max(perf_step.prefix_max, prefix);
             ++perf_step.batch;
             perf_step.batch_identity = perf_step.batch_identity * 1099511628211ULL + stream->streamId();
-            perf_step.emitted_tokens -= static_cast<int64_t>(stream->outputTokenLen());
+            perf_step.emitted_tokens -= static_cast<int64_t>(ppu_dspark_overlap ? stream->outputTokenLenSnapshot() :
+                                                                                stream->outputTokenLen());
             if (stream->isContextStream()) {
                 ++perf_step.context_batch;
                 perf_step.fresh_tokens += stream->contextLength();
@@ -1089,11 +1125,21 @@ absl::Status NormalEngine::step() try {
         perf_step.end_ns = referencePerfClockNs();
         for (const auto& stream : streams) {
             if (!stream->isFakeStream()) {
-                const auto emitted = static_cast<int>(stream->outputTokenLen());
-                perf_step.emitted_tokens += emitted;
+                const auto emitted = static_cast<int>(ppu_dspark_overlap ? stream->outputTokenLenSnapshot() :
+                                                                          stream->outputTokenLen());
+                perf_step.cumulative_output_tokens += emitted;
                 perf_step.output_max = std::max(perf_step.output_max, emitted);
             }
         }
+        if (ppu_dspark_overlap && !reference_perf_steps_.empty()) {
+            const auto& previous = reference_perf_steps_.back();
+            if (previous.batch_identity == perf_step.batch_identity && previous.index + 1 == perf_step.index) {
+                // Host output can land between steps. Use consecutive endpoint
+                // samples so the full window accounts for every emitted token.
+                perf_step.emitted_tokens = -previous.cumulative_output_tokens;
+            }
+        }
+        perf_step.emitted_tokens += perf_step.cumulative_output_tokens;
         if (reference_perf_steps_.size() < kMaxReferencePerfSteps) {
             reference_perf_steps_.push_back(perf_step);
         }

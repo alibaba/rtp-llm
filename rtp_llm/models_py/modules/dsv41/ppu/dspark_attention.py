@@ -9,6 +9,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_p
 from rtp_llm.models_py.modules.dsv41.ppu.grouped_projection import project_wo_a
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import _rope_tail
 from rtp_llm.models_py.modules.dsv41.ppu.block import SharedPPUBlock
+from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import try_stage_private_draft_rows
 from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedRMSNorm
 from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import (
     dequantize_draft_swa,
@@ -79,19 +80,26 @@ def graph_commit_layer(
         state.shared = {}
     shared = state.shared
     if "commit_positions" not in shared:
-        req = requests.long().clamp_min(0)
-        end = ends[req]
-        live = (
-            (requests >= 0) & state.live[req] & (positions >= 0)
-            & (positions >= end - g.window) & (positions < end)
-            & (positions < cache.max_seq_len)
-        )
-        pos = positions.clamp(0, cache.max_seq_len - 1).long()
-        raw = torch.where(live, pos, -1)
+        staged = try_stage_private_draft_rows(
+            requests, positions, ends, state.live, window=g.window, max_seq_len=cache.max_seq_len,
+        ) if private else None
+        if staged is None:
+            req = requests.long().clamp_min(0)
+            end = ends[req]
+            live = (
+                (requests >= 0) & state.live[req] & (positions >= 0)
+                & (positions >= end - g.window) & (positions < end)
+                & (positions < cache.max_seq_len)
+            )
+            pos = positions.clamp(0, cache.max_seq_len - 1).long()
+            raw = torch.where(live, pos, -1)
+            count = live.sum() if private else None
+        else:
+            req, pos, raw, live, count = staged
         shared["commit_positions"] = (req, pos, raw)
         if private:
             cache.bind_commit(req, live, state.live)
-            shared["commit_private_rows"] = live.sum()
+            shared["commit_private_rows"] = count
     req, pos, raw = shared["commit_positions"]
     attn = model.v4.layers[layer_idx].attn
     values = _project_commit_kv(attn, main_x, quantized_input)

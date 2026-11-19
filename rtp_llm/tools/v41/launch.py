@@ -10,6 +10,9 @@ import sys
 from pathlib import Path
 
 from rtp_llm.config.v41_runtime import (
+    DSPARK_DECODE_DEFAULTS,
+    DSPARK_OVERLAP_ENV,
+    DSPARK_OVERLAP_FLAGS,
     MEGAMOE_DSPARK_ASYNC_FLAGS,
     PPU_STRATEGY,
     V41RuntimeConfig,
@@ -374,6 +377,12 @@ def preset_env(
             env["RTP_LLM_DEVICE_INPUT"] = str(int(shared_graph_async))
         elif dspark_gamma:
             env.update(dict.fromkeys(MEGAMOE_DSPARK_ASYNC_FLAGS, "0"))
+            qualified_overlap = dspark_gamma == 3 and dspark_verify_mode == "dense" and dspark_confidence == "off"
+            if env_bool(env, DSPARK_OVERLAP_ENV, default=qualified_overlap):
+                env[DSPARK_OVERLAP_ENV] = "1"
+                env.update(DSPARK_OVERLAP_FLAGS)
+                for key, value in DSPARK_DECODE_DEFAULTS.items():
+                    env.setdefault(key, value)
         if shared_grouped_graph or dspark_gamma:
             env.pop("GENERATION_PREFILL_CAPTURE_CONFIG", None)
     if not cp_prefill:

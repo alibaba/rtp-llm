@@ -15,7 +15,9 @@ import torch
 
 from rtp_llm.config.v41_runtime import env_bool
 from rtp_llm.models_py.modules.dsv41.ppu._quant import prepare_e2m1_codebooks
+from rtp_llm.models_py.modules.dsv41.ppu.eplb import batch_sail_replica_draws
 from rtp_llm.models_py.modules.dsv41.ppu.graph_engram import GraphEngram
+from rtp_llm.models_py.modules.dsv41.ppu.graph_indexer import verify_candidate_overlap
 from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import increment_decode_counters
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
     enabled as optimization_enabled,
@@ -329,7 +331,9 @@ class SharedGraphRuntime:
             ids = torch.where(metadata.valid_mask, inputs.input_ids.reshape(rows), 0)
             packed = getattr(impl, "packed_attention", None)
             transaction = packed.verify_tail_transaction() if verify and packed is not None else nullcontext()
-            with transaction:
+            with transaction, verify_candidate_overlap(impl, state.shared), batch_sail_replica_draws(
+                self.ops.moe_engine, getattr(impl, "mode", None), rows, ids.device,
+            ):
                 hidden = model.v4.forward_decode(
                     ids, metadata, expert_token_counts=inputs.expert_token_counts,
                     kv_cache=model.kv_cache,

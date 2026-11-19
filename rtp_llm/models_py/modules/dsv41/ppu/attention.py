@@ -24,6 +24,8 @@ preconditions; the V41CacheView -> paged-metadata mapping is L3's wiring.
 
 from __future__ import annotations
 
+import os
+
 import torch
 from rtp_llm.models_py.modules.dsv41.chunk_env import FLASH_MLA_SPARSE_Q_CHUNK
 from rtp_llm.models_py.modules.dsv41.ppu import _quant, kv_codec
@@ -41,6 +43,33 @@ HEAD_DIM = 512
 
 GLOBAL_KV_TAGS = kv_codec.GLOBAL_KV_TAGS
 SWA_KV_TAG = kv_codec.SWA_KV_TAG
+BF16_SPARSE_PROVIDER_RECEIPT = "RTP_V41_PPU_BF16_SPARSE_PROVIDER_RECEIPT"
+_BF16_SPARSE_PROVIDERS = {}
+
+
+def _bf16_sparse_native(q):
+    """Select only the BF16 primitive; MegaAttention keeps its own provider."""
+    receipt = os.environ.get(BF16_SPARSE_PROVIDER_RECEIPT, "")
+    if not receipt:
+        from flash_mla import flash_mla_sparse_fwd
+
+        return flash_mla_sparse_fwd
+    entry = _BF16_SPARSE_PROVIDERS.get(receipt)
+    if q.is_cuda and torch.cuda.is_current_stream_capturing():
+        if entry is None:
+            raise RuntimeError("isolated BF16 sparse provider requires eager warmup before capture")
+        native, load_provider = entry
+    else:
+        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_attention_provider import load_provider
+
+        native = None if entry is None else entry[0]
+    # Revalidate the explicit receipt even during capture. A warmed loader
+    # has already authenticated/imported the fixed binary outside capture.
+    provider = load_provider(receipt)
+    if native is not None and provider.native is not native:
+        raise RuntimeError("isolated BF16 sparse provider changed; recapture required")
+    _BF16_SPARSE_PROVIDERS[receipt] = provider.native, load_provider
+    return provider.native
 
 
 def _pad_heads(q, attn_sink):
@@ -61,7 +90,7 @@ def flash_mla_sparse_fwd_ppu(
     q, kv, indices, sm_scale, d_v=HEAD_DIM, attn_sink=None, topk_length=None
 ):
     """Lazy-importing ``flash_mla_sparse_fwd`` with rtp's head padding."""
-    from flash_mla import flash_mla_sparse_fwd as native
+    native = _bf16_sparse_native(q)
 
     q, sink, heads = _pad_heads(q, attn_sink)
     output, maximum, lse = native(

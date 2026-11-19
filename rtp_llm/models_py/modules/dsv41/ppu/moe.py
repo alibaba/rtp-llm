@@ -559,13 +559,15 @@ def _get_triton_kernels():
         # Preserve RTP's native FakeBalance mapping by default, per-slot negative
         # sentinels and private output ownership rather than sail's in-place
         # override. Uniform weights are normalized to 1/K like sail.
-        # Logical->physical expert mapping still follows this op.
+        # The static Sail replica path can reuse its existing draws here.
         @triton.jit(do_not_specialize=["deal_offset"])
         def _simulate_balanced_routing_kernel(
             original_ids, output_ids, output_weights,
             stride_im, stride_ik,
             num_ranks, experts_per_rank, rank_offset, local_offset,
             deal_offset, K: tl.constexpr, BLOCK_K: tl.constexpr, SAIL: tl.constexpr,
+            valid_rows=None, routed_count=None, M: tl.constexpr = 0, COUNT_BLOCK: tl.constexpr = 1,
+            replica_draws=None, physical_ids=None, replica_rank=0,
         ):
             t = tl.program_id(0)
             j = tl.arange(0, BLOCK_K)
@@ -582,9 +584,26 @@ def _get_triton_kernels():
                 rank = (rank_offset + deal % num_ranks) % num_ranks
                 local = (local_offset + deal // num_ranks) % experts_per_rank
             gid = rank * experts_per_rank + local
+            if valid_rows is not None:
+                original = tl.where(tl.load(valid_rows + t), original, -1)
             live = original >= 0
-            tl.store(output_ids + t * K + j, tl.where(live, gid, original), mask)
-            tl.store(output_weights + t * K + j, tl.where(live, 1.0 / K, 0.0), mask)
+            offset = t * K + j
+            tl.store(output_ids + offset, tl.where(live, gid, original), mask)
+            tl.store(output_weights + offset, tl.where(live, 1.0 / K, 0.0), mask)
+            if replica_draws is not None:
+                tl.static_assert(SAIL and M == 32 and K == 6)
+                draw = tl.load(replica_draws + offset, mask & live, other=0)
+                replica = gid + 384
+                own_master = gid // 56 == replica_rank
+                own_replica = replica // 56 == replica_rank
+                use_replica = (gid < 64) & (own_replica | (~own_master & ((draw & 1) != 0)))
+                physical = tl.where(use_replica, replica, gid)
+                tl.store(physical_ids + offset, tl.where(live, physical, -1), mask)
+            if routed_count is not None:
+                if t == 0:
+                    rows = tl.arange(0, COUNT_BLOCK)
+                    real = tl.load(valid_rows + rows, rows < M, other=False)
+                    tl.store(routed_count, tl.sum(real.to(tl.int32), 0))
 
         @triton.jit
         def _mask_fake_routes_kernel(
@@ -1678,6 +1697,7 @@ class PPUMoE:
         self._weights: Dict[int, Tuple[torch.Tensor, ...]] = {}
         self._processed: Dict[Tuple[int, torch.device], Tuple[torch.Tensor, ...]] = {}
         self._eplb_layers = {}
+        self._sail_replica_draws = None
         self._eplb_inventory = {}
         self._eplb_invariants = {}
         self._eplb_routes = {}
@@ -1700,7 +1720,10 @@ class PPUMoE:
             raise ValueError("fake balance configuration is frozen per model")
         self._fake_balance_config = config
 
-    def _apply_fake_balance(self, expert_ids, expert_weights, *, layer_id=None):
+    def _apply_fake_balance(
+        self, expert_ids, expert_weights, *, layer_id=None,
+        routed_count=None, route_valid_mask=None, replica_draws=None, physical_ids=None,
+    ):
         """Override only real routes; preserve idle rows and communication padding.
 
         Native FakeBalanceExpertOp expects tightly packed [T, real_top_k]
@@ -1742,6 +1765,10 @@ class PPUMoE:
                 int(dp_rank * max(logical_local / dp_size, 1.0)),
                 deal_offset, K=top_k, BLOCK_K=kernels.triton.next_power_of_2(top_k),
                 SAIL=sail, num_warps=1,
+                valid_rows=route_valid_mask, routed_count=routed_count,
+                M=ids.shape[0], COUNT_BLOCK=kernels.triton.next_power_of_2(ids.shape[0]),
+                replica_draws=replica_draws, physical_ids=physical_ids,
+                replica_rank=self.ep_rank if replica_draws is not None else 0,
             )
             return ids, weights
         original = expert_ids[:, :top_k]
@@ -2048,7 +2075,9 @@ class PPUMoE:
             physical = mapping.reshape(-1).index_select(0, lookup).view_as(ids).to(ids.dtype)
             physical.masked_fill_(ids < 0, -1)
         else:
-            physical = layer.map_ids(ids)
+            bank = getattr(self, "_sail_replica_draws", None)
+            draws = None if bank is None else bank.get(layer.layer_id)
+            physical = layer.map_ids(ids) if draws is None else layer.map_sail_draws(ids, draws)
         # Borrow the actual dispatched tensors for bounded native diagnostics.
         # Graph capture retains these same device buffers; no host reads here.
         self._eplb_routes[layer.layer_id] = (ids, physical, weights)
@@ -2374,6 +2403,33 @@ class PPUMoE:
         for layer_id in layer_ids:
             self._processed_weights(layer_id, x.device)
 
+    def _fused_sail_replica_draws(self, ids, layer_id):
+        bank = self._sail_replica_draws
+        config = self._fake_balance_config
+        if (
+            bank is None
+            or config is None
+            or not config[0]
+            or (config[1], config[3]) != (6, 8)
+            or self._fake_balance_policy != "sail_round_robin"
+            or not ids.is_cuda
+            or ids.shape != (32, 6)
+        ):
+            return None
+        layer = self._eplb_layers.get(layer_id)
+        if not getattr(layer, "_fuse_sail_replica_routes", False):
+            return None
+        draws = bank.get(layer_id)
+        if (
+            draws is None
+            or draws.shape != ids.shape
+            or draws.device != ids.device
+            or draws.dtype != torch.int32
+            or not draws.is_contiguous()
+        ):
+            return None
+        return draws
+
     def forward_shared_graph(
         self,
         x,
@@ -2383,6 +2439,8 @@ class PPUMoE:
         layer_id,
         expert_load=None,
         fused_expert_load=False,
+        routed_count=None,
+        route_valid_mask=None,
     ):
         """Fixed workspace path for capture AND graph-safe eager reference."""
         if (self.backend, self.precision) != ("megamoe", "w4a4"):
@@ -2391,8 +2449,21 @@ class PPUMoE:
             raise RuntimeError("shared Graph weights/workspace were not prepared")
         if x.shape[0] > self._mega_capacity:
             raise ValueError("shared Graph exceeds its fixed MegaMoE capacity")
-        expert_ids, expert_weights = self._apply_fake_balance(expert_ids, expert_weights, layer_id=layer_id)
-        expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
+        draws = self._fused_sail_replica_draws(expert_ids, layer_id)
+        physical = (
+            torch.empty_like(expert_ids, memory_format=torch.contiguous_format)
+            if draws is not None else None
+        )
+        expert_ids, expert_weights = self._apply_fake_balance(
+            expert_ids, expert_weights, layer_id=layer_id,
+            routed_count=routed_count, route_valid_mask=route_valid_mask,
+            replica_draws=draws, physical_ids=physical,
+        )
+        if physical is None:
+            expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
+        else:
+            self._eplb_routes[layer_id] = (expert_ids, physical, expert_weights)
+            expert_ids = physical
         return self._forward_megamoe(
             x, expert_ids, expert_weights, layer_id, expert_load,
             prepared_buffer=self._mega_buffer,
@@ -2988,6 +3059,14 @@ def shared_expert_forward(
     metadata retains the portable ATen reference.
     """
     gate_up = w13(x)
+    if not allow_quant:
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import try_shared_activation_quant
+        from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUPTPCLinear
+
+        if type(w2) is PPUPTPCLinear:
+            prepared = try_shared_activation_quant(gate_up, swiglu_limit)
+            if prepared is not None:
+                return w2.forward_quantized(*prepared)
     if allow_quant:
         from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUPTPCLinear
 
