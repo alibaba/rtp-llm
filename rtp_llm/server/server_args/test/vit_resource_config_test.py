@@ -62,6 +62,10 @@ class VitResourceConfigTest(unittest.TestCase):
                     "gdr_num": 4,
                     "audit": True,
                     "read_timeout_ms": 1000,
+                    "metadata_workers": 48,
+                    "read_transfer_workers": 4,
+                    "write_transfer_workers": 6,
+                    "max_pending": 256,
                 },
             }
         )
@@ -77,7 +81,15 @@ class VitResourceConfigTest(unittest.TestCase):
         self.assertFalse(config.mm_remote_cache_gdr_enable)
         self.assertEqual(config.mm_remote_cache_gdr_num, 4)
         self.assertEqual(config.mm_remote_cache_read_timeout_ms, 1000)
-        self.assertEqual(config.mm_remote_cache_max_pending, 8)
+        self.assertEqual(config.mm_remote_cache_max_pending, 256)
+        self.assertEqual(config.mm_remote_cache_metadata_workers, 48)
+        self.assertEqual(config.mm_remote_cache_read_transfer_workers, 4)
+        self.assertEqual(config.mm_remote_cache_write_transfer_workers, 6)
+        defaults, _ = self.parse()
+        self.assertEqual(defaults.mm_remote_cache_max_pending, 128)
+        self.assertEqual(defaults.mm_remote_cache_metadata_workers, 32)
+        self.assertIsNone(defaults.mm_remote_cache_read_transfer_workers)
+        self.assertIsNone(defaults.mm_remote_cache_write_transfer_workers)
 
     def test_embedding_json_cli_overrides_json_env(self):
         config, _ = self.parse(
@@ -97,6 +109,9 @@ class VitResourceConfigTest(unittest.TestCase):
             '{"local":{"cpu_max_bytes":false}}',
             '{"remote":{"enable":1}}',
             '{"remote":{"max_pending":0}}',
+            '{"remote":{"metadata_workers":0}}',
+            '{"remote":{"read_transfer_workers":false}}',
+            '{"remote":{"write_transfer_workers":0}}',
             '{"remote":{"gdr_num":0}}',
             '{"remote":{"gdr_num":-1}}',
             '{"remote":{"gdr_num":true}}',

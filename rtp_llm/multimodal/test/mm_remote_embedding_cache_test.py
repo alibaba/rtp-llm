@@ -151,81 +151,26 @@ class RemoteCacheTest(unittest.TestCase):
             [(1, {"status": "timeout"})],
         )
 
-    def test_lookup_failure_keeps_sanitized_service_or_grpc_cause(self):
-        from unittest.mock import Mock
+    def test_native_lookup_failure_logs_code_and_keeps_the_client(self):
+        class LookupFailure(RuntimeError):
+            code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")
+            operation = "get_object_meta"
+            data_transfer_may_be_inflight = False
 
-        import grpc
-
-        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookup, KvMetaLookupError
-
-        class Unavailable(grpc.RpcError):
-            def code(self):
-                return grpc.StatusCode.UNAVAILABLE
-
-            def details(self):
-                return "metadata connection refused; token=do-not-log"
-
-        direct = MMRemoteEmbeddingCache._error_context(
-            Unavailable("metadata unavailable")
-        )
-        self.assertEqual(direct["error_code"], "UNAVAILABLE")
-        self.assertEqual(direct["error_numeric_code"], 14)
-        self.assertIn("metadata connection refused", direct["error_details"])
-        self.assertNotIn("do-not-log", json.dumps(direct))
-
-        config = SimpleNamespace(
-            addresses=("unused:1",),
-            instance_id="instance",
-            call_timeout_ms=100,
-            max_object_bytes=65536,
-            vipserver_domain="",
-        )
-        for grpc_failure in (False, True):
-            with self.subTest(grpc_failure=grpc_failure):
-                call = Mock()
-                if grpc_failure:
-                    call.side_effect = Unavailable(
-                        "metadata connection refused; token=do-not-log"
-                    )
-                else:
-                    call.return_value = SimpleNamespace(
-                        header=SimpleNamespace(
-                            status=SimpleNamespace(
-                                code=9,
-                                message="metadata leader changed; token=do-not-log",
-                            )
-                        )
-                    )
-                channel = Mock()
-                channel.unary_unary.return_value = call
-                with patch(
-                    "rtp_llm.multimodal.kvcm.lookup.grpc.insecure_channel",
-                    return_value=channel,
-                ):
-                    lookup = KvMetaLookup(config)
-                try:
-                    with self.assertRaises(KvMetaLookupError) as caught:
-                        lookup.size("key")
-                    fields = MMRemoteEmbeddingCache._error_context(caught.exception)
-                    self.assertIn(
-                        (
-                            "metadata connection refused"
-                            if grpc_failure
-                            else "metadata leader changed"
-                        ),
-                        fields["error_causes"][0]["error_message"],
-                    )
-                    self.assertNotIn("do-not-log", json.dumps(fields))
-                    call.assert_called_once()
-                    if grpc_failure:
-                        self.assertEqual(fields["rpc_attempt"], 1)
-                        self.assertGreater(fields["rpc_budget_ms"], 0)
-                        self.assertLessEqual(fields["rpc_budget_ms"], 100)
-                        self.assertGreaterEqual(fields["rpc_elapsed_ms"], 0)
-                    else:
-                        self.assertNotIn("rpc_budget_ms", fields)
-                finally:
-                    lookup.close()
+        store = Store({})
+        remote = self.remote(store)
+        with (
+            patch.object(store, "object_size", side_effect=LookupFailure("Get failed")),
+            patch.object(remote, "_retire_client") as retire,
+            self.assertLogs(level="ERROR") as logs,
+        ):
+            self.assertIsNone(remote.load("key", trace_id="native-get"))
+        retire.assert_not_called()
+        event = json.loads(logs.output[0].split("MM_EMB_REMOTE_JSON ", 1)[1])
+        self.assertEqual(event["stage"], "metadata")
+        self.assertFalse(event["data_transfer_may_be_inflight"])
+        self.assertEqual(event["error_code"], "ER_INVALID_GRPCSTATUS")
+        self.assertEqual(event["trace_id"], "native-get")
 
     def test_error_details_are_bounded_redacted_and_preserve_suppressed_cause(self):
         secret = "do-not-log-this-secret"
@@ -447,7 +392,7 @@ class RemoteCacheTest(unittest.TestCase):
 
         def fake_slots(pool, *args):
             pool._slots = slots
-            pool._client = Store(shared)
+            pool._client = slots[0]
             pool._arena = None
 
         with patch.object(RegisteredTransportPool, "_create_slots", fake_slots):
@@ -591,7 +536,7 @@ class RemoteCacheTest(unittest.TestCase):
             with patch.object(
                 slot, "object_size", wraps=slot.object_size
             ) as metadata, patch.object(
-                remote._executor, "submit", wraps=remote._executor.submit
+                remote._metadata_executor, "submit", wraps=remote._metadata_executor.submit
             ) as submit, patch.object(
                 remote, "_report_outcome"
             ) as outcome:
@@ -621,8 +566,8 @@ class RemoteCacheTest(unittest.TestCase):
         remote, (slot,) = self.slot_cache(1)
         gate = threading.Event()
         blockers = [
-            remote._executor.submit(gate.wait, 3)
-            for _ in range(remote._executor._max_workers)
+            remote._metadata_executor.submit(gate.wait, 3)
+            for _ in range(remote._metadata_executor._max_workers)
         ]
         try:
             with patch.object(slot, "object_size", wraps=slot.object_size) as lookup:
@@ -636,7 +581,7 @@ class RemoteCacheTest(unittest.TestCase):
             gate.set()
             for blocker in blockers:
                 blocker.result(timeout=1)
-            remote._executor.shutdown(wait=True)
+            remote._metadata_executor.shutdown(wait=True)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
     def test_metadata_remains_available_while_two_payloads_are_stalled(self):
@@ -673,87 +618,46 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
-    def test_metadata_admission_remains_held_after_caller_timeouts(self):
+    def test_running_metadata_retains_the_total_budget_after_caller_timeout(self):
         store = Store({})
-        remote = self.remote(store, max_pending=16)
-        started = threading.Semaphore(0)
+        remote = self.remote(store, max_pending=2, metadata_workers=2)
+        entered = threading.Semaphore(0)
         release = threading.Event()
 
         def block_lookup(*args, **kwargs):
-            started.release()
-            if not release.wait(3):
-                raise RuntimeError("metadata test was not released")
+            entered.release()
+            self.assertTrue(release.wait(3))
             return None
 
         with (
             patch.object(store, "object_size", side_effect=block_lookup) as lookup,
-            patch.object(remote, "_report_skip", wraps=remote._report_skip) as report_skip,
-            concurrent.futures.ThreadPoolExecutor(8) as callers,
+            patch.object(remote, "_report_skip", wraps=remote._report_skip) as skip,
+            concurrent.futures.ThreadPoolExecutor(2) as callers,
         ):
-            reads = [
-                callers.submit(remote.load, f"key-{index}", timeout_ms=500)
-                for index in range(8)
-            ]
+            reads = [callers.submit(remote.load, str(i), timeout_ms=200) for i in range(2)]
             try:
-                self.assertTrue(all(started.acquire(timeout=1) for _ in reads))
-                self.assertIsNone(remote.load("busy"))
+                self.assertTrue(all(entered.acquire(timeout=1) for _ in reads))
                 for read in reads:
                     self.assertIsNone(read.result(timeout=1))
-                self.assertIsNone(remote.load("still-busy"))
-                self.assertEqual(lookup.call_count, 8)
-                self.assertEqual(remote.stats()["inflight_tasks"], 8)
-                self.assertEqual(
-                    report_skip.call_args_list,
-                    [call("read", "metadata_admission")] * 2,
-                )
+                self.assertIsNone(remote.load("over-budget"))
+                self.assertEqual(lookup.call_count, 2)
+                self.assertEqual(remote.stats()["inflight_tasks"], 2)
+                skip.assert_called_once_with("read", "admission")
             finally:
                 release.set()
-        remote._executor.shutdown(wait=True)
-        self.assertEqual(remote.stats()["inflight_tasks"], 0)
-
-    def test_read_waits_briefly_for_metadata_admission(self):
-        store = Store({})
-        remote = self.remote(store, max_pending=16)
-        for _ in range(8):
-            self.assertTrue(remote._metadata_slots.acquire(blocking=False))
-        acquire = remote._metadata_slots.acquire
-
-        def release_one_slot(**kwargs):
-            if "timeout" in kwargs:
-                remote._metadata_slots.release()
-            return acquire(**kwargs)
-
-        with (
-            patch.object(
-                remote._metadata_slots, "acquire", side_effect=release_one_slot
-            ) as admission,
-            patch.object(store, "object_size", wraps=store.object_size) as lookup,
-            patch.object(remote, "_report_skip") as skip,
-        ):
-            self.assertIsNone(remote.load("key"))
-            self.assertEqual(admission.call_count, 2)
-            self.assertEqual(admission.call_args_list[0], call(blocking=False))
-            wait_seconds = admission.call_args_list[1].kwargs["timeout"]
-            self.assertGreater(wait_seconds, 0)
-            self.assertLessEqual(wait_seconds, 0.05)
-            lookup.assert_called_once()
-            skip.assert_not_called()
-        for _ in range(7):
-            remote._metadata_slots.release()
-        self.assertTrue(remote._metadata_slots.acquire(blocking=False))
-        remote._metadata_slots.release()
+        remote.close()
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
     def test_timed_out_queued_reads_keep_admission_until_consumed(self):
         remote, (slot,) = self.slot_cache(1, max_pending=2)
         gate = threading.Event()
         blockers = [
-            remote._executor.submit(gate.wait, 3)
-            for _ in range(remote._executor._max_workers)
+            remote._metadata_executor.submit(gate.wait, 3)
+            for _ in range(remote._metadata_executor._max_workers)
         ]
         try:
             with patch.object(
-                remote._executor, "submit", wraps=remote._executor.submit
+                remote._metadata_executor, "submit", wraps=remote._metadata_executor.submit
             ) as submit, patch.object(slot, "object_size") as metadata, patch.object(
                 remote._gdr_pool, "acquire", wraps=remote._gdr_pool.acquire
             ) as acquire:
@@ -768,7 +672,7 @@ class RemoteCacheTest(unittest.TestCase):
             gate.set()
             for blocker in blockers:
                 blocker.result(timeout=1)
-            remote._executor.shutdown(wait=True)
+            remote._metadata_executor.shutdown(wait=True)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
@@ -859,7 +763,7 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertFalse(remote._gdr_pool._in_use)
             finally:
                 resume.set()
-                remote._executor.shutdown(wait=True)
+                remote._metadata_executor.shutdown(wait=True)
             acquire.assert_not_called()
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
@@ -1189,14 +1093,14 @@ class RemoteCacheTest(unittest.TestCase):
         from concurrent.futures import ThreadPoolExecutor
 
         remote = self.remote(Store())
-        entered = [threading.Event() for _ in range(remote._executor._max_workers)]
+        entered = [threading.Event() for _ in range(remote._metadata_executor._max_workers)]
         release = threading.Event()
 
         def block(index):
             entered[index].set()
             release.wait(3)
 
-        blockers = [remote._executor.submit(block, i) for i in range(len(entered))]
+        blockers = [remote._metadata_executor.submit(block, i) for i in range(len(entered))]
         self.assertTrue(all(e.wait(2) for e in entered))
         with patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
@@ -3232,11 +3136,28 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             model = SimpleNamespace(
                 model_type="test", compute_dtype="bf16", ckpt_path=directory
             )
-            cache = MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
-            cache.close()
-        constructor.assert_called_once()
-        self.assertEqual(constructor.call_args.kwargs["slots"], 4)
-        pool.close.assert_called_once()
+            for read_workers, write_workers in ((None, None), (3, 2)):
+                with self.subTest(read_workers=read_workers, write_workers=write_workers):
+                    vit.mm_remote_cache_read_transfer_workers = read_workers
+                    vit.mm_remote_cache_write_transfer_workers = write_workers
+                    constructor.reset_mock()
+                    pool.reset_mock()
+                    cache = MMRemoteEmbeddingCache.from_configs(
+                        model, vit, device="cuda:0"
+                    )
+                    try:
+                        constructor.assert_called_once()
+                        self.assertEqual(constructor.call_args.kwargs["slots"], 4)
+                        self.assertEqual(cache._metadata_executor._max_workers, 32)
+                        self.assertEqual(
+                            cache._transfer_executor._max_workers, read_workers or 4
+                        )
+                        self.assertEqual(
+                            cache._write_executor._max_workers, write_workers or 4
+                        )
+                    finally:
+                        cache.close()
+                    pool.close.assert_called_once()
 
     def test_startup_client_creation_registers_before_first_report(self):
         from unittest import mock
@@ -3295,7 +3216,7 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             instance_id="registered-serving", instance_group="test", quarantined=False
         )
         client.acquire.return_value = client
-        client.object_size.side_effect = [TimeoutError("metadata timeout"), None]
+        client.get_object_meta.side_effect = [TimeoutError("metadata timeout"), None]
         vit = SimpleNamespace(
             mm_remote_cache_gdr_enable=None,
             mm_remote_cache_audit=None,
@@ -3337,7 +3258,7 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             constructor.assert_called_once()  # Registration precedes any request.
             self.assertIsNone(cache.load("first"))
             self.assertIsNone(cache.load("second"))
-            self.assertEqual(client.object_size.call_count, 2)
+            self.assertEqual(client.get_object_meta.call_count, 2)
             client.close.assert_not_called()
             constructor.assert_called_once()
             cache.close()
