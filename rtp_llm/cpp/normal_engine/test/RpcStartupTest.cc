@@ -39,7 +39,7 @@ protected:
         op_ = std::make_unique<RtpLLMOp>();
         op_->init_params_ = std::make_unique<EngineInitParams>();
         op_->init_params_->server_config = py::module_::import("types").attr("SimpleNamespace")(
-            py::arg("rpc_server_port") = -1, py::arg("startup_health_check_timeout") = 1);
+            py::arg("rpc_server_port") = -1);
         server_ = std::make_shared<StartupRpcServer>();
         op_->model_rpc_service_ = std::make_unique<LocalRpcServiceImpl>();
         op_->model_rpc_service_->local_server_ = server_;
@@ -72,19 +72,6 @@ TEST_F(RpcStartupTest, PropagatesStartupFailure) {
     } catch (const std::exception& error) {
         EXPECT_NE(std::string(error.what()).find("injected transport failure"), std::string::npos);
     }
-}
-
-TEST_F(RpcStartupTest, UsesConfiguredStartupTimeout) {
-    std::promise<void> release;
-    const auto ready = release.get_future().share();
-    server_->on_start = [ready] { ready.wait_for(5s); };
-    try {
-        op_->startRPCServer();
-        ADD_FAILURE() << "startup did not time out";
-    } catch (const std::exception& error) {
-        EXPECT_NE(std::string(error.what()).find("timed out"), std::string::npos);
-    }
-    release.set_value();
 }
 
 TEST_F(RpcStartupTest, StopBeforeListenerPublicationJoinsTheStartupThread) {

@@ -33,14 +33,6 @@ namespace rtp_llm {
 
 namespace {
 
-int64_t getStartupTimeoutMs(int64_t health_check_timeout_s) {
-    constexpr int64_t kDefaultStartupTimeoutMs = 3600 * 1000;
-    if (health_check_timeout_s == -1) {
-        return -1;
-    }
-    return health_check_timeout_s > 0 ? health_check_timeout_s * 1000 : kDefaultStartupTimeoutMs;
-}
-
 int64_t getGrpcStopTimeoutMs() {
     constexpr int64_t kDefaultStopTimeoutMs = 600 * 1000;
     const auto        explicit_timeout_ms   = autil::EnvUtil::getEnv("RTP_LLM_STOP_TIMEOUT_MS", int64_t(0));
@@ -242,14 +234,6 @@ void RtpLLMOp::startRPCServer() {
         return;
     }
     RTP_LLM_CHECK_WITH_INFO(init_params_ != nullptr, "RPC init params are missing");
-    const auto& server_config = init_params_->server_config;
-    // The launcher supplies the total startup budget. Direct native callers
-    // may omit ServerConfig's health-check timeout and use the RPC default.
-    const auto health_timeout_s = py::hasattr(server_config, "startup_health_check_timeout") ?
-                                      server_config.attr("startup_health_check_timeout").cast<int64_t>() :
-                                      600;
-    const int64_t startup_timeout_ms = getStartupTimeoutMs(health_timeout_s);
-
     // Publish the thread before releasing the GIL so Python stop() can join it.
     grpc_server_thread_ = std::thread([this]() {
         try {
@@ -262,17 +246,12 @@ void RtpLLMOp::startRPCServer() {
     });
     {
         pybind11::gil_scoped_release release;
-        const auto    begin_wait_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         while (!is_server_ready_ && !stop_requested_) {
             {
                 std::lock_guard<std::mutex> lock(server_state_mutex_);
                 if (!server_start_error_.empty()) {
                     RTP_LLM_FAIL("%s", server_start_error_.c_str());
                 }
-            }
-            if (startup_timeout_ms >= 0
-                && (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us) / 1000 > startup_timeout_ms) {
-                RTP_LLM_FAIL("RPC server start timed out after %ld ms", startup_timeout_ms);
             }
             sleep(1);
         }
