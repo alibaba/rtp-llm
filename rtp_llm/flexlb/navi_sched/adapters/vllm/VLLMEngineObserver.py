@@ -1838,7 +1838,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             self._native_ingress
             and int(getattr(parallel_config, "pipeline_parallel_size", 1)) > 1
         )
-        self._native_request_states: dict[str, tuple[str, str, bool]] = {}
+        self._native_request_states: dict[str, tuple[object, ...]] = {}
         self._workload_aggregate = _WorkloadAggregate()
         self._current_workload: _ObservedWorkload | None = None
         self._running_prefill_started_ns: dict[str, int] = {}
@@ -4164,14 +4164,50 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 self._active_scheduled_tokens,
             )
 
-    def _audit_native_request_state(self, request, queue):
+    def _native_prefix_preparation_audit(self, scheduler, request):
+        if not self._pp_capacity_unified:
+            return {}
+        batch_id = getattr(request, "_navi_forward_batch_id", None)
+        prepared = None
+        query_resolved = None
+        load_async = None
+        prefixes = getattr(scheduler, "_prepared_prefill_prefixes", None)
+        if isinstance(prefixes, dict):
+            prepared = request.request_id in prefixes
+            prefix = prefixes.get(request.request_id)
+            if prepared and hasattr(prefix, "resolved"):
+                resolved = prefix.resolved
+                query_resolved = resolved is not None
+                if isinstance(resolved, tuple) and len(resolved) > 4:
+                    load_async = bool(resolved[4])
+        ready_batches = getattr(scheduler, "_prepared_prefill_batches_ready", None)
+        started_batches = getattr(scheduler, "_prepared_prefill_batches_started", None)
+        # These are Native's last scheduling checkpoint, not a new cache query
+        # or a guarantee that an asynchronous KV transfer has completed.
+        return {
+            "native_prefix_prepared": prepared,
+            "native_prefix_query_resolved": query_resolved,
+            "native_prefix_load_async": load_async,
+            "native_prepared_batch_id": batch_id,
+            "native_batch_ready": (
+                ready_batches.get(batch_id) if isinstance(ready_batches, dict) else None
+            ),
+            "native_batch_started": (
+                batch_id in started_batches
+                if batch_id is not None and isinstance(started_batches, (set, frozenset))
+                else None
+            ),
+        }
+
+    def _audit_native_request_state(self, request, queue, scheduler=None):
         if not self._native_request_state_audit_enabled:
             return
         request_id = str(request.request_id)
         status = getattr(request, "status", None)
         status_name = str(getattr(status, "name", status))
         lookup_complete = self._native_cache_lookup_complete(request)
-        observed = (queue, status_name, lookup_complete)
+        preparation = self._native_prefix_preparation_audit(scheduler, request)
+        observed = (queue, status_name, lookup_complete, *preparation.values())
         if self._native_request_states.get(request_id) == observed:
             return
         self._native_request_states[request_id] = observed
@@ -4189,6 +4225,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 "prompt_tokens": int(getattr(request, "num_prompt_tokens", 0)),
                 "local_cached_tokens": getattr(stats, "num_local_cached_tokens", None),
                 "external_cached_tokens": getattr(stats, "num_external_cached_tokens", None),
+                **preparation,
             }
         )
 
@@ -4231,7 +4268,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 request = scheduler.requests.get(request_id)
                 if request is not None:
                     self._audit_native_request_state(
-                        request, "running" if running_now else "waiting"
+                        request, "running" if running_now else "waiting", scheduler
                     )
             if self._pp_capacity_unified and self._is_finished_pp_request(
                 scheduler.requests.get(request_id)
