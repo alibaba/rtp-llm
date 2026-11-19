@@ -81,14 +81,7 @@ class CausalAttention(nn.Module):
         kv_cache: Optional[LayerKVCache],
         gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        input_shape = hidden_states.shape[:-1]
-        qkv = self.qkv_proj(hidden_states)
-        if self.qk_fuse_norm is not None:
-            qkv = self.qk_fuse_norm(qkv)
-        attn_output = fmha_impl.forward(qkv, kv_cache, self.layer_idx)
-        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
+        attn_output = self._attention_output(hidden_states, fmha_impl, kv_cache, gate)
         output = self.o_proj(attn_output)
         if self.tp_size > 1:
             output = all_reduce(output, group=Group.TP)
@@ -103,6 +96,29 @@ class CausalAttention(nn.Module):
         quantized_hidden_states: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         output_rows: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        attn_output = self._attention_output(
+            hidden_states, fmha_impl, kv_cache, gate, quantized_hidden_states
+        )
+        if output_rows is not None:
+            # Attention still consumes every key/value. Each following operation
+            # in the last encoder layer is independent across token rows.
+            attn_output = attn_output.index_select(0, output_rows)
+        if self.tp_size > 1 or not self.o_proj.supports_deferred_bias:
+            output = self.o_proj(attn_output)
+            if self.tp_size > 1:
+                output = all_reduce(output, group=Group.TP)
+            return output, None
+        output = self.o_proj.forward_without_bias(attn_output)
+        return output, self.o_proj.bias
+
+    def _attention_output(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        gate: Optional[torch.Tensor],
+        quantized_hidden_states: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+    ) -> torch.Tensor:
         input_shape = hidden_states.shape[:-1]
         if (
             quantized_hidden_states is not None
@@ -119,14 +135,4 @@ class CausalAttention(nn.Module):
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
-        if output_rows is not None:
-            # Attention still consumes every key/value. Each following operation
-            # in the last encoder layer is independent across token rows.
-            attn_output = attn_output.index_select(0, output_rows)
-        if self.tp_size > 1 or not self.o_proj.supports_deferred_bias:
-            output = self.o_proj(attn_output)
-            if self.tp_size > 1:
-                output = all_reduce(output, group=Group.TP)
-            return output, None
-        output = self.o_proj.forward_without_bias(attn_output)
-        return output, self.o_proj.bias
+        return attn_output

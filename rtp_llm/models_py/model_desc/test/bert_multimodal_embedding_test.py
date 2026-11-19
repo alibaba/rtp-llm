@@ -1,4 +1,5 @@
-from unittest import SkipTest, TestCase, main
+from types import SimpleNamespace
+from unittest import SkipTest, TestCase, main, mock
 
 import torch
 from torch.nn import functional as F
@@ -240,6 +241,9 @@ class BertMultimodalEmbeddingTest(TestCase):
         multimodal_inputs.input_ids[2:] = torch.tensor(
             [-3, 741852], dtype=torch.int32, device="cuda"
         )
+        multimodal_inputs.bert_embedding_inputs.combo_tokens_type_ids = torch.tensor(
+            [-1, 0, -3, 741852], dtype=torch.int32, device="cuda"
+        )
         multimodal_inputs.embedding_inputs.text_tokens_mask = torch.tensor(
             [0, 1, 0, 0], dtype=torch.int32, device="cuda"
         )
@@ -425,6 +429,81 @@ class BertMultimodalEmbeddingTest(TestCase):
         )
         self.assertTrue(torch.isfinite(actual).all())
         self.assertFalse(torch.allclose(actual, baseline))
+
+    def test_handler_negotiates_first_or_last_rows_and_can_require_full_output(self):
+        from rtp_llm.utils.tensor_utils import first_token_indices, last_token_indices
+
+        if torch.version.hip is not None:
+            self.skipTest("real Bert FMHA coverage is CUDA-only")
+        model = self._build_one_layer_model()
+        first = SimpleNamespace(pooled_row_indices=first_token_indices)
+        self.assertIsNone(
+            model.get_pooled_embedding_forward(first)
+        )  # Plain FP16 linear.
+        with mock.patch.object(BertModel, "supports_pooled_embedding", True):
+            self.assertIsNone(model.get_pooled_embedding_forward(object()))
+            inputs = self._build_one_layer_inputs()
+            full = model.forward(inputs).hidden_states
+            for indices, expected in (
+                (first_token_indices, 0),
+                (last_token_indices, -1),
+            ):
+                forward = model.get_pooled_embedding_forward(
+                    SimpleNamespace(pooled_row_indices=indices)
+                )
+                torch.testing.assert_close(
+                    forward(inputs).hidden_states,
+                    full[[expected]],
+                    atol=1e-3,
+                    rtol=1e-3,
+                )
+
+    def test_attention_output_projection_preserves_bias_gate_and_tp_reduction(self):
+        attn = self._build_one_layer_model().layers[0].self_attn
+        hidden = torch.arange(12, device="cuda", dtype=torch.float32).reshape(4, 3)
+        bias = torch.tensor([1.0, -1.0, 2.0], device="cuda")
+        gate = torch.full_like(hidden, 2.0)
+        rows = torch.tensor([2, 0, 2], device="cuda")
+        expected = hidden * gate.sigmoid()
+        fmha = SimpleNamespace(forward=lambda qkv, kv_cache, layer_idx: qkv)
+
+        class Projection(torch.nn.Module):
+            supports_deferred_bias = True
+
+            def __init__(self):
+                super().__init__()
+                self.bias = bias
+
+            def forward(self, x):
+                return x + self.bias
+
+            def forward_without_bias(self, x):
+                return x
+
+        attn.qkv_proj = torch.nn.Identity()
+        attn.qk_fuse_norm = None
+        attn.o_proj = Projection()
+        torch.testing.assert_close(attn(hidden, fmha, None, gate), expected + bias)
+        compact, deferred_bias = attn.forward_without_output_bias(
+            hidden, fmha, None, gate, output_rows=rows
+        )
+        torch.testing.assert_close(compact, expected[rows])
+        self.assertIs(deferred_bias, bias)
+
+        attn.tp_size = 2
+        with mock.patch(
+            "rtp_llm.models_py.modules.hybrid.causal_attention.all_reduce",
+            side_effect=lambda x, group: x * 2,
+        ) as reduce:
+            torch.testing.assert_close(
+                attn(hidden, fmha, None, gate), (expected + bias) * 2
+            )
+            reduced, deferred_bias = attn.forward_without_output_bias(
+                hidden, fmha, None, gate
+            )
+            torch.testing.assert_close(reduced, (expected + bias) * 2)
+            self.assertIsNone(deferred_bias)
+            self.assertEqual(reduce.call_count, 2)
 
     def test_final_layer_computes_only_requested_rows_after_full_attention(self):
         if torch.version.hip is not None:

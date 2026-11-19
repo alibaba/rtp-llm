@@ -25,6 +25,11 @@ class LinearBase(nn.Module, ABC):
     supports_prequantized_activation = False
     fused_activation_quant_format: Optional[str] = None
 
+    @property
+    def supports_output_rows(self) -> bool:
+        """Whether the selected linear implementation supports the BERT output-row path."""
+        return False
+
     @classmethod
     @abstractmethod
     def can_handle(
@@ -49,19 +54,6 @@ class LinearBase(nn.Module, ABC):
             Whether this configuration can be handled
         """
         pass
-
-    @classmethod
-    def rejection_reason(
-        cls,
-        quant_config: object,
-        weight: torch.Tensor,
-        weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional["HWKernelConfig"] = None,
-        weight_scale_2: Optional[torch.Tensor] = None,
-        input_scale: Optional[torch.Tensor] = None,
-    ) -> Optional[str]:
-        """Explain why a backend cannot consume these weights."""
-        return None
 
     @abstractmethod
     def __init__(

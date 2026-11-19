@@ -93,6 +93,7 @@ void embedding(at::Tensor&               output,
                                   static_cast<const int*>(mask_ptr),  // mask
                                   tokens,
                                   hidden_size,
+                                  0,  // no token-type table
                                   stream);
         }
         return true;
@@ -167,6 +168,7 @@ void embeddingBert(at::Tensor&               output,
                               mask_ptr,
                               tokens,
                               hidden_size,
+                              static_cast<int>(token_type_embedding.size(0)),
                               stream);
         return true;
     });

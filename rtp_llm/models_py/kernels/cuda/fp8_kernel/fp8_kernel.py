@@ -90,12 +90,16 @@ def create_per_token_group_quant_fp8_output_scale(
         x_s_mn, x_s_k = x_q_mn, x_q_k // group_size
         aligned_mn = ceil_align(x_s_mn, 4)
         aligned_k = ceil_align(x_s_k, 4)
-        # TODO(FIXME): Fix cuda kernel and recover here to empty.
-        return torch.empty(
-            (*x_batch, aligned_k // 4, aligned_mn),
+        packed_k = aligned_k // 4
+        storage = torch.empty(
+            (*x_batch, packed_k, aligned_mn),
             device=device,
             dtype=torch.int,
-        ).transpose(-1, -2)[..., :x_s_mn, :]
+        )
+        if not x_batch:
+            # Return the logical rows while retaining the trailing TMA padding.
+            return storage.as_strided((x_s_mn, packed_k), (1, storage.stride(0)))
+        return storage.transpose(-1, -2)[..., :x_s_mn, :]
     elif column_major_scales:
         if scale_tma_aligned:
             # TODO extract "align" function
@@ -130,7 +134,6 @@ def sgl_per_token_group_quant_fp8(
     fuse_silu_and_mul: bool = False,
     masked_m: Optional[torch.Tensor] = None,
     preserve_silu_mul_rounding: bool = False,
-    quant_kernel: Optional[str] = None,
 ):
     assert (
         x.shape[-1] % group_size == 0
@@ -164,19 +167,6 @@ def sgl_per_token_group_quant_fp8(
         scale_ue8m0=scale_ue8m0,
     )
     if x.shape[0] > 0:
-        if quant_kernel == "legacy":
-            if masked_m is not None or fuse_silu_and_mul or preserve_silu_mul_rounding:
-                raise ValueError(
-                    "legacy quantization does not support masked or fused inputs"
-                )
-            per_token_group_quant_fp8(
-                x, x_q, x_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0
-            )
-            return x_q, x_s
-        if quant_kernel is not None:
-            raise ValueError(
-                f"Unsupported explicit quantization kernel: {quant_kernel!r}"
-            )
 
         def can_use_v2() -> bool:
             if group_size not in (16, 32, 64, 128):

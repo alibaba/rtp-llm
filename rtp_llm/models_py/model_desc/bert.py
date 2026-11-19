@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Dict, Optional
 
 import torch
@@ -63,6 +64,23 @@ class BertDecoderLayer(nn.Module):
             eps=config.layernorm_eps,
         )
 
+        hidden_size = weights[W.post_ln_gamma].numel()
+        supports_fused_width = hidden_size <= 1024 and hidden_size % 128 == 0
+        # The fused norms emit UE8M0 scales for their consuming blockwise linear.
+        self.quantize_mlp_input = (
+            supports_fused_width
+            and self.mlp.up_proj.supports_prequantized_activation
+            and getattr(self.mlp.up_proj, "scale_ue8m0", False)
+            and hasattr(self.input_layernorm, "forward_quantized")
+        )
+        self.accepts_quantized_input = (
+            self.self_attn.qkv_proj.supports_prequantized_activation
+            and getattr(self.self_attn.qkv_proj, "scale_ue8m0", False)
+        )
+        self.can_quantize_output = supports_fused_width and hasattr(
+            self.post_attention_layernorm, "forward_quantized"
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -72,10 +90,6 @@ class BertDecoderLayer(nn.Module):
         quantize_output: bool = False,
         output_rows: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
-        empty_bias = torch.empty(
-            0, device=hidden_states.device, dtype=hidden_states.dtype
-        )
-
         residual = (
             hidden_states
             if output_rows is None
@@ -91,17 +105,9 @@ class BertDecoderLayer(nn.Module):
         attention_bias_tensor = (
             attention_bias.to(hidden_states.dtype)
             if attention_bias is not None
-            else empty_bias
+            else hidden_states.new_empty((0,))
         )
-        # The fused LayerNorm emits packed UE8M0 scales, not Hopper float scales.
-        use_quantized_mlp_input = (
-            self.mlp.up_proj.supports_prequantized_activation
-            and getattr(self.mlp.up_proj, "scale_ue8m0", False)
-            and hidden_states.shape[-1] <= 1024
-            and hidden_states.shape[-1] % 128 == 0
-            and hasattr(self.input_layernorm, "forward_quantized")
-        )
-        if use_quantized_mlp_input:
+        if self.quantize_mlp_input:
             hidden_states, mlp_input, mlp_input_scales = (
                 self.input_layernorm.forward_quantized(
                     hidden_states, residual, attention_bias_tensor
@@ -119,16 +125,11 @@ class BertDecoderLayer(nn.Module):
             hidden_states, quantized_mlp_input
         )
         ffn_bias_tensor = (
-            ffn_bias.to(hidden_states.dtype) if ffn_bias is not None else empty_bias
+            ffn_bias.to(hidden_states.dtype)
+            if ffn_bias is not None
+            else hidden_states.new_empty((0,))
         )
-        if (
-            quantize_output
-            and self.self_attn.qkv_proj.supports_prequantized_activation
-            and getattr(self.self_attn.qkv_proj, "scale_ue8m0", False)
-            and hidden_states.shape[-1] <= 1024
-            and hidden_states.shape[-1] % 128 == 0
-            and hasattr(self.post_attention_layernorm, "forward_quantized")
-        ):
+        if quantize_output and self.can_quantize_output:
             hidden_states, output_fp8, output_scales = (
                 self.post_attention_layernorm.forward_quantized(
                     hidden_states, residual, ffn_bias_tensor
@@ -180,6 +181,36 @@ class BertModel(GptModelBase):
                 )
                 for idx in range(self.layer_num)
             ]
+        )
+
+    @property
+    def supports_pooled_embedding(self) -> bool:
+        if not self.layer_num:
+            return False
+        layer = self.layers[-1]
+        return (
+            layer.self_attn.tp_size == 1
+            and self.parallelism_config.get_ffn_tp_size() == 1
+            and all(
+                getattr(proj, "supports_output_rows", False)
+                for proj in (
+                    layer.self_attn.o_proj,
+                    layer.mlp.up_proj,
+                    layer.mlp.down_proj,
+                )
+            )
+        )
+
+    def get_pooled_embedding_forward(self, handler):
+        select_rows = getattr(handler, "pooled_row_indices", None)
+        if callable(select_rows) and self.supports_pooled_embedding:
+            return partial(self._forward_selected_rows, select_rows)
+        return None
+
+    def _forward_selected_rows(self, select_rows, inputs, fmha_impl=None):
+        rows = select_rows(inputs.attention_inputs.input_lengths)
+        return self.forward(
+            inputs, fmha_impl, rows.to(inputs.input_ids.device, non_blocking=True)
         )
 
     def forward(
@@ -260,10 +291,7 @@ class BertModel(GptModelBase):
         for i in range(self.layer_num):
             decoder_layer = self.layers[i]
             next_layer_uses_quantized_input = (
-                i + 1 < self.layer_num
-                and self.layers[
-                    i + 1
-                ].self_attn.qkv_proj.supports_prequantized_activation
+                i + 1 < self.layer_num and self.layers[i + 1].accepts_quantized_input
             )
             row_args = (
                 {"output_rows": output_rows}
