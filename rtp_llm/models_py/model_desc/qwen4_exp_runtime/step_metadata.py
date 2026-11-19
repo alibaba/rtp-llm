@@ -99,6 +99,38 @@ def cached_prefill_geometry(context, lengths, prefixes, ratio, device):
     ).geometry
 
 
+def check_prefill_metadata_once(context, checks, key, tensors, add_checks):
+    """Reuse only successful read-only checks in the model's Prefill scope.
+
+    The existing model preflight excludes hooks and keeps native metadata
+    stable until forward returns. Retain tensor owners, and additionally
+    invalidate ordinary tensors on in-place changes. Pending or failed
+    verdicts never authorize a later writer. No receipt survives the forward.
+    """
+    inputs = context.main_inputs
+    cache = context.metadata_cache
+    if (
+        cache is None
+        or not checks.prefill_metadata_readonly
+        or context.is_mtp_draft
+        or not inputs.is_prefill
+        or inputs.is_target_verify
+        or inputs.is_cuda_graph
+    ):
+        add_checks()
+        return
+    signatures = tuple(
+        tensor_signature(tensor) + (None if tensor.is_inference() else tensor._version,)
+        for tensor in tensors
+    )
+    key = ("prefill_checks", key, signatures)
+    previous = cache.get(key)
+    if previous is not None and (previous[0] is checks or previous[0].verified):
+        return
+    add_checks()
+    cache[key] = (checks, tensors)
+
+
 def cached_query_geometry(context, prefixes, query_len, ratio):
     """Share one query window across layers, for decode and verification."""
 
