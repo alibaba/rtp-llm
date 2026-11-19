@@ -63,6 +63,8 @@ class PureDpRouterBase(FusedMoeDataRouter):
     reduce_scatter.
     """
 
+    executor_uses_local_ids = True
+
     @classmethod
     def router_type(cls):
         return RouterType.PURE_TP
@@ -149,11 +151,13 @@ class PureDpRouterBase(FusedMoeDataRouter):
 
         expert_x, expert_x_scale = self._do_quant(a1_full)
 
-        adjusted_topk_ids, num_recv_tokens_per_expert = (
-            recompute_topk_ids_sum_expert_count(
-                topk_ids_full, self.expert_start_id, self.expert_num_per_rank
+        adjusted_topk_ids, num_recv_tokens_per_expert = topk_ids_full, None
+        if self.executor_uses_local_ids:
+            adjusted_topk_ids, num_recv_tokens_per_expert = (
+                recompute_topk_ids_sum_expert_count(
+                    topk_ids_full, self.expert_start_id, self.expert_num_per_rank
+                )
             )
-        )
 
         return ExpertForwardPayload(
             expert_x,
@@ -181,10 +185,23 @@ class PureDpRouterBase(FusedMoeDataRouter):
         ), "PureDpRouter.finalize requires extra_finalize_args['original_num_tokens']"
         local_batch_size: int = extra_finalize_args["original_num_tokens"]
 
-        output = reduce_scatter(payload.fused_expert_output, group=Group.STAGE)
+        output = reduce_scatter(
+            payload.fused_expert_output,
+            group=Group.STAGE,
+            batch_invariant=self.config.batch_invariant,
+        )
         if output.shape[0] > local_batch_size:
             output = output[:local_batch_size]
         return output
+
+
+class PureDpRouterNoQuant(PureDpRouterBase):
+    """Gather BF16 activations and let the Triton executor map global IDs."""
+
+    executor_uses_local_ids = False
+
+    def _do_quant(self, a1: torch.Tensor) -> Tuple[torch.Tensor, None]:
+        return a1, None
 
 
 class PureDpRouterFp8PerBlock(PureDpRouterBase):

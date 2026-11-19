@@ -1065,7 +1065,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
-def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
+def reduce_scatter(
+    input_tensor: torch.Tensor, group: Group, *, batch_invariant: bool = False
+) -> torch.Tensor:
     """Reduce-scatter a tensor across all ranks in the group.
 
     Reduces (sums) the input tensor across all ranks and scatters the result
@@ -1075,6 +1077,7 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         input_tensor: Full-size tensor to reduce-scatter
             (shape: [world_size * chunk_size] + remaining_dims)
         group: Process group to use
+        batch_invariant: Sum floating-point shards in fixed rank order.
 
     Returns:
         Scattered chunk of the reduced tensor for this rank
@@ -1092,6 +1095,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         device=input_tensor.device,
         dtype=input_tensor.dtype,
     )
+    if batch_invariant and input_tensor.is_floating_point():
+        return _get_all_reduce_module().batch_invariant_reduce_scatter(
+            input_tensor, process_group, output_tensor
+        )
     torch.distributed.reduce_scatter_tensor(
         output_tensor,
         input_tensor,

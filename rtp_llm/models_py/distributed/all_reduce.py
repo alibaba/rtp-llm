@@ -315,11 +315,29 @@ def batch_invariant_all_reduce(tensor, group, out):
     # change the arithmetic, which follows the same order for each element.
     contributions = flat.new_empty((world_size, flat.numel()))
     dist.all_gather_into_tensor(contributions, flat, group=group)
+    return _sum_rank_order(contributions, out)
+
+
+def batch_invariant_reduce_scatter(tensor, group, out):
+    """Exchange padded shards and sum each destination in source-rank order."""
+    if group.size() == 1:
+        out.copy_(tensor)
+        return out
+    if out.numel() == 0:
+        return out
+
+    # Each rank receives one shard from every source, in process group order.
+    contributions = torch.empty_like(tensor, memory_format=torch.contiguous_format)
+    dist.all_to_all_single(contributions, tensor.contiguous(), group=group)
+    return _sum_rank_order(contributions.view(group.size(), *out.shape), out)
+
+
+def _sum_rank_order(contributions, out):
     first, *rest = contributions.unbind()
-    acc = first if tensor.dtype == torch.float64 else first.float()
+    acc = first if first.dtype == torch.float64 else first.float()
     for partial in rest:
         acc.add_(partial)
-    out.copy_(acc.view(tensor.shape))
+    out.copy_(acc.view(out.shape))
     return out
 
 

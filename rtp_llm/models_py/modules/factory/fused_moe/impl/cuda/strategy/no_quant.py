@@ -80,6 +80,31 @@ class CudaNoQuantCppStrategy(MoeStrategy):
         )
 
 
+class CudaNoQuantPureDPStrategy(MoeStrategy):
+    """BF16 batch-invariant MoE over the pure DP router."""
+
+    strategy_name = "no_quant_pure_dp"
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        checker.check(config.batch_invariant)
+        checker.check(config.moe_strategy == cls.strategy_name)
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.triton_fused_executor import (
+            TritonFusedMoeExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_dp_router import (
+            PureDpRouterNoQuant,
+        )
+
+        return StrategyAttributes(
+            router_class=PureDpRouterNoQuant,
+            executor_class=TritonFusedMoeExecutor,
+            quant_config=FusedMoEQuantConfig(quant_dtype=None),
+        )
+
+
 class CudaNoQuantDpNormalStrategy(MoeStrategy):
     """CUDA CPP mode without quantization strategy and dp normal mode"""
 
