@@ -11,6 +11,12 @@ repos:
     # Formatters
   - repo: local
     hooks:
+      - id: mock-staged-datasets
+        name: Reject staged Mock replay datasets
+        entry: bash rtp_llm/flexlb/mock-framework/scripts/check-staged-datasets.sh
+        language: system
+        always_run: true
+        pass_filenames: false
       - id: flexlb-java-conventions
         name: Check FlexLB Java member order and changed-class Javadoc
         entry: python rtp_llm/flexlb/tools/check_flexlb_java.py
