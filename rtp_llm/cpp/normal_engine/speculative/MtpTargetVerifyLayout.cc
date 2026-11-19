@@ -41,7 +41,8 @@ void setVerifyPairInputs(GptModelInputs& model_input,
                          size_t          batch_size,
                          size_t          score_len,
                          TensorHolder&   host_holder) {
-    model_input.combo_tokens       = std::move(combo_tokens);
+    model_input.combo_tokens = std::move(combo_tokens);
+    MtpBatchStreamProcessor::resetDecodeTextTokensMask(model_input);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});
     model_input.last_hidden_states = torch::Tensor();
     model_input.prefix_lengths     = toCudaInt32(model_input.prefix_lengths, host_holder).contiguous();

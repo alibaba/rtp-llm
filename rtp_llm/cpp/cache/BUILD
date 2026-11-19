@@ -100,6 +100,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":block_info",
         ":cache_group_type",
         ":kv_cache_specs",
         "//rtp_llm/cpp/config:config_modules",

@@ -1231,8 +1231,6 @@ static GroupBase makeTpTransferGroup(int tp, bool linear_cache, DataType mha_dty
     group.tag                = desc.tag;
     group.spec               = linear_cache ? LinearKVCacheSpec::build(desc, ctx) : MHAKVCacheSpec::build(desc, ctx);
     group.policy             = defaultCacheGroupPolicy(linear_cache ? CacheGroupType::LINEAR : CacheGroupType::FULL);
-
-
     group.block_num          = 3;
     return group;
 }

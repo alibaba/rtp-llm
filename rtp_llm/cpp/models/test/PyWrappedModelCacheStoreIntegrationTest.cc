@@ -1745,11 +1745,10 @@ py::list runMropeGraphPreparationScenario(py::object py_model) {
                               MlaOpsType::AUTO,
                               /*max_seq_len=*/256,
                               /*hidden_size=*/4,
-                              /*tokens_per_block=*/64,
-                              /*kernel_tokens_per_block=*/64,
                               manager};
+    params.kernel_block_table_width = 4;
     PyWrappedModel model(params, py_model, /*is_prefill_cuda_graph_mode=*/true);
-    auto* runner = dynamic_cast<CudaGraphRunner*>(model.graph_runner_);
+    auto* runner = dynamic_cast<CudaGraphRunner*>(model.graph_runner_.get());
     if (!runner) {
         throw std::runtime_error("mRoPE preparation regression requires the real CUDA graph runner");
     }
@@ -1770,10 +1769,10 @@ py::list runMropeGraphPreparationScenario(py::object py_model) {
                                  {11, 12, 13, 14, 21, 22, 23, 24},
                                  4,
                                  {1, 2, 3, 4, 2, 3, 4, 5},
-                                 1,
+                                 {"full"},
                                  4,
                                  64,
-                                 config.kv_block_stride_bytes);
+                                 config.group("full").kvBlockStrideBytes());
         inputs.pd_separation          = false;
         inputs.use_opaque_kv_cache_store = false;
         inputs.request_pd_separation = pinnedBoolTensor(2, false);

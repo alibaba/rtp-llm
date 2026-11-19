@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 

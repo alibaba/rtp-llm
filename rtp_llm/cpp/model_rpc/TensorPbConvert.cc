@@ -1,5 +1,9 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
+#if USING_CUDA
+#include <torch/cuda.h>
+#endif
+
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -76,7 +80,11 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
 }
 
 torch::Tensor TensorPbConvert::pbToPinnedTorch(const TensorPB& tensor_pb) {
-    return pbToTorchImpl(tensor_pb, true);
+#if USING_CUDA
+    return pbToTorchImpl(tensor_pb, torch::cuda::is_available());
+#else
+    return pbToTorchImpl(tensor_pb, false);
+#endif
 }
 
 void TensorPbConvert::torchToPb(TensorPB* tensor_pb, const torch::Tensor& tensor) {

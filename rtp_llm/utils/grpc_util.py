@@ -78,7 +78,7 @@ def trans_from_tensor(t: torch.Tensor, res=None):
     else:
         res.Clear()
         res.SetInParent()
-    if t is None or t.numel() == 0:
+    if t is None:
         return res
     with cuda_graph_gate.operation():
         t = t.cpu()

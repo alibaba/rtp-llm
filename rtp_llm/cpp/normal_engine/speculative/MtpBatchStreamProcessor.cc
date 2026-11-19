@@ -1914,9 +1914,15 @@ void MtpBatchStreamProcessor::alignPrefillMultimodalInputs(
     if (!shifted_locs.empty()) {
         std::copy(shifted_locs.begin(), shifted_locs.end(), shifted_locs_tensor.data_ptr<int32_t>());
     }
-    model_input.text_tokens_mask = std::move(shifted_mask);
+    if (model_input.text_tokens_mask.is_cuda()) {
+        shifted_mask = shifted_mask.to(model_input.text_tokens_mask.device(), /*non_blocking=*/true);
+    }
+    if (model_input.mm_features_locs.is_cuda()) {
+        shifted_locs_tensor = shifted_locs_tensor.to(model_input.mm_features_locs.device(), /*non_blocking=*/true);
+    }
+    model_input.text_tokens_mask    = std::move(shifted_mask);
     model_input.multimodal_features = std::move(shifted_features);
-    model_input.mm_features_locs = std::move(shifted_locs_tensor);
+    model_input.mm_features_locs    = std::move(shifted_locs_tensor);
     if (has_extra) {
         model_input.mm_extra_input = std::move(shifted_extra);
     }
@@ -1942,17 +1948,13 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     torch::Tensor combo_tokens_cpu =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
 
-    if (align_qwen_mtp_multimodal_) {
-        alignPrefillMultimodalInputs(model_input, input_lengths_cpu);
-        if (model_input.multimodal_features.has_value())
-            model_input.combo_tokens_type_ids = shiftedMtpTokenField(model_input.combo_tokens_type_ids, input_lengths_cpu, 0);
-    } else {
-        const bool has_multimodal =
-            model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
-        if (has_multimodal) {
+    if (model_input.multimodal_features && !model_input.multimodal_features->empty()) {
+        model_input.combo_tokens_type_ids =
+            shiftedMtpTokenField(model_input.combo_tokens_type_ids, input_lengths_cpu, 0);
+        if (align_qwen_mtp_multimodal_) {
+            alignPrefillMultimodalInputs(model_input, input_lengths_cpu);
+        } else {
             model_input.text_tokens_mask = shiftedMtpTokenField(model_input.text_tokens_mask, input_lengths_cpu, 1);
-            model_input.combo_tokens_type_ids =
-                shiftedMtpTokenField(model_input.combo_tokens_type_ids, input_lengths_cpu, 0);
             shiftMtpMultimodalLocations(model_input, input_lengths_cpu);
         }
     }
