@@ -87,6 +87,8 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams& init_params) {
     auto cache_store = NormalCacheStore::createNormalCacheStore(params);
     RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr, "cache store init failed");
     cache_manager->setCacheStore(cache_store);
+    // The engine's cache manager already owns the merged target/draft/MTP
+    // layout. Register all its pools; proposal initialization belongs to the engine.
     cache_manager->regUserMr(init_params.model_id, cache_store);
     resource_.cache_store = std::move(cache_store);
     RTP_LLM_LOG_INFO("cache store init success");

@@ -1,6 +1,10 @@
 #include "autil/EnvUtil.h"
+#include "autil/NetUtil.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
+#include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include <pybind11/embed.h>
 
 namespace rtp_llm {
 
@@ -80,6 +84,59 @@ TEST_F(DeferredEngineStartTest, AbortedTemplateCanStopBeforeLoopStarts) {
     EXPECT_TRUE(engine->stop().ok());
     // Destruction must also tolerate an initialized engine with no loop.
     engine.reset();
+}
+
+TEST_F(DeferredEngineStartTest, PdMtpCacheIsPreparedBeforeTransportAndRegisteredAfterRelease) {
+    py::scoped_interpreter interpreter{};
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    CustomConfig config;
+    config.role_type = RoleType::PREFILL;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.server_config = py::none();
+    params.parallelism_config.role_type = RoleType::PREFILL;
+    params.sp_config.type = SP_TYPE_MTP;
+    params.sp_config.gen_num_per_cycle = 2;
+    params.pd_sep_config.cache_store_listen_port = autil::NetUtil::randomPort();
+    params.pd_sep_config.cache_store_rdma_mode = false;
+    auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    auto draft = std::make_unique<EngineInitParams>(params);
+    draft->model_id = 1;
+    modules->push_back(std::move(draft));
+    auto proposal = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_MTP, 2, std::move(modules));
+    auto* proposal_identity = proposal.get();
+
+    RemoteRpcServer server;
+    ASSERT_TRUE(server.init(params, std::move(proposal), py::none()).ok());
+    auto engine = std::dynamic_pointer_cast<NormalEngine>(server.getEngine());
+    ASSERT_NE(engine, nullptr);
+    EXPECT_EQ(engine->propose_params_.get(), proposal_identity);
+    EXPECT_EQ(server.propose_maga_init_params_, proposal_identity);
+    EXPECT_NE(dynamic_cast<MtpExecutor*>(engine->executor_.get()), nullptr);
+    const auto manager = engine->resourceContext().cache_manager;
+    ASSERT_EQ(manager->cacheConfig().mtp_sub_configs.size(), 2u);
+    const auto checkpoint_tensors = manager->gpuCacheTensors();
+    ASSERT_FALSE(checkpoint_tensors.empty());
+    EXPECT_EQ(engine->loop_thread_, nullptr);
+    EXPECT_EQ(server.resource().cache_store, nullptr);
+    EXPECT_EQ(manager->getCacheStore(), nullptr);
+    for (const auto& pool : manager->coordinator_manager_->groupBlockPools()) {
+        EXPECT_FALSE(pool->kvcache_reg_mr_);
+    }
+
+    ASSERT_NO_THROW(server.startServices());
+    ASSERT_NE(server.resource().cache_store, nullptr);
+    EXPECT_EQ(manager->getCacheStore(), server.resource().cache_store);
+    EXPECT_NE(engine->loop_thread_, nullptr);
+    for (const auto& pool : manager->coordinator_manager_->groupBlockPools()) {
+        EXPECT_TRUE(pool->kvcache_reg_mr_);
+    }
+    const auto released_tensors = manager->gpuCacheTensors();
+    ASSERT_EQ(released_tensors.size(), checkpoint_tensors.size());
+    for (size_t i = 0; i < checkpoint_tensors.size(); ++i) {
+        EXPECT_EQ(released_tensors[i].data_ptr(), checkpoint_tensors[i].data_ptr());
+    }
 }
 
 TEST_F(DeferredEngineStartTest, ReleaseStartsOneLoopAndGenerates) {
