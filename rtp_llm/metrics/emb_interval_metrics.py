@@ -146,7 +146,10 @@ class EmbLatencyMetric(MetricBase):
         with self._lock:
             entry = self._samples.get(key)
             if entry is None:
-                histogram = key == ("read",) or key[:2] == ("read", "metadata")
+                histogram = key in (("read",), ("read_transfer",)) or key[:2] == (
+                    "read",
+                    "metadata",
+                )
                 entry = self._samples[key] = _Latency(histogram)
             entry.add(value)
 

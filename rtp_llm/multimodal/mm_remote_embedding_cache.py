@@ -482,7 +482,7 @@ class MMRemoteEmbeddingCache:
         )
         return elapsed_ms
 
-    def _lookup_object_meta(self, client, key, trace_id, timeout_ms):
+    def _lookup_object_meta(self, client, key, trace_id, timeout_ms, deadline):
         outcome = "error"
         try:
             with self._observe_stage("read", "metadata"):
@@ -502,6 +502,8 @@ class MMRemoteEmbeddingCache:
                     ):
                         self._retire_client(client, error)
                     raise
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote embedding metadata completed after deadline")
                 if meta is None:
                     outcome = "miss"
                 elif not 0 < meta.size_bytes <= self.max_object_bytes:
@@ -1209,7 +1211,9 @@ class MMRemoteEmbeddingCache:
                 timing["lookup_budget_ms"] = remaining_ms
                 api_started = time.perf_counter()
                 try:
-                    meta = self._lookup_object_meta(client, key, trace_id, remaining_ms)
+                    meta = self._lookup_object_meta(
+                        client, key, trace_id, remaining_ms, deadline
+                    )
                 finally:
                     timing["metadata_ms"] = (time.perf_counter() - api_started) * 1000
                     timing["sdk_api_ms"] = timing["metadata_ms"]

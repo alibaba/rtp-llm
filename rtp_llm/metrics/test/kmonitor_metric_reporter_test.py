@@ -196,7 +196,7 @@ class MetricReporterTest(unittest.TestCase):
                     counters.report(
                         1, {"operation": "read", "stage": "all", "status": status}
                     )
-                    waits.report(i, {"operation": "read"})
+                    waits.report(i, {"operation": "read_transfer"})
 
             outcomes = []
             latencies = []
@@ -229,6 +229,14 @@ class MetricReporterTest(unittest.TestCase):
         self.assertEqual(
             sum(p.value for p in latencies if p.metric_name == rt + "_sum"),
             workers * sum(range(iterations)),
+        )
+        self.assertEqual(
+            sum(
+                p.value
+                for p in latencies
+                if p.metric_name == rt + "_bucket" and p.tags["le"] == "+Inf"
+            ),
+            workers * iterations,
         )
 
     def test_empty_selection_does_not_register_all_metrics(self):

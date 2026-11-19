@@ -1368,9 +1368,19 @@ class RemoteCacheTest(unittest.TestCase):
             time.sleep(0.050)
             return None
 
-        with patch.object(remote._client, "object_size", side_effect=late_miss):
-            with patch.object(remote, "record", wraps=remote.record) as record:
-                self.assertIsNone(remote.load("missing", trace_id="late-miss"))
+        with patch.object(remote._client, "object_size", side_effect=late_miss), patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report, patch.object(remote, "record", wraps=remote.record) as record:
+            self.assertIsNone(remote.load("missing", trace_id="late-miss"))
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_METADATA_QPS_METRIC),
+            [(1, {"status": "timeout"})],
+        )
+        stages = self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC)
+        self.assertEqual(
+            [tags for _, tags in stages],
+            [{"operation": "read", "stage": "metadata", "status": "timeout"}],
+        )
         record.assert_called_once()
         self.assertEqual(record.call_args.args[0], "read_error")
         self.assertEqual(record.call_args.kwargs["stage"], "metadata")
