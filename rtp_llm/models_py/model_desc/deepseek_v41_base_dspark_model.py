@@ -39,6 +39,10 @@ from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v41_base_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv41 import _profiler
+from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    reuse_prefill_cp_collectives,
+    try_commit_all_gather,
+)
 from rtp_llm.models_py.modules.dsv41._dspark_commit_wkv import prepare_dspark_commit_wkv
 from rtp_llm.models_py.modules.dsv41._dspark_metadata_triton import (
     DSparkMetadata,
@@ -81,6 +85,14 @@ from rtp_llm.models_py.utils.expert_load_monitor import expert_load_for_layer
 from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+
+def _gather_commit_shards(shard: torch.Tensor, *, retain: bool = False) -> torch.Tensor:
+    """Gather contiguous rank-local commit metadata or normalized KV."""
+    from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+
+    gathered = try_commit_all_gather(shard, retain=retain)
+    return all_gather(shard, group=Group.TP) if gathered is None else gathered
 
 
 def _write_dspark_swa(*, kv, slot_mapping, swa_pool_3d, bsz, q_len, head_dim):
@@ -671,12 +683,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 eps=float(attn.eps),
             )
             if gathered_positions is not None:
-                from rtp_llm.models_py.distributed.collective_torch import (
-                    Group,
-                    all_gather,
-                )
-
-                context_kv = all_gather(context_kv.contiguous(), group=Group.TP)
+                context_kv = _gather_commit_shards(context_kv)
             context_rows = int(write_positions.numel())
             if metadata is None:
                 # Dense decode / CUDA graph calls keep their existing build
@@ -814,12 +821,8 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if commit_ctx is not None:
             # Proj-then-gather: the row map is gathered once here; each
             # layer's projected KV is gathered inside _commit_layer_features.
-            from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
-
-            gathered_req_ids = all_gather(context_req_ids.contiguous(), group=Group.TP)
-            gathered_positions = all_gather(
-                context_positions.contiguous(), group=Group.TP
-            )
+            gathered_req_ids = _gather_commit_shards(context_req_ids, retain=True)
+            gathered_positions = _gather_commit_shards(context_positions, retain=True)
             block_table = (
                 block_table[:batch_size]
                 .to(device=main_x.device, dtype=torch.int32)
@@ -1145,6 +1148,23 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     device=device,
                 )
             )
+        if (
+            device.type == "cuda"
+            and self._dspark_commit_cp_enabled
+            and self.tp_size == 4
+        ):
+            attn = as_tagged_attention_inputs(inputs.attention_inputs)
+            cp_info = getattr(attn, "context_parallel_info", None)
+            padding_mask = getattr(cp_info, "prefill_qkv_padding_mask", None)
+            if (
+                getattr(attn, "is_prefill", False)
+                and not getattr(attn, "is_target_verify", False)
+                and not getattr(attn, "is_cuda_graph", False)
+                and padding_mask is not None
+                and padding_mask.numel() > 0
+            ):
+                with reuse_prefill_cp_collectives(device):
+                    return self.run_commit_step(inputs, device)
         return self.run_commit_step(inputs, device)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

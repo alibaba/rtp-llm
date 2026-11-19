@@ -3,16 +3,17 @@
 import random
 import tempfile
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import triton
 
+from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv41.attn_type import HCA_KV, INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as codec
@@ -22,6 +23,35 @@ from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_pools as pools
 
 
 class OwnedPoolHostTest(unittest.TestCase):
+    def test_collective_keeps_local_receive_slice_as_input(self):
+        gathered = torch.empty(12, dtype=torch.uint8)
+        send = gathered[6:9]
+        group = object()
+        for fast_path in (True, False):
+            with self.subTest(fast_path=fast_path):
+                work = Mock()
+                with (
+                    patch.object(collective_torch, "_get_group", return_value=group),
+                    patch.object(dist, "get_world_size", return_value=4),
+                    patch.object(dist, "get_rank", return_value=2),
+                    patch.object(
+                        owned, "try_all_gather_into", return_value=fast_path
+                    ) as attempt,
+                    patch.object(
+                        dist, "all_gather_into_tensor", return_value=work
+                    ) as nccl,
+                ):
+                    owned._collect(gathered, send, 4, 2)
+                attempt.assert_called_once_with(gathered, send, group)
+                if fast_path:
+                    nccl.assert_not_called()
+                    work.wait.assert_not_called()
+                else:
+                    nccl.assert_called_once_with(
+                        gathered, send, group=group, async_op=True
+                    )
+                    work.wait.assert_called_once_with()
+
     def test_segmented_path_requires_startup_kernels_before_collective(self):
         layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
         with self.assertRaisesRegex(RuntimeError, "startup warmup"):
@@ -38,7 +68,8 @@ class OwnedPoolHostTest(unittest.TestCase):
 
     def test_try_gather_uses_segmented_plan_after_common_plan_rejects(self):
         layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
-        plan, result = object(), object()
+        plan = SimpleNamespace(direct_receive_aligned=False)
+        result = object()
         with (
             patch.object(owned, "plan_groups", return_value=None) as common,
             patch.object(
@@ -56,6 +87,48 @@ class OwnedPoolHostTest(unittest.TestCase):
         common.assert_called_once_with((600_001,), cp_size=4, owner_rows=256)
         segmented.assert_called_once_with((600_001,), cp_size=4, owner_rows=256)
         self.assertIs(gather.call_args.args[8], plan)
+
+    def test_owned_pool_borrows_only_for_aligned_groups(self):
+        layout = (1, 256, 128, 128, 0, torch.int32, torch.int32, 128, 128, 4)
+        ends = torch.tensor([5120], dtype=torch.int64)
+        region = object()
+        output = object()
+        calls = []
+
+        @contextmanager
+        def borrow(reference, group, *, numel, dtype):
+            self.assertIs(reference, ends)
+            self.assertEqual(numel, 5120 * owned._BYTES)
+            self.assertEqual(dtype, torch.uint8)
+            calls.append("borrow")
+            yield region
+            calls.append("release")
+
+        def gather(*args, borrowed_receive, **kwargs):
+            if borrowed_receive is not None:
+                self.assertIs(borrowed_receive, region)
+                self.assertEqual(calls, ["borrow"])
+            calls.append("restore")
+            return output
+
+        with (
+            patch.object(owned, "_validate_local"),
+            patch.object(owned, "borrowed_gather_buffer", side_effect=borrow),
+            patch.object(owned, "_gather_planned", side_effect=gather),
+        ):
+            self.assertIs(
+                owned.try_gather(
+                    None, None, (5120,), ends, None, None, layout, object()
+                ),
+                output,
+            )
+            self.assertEqual(calls, ["borrow", "restore", "release"])
+            calls.clear()
+            self.assertIs(
+                owned.try_gather(None, None, (1,), ends, None, None, layout, object()),
+                output,
+            )
+            self.assertEqual(calls, ["restore"])
 
     def test_segmented_plan_covers_mixed_requests_with_bounded_scratch(self):
         for cp in (1, 2, 4):
@@ -344,7 +417,7 @@ class OwnedPoolHostTest(unittest.TestCase):
         self.assertEqual(owned._plan_groups_cached.cache_info().misses, info.misses + 1)
 
         def check(value):
-            if value is None or type(value) is int:
+            if value is None or type(value) in (bool, int):
                 return
             if type(value) is tuple:
                 for item in value:

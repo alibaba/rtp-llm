@@ -12,6 +12,7 @@ their lifetime is independent of transport grouping and they never alias scratch
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
 from math import lcm
@@ -20,6 +21,12 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    borrowed_gather_buffer,
+    gather_inplace,
+    try_all_gather_into,
+)
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as codec
 
@@ -49,6 +56,7 @@ class OwnedPlan:
     max_output_rows: int
     temporary_bytes: int
     index_output_bytes: int
+    direct_receive_aligned: bool
 
 
 @dataclass(frozen=True)
@@ -67,6 +75,7 @@ class SegmentedPlan:
     max_local_rows: int
     max_output_rows: int
     temporary_bytes: int
+    direct_receive_aligned: bool
 
 
 def owned_count(count, cp_size, owner_rows, rank):
@@ -171,7 +180,13 @@ def plan_segmented_groups(counts, *, cp_size, owner_rows):
     scratch = scratch_per_local * local + _INVERSE_BYTES * rows
     if scratch > limit:
         return None
-    return SegmentedPlan(tuple(groups), local, rows, scratch)
+    return SegmentedPlan(
+        tuple(groups),
+        local,
+        rows,
+        scratch,
+        all(group.local_rows * _BYTES % 16 == 0 for group in groups),
+    )
 
 
 @lru_cache(maxsize=128, typed=True)
@@ -208,6 +223,7 @@ def _plan_groups_cached(counts, cp_size, owner_rows, limit):
         output_max,
         scratch_per_local * local_max + _INVERSE_BYTES * output_max,
         _INDEX_BYTES * sum(group.rows for group in groups),
+        all(group.local_rows * _BYTES % 16 == 0 for group in groups),
     )
 
 
@@ -569,6 +585,8 @@ def _collect(gathered, send, cp_size, cp_rank):
         or torch.distributed.get_rank(group) != cp_rank
     ):
         raise RuntimeError("Owned pool CP size/rank differs from its process group")
+    if try_all_gather_into(gathered, send, group):
+        return
     work = torch.distributed.all_gather_into_tensor(
         gathered, send, group=group, async_op=True
     )
@@ -620,6 +638,7 @@ def _gather_planned(
     workspace,
     swa,
     output_stream,
+    borrowed_receive,
 ):
     from . import _v41_joint_pool as joint
     from ._v41_prefill_indexer import PrefillIndexerKeys
@@ -639,9 +658,11 @@ def _gather_planned(
             ),
         )
     device = seq_ends.device
-    receive_buffer = torch.empty(
-        cp * plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device
-    )
+    receive_buffer = borrowed_receive
+    if receive_buffer is None:
+        receive_buffer = torch.empty(
+            cp * plan.max_local_rows * _BYTES, dtype=torch.uint8, device=device
+        )
     slots = torch.empty(2 * plan.max_local_rows, dtype=torch.int64, device=device)
     inverse = torch.empty(2 * plan.max_output_rows, dtype=torch.int64, device=device)
     pack_words = codec._words_aligned(
@@ -717,7 +738,10 @@ def _gather_planned(
                     index.shape[1],
                 )
             with record_function_range("dsv41.prefill.pool.owned.all_gather"):
-                _collect(receive, send, cp, rank)
+                if borrowed_receive is not None:
+                    gather_inplace(receive, send, Group.TP)
+                else:
+                    _collect(receive, send, cp, rank)
         if segmented:
             global_keys, full_q, full_s = long_outputs[first]
             out = (
@@ -798,17 +822,32 @@ def try_gather(
     if kernels is None:
         raise RuntimeError("Owned pool kernels were not prepared by startup warmup")
     _validate_local(main, index, seq_ends, mt, it, len(ends), layout)
-    return _gather_planned(
-        main,
-        index,
-        ends,
-        seq_ends,
-        mt,
-        it,
-        layout,
-        kernels,
-        plan,
-        workspace=workspace,
-        swa=swa,
-        output_stream=output_stream,
+    # Plan geometry, including padding and alignment, is common to all ranks.
+    # Pack, collective, and restore stay on the current stream; only restored
+    # private outputs escape this scope.
+    scope = (
+        borrowed_gather_buffer(
+            seq_ends,
+            Group.TP,
+            numel=cp * plan.max_local_rows * _BYTES,
+            dtype=torch.uint8,
+        )
+        if cp == 4 and plan.direct_receive_aligned
+        else nullcontext()
     )
+    with scope as receive:
+        return _gather_planned(
+            main,
+            index,
+            ends,
+            seq_ends,
+            mt,
+            it,
+            layout,
+            kernels,
+            plan,
+            workspace=workspace,
+            swa=swa,
+            output_stream=output_stream,
+            borrowed_receive=receive,
+        )

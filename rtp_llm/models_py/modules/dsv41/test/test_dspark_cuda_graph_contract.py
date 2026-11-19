@@ -28,6 +28,81 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_cp_commit_gather_preserves_metadata_and_kv_shapes(self) -> None:
+        from rtp_llm.models_py.distributed import collective_torch
+
+        shards = (
+            (torch.arange(6, dtype=torch.int32)[1:], True),
+            (torch.arange(5, dtype=torch.int32), True),
+            (torch.arange(0, 5 * 1024, 2, dtype=torch.bfloat16).reshape(5, 512), False),
+        )
+        for shard, retain in shards:
+            expected = torch.cat([shard + rank for rank in range(4)])
+            for use_fast_path in (True, False):
+                with (
+                    patch.object(
+                        dspark_model_module,
+                        "try_commit_all_gather",
+                        return_value=expected if use_fast_path else None,
+                    ) as fast,
+                    patch.object(
+                        collective_torch, "all_gather", return_value=expected
+                    ) as fallback,
+                ):
+                    actual = dspark_model_module._gather_commit_shards(
+                        shard, retain=retain
+                    )
+                    self.assertEqual(actual.shape, (20, *shard.shape[1:]))
+                    self.assertEqual(actual.dtype, shard.dtype)
+                    (arg,) = fast.call_args.args
+                    self.assertIs(arg, shard)
+                    self.assertEqual(fast.call_args.kwargs, {"retain": retain})
+                    if use_fast_path:
+                        fallback.assert_not_called()
+                    else:
+                        fallback.assert_called_once()
+                        (local,), kwargs = fallback.call_args
+                        self.assertIs(local, shard)
+                        self.assertEqual(kwargs, {"group": collective_torch.Group.TP})
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_only_eager_cp_prefill_commit_reuses_the_workspace(self) -> None:
+        model = _dspark_harness()
+        model._dspark_commit_cp_enabled = True
+        model.tp_size = 4
+        model.kv_cache = object()
+        device = torch.device("cuda", 0)
+        model._forward_device = Mock(return_value=device)
+        model.run_commit_step = Mock()
+        for fields, should_reuse in (
+            ({}, True),
+            ({"is_prefill": False}, False),
+            ({"is_target_verify": True}, False),
+            ({"is_cuda_graph": True}, False),
+            ({"context_parallel_info": None}, False),
+        ):
+            with self.subTest(fields=fields):
+                attn = {
+                    "is_prefill": True,
+                    "context_parallel_info": SimpleNamespace(
+                        prefill_qkv_padding_mask=torch.ones(20)
+                    ),
+                }
+                attn.update(fields)
+                inputs = SimpleNamespace(attention_inputs=SimpleNamespace(**attn))
+                with patch.object(
+                    dspark_model_module,
+                    "reuse_prefill_cp_collectives",
+                    return_value=nullcontext(),
+                ) as reuse:
+                    result = model.forward_commit(inputs)
+                self.assertIs(result, model.run_commit_step.return_value)
+                model.run_commit_step.assert_called_with(inputs, device)
+                if should_reuse:
+                    reuse.assert_called_once_with(device)
+                else:
+                    reuse.assert_not_called()
+
     def test_cp_swa_uses_logical_entries_without_byte_padding(self) -> None:
         model = _dspark_harness()
         model.kv_cache = SimpleNamespace(get_entries_per_block=lambda _tag: 136)

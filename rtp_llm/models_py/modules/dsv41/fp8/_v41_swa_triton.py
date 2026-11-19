@@ -15,6 +15,7 @@ codec, or selected as a fallback for an already allocated 584B cache.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from functools import partial
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -22,6 +23,10 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    borrowed_all_gather,
+    try_all_gather_into,
+)
 from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
 
@@ -566,7 +571,8 @@ def _try_all_gather_cp4_bytes(local: torch.Tensor) -> Optional[torch.Tensor]:
         dtype=local.dtype,
     )
     # The same collective overwrites every receive byte, on the caller's stream.
-    torch.distributed.all_gather_into_tensor(gathered, local, group=group)
+    if not try_all_gather_into(gathered, local, group):
+        torch.distributed.all_gather_into_tensor(gathered, local, group=group)
     return gathered
 
 
@@ -614,28 +620,33 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         else:
             from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
 
-            gathered = _try_all_gather_cp4_bytes(local) if rank_major else None
-            if gathered is None:
-                gathered = all_gather(local, group=Group.TP)
-            if rank_major and gathered.is_contiguous():
-                _gather_swa_rank_major(
-                    out,
-                    gathered,
-                    compaction.compact_slots,
-                    gather_lens,
-                    offset,
-                    unique_blocks.numel(),
-                    local_bytes,
-                    full_entries_per_block,
-                    out_row_offsets=out_row_offsets,
-                )
-                return
-            full_raw = (
-                gathered.view(cp_size, unique_blocks.numel(), local_bytes)
-                .permute(1, 0, 2)
-                .reshape(unique_blocks.numel(), cp_size * local_bytes)
-                .contiguous()
+            scope = (
+                borrowed_all_gather(local, Group.TP) if rank_major else nullcontext()
             )
+            with scope as gathered:
+                if gathered is None:
+                    gathered = _try_all_gather_cp4_bytes(local) if rank_major else None
+                    if gathered is None:
+                        gathered = all_gather(local, group=Group.TP)
+                if rank_major and gathered.is_contiguous():
+                    _gather_swa_rank_major(
+                        out,
+                        gathered,
+                        compaction.compact_slots,
+                        gather_lens,
+                        offset,
+                        unique_blocks.numel(),
+                        local_bytes,
+                        full_entries_per_block,
+                        out_row_offsets=out_row_offsets,
+                    )
+                    return
+                full_raw = (
+                    gathered.view(cp_size, unique_blocks.numel(), local_bytes)
+                    .permute(1, 0, 2)
+                    .reshape(unique_blocks.numel(), cp_size * local_bytes)
+                    .contiguous()
+                )
     full_view = full_raw.as_strided(
         (unique_blocks.numel(), full_entries_per_block, ENTRY_BYTES),
         (full_raw.shape[1], ENTRY_BYTES, 1),

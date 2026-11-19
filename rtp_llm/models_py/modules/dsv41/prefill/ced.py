@@ -28,6 +28,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.dsv41 import _cp_collectives
 from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.attn_type import DECODER_SWA_KV, SWA_KV
@@ -127,6 +128,13 @@ def _supported_model(v4) -> bool:
     return True
 
 
+def _split_matrix(source_owners, destination_owners, cp_size):
+    counts = np.bincount(
+        source_owners * cp_size + destination_owners, minlength=cp_size * cp_size
+    ).reshape(cp_size, cp_size)
+    return tuple(tuple(row) for row in counts.tolist())
+
+
 @dataclass
 class _RowExchange:
     """A bijection on real selected rows; padding is never sent back."""
@@ -138,6 +146,7 @@ class _RowExchange:
     send_sizes: Tuple[int, ...]
     receive_sizes: Tuple[int, ...]
     group: Any
+    splits_matrix: Tuple[Tuple[int, ...], ...]
     candidate_rows_host: Optional[Tuple[int, ...]] = None
     projection_groups_host: Tuple = ()
     receive_is_identity: bool = False
@@ -145,31 +154,38 @@ class _RowExchange:
     # owns fresh host/device storage, including when earlier H2D is pending.
     _layout_host_buffer: Optional[torch.Tensor] = field(default=None, repr=False)
 
-    def compact(self, value):
-        send = value.index_select(0, self.send_indices)
-        received = value.new_empty((sum(self.receive_sizes), *value.shape[1:]))
+    def _exchange_into(self, received, value, rows, *, transpose=False):
+        if _cp_collectives.try_all_to_all_into(
+            received,
+            value,
+            self.group,
+            self.splits_matrix,
+            rows=rows,
+            transpose=transpose,
+        ):
+            return
+        send_sizes, receive_sizes = self.send_sizes, self.receive_sizes
+        if transpose:
+            send_sizes, receive_sizes = receive_sizes, send_sizes
         torch.distributed.all_to_all_single(
             received,
-            send,
-            output_split_sizes=list(self.receive_sizes),
-            input_split_sizes=list(self.send_sizes),
+            value.index_select(0, rows),
+            output_split_sizes=list(receive_sizes),
+            input_split_sizes=list(send_sizes),
             group=self.group,
         )
+
+    def compact(self, value):
+        received = value.new_empty((sum(self.receive_sizes), *value.shape[1:]))
+        self._exchange_into(received, value, self.send_indices)
         if self.receive_is_identity:
             return received
         output = value.new_zeros((self.compact_rows, *value.shape[1:]))
         return output.index_copy_(0, self.receive_positions, received)
 
     def restore(self, value, out=None):
-        send = value.index_select(0, self.receive_positions)
         received = value.new_empty((sum(self.send_sizes), *value.shape[1:]))
-        torch.distributed.all_to_all_single(
-            received,
-            send,
-            output_split_sizes=list(self.send_sizes),
-            input_split_sizes=list(self.receive_sizes),
-            group=self.group,
-        )
+        self._exchange_into(received, value, self.receive_positions, transpose=True)
         if out is None:
             out = value.new_empty((self.original_rows, *value.shape[1:]))
         # received is independent even when value and out alias the aux buffer.
@@ -512,7 +528,8 @@ def _host_query_layout(original, selected, group, *, keep_candidate_rows):
     source_owners = source_flat // original.chunk_length
     source_rows = source_flat % original.chunk_length
 
-    sends, receives, send_sizes, receive_sizes, group_arrays = [], [], [], [], []
+    splits_matrix = _split_matrix(source_owners, owners, cp)
+    sends, receives, group_arrays = [], [], []
     projection_groups = []
     for peer in range(cp):
         outgoing = (source_owners == rank) & (owners == peer)
@@ -521,8 +538,6 @@ def _host_query_layout(original, selected, group, *, keep_candidate_rows):
         source = source_rows[incoming]
         sends.append(send)
         receives.append(receive)
-        send_sizes.append(send.size)
-        receive_sizes.append(receive.size)
         if receive.size:
             group_arrays.extend((receive, source))
             if keep_candidate_rows:
@@ -556,14 +571,17 @@ def _host_query_layout(original, selected, group, *, keep_candidate_rows):
     # Keep peer arrays independently aligned even for odd ragged split sizes;
     # downstream JIT kernels see the same alignment as separate allocations.
     groups = tuple(zip(group_devices[::2], group_devices[1::2]))
+    send_sizes = splits_matrix[rank]
+    receive_sizes = tuple(source[rank] for source in splits_matrix)
     exchange = _RowExchange(
         original.chunk_length,
         rows,
         send_device,
         receive_device,
-        tuple(send_sizes),
-        tuple(receive_sizes),
+        send_sizes,
+        receive_sizes,
         group,
+        splits_matrix,
         candidate_rows_host=(
             tuple(sorted(source_rows[source_owners == rank].tolist()))
             if keep_candidate_rows
@@ -657,15 +675,14 @@ def _query_layout_fallback(original, selected, group, *, keep_candidate_rows=Fal
     source_owners = source_flat // original.chunk_length
     source_rows = source_flat % original.chunk_length
     own = owners == rank
-    sends, receives, send_sizes, receive_sizes, indexer_groups = [], [], [], [], []
+    splits_matrix = _split_matrix(source_owners.numpy(), owners.numpy(), cp)
+    sends, receives, indexer_groups = [], [], []
     projection_groups_host = []
     for peer in range(cp):
         outgoing = (source_owners == rank) & (owners == peer)
         incoming = (source_owners == peer) & own
         sends.append(source_rows[outgoing])
         receives.append(local[incoming])
-        send_sizes.append(int(outgoing.sum()))
-        receive_sizes.append(int(incoming.sum()))
         if incoming.any():
             indexer_groups.append(
                 (
@@ -681,14 +698,17 @@ def _query_layout_fallback(original, selected, group, *, keep_candidate_rows=Fal
                     )
                 )
     receive_positions_host = torch.cat(receives)
+    send_sizes = splits_matrix[rank]
+    receive_sizes = tuple(source[rank] for source in splits_matrix)
     exchange = _RowExchange(
         original.chunk_length,
         rows,
         torch.cat(sends).to(device, non_blocking=True),
         receive_positions_host.to(device, non_blocking=True),
-        tuple(send_sizes),
-        tuple(receive_sizes),
+        send_sizes,
+        receive_sizes,
         group,
+        splits_matrix,
         candidate_rows_host=(
             tuple(sorted(source_rows[source_owners == rank].tolist()))
             if keep_candidate_rows

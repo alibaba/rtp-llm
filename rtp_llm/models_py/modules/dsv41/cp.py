@@ -27,6 +27,7 @@ stashed on each module via ``_cp_ctx`` before ``forward`` runs.  A
 single-rank path unchanged.
 """
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Union
 
@@ -34,6 +35,11 @@ import torch
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    borrowed_all_gather,
+    try_all_gather,
+    try_all_gather_into,
+)
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 
 if TYPE_CHECKING:
@@ -160,7 +166,7 @@ class CPSyncGatherHandle:
 
 @dataclass
 class CPCudaAsyncGatherHandle:
-    """In-flight CUDA/NCCL CP gather result."""
+    """In-flight CUDA CP gather result; Work is absent for current-stream transport."""
 
     cp_ctx: CPContext
     gathered: torch.Tensor
@@ -203,7 +209,7 @@ class SyncCPGatherImpl:
 class CudaAsyncCPGatherImpl:
     """Production CUDA implementation.
 
-    This path intentionally fails fast when CUDA distributed all-gather cannot
+    This path intentionally fails fast when the selected CUDA all-gather cannot
     be launched. CPU/reference execution should select ``SyncCPGatherImpl``
     explicitly instead of relying on a silent fallback.
     """
@@ -247,12 +253,11 @@ class CudaAsyncCPGatherImpl:
         # Together those lifetimes replace allocator ``record_stream`` calls.
         with torch.cuda.stream(gather_stream):
             with record_function_range(f"{profile_name}.launch"):
-                work = torch.distributed.all_gather_into_tensor(
-                    gathered,
-                    local_2d,
-                    group=process_group,
-                    async_op=True,
-                )
+                work = None
+                if not try_all_gather_into(gathered, local_2d, process_group):
+                    work = torch.distributed.all_gather_into_tensor(
+                        gathered, local_2d, group=process_group, async_op=True
+                    )
                 completion_event = torch.cuda.Event()
                 completion_event.record(gather_stream)
 
@@ -272,7 +277,8 @@ class CudaAsyncCPGatherImpl:
         current_stream = torch.cuda.current_stream(handle.gathered.device)
         with record_function_range(f"{handle.profile_name}.wait_host"):
             current_stream.wait_event(handle.completion_event)
-            handle.work.wait()
+            if handle.work is not None:
+                handle.work.wait()
         # Restore destination: the per-forward workspace restore scratch
         # (non-prefix path) instead of a fresh per-layer ``index_select``
         # output. The prefix fast-path returns a view of ``gathered`` and
@@ -741,8 +747,8 @@ def cp_all_gather_full_async(
 ) -> Any:
     """Start CP gather for flattened ``[T_local, H]`` input.
 
-    The production implementation is CUDA/NCCL async. Callers that want side
-    stream overlap must pass an explicit stream; otherwise the current stream is
+    The production implementation launches CUDA transport asynchronously.
+    Callers that want side stream overlap must pass an explicit stream; otherwise the current stream is
     used so helper fallback paths do not allocate profiler-visible streams.
 
     ``workspace`` is the per-forward :class:`PrefillWorkspace` (required, never
@@ -784,7 +790,8 @@ def _cp_all_gather_into_empty(tensor: torch.Tensor, group: Group) -> torch.Tenso
         device=tensor.device,
         dtype=tensor.dtype,
     )
-    torch.distributed.all_gather_into_tensor(gathered, tensor, group=process_group)
+    if not try_all_gather_into(gathered, tensor, process_group):
+        torch.distributed.all_gather_into_tensor(gathered, tensor, group=process_group)
     return gathered
 
 
@@ -814,14 +821,24 @@ def cp_all_gather_full_varlen(
     profile_name = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.varlen"
     trailing = local_flat.shape[1:]
     local_2d = local_flat.reshape(cp_ctx.chunk_length, -1).contiguous()
-    with record_function_range(f"{profile_name}.launch"):
-        gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
-    with record_function_range(f"{profile_name}.restore"):
-        full = (
-            gathered.index_select(0, cp_ctx.unpad_restore)
-            if replay_only
-            else _cp_restore_gathered_full_2d(gathered, cp_ctx)
-        )
+    # A prefix restore can return a view. Borrow the transport buffer only
+    # when restore materializes a private tensor before the scope ends.
+    materializes = (
+        replay_only
+        or not cp_ctx.unpad_restore_is_prefix
+        or getattr(cp_ctx, "gather_restore_positions", None) is not None
+    )
+    scope = borrowed_all_gather(local_2d, Group.TP) if materializes else nullcontext()
+    with scope as gathered:
+        if gathered is None:
+            with record_function_range(f"{profile_name}.launch"):
+                gathered = _cp_all_gather_into_empty(local_2d, group=Group.TP)
+        with record_function_range(f"{profile_name}.restore"):
+            full = (
+                gathered.index_select(0, cp_ctx.unpad_restore)
+                if replay_only
+                else _cp_restore_gathered_full_2d(gathered, cp_ctx)
+            )
     return full.view((full.shape[0],) + trailing)
 
 
@@ -868,7 +885,10 @@ def cp_gather_last_by_request(
     # RTP-LLM CP reuses the TP process group, matching the full hidden gather
     # path above.
     with record_function_range("dsv4.cp.all_gather.last_hidden_by_request.launch"):
-        gathered = all_gather(local_last.contiguous(), group=Group.TP)
+        local_last = local_last.contiguous()
+        gathered = try_all_gather(local_last, Group.TP)
+        if gathered is None:
+            gathered = all_gather(local_last, group=Group.TP)
     return gathered.view(cp_ctx.cp_size, B, H).sum(dim=0).contiguous()
 
 

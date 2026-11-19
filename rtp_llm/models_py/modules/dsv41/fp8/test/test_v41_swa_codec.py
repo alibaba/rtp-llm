@@ -57,6 +57,45 @@ def _staged_cp_write(values, raw, slots, rank, metadata, entries=136):
 
 
 class V41SwaCodecContractTest(unittest.TestCase):
+    def test_rank_major_prefix_reads_before_releasing_borrowed_bytes(self):
+        raw = torch.tensor([[7, 8], [9, 10]], dtype=torch.uint8)
+        borrowed = torch.arange(8, dtype=torch.uint8).reshape(4, 2)
+        slots = torch.tensor([[0]], dtype=torch.int32)
+        out = torch.empty((1, 1, 512), dtype=torch.bfloat16)
+        compaction = types.SimpleNamespace(
+            unique_blocks=torch.tensor([0]),
+            compact_slots=slots,
+            contiguous_block_start=0,
+        )
+        events = []
+
+        @contextlib.contextmanager
+        def borrow(local, group):
+            torch.testing.assert_close(local, raw[:1])
+            events.append("borrow")
+            yield borrowed
+            events.append("release")
+            borrowed.zero_()
+
+        def consume(destination, gathered, *args, **kwargs):
+            self.assertIs(gathered, borrowed)
+            self.assertEqual(events, ["borrow"])
+            destination.fill_(gathered[-1, -1])
+            events.append("consume")
+
+        with (
+            patch.object(codec, "_cp_addressing_supported", return_value=True),
+            patch.object(codec, "borrowed_all_gather", side_effect=borrow),
+            patch.object(codec, "_gather_swa_rank_major", side_effect=consume),
+            patch.object(codec, "_try_all_gather_cp4_bytes") as fallback,
+        ):
+            codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                out, raw, slots, None, 0, 256, 0, 4, compaction
+            )
+        fallback.assert_not_called()
+        self.assertEqual(events, ["borrow", "consume", "release"])
+        torch.testing.assert_close(out, torch.full_like(out, 7))
+
     def test_136_entry_byte_owners_split_tokens_and_exclude_padding(self):
         local = 18048
         for token, first, sizes in (
@@ -666,8 +705,9 @@ class V41SwaGatherOutputTest(unittest.TestCase):
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         with self.collective(expected) as (native, legacy, _):
-            with torch.cuda.stream(side), patch.object(
-                codec.torch, "empty", side_effect=poison
+            with (
+                torch.cuda.stream(side),
+                patch.object(codec.torch, "empty", side_effect=poison),
             ):
                 actual = codec._try_all_gather_cp4_bytes(local)
                 observed = actual.clone()
@@ -687,9 +727,10 @@ class V41SwaGatherOutputTest(unittest.TestCase):
                 (symm, "should_torch_symm_mem_allgather", True),
             ):
                 kwargs = {"new": value} if name == "hip" else {"return_value": value}
-                with patch.object(target, name, **kwargs), patch.object(
-                    codec.torch, "empty"
-                ) as empty:
+                with (
+                    patch.object(target, name, **kwargs),
+                    patch.object(codec.torch, "empty") as empty,
+                ):
                     self.assertIsNone(codec._try_all_gather_cp4_bytes(local))
                     empty.assert_not_called()
             for unsupported in (local.cpu(), local.float(), local[:, ::2], local[:0]):
@@ -966,6 +1007,41 @@ class BatchedBoundedSWA(unittest.TestCase):
                 expected = ctx.gather_restore_positions[:, None, None].expand(-1, 2, 3)
                 self.assertTrue(torch.equal(compact, expected))
                 self.assertEqual(gather.call_count, 1)
+
+    def test_private_restore_consumes_borrowed_rows_before_reuse(self):
+        ctx, ranks = _layout((129, 135), (0, 0))
+        send = ranks[0][:, None]
+        packed = torch.cat(ranks)[:, None]
+        expected = ctx.gather_restore_positions[:, None]
+
+        @contextlib.contextmanager
+        def borrow(local, group):
+            self.assertEqual(local.data_ptr(), send.data_ptr())
+            yield packed
+            packed.fill_(-9)
+
+        with (
+            patch.object(self.cp, "borrowed_all_gather", side_effect=borrow),
+            patch.object(self.cp, "_cp_all_gather_into_empty") as fallback,
+        ):
+            compact = self.cp.cp_all_gather_full_varlen(send, ctx, replay_only=True)
+        fallback.assert_not_called()
+        torch.testing.assert_close(compact, expected)
+
+    def test_prefix_restore_does_not_borrow_aliased_storage(self):
+        local = torch.arange(2).reshape(2, 1)
+        packed = torch.arange(8).reshape(8, 1)
+        ctx = types.SimpleNamespace(
+            chunk_length=2, seq_len_full=4, unpad_restore_is_prefix=True
+        )
+        with (
+            patch.object(self.cp, "borrowed_all_gather") as provider,
+            patch.object(self.cp, "_cp_all_gather_into_empty", return_value=packed),
+        ):
+            full = self.cp.cp_all_gather_full_varlen(local, ctx)
+        provider.assert_not_called()
+        torch.testing.assert_close(full, packed[:4])
+        self.assertEqual(full.data_ptr(), packed.data_ptr())
 
     def test_exact_ced_gather_retains_original_full_domain(self):
         ctx, ranks = _layout((133, 7), (0, 0))

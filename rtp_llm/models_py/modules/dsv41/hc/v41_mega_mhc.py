@@ -95,7 +95,7 @@ def prefill_mhc_stream(device: torch.device, *, reuse_capture: bool = False):
             with default_eager_prefill(
                 reuse_capture and stream is not None and stream.key[1] == 0
             ):
-                yield
+                yield stream is not None
         finally:
             _PREFILL_STREAM.reset(token)
 

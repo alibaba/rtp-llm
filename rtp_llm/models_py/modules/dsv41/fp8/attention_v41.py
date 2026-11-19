@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
     cp_state_slot_mapping,
 )
+from rtp_llm.models_py.modules.dsv41._cp_collectives import try_all_gather_into
 from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41._rope_only_triton import rope_only_inplace
@@ -176,7 +177,9 @@ def _prefill_source_tile_ranges(cohorts):
             yield start, min(start + _PRODUCE_GLOBAL_TILE_ROWS, end)
 
 
-def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights, *, direct_map=False):
+def _prefill_projected_x_cohorts(
+    x, cp_ctx, cohorts, weights, *, direct_map=False, resources=None
+):
     """Gather bounded cohorts for the compressor's global-row mapping."""
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
@@ -208,12 +211,15 @@ def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights, *, direct_map=Fals
         groups.append((first, stop))
         first = stop
 
-    def project(group):
+    def project(group, out=None):
         first, stop = group
         local_start = cohorts[first][0]
         local_rows = cohorts[stop - 1][1] - local_start
-        gathered = torch.empty(
-            (cp_ctx.cp_size * local_rows, width), device=x.device, dtype=projected_dtype
+        shape = (cp_ctx.cp_size * local_rows, width)
+        gathered = (
+            torch.empty(shape, device=x.device, dtype=projected_dtype)
+            if out is None
+            else out.view(shape)
         )
         send = gathered[cp_ctx.cp_rank * local_rows : (cp_ctx.cp_rank + 1) * local_rows]
         if projected_dtype == torch.bfloat16:
@@ -232,22 +238,54 @@ def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights, *, direct_map=Fals
     # Project the first group on the compute stream, then overlap its
     # AllGather with QKV/SWA. Later groups overlap current-group compression.
     asynchronous = not prefill_stream_is_capturing()
+    borrowed = None
+    if (
+        asynchronous
+        and resources is not None
+        and cp_ctx.cp_size == 4
+        and len(groups) == 1
+    ):
+        from rtp_llm.models_py.distributed.collective_torch import Group
+        from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+            gather_inplace,
+            projected_gather_buffer,
+        )
+
+        first, stop = groups[0]
+        local_rows = cohorts[stop - 1][1] - cohorts[first][0]
+        borrowed = resources.enter_context(
+            projected_gather_buffer(
+                x, Group.TP, numel=4 * local_rows * width, dtype=projected_dtype
+            )
+        )
     if asynchronous:
-        first_send, first_gathered = project(groups[0])
+        first_send, first_gathered = project(groups[0], out=borrowed)
+        if borrowed is not None:
+            borrowed = first_gathered
+            initial = launch(
+                x.device, lambda: gather_inplace(first_gathered, first_send, Group.TP)
+            )
+            # If QKV or metadata preparation raises before the first tile is
+            # requested, the generator has not entered and cannot join this.
+            # Join on the consumer stream before releasing the borrowed window.
+            resources.callback(initial.wait)
+        else:
 
-        def gather_first():
-            _gather_prefill_x_cohort(first_send, cp_ctx, first_gathered)
-            return first_gathered
+            def gather_first():
+                _gather_prefill_x_cohort(first_send, cp_ctx, first_gathered)
+                return first_gathered
 
-        initial = launch(x.device, gather_first, inputs=(first_gathered,))
+            initial = launch(x.device, gather_first, inputs=(first_gathered,))
     else:
         initial = None
 
-    def tiles(initial_pending):
+    def tiles(initial_pending, borrowed):
         pending = initial_pending
         del initial_pending
         for index, group in enumerate(groups):
             gathered = pending.wait() if pending is not None else gather(group)
+            if borrowed is not None:
+                gathered = borrowed
             pending = (
                 launch(
                     x.device,
@@ -287,7 +325,7 @@ def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights, *, direct_map=Fals
                     del restored
             del gathered
 
-    return tiles(initial)
+    return tiles(initial, borrowed)
 
 
 def _prefill_request_row_slices(common):
@@ -325,11 +363,13 @@ def _gather_prefill_x_cohort(x: torch.Tensor, cp_ctx, buffer):
     current = torch.cuda.current_stream(x.device)
     stream = _get_cp_comm_stream(x.device)
     if current == stream:
-        torch.distributed.all_gather_into_tensor(buffer, x, group=process_group)
+        if not try_all_gather_into(buffer, x, process_group):
+            torch.distributed.all_gather_into_tensor(buffer, x, group=process_group)
         return
     stream.wait_stream(current)
     with torch.cuda.stream(stream):
-        torch.distributed.all_gather_into_tensor(buffer, x, group=process_group)
+        if not try_all_gather_into(buffer, x, process_group):
+            torch.distributed.all_gather_into_tensor(buffer, x, group=process_group)
     current.wait_stream(stream)
 
 
@@ -2465,6 +2505,14 @@ class AttentionV41FP8(AttentionFP8):
             if fresh_store is None:
                 self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
             return common, qkv, swa, swa_starts, None
+        from contextlib import ExitStack
+
+        with ExitStack() as resources:
+            return self._prefill_produce_source(
+                x, common, shared_input_quant, resources
+            )
+
+    def _prefill_produce_source(self, x, common, shared_input_quant, resources):
         previous_state = None
         projected_tiles = None
         source_cohorts = None
@@ -2495,7 +2543,9 @@ class AttentionV41FP8(AttentionFP8):
                 source_cohorts,
                 weights,
                 direct_map=stream_metadata,
+                resources=resources,
             )
+            resources.callback(projected_tiles.close)
         if (
             x.is_cuda
             and self.compress_ratio == 2
@@ -2505,6 +2555,10 @@ class AttentionV41FP8(AttentionFP8):
             and self._source_pool(CSA_STATE) is not None
             and not prefill_stream_is_capturing()
         ):
+            from rtp_llm.models_py.distributed import collective_torch
+            from rtp_llm.models_py.distributed.collective_torch import Group
+            from rtp_llm.models_py.modules.dsv41 import _cp_collectives
+
             from ._v41_cp_async import launch
 
             state_pool = self._source_pool(CSA_STATE)
@@ -2520,6 +2574,9 @@ class AttentionV41FP8(AttentionFP8):
                     common.cp_ctx.cp_size,
                     common.cp_ctx.cp_rank,
                 )
+                group = collective_torch._get_group(Group.TP)
+                if _cp_collectives.try_all_reduce_sum_(previous, group):
+                    return previous
                 return self._gather_shards(previous)
 
             # Snapshot the old ring state before this layer can write it, while
@@ -2588,22 +2645,18 @@ class AttentionV41FP8(AttentionFP8):
                     - cu[ids_full]
                     + starts[ids_full]
                 )
-        try:
-            self._produce_global(
-                x_full,
-                pos_full,
-                ids_full,
-                starts,
-                lengths,
-                prefill=True,
-                projected_tiles=projected_tiles,
-                source_cohorts=source_cohorts,
-                swa=swa,
-                previous_state=previous_state,
-            )
-        finally:
-            if projected_tiles is not None:
-                projected_tiles.close()
+        self._produce_global(
+            x_full,
+            pos_full,
+            ids_full,
+            starts,
+            lengths,
+            prefill=True,
+            projected_tiles=projected_tiles,
+            source_cohorts=source_cohorts,
+            swa=swa,
+            previous_state=previous_state,
+        )
         del x_full
         return common, qkv, swa, swa_starts, None
 

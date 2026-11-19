@@ -150,6 +150,9 @@ class DeepSeekV41(DeepSeekV4):
             device_resource_config=self.device_resource_config,
             engram_runtime=process_runtime,
         )
+        # The native engine sizes its KV cache after model creation. Keep the
+        # target's workspace live across sizing, including without warmup.
+        self.py_model.initialize_prefill_cp_collectives(torch.device(self.device))
 
     @staticmethod
     def get_weight_cls():
