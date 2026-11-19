@@ -426,6 +426,19 @@ class BertMultimodalEmbeddingTest(TestCase):
         self.assertTrue(torch.isfinite(actual).all())
         self.assertFalse(torch.allclose(actual, baseline))
 
+    def test_final_layer_computes_only_requested_rows_after_full_attention(self):
+        if torch.version.hip is not None:
+            self.skipTest("real Bert FMHA coverage is CUDA-only")
+        model = self._build_one_layer_model()
+        rows = torch.tensor([3, 0, 3], dtype=torch.long, device="cuda")
+        full = model.forward(self._build_one_layer_inputs()).hidden_states
+        compact = model.forward(
+            self._build_one_layer_inputs(), output_rows=rows
+        ).hidden_states
+        torch.testing.assert_close(
+            compact, full.index_select(0, rows), atol=1e-3, rtol=1e-3
+        )
+
     def test_forward_rejects_nonempty_mask_without_multimodal_features(self):
         model = self._build_model()
         masked_inputs = _build_inputs()

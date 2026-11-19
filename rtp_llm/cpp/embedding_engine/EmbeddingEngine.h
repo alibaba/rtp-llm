@@ -28,9 +28,10 @@ public:
                                             th::Tensor                       token_type_ids,
                                             th::Tensor                       input_lengths,
                                             int64_t                          request_id,
-                                            std::optional<MultimodalFeature> multimodal_features = std::nullopt,
-                                            std::optional<th::Tensor>        input_embeddings    = std::nullopt,
-                                            EmbeddingProfileConfig           profile_config      = {});
+                                            std::optional<MultimodalFeature> multimodal_features      = std::nullopt,
+                                            std::optional<th::Tensor>        input_embeddings         = std::nullopt,
+                                            EmbeddingProfileConfig           profile_config           = {},
+                                            bool                             inputs_on_current_stream = false);
     std::shared_ptr<EmbeddingOutput> decode(std::shared_ptr<EmbeddingInput> input,
                                             EmbeddingProfileConfig          profile_config = {});
 

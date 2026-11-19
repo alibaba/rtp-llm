@@ -858,6 +858,16 @@ void invokeGeneralLayerNorm(T*           out,
                               );
 
     if (use_vec_type) {
+#if USING_CUDA
+        // A packed thread handles two scalar columns. For the unquantized
+        // path, remove only whole warps whose inputs and outputs were empty.
+        // Active lanes keep the same packed index and both reduction stages
+        // keep the same nonzero operands and zero padding.
+        if (scale == nullptr && dynamic_scale == nullptr && out_quant == nullptr) {
+            const int packed_dim = hidden_dim / vec_size;
+            block.x              = 32 * ((min(packed_dim, 1024) + 31) / 32);
+        }
+#endif
         using Tp = typename packed_as<T, vec_size>::type;
         dispatch_layernorm_output(reinterpret_cast<Tp*>(out),
                                   reinterpret_cast<Tp*>(normed_output),
@@ -935,6 +945,16 @@ void invokeGeneralAddBiasResidualLayerNorm(T*           out,
                               );
 
     if (use_vec_type) {
+#if USING_CUDA
+        // A packed thread handles two scalar columns. For the unquantized
+        // path, remove only whole warps whose inputs and outputs were empty.
+        // Active lanes keep the same packed index and both reduction stages
+        // keep the same nonzero operands and zero padding.
+        if (scale == nullptr && dynamic_scale == nullptr && out_quant == nullptr) {
+            const int packed_dim = hidden_dim / vec_size;
+            block.x              = 32 * ((min(packed_dim, 1024) + 31) / 32);
+        }
+#endif
         using Tp = typename packed_as<T, vec_size>::type;
         dispatch_layernorm_output(reinterpret_cast<Tp*>(out),
                                   reinterpret_cast<Tp*>(norm_output),
