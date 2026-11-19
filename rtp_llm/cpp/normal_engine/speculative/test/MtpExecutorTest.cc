@@ -2639,6 +2639,9 @@ TEST_F(MtpExecutorTest, testPrepareStreamsRejectsMixedPrefillExecutionBatchPerRe
 }
 
 TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
+#if !USING_CUDA
+    GTEST_SKIP() << "The context-parallel input splitter requires CUDA.";
+#endif
     // Use the real CP splitter with fake model forwards and TP collectives.
     for (const bool explicit_position_ids : {false, true}) {
         for (const bool middle_chunk : {false, true}) {
@@ -2839,6 +2842,15 @@ class MtpExecutorPublicationTest: public MtpExecutorTest, public ::testing::With
 public:
     static void SetUpTestSuite() {
         interpreter_ = std::make_unique<py::scoped_interpreter>();
+#if USING_ROCM
+        // The test executable links ROCm SMI. Isolate AMD SMI's overlapping
+        // C++ globals before the embedded torch import loads it via ctypes.
+        py::exec(R"(
+import ctypes
+import os
+_amd_smi = ctypes.CDLL("libamd_smi.so", mode=os.RTLD_LOCAL | os.RTLD_DEEPBIND)
+)");
+#endif
         /** Resolve Python OpenSSL modules before the executable's linked BoringSSL symbols. */
         py::exec(R"(
 import os
@@ -4259,7 +4271,11 @@ void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hi
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
-    EXPECT_EQ(target_model->mtp_hidden_requests, (std::vector<int64_t>{10}));
+    if (target_output.mtp_target_hidden_states.defined()) {
+        EXPECT_TRUE(target_model->mtp_hidden_requests.empty());
+    } else {
+        EXPECT_EQ(target_model->mtp_hidden_requests, (std::vector<int64_t>{10}));
+    }
 }
 
 TEST_F(MtpExecutorTest, testIndexerSeedsFollowRequestOrderAndSnapshotIsIsolated) {
