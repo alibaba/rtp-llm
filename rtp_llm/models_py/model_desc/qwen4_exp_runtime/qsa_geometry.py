@@ -328,6 +328,7 @@ def _draft_incremental_prefill_geometry(
             "head_num": head_num,
             "ratio": ratio,
             "token_budget": token_budget,
+            "host_prefixes": host_prefixes,
             "prefixes": prefixes,
             "cu_seqlens": expected_cu,
             "current_cos": current_cos,
