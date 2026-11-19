@@ -26,8 +26,7 @@ struct P2PConnectorSchedulerConfig {
     std::vector<std::string> worker_addrs;
     std::string                          pipeline_layout;
     int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
-    int                      p2p_kv_leak_exit_threshold_min_percent        = 30;
-    int                      p2p_kv_leak_exit_threshold_max_percent        = 70;
+    int                      p2p_kv_force_release_timeout_ms              = CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     std::shared_ptr<const CacheTopology> topology;
@@ -55,8 +54,7 @@ struct P2PConnectorSchedulerConfig {
         config.worker_grpc_addrs                      = runtime_config.worker_grpc_addrs;
         config.worker_addrs                           = runtime_config.worker_addrs;
         config.p2p_lease_query_timeout_ms = cache_store_config.p2p_lease_query_timeout_ms;
-        config.p2p_kv_leak_exit_threshold_min_percent = cache_store_config.p2p_kv_leak_exit_threshold_min_percent;
-        config.p2p_kv_leak_exit_threshold_max_percent = cache_store_config.p2p_kv_leak_exit_threshold_max_percent;
+        config.p2p_kv_force_release_timeout_ms = cache_store_config.p2p_kv_force_release_timeout_ms;
         config.p2p_cancel_broadcast_timeout_ms = cache_store_config.p2p_cancel_broadcast_timeout_ms;
         config.p2p_cancelled_keys_ttl_ms       = cache_store_config.p2p_cancelled_keys_ttl_ms;
         return config;

@@ -1,6 +1,6 @@
 # P2P 超时与 KV 资源保护
 
-请求超时不代表 RDMA 已停止访问内存。Decode 超时后可立即返回失败，但目标 KV 必须继续持有，直到所有 rank 都确认物理传输停止。
+Decode 请求超时或取消时，如果接收任务可能已经派发，目标 KV 进入隔离。所有 rank 确认停写后立即释放，仍未确认的请求在隔离满 5 分钟后强制释放。
 
 ## 部署端口
 
@@ -9,18 +9,14 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 ## 处理顺序
 
 1. 到达 transfer deadline 后，请求进入失败终态，后台发送 `CANCEL_READ`，取消未开始的任务。正在传输的任务只记录取消意图，等待真实完成回调。
-2. RDMA watchdog 先结束超时 RPC；若回调仍未到达，在 deadline 加 `P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS`（默认 10000ms）后关闭相关 connection。关闭连接后如果仍收不到已派发读操作的完成回调，对应 KV 继续保留，并计入下文的滞留阈值。
+2. RDMA watchdog 先结束超时 RPC。如果回调仍未到达，在 deadline 加 `P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS`（默认 10000ms）后关闭相关 connection。等待完成回调期间，对应 KV 计入滞留量。
 3. `P2PConnectorAsyncReadContextChecker` 在后台继续持有目标资源。取消广播成功后，按 10～100ms 的退避间隔查询全部 rank 的 lease。单轮查询最多等待 500ms，并受 `P2P_LEASE_QUERY_TIMEOUT_MS` 限制。每个请求同时最多执行一个控制任务，不同请求最多并行四个。
-4. 只有全部 rank 都满足 `sealed && started_ops == finished_ops`，才能释放该上下文持有的 KV 引用。释放不要求调用方先销毁失败上下文。
-5. 查询失败、取消失败或仍有未完成任务时，持续持有并重试；不再因持有时间到期而 abort，也不按时间强制释放。
+4. 全部 rank 都满足 `sealed && started_ops == finished_ops` 时，立即释放该上下文持有的 KV 引用。
+5. 查询失败、取消失败或仍有未完成任务时，从该请求进入隔离开始计时。达到 `P2P_KV_FORCE_RELEASE_TIMEOUT_MS`（CLI `--p2p_kv_force_release_timeout_ms`，默认 300000 毫秒）后释放 KV 引用并记录 WARN 告警。强制释放假设先前提交的 RDMA 或 H2D 操作已经停止访问这些块。
 
-## 泄漏阈值
-
-环境变量 `P2P_KV_LEAK_EXIT_THRESHOLD_MIN_PERCENT` 和 `P2P_KV_LEAK_EXIT_THRESHOLD_MAX_PERCENT` 分别设置阈值下界和上界，默认 **30%** 和 **70%**。Decode 进程启动时在闭区间内均匀抽取一次。上下界必须满足 `0 <= 下界 <= 上界 <= 100`。两者设为同一个正值时使用固定阈值，均设为 0 时关闭按阈值退出，滞留指标和租约查询继续运行。
+## 滞留量
 
 统计对象为失败后仍在等待物理完成的目标 KV，按 `(cache group, block ID)` 去重。启用 PP 时，分子和分母按该 Decode 副本的所有 PP stage 和 TP rank 加总，包含 KV scale。正常传输中的请求不计入滞留量。
-
-滞留量首次严格超过实际阈值时，rank 0 记录告警，并继续取消和查询租约。滞留量持续超阈 30 秒时，rank 0 在保留 KV 引用的状态下退出进程。回落到阈值或更低时清零，下次越线再开始计时。KV 分片布局沿用现有对称部署假设。
 
 ## 状态观测
 
@@ -33,6 +29,8 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 - `retained_context_count`：滞留上下文数。
 - `oldest_kv_hold_ms`：最长持有时间。
 
-存在滞留时每 30 秒打印容量、占比、阈值和最长持有时间；全部释放后打印恢复日志。后台容量检查不依赖控制 RPC 完成，控制线程繁忙时也会按秒唤醒。
+`forced_kv_release_count` 使用同一前缀。每次请求触发强制回收上报一次事件。
+
+存在滞留时每 30 秒打印容量、占比和最长持有时间，全部释放后打印恢复日志。回收定时器独立于控制 RPC。
 
 Prefill 请求状态表最多保留 1,048,576 个活跃及终态记录。终态记录保留一小时用于防止重放。表满时返回 `RESOURCE_EXHAUSTED`，已有请求仍可完成，保留期到期后会腾出空间。

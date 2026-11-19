@@ -413,9 +413,8 @@ struct CacheStoreConfig {
     int p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
     int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
-    // 启动时从上下界之间抽取滞留退出阈值；两者均为 0 时关闭阈值退出。
-    int p2p_kv_leak_exit_threshold_min_percent = 30;
-    int p2p_kv_leak_exit_threshold_max_percent = 70;
+    static constexpr int kDefaultP2PKvForceReleaseTimeoutMs = 5 * 60 * 1000;
+    int p2p_kv_force_release_timeout_ms = kDefaultP2PKvForceReleaseTimeoutMs;
 
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
     // TTL for cancelled_keys_ tombstones; should cover the longest expected

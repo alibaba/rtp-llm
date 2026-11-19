@@ -24,6 +24,22 @@ namespace rtp_llm {
 namespace transfer {
 namespace tcp {
 
+TEST(CudaCopyUtilTest, ExpiredCopyLeavesDestinationUntouched) {
+    char source = 'a';
+    char destination = 'b';
+    std::vector<CopyTask> tasks{{&source, sizeof(source), &destination, -1, false}};
+    CudaCopyUtil copy_util;
+
+    EXPECT_EQ(copy_util.batchCopyToDevice(tasks, currentTimeMs()), TransferErrorCode::TIMEOUT);
+    EXPECT_EQ(destination, 'b');
+    const auto future_deadline_ms = currentTimeMs() + 10000;
+    EXPECT_EQ(copy_util.batchCopyToDevice(tasks, future_deadline_ms, [] { return true; }),
+              TransferErrorCode::CANCELLED);
+    EXPECT_EQ(destination, 'b');
+    EXPECT_EQ(copy_util.batchCopyToDevice(tasks, future_deadline_ms), TransferErrorCode::OK);
+    EXPECT_EQ(destination, 'a');
+}
+
 // ---------------------------------------------------------------------------
 // Test doubles
 // ---------------------------------------------------------------------------
@@ -515,6 +531,40 @@ TEST_F(TcpTaskContextTest, Run_WithTask_CancelInTransferring_OverridesSuccess) {
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED);
     EXPECT_EQ(resp.error_message(), "TransferTask cancelled during transfer");
     EXPECT_EQ(closure.run_count(), 1);
+}
+
+TEST_F(TcpTaskContextTest, Run_ObservedBufferMismatchSurvivesLaterDeadlineExpiry) {
+    char dummy[64]{};
+    auto req = makeSimpleRequest("k1", currentTimeMs() + 5000, 1, 32, std::string(32, 'X'));
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure                                   closure;
+    auto                                          ctx  = makeContext(&req, &resp, &closure);
+    auto                                          task = makeTask(1, dummy, sizeof(dummy));
+    ctx->setTask(task);
+    ASSERT_TRUE(ctx->startTransfer());
+
+    CudaCopyUtil copy_util;
+    ASSERT_FALSE(ctx->executeCopy(copy_util));
+    ASSERT_EQ(ctx->copyErrorCode(), TransferErrorCode::BUFFER_MISMATCH);
+    const auto observed_message = ctx->copyErrorMessage();
+    // No threads share this task. Move its deadline only after observing the
+    // mismatch, deterministically modelling expiry before the completion callback.
+    task->deadline_ms_ = currentTimeMs() - 1;
+    ASSERT_TRUE(ctx->isTimeout());
+    ctx->run(false, ctx->copyErrorCode(), observed_message);
+
+    EXPECT_TRUE(task->done());
+    EXPECT_FALSE(task->success());
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::BUFFER_MISMATCH);
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_BUFFER_MISMATCH);
+    EXPECT_EQ(resp.error_message(), observed_message);
+    EXPECT_EQ(closure.run_count(), 1);
+    ctx->run(false, TransferErrorCode::TIMEOUT);
+    EXPECT_EQ(closure.run_count(), 1);
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_BUFFER_MISMATCH);
+    for (char byte : dummy) {
+        EXPECT_EQ(byte, 0);
+    }
 }
 
 TEST_F(TcpTaskContextTest, Run_WithTask_ExpiredDeadline_OverridesSuccess) {

@@ -53,6 +53,7 @@ public:
 
     /// Acquire one physical receive slot. Call completion once for each acquired slot.
     bool startTransfer();
+    bool isCancelled() const;
 
     // Observe cancellation while waiting for staging, before taking a physical receive slot.
     size_t addCancelCallback(std::function<void()> callback);

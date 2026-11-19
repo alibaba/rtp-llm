@@ -104,6 +104,10 @@ void RdmaTransferService::transfer(::google::protobuf::RpcController*           
     }
 
     auto ctx = std::make_shared<RdmaTaskContext>(controller, request, response, done, metrics_reporter_);
+    if (ctx->isTimeout()) {
+        ctx->run(false, TransferErrorCode::TIMEOUT, "RDMA transfer expired before matching");
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(wait_tasks_mutex_);
         wait_tasks_.push_back(ctx);
@@ -177,6 +181,14 @@ uint64_t RdmaTransferService::matchWaitingTasks() {
         }
     }
     for (auto& ctx : ready_ctxs) {
+        if (ctx->isTimeout()) {
+            ctx->run(false, TransferErrorCode::TIMEOUT, "matched RDMA transfer expired before worker enqueue");
+            continue;
+        }
+        if (ctx->isCancelled()) {
+            ctx->run(false, TransferErrorCode::CANCELLED, "matched RDMA transfer cancelled before worker enqueue");
+            continue;
+        }
         auto ret = worker_thread_pool_->pushTask([this, ctx]() { this->transferViaRdma(ctx); });
         if (ret != autil::ThreadPoolBase::ERROR_NONE) {
             ctx->run(false, TransferErrorCode::QUEUE_REJECTED, "push rdma task to thread pool failed");
@@ -188,6 +200,10 @@ uint64_t RdmaTransferService::matchWaitingTasks() {
 void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>& ctx) {
     if (ctx->isTimeout()) {
         ctx->run(false, TransferErrorCode::TIMEOUT, "RDMA transfer expired in the Decode worker queue");
+        return;
+    }
+    if (ctx->isCancelled()) {
+        ctx->run(false, TransferErrorCode::CANCELLED, "RDMA transfer cancelled in the Decode worker queue");
         return;
     }
     if (!rdma_client_) {
@@ -235,11 +251,21 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
                           bool success, TransferErrorCode ec = TransferErrorCode::OK, const std::string& msg = "") {
         auto        staging_transfer = std::move(resources->staging);
         std::string final_message = msg;
-        if (success && staging_transfer
-            && (!cuda_copy_util || !cuda_copy_util->batchCopyToDevice(staging_transfer->h2d_copy_tasks))) {
-            success = false;
-            ec = TransferErrorCode::COPY_FAILED;
-            final_message = "rdma staging h2d copy failed";
+        if (success && staging_transfer) {
+            ec = cuda_copy_util ? cuda_copy_util->batchCopyToDevice(staging_transfer->h2d_copy_tasks,
+                                                                   ctx->getDeadlineMs(),
+                                                                   [&ctx] { return ctx->isCancelled(); }) :
+                                  TransferErrorCode::COPY_FAILED;
+            success = ec == TransferErrorCode::OK;
+            if (!success) {
+                if (ec == TransferErrorCode::CANCELLED) {
+                    final_message = "recv task cancelled before rdma staging h2d copy";
+                } else if (ec == TransferErrorCode::TIMEOUT) {
+                    final_message = "deadline expired before rdma staging h2d copy";
+                } else {
+                    final_message = "rdma staging h2d copy failed";
+                }
+            }
         }
         bool expected = false;
         const bool owns_rpc_completion = already_run->compare_exchange_strong(expected, true);
@@ -308,7 +334,8 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
                     guardedRun(false, ec, detail);
                 }
             },
-            ctx->getDeadlineMs());
+            ctx->getDeadlineMs(),
+            [ctx] { return ctx->isCancelled(); });
         return;
     }
 
@@ -363,7 +390,8 @@ void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>
                     }
                 }
             },
-            ctx->getDeadlineMs());
+            ctx->getDeadlineMs(),
+            [ctx] { return ctx->isCancelled(); });
     }
 }
 

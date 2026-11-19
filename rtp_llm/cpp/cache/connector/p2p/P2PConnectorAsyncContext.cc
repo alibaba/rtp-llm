@@ -6,10 +6,8 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <algorithm>
-#include <cstdlib>
 #include <functional>
 #include <limits>
-#include <random>
 #include <set>
 
 namespace rtp_llm {
@@ -20,9 +18,6 @@ constexpr int64_t kLeasePollMaxIntervalMs     = 100;
 constexpr int64_t kLeasePollRpcTimeoutMs      = 500;
 constexpr int64_t kCancelRetryMaxBaseMs      = 800;
 constexpr int64_t kCancelWarningIntervalMs   = 30 * 1000;
-constexpr int64_t kRetainedKvExitGraceMs      = 30 * 1000;
-constexpr int     kBasisPointsPerPercent     = 100;
-constexpr int     kBasisPointsPerWhole        = 100 * kBasisPointsPerPercent;
 
 const char* readOutcomeHoldReason(ErrorCode error_code) {
     switch (error_code) {
@@ -127,7 +122,9 @@ void P2PConnectorAsyncReadContext::markStartFailed(const ErrorInfo& error_info) 
         if (done_) {
             // startAsyncReadCalls failed before publishing any RPC result, so
             // there is no transfer that can still target resource_.
-            lease_hold_pending_.store(false, std::memory_order_release);
+            if (resourceHoldPending()) {
+                releaseLeaseHoldLocked(/*all_ranks_stopped=*/false, P2PNotification::nowUs());
+            }
             notify();
             return;
         }
@@ -167,7 +164,7 @@ void P2PConnectorAsyncReadContext::markKickoffUnconfirmed(const ErrorInfo& error
 }
 
 void P2PConnectorAsyncReadContext::beginLeaseHold() {
-    if (no_transfer_) {
+    if (no_transfer_ || lease_released_ || resourceHoldPending()) {
         return;
     }
     const int64_t now_ms      = P2PNotification::nowMs();
@@ -178,6 +175,34 @@ void P2PConnectorAsyncReadContext::beginLeaseHold() {
     lease_query_state_.store(LeaseQueryState::Pending, std::memory_order_relaxed);
     lease_hold_start_us_.store(P2PNotification::nowUs(), std::memory_order_relaxed);
     lease_hold_pending_.store(true, std::memory_order_release);
+}
+
+void P2PConnectorAsyncReadContext::releaseLeaseHoldLocked(bool all_ranks_stopped, int64_t now_us) {
+    const auto hold_start_us = lease_hold_start_us_.exchange(0);
+    if (collector_ && hold_start_us > 0) {
+        collector_->decode_schedule_lease_hold_time_us = now_us - hold_start_us;
+    }
+    resource_.reset();
+    lease_released_ = true;
+    lease_all_ranks_stopped_.store(all_ranks_stopped, std::memory_order_release);
+    lease_poll_next_ms_.store(0, std::memory_order_relaxed);
+    lease_hold_pending_.store(false, std::memory_order_release);
+}
+
+bool P2PConnectorAsyncReadContext::expireLeaseHoldIfNeeded(int64_t now_us) {
+    DoneNotifier done_notifier{*this};
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const auto hold_start_us = lease_hold_start_us_.load();
+    if (!resourceHoldPending() || hold_start_us <= 0 || now_us - hold_start_us < kv_force_release_timeout_ms_ * 1000) {
+        return false;
+    }
+    RTP_LLM_LOG_WARNING("P2P forcibly releasing retained Decode KV without all-rank stop confirmation, "
+                      "unique_key=%s hold_ms=%ld cancel_confirmed=%d",
+                      uniqueKey().c_str(),
+                      (now_us - hold_start_us) / 1000,
+                      cancel_confirmed_.load(std::memory_order_acquire));
+    releaseLeaseHoldLocked(/*all_ranks_stopped=*/false, now_us);
+    return true;
 }
 
 bool P2PConnectorAsyncReadContext::expireTransferDeadlineIfNeeded() {
@@ -287,8 +312,10 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
     // StartLoad can report an unconfirmed transfer even when the READ RPC succeeded.
     // Its exact first cause is preserved while the physical lease remains held.
     const bool holdable_outcome = outcome.error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
-                                  || outcome.error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED;
-    if (!success && lease_query_timeout_ms_ > 0 && (read_result_unconfirmed || holdable_outcome)) {
+                                  || outcome.error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED
+                                  || outcome.error_code == ErrorCode::GENERATE_TIMEOUT
+                                  || outcome.error_code == ErrorCode::CANCELLED;
+    if (!success && !no_transfer_ && (holdable_outcome || (lease_query_timeout_ms_ > 0 && read_result_unconfirmed))) {
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
             if (done_)
@@ -385,22 +412,23 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
         if (done_ && !lease_hold_pending_.load(std::memory_order_acquire)) {
             return;
         }
-        if (kickoff_state_ == KickoffState::QUEUED) {
-            // Cancellation won before the async task claimed kickoff, so no
-            // StartLoad/READ RPC can be created after the target is released.
-            if (!done_) {
-                done_          = true;
-                success_       = false;
-                error_code_    = ErrorCode::CANCELLED;
-                error_message_ = "observer_role=DECODE stage=kickoff selected_path=decode_cancel key=" + uniqueKey()
-                                 + ": P2P async read cancelled before kickoff";
-                if (collector_) {
-                    collector_->decode_schedule_success            = false;
-                    collector_->decode_schedule_total_cost_time_us = currentTimeUs() - collector_->decode_schedule_start_time_us;
-                }
+        if (!done_) {
+            if (kickoff_state_ != KickoffState::QUEUED) {
+                beginLeaseHold();
+            }
+            done_          = true;
+            success_       = false;
+            error_code_    = ErrorCode::CANCELLED;
+            error_message_ = "observer_role=DECODE stage=kickoff selected_path=decode_cancel key=" + uniqueKey()
+                             + ": P2P async read cancelled";
+            if (collector_) {
+                collector_->decode_schedule_success            = false;
+                collector_->decode_schedule_total_cost_time_us = currentTimeUs() - collector_->decode_schedule_start_time_us;
             }
             done_cv_.notify_all();
             notify();
+        }
+        if (kickoff_state_ == KickoffState::QUEUED) {
             return;
         }
         // STARTING may be blocked while creating RPCs. Install the worker
@@ -505,7 +533,7 @@ void P2PConnectorAsyncReadContext::checkCancelDone() {
 }
 
 void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client) {
-    if (!calls_ready_.load(std::memory_order_acquire)) {
+    if (lease_query_timeout_ms_ <= 0 || !calls_ready_.load(std::memory_order_acquire)) {
         return;
     }
     if (!lease_hold_pending_.load(std::memory_order_acquire)) {
@@ -549,18 +577,11 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
 
     if (result.allStopped()) {
         DoneNotifier done_notifier{*this};
-        const auto hold_start_us = lease_hold_start_us_.exchange(0);
-        if (collector_ && hold_start_us > 0) {
-            collector_->decode_schedule_lease_hold_time_us = P2PNotification::nowUs() - hold_start_us;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (resourceHoldPending()) {
+            RTP_LLM_LOG_DEBUG("pollLeaseIfNeeded: all ranks stopped, unique_key=%s retry=%d", unique_key.c_str(), retry);
+            releaseLeaseHoldLocked(/*all_ranks_stopped=*/true, P2PNotification::nowUs());
         }
-        RTP_LLM_LOG_DEBUG("pollLeaseIfNeeded: all ranks stopped, unique_key=%s retry=%d", unique_key.c_str(), retry);
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            resource_.reset();
-        }
-        lease_all_ranks_stopped_.store(true, std::memory_order_release);
-        lease_hold_pending_.store(false, std::memory_order_release);
-        lease_poll_next_ms_.store(0, std::memory_order_relaxed);
         return;
     }
 
@@ -633,7 +654,12 @@ int64_t P2PConnectorAsyncReadContext::nextWakeupMs(bool allow_control) const {
         next = transfer_stop_at_ms_;
     }
     if (resourceHoldPending()) {
-        if (allow_control && calls_ready_.load(std::memory_order_acquire) && cancel_confirmed_.load()) {
+        const auto hold_start_us = lease_hold_start_us_.load();
+        if (hold_start_us > 0) {
+            next = std::min(next, (hold_start_us + 999) / 1000 + kv_force_release_timeout_ms_);
+        }
+        if (lease_query_timeout_ms_ > 0 && allow_control && calls_ready_.load(std::memory_order_acquire)
+            && cancel_confirmed_.load()) {
             next = std::min(next, lease_poll_next_ms_.load());
         }
     }
@@ -674,13 +700,6 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
         RTP_LLM_LOG_ERROR("P2P lease checker requires a control pool and topology");
         return false;
     }
-    const int min_percent = config.p2p_kv_leak_exit_threshold_min_percent;
-    const int max_percent = config.p2p_kv_leak_exit_threshold_max_percent;
-    if (min_percent < 0 || max_percent > 100 || min_percent > max_percent) {
-        RTP_LLM_LOG_ERROR(
-            "Invalid P2P KV leak exit threshold range [%d, %d]: use 0 <= min <= max <= 100", min_percent, max_percent);
-        return false;
-    }
     group_block_bytes_.clear();
     total_kv_bytes_ = 0;
     for (const auto& group : config.topology->groups()) {
@@ -695,19 +714,11 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
         RTP_LLM_LOG_ERROR("P2P lease checker requires nonzero total KV capacity");
         return false;
     }
-    kv_leak_exit_enabled_       = max_percent != 0;
-    kv_leak_exit_threshold_bps_ = min_percent * kBasisPointsPerPercent;
-    if (min_percent < max_percent) {
-        // Sample once per checker to spread restarts across Decode instances.
-        std::mt19937 generator{std::random_device{}()};
-        std::uniform_int_distribution<int> threshold(min_percent * kBasisPointsPerPercent,
-                                                     max_percent * kBasisPointsPerPercent);
-        kv_leak_exit_threshold_bps_ = threshold(generator);
+    if (config.p2p_kv_force_release_timeout_ms <= 0) {
+        RTP_LLM_LOG_ERROR("p2p_kv_force_release_timeout_ms must be positive");
+        return false;
     }
-    RTP_LLM_LOG_INFO("P2P retained KV exit protection: min_percent=%d max_percent=%d effective_percent=%.2f",
-                     min_percent,
-                     max_percent,
-                     static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent);
+    RTP_LLM_LOG_INFO("P2P retained KV forced release interval: %d ms", config.p2p_kv_force_release_timeout_ms);
     metrics_reporter_    = metrics_reporter;
     tp_broadcast_client_ = tp_broadcast_client;
     control_pool_        = control_pool;
@@ -870,13 +881,12 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
     const int64_t now_ms = now_us / 1000;
     if (held_contexts > 0 && (last_leak_log_ms_ == 0 || now_ms - last_leak_log_ms_ >= 30 * 1000)) {
         RTP_LLM_LOG_WARNING("P2P retained KV: contexts=%zu held_bytes=%zu total_bytes=%zu held_percent=%.2f "
-                            "exit_threshold_percent=%.2f oldest_hold_ms=%ld awaiting_cancel=%zu pending_query=%zu "
+                            "oldest_hold_ms=%ld awaiting_cancel=%zu pending_query=%zu "
                             "failed_query=%zu awaiting_stop=%zu",
                             held_contexts,
                             held_bytes,
                             total_kv_bytes_,
                             held_percent,
-                            static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent,
                             oldest_hold_ms,
                             awaiting_cancel,
                             pending_query,
@@ -884,37 +894,8 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
                             awaiting_stop);
         last_leak_log_ms_ = now_ms;
     } else if (held_contexts == 0 && last_leak_log_ms_ != 0) {
-        RTP_LLM_LOG_INFO("P2P retained KV: all held resources released after physical stop confirmation");
+        RTP_LLM_LOG_INFO("P2P retained KV: all held resources released");
         last_leak_log_ms_ = 0;
-    }
-    if (!kv_leak_exit_enabled_) {
-        return;
-    }
-    // Exact strict comparison without overflowing size_t or rounding percentages.
-    const size_t threshold_bytes =
-        (total_kv_bytes_ / kBasisPointsPerWhole) * kv_leak_exit_threshold_bps_
-        + (total_kv_bytes_ % kBasisPointsPerWhole) * kv_leak_exit_threshold_bps_ / kBasisPointsPerWhole;
-    if (held_bytes <= threshold_bytes) {
-        retained_kv_over_threshold_since_ms_ = 0;
-        return;
-    }
-    if (retained_kv_over_threshold_since_ms_ == 0) {
-        retained_kv_over_threshold_since_ms_ = now_ms;
-        RTP_LLM_LOG_WARNING("P2P retained KV exceeded exit threshold; allowing lease cleanup: "
-                            "held_bytes=%zu total_bytes=%zu exit_threshold_percent=%.2f grace_ms=%ld",
-                            held_bytes,
-                            total_kv_bytes_,
-                            static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent,
-                            kRetainedKvExitGraceMs);
-    }
-    if (now_ms - retained_kv_over_threshold_since_ms_ >= kRetainedKvExitGraceMs) {
-        RTP_LLM_LOG_ERROR("P2P retained KV exceeded exit threshold; aborting rank 0 with KV still held: "
-                          "held_bytes=%zu total_bytes=%zu held_percent=%.2f exit_threshold_percent=%.2f",
-                          held_bytes,
-                          total_kv_bytes_,
-                          held_percent,
-                          static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent);
-        std::abort();
     }
 }
 
@@ -945,6 +926,11 @@ void P2PConnectorAsyncReadContextChecker::advanceRead(
     }
     try {
         context->expireTransferDeadlineIfNeeded();
+        if (context->expireLeaseHoldIfNeeded(P2PNotification::nowUs()) && metrics_reporter_) {
+            P2PConnectorMetricsCollector collector;
+            collector.decode_scheduler_forced_kv_release = true;
+            metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, &collector);
+        }
         context->checkCancelDone();
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("P2P read deadline or cancellation processing failed, key=%s error=%s",

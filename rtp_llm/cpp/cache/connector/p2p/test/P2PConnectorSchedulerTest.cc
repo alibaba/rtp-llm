@@ -1,6 +1,4 @@
 #include <algorithm>
-#include <csignal>
-#include <sys/resource.h>
 #include <future>
 #include <set>
 #include <map>
@@ -922,7 +920,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadPendingContextCanBeCancelledBeforeKic
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::CANCELLED);
 }
 
-TEST_F(P2PConnectorSchedulerTest, AsyncReadStartingContextIsNotCompletedByCancelBeforeCallsReady) {
+TEST_F(P2PConnectorSchedulerTest, AsyncReadStartingContextRetainsKvOnCancelBeforeCallsReady) {
     auto resource  = createValidKVCacheResource(1, 1);
     auto collector = std::make_shared<P2PConnectorMetricsCollector>();
     auto context   = std::make_shared<P2PConnectorAsyncReadContext>(
@@ -932,11 +930,14 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadStartingContextIsNotCompletedByCancel
     context->cancel(nullptr);
 
     EXPECT_TRUE(context->cancelRequested());
-    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->done());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_TRUE(context->resourceHoldPending());
 
     context->markStartFailed(ErrorInfo(ErrorCode::CANCELLED, "kickoff cancelled before calls were created"));
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->resourceHoldPending());
 }
 
 // ==================== asyncRead 测试 (Decode 端功能) ====================
@@ -1717,142 +1718,37 @@ TEST_F(P2PConnectorSchedulerTest, LeaseQueriesForDistinctRequestsCanOverlap) {
     ASSERT_TRUE(waitUntil([&] { return !first->resourceHoldPending() && !second->resourceHoldPending(); }));
 }
 
-namespace {
-
-void disableRetainedKvCoreDump() {
-    const rlimit no_core{0, 0};
-    setrlimit(RLIMIT_CORE, &no_core);
-}
-
-}  // namespace
-
-TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
-    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
-    auto resource = std::make_shared<KVCacheResource>();
-    resource->initGroups(test::makeTestCacheTopology(1, 1, {{0}}));
-    resource->mutableBlockIds("group0").assign({1, 2, 3});
+TEST(P2PRetainedKvTest, ForceReleasesEachRequestAfterFiveMinutes) {
     const auto deadline = currentTimeMs() - 1;
-    auto       context =
-        std::make_shared<P2PConnectorAsyncReadContext>(resource, "retained", nullptr, 1, false, deadline, deadline);
-    ASSERT_TRUE(context->beginKickoff());
-    ASSERT_TRUE(context->expireTransferDeadlineIfNeeded());
-
-    P2PConnectorAsyncReadContextChecker checker;
-    checker.group_block_bytes_ = {{"group0", 100}};
-    checker.total_kv_bytes_    = 1000;
-    // Exactly 30%, including duplicate contexts/blocks, must keep running.
-    checker.checkRetainedResources({context, context});
-    resource->mutableBlockIds("group0").assign({0, 1, 2, 3, NULL_BLOCK_IDX});
-    checker.checkRetainedResources({context});
-    resource->mutableBlockIds("group0").assign({1, 2, 3, 4});
-    checker.checkRetainedResources({context});
-    ASSERT_NE(checker.retained_kv_over_threshold_since_ms_, 0);
-    EXPECT_EXIT({
-        disableRetainedKvCoreDump();
-        checker.retained_kv_over_threshold_since_ms_ -= 31000;
-        checker.checkRetainedResources({context});
-    }, ::testing::KilledBySignal(SIGABRT), "");
-    checker.kv_leak_exit_threshold_bps_ = 4000;
-    checker.checkRetainedResources({context});
-    EXPECT_EQ(checker.retained_kv_over_threshold_since_ms_, 0);
-    checker.kv_leak_exit_threshold_bps_ = 3999;
-    checker.checkRetainedResources({context});
-    EXPECT_EXIT({
-        disableRetainedKvCoreDump();
-        checker.retained_kv_over_threshold_since_ms_ -= 31000;
-        checker.checkRetainedResources({context});
-    }, ::testing::KilledBySignal(SIGABRT), "");
-    checker.kv_leak_exit_enabled_ = false;
-    checker.retained_kv_over_threshold_since_ms_ -= 31000;
-    checker.checkRetainedResources({context});
-    EXPECT_TRUE(context->resourceHoldPending());
-}
-
-TEST(P2PRetainedKvTest, DistinctRequestsAccumulateAndGroupsUseDifferentBlockSizes) {
-    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
-    const auto topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
-    const auto reordered_topology =
-        CacheTopology::create({topology->group("group1"), topology->group("group0")}, topology->layers());
-    auto make_context = [&](BlockIndicesType first, BlockIndicesType second, bool reorder = false) {
-        auto resource = std::make_shared<KVCacheResource>();
-        resource->initGroups(reorder ? reordered_topology : topology);
-        resource->mutableBlockIds("group0").assign(std::move(first));
-        resource->mutableBlockIds("group1").assign(std::move(second));
-        const auto deadline = currentTimeMs() - 1;
-        auto       context =
-            std::make_shared<P2PConnectorAsyncReadContext>(resource, "weighted", nullptr, 1, false, deadline, deadline);
+    auto make_context = [&](const std::string& key) {
+        auto context = std::make_shared<P2PConnectorAsyncReadContext>(
+            std::make_shared<KVCacheResource>(), key, nullptr, 1, false, deadline, deadline);
         EXPECT_TRUE(context->beginKickoff());
         EXPECT_TRUE(context->expireTransferDeadlineIfNeeded());
         return context;
     };
-    P2PConnectorAsyncReadContextChecker checker;
-    checker.group_block_bytes_ = {{"group0", 100}, {"group1", 400}};
-    checker.total_kv_bytes_    = 2000;
-    const auto a               = make_context({1}, {1});    // 500 bytes, 25%.
-    const auto b               = make_context({1, 2}, {}, true);  // Reordered rows; union is 600 bytes, 30%.
-    checker.checkRetainedResources({a, b});
-    const auto c = make_context({3}, {});  // Union is 700 bytes, 35%.
-    checker.checkRetainedResources({a, b, c});
-    EXPECT_EXIT({
-        disableRetainedKvCoreDump();
-        checker.retained_kv_over_threshold_since_ms_ -= 31000;
-        checker.checkRetainedResources({a, b, c});
-    }, ::testing::KilledBySignal(SIGABRT), "");
-    c->lease_hold_pending_.store(false);
-    checker.checkRetainedResources({a, b, c});
-    EXPECT_EQ(checker.retained_kv_over_threshold_since_ms_, 0);
+    auto expired = make_context("expired-hold");
+    auto recent = make_context("recent-hold");
+    const auto expires_at = expired->lease_hold_start_us_.load() + 5 * 60 * 1000 * 1000LL;
+    recent->lease_hold_start_us_.store(expired->lease_hold_start_us_.load() + 1000);
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(expires_at - 1));
+    EXPECT_TRUE(expired->resourceHoldPending());
+    EXPECT_TRUE(expired->expireLeaseHoldIfNeeded(expires_at));
+    EXPECT_FALSE(expired->expireLeaseHoldIfNeeded(expires_at));
+    EXPECT_FALSE(recent->expireLeaseHoldIfNeeded(expires_at));
+    EXPECT_FALSE(expired->resourceHoldPending());
+    EXPECT_FALSE(expired->resource_);
+    EXPECT_FALSE(expired->lease_all_ranks_stopped_.load());
+    EXPECT_TRUE(recent->resourceHoldPending());
+    EXPECT_TRUE(recent->resource_);
+
+    expired->markKickoffUnconfirmed({ErrorCode::GENERATE_TIMEOUT, "late kickoff error"});
+    EXPECT_FALSE(expired->resourceHoldPending());
 }
 
-TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
-    auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PKvCapacityTest");
-    ASSERT_TRUE(pool->start());
-    P2PConnectorSchedulerConfig config;
-    config.topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
-    P2PConnectorAsyncReadContextChecker checker;
-    for (const auto& [min_percent, max_percent] : {std::pair{-1, 70}, std::pair{30, 101}, std::pair{70, 30}}) {
-        config.p2p_kv_leak_exit_threshold_min_percent = min_percent;
-        config.p2p_kv_leak_exit_threshold_max_percent = max_percent;
-        EXPECT_FALSE(checker.init(nullptr, nullptr, pool, config));
-    }
-    config.p2p_kv_leak_exit_threshold_min_percent = 45;
-    config.p2p_kv_leak_exit_threshold_max_percent = 45;
-    config.physical_block_bytes_by_group.emplace(config.topology->groups().front().tag, 135);
-    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
-    checker.stop();
-    size_t expected_bytes = 0;
-    for (const auto& group : config.topology->groups()) {
-        const auto physical = config.physical_block_bytes_by_group.find(group.tag);
-        expected_bytes += group.block_num
-                          * (physical != config.physical_block_bytes_by_group.end() ?
-                                 physical->second :
-                                 config.topology->blockSizeBytesForGroup(group.tag));
-    }
-    EXPECT_EQ(checker.total_kv_bytes_, expected_bytes);
-    EXPECT_EQ(checker.kv_leak_exit_threshold_bps_, 4500);
-
-    config.p2p_kv_leak_exit_threshold_min_percent = 35;
-    config.p2p_kv_leak_exit_threshold_max_percent = 42;
-    P2PConnectorAsyncReadContextChecker range_checker;
-    ASSERT_TRUE(range_checker.init(nullptr, nullptr, pool, config));
-    EXPECT_GE(range_checker.kv_leak_exit_threshold_bps_, 3500);
-    EXPECT_LE(range_checker.kv_leak_exit_threshold_bps_, 4200);
-    range_checker.stop();
-
-    config.p2p_kv_leak_exit_threshold_min_percent = 0;
-    config.p2p_kv_leak_exit_threshold_max_percent = 0;
-    P2PConnectorAsyncReadContextChecker disabled;
-    ASSERT_TRUE(disabled.init(nullptr, nullptr, pool, config));
-    EXPECT_EQ(disabled.kv_leak_exit_threshold_bps_, 0);
-    EXPECT_FALSE(disabled.kv_leak_exit_enabled_);
-    disabled.stop();
-    pool->stop();
-}
-
-TEST(P2PRetainedKvTest, ThresholdUsesAllDecodePipelineStages) {
+TEST(P2PRetainedKvTest, CapacityIncludesAllDecodePipelineStages) {
     P2PConnectorSchedulerConfig config;
     config.topology                               = test::makeTestCacheTopology(2, 2, {{0}, {1}});
-    config.p2p_kv_leak_exit_threshold_min_percent = 30;
-    config.p2p_kv_leak_exit_threshold_max_percent = 30;
     P2PStageStartupPB stage0;
     (*stage0.mutable_decode_block_bytes())["group0"] = 100;
     (*stage0.mutable_decode_block_bytes())["group1"] = 200;
@@ -1877,13 +1773,8 @@ TEST(P2PRetainedKvTest, ThresholdUsesAllDecodePipelineStages) {
         std::make_shared<P2PConnectorAsyncReadContext>(resource, "pp-held", nullptr, 1, false, deadline, deadline);
     ASSERT_TRUE(context->beginKickoff());
     ASSERT_TRUE(context->expireTransferDeadlineIfNeeded());
-    // 8000 / 28800 stays below 30%, including when the same blocks appear twice.
     checker.checkRetainedResources({context, context});
-    EXPECT_EQ(checker.retained_kv_over_threshold_since_ms_, 0);
-    // 9600 / 28800 exceeds 30%; Stage 0 alone would still report 25%.
-    resource->mutableBlockIds("group1").assign({1, 2, 3, 4, 5, 6});
-    checker.checkRetainedResources({context});
-    EXPECT_NE(checker.retained_kv_over_threshold_since_ms_, 0);
+    EXPECT_TRUE(context->resourceHoldPending());
     checker.stop();
     pool->stop();
 }
