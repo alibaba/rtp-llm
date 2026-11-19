@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def _aligned_buffer_like(value):
-    output = torch.empty_like(value)
+    output = torch.empty_like(value, memory_format=torch.contiguous_format)
     if output.data_ptr() % 16 == 0:
         return output
     # A contiguous view can start at an unaligned BF16 offset. Construct an
@@ -31,12 +31,13 @@ def _aligned_buffer_like(value):
 class LsaMoeReduce:
     """One symmetric window shared by serialized forwards of a single model."""
 
-    def __init__(self, ops, device, hidden_size, handle):
+    def __init__(self, ops, device, hidden_size, handle, buffers):
         self.hidden_size = hidden_size
         self.ops = ops
         self.device = device
         self.closed = False
         self.handle = handle
+        self.partial_staging, self.shared_staging, self.gate_staging = buffers
 
     def supports(self, value):
         # TP consumes the same logical batch shape on both ranks. Local tensor
@@ -47,29 +48,43 @@ class LsaMoeReduce:
             and value.shape[1] == self.hidden_size
         )
 
-    def __call__(self, partial, shared, gate):
+    def prepare_output(self, value):
+        # Allocate while the routed branch still owns its ordinary collective.
+        # Each call retains its own output, including distinct Graph nodes.
+        if self.closed:
+            raise RuntimeError("LSA owner is closed; restart the TP group")
+        return _aligned_buffer_like(value)
+
+    def __call__(self, partial, shared, gate, output):
         # Once the routed collective is suppressed, a local failure cannot
-        # choose a different collective. The peer's timed barrier bounds
-        # the wait and both workers must be restarted on such a failure.
+        # choose a different collective. Follow the TP supervisor's fatal
+        # failure policy; never resume this worker on another collective.
         if not (
             not self.closed
             and self.supports(partial)
             and partial.shape == shared.shape
             and gate.shape == (partial.shape[0], 1)
+            and output.shape == partial.shape
+            and output.is_contiguous()
+            and output.data_ptr() % 16 == 0
             and all(
                 value.device == self.device and value.dtype == torch.bfloat16
-                for value in (partial, shared, gate)
+                for value in (partial, shared, gate, output)
             )
         ):
             raise ValueError("LSA epilogue requires local BF16 [M,H] and gate [M,1]")
-        partial = partial.contiguous()  # Native code stages it with a byte copy.
-        shared = shared.contiguous()
-        gate = gate.contiguous()
-        if shared.data_ptr() % 16:
-            aligned = _aligned_buffer_like(shared)
-            aligned.copy_(shared)
-            shared = aligned
-        output = _aligned_buffer_like(partial)
+        rows = partial.shape[0]
+        # Staging is model-owned and allocated before communicator bootstrap.
+        # The serialized Decode stream and the final LSA barrier protect reuse.
+        if not partial.is_contiguous():
+            self.partial_staging[:rows].copy_(partial)
+            partial = self.partial_staging[:rows]
+        if not shared.is_contiguous() or shared.data_ptr() % 16:
+            self.shared_staging[:rows].copy_(shared)
+            shared = self.shared_staging[:rows]
+        if not gate.is_contiguous():
+            self.gate_staging[:rows].copy_(gate)
+            gate = self.gate_staging[:rows]
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream(self.device)
             self.ops.apply(
@@ -105,7 +120,14 @@ def prepare_model_reduce(model, config, parallelism):
         PureTpRouterNvfp4Cutlass,
     )
 
+    timeout_ms = getattr(
+        getattr(config, "quant_config", None), "decode_lsa_timeout_ms", 0
+    )
     state = {
+        "timeout_ms": timeout_ms,
+        "shared_gemm_nk": getattr(
+            getattr(config, "quant_config", None), "decode_shared_gemm_nk", False
+        ),
         "error": None,
         "host": socket.gethostname(),
         "layers": len(model.layers),
@@ -114,7 +136,14 @@ def prepare_model_reduce(model, config, parallelism):
     ops = None
     device = None
     try:
-        if os.environ.get("NCCL_P2P_DISABLE") == "1" or os.environ.get("NCCL_CUMEM_ENABLE") == "0":
+        if type(timeout_ms) is not int or not 0 <= timeout_ms <= 2**31 - 1:
+            raise ValueError(
+                "decode_lsa_timeout_ms must be an integer from 0 through 2147483647"
+            )
+        if (
+            os.environ.get("NCCL_P2P_DISABLE") == "1"
+            or os.environ.get("NCCL_CUMEM_ENABLE") == "0"
+        ):
             raise ValueError("NCCL P2P access or CUDA memory management is disabled")
         if not (
             not getattr(config, "is_mtp", False)
@@ -135,7 +164,9 @@ def prepare_model_reduce(model, config, parallelism):
         window_bytes = _MAX_ROWS * config.hidden_size * torch.bfloat16.itemsize
         free_bytes, _ = torch.cuda.mem_get_info(device)
         if free_bytes < window_bytes + _NCCL_HEADROOM_BYTES:
-            raise ValueError("insufficient free CUDA memory for the LSA window and headroom")
+            raise ValueError(
+                "insufficient free CUDA memory for the LSA window and headroom"
+            )
         for layer in model.layers:
             mlp = layer.mlp
             if not (
@@ -165,6 +196,8 @@ def prepare_model_reduce(model, config, parallelism):
         or len({peer["host"] for peer in peers}) != 1
         or len({peer["layers"] for peer in peers}) != 1
         or len({peer["hidden"] for peer in peers}) != 1
+        or len({peer["timeout_ms"] for peer in peers}) != 1
+        or len({peer["shared_gemm_nk"] for peer in peers}) != 1
         or len({peer["bus_id"] for peer in peers}) != 2
     ):
         logger.info("MoE LSA unavailable for this TP group: %s", peers)
@@ -172,6 +205,7 @@ def prepare_model_reduce(model, config, parallelism):
 
     rank = dist.get_rank(group)
     handle = None
+    buffers = None
     try:
         state = {"error": None, "uid": None}
         try:
@@ -179,6 +213,16 @@ def prepare_model_reduce(model, config, parallelism):
             if rank == 0:
                 state["uid"] = ops.unique_id().hex()
             handle = ops.allocate(device.index, config.hidden_size)
+            ops.set_timeout(handle, timeout_ms)
+            buffers = (
+                torch.empty(
+                    (_MAX_ROWS, config.hidden_size), device=device, dtype=torch.bfloat16
+                ),
+                torch.empty(
+                    (_MAX_ROWS, config.hidden_size), device=device, dtype=torch.bfloat16
+                ),
+                torch.empty((_MAX_ROWS, 1), device=device, dtype=torch.bfloat16),
+            )
         except Exception as error:
             state["error"] = str(error)
         peers = exchange_group_state(group, state, "qwen38-lsa-allocation")
@@ -204,14 +248,15 @@ def prepare_model_reduce(model, config, parallelism):
         # collective. Let errors propagate instead of switching protocols.
         ops.activate(handle)
         exchange_group_state(group, {"ready": True}, "qwen38-lsa-ready")
-        owner = LsaMoeReduce(ops, device, config.hidden_size, handle)
+        owner = LsaMoeReduce(ops, device, config.hidden_size, handle, buffers)
         handle = None
     finally:
         if handle is not None:
             ops.destroy(handle)
     logger.info(
-        "MoE LSA ready on %s; missing-peer barrier timeout is nominally 10 seconds",
+        "MoE LSA ready on %s; timeout_ms=%d (0 uses NCCL abort-driven waiting)",
         device,
+        timeout_ms,
     )
     for layer in model.layers:
         layer.mlp._reduce_shared_gate = owner

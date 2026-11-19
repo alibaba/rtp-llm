@@ -33,6 +33,9 @@ class Qwen4MoeLayer(GenericMoeLayer):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
             CutlassNvfp4Executor,
         )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.nvfp4_hybrid_executor import (
+            Nvfp4HybridExecutor,
+        )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
             PureTpRouterNvfp4Cutlass,
         )
@@ -56,7 +59,8 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and type(shared) is DenseMLP
             and type(self.fused_moe) is FusedMoe
             and type(self.fused_moe.router) is PureTpRouterNvfp4Cutlass
-            and type(self.fused_moe.fused_experts) is CutlassNvfp4Executor
+            and type(self.fused_moe.fused_experts)
+            in (CutlassNvfp4Executor, Nvfp4HybridExecutor)
             and type(shared.up_proj) is Fp8Linear
             and type(shared.down_proj) is Fp8Linear
             and type(self.shared_expert_gate) is Fp8Linear
@@ -90,6 +94,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         reduce_shared = getattr(self, "_reduce_shared_gate", None)
         if reduce_shared is not None and reduce_shared.supports(hidden_states):
+            output = reduce_shared.prepare_output(hidden_states)
             stream = self._reduce_gate_shared_stream
             if stream is None:
                 experts = self._forward_routed(hidden_states, skip_tp_allreduce=True)
@@ -99,7 +104,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
                 experts, shared, gate = self._overlap_shared_branch(
                     hidden_states, stream, skip_tp_allreduce=True
                 )
-            return reduce_shared(experts, shared, gate)
+            return reduce_shared(experts, shared, gate, output)
         stream = self._shared_stream
         # Larger shapes did not improve in the complete TP2 consumer. Keep
         # their established schedule and each layer's distinct event pair.
