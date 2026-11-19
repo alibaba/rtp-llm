@@ -89,7 +89,9 @@ async def request(session, text, kind, seed, temperature):
         raise RuntimeError(f'{kind}/{seed}: expected P/D input={INPUT}, output={OUTPUT}; got {usage}, {aux}')
     if kind != 'prime' and aux.get('reuse_len') != 5120:
         raise RuntimeError(f"{kind}/{seed}: expected 5120 reused tokens; got {aux.get('reuse_len')}")
-    if rounds <= 0 or len(accepted) != 3:
+    if (not isinstance(rounds, int) or rounds <= 0 or len(accepted) != 3
+            or any(type(n) is not int for n in accepted)
+            or not rounds >= accepted[0] >= accepted[1] >= accepted[2] >= 0):
         raise RuntimeError(f'{kind}/{seed}: expected three MTP proposal positions; got {rounds=}, {accepted=}')
     return {
         'kind':kind,'seed':seed,'temperature':temperature,

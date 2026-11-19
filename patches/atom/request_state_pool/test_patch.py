@@ -1,23 +1,15 @@
 """CPU source-fixture checks for the pinned additive dependency patch."""
 
-import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ATOM_SOURCE = Path(
-    os.getenv(
-        "RTP_DOUBLE_BUFFER_ATOM_SOURCE",
-        str(HERE / "baseline_atom"),
-    )
-)
-AITER_SOURCE = Path(
-    os.getenv("RTP_DOUBLE_BUFFER_AITER_SOURCE", str(HERE / "baseline_aiter"))
-)
 SPEC = importlib.util.spec_from_file_location(
     "double_buffer_patch_apply", HERE / "apply.py"
 )
@@ -34,21 +26,30 @@ class DoubleBufferPatchTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.manifest = json.loads((HERE / "manifest.json").read_text())
         for name, spec in self.manifest["components"].items():
-            for path, sha in spec["source_files_sha256"].items():
-                if sha == hashlib.sha256(b"").hexdigest():
-                    continue
-                source = (
-                    ATOM_SOURCE / path[5:] if name == "atom" else AITER_SOURCE / path
+            if env := os.getenv(f"RTP_DOUBLE_BUFFER_{name.upper()}_SOURCE"):
+                source = Path(env)
+            else:
+                package = "atom" if name == "atom" else "amd-aiter"
+                source = Path(importlib.metadata.distribution(package).locate_file(""))
+            paths = spec["source_files_sha256"]
+            for path in paths:
+                original = source / (path[5:] if env and name == "atom" else path)
+                if original.is_file():
+                    target = self.root / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(original.read_bytes())
+
+            # The image contains the postimage. Reconstruct the reviewed
+            # preimage in scratch so both apply and rejection paths are tested.
+            def hashes():
+                return {path: APPLIER.digest(self.root / path) for path in paths}
+
+            if hashes() == spec["patched_files_sha256"]:
+                subprocess.run(
+                    ["git", f"--work-tree={self.root}", "apply", "--reverse", str(HERE / spec["patch"])],
+                    cwd=self.root, check=True,
                 )
-                self.assertTrue(
-                    source.is_file(),
-                    f"Required reviewed source fixture missing: {source}",
-                )
-                payload = source.read_bytes()
-                self.assertEqual(hashlib.sha256(payload).hexdigest(), sha)
-                target = self.root / path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(payload)
+            self.assertEqual(hashes(), paths)
 
     def test_apply_verify_idempotence_and_compilable_sources(self):
         APPLIER.apply(self.root)
