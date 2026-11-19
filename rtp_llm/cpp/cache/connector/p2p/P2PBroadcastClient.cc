@@ -107,7 +107,8 @@ P2PBroadcastClient::broadcastRequests(std::vector<FunctionRequestPB> requests,
         std::move(requests),
         static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())),
         rpc_call,
-        before_dispatch);
+        before_dispatch,
+        BroadcastManager::DispatchFailurePolicy::kStop);
     if (!result) {
         RTP_LLM_LOG_WARNING("broadcast failed, cannot create broadcast result");
         return nullptr;
@@ -200,7 +201,11 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
     };
 
     auto result = tp_broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        std::move(requests), static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())), rpc_call);
+        std::move(requests),
+        static_cast<int>(std::min<int64_t>(timeout_ms, std::numeric_limits<int>::max())),
+        rpc_call,
+        {},
+        BroadcastManager::DispatchFailurePolicy::kContinue);
     if (!result) {
         RTP_LLM_LOG_WARNING("P2PBroadcastClient cancel: broadcast failed, unique_key: %s", unique_key.c_str());
         return nullptr;

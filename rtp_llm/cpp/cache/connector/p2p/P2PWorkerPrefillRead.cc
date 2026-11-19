@@ -496,7 +496,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             return count;
         }
 
-        if (transfer_result->dispatch_failed.load() || (cancel_flag && cancel_flag->load(std::memory_order_relaxed))) {
+        if (!transfer_result->all_success.load() || (cancel_flag && cancel_flag->load(std::memory_order_relaxed))) {
             return count;
         }
         if (currentTimeMs() >= transfer_deadline_ms) {
@@ -520,6 +520,9 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         send_req.unique_key  = route_layer_key;
         send_req.block_info  = std::move(key_block_infos.value());
         send_req.deadline_ms = transfer_deadline_ms;
+        send_req.is_cancelled = [cancel_flag, transfer_result] {
+            return cancel_flag->load() || !transfer_result->all_success.load();
+        };
         // The Decode transfer budget owns this window, not Prefill's local configuration.
         send_req.timeout_ms = std::min<int64_t>(std::numeric_limits<int32_t>::max(),
                                                 std::max<int64_t>(1, transfer_deadline_ms - currentTimeMs()));
@@ -548,7 +551,6 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         auto          task            = [sender = sender_,
                      task_state,
                      done_cb,
-                     cancel_flag,
                      route_layer_key,
                      chunk_id,
                      reporter = metrics_reporter_,
@@ -566,7 +568,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                 done_cb(transfer::TransferErrorCode::CANCELLED, "send cancelled before async task started");
                 return;
             }
-            if (cancel_flag && cancel_flag->load(std::memory_order_relaxed)) {
+            if (send_req_local->is_cancelled && send_req_local->is_cancelled()) {
                 done_cb(transfer::TransferErrorCode::CANCELLED, "send cancelled before async task started");
                 return;
             }
@@ -607,7 +609,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                     done_cb(transfer::TransferErrorCode::TIMEOUT, "send deadline expired in the Prefill worker queue");
                     return;
                 }
-                if (cancel_flag && cancel_flag->load(std::memory_order_relaxed)) {
+                if (send_req_local->is_cancelled && send_req_local->is_cancelled()) {
                     done_cb(transfer::TransferErrorCode::CANCELLED, "send cancelled before transport submission");
                     return;
                 }
