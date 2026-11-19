@@ -1563,9 +1563,13 @@ public:
         if (result == TransferTaskRegistry::ForgetResult::INVALID) {
             RTP_LLM_LOG_WARNING("KVCM READ completion forget rejected rank=%ld trace=%s reason=empty_trace",
                                 static_cast<long>(parallelism_config_.world_rank), trace_id.c_str());
-        } else if (result == TransferTaskRegistry::ForgetResult::RUNNING && client_wrapper_) {
+        } else if (result == TransferTaskRegistry::ForgetResult::RUNNING && read_registry_->readExited(trace_id)) {
+            // The coordinator queues forget for an unproven READ only after unfreeze.
+            // Erasing it earlier could make recovery mistake it for a never-admitted READ.
             try {
-                client_wrapper_->discardReadRecovery(trace_id);
+                if (client_wrapper_)
+                    client_wrapper_->discardReadRecovery(trace_id);
+                return read_registry_->forget(trace_id, /*read_recovery_discarded=*/true);
             } catch (...) {
                 RTP_LLM_LOG_WARNING("KVCM READ recovery discard failed trace=%s", trace_id.c_str());
             }
@@ -1701,8 +1705,14 @@ public:
         // Declared before the existing payload reconciliation scopes: their
         // final explicit proof must be published first, including while unwinding.
         block_tree_cache_detail::ScopeRollback publish_completion([&] {
-            if (execution)
-                execution->proof->report(response.payload_buffer_safe());
+            if (!execution)
+                return;
+            if (response.payload_buffer_safe()) {
+                execution->proof->report(true);
+            } else {
+                // The READ has returned from all SDK calls that can insert recovery records.
+                read_registry_->markReadExited(execution->trace_id);
+            }
         });
         response.set_sdk_failed(false);
         response.set_payload_buffer_safe(true);

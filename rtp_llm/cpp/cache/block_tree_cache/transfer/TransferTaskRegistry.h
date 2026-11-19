@@ -62,8 +62,8 @@ public:
             return false;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto inserted = records_.emplace(trace_id, State::RUNNING);
-        if (!inserted.second && inserted.first->second == State::REJECTED) {
+        const auto inserted = records_.emplace(trace_id, Record{State::RUNNING});
+        if (!inserted.second && inserted.first->second.state == State::REJECTED) {
             // The fence has intercepted its sole possible late execution. Consume
             // it atomically, but reject this arrival without admitting any I/O.
             const auto missing = missing_.find(trace_id);
@@ -74,7 +74,7 @@ public:
             logEvent("begin", trace_id, State::REJECTED, "late_execution_rejected_and_removed");
             return false;
         }
-        logEvent("begin", trace_id, inserted.first->second, inserted.second ? "inserted" : "duplicate");
+        logEvent("begin", trace_id, inserted.first->second.state, inserted.second ? "inserted" : "duplicate");
         return inserted.second;
     }
 
@@ -92,16 +92,17 @@ public:
             logEvent("finish", trace_id, State::UNKNOWN, "missing");
             return false;
         }
-        if (it->second == State::REJECTED) {
+        auto& state = it->second.state;
+        if (state == State::REJECTED) {
             // A late completion must not turn a missing record into a safety proof.
             touchMissing(trace_id, "finish");
-            logEvent("finish", trace_id, it->second, "rejection_retained");
+            logEvent("finish", trace_id, state, "rejection_retained");
             return true;
         }
         if (buffer_safe) {
-            it->second = State::BUFFER_SAFE;
+            state = State::BUFFER_SAFE;
         }
-        logEvent("finish", trace_id, it->second, buffer_safe ? "safe_proof" : "no_safe_proof");
+        logEvent("finish", trace_id, state, buffer_safe ? "safe_proof" : "no_safe_proof");
         return true;
     }
 
@@ -109,11 +110,24 @@ public:
         return trace_id != 0 && finish(std::to_string(trace_id), buffer_safe);
     }
 
-    // Admitted executions require safety proof before deletion. Absent records
-    // are already forgotten; a later finish never recreates them. Missing fences
-    // survive client cleanup: DONE lets the caller retire its cleanup record,
-    // while the server still rejects a late execution until arrival or expiry.
-    ForgetResult forget(const std::string& trace_id) {
+    // A KVCM READ can stop publishing recovery records before its buffer is safe.
+    void markReadExited(const std::string& trace_id) noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = records_.find(trace_id);
+        if (it != records_.end() && it->second.state == State::RUNNING)
+            it->second.read_exited = true;
+    }
+
+    bool readExited(const std::string& trace_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = records_.find(trace_id);
+        return it != records_.end() && it->second.read_exited;
+    }
+
+    // The KVCM exception requires an already released READ, followed by SDK
+    // recovery discard after the READ exited. Missing admission fences survive
+    // all cleanup, and late completions cannot recreate an erased record.
+    ForgetResult forget(const std::string& trace_id, bool read_recovery_discarded = false) {
         if (trace_id.empty()) {
             logEvent("forget", trace_id, State::UNKNOWN, "invalid");
             return ForgetResult::INVALID;
@@ -124,16 +138,17 @@ public:
             logEvent("forget", trace_id, State::UNKNOWN, "already_missing");
             return ForgetResult::DONE;
         }
-        if (it->second == State::REJECTED) {
+        const auto state = it->second.state;
+        if (state == State::REJECTED) {
             logEvent("forget", trace_id, State::REJECTED, "fence_retained_cleanup_acknowledged");
             return ForgetResult::DONE;
         }
-        if (it->second != State::BUFFER_SAFE) {
-            logEvent("forget", trace_id, it->second, "retained");
+        if (state != State::BUFFER_SAFE && !(read_recovery_discarded && it->second.read_exited)) {
+            logEvent("forget", trace_id, state, "retained");
             return ForgetResult::RUNNING;
         }
         records_.erase(it);
-        logEvent("forget", trace_id, State::BUFFER_SAFE, "removed");
+        logEvent("forget", trace_id, state, "removed");
         return ForgetResult::DONE;
     }
 
@@ -153,8 +168,8 @@ public:
                 logQuery(trace_ids[i], states[i]);
                 continue;
             }
-            const auto inserted = records_.emplace(trace_ids[i], State::REJECTED);
-            states[i] = inserted.first->second;
+            const auto inserted = records_.emplace(trace_ids[i], Record{State::REJECTED});
+            states[i] = inserted.first->second.state;
             if (states[i] == State::REJECTED)
                 touchMissing(trace_ids[i], "query");
             if (inserted.second)
@@ -180,7 +195,7 @@ public:
         for (size_t i = 0; i < trace_ids.size(); ++i) {
             const auto it = records_.find(trace_ids[i]);
             if (it != records_.end()) {
-                states[i] = it->second;
+                states[i] = it->second.state;
             }
             logQuery(trace_ids[i], states[i]);
         }
@@ -234,6 +249,11 @@ public:
     }
 
 private:
+    struct Record {
+        State state;
+        bool  read_exited{false};
+    };
+
     struct MissingRecord {
         uint64_t count{0};
         Clock::time_point expire_time{};
@@ -320,7 +340,7 @@ private:
     mutable std::mutex                    mutex_;
     std::list<std::string>                missing_queue_;
     std::unordered_map<std::string, MissingRecord> missing_;
-    std::unordered_map<std::string, State> records_;
+    std::unordered_map<std::string, Record> records_;
     mutable std::unordered_map<std::string, State> logged_query_states_;
 };
 

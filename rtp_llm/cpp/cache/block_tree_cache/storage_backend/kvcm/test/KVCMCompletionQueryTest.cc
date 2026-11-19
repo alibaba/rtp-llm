@@ -181,19 +181,19 @@ FunctionRequestPB payloadRequest(const BackendEnvironment& environment, const st
 }
 
 template<typename Code>
-std::vector<Code> safeReadCompletionCodes() {
-    std::vector<Code> codes{Code::ER_OK};
+std::vector<Code> readCompletionCodes() {
+    std::vector<Code> codes{Code::ER_OK, Code::ER_SDKREAD_ERROR};
     if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<Code>::value) {
         codes.push_back(Code::ER_SDK_ERROR_BUFFER_SAFE);
     }
     return codes;
 }
 
-TEST(KVCMCompletionQueryTest, LocalReadSettlementQueuesCleanupForSuccessAndSafeFailure) {
+TEST(KVCMCompletionQueryTest, LocalReadCleanupAfterSafeCompletionOrUnfreeze) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     for (const bool asynchronous : {false, true}) {
-        for (const auto code : safeReadCompletionCodes<kv_cache_manager::ClientErrorCode>()) {
+        for (const auto code : readCompletionCodes<kv_cache_manager::ClientErrorCode>()) {
             SCOPED_TRACE(::testing::PrintToString(std::make_pair(asynchronous, code)));
             auto worker = std::make_shared<QueryWorker>();
             ASSERT_TRUE(worker->init());
@@ -211,6 +211,7 @@ TEST(KVCMCompletionQueryTest, LocalReadSettlementQueuesCleanupForSuccessAndSafeF
             EXPECT_EQ(worker->backend->taskRegistry().size(), 0u);
             auto request = makeStorageRequest(environment);
             const bool success = code == kv_cache_manager::ClientErrorCode::ER_OK;
+            const bool safe = kvcm::sdkCodeProvesBufferSafety(code);
             if (asynchronous) {
                 EXPECT_EQ(readResult(*worker->backend, std::move(request), std::move(matched.match_meta)).ok(), success);
                 ASSERT_TRUE(waitForBackendOperationsForTest(*worker->backend));
@@ -218,13 +219,22 @@ TEST(KVCMCompletionQueryTest, LocalReadSettlementQueuesCleanupForSuccessAndSafeF
                 request.transfer_task.emplace(std::vector<TransferDescriptor>{}, 30s);
                 if (success) {
                     EXPECT_NO_THROW(worker->backend->readImpl(request, matched.match_meta));
-                } else {
+                } else if (safe) {
                     EXPECT_THROW(worker->backend->readImpl(request, matched.match_meta), StorageOperationBufferSafeFailure);
+                } else {
+                    EXPECT_THROW(worker->backend->readImpl(request, matched.match_meta), StorageOperationCompletionUnknown);
                 }
+            }
+            if (!safe) {
+                const auto frozen = worker->manager->frozenTasks();
+                ASSERT_EQ(frozen.size(), 1u);
+                EXPECT_EQ(cleanup->size(), 0u);
+                EXPECT_FALSE(worker->manager->queryTransferCompletion(frozen.front()->execution(), 2000).all_safe);
+                ASSERT_TRUE(frozen.front()->unfreeze());
             }
             EXPECT_TRUE(worker->manager->frozenTasks().empty());
             EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"block_tree_read_1"}).front(),
-                      RegistryState::BUFFER_SAFE);
+                      safe ? RegistryState::BUFFER_SAFE : RegistryState::RUNNING);
             ASSERT_EQ(cleanup->size(), 1u);
             size_t forget_calls = 0;
             auto forget = [&](const auto& target, const auto& traces, int timeout_ms) {
