@@ -193,4 +193,10 @@ WorkerStatus 从接入会话与 Scheduler 采集任务快照，`TaskHistory` 提
 
 调度器管理队列和状态转换，`EngineLoop` 驱动 Forward。每个 `LLMMockEngine` 持有并采集自己的 `RtpMetrics`，RTP Scheduler 在组批、Forward 完成和请求结束等时点记录数据。采集时直接读取调度队列和 KV 状态，再合并 RPC 指标。独立验证调度策略时可从 `LLMMockEngine.start(..., EngineScheduler.Factory)` 注入调度器。
 
-Java 测试覆盖组件状态与原生 RPC，Python 测试覆盖编译、协调、采集和跨语言接线。完整实验用 Case YAML 定义并通过 `mock-case run` 执行，构建及检查命令见 [使用说明](../README.md#开发检查与详细文档)。
+### Java 与 Python 的改动边界
+
+- **Java** 管回放、原生 RPC、调度、计算模拟和 KV。模型默认值和状态转换在所属组件内维护。改取消、超时或关闭时，验证请求只有一次终态、资源能回收、迟到回调不会恢复已结束的请求。改 proto、业务错误码、P/D 交接或 cache key 时，核对生产调用方和协议兼容测试。
+- **Python** 管 Case 编译、动作、进程编排、发现、采集和 View。动作复用 `StepContext` 的查询和剩余预算，按角色管理实例。改 Runner 公共流程时，验证超时、后台失败、写操作回执未知和进程回收。改已有 Case 接口或 `result.json`、`gates.jsonl` 等记录格式时，核对现有 Case 和 View 的读取路径。
+- **跨语言接线** 涉及启动配置、就绪端点或回放结果时，同时核对 Java 产出和 Python 消费，并用实际启动组件的测试覆盖。
+
+完整实验通过 `mock-case run` 执行。[构建及检查命令](../README.md#开发检查与详细文档)

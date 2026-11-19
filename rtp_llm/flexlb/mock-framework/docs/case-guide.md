@@ -6,9 +6,13 @@
 
 1. 在 `cases/<case_id>/` 添加 `case.yaml`。基础收发参考 [Basic](../cases/basic/case.yaml)，故障恢复参考 [Master HA](../cases/master_ha_failover/case.yaml)，吞吐和延迟门禁参考 [性能回归](../cases/performance_regression/case.yaml)。
 2. 把本 Case 的角色配置放在 `configs/`，用 `config: configs/master.yaml` 等本地相对路径引用。借用其他 Case 的配置时先复制到本目录。少量参数可内联，空配置用 `config: {}`。
-3. 流量数据放在共享的 `data/traffic/`，在 `frontend/start/playback.args.requests_file` 引用 `.mckidx`。以 `data/` 开头的路径按共享根解析，默认是框架目录，可用 `--shared-root` 指定。其他相对路径从 Case 目录解析。Frontend 共用同一份数据，各自按索引读取。[回放格式](architecture.md#共享索引回放输入)
+3. 新流量放在仓库外的 `<shared-root>/data/traffic/`。`frontend/start/playback.args.requests_file` 写 `data/traffic/<文件名>.mckidx`，运行时传 `--shared-root <目录>`。共享根默认是框架目录，其他相对路径从 Case 目录解析。[回放格式](architecture.md#共享索引回放输入)
 4. 按实验目的划分 Phase。用已有接口描述操作和可观测的通过条件。使用默认大盘时省略 `view`，自定义大盘才显式声明路径。[默认大盘](../views/README.md)
 5. 提交前在框架目录运行 `uv run --locked mock-case compile cases/<case_id>/case.yaml`。编译检查 YAML、组件配置、接口参数和引用。再按 README 运行完整 Case，核对门禁和请求证据。
+
+提交钩子拦截暂存区新增或替换的 `.mckidx`，随仓小样本 `data/traffic/basic.mckidx` 除外。已有 DeepSeek 数据集沿用当前版本。
+
+通用测试需要有效 Case 时复用 `basic`。验证故障恢复、扩缩容或 ViT 时，用覆盖该行为的最小场景。随仓 Case 的编译测试遍历全部 `cases/*/case.yaml`。
 
 ## YAML 规范
 
@@ -113,6 +117,6 @@ phases:
 
 用函数的返回类型注解声明结果。只有一个值时直接返回，例如单值指标用 `float`，逐点指标用 `list[float]`，地址列表用 `list[str]`。有多个固定字段时，在产出结果的 Step 文件中定义 dataclass。接收方只声明自己需要的参数类型，YAML 用 `ref` 指定取整个结果还是单个字段。门禁记录在 `gates.jsonl` 中保存当次检查的单位。
 
-用测试验证参数、返回值和失败语义，用实际 Case 验证接线。
+新增动作时，用默认注册表编译一段调用它的最小 Case，确认接线。动作测试覆盖自身的成功和关键失败路径，参数类型、返回值、引用和断言沿用公共校验。修改已有接口名、参数或结果字段时，同步核对调用它的 Case 和结果引用。
 
 [现有动作示例 `master/list/addresses`](../python/mock_framework/execution/step/master.py) · [Step 注册和类型校验](../python/mock_framework/execution/step/step_registry.py) · [Case 执行架构](architecture.md#case-如何执行)
