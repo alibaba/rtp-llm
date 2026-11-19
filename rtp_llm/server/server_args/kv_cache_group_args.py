@@ -166,40 +166,12 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="KVCM 全量快照采集间隔（毫秒），默认 600000；非正数禁用数据上报，保留 remote 控制心跳；未启用 remote 时必须为正数。",
     )
     kv_cache_group.add_argument(
-        "--kv_cache_event_manager_endpoint",
-        env_name="KV_CACHE_EVENT_MANAGER_ENDPOINT",
-        bind_to=(kv_cache_config, "kv_cache_event_manager_endpoint"),
-        type=str,
-        default="",
-        help="KVCM Meta HTTP endpoint；为空时复用 RECO_* 发现 leader，非空时覆盖自动发现。",
-    )
-    kv_cache_group.add_argument(
-        "--kv_cache_event_instance_group",
-        env_name="KV_CACHE_EVENT_INSTANCE_GROUP",
-        bind_to=(kv_cache_config, "kv_cache_event_instance_group"),
-        type=str,
-        default="",
-        help="KVCM instance group；为空时复用 kvcm_instance_group。",
-    )
-    kv_cache_group.add_argument(
         "--kv_cache_event_instance_id",
         env_name="KV_CACHE_EVENT_INSTANCE_ID",
         bind_to=(kv_cache_config, "kv_cache_event_instance_id"),
         type=str,
         default="",
-        help="稳定的 KVCM instance id，不能使用进程 PID。",
-    )
-    kv_cache_group.add_argument(
-        "--kv_cache_event_host_ip_port",
-        env_name="KV_CACHE_EVENT_HOST_IP_PORT",
-        bind_to=(kv_cache_config, "kv_cache_event_host_ip_port"),
-        type=str,
-        default="",
-        help=(
-            "当前 DP replica 的 tp_rank=0 Cache 协调端点；dp_size>1 时每个 DP replica 必须唯一。"
-            "为空时按 server_ip:(start_port + rank_id * worker_info_port_num) 自动派生；"
-            "pp_size>1 时该功能禁用。"
-        ),
+        help="稳定的 KVCM 事件实例 ID，默认取 SPECTRUM_DEPLOYMENT_NAME 或 DEPLOYMENT_NAME。",
     )
     kv_cache_group.add_argument(
         "--multi_task_prompt",
@@ -490,28 +462,12 @@ def init_kv_cache_group_args(parser, kv_cache_config):
 
     # KVCM storage backend configuration arguments
     kv_cache_group.add_argument(
-        "--kvcm_enable_vipserver",
-        env_name="RECO_ENABLE_VIPSERVER",
-        bind_to=(kv_cache_config, "kvcm_enable_vipserver"),
-        type=str2bool,
-        default=False,
-        help="是否启用kvcm的VIPServer",
-    )
-    kv_cache_group.add_argument(
-        "--kvcm_vipserver_domain",
-        env_name="RECO_VIPSERVER_DOMAIN",
-        bind_to=(kv_cache_config, "kvcm_vipserver_domain"),
-        type=str,
-        default="",
-        help="kvcm VIPServer域名",
-    )
-    kv_cache_group.add_argument(
         "--kvcm_server_address",
         env_name="RECO_SERVER_ADDRESS",
         bind_to=(kv_cache_config, "kvcm_server_address"),
         type=str,
         default="",
-        help="kvcm server地址",
+        help="KVCM Meta 地址。支持 host:RPC端口、vipserver://域名或裸 .vipserver 域名。",
     )
     kv_cache_group.add_argument(
         "--kvcm_instance_group",

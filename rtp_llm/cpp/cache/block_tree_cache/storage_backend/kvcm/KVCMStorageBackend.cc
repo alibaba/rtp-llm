@@ -326,8 +326,7 @@ public:
         broadcast_manager_(std::move(broadcast_manager)),
         metrics_reporter_(std::move(metrics_reporter)),
         client_wrapper_(std::move(client_wrapper)),
-        gdr_enabled_(gdr_enabled),
-        sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {}
+        gdr_enabled_(gdr_enabled) {}
 
     std::optional<ControlConfig> controlConfig() const {
         return control_config_;
@@ -1350,8 +1349,7 @@ public:
             if (source_may_be_touched)
                 *source_may_be_touched = unknown;
         });
-        const auto                             result =
-            executeTagTransfers(request.op(), tags, blocks, uris, buffers, response, unknown, nullptr, task, &request);
+        const auto result = executeTagTransfers(request.op(), tags, uris, buffers, response, unknown, nullptr, task);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
@@ -1732,17 +1730,14 @@ private:
 
     TransferResult executeClientTransfer(RemoteOpType                       operation,
                                          const std::string&                 client_tag,
-                                         const std::vector<int32_t>&        blocks,
                                          const kv_cache_manager::UriStrVec& uris,
                                          kv_cache_manager::BlockBuffers&    buffers,
                                          kv_cache_manager::UriStrVec&       actual_uris,
                                          RemoteOperationResponsePB&         response,
                                          bool&                              source_may_be_touched,
                                          bool*                              transfer_attempted,
-                                         const TransferTask&                task,
-                                         const RemoteOperationRequestPB*    request = nullptr) {
-        const auto                           trace_info = makeTransferTraceInfo(blocks, request);
-        auto                                 completion = kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED;
+                                         const TransferTask&                task) {
+        auto completion = kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED;
         RtpLLMRemoteCacheSDKMetricsCollector collector;
         collector.remote_sdk_block_num               = static_cast<int64_t>(uris.size());
         const auto                             start = Clock::now();
@@ -1768,7 +1763,7 @@ private:
         }
         if (operation == REMOTE_OPERATION_READ) {
             const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(
-                client_tag, uris, buffers, trace_info, &completion, task.deadline());
+                client_tag, uris, buffers, nullptr, &completion, task.deadline());
             if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
                 return TransferResult::TIMEOUT;
             }
@@ -1777,7 +1772,7 @@ private:
             }
         } else {
             auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(
-                client_tag, uris, buffers, trace_info, &completion, task.deadline());
+                client_tag, uris, buffers, nullptr, &completion, task.deadline());
             if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
                 return TransferResult::TIMEOUT;
             }
@@ -1795,14 +1790,12 @@ private:
 
     TransferResult executeTagTransfers(RemoteOpType                       operation,
                                        const std::vector<std::string>&    tags,
-                                       const std::vector<int32_t>&        blocks,
                                        const kv_cache_manager::UriStrVec& uris,
                                        kv_cache_manager::BlockBuffers&    buffers,
                                        RemoteOperationResponsePB&         response,
                                        bool&                              source_may_be_touched,
                                        bool*                              transfer_attempted,
-                                       const TransferTask&                task,
-                                       const RemoteOperationRequestPB*    request = nullptr) {
+                                       const TransferTask&                task) {
         if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return TransferResult::FAILED;
@@ -1813,15 +1806,13 @@ private:
             // request unchanged; the SDK selects normal or gather/scatter mode.
             const auto result = executeClientTransfer(operation,
                                                       registration_tags_.front(),
-                                                      blocks,
                                                       uris,
                                                       buffers,
                                                       actual_uris,
                                                       response,
                                                       source_may_be_touched,
                                                       transfer_attempted,
-                                                      task,
-                                                      request);
+                                                      task);
             if (result != TransferResult::SUCCESS) {
                 return result;
             }
@@ -1842,15 +1833,12 @@ private:
                 const auto&                    indices = found->second;
                 kv_cache_manager::UriStrVec    tag_uris, tag_actual_uris;
                 kv_cache_manager::BlockBuffers tag_buffers;
-                std::vector<int32_t>           tag_blocks;
                 for (size_t index : indices) {
                     tag_uris.push_back(uris[index]);
                     tag_buffers.push_back(std::move(buffers[index]));
-                    tag_blocks.push_back(blocks[index]);
                 }
                 const auto result = executeClientTransfer(operation,
                                                           tag,
-                                                          tag_blocks,
                                                           tag_uris,
                                                           tag_buffers,
                                                           tag_actual_uris,
@@ -2180,35 +2168,6 @@ private:
         }
     }
 
-    std::shared_ptr<kv_cache_manager::TransferTraceInfo>
-    makeTransferTraceInfo(const std::vector<int32_t>&     block_ids,
-                          const RemoteOperationRequestPB* request = nullptr) const {
-        if (!sdk_check_enabled_) {
-            return nullptr;
-        }
-        auto trace_info        = std::make_shared<kv_cache_manager::TransferTraceInfo>();
-        trace_info->need_print = true;
-        if (request && !request->uri_block_counts().empty()) {
-            trace_info->block_ids.reserve(request->uris_size());
-            size_t begin = 0;
-            for (const auto count : request->uri_block_counts()) {
-                std::string ids;
-                for (size_t member = 0; member < count; ++member) {
-                    if (member)
-                        ids += ',';
-                    ids += std::to_string(block_ids[begin++]);
-                }
-                trace_info->block_ids.push_back(std::move(ids));
-            }
-        } else {
-            trace_info->block_ids.reserve(block_ids.size());
-            for (const auto block_id : block_ids) {
-                trace_info->block_ids.push_back(std::to_string(block_id));
-            }
-        }
-        return trace_info;
-    }
-
 private:
     const StorageBackend&                          backend_;
     CacheConfig                                    cache_config_;
@@ -2244,7 +2203,6 @@ private:
     std::atomic<uint64_t> read_trace_sequence_{1};
     std::atomic<uint64_t> write_trace_sequence_{1};
     std::atomic<uint64_t> finish_write_trace_sequence_{1};
-    const bool            sdk_check_enabled_;
     const CacheTopology*  topology_           = nullptr;
     bool                  has_swa_            = false;
     bool                  merge_full_specs_   = false;

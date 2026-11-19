@@ -1,7 +1,6 @@
 #include "VIPServerSubscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #if defined(KVCM_INTERNAL) || defined(RECO_INTERNAL)
-#include "autil/EnvUtil.h"
 #include "option.h"
 #include "iphost.h"
 #include "vipclient.h"
@@ -28,14 +27,12 @@ public:
         if (inited_) {
             return true;
         }
-        const auto domain = autil::EnvUtil::getEnv(
-            "KVCM_VIP_JMENV", autil::EnvUtil::getEnv("RECO_VIP_JMENV", std::string("jmenv.tbsite.net")));
         VipClientApi::CreateApi();
         Option option;
         option.set_failover_path(".");
         option.set_log_path(".");
         option.set_cache_path(".");
-        if (!VipClientApi::Init(domain.c_str(), option)) {
+        if (!VipClientApi::Init("jmenv.tbsite.net", option)) {
             RTP_LLM_LOG_ERROR("VIPServer initialization failed: %s", strerror(errno));
             VipClientApi::DestoryApi();
             return false;

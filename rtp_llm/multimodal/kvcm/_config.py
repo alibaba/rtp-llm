@@ -22,6 +22,8 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any
 
+from rtp_llm.utils.kvcm_address import normalize_kvcm_address
+
 KVE_INSTANCE_PREFIX = "kve_"
 
 _MAX_CLIENT_CONFIG_BYTES = 1024 * 1024
@@ -127,8 +129,6 @@ class _RecoSettings:
 
 
 _ENV_DEFAULTS = {
-    "RECO_ENABLE_VIPSERVER": "0",
-    "RECO_VIPSERVER_DOMAIN": "",
     "RECO_SERVER_ADDRESS": "",
     "RECO_INSTANCE_GROUP": "default",
     "RECO_INSTANCE_ID_SALT": "",
@@ -436,15 +436,6 @@ def _validate_sdk_config(primary: dict) -> int:
     return put_timeout_ms
 
 
-def _parse_env_bool(value: str, name: str) -> bool:
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise RtpKvMetaObjectConfigError(f"{name} must be a boolean")
-
-
 def _parse_env_int(value: str, name: str) -> int:
     try:
         return int(value)
@@ -483,12 +474,13 @@ def _reco_settings_from_env(
         if not isinstance(value, str):
             raise RtpKvMetaObjectConfigError(f"{name} must be a string")
 
+    server_address, vipserver_domain = normalize_kvcm_address(
+        snapshot["RECO_SERVER_ADDRESS"]
+    )
     return _RecoSettings(
-        enable_vipserver=_parse_env_bool(
-            snapshot["RECO_ENABLE_VIPSERVER"], "RECO_ENABLE_VIPSERVER"
-        ),
-        vipserver_domain=snapshot["RECO_VIPSERVER_DOMAIN"],
-        server_address=snapshot["RECO_SERVER_ADDRESS"],
+        enable_vipserver=bool(vipserver_domain),
+        vipserver_domain=vipserver_domain,
+        server_address=server_address,
         instance_group=snapshot["RECO_INSTANCE_GROUP"],
         instance_id_salt=snapshot["RECO_INSTANCE_ID_SALT"],
         meta_channel_retry_time=_parse_env_int(
@@ -605,10 +597,10 @@ def _split_reco_primary_config(settings: _RecoSettings) -> dict:
     instance_id = instance_id_salt or instance_group
 
     if type(settings.enable_vipserver) is not bool:
-        raise RtpKvMetaObjectConfigError("RECO_ENABLE_VIPSERVER must be a boolean")
+        raise RtpKvMetaObjectConfigError("KVCM enable_vipserver must be a boolean")
     vipserver_domain = _bounded_text(
         settings.vipserver_domain,
-        "RECO_VIPSERVER_DOMAIN",
+        "KVCM VIPServer domain",
         _MAX_ADDRESS_BYTES,
         allow_empty=True,
     )

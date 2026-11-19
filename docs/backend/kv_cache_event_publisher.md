@@ -1,7 +1,7 @@
 # KV cache event publisher
 
-RTP-LLM can publish reusable HBM prefix-cache keys directly to KVCM. It is disabled by default: `none` creates no
-queue, worker, or connection; `kvcm` enables publishing.
+RTP-LLM can publish reusable HBM prefix-cache keys directly to KVCM. `none` disables HBM events by default, and `kvcm`
+enables them. A remote backend can still register and send control heartbeats with `none`.
 
 ## Semantics
 
@@ -13,11 +13,9 @@ Cache mutations only attempt a bounded non-blocking enqueue; network I/O runs on
 request failure, heartbeat failure, and periodic reconciliation trigger an authoritative snapshot. Publishing is
 fail-open and never affects allocation, eviction, readiness, or inference responses.
 
-Only `tp_rank=0` publishes when `pp_size=1`. Pipeline parallelism and CP-sharded KV cache are unsupported because the
-runtime cannot assign an unambiguous external owner and block granularity. Each DP replica needs a distinct
-`KV_CACHE_EVENT_HOST_IP_PORT`; sharing one lets an authoritative snapshot from one replica replace another replica's
-host state. When the value is empty, RTP-LLM derives a per-rank endpoint as
-`server_ip:(start_port + rank_id * worker_info_port_num)`.
+Only `tp_rank=0` publishes when `pp_size=1`. RTP-LLM derives the host address for each DP replica as
+`server_ip:(start_port + rank_id * worker_info_port_num)`. These addresses must be distinct because an authoritative
+snapshot replaces the state for its host address.
 
 ## KVCM lifecycle
 
@@ -30,18 +28,42 @@ The initial version publishes device `SharedBlockCache` state as medium `hbm`; D
 
 ## Configuration
 
-Arguments have equivalent upper-case environment variables.
+`RECO_SERVER_ADDRESS` accepts an IP or hostname with the KVCM Meta RPC port, such as `192.0.2.10:12345`,
+an explicit VIPServer address such as `vipserver://kvcm.example.vipserver`, or a bare `.vipserver` domain such as
+`kvcm.example.vipserver`. Both domain forms enable VIPServer discovery. The publisher calls `GetClusterInfo`
+over RPC to find the leader's HTTP address.
 
-| Argument | Default | Meaning |
-|---|---:|---|
-| `--kv_cache_event_publisher_type` | `none` | `none` or `kvcm` |
-| `--kv_cache_event_manager_endpoint` | empty | KVCM Meta HTTP endpoint |
-| `--kv_cache_event_instance_group` | empty | group; falls back to `reco_instance_group` |
-| `--kv_cache_event_instance_id` | empty | stable deployment-level instance ID |
-| `--kv_cache_event_host_ip_port` | empty (auto-derived) | stable endpoint; must be unique for every DP replica when `dp_size>1` |
+When remote cache is enabled, the publisher uses the backend client's discovery settings and instance group.
+`RECO_CLIENT_CONFIG` can supply the full remote client configuration. HBM-only deployments use
+`RECO_SERVER_ADDRESS` and `RECO_INSTANCE_GROUP`.
 
-Invalid configuration disables publishing without disabling inference. The KVCM manager endpoint must already be
-resolved; service discovery and leader switching are outside this version.
+| Environment variable | Default | When to set it |
+|---|---|---|
+| `RECO_SERVER_ADDRESS` | Empty | Set the KVCM Meta address for remote cache or HBM publishing. A full remote client configuration can supply its own address. |
+| `RECO_INSTANCE_GROUP` | `default` | Set the group when the deployment uses a different KVCM group. |
+| `ENABLE_REMOTE_CACHE` | `0` | Set to `1` for remote cache reads and writes. |
+| `KV_CACHE_EVENT_PUBLISHER_TYPE` (`--kv_cache_event_publisher_type`) | `none` | Set to `kvcm` to publish HBM events. The remote backend can send control heartbeats in either mode. |
+| `KV_CACHE_EVENT_INSTANCE_ID` (`--kv_cache_event_instance_id`) | `SPECTRUM_DEPLOYMENT_NAME`, then `DEPLOYMENT_NAME` | Set an explicit ID if the platform does not provide a deployment name or to keep an existing event identity. |
+| `KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS` (`--kv_cache_event_snapshot_interval_ms`) | `600000` | Leave at the default for a ten-minute snapshot interval. When remote cache is enabled, a nonpositive value disables HBM data events and retains control heartbeats. With remote cache disabled, the interval must be positive. |
+
+To publish HBM events without remote cache, use `ENABLE_REMOTE_CACHE=0` and `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`
+with the KVCM address and group. Local device prefix reuse must be enabled for HBM data events.
+
+HBM publishing requires an instance ID that is unique within the Meta and stable across replicas with the same
+registration settings. Invalid configuration disables publishing without disabling inference.
+
+### Upgrading existing deployments
+
+Remove these variables from the RTP startup configuration.
+
+| Removed variable | Replacement |
+|---|---|
+| `RECO_ENABLE_VIPSERVER`, `RECO_VIPSERVER_DOMAIN` | Move the VIPServer domain to `RECO_SERVER_ADDRESS`. The address format selects discovery. |
+| `KV_CACHE_EVENT_MANAGER_ENDPOINT` | Set the KVCM Meta RPC address through `RECO_SERVER_ADDRESS`. The publisher discovers the leader's HTTP address. |
+| `KV_CACHE_EVENT_INSTANCE_GROUP` | Use `RECO_INSTANCE_GROUP` or the group in the remote client configuration. |
+| `KV_CACHE_EVENT_HOST_IP_PORT` | RTP-LLM derives the host address from the TP0 server address of each DP replica. |
+| `RECO_VIP_JMENV`, `KVCM_VIP_JMENV` | RTP-LLM initializes the VIPServer client with `jmenv.tbsite.net`. |
+| `RECO_SDK_CHECK`, `KVCM_SDK_CHECK` | RTP-LLM no longer attaches block IDs to SDK diagnostic traces. |
 
 `KVCacheConfig` pickle state supports legacy 43-, 54-, and 57-element layouts plus the current 62-element layout.
 Processes exchanging this state must be upgraded or rolled back together.

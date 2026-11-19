@@ -699,18 +699,8 @@ TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
 }
 
-class KVCMSdkCheckTest: public ::testing::TestWithParam<std::tuple<const char*, const char*, bool>> {};
-
-TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
-    const auto [canonical, legacy, enabled] = GetParam();
-    autil::EnvGuard sdk_check("KVCM_SDK_CHECK", canonical ? canonical : "0");
-    autil::EnvGuard legacy_sdk_check("RECO_SDK_CHECK", legacy ? legacy : "0");
-    if (!canonical) {
-        autil::EnvUtil::unsetEnv("KVCM_SDK_CHECK");
-    }
-    if (!legacy) {
-        autil::EnvUtil::unsetEnv("RECO_SDK_CHECK");
-    }
+TEST(KVCMMockOnlyFullTest, RemoteTransfersOmitRtpSdkTrace) {
+    autil::EnvGuard sdk_check("KVCM_SDK_CHECK", "1");
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_sdk_check");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
 
@@ -719,21 +709,9 @@ TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
-    const std::vector<std::string> expected_block_ids{std::to_string(environment.block_id)};
-    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
-        .WillOnce(Invoke([&](const std::string&,
-                             const kv_cache_manager::UriStrVec&,
-                             kv_cache_manager::BlockBuffers&,
-                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
-            if (trace_info == nullptr) {
-                EXPECT_FALSE(enabled);
-                return !enabled;
-            }
-            EXPECT_TRUE(enabled);
-            EXPECT_TRUE(trace_info->need_print);
-            EXPECT_EQ(trace_info->block_ids, expected_block_ids);
-            return true;
-        }));
+    EXPECT_CALL(*client_wrapper,
+                loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, ::testing::IsNull()))
+        .WillOnce(Return(true));
     RemoteOperationRequestPB read_request;
     read_request.set_op(REMOTE_OPERATION_READ);
     identifyReadRequest(read_request);
@@ -743,20 +721,9 @@ TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
     RemoteOperationResponsePB read_response;
     EXPECT_TRUE(backend->execute(read_request, read_response));
 
-    EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
-        .WillOnce(Invoke([&](const std::string&,
-                             const kv_cache_manager::UriStrVec&,
-                             const kv_cache_manager::BlockBuffers&,
-                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
-            if (trace_info == nullptr) {
-                EXPECT_FALSE(enabled);
-                return std::make_pair(!enabled, kv_cache_manager::UriStrVec{});
-            }
-            EXPECT_TRUE(enabled);
-            EXPECT_TRUE(trace_info->need_print);
-            EXPECT_EQ(trace_info->block_ids, expected_block_ids);
-            return std::make_pair(true, kv_cache_manager::UriStrVec{});
-        }));
+    EXPECT_CALL(*client_wrapper,
+                saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, ::testing::IsNull()))
+        .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{})));
     RemoteOperationRequestPB write_request;
     write_request.set_op(REMOTE_OPERATION_WRITE);
     identifyReadRequest(write_request);
@@ -766,13 +733,6 @@ TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
     RemoteOperationResponsePB write_response;
     EXPECT_TRUE(backend->execute(write_request, write_response));
 }
-
-INSTANTIATE_TEST_SUITE_P(Compatibility,
-                         KVCMSdkCheckTest,
-                         ::testing::Values(std::make_tuple("1", "0", true),
-                                           std::make_tuple(nullptr, "1", true),
-                                           std::make_tuple("0", "1", false),
-                                           std::make_tuple(nullptr, nullptr, false)));
 
 TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_write");

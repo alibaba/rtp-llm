@@ -263,6 +263,84 @@ class DynamicDecodeArgumentsTest(TestCase):
 
 
 class KVCacheControlArgumentsTest(TestCase):
+    def test_kvcm_address_selects_connection_mode(self):
+        from rtp_llm.server.server_args import server_args
+
+        cases = (
+            (
+                {"RECO_SERVER_ADDRESS": "10.0.0.8:19001"},
+                "10.0.0.8:19001",
+                "",
+            ),
+            ({"RECO_SERVER_ADDRESS": "vipserver://kvcm.example"}, "", "kvcm.example"),
+            (
+                {"RECO_SERVER_ADDRESS": "kvcm.example.vipserver"},
+                "",
+                "kvcm.example.vipserver",
+            ),
+            (
+                {"RECO_SERVER_ADDRESS": "kvcm.example.vipserver:19001"},
+                "kvcm.example.vipserver:19001",
+                "",
+            ),
+            (
+                {
+                    "RECO_VIPSERVER_DOMAIN": "legacy.example",
+                    "RECO_SERVER_ADDRESS": "vipserver://other.example",
+                    "RECO_ENABLE_VIPSERVER": "0",
+                },
+                "",
+                "other.example",
+            ),
+            ({"RECO_ENABLE_VIPSERVER": "1"}, "", ""),
+        )
+        for environ, expected_address, expected_domain in cases:
+            with (
+                self.subTest(environ=environ),
+                patch.dict(os.environ, environ, clear=True),
+            ):
+                config = server_args.setup_args([]).kv_cache_config
+                self.assertEqual(config.kvcm_server_address, expected_address)
+                self.assertEqual(config.kvcm_vipserver_domain, expected_domain)
+                self.assertIs(config.kvcm_enable_vipserver, bool(expected_domain))
+
+    def test_event_instance_id_falls_back_to_deployment_name(self):
+        from rtp_llm.server.server_args import server_args
+
+        cases = (
+            ({"DEPLOYMENT_NAME": "whale-deploy"}, "whale-deploy"),
+            (
+                {
+                    "SPECTRUM_DEPLOYMENT_NAME": " spectrum-deploy ",
+                    "DEPLOYMENT_NAME": "whale-deploy",
+                },
+                "spectrum-deploy",
+            ),
+            (
+                {"DEPLOYMENT_NAME": "whale-deploy", "KV_CACHE_EVENT_INSTANCE_ID": ""},
+                "whale-deploy",
+            ),
+            (
+                {
+                    "SPECTRUM_DEPLOYMENT_NAME": "spectrum-deploy",
+                    "KV_CACHE_EVENT_INSTANCE_ID": "configured-id",
+                },
+                "configured-id",
+            ),
+            ({"BIZ_NAME": "example-biz"}, ""),
+        )
+        for environ, expected in cases:
+            with (
+                self.subTest(environ=environ),
+                patch.dict(
+                    os.environ,
+                    {"KV_CACHE_EVENT_PUBLISHER_TYPE": "kvcm", **environ},
+                    clear=True,
+                ),
+            ):
+                config = server_args.setup_args([]).kv_cache_config
+                self.assertEqual(config.kv_cache_event_instance_id, expected)
+
     def test_remote_control_accepts_unused_nonpositive_snapshot_interval(self):
         from rtp_llm.server.server_args import server_args
 
@@ -326,8 +404,6 @@ class KVCacheControlArgumentsTest(TestCase):
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
-        "enable_vipserver": True,
-        "vipserver_domain": "vip.example",
         "server_address": "127.0.0.1:1234",
         "instance_group": "legacy-group",
         "meta_channel_retry_time": 7,
@@ -648,6 +724,46 @@ class CacheConfigArgumentsTest(TestCase):
             for name in samples:
                 with self.subTest(name=name, args=args):
                     self.assertEqual(getattr(config, name), getattr(defaults, name))
+
+    def test_retired_kvcm_settings_have_no_startup_override(self):
+        retired_options = (
+            (
+                "kv_cache_event_manager_endpoint",
+                "KV_CACHE_EVENT_MANAGER_ENDPOINT",
+                "http://127.0.0.1:18000",
+            ),
+            (
+                "kv_cache_event_instance_group",
+                "KV_CACHE_EVENT_INSTANCE_GROUP",
+                "old-group",
+            ),
+            (
+                "kv_cache_event_host_ip_port",
+                "KV_CACHE_EVENT_HOST_IP_PORT",
+                "127.0.0.1:18000",
+            ),
+            ("kvcm_enable_vipserver", "RECO_ENABLE_VIPSERVER", "1"),
+            ("kvcm_vipserver_domain", "RECO_VIPSERVER_DOMAIN", "legacy.example"),
+        )
+        defaults = self.parse_cache_config([], {})
+        environ = {env_name: value for _, env_name, value in retired_options}
+        for args in (None, []):
+            with self.subTest(args=args):
+                config = self.parse_cache_config(args, environ)
+                for field_name, _, _ in retired_options:
+                    self.assertEqual(
+                        getattr(config, field_name), getattr(defaults, field_name)
+                    )
+
+        for field_name, _, value in retired_options:
+            flag = f"--{field_name}"
+            with self.subTest(flag=flag), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ) as stderr:
+                with self.assertRaises(SystemExit) as raised:
+                    self.parse_cache_config([flag, value], {})
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn(f"unrecognized arguments: {flag}", stderr.getvalue())
 
     def test_removed_sm_copy_cli_is_rejected(self):
         # This copy optimization was removed with the old connector. It is
