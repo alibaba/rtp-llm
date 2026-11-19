@@ -9,12 +9,11 @@ flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
 # Self-built wheels against torch 2.11+cu130; source SHAs encoded in filenames.
-https://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+a5165ad.cu132-cp310-cp310-linux_aarch64.whl#sha256=3031fe7aa79ffacfdb0fd4ffba88b1c7d24bde1738d8f04cb67a3e4c533f6dc3
+deep-gemm==2.8.2+a5165ad.cu132
 # Current and legacy model KV formats share one versioned FlashMLA wheel.
-https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_mla/flash_mla-1.0.0%2Bbdd41db.cu132-cp310-cp310-linux_aarch64.whl#sha256=dc9876a2df6ed59f34d08a01488da5e43c7bc593be7c317505d5040b29b617c1
-https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_aarch64.whl#sha256=007154cc956e143d8a2ff0fac2c6a9fbbc7dffd5fbe2f7adaba89696d7fd0ab1
-https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl#sha256=20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de
-nvidia-cutlass-dsl==4.5.3
+flash-mla==1.0.0+bdd41db.cu132
+cuda-linear-attention==0.1.dev88+dcce4719.cu132
+flash-linear-attention==0.5.0+rtp.3a9ce1c.6
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615
 
@@ -39,4 +38,5 @@ av==16.1.0
 
 fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl
 
-nvidia-cutlass-dsl-libs-base==4.5.3
+nvidia-cutlass-dsl==4.5.0
+nvidia-cutlass-dsl-libs-base==4.5.0

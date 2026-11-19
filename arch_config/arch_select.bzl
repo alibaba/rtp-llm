@@ -157,7 +157,7 @@ def whl_deps():
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             # DeepGEMM with K3 Mega MoE and shared-expert kernels.
-            "deep_gemm@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+a5165ad.cu132-cp310-cp310-linux_x86_64.whl#sha256=4cfa7d2a31acfe426ec48ba13fd93f8fa6944bbaf1efe95cea091c8dfec34c92",
+            "deep-gemm==2.8.2+a5165ad.cu132",
             "flash-mla==1.0.0+bdd41db.cu132",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
@@ -175,15 +175,15 @@ def whl_deps():
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
             # FlashAttention 3 remains deferred on CUDA13.
-            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl#sha256=aad30390809c5d4b4e017a779f046e383407c0add52f700b43917e7c5ecdc4d4",
-            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl#sha256=20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de",
+            "cuda-linear-attention==0.1.dev88+dcce4719.cu132",
+            "flash-linear-attention==0.5.0+rtp.3a9ce1c.6",
             "nvidia-cutlass-dsl==4.4.2",
             "nvidia-cutlass-dsl-libs-cu13==4.4.2",
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
-            "deep_gemm@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep_gemm/deep_gemm-2.8.2+a5165ad.cu132-cp310-cp310-linux_aarch64.whl#sha256=3031fe7aa79ffacfdb0fd4ffba88b1c7d24bde1738d8f04cb67a3e4c533f6dc3",
+            "deep-gemm==2.8.2+a5165ad.cu132",
             "flash-mla==1.0.0+bdd41db.cu132",
             "deep-ep==2.1.0+a56d615",
             "flashinfer-python==0.6.9+8c4f4dcf",
@@ -195,10 +195,10 @@ def whl_deps():
             "apache-tvm-ffi==0.1.12",
             # FlashAttention wheels remain deferred on CUDA13 ARM.
             "fast-hadamard-transform@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl",
-            "cuda-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_aarch64.whl#sha256=007154cc956e143d8a2ff0fac2c6a9fbbc7dffd5fbe2f7adaba89696d7fd0ab1",
-            "flash-linear-attention@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl#sha256=20db1cc279f59abf8f18d20cc9fa575eeb152cf781cc4bff78e5a1d8a77141de",
-            "nvidia-cutlass-dsl==4.5.3",
-            "nvidia-cutlass-dsl-libs-base==4.5.3",
+            "cuda-linear-attention==0.1.dev88+dcce4719.cu132",
+            "flash-linear-attention==0.5.0+rtp.3a9ce1c.6",
+            "nvidia-cutlass-dsl==4.5.0",
+            "nvidia-cutlass-dsl-libs-base==4.5.0",
         ],
         "@rtp_llm//:using_cuda12_9_x86": [
             # torch 2.8.0+cu129: the upstream wheel (http.bzl torch_2.8_py310_cuda
