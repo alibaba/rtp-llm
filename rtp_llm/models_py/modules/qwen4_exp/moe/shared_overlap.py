@@ -5,6 +5,7 @@ The routed TP reduction stays on the original stream. The unsharded shared
 branch retains its BF16 output and original fused sigmoid-scale-add boundary.
 """
 
+import logging
 import os
 from functools import lru_cache
 
@@ -12,6 +13,8 @@ import torch
 
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.utils.model_weight import W
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=None)
@@ -91,8 +94,13 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._fuse_ep_shared_gate = (
             os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
         )
-        if os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1":
+        if (os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1"
+                or os.environ.get("QWEN_MOE_EP_TBO", "0") == "1"):
             self._prepare_ep_shared_overlap()
+        if os.environ.get("QWEN_MOE_DOWN_COMBINE_OVERLAP", "0") == "1":
+            logger.warning("QWEN_MOE_DOWN_COMBINE_OVERLAP: fallback; the active "
+                           "executor/router does not expose a verified chunk-ready "
+                           "and partial-combine contract")
         if not getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
             return
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
@@ -144,6 +152,21 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
     def _forward_routed(self, hidden_states):
         mega = getattr(self, "_sm90_mega_moe", None)
+        # The microbatch path is selected independently of the shared stream.
+        # Do not silently replace a configured MegaMoE executor.
+        tbo = self._ep_two_batch
+        tbo_eligible = (mega is None and tbo is not None and hidden_states.is_cuda
+                        and hidden_states.ndim == 2 and hidden_states.is_contiguous()
+                        and hidden_states.dtype == torch.bfloat16
+                        and hidden_states.shape[1] == 2560 and tbo.supports(hidden_states))
+        if tbo is not None and not getattr(self, "_tbo_reported", False):
+            logger.info("Qwen MoE TBO first forward: selected=%s tensor_shape=%s "
+                        "(may be CUDA Graph padded); "
+                        "fallback if disabled: shape, dtype, device, or MegaMoE",
+                        tbo_eligible, tuple(hidden_states.shape))
+            self._tbo_reported = True
+        if tbo_eligible:
+            return tbo.forward(self, hidden_states)
         if mega is None or not mega.supports(hidden_states):
             return super()._forward_routed(hidden_states)
         tokens = hidden_states.shape[0]
@@ -201,12 +224,17 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and torch.version.hip is None
             and torch.cuda.get_device_capability(shared.up_proj.weight.device) == (9, 0)
         ):
+            logger.warning("Qwen MoE overlap fallback: unsupported router=%s "
+                           "executor=%s, topology, dtype, or reduction layout",
+                           type(self.fused_moe.router).__name__,
+                           type(self.fused_moe.fused_experts).__name__)
             return
-        self._ep_shared_stream = _shared_stream_for_device(
-            shared.up_proj.weight.device.index
-        )
-        self._ep_shared_input_ready = torch.cuda.Event()
-        self._ep_shared_output_ready = torch.cuda.Event()
+        if os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1":
+            self._ep_shared_stream = _shared_stream_for_device(
+                shared.up_proj.weight.device.index
+            )
+            self._ep_shared_input_ready = torch.cuda.Event()
+            self._ep_shared_output_ready = torch.cuda.Event()
         if (
             os.environ.get("QWEN_MOE_EP_TBO", "0") == "1"
             and self.correction_bias is None
@@ -215,6 +243,12 @@ class Qwen4MoeLayer(GenericMoeLayer):
             from .ep_tbo import QwenEpTwoBatch
 
             self._ep_two_batch = QwenEpTwoBatch(self)
+        logger.info("Qwen MoE overlap eligible: router=%s executor=%s shared=%s tbo=%s; "
+                    "runtime shape restrictions still apply",
+                    type(self.fused_moe.router).__name__,
+                    type(self.fused_moe.fused_experts).__name__,
+                    self._ep_shared_stream is not None,
+                    self._ep_two_batch is not None)
 
     def _forward_ep_shared_overlap(self, hidden_states):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -232,12 +266,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
                     shared = self._gate_shared_expert_output(hidden_states, shared)
                 finally:
                     self._ep_shared_output_ready.record(self._ep_shared_stream)
-            if self._ep_two_batch is not None and self._ep_two_batch.supports(
-                hidden_states
-            ):
-                experts = self._ep_two_batch.forward(self, hidden_states)
-            else:
-                experts = self._forward_routed(hidden_states)
+            experts = self._forward_routed(hidden_states)
         finally:
             # Allocator reuse on the original stream is ordered after the join,
             # including when either branch raises during eager execution.
