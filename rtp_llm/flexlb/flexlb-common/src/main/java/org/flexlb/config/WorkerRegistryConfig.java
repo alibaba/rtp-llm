@@ -12,6 +12,21 @@ public final class WorkerRegistryConfig {
 
     private HealthConfig health = new HealthConfig();
     private CacheStatusConfig cacheStatus = new CacheStatusConfig();
+    private ExecutorsConfig executors = new ExecutorsConfig();
+
+    /**
+     * Thread counts are captured when the owning executors start.
+     */
+    @Getter
+    @Setter
+    public static final class ExecutorsConfig {
+        private int cacheStatusThreads = 32;
+
+        /**
+         * CPU-bound diff work is also capped by available processors.
+         */
+        private int cacheDiffParallelism = 8;
+    }
 
     /**
      * Defines status polling, RPC timeout, stale-status and cleanup intervals in milliseconds.
@@ -21,7 +36,6 @@ public final class WorkerRegistryConfig {
     public static final class HealthConfig {
         private long statusPollIntervalMs = 20;
         private long statusRpcTimeoutMs = 5000;
-        private long statusStaleAfterMs = 10_000;
         private long cleanupIntervalMs = 3000;
     }
 

@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import lombok.Getter;
+import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -10,16 +11,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Primary abstraction for a remote inference worker.
- * Holds one immutable-generation {@link WorkerStatus} reference — all state
- * (identity, engine metrics, topology) is carried by the status object.
- *
- * <p>Callers read dynamic engine state via {@link #getStatus()} and
- * operate on it directly.
- *
- * <p>Callers pin the exact generation before handing off work. Retirement closes new handoffs,
- * waits for accepted handoffs, and invokes role-specific cleanup. Pins and callbacks must not
- * silently follow a replacement endpoint at the same address.
+ * Represents one remote worker generation and exposes its status and role-specific resources.
+ * Callers pin that exact generation before handing off work; retirement closes new handoffs,
+ * waits for accepted handoffs and invokes role-specific cleanup without following replacements.
  */
 public class WorkerEndpoint {
     private static final Runnable NO_STATUS_PROJECTION = () -> {};
@@ -122,13 +116,21 @@ public class WorkerEndpoint {
      * the point of the pin: a capture which linearized before registry detach
      * may finish its already accepted handoff. The owner must close the pin on
      * every selected, rejected, and exceptional path.</p>
+     *
+     * <p>New scheduling admissions require an available worker generation.</p>
      */
+    public final GenerationPin tryPinSchedulingGeneration() {
+        return hasAvailableSchedulingStatus() ? tryPinGeneration() : null;
+    }
+
     public final GenerationPin tryPinGeneration() {
         EndpointGenerationLifecycle.HandoffPermit permit = generationLifecycle.tryAcquireHandoff();
         return permit == null ? null : new GenerationPin(this, status.getGenerationId(), permit);
     }
 
-    /** Validate an exact, still-open pin before consuming its admission right. */
+    /**
+     * Validate an exact, still-open pin before consuming its admission right.
+     */
     public final void requirePinnedGeneration(GenerationPin pin) {
         if (pin == null
                 || pin.endpoint != this
@@ -171,6 +173,10 @@ public class WorkerEndpoint {
                 engine.runningTaskList() == null ? 0L : engine.runningTaskList().size());
     }
 
+    protected final boolean hasAvailableSchedulingStatus() {
+        return status.isAvailableForScheduling();
+    }
+
     protected final void requireStatusGeneration(WorkerStatus ws) {
         if (status != ws) {
             throw new IllegalArgumentException(
@@ -210,9 +216,12 @@ public class WorkerEndpoint {
      */
     final void beginRetirement() {
         generationLifecycle.beginRetirement();
+        status.trace().record(Stage.ENDPOINT_GATE_CLOSED);
     }
 
-    /** Initiate unpublished-candidate cleanup without blocking its status lock. */
+    /**
+     * Initiate unpublished-candidate cleanup without blocking its status lock.
+     */
     final void closeAsynchronously() {
         retireInternal(true);
     }

@@ -89,7 +89,6 @@ def _wait_tcp_port_ready(
             time.sleep(1.0)
 
 
-
 def _dump_manager_logs(managers, max_lines: int = 200) -> None:
     """Best-effort process-log dump for managers whose run failed mid-flight."""
     for manager in managers:
@@ -197,7 +196,6 @@ class SeparatedCaseRunner(CaseRunner):
                 "health": {
                     "statusPollIntervalMs": 50,
                     "statusRpcTimeoutMs": 500,
-                    "statusStaleAfterMs": 10000,
                 },
                 "cacheStatus": {
                     "targetDiffSize": 30,
@@ -793,7 +791,9 @@ class DpSeperationCaseRunner(CaseRunner):
         if enable_remote_cache and self.remote_kvcm_server is not None:
             started.append(self.remote_kvcm_server)
         try:
-            server_managers, task_states_list = self.start_servers_parallel(server_configs)
+            server_managers, task_states_list = self.start_servers_parallel(
+                server_configs
+            )
             started.extend(m for m in server_managers if m is not None)
 
             decode_server_manager, decode_task_states = (
@@ -955,7 +955,9 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 role_name="frontend",
             )
             if task_states.ret != True:
-                task_states.err_msg = "frontend server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "frontend server start failed, " + task_states.err_msg
+                )
                 return task_states
             assert (
                 frontend_server_manager is not None
@@ -974,9 +976,13 @@ class FrontAppSeperationCaseRunner(CaseRunner):
                 role_name="pd_fusion",  # Fixed: use "pd_fusion" to match BUILD file key
             )
             if task_states.ret != True:
-                task_states.err_msg = "PDFUSION server start failed, " + task_states.err_msg
+                task_states.err_msg = (
+                    "PDFUSION server start failed, " + task_states.err_msg
+                )
                 return task_states
-            assert server_manager is not None, "PDFUSION server manager should not be None"
+            assert (
+                server_manager is not None
+            ), "PDFUSION server manager should not be None"
 
             if str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")):
                 return self._keep_servers_alive(

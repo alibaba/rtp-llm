@@ -78,14 +78,16 @@ public class RequestRegistry {
             RequestSchedulerReporter requestReporter) {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.requestReporter = Objects.requireNonNull(requestReporter);
-        this.expirationTimer =
-                new ExpirationTimer(this, Objects.requireNonNull(configService, "configService"));
+        Objects.requireNonNull(configService, "configService");
+        this.expirationTimer = new ExpirationTimer(this);
         this.completionPublisher =
                 new RequestCompletionPublisher(completionPublisherWorkers(configService), reporter);
         this.terminalCleanup = new RequestTerminalCleanup(expirationTimer, requestReporter);
     }
 
-    /** Transfer queued Decode capacity, then return each victim to its original global queue identity. */
+    /**
+     * Transfer queued Decode capacity, then return each victim to its original global queue identity.
+     */
     public boolean replaceQueuedDecodeReservations(
             DecodeEndpoint endpoint,
             List<DecodeEndpoint.ReservationHandle> victims,

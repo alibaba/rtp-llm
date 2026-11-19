@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -28,6 +30,102 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class FaultInjectionE2ETest {
     private static final int BASE_PORT = 62900;
+
+    @Test
+    @Timeout(30)
+    void stoppedWorkerDoesNotInterruptHealthyStatusPumps() throws Exception {
+        try (var h =
+                new AutoTpmE2EHarness(
+                        BASE_PORT + 120, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
+            var stopped = h.prefillEndpoint(0).getStatus();
+            var healthy = h.prefillEndpoint(1).getStatus();
+            long healthyVersion = healthy.appliedStatusCursor().statusVersion();
+            long stoppedVersion = stopped.appliedStatusCursor().statusVersion();
+            h.prefillEngines.get(0).setStopped(true);
+
+            for (int round = 0; round < 5; round++) {
+                h.pumpOnce();
+            }
+
+            assertEquals(3L, stopped.pollHealth().consecutiveWorkerFailures());
+            assertFalse(stopped.isAvailableForScheduling());
+            assertEquals(stoppedVersion, stopped.appliedStatusCursor().statusVersion());
+            assertTrue(healthy.appliedStatusCursor().statusVersion() > healthyVersion);
+            h.assertAutoPumpHealthy();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    void stoppingPumpDoesNotReportItsInterruptedRpcAsAWorkerFailure() throws Exception {
+        try (var h =
+                new AutoTpmE2EHarness(
+                        BASE_PORT + 140, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
+            var first = h.services.values().iterator().next();
+            var blocked = org.mockito.Mockito.spy(first);
+            var entered = new CountDownLatch(1);
+            org.mockito.Mockito.doAnswer(
+                            invocation -> {
+                                entered.countDown();
+                                try {
+                                    new CountDownLatch(1).await();
+                                } catch (InterruptedException interruption) {
+                                    Thread.currentThread().interrupt();
+                                    throw new AssertionError(
+                                            "interrupted test status RPC", interruption);
+                                }
+                                return null;
+                            })
+                    .when(blocked)
+                    .getWorkerStatus(
+                            org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            h.services.put(first.getGrpcPort(), blocked);
+            h.startAutoPump(1L);
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+
+            h.stopAutoPump();
+
+            h.assertAutoPumpHealthy();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    void unexpectedPumpFailureStillUpdatesOtherWorkersAndFailsTestCleanup() {
+        var injected = new IllegalStateException("injected status pump failure");
+        AssertionError failure =
+                assertThrows(
+                        AssertionError.class,
+                        () -> {
+                            try (var h =
+                                    new AutoTpmE2EHarness(
+                                            BASE_PORT + 130,
+                                            2,
+                                            1,
+                                            "5",
+                                            1.0,
+                                            true,
+                                            DecisionPolicyConfig.single())) {
+                                var first = h.services.values().iterator().next();
+                                var healthy =
+                                        h.prefillEndpoint(first == h.prefillEngines.get(0) ? 1 : 0)
+                                                .getStatus();
+                                long before = healthy.appliedStatusCursor().statusVersion();
+                                var broken = org.mockito.Mockito.spy(first);
+                                org.mockito.Mockito.doThrow(injected)
+                                        .when(broken)
+                                        .getWorkerStatus(
+                                                org.mockito.ArgumentMatchers.any(),
+                                                org.mockito.ArgumentMatchers.any());
+                                h.services.put(first.getGrpcPort(), broken);
+
+                                h.pumpOnce();
+
+                                assertTrue(healthy.appliedStatusCursor().statusVersion() > before);
+                            }
+                        });
+        assertSame(injected, failure.getCause());
+    }
 
     // ==================== C1 failOnEnqueue + enqueueErrorMessage + enqueueErrorCode
     // ====================

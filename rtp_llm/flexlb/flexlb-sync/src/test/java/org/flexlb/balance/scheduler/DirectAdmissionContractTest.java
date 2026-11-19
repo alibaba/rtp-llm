@@ -21,13 +21,14 @@ import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusResponse;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -303,8 +304,11 @@ class DirectAdmissionContractTest {
                                         .publishPreparedEndpoint(
                                                 worker.getIpPort(),
                                                 worker,
-                                                worker.prepareNewStatus(
-                                                        worker.freezeStatusResponse(response)))
+                                                WorkerStatusTestFixtures.prepare(
+                                                        worker,
+                                                        org.flexlb.testfixture
+                                                                .WorkerStatusTestFixtures
+                                                                .observation(worker, response)))
                                         .endpoint();
             } finally {
                 worker.lock.unlock();
@@ -410,7 +414,9 @@ class DirectAdmissionContractTest {
                 projection =
                         endpoint.applyPreparedStatus(
                                 worker,
-                                worker.prepareNewStatus(worker.freezeStatusResponse(response)));
+                                WorkerStatusTestFixtures.prepare(
+                                        worker,
+                                        WorkerStatusTestFixtures.observation(worker, response)));
             } finally {
                 worker.lock.unlock();
             }

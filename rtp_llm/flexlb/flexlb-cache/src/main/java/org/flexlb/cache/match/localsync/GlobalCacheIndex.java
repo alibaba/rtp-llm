@@ -1,6 +1,9 @@
 package org.flexlb.cache.match.localsync;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.cache.primitive.LongObjectMap;
+import org.flexlb.cache.primitive.SmallOwnerSet;
+import org.flexlb.dao.master.EndpointTrace;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -8,9 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.LongAdder;
-import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Global cache index (large hash table)
@@ -24,20 +25,16 @@ public class GlobalCacheIndex {
     /**
      * Core storage structure: block_hash_id -> Set<engine_ip:engine_port>
      */
-    private final ConcurrentHashMap<Long, Set<String>> blockToEnginesMap =
-            new ConcurrentHashMap<>();
-
-    /**
-     * Serializes index mutations and mapping-count updates
-     */
-    private final ReentrantLock lock = new ReentrantLock();
+    private final LongObjectMap<Set<String>> blockToEnginesMap = new LongObjectMap<>();
 
     /**
      * Statistics
      */
     private final LongAdder totalMappings = new LongAdder();
 
-    /** Per-caller compaction storage; cache queries never retain this array. */
+    /**
+     * Per-caller compaction storage; cache queries never retain this array.
+     */
     private final ThreadLocal<String[]> prefixCandidates =
             ThreadLocal.withInitial(() -> new String[0]);
 
@@ -49,7 +46,8 @@ public class GlobalCacheIndex {
      *                      index identifies one independently routable engine behind the physical
      *                      frontend
      */
-    public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
+    public void addCacheBlock(
+            Long blockCacheKey, String engineIpPort, EndpointTrace.Poll pollTrace) {
         if (blockCacheKey == null || engineIpPort == null) {
             log.warn(
                     "Invalid parameters: blockCacheKey={}, engineIpPort={}",
@@ -58,19 +56,14 @@ public class GlobalCacheIndex {
             return;
         }
 
-        lock.lock();
-        try {
-            Set<String> engines =
-                    blockToEnginesMap.computeIfAbsent(
-                            blockCacheKey, k -> ConcurrentHashMap.newKeySet());
-
-            boolean added = engines.add(engineIpPort);
-            if (added) {
-                totalMappings.increment();
-            }
-        } finally {
-            lock.unlock();
-        }
+        // The former global-lock trace is intentionally not emitted for shard monitors.
+        blockToEnginesMap.compute(
+                blockCacheKey,
+                owners -> {
+                    if (owners == null) owners = new SmallOwnerSet();
+                    if (owners.add(engineIpPort)) totalMappings.increment();
+                    return owners;
+                });
     }
 
     /**
@@ -79,58 +72,39 @@ public class GlobalCacheIndex {
      * @param engineIp      logical worker identity in {@code ip:port@engineIndex} format
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIp, Long blockCacheKey) {
+    public void removeCacheBlock(
+            String engineIp, Long blockCacheKey, EndpointTrace.Poll pollTrace) {
         if (blockCacheKey == null || engineIp == null) {
             return;
         }
 
-        lock.lock();
-        try {
-            Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-            if (engines == null) {
-                return;
-            }
-
-            boolean removed = engines.remove(engineIp);
-            if (removed) {
-                totalMappings.decrement();
-
-                // Remove entire entry if no engine owns this cache block
-                if (engines.isEmpty()) {
-                    blockToEnginesMap.remove(blockCacheKey);
-                }
-            }
-        } finally {
-            lock.unlock();
-        }
+        removeOwner(engineIp, blockCacheKey, null);
     }
 
     /**
      * Remove an engine
      *
-     * @param engineIp logical worker identity in {@code ip:port@engineIndex} format
+     * <p>The caller must keep the owning generation's cacheMutationLock held
+     * from obtaining blockCacheKeys until this method returns. The shard locks
+     * protect individual mappings; they do not freeze the borrowed local key set.
+     *
+     * @param engineIp logical worker identity in ip:port@engineIndex format
      */
-    public void removeAllCacheBlockOfEngine(String engineIp) {
-        if (engineIp == null) {
+    public void removeAllCacheBlockOfEngine(
+            String engineIp, Set<Long> blockCacheKeys, EndpointTrace trace) {
+        if (engineIp == null || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return;
         }
 
-        lock.lock();
+        long scannedKeys = 0L;
+        long[] removedMappings = {0L};
         try {
-            blockToEnginesMap.forEach(
-                    (blockCacheKey, engines) -> {
-                        boolean removed = engines.remove(engineIp);
-                        if (removed) {
-                            totalMappings.decrement();
-
-                            // Remove entire entry if no engine owns this cache block
-                            if (engines.isEmpty()) {
-                                blockToEnginesMap.remove(blockCacheKey);
-                            }
-                        }
-                    });
+            for (Long key : blockCacheKeys) {
+                scannedKeys++;
+                removeOwner(engineIp, key, removedMappings);
+            }
         } finally {
-            lock.unlock();
+            if (trace != null) trace.recordCleanupCounts(scannedKeys, removedMappings[0]);
         }
     }
 
@@ -155,13 +129,7 @@ public class GlobalCacheIndex {
      */
     public void clear() {
 
-        lock.lock();
-        try {
-            blockToEnginesMap.clear();
-            totalMappings.reset();
-        } finally {
-            lock.unlock();
-        }
+        blockToEnginesMap.clear(totalMappings::reset);
         log.info("Cleared global cache index");
     }
 
@@ -171,6 +139,18 @@ public class GlobalCacheIndex {
 
     public long totalMappings() {
         return totalMappings.sum();
+    }
+
+    private void removeOwner(String engineIp, long key, long[] removed) {
+        blockToEnginesMap.compute(
+                key,
+                owners -> {
+                    if (owners != null && owners.remove(engineIp)) {
+                        totalMappings.decrement();
+                        if (removed != null) removed[0]++;
+                    }
+                    return owners == null || owners.isEmpty() ? null : owners;
+                });
     }
 
     /**
@@ -247,8 +227,9 @@ public class GlobalCacheIndex {
         if (blockCacheKey == null) {
             return Collections.emptySet();
         }
-        Set<String> engines = blockToEnginesMap.get(blockCacheKey);
-        return engines != null ? engines : Collections.emptySet();
+        return blockToEnginesMap.read(
+                blockCacheKey,
+                engines -> engines == null ? Collections.emptySet() : Set.copyOf(engines));
     }
 
     /**

@@ -61,15 +61,21 @@ final class DecodeState {
      */
     private volatile int confirmedEngineOwnedCount;
 
-    /** Number of reservation-phase entries in {@link #decodeRequests}. */
+    /**
+     * Number of reservation-phase entries in {@link #decodeRequests}.
+     */
     private final AtomicInteger reservedRequestCount = new AtomicInteger();
 
     private final Map<Long, EndpointPreemptionAttempt> preemptionAttempts = new HashMap<>();
 
-    /** KV that Decode has reported free but the Prefill CANCELED fence has not settled yet. */
+    /**
+     * KV that Decode has reported free but the Prefill CANCELED fence has not settled yet.
+     */
     private final AtomicLong priorityPreemptionHeldRequiredKv = new AtomicLong();
 
-    /** KV capacity budget retained until the same cancellation fence settles; budget >= required KV. */
+    /**
+     * KV capacity budget retained until the same cancellation fence settles; budget >= required KV.
+     */
     private final AtomicLong priorityPreemptionHeldKvBudget = new AtomicLong();
 
     /**
@@ -81,10 +87,14 @@ final class DecodeState {
      */
     private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
 
-    /** Prompt-only KV held by reservations which are still Prefill-queued. */
+    /**
+     * Prompt-only KV held by reservations which are still Prefill-queued.
+     */
     private final AtomicLong queuedInputKvReservedTotal = new AtomicLong(0);
 
-    /** Input plus max_new_tokens reserved for requests still waiting in the Prefill queue. */
+    /**
+     * Input plus max_new_tokens reserved for requests still waiting in the Prefill queue.
+     */
     private final AtomicLong queuedInputAndMaxOutputKvReservedTotal = new AtomicLong(0);
 
     /**
@@ -94,13 +104,19 @@ final class DecodeState {
      */
     private final AtomicLong engineDispatchPermitRequiredKvReservedTotal = new AtomicLong();
 
-    /** Input plus max_new_tokens already committed to acquired pre-delivery permits. */
+    /**
+     * Input plus max_new_tokens already committed to acquired pre-delivery permits.
+     */
     private final AtomicLong engineDispatchPermitKvBudgetReservedTotal = new AtomicLong();
 
-    /** Mutated under admissionLock; volatile for the lock-free waiter predicate. */
+    /**
+     * Mutated under admissionLock; volatile for the lock-free waiter predicate.
+     */
     private volatile int activeEngineDispatchPermitCount;
 
-    /** Guarded by {@link #admissionLock}; zero is never issued. */
+    /**
+     * Guarded by {@link #admissionLock}; zero is never issued.
+     */
     private long nextReservationToken = 1L;
 
     /**
@@ -109,7 +125,9 @@ final class DecodeState {
      */
     private final ReentrantLock admissionLock = new ReentrantLock();
 
-    /** Monotonic diagnostic generation for the layered admission projection. */
+    /**
+     * Monotonic diagnostic generation for the layered admission projection.
+     */
     private final AtomicLong admissionVersion = new AtomicLong();
 
     /**
@@ -326,13 +344,15 @@ final class DecodeState {
         }
     }
 
-    boolean shouldRetryDispatch(String requestId, AdmissionCapacity capacity) {
+    boolean shouldRetryDispatch(
+            String requestId, AdmissionCapacity capacity, boolean schedulingReady) {
         DecodeRequestState candidate = shadowReservation(requestId);
         if (candidate == null || !candidate.queued() || candidate.dispatchPermit() != null) {
             return true;
         }
         WorkerStatus.CommittedWorkerStatus committed = status.committedWorkerStatus();
-        return !isEngineDispatchCapacityFullSnapshot(candidate, capacity, committed.fields());
+        return schedulingReady
+                && !isEngineDispatchCapacityFullSnapshot(candidate, capacity, committed.fields());
     }
 
     // Preemption: local replacement and the complete remote-cancel resource transaction.
@@ -2220,18 +2240,26 @@ final class DecodeState {
         private long lastSeenAtMs;
         private boolean queued;
 
-        /** True after dispatch crosses the Master rollback boundary. */
+        /**
+         * True after dispatch crosses the Master rollback boundary.
+         */
         private boolean engineLifecycleOwned;
 
         private DispatchLease dispatchPermit;
 
-        /** Incoming instruction owner until dispatch crosses the rollback boundary. */
+        /**
+         * Incoming instruction owner until dispatch crosses the rollback boundary.
+         */
         private volatile long returnedPreemptionToken;
 
-        /** Current protocol owners for this exact request generation. */
+        /**
+         * Current protocol owners for this exact request generation.
+         */
         private PreemptionClaim preemptionClaim;
 
-        /** Non-zero while stale WorkerStatus must not resurrect this request id. */
+        /**
+         * Non-zero while stale WorkerStatus must not resurrect this request id.
+         */
         private long settledAtMs;
 
         /**

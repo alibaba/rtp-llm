@@ -24,19 +24,24 @@ import java.util.function.BiFunction;
 import java.util.function.Predicate;
 
 /**
- * <p>Discovery prepares an endpoint privately before publishing its generation for routing.
+ * Discovery prepares an endpoint privately before publishing its generation for routing.
  * Captures return exact generation pins; replacement and retirement withdraw the old generation
  * and coordinate its cleanup rather than redirecting existing handles.
+ * Orphan cleanup preserves every request still registered with the scheduler.
  */
 @Component
 public class EndpointRegistry {
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> endpointsByRole =
             endpointMaps();
 
-    /** Advisory Prefill generations, atomically replaced after each map write. */
+    /**
+     * Advisory Prefill generations, atomically replaced after each map write.
+     */
     private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
 
-    /** PDFusion uses the same Prefill planning path but a distinct role map. */
+    /**
+     * PDFusion uses the same Prefill planning path but a distinct role map.
+     */
     private volatile List<PrefillRoutingEntry> pdFusionDirectory = List.of();
 
     /**
@@ -214,7 +219,9 @@ public class EndpointRegistry {
         };
     }
 
-    /** Return the endpoint only when it belongs to the expected status generation. */
+    /**
+     * Return the endpoint only when it belongs to the expected status generation.
+     */
     public WorkerEndpoint get(RoleType roleType, String ipPort, WorkerStatus expectedStatus) {
         WorkerEndpoint endpoint = get(roleType, ipPort);
         return endpoint != null && endpoint.getStatus() == expectedStatus ? endpoint : null;
@@ -364,13 +371,17 @@ public class EndpointRegistry {
         rethrowCloseFailure(failure);
     }
 
-    /** Immutable point-in-time view; publication remains owned by this registry. */
+    /**
+     * Immutable point-in-time view; publication remains owned by this registry.
+     */
     @SuppressWarnings("unchecked")
     public Map<String, PrefillEndpoint> snapshotPrefillEndpoints() {
         return (Map<String, PrefillEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.PREFILL));
     }
 
-    /** Immutable point-in-time view; publication remains owned by this registry. */
+    /**
+     * Immutable point-in-time view; publication remains owned by this registry.
+     */
     @SuppressWarnings("unchecked")
     public Map<String, DecodeEndpoint> snapshotDecodeEndpoints() {
         return (Map<String, DecodeEndpoint>) (Map<?, ?>) Map.copyOf(endpoints(RoleType.DECODE));
@@ -416,7 +427,7 @@ public class EndpointRegistry {
                             logEndpointEviction(
                                     RoleType.PDFUSION,
                                     endpoint,
-                                    ep.evictExpiredBatches(ttlMs),
+                                    ep.evictExpiredBatches(ttlMs, retainForSchedulerCleanup),
                                     ttlMs);
                         });
     }
@@ -446,7 +457,7 @@ public class EndpointRegistry {
         endpoints.computeIfPresent(
                 ipPort,
                 (ignored, current) -> {
-                    captured.set(current.tryPinGeneration());
+                    captured.set(current.tryPinSchedulingGeneration());
                     return current;
                 });
         return captured.get();
@@ -491,7 +502,8 @@ public class EndpointRegistry {
                         }
                         if (current != null) {
                             throw new IllegalStateException(
-                                    "Existing endpoint generation must be withdrawn before publication for "
+                                    "Existing endpoint generation must be withdrawn before"
+                                            + " publication for "
                                             + ipPort);
                         }
                         return candidate;
@@ -543,7 +555,8 @@ public class EndpointRegistry {
                                 if (observed != exactCurrent) {
                                     throw new IllegalStateException(
                                             role
-                                                    + " endpoint mapping changed outside its directory transaction: "
+                                                    + " endpoint mapping changed outside its"
+                                                    + " directory transaction: "
                                                     + address);
                                 }
                                 return next;
@@ -557,7 +570,9 @@ public class EndpointRegistry {
         }
     }
 
-    /** Build the exact post-mutation Prefill directory before its CHM write. */
+    /**
+     * Build the exact post-mutation Prefill directory before its CHM write.
+     */
     private List<PrefillRoutingEntry> prefillDirectoryAfterMutationLocked(
             List<PrefillRoutingEntry> previous, String address, PrefillEndpoint next) {
         List<PrefillRoutingEntry> updated =
@@ -583,7 +598,9 @@ public class EndpointRegistry {
         return role == RoleType.PREFILL ? prefillDirectory : pdFusionDirectory;
     }
 
-    /** Build the exact post-mutation directory before the CHM write. */
+    /**
+     * Build the exact post-mutation directory before the CHM write.
+     */
     private List<Map.Entry<String, DecodeEndpoint>> decodeDirectoryAfterMutationLocked(
             List<Map.Entry<String, DecodeEndpoint>> previous, String address, DecodeEndpoint next) {
         if (registryPhase != RegistryPhase.OPEN) {
@@ -714,7 +731,9 @@ public class EndpointRegistry {
         return detached.get();
     }
 
-    /** Resolve one exact detached-generation barrier token. */
+    /**
+     * Resolve one exact detached-generation barrier token.
+     */
     private void resolveDetachedGeneration(DetachedGeneration exact) {
         synchronized (lifecycleGate) {
             if (exact == null || exact.registry != this) {
@@ -774,7 +793,9 @@ public class EndpointRegistry {
         }
     }
 
-    /** Wait for every generation detached before the close gate linearized. */
+    /**
+     * Wait for every generation detached before the close gate linearized.
+     */
     private void awaitDetachedRetirements() {
         boolean interrupted = false;
         synchronized (lifecycleGate) {
@@ -945,12 +966,16 @@ public class EndpointRegistry {
             this.endpoint = endpoint;
         }
 
-        /** Exact identity check without exposing the owned endpoint resource. */
+        /**
+         * Exact identity check without exposing the owned endpoint resource.
+         */
         public boolean ownsEndpoint(WorkerEndpoint exactEndpoint) {
             return endpoint == exactEndpoint;
         }
 
-        /** Drain this exact generation and resolve its registry barrier token. */
+        /**
+         * Drain this exact generation and resolve its registry barrier token.
+         */
         public void retireAndAwait() {
             if (!retirementClaimed.compareAndSet(false, true)) {
                 throw new IllegalStateException(

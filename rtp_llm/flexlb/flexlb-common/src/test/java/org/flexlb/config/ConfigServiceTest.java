@@ -145,7 +145,6 @@ class ConfigServiceTest {
         var health = config.getWorkerRegistry().getHealth();
         assertEquals(20L, health.getStatusPollIntervalMs());
         assertEquals(5000L, health.getStatusRpcTimeoutMs());
-        assertEquals(10000L, health.getStatusStaleAfterMs());
         assertEquals(3000L, health.getCleanupIntervalMs());
         var cache = config.getWorkerRegistry().getCacheStatus();
         assertEquals(30, cache.getTargetDiffSize());
@@ -546,6 +545,7 @@ class ConfigServiceTest {
         Map<String, String> removed =
                 Map.ofEntries(
                         Map.entry("autoTpmEnabled", "true"),
+                        Map.entry("workerRegistry.health.statusStaleAfterMs", "10000"),
                         Map.entry("autoTpmSloLengthBuckets", "\"*:100\""),
                         Map.entry("router.availabilityHysteresisPercent", "15"),
                         Map.entry("router.roles.prefill.availability.maxPendingRequests", "32"),
@@ -684,7 +684,6 @@ class ConfigServiceTest {
                     "{\"requestLifecycle\":{\"decision\":{\"lifetime\":0.99}}}",
                     "{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxEngineRequests\":0}}}}}",
                     "{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxKvUsagePercent\":101}}}}}",
-                    "{\"workerRegistry\":{\"health\":{\"statusStaleAfterMs\":9999}}}",
                     "{\"workerRegistry\":{\"health\":{\"cleanupIntervalMs\":0}}}",
                     "{\"workerRegistry\":{\"health\":{\"cleanupIntervalMs\":-1}}}",
                     "{\"workerRegistry\":{\"cacheStatus\":{\"minRefreshIntervalMs\":100,\"maxRefreshIntervalMs\":99}}}"

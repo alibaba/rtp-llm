@@ -19,9 +19,6 @@ import java.util.Set;
 @Builder
 public class CacheStatus {
 
-    @JsonProperty("message")
-    private String message;
-
     @JsonProperty("available_kv_cache")
     private long availableKvCache; // available kv cache tokens
 

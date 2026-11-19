@@ -40,9 +40,11 @@ public class BalanceContext {
     private long originalNumericRequestId;
 
     private Response response;
-    @ToString.Exclude private ByteString generateInputPb;
+    @ToString.Exclude private volatile ByteString generateInputPb;
 
-    /** Captured at RPC entry and carried through asynchronous scheduling. */
+    /**
+     * Captured at RPC entry and carried through asynchronous scheduling.
+     */
     @ToString.Exclude private Context traceContext;
 
     // ======================== Queue ========================//
@@ -53,7 +55,9 @@ public class BalanceContext {
 
     private long startTime = System.currentTimeMillis();
 
-    /** Monotonic timestamp captured when server-side request processing starts. */
+    /**
+     * Monotonic timestamp captured when server-side request processing starts.
+     */
     private long serviceStartNanos = System.nanoTime();
 
     private long totalTimeUs;
@@ -78,18 +82,26 @@ public class BalanceContext {
      */
     private long grpcEntryTime;
 
-    /** Monotonic counterpart of {@link #grpcEntryTime} for duration measurements. */
+    /**
+     * Monotonic counterpart of {@link #grpcEntryTime} for duration measurements.
+     */
     private long grpcEntryNanos;
 
-    /** Monotonic timestamp immediately before the request enters its worker batcher. */
+    /**
+     * Monotonic timestamp immediately before the request enters its worker batcher.
+     */
     private long routeSubmittedNanos;
 
-    /** Monotonic timestamp immediately before the batch is dispatched to the engine. */
+    /**
+     * Monotonic timestamp immediately before the batch is dispatched to the engine.
+     */
     private long batchDispatchedNanos;
 
     private long enqueueTime;
 
-    /** Stable worker-queue age and tie-breaker across local route withdrawals. */
+    /**
+     * Stable worker-queue age and tie-breaker across local route withdrawals.
+     */
     private long firstWorkerEnqueueTime;
 
     private long workerEnqueueSequence;
@@ -102,14 +114,18 @@ public class BalanceContext {
      */
     private long ackAtMs;
 
-    /** Monotonic counterpart of {@link #ackAtMs}. */
+    /**
+     * Monotonic counterpart of {@link #ackAtMs}.
+     */
     private long ackAtNanos;
 
     private boolean success = true;
 
     private String errorMessage;
 
-    /** Failure-time scheduling evidence exported in the completed PV log. */
+    /**
+     * Failure-time scheduling evidence exported in the completed PV log.
+     */
     private volatile Map<String, Object> schedulingDiagnostics;
 
     // ===================== Scheduling =================//
@@ -137,10 +153,14 @@ public class BalanceContext {
      */
     private String planType = "";
 
-    /** Cost of the committed eviction plan; 0 for normal placement. */
+    /**
+     * Cost of the committed eviction plan; 0 for normal placement.
+     */
     private long planCost;
 
-    /** Victims preempted to place this request; 0 for normal placement. */
+    /**
+     * Victims preempted to place this request; 0 for normal placement.
+     */
     private int victimCount;
 
     // ===================== Method ===================//
@@ -186,7 +206,9 @@ public class BalanceContext {
         return Long.MAX_VALUE;
     }
 
-    /** Direct accessor for immutable scheduling metadata. */
+    /**
+     * Direct accessor for immutable scheduling metadata.
+     */
     public SchedulingMetadata schedulingMetadata() {
         return schedulingMetadata;
     }

@@ -22,6 +22,14 @@
     <dependency>
       <groupId>org.flexlb</groupId>
       <artifactId>flexlb-common</artifactId>
+      <version>${project.version}</version>
+      <type>test-jar</type>
+      <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-common</artifactId>
     </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
@@ -131,6 +139,41 @@
                   replace="\1option java_package = &quot;org.flexlb.engine.grpc&quot;;${line.separator}\2"
                   flags="s"
                 />
+              </target>
+            </configuration>
+          </execution>
+          <execution>
+            <id>primitive-cache-map-storage</id>
+            <phase>process-sources</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <replaceregexp
+                  file="${project.build.directory}/generated-sources/protobuf/java/org/flexlb/engine/grpc/EngineRpcService.java"
+                  match="com\.google\.protobuf\.MapField\.newMapField\(\s*CacheKeysDefaultEntryHolder\.defaultEntry\)"
+                  replace="org.flexlb.engine.grpc.PackedCacheMapField.create(CacheKeysDefaultEntryHolder.defaultEntry)"
+                  flags="g"
+                />
+                <replaceregexp
+                  file="${project.build.directory}/generated-sources/protobuf/java/org/flexlb/engine/grpc/EngineRpcService.java"
+                  match="cacheKeys_ = cacheKeys_\.copy\(\)"
+                  replace="cacheKeys_ = org.flexlb.engine.grpc.PackedCacheMapField.copy(cacheKeys_, CacheKeysDefaultEntryHolder.defaultEntry)"
+                  flags="g"
+                />
+                <fail
+                  message="CacheStatusPB primitive map generation did not match the pinned protobuf output"
+                >
+                  <condition>
+                    <not>
+                      <resourcecontains
+                        resource="${project.build.directory}/generated-sources/protobuf/java/org/flexlb/engine/grpc/EngineRpcService.java"
+                        substring="PackedCacheMapField.create(CacheKeysDefaultEntryHolder.defaultEntry)"
+                      />
+                    </not>
+                  </condition>
+                </fail>
               </target>
             </configuration>
           </execution>

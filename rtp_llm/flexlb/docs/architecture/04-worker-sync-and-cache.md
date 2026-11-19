@@ -59,7 +59,7 @@ NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需�
 全部检查通过后才发布初始地址并注册地址监听；任一查询失败或返回空/null 时抛出异常，阻止 Master 启动。
 定期查询和订阅回调同样忽略空列表，保留该 Endpoint 的地址，
 避免关闭现有 channel 或清除已有 worker cache。无论空列表持续多久，都不把它作为撤销通知；
-真实 worker 失效由健康探测处理。
+确认发现地址缺席时退役对应 worker；静态发现列表不会自行移除失联地址。
 
 Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不覆盖旧地址。
 
@@ -121,11 +121,20 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
 对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
 任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
-连续 3 次状态探测失败（RPC 失败或响应转换失败）会把该逻辑 worker 标为不健康并移除其 endpoint；
-同一 frontend 的其他已发布 logical worker 不受影响。任务既没有有效字符串 ID，也没有可兼容读取的
-旧 int64 编码时，整份状态观测被拒收，不发布部分任务状态，并按上述连续失败规则处理。
-新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
-（`status_version=0`）与响应处理异常跳过本轮更新。
+连续 3 次有效状态响应上报 `alive=false` 会关闭该逻辑 worker 的新请求准入，
+后续由清理器退役；确认服务发现地址缺席也会触发退役。同一 frontend 的其他 logical worker 独立处理。
+RPC 失败、空响应和响应转换失败不计入这三次自报失败，也不会仅凭经过时间驱逐 worker。
+因此，曾健康但持续不响应、且始终留在发现列表中的 worker 不会自动失去其健康标记。
+新发现的 worker 在首次接受有效状态前不可路由。任务 ID 无法解析时不发布部分任务状态；
+未初始化状态（`status_version=0`）与响应处理异常跳过本轮更新。
+
+### 缓存协议升级顺序
+
+引擎的 `GetCacheStatus` 使用 `CacheStatusPB.cache_key_list`（field 7）发送缓存键。
+新版 Master 优先读该列表，非空列表缺失时回退读取旧 `cache_keys`（field 5）。
+发布必须先升级全部 Master，再升级引擎。回滚时先恢复旧引擎，再回滚 Master；
+仍有新版引擎时不能仅回滚 Master。旧 Master 不认识 field 7，会把新引擎的缓存键误读为空，
+导致缓存索引清空和缓存亲和路由失效。
 
 ### WorkerStatus 的本地预测与对账
 
@@ -147,8 +156,10 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 
 `GrpcCacheStatusCheckRunner`：挂在 20ms 同步 tick 上，但 PREFILL/PDFUSION 按
 `DynamicCacheIntervalService.getCurrentIntervalMs()` 降频（跳 tick 实现）。请求携带当前
-cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `cached_keys`（block hash 集合）
-经 `CacheAwareService.updateFromWorkerStatus()` 喂给本地索引（仅 PREFILL/PDFUSION）。
+已成功应用到索引的 cache 版本；尚未初始化索引时发送 `-1` 请求全量。版本不变时复用原快照，
+版本变化时解析 `cached_keys`（block hash 全量集合），经 `CacheAwareService.updateFromWorkerStatus()`
+更新本地索引（仅 PREFILL/PDFUSION）。RPC 使用异步回调，轮询 lease 在处理完成后释放，
+同一 worker generation 不会重叠执行 cache 轮询。
 
 **动态间隔**：`DefaultDynamicCacheIntervalService` 维护 30 样本滚动平均 diff 大小，目标
 `CACHE_STATUS_DIFF_SIZE(30)`；偏差 >10% 时按 ±30% 调整间隔，钳制在
@@ -159,13 +170,16 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 
 ### LOCAL_SYNC 两级索引
 
-- **大表** `GlobalCacheIndex`：`ConcurrentHashMap<Long blockHash, Set<String engineIpPort>>`，
-  变更加单把 `ReentrantLock`。`batchCalculatePrefixMatchLength`：按序遍历请求 block 链，
-  用候选集过滤 + 首个未命中即淘汰该引擎（早停），返回每引擎的前缀匹配块数。
-- **小表** `EngineLocalView`：`ConcurrentHashMap<String engineIpPort, Set<Long>>`。
-  `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
-- `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
-  `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+- **大表** `GlobalCacheIndex`：primitive long key 的 `LongObjectMap`，分为 256 个 shard。
+  每个 block 的 owner 集合读写在所属 shard 内完成；读取会复制集合，不暴露可变 owner 集合。
+  `batchCalculatePrefixMatchLength` 按序遍历请求 block 链，过滤候选并在首次未命中时淘汰该引擎。
+  多个 block 的读取不是整轮快照事务，可能跨越一次更新；匹配结果用于预测，实际派发仍检查 worker 状态。
+- **小表** `EngineLocalView`：逻辑 worker 地址到 primitive `LongKeySet` 的映射。
+  `calculateDiff` 在延迟创建的专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
+  diff 的两个任务都结束后才允许释放 worker 的 cache 锁，包括其中一个任务异常的情况。
+- `KvCacheManager`：管理查询、diff 应用和清理。一个 worker generation 的更新与清理共用
+  `cacheMutationLock`；不同 worker 可并行。清理按精确的 `WorkerStatus` 实例核对 generation，
+  旧 generation 的迟到清理不会删除替代实例的索引。清理后使 indexed version 失效，下次重新取全量。
 - `LocalSyncCacheMatchProvider` 仅在 LOCAL_SYNC 模式订阅 `EngineAddressResolver`，按最新
   `WorkerHost` 集合清理已下线 frontend 的本地 cache；KVCM 模式不注册该 listener。
 

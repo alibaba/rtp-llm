@@ -1,3 +1,4 @@
+import ast
 import json
 import re
 import runpy
@@ -15,6 +16,24 @@ from flexlb_ft.harness import EnvManager, EnvSpec, MasterSpec, build_flexlb_conf
 
 
 class ShellFlexlbConfigTest(unittest.TestCase):
+    def test_repository_generators_do_not_emit_removed_health_control(self):
+        paths = (
+            SCRIPT_DIR / "flexlb_ft/harness.py",
+            SCRIPT_DIR / "run_inflight_experiment.py",
+            SCRIPT_DIR.parents[2] / "test/smoke/multi_inst_case_runner.py",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                tree = ast.parse(path.read_text())
+                emitted_keys = {
+                    key.value
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Dict)
+                    for key in node.keys
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                }
+                self.assertNotIn("statusStaleAfterMs", emitted_keys)
+
     def test_separate_runs_get_distinct_default_deployment_names(self):
         script = (SCRIPT_DIR / "run_online_eval.sh").read_text()
         assignment = next(
@@ -38,6 +57,9 @@ class ShellFlexlbConfigTest(unittest.TestCase):
         self.assertEqual("shared", explicit.stdout)
 
     def assert_v3(self, config):
+        self.assertNotIn(
+            "statusStaleAfterMs", config.get("workerRegistry", {}).get("health", {})
+        )
         self.assertEqual(3, config["schemaVersion"])
         prefill = config["router"]["roles"].get("prefill", {})
         self.assertNotIn("maxUncachedTokens", prefill.get("availability", {}))
@@ -159,9 +181,7 @@ class ShellFlexlbConfigTest(unittest.TestCase):
         self.assert_v3(config)
         self.assertEqual(12345, config["requestLifecycle"]["request"]["timeoutMs"])
         self.assertEqual(7, config["dispatcher"]["maxInflightPerPrefillWorker"])
-        self.assertEqual(
-            12000, config["workerRegistry"]["health"]["statusStaleAfterMs"]
-        )
+        self.assertEqual(6000, config["workerRegistry"]["health"]["statusRpcTimeoutMs"])
 
     def test_inflight_experiment_uses_v3_and_retains_its_prefill_formula(self):
         module = runpy.run_path(str(SCRIPT_DIR / "run_inflight_experiment.py"))

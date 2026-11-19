@@ -37,6 +37,7 @@ import org.flexlb.metric.FlexMonitor;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -161,7 +162,14 @@ class CacheHitFeedbackFlowTest {
                 .thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServer(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
         when(loops.onServerSelect(true)).thenReturn(mock(io.netty.channel.EventLoopGroup.class));
-        reporter = new EngineHealthReporter(monitor, cacheMetrics, engineClient, loops, directory);
+        reporter =
+                new EngineHealthReporter(
+                        monitor,
+                        cacheMetrics,
+                        engineClient,
+                        loops,
+                        directory,
+                        mock(org.flexlb.service.monitor.StatusFailureReporter.class));
         strategy = new CostBasedPrefillStrategy(directory, cache, reporter);
         pv.start();
         ((ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger")).addAppender(pv);
@@ -284,7 +292,7 @@ class CacheHitFeedbackFlowTest {
         select("1005");
         poll(worker, task("1005", true, 500), true, 2);
         poll(worker, task("1005", true, 500), true, 2);
-        var lease = worker.tryBeginStatusPoll();
+        var lease = worker.tryBeginStatusPoll(1L);
         assertNotNull(lease, "comparison must not retain the poll lease");
         lease.close();
         assertTrue(events("cache_hit_comparison").isEmpty());
@@ -395,8 +403,9 @@ class CacheHitFeedbackFlowTest {
             registry.publishPreparedEndpoint(
                     status.getLogicalIpPort(),
                     status,
-                    status.prepareNewStatus(status.freezeStatusResponse(value)));
-            status.recordSuccessfulPoll(true);
+                    WorkerStatusTestFixtures.prepare(
+                            status, WorkerStatusTestFixtures.observation(status, value)));
+            WorkerStatusTestFixtures.receive(status, true, null);
         } finally {
             status.lock.unlock();
         }
@@ -429,7 +438,7 @@ class CacheHitFeedbackFlowTest {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response(task, finished, version)));
-        var lease = status.tryBeginStatusPoll();
+        var lease = status.tryBeginStatusPoll(1L);
         assertNotNull(lease);
         new GrpcWorkerStatusRunner(
                         "model",

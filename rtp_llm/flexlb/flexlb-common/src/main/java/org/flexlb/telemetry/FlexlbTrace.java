@@ -2,6 +2,7 @@ package org.flexlb.telemetry;
 
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanBuilder;
 import io.opentelemetry.api.trace.SpanContext;
@@ -26,6 +27,8 @@ import java.util.concurrent.TimeUnit;
  * Small fail-open facade for the FlexLB manual tracing points.
  */
 public final class FlexlbTrace {
+    private static final int MAX_DIAGNOSTIC_ATTRIBUTE_CHARS = 256;
+
     public static final String INSTRUMENTATION_NAME = "org.flexlb";
 
     /**
@@ -97,7 +100,9 @@ public final class FlexlbTrace {
 
     private FlexlbTrace() {}
 
-    /** 完整初始化成功后注入 Provider；null 表示关闭。 */
+    /**
+     * 完整初始化成功后注入 Provider；null 表示关闭。
+     */
     public static void configure(OpenTelemetry sdk, String scopeVersion) {
         enabled = false;
         tracer =
@@ -111,12 +116,15 @@ public final class FlexlbTrace {
         return enabled;
     }
 
-    /** Only explicit admission/validation codes imply a business rejection. */
+    /**
+     * Only explicit admission/validation codes imply a business rejection.
+     */
     public static String scheduleFailureType(int code) {
         if (code == StatusEnum.INTERNAL_ERROR.getCode()) {
             return "FLEXLB_INTERNAL_ERROR";
         }
         if (code == StrategyErrorType.INVALID_REQUEST.getErrorCode()
+                || code == StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode()
                 || code == StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED.getErrorCode()
                 || code == StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode()
                 || code == StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
@@ -211,6 +219,84 @@ public final class FlexlbTrace {
     }
 
     /**
+     * Record on the existing request span carried explicitly across scheduler threads.
+     */
+    public static void recordPlacement(
+            Context context,
+            long startedNanos,
+            String outcome,
+            Map<String, Object> diagnostics,
+            Throwable failure) {
+        if (!enabled) {
+            return;
+        }
+        try {
+            Span span = spanFromContext(context);
+            if (!span.isRecording()) {
+                return;
+            }
+            var attributes =
+                    Attributes.builder()
+                            .put("flexlb.placement.outcome", outcome)
+                            .put(
+                                    "flexlb.placement.duration_us",
+                                    TimeUnit.NANOSECONDS.toMicros(
+                                            Math.max(0, System.nanoTime() - startedNanos)));
+            // Overwrite all latest-attempt fields so a later success cannot retain stale failure
+            // data.
+            Object workers = diagnostics == null ? null : diagnostics.get("workers");
+            attributes
+                    .put(
+                            "flexlb.placement.registered_workers",
+                            workers instanceof Number n ? n.longValue() : -1L)
+                    .put("flexlb.placement.role", diagnosticText(diagnostics, "role"))
+                    .put("flexlb.placement.group", diagnosticText(diagnostics, "group"))
+                    .put("flexlb.placement.cause", diagnosticText(diagnostics, "cause"))
+                    .put(
+                            "flexlb.placement.exception.type",
+                            failure == null ? "" : failure.getClass().getName())
+                    .put(
+                            "flexlb.placement.exception.message",
+                            failure == null ? "" : bounded(failure.getMessage()));
+            // SDK span limits bound events; latest attributes remain useful when the event limit is
+            // reached.
+            var values = attributes.build();
+            span.setAllAttributes(values);
+            span.addEvent("flexlb.placement", values);
+        } catch (Throwable ignored) {
+            // Observability cannot change placement or hold a request open.
+        }
+    }
+
+    public static void recordScheduleFailure(
+            Context context, int code, String type, Map<String, Object> diagnostics) {
+        if (!enabled) {
+            return;
+        }
+        try {
+            Span span = spanFromContext(context);
+            if (!span.isRecording()) {
+                return;
+            }
+            var attributes =
+                    Attributes.builder().put(SCHEDULE_CODE, (long) code).put(ERROR_TYPE, type);
+            if (diagnostics != null) {
+                if (diagnostics.get("queueDepth") instanceof Number depth) {
+                    attributes.put("flexlb.queue.depth", depth.longValue());
+                }
+                if (diagnostics.get("cause") instanceof String cause) {
+                    attributes.put("flexlb.failure.cause", bounded(cause));
+                }
+            }
+            var values = attributes.build();
+            span.setAllAttributes(values);
+            span.addEvent("flexlb.schedule.failed", values);
+        } catch (Throwable ignored) {
+            // The response and existing PV failure log remain authoritative.
+        }
+    }
+
+    /**
      * Ends a span this class owns using the call's real gRPC terminal status.
      *
      * <p>Deliberately not routed through {@link #finish(Span, Throwable)}: that
@@ -289,7 +375,9 @@ public final class FlexlbTrace {
         }
     }
 
-    /** Marks an already-created span from an asynchronous scheduling callback. */
+    /**
+     * Marks an already-created span from an asynchronous scheduling callback.
+     */
     public static void markBusinessError(Context context, long code, String type) {
         if (!enabled) {
             return;
@@ -315,6 +403,17 @@ public final class FlexlbTrace {
         } catch (Throwable ignored) {
             // Trace must never affect routing or dispatch.
         }
+    }
+
+    private static String diagnosticText(Map<String, Object> diagnostics, String key) {
+        Object value = diagnostics == null ? null : diagnostics.get(key);
+        return value instanceof String text ? bounded(text) : "UNKNOWN";
+    }
+
+    private static String bounded(String value) {
+        return value == null
+                ? "UNKNOWN"
+                : value.substring(0, Math.min(MAX_DIAGNOSTIC_ATTRIBUTE_CHARS, value.length()));
     }
 
     private static Span start(String name, Context parent, SpanKind kind) {

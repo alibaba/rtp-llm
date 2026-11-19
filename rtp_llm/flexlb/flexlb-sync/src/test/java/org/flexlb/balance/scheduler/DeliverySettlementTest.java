@@ -51,6 +51,7 @@ import static org.mockito.Mockito.when;
  * Checks exact member release across mixed batch rejection and worker completion.
  */
 class DeliverySettlementTest {
+    private final WorkerStatus schedulingWorker = mock(WorkerStatus.class);
     private FlexlbConfig config;
     private RequestRegistry registry;
     private DeliverySettlementTestSupport ledger;
@@ -58,6 +59,7 @@ class DeliverySettlementTest {
 
     @BeforeEach
     void setUp() {
+        when(schedulingWorker.isAvailableForScheduling()).thenReturn(true);
         config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
@@ -194,7 +196,7 @@ class DeliverySettlementTest {
                     .onPrefillStatus(prefill, RoleType.PREFILL, ledger.finish(20L, member.item()));
             assertOccupancy(i == 15 ? 0 : 1, 15 - i);
         }
-        assertTrue(ledger.prefill.batchAvailability(2).isAvailable());
+        assertTrue(ledger.prefill.batchAvailability(2, schedulingWorker).isAvailable());
     }
 
     @Test
@@ -206,7 +208,7 @@ class DeliverySettlementTest {
             reject(rejected);
             ledger.finish(30L + i, successful.item());
             assertOccupancy(0, 0);
-            assertTrue(ledger.prefill.batchAvailability(1).isAvailable());
+            assertTrue(ledger.prefill.batchAvailability(1, schedulingWorker).isAvailable());
         }
     }
 

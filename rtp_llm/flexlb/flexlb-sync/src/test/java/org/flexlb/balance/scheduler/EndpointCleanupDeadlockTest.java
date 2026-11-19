@@ -295,7 +295,7 @@ class EndpointCleanupDeadlockTest {
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             RequestRegistry registry = mock(RequestRegistry.class);
-            ExpirationTimer timer = new ExpirationTimer(registry, service);
+            ExpirationTimer timer = new ExpirationTimer(registry);
             RequestSlot slot =
                     new RequestSlot(
                             mock(RequestCompletionPublisher.class),
