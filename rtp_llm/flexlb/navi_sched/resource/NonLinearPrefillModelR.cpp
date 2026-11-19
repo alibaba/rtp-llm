@@ -405,6 +405,10 @@ bool NonLinearPrefillModelR::fitImpl(
                      _useRunningDecodeRequestCountFeature);
     disableParameter(RUNNING_DECODE_GENERATED_TOKEN_COUNT_PARAMETER_INDEX,
                      _useRunningDecodeGeneratedTokenCountFeature);
+    // This capacity model describes continuously submitted PP prefill work.
+    // Keep the existing optimizer behavior for other model modes.
+    const bool usePpLossDescent = _pdSeparated && _useCapacitySplitFeature && !usesExecutionGeometry() && !stepInputs;
+    std::array<bool, WAITING_PARAMETER_COUNT> waitingInputPresent{};
     Values gradient{};
     double totalSampleWeight = 0.0;
     for (size_t sampleIndex = 0; sampleIndex < samples.size(); ++sampleIndex) {
@@ -422,6 +426,11 @@ bool NonLinearPrefillModelR::fitImpl(
         }
         if (!_useRunningDecodeGeneratedTokenCountFeature) {
             input[15] = 0.0;
+        }
+        if (usePpLossDescent) {
+            for (size_t offset = 0; offset < WAITING_PARAMETER_COUNT; ++offset) {
+                waitingInputPresent[offset] = waitingInputPresent[offset] || input[7 + offset] != 0.0;
+            }
         }
         if (_checkGradient) {
             size_t failedIndex = 0;
@@ -490,7 +499,7 @@ bool NonLinearPrefillModelR::fitImpl(
     }
     std::array<bool, WAITING_PARAMETER_COUNT> retainedWaitingParameters{};
     bool rejectedWaitingCandidate = false;
-    if (rejectNonPositiveWaitingCandidate && _useCapacitySplitFeature) {
+    if (rejectNonPositiveWaitingCandidate && _useCapacitySplitFeature && !usePpLossDescent) {
         for (size_t offset = 0; offset < WAITING_PARAMETER_COUNT; ++offset) {
             const auto index = WAITING_PARAMETER_OFFSET + offset;
             if (std::isfinite(weights[index]) &&
@@ -564,11 +573,57 @@ bool NonLinearPrefillModelR::fitImpl(
             adamMoment2[index] = _adamMoment2[index];
         }
     }
+    if (usePpLossDescent) {
+        // Momentum from an earlier waiting sample must not move a coefficient
+        // while every sample in this fit has zero input for that coefficient.
+        for (size_t offset = 0; offset < WAITING_PARAMETER_COUNT; ++offset) {
+            if (!waitingInputPresent[offset]) {
+                const auto index = WAITING_PARAMETER_OFFSET + offset;
+                weights[index]   = currentParameters[index];
+            }
+        }
+    }
     const auto candidateOutputParameters = weights;
     std::vector<double> outputParameters(weights.begin(),
                                          weights.begin() + parameterCount);
     if (!validateConfiguredParameters(outputParameters)) {
         return false;
+    }
+    if (usePpLossDescent) {
+        const auto batchLogLoss = [&](const std::vector<double>& parameters) {
+            double loss = 0.0;
+            for (size_t sampleIndex = 0; sampleIndex < samples.size(); ++sampleIndex) {
+                const auto& sample     = samples[sampleIndex];
+                const auto  prediction = predictConfigured(sample.features, parameters);
+                if (!std::isfinite(prediction) || prediction < 0.0) {
+                    return std::numeric_limits<double>::infinity();
+                }
+                const auto residual = std::log1p(prediction) - std::log1p(sample.latencyMs);
+                const auto weight   = sampleIndex + 1 == samples.size() ? currentSampleWeight : 1.0;
+                loss += weight * residual * residual;
+            }
+            return loss / totalSampleWeight;
+        };
+        const auto previousLoss = batchLogLoss(currentParameters);
+        const auto candidate    = outputParameters;
+        bool       accepted     = false;
+        double     fraction     = 1.0;
+        for (size_t attempt = 0; attempt <= 30; ++attempt, fraction *= 0.5) {
+            for (size_t index = 0; index < parameterCount; ++index) {
+                outputParameters[index] =
+                    currentParameters[index] + fraction * (candidate[index] - currentParameters[index]);
+            }
+            if (batchLogLoss(outputParameters) <= previousLoss + 1e-12) {
+                accepted = true;
+                break;
+            }
+        }
+        if (!accepted) {
+            outputParameters = currentParameters;
+        }
+        // Consume the observed gradient even when coefficient movement is
+        // shortened or rejected, so stale Adam momentum can recover.
+        weights = toValues(outputParameters);
     }
     bool resetUnsafeWaitingState = false;
     size_t candidateSampleIndex = 0;
