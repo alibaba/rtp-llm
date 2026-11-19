@@ -79,7 +79,6 @@ class MMRemoteEmbeddingCache:
         max_object_bytes,
         max_inflight_bytes,
         max_pending=128,
-        metadata_workers=32,
         read_transfer_workers=2,
         write_transfer_workers=2,
         read_timeout_ms=200,
@@ -99,7 +98,6 @@ class MMRemoteEmbeddingCache:
             max_pending,
             read_timeout_ms,
             write_timeout_ms,
-            metadata_workers,
             read_transfer_workers,
             write_transfer_workers,
         ) <= 0:
@@ -135,12 +133,6 @@ class MMRemoteEmbeddingCache:
         if gdr_enabled is None:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
         self._transport_mode = "gdr" if gdr_enabled else "staging"
-        self._metadata_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=metadata_workers, thread_name_prefix="mm-remote-metadata"
-        )
-        # Wait for a worker within the read deadline before submitting. Timed
-        # out callers never leave an unbounded backlog in the executor queue.
-        self._metadata_workers = threading.BoundedSemaphore(metadata_workers)
         self._transfer_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=read_transfer_workers, thread_name_prefix="mm-remote-cache"
         )
@@ -279,7 +271,6 @@ class MMRemoteEmbeddingCache:
             max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
             max_inflight_bytes=vit_config.mm_remote_cache_max_inflight_bytes,
             max_pending=vit_config.mm_remote_cache_max_pending,
-            metadata_workers=getattr(vit_config, "mm_remote_cache_metadata_workers", 32),
             read_transfer_workers=(
                 default_transfer_workers
                 if read_transfer_workers is None
@@ -704,8 +695,8 @@ class MMRemoteEmbeddingCache:
             cls._report_metric(metric, value, {})
 
     def _get_client(self):
-        # The fixed registered client is closed after all three executors drain.
-        # Only replaceable clients need per-operation reference tracking.
+        # ViT drains its request workers before stopping the cache. Only
+        # replaceable clients need per-operation reference tracking.
         if self._fixed_gdr_client is not None:
             if self._closed:
                 raise RuntimeError("remote embedding cache is closed")
@@ -1110,7 +1101,7 @@ class MMRemoteEmbeddingCache:
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
         started = time.perf_counter()
-        timing = {"stage": "queue", "nbytes": 0}
+        timing = {"stage": "client_acquire", "nbytes": 0}
         payload_nbytes = 0
         outcome = "error"
         cost = 0
@@ -1121,37 +1112,12 @@ class MMRemoteEmbeddingCache:
             return {
                 key: timing[key]
                 for key in (
-                    "queue_ms",
                     "lookup_budget_ms",
                     "metadata_ms",
                     "transfer_queue_ms",
                 )
                 if key in timing
             }
-
-        def lookup():
-            timing["queue_ms"] = self._report_queue_wait("read", queued_at)
-            if time.monotonic() >= deadline:
-                raise TimeoutError("remote embedding queue deadline expired")
-            timing["stage"] = "client_acquire"
-            client = self._get_client()
-            try:
-                remaining_ms = int((deadline - time.monotonic()) * 1000)
-                if remaining_ms <= 0:
-                    raise TimeoutError("remote embedding lookup deadline expired")
-                timing["stage"] = "metadata"
-                timing["lookup_budget_ms"] = remaining_ms
-                api_started = time.perf_counter()
-                try:
-                    meta = self._lookup_object_meta(client, key, trace_id, remaining_ms)
-                finally:
-                    timing["metadata_ms"] = (time.perf_counter() - api_started) * 1000
-                    timing["sdk_api_ms"] = timing["metadata_ms"]
-                if meta is None:
-                    timing["outcome"] = "miss"
-                return meta
-            finally:
-                self._release_client(client)
 
         def read(meta):
             size = meta.size_bytes
@@ -1236,20 +1202,27 @@ class MMRemoteEmbeddingCache:
                 self._transfer_slots.release()
 
         try:
-            queued_at = time.perf_counter()
-            if not self._metadata_workers.acquire(
-                timeout=max(0, deadline - time.monotonic())
-            ):
-                timing["queue_ms"] = self._report_queue_wait("read", queued_at)
-                raise TimeoutError("remote embedding metadata worker deadline expired")
+            # The existing ViT request worker calls the native SDK, which
+            # releases the GIL and applies the remaining deadline to the RPC.
+            # Only metadata hits can reserve payload resources below.
+            timing["stage"] = "client_acquire"
+            client = self._get_client()
             try:
-                future = self._metadata_executor.submit(lookup)
-            except BaseException:
-                self._metadata_workers.release()
-                raise
-            future.add_done_callback(lambda _: self._metadata_workers.release())
-            meta = future.result(timeout=max(0, deadline - time.monotonic()))
-            future = None
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    raise TimeoutError("remote embedding lookup deadline expired")
+                timing["stage"] = "metadata"
+                timing["lookup_budget_ms"] = remaining_ms
+                api_started = time.perf_counter()
+                try:
+                    meta = self._lookup_object_meta(client, key, trace_id, remaining_ms)
+                finally:
+                    timing["metadata_ms"] = (time.perf_counter() - api_started) * 1000
+                    timing["sdk_api_ms"] = timing["metadata_ms"]
+            finally:
+                self._release_client(client)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("remote embedding metadata completed after deadline")
             if meta is None:
                 outcome = "miss"
                 self._count("miss")
@@ -1259,8 +1232,8 @@ class MMRemoteEmbeddingCache:
             size = meta.size_bytes
             timing["nbytes"] = size
             with self._lock:
-                if self._closed or self._tasks >= self.max_pending:
-                    skip_reason = "transfer_admission"
+                if self._closed:
+                    skip_reason = "executor_closed"
                 elif self._bytes + 3 * size > self.max_inflight_bytes:
                     skip_reason = "payload_budget"
                 else:
@@ -1434,7 +1407,6 @@ class MMRemoteEmbeddingCache:
         if self._gdr_pool is not None:
             self._gdr_pool.stop_acquiring()
         self._write_executor.shutdown(wait=True, cancel_futures=True)
-        self._metadata_executor.shutdown(wait=True, cancel_futures=True)
         self._transfer_executor.shutdown(wait=True, cancel_futures=True)
         with self._client_lock:
             client, self._client = self._client, None
