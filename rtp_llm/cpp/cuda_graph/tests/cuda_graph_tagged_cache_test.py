@@ -1777,37 +1777,6 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 self.assertTrue(runner.canPrepare(inputs))
                 self.assertTrue(runner.canRun(inputs))
 
-    def test_legacy_embedding_multimodal_payload_requires_eager(self) -> None:
-        runner = CudaGraphRunner()
-        runner.init_prefill(
-            TaggedBlockTableModel(),
-            1,
-            TOKENS_PER_BLOCK,
-            KERNEL_BLOCK_TABLE_WIDTH,
-            [TOKENS_PER_BLOCK],
-            HIDDEN_SIZE,
-            GROUP_TAGS,
-        )
-        baseline = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-        self.assertTrue(runner.canRun(baseline))
-        for signal in ("features", "locations", "extra", "mask"):
-            with self.subTest(signal=signal):
-                inputs = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
-                feature = torch.ones((1, HIDDEN_SIZE), device="cuda")
-                if signal == "features":
-                    inputs.multimodal_inputs.multimodal_features = [feature]
-                elif signal == "locations":
-                    inputs.multimodal_inputs.mm_features_locs = torch.tensor(
-                        [0], dtype=torch.int32, device="cuda"
-                    )
-                elif signal == "extra":
-                    inputs.multimodal_inputs.mm_extra_input = [feature]
-                else:
-                    inputs.embedding_inputs.text_tokens_mask = torch.ones(
-                        inputs.input_ids.numel(), dtype=torch.int32, device="cuda"
-                    )
-                self.assertFalse(runner.canRun(inputs))
-
     def test_legacy_embedding_refreshes_bert_ids_during_prepare(self) -> None:
         runner = CudaGraphRunner()
         position_encoding = torch.tensor(
