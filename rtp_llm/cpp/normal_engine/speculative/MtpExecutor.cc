@@ -3395,7 +3395,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
 
     bool pre_target_from_device_state = false;
-    const auto all_streams                  = stream_groups.allStreams();
 
     // Column 0 belongs to target verification, not Q1 draft forwards. Bind it
     // after the loop so waiting for its preparation cannot delay draft launch.
