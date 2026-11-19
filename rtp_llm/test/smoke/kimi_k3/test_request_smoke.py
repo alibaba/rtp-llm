@@ -6,11 +6,45 @@ import pathlib
 import tempfile
 import unittest
 from types import SimpleNamespace
+from urllib.error import HTTPError
 
 from request_smoke import SmokeRequests, merge_sse, strict_json, validate_answer
 
 
 class RequestSmokeChecksTest(unittest.TestCase):
+
+    def test_invalid_params_uses_public_error_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = SmokeRequests(
+                SimpleNamespace(
+                    output=pathlib.Path(directory) / "accuracy.json", timeout=30
+                )
+            )
+
+            def reject(code, message):
+                body = json.dumps({"error_code": code, "message": message}).encode()
+                raise HTTPError(
+                    "http://example.test", 500, message, {}, io.BytesIO(body)
+                )
+
+            client.post = lambda *args: reject(605, "INVALID_PARAMS")
+            client.openai(
+                "request_invalid_temperature",
+                {"temperature": 1.1},
+                expect_invalid_params=True,
+            )
+            self.assertTrue(client.records[-1]["passed"])
+
+            client.post = lambda *args: reject(514, "UNKNOWN_ERROR")
+            with self.assertRaisesRegex(
+                AssertionError, "expected OpenAI INVALID_PARAMS"
+            ):
+                client.openai(
+                    "request_invalid_temperature",
+                    {"temperature": 1.1},
+                    expect_invalid_params=True,
+                )
+            self.assertFalse(client.records[-1]["passed"])
 
     def test_protocol_failure_reports_case_and_retains_response(self):
         with tempfile.TemporaryDirectory() as directory:

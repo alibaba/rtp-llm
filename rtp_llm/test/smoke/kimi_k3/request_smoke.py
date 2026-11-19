@@ -24,6 +24,16 @@ def strict_json(value):
     return json.loads(value, parse_constant=invalid)
 
 
+def validate_invalid_params_response(http_status, body):
+    require(
+        http_status >= 400
+        and isinstance(body, dict)
+        and body.get("error_code") == 605
+        and body.get("message") == "INVALID_PARAMS",
+        f"expected OpenAI INVALID_PARAMS rejection, got HTTP {http_status}: {body}",
+    )
+
+
 def merge_sse(events, *, include_usage=False):
     message = {"content": "", "reasoning_content": "", "tool_calls": []}
     tools = {}
@@ -197,14 +207,14 @@ class SmokeRequests:
             )
             temporary.replace(self.root / "summary.json")
 
-    def openai(self, name, payload, check=None, error_field=None):
+    def openai(self, name, payload, check=None, *, expect_invalid_params=False):
         record = {
             "name": name,
             "transport": "openai",
             "request": copy.deepcopy(payload),
             "start_ns": time.time_ns(),
             "passed": False,
-            "expected_error": bool(error_field),
+            "expected_error": expect_invalid_params,
         }
         self.records.append(record)
         self.save()
@@ -242,17 +252,8 @@ class SmokeRequests:
                 record["http_status"] = error.code
                 body = strict_json(error.read())
             record["response"] = body
-            if error_field:
-                require(
-                    record["http_status"] >= 400
-                    or body.get("error")
-                    or body.get("exception"),
-                    "invalid request unexpectedly succeeded",
-                )
-                require(
-                    error_field.lower() in json.dumps(body, ensure_ascii=False).lower(),
-                    f"error does not identify {error_field}: {body}",
-                )
+            if expect_invalid_params:
+                validate_invalid_params_response(record["http_status"], body)
             else:
                 require(
                     record["http_status"] == 200 and not body.get("error"),
@@ -313,7 +314,7 @@ def run_request_cases(client):
         client.openai(
             "request_invalid_" + field,
             client.payload(**{field: value}),
-            error_field=field,
+            expect_invalid_params=True,
         )
     tool = {
         "type": "function",
@@ -357,7 +358,7 @@ def run_request_cases(client):
     client.openai(
         "request_missing_tool_result",
         client.payload(messages=history, tools=[tool]),
-        error_field="tool",
+        expect_invalid_params=True,
     )
     history += [
         {

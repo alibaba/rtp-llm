@@ -328,7 +328,11 @@ def _check_protocol(
 ) -> list[str]:
     from rtp_llm.test.smoke.kimi_k3.grammar_smoke import check_json_answer
     from rtp_llm.test.smoke.kimi_k3.logprobs_smoke import COPY_TEXT, check_logprobs
-    from rtp_llm.test.smoke.kimi_k3.request_smoke import merge_sse, validate_answer
+    from rtp_llm.test.smoke.kimi_k3.request_smoke import (
+        merge_sse,
+        validate_answer,
+        validate_invalid_params_response,
+    )
 
     errors = []
     names = [row["name"] for row in records]
@@ -356,20 +360,7 @@ def _check_protocol(
                 name.startswith("request_invalid_")
                 or name == "request_missing_tool_result"
             ):
-                field = (
-                    name.removeprefix("request_invalid_")
-                    if name.startswith("request_invalid_")
-                    else "tool"
-                )
-                if (
-                    not (
-                        row["http_status"] >= 400
-                        or body.get("error")
-                        or body.get("exception")
-                    )
-                    or field not in json.dumps(body).lower()
-                ):
-                    raise ValueError("missing expected OpenAI rejection")
+                validate_invalid_params_response(row["http_status"], body)
                 continue
             if row["http_status"] != 200 or body.get("error"):
                 raise ValueError("OpenAI request failed")
