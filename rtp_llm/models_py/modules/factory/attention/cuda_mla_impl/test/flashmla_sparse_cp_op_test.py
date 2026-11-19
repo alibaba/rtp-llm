@@ -1113,5 +1113,121 @@ class SparseMlaFp8CPOpTest(TestCase):
         )
 
 
+class ShardedFp8ByteRestoreTest(TestCase):
+    def test_owner_blocks_restore_encoded_bytes_with_partial_pages_and_empty_rank(self):
+        from types import SimpleNamespace
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp,
+        )
+
+        for lengths, actuals, tables in [
+            ([70, 5], [[64, 5], [6, 0]], [[[4, 1], [6, 0]], [[3, 2], [0, 0]]]),
+            ([5], [[5], [0]], [[[2]], [[]]]),
+        ]:
+            width, page, owner = 656, 32, 64
+            logical = (torch.arange(sum(lengths) * width).reshape(-1, width) % 251).to(
+                torch.uint8
+            )
+            lens = torch.tensor(lengths, dtype=torch.int64)
+            padded_lens = cp.cp_padded_local_kv_lens(lens, 2, owner).to(torch.int32)
+            padded_count = int(padded_lens.sum())
+            restore = cp.build_kv_allgather_restore_indices(
+                lens, 2, owner, torch.device("cpu")
+            )
+            ops, caches, payloads = [], [], []
+            for rank in range(2):
+                op = cp.SparseMlaFp8CPOp.__new__(cp.SparseMlaFp8CPOp)
+                op.block_table = torch.tensor(tables[rank], dtype=torch.int32)
+                op.token_per_block = page
+                op._gather = SimpleNamespace(seq_lens=lens)
+                op.sharded_actual_local_kv_lens = torch.tensor(
+                    actuals[rank], dtype=torch.int32
+                )
+                op.sharded_local_kv_lens = padded_lens
+                op.sharded_total_local_kv_len = padded_count
+                op.sharded_kv_restore_indices = restore
+                op._plan_sharded_fp8_gather()
+                cache = torch.zeros((8, page, width), dtype=torch.uint8)
+                payload = torch.zeros((padded_count, width), dtype=torch.uint8)
+                logical_start = padded_start = 0
+                for row, length in enumerate(lengths):
+                    owned = [i for i in range(length) if (i // owner) % 2 == rank]
+                    for compact, position in enumerate(owned):
+                        slot = (
+                            int(op.block_table[row, compact // page]) * page
+                            + compact % page
+                        )
+                        cache.view(-1, width)[slot].copy_(
+                            logical[logical_start + position]
+                        )
+                        payload[padded_start + compact].copy_(
+                            logical[logical_start + position]
+                        )
+                    logical_start += length
+                    padded_start += int(padded_lens[row])
+                ops.append(op)
+                caches.append(SimpleNamespace(kv_cache_base=cache))
+                payloads.append(payload)
+            combined = torch.cat(payloads)
+            for rank, (op, cache) in enumerate(zip(ops, caches)):
+
+                def gather(value, group, role):
+                    self.assertEqual(value.dtype, torch.uint8)
+                    self.assertTrue(torch.equal(value, payloads[rank]))
+                    return combined
+
+                with patch.object(cp, "all_gather", side_effect=gather):
+                    restored = op._gather_sharded_fp8_cache(cache).view(-1, width)
+                self.assertTrue(
+                    torch.equal(restored[op._sharded_fp8_destination], logical)
+                )
+                unused = torch.ones(restored.size(0), dtype=torch.bool)
+                unused[op._sharded_fp8_destination] = False
+                self.assertEqual(int(torch.count_nonzero(restored[unused])), 0)
+
+    def test_fp8_attention_preserves_request_offsets_padding_and_kernel_contract(self):
+        from types import SimpleNamespace
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp,
+        )
+
+        op = cp.SparseMlaFp8CPOp.__new__(cp.SparseMlaFp8CPOp)
+        op.token_per_block = 32
+        op._sharded_fp8_block_table = torch.tensor(
+            [[0, 1, 2], [3, 0, 0]], dtype=torch.int32
+        )
+        op.precomputed_req_ids = torch.tensor([0, 1], dtype=torch.int32)
+        op._fp8_kernel_metadata_q0 = SimpleNamespace(
+            tile_scheduler_metadata=object(), num_splits=object()
+        )
+        op.scale = 0.125
+        op.kv_lora_rank = 512
+        cache = torch.zeros((4, 32, 656), dtype=torch.uint8)
+        query = torch.zeros((2, 1, 576), dtype=torch.bfloat16)
+        topk = torch.tensor([[0, 1, -1], [0, 4, -1]], dtype=torch.int32)
+        with patch.object(
+            op, "_gather_sharded_fp8_cache", return_value=cache
+        ), patch.object(
+            cp, "flash_mla_with_kvcache", return_value=(query.unsqueeze(0), None)
+        ) as kernel:
+            result = op._attend_sharded_fp8(query, object(), topk)
+        self.assertTrue(torch.equal(result, query))
+        args = kernel.call_args.kwargs
+        self.assertEqual(args["k_cache"].dtype, torch.uint8)
+        self.assertEqual(args["k_cache"].shape, (128, 1, 1, 656))
+        self.assertTrue(
+            torch.equal(
+                args["indices"],
+                torch.tensor([[[0, 1, -1], [96, 100, -1]]], dtype=torch.int32),
+            )
+        )
+        self.assertTrue(args["is_fp8_kvcache"])
+        self.assertEqual(args["softmax_scale"], op.scale)
+        self.assertIs(
+            args["tile_scheduler_metadata"],
+            op._fp8_kernel_metadata_q0.tile_scheduler_metadata,
+        )
+
+
 if __name__ == "__main__":
     main()

@@ -708,6 +708,104 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             and (not self.use_cuda_graph or self.kv_cache_sharded)
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
+        if self._gather is not None and self.kv_cache_sharded:
+            self._plan_sharded_fp8_gather()
+
+    def _plan_sharded_fp8_gather(self) -> None:
+        """Plan a byte-preserving KV restore; host shape work stays outside forward."""
+        ws = self._gather
+        device = self.block_table.device
+        lengths = [int(n) for n in ws.seq_lens.cpu().tolist()]
+        actual_lengths = [
+            int(n) for n in self.sharded_actual_local_kv_lens.cpu().tolist()
+        ]
+        page = self.token_per_block
+        pages = [(n + page - 1) // page for n in lengths]
+        table = torch.zeros((len(pages), max(pages)), dtype=torch.int32)
+        destination = []
+        start = 0
+        for row, (length, count) in enumerate(zip(lengths, pages)):
+            table[row, :count] = torch.arange(start, start + count, dtype=torch.int32)
+            destination.extend(range(start * page, start * page + length))
+            start += count
+        self._sharded_fp8_num_pages = start
+        self._sharded_fp8_block_table = table.to(device)
+        self._sharded_fp8_destination = torch.tensor(
+            destination, dtype=torch.long, device=device
+        )
+        requests = torch.tensor(
+            [i for i, n in enumerate(actual_lengths) for _ in range(n)],
+            dtype=torch.long,
+            device=device,
+        )
+        positions = torch.tensor(
+            [j for n in actual_lengths for j in range(n)],
+            dtype=torch.long,
+            device=device,
+        )
+        self._sharded_fp8_source = (
+            self.block_table[requests, positions // page].to(torch.long) * page
+            + positions % page
+        )
+
+    def _gather_sharded_fp8_cache(self, kv_cache) -> torch.Tensor:
+        """Restore encoded FP8 bytes, including scales and RoPE, without BF16 rounding."""
+        src = _as_uint8(kv_cache.kv_cache_base)
+        width = src.size(-1)
+        padded = torch.zeros(
+            (self.sharded_total_local_kv_len, width),
+            dtype=torch.uint8,
+            device=src.device,
+        )
+        actual = src.reshape(-1, width).index_select(0, self._sharded_fp8_source)
+        _scatter_actual_to_padded(
+            actual=actual,
+            padded=padded,
+            per_req_actual_local_kv_lens=self.sharded_actual_local_kv_lens,
+            per_req_padded_local_kv_lens=self.sharded_local_kv_lens,
+        )
+        gathered = all_gather(padded, group=Group.TP, role="mla_history").reshape(
+            -1, width
+        )
+        restored = gathered.index_select(
+            0, self.sharded_kv_restore_indices.to(torch.long)
+        )
+        cache = torch.zeros(
+            (self._sharded_fp8_num_pages, self.token_per_block, width),
+            dtype=torch.uint8,
+            device=src.device,
+        )
+        cache.view(-1, width).index_copy_(0, self._sharded_fp8_destination, restored)
+        return cache
+
+    def _attend_sharded_fp8(self, q0, kv_cache, topk):
+        cache = self._gather_sharded_fp8_cache(kv_cache)
+        topk_2d = _topk_2d(topk).to(torch.long)
+        valid = topk_2d >= 0
+        positions = topk_2d.clamp_min(0)
+        table = self._sharded_fp8_block_table
+        indices = table[
+            self.precomputed_req_ids.to(torch.long).unsqueeze(1),
+            positions // self.token_per_block,
+        ]
+        indices = (
+            indices.to(torch.long) * self.token_per_block
+            + positions % self.token_per_block
+        ).masked_fill(~valid, -1)
+        meta = self._fp8_kernel_metadata_q0
+        out, _ = flash_mla_with_kvcache(
+            q=q0.unsqueeze(0),
+            k_cache=cache.view(-1, 1, 1, cache.size(-1)),
+            block_table=table,
+            head_dim_v=self.kv_lora_rank,
+            cache_seqlens=None,
+            tile_scheduler_metadata=meta.tile_scheduler_metadata,
+            num_splits=meta.num_splits,
+            is_fp8_kvcache=True,
+            indices=indices.to(torch.int32).unsqueeze(0),
+            softmax_scale=self.scale,
+        )
+        return out.squeeze(0)
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Record the gather layout from prefill_ragged_kv_len_indptr_d.
@@ -798,7 +896,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         if no_q_work:
             if self.kv_cache_sharded and self._gather is not None:
-                self._gather_sharded_kv_cache(kv_cache, None)
+                self._gather_sharded_fp8_cache(kv_cache)
             if self.total_local_ids is not None and self.total_local_ids.numel() == 0:
                 return q.new_zeros((q.size(0), q.size(1), self.kv_lora_rank))
             return None
@@ -954,6 +1052,8 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         """gather + flash_mla_sparse_fwd. After CP all-gather/restore/write, the paged
         cache has the full per-request KV; the only CP-specific bit is using
         precomputed_req_ids (req id per global q token) for the offset lookup."""
+        if self.kv_cache_sharded:
+            return self._attend_sharded_fp8(q0, kv_cache, topk)
         ws = self._gather
         assert ws is not None and self.precomputed_req_ids is not None
         fused_kv = self._allocate_fused_kv()
