@@ -94,7 +94,8 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._fuse_ep_shared_gate = (
             os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
         )
-        if (os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1"
+        self._ep_shared_report_enabled = os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1"
+        if (self._ep_shared_report_enabled
                 or os.environ.get("QWEN_MOE_EP_TBO", "0") == "1"):
             self._prepare_ep_shared_overlap()
         if os.environ.get("QWEN_MOE_DOWN_COMBINE_OVERLAP", "0") == "1":
@@ -187,13 +188,29 @@ class Qwen4MoeLayer(GenericMoeLayer):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor import (
             DeepGemmMaskedExecutor,
         )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
+            DeepGemmMaskedExecutorV2,
+        )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
             DeepEpLowLatencyRouter,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterFp8PerBlock,
         )
         from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 
         pc = self.parallelism_config
         shared = self.shared_expert
+        router = self.fused_moe.router
+        executor = self.fused_moe.fused_experts
+        is_deepep = (type(router) is DeepEpLowLatencyRouter
+                      and type(executor) is DeepGemmMaskedExecutor)
+        is_puretp = (type(router) is PureTpRouterFp8PerBlock
+                      and type(executor) is DeepGemmMaskedExecutorV2
+                      and pc.tp_size == pc.ep_size == 2
+                      and router.tp_collective_size == pc.tp_size
+                      and router.do_recompute_topk
+                      and getattr(self, "_sm90_mega_moe", None) is None)
         if not (
             (
                 (
@@ -214,8 +231,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and not self.config.eplb_config.enable_eplb()
             and type(shared) is DenseMLP
             and type(self.fused_moe) is FusedMoe
-            and type(self.fused_moe.router) is DeepEpLowLatencyRouter
-            and type(self.fused_moe.fused_experts) is DeepGemmMaskedExecutor
+            and (is_deepep or is_puretp)
             and type(shared.up_proj) is Fp8Linear
             and type(shared.down_proj) is Fp8Linear
             and type(self.shared_expert_gate) is Fp8Linear
@@ -228,6 +244,15 @@ class Qwen4MoeLayer(GenericMoeLayer):
                            "executor=%s, topology, dtype, or reduction layout",
                            type(self.fused_moe.router).__name__,
                            type(self.fused_moe.fused_experts).__name__)
+            logger.info("Qwen MoE overlap qualification: tp=%s ep=%s dp=%s "
+                        "shared=%s up=%s down=%s gate=%s ep_shared_reduce=%s "
+                        "unified=%s mega=%s",
+                        pc.tp_size, pc.ep_size, pc.dp_size,
+                        type(shared).__name__, type(getattr(shared, "up_proj", None)).__name__,
+                        type(getattr(shared, "down_proj", None)).__name__,
+                        type(self.shared_expert_gate).__name__, self.use_ep_shared_allreduce,
+                        self.use_unified_tp_allreduce,
+                        getattr(self, "_sm90_mega_moe", None) is not None)
             return
         if os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1":
             self._ep_shared_stream = _shared_stream_for_device(
@@ -237,12 +262,17 @@ class Qwen4MoeLayer(GenericMoeLayer):
             self._ep_shared_output_ready = torch.cuda.Event()
         if (
             os.environ.get("QWEN_MOE_EP_TBO", "0") == "1"
+            and is_deepep
             and self.correction_bias is None
             and self.fake_balance_expert is None
         ):
             from .ep_tbo import QwenEpTwoBatch
 
             self._ep_two_batch = QwenEpTwoBatch(self)
+        elif os.environ.get("QWEN_MOE_EP_TBO", "0") == "1":
+            logger.warning("Qwen MoE TBO fallback: requires DeepEP low-latency "
+                           "with compatible routing; actual router=%s executor=%s",
+                           type(router).__name__, type(executor).__name__)
         logger.info("Qwen MoE overlap eligible: router=%s executor=%s shared=%s tbo=%s; "
                     "runtime shape restrictions still apply",
                     type(self.fused_moe.router).__name__,
@@ -313,7 +343,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         return self._forward_impl(hidden_states)
 
     def _forward_impl(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if (
+        ep_shared_selected = (
             self._ep_shared_stream is not None
             and hidden_states.is_cuda
             and hidden_states.device == self._ep_shared_stream.device
@@ -322,7 +352,16 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and hidden_states.is_contiguous()
             and 1 <= hidden_states.shape[0] <= 32
             and hidden_states.shape[1] == 2560
-        ):
+        )
+        if (getattr(self, "_ep_shared_report_enabled", False)
+                and not getattr(self, "_ep_shared_first_reported", False)):
+            logger.info("Qwen MoE shared overlap first forward: selected=%s "
+                        "tensor_shape=%s (may be CUDA Graph padded); stream=%s; "
+                        "requires contiguous BF16 CUDA tensor, 1..32 rows, width 2560",
+                        ep_shared_selected, tuple(hidden_states.shape),
+                        self._ep_shared_stream is not None)
+            self._ep_shared_first_reported = True
+        if ep_shared_selected:
             return self._forward_ep_shared_overlap(hidden_states)
         if (
             self._pack_ep_shared_reduce

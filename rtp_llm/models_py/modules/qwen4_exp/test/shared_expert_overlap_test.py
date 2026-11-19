@@ -47,6 +47,62 @@ def make_layer():
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class SharedExpertOverlapTest(unittest.TestCase):
+    def test_puretp_v2_is_qualified_and_tbo_remains_unavailable(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import DeepGemmMaskedExecutorV2
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import PureTpRouterFp8PerBlock
+
+        layer = make_layer()
+        def linear(n, k):
+            weight = torch.zeros((n, k), device="cuda", dtype=torch.float8_e4m3fn)
+            return Fp8Linear(weight, torch.tensor([1.0], device="cuda"))
+        layer.shared_expert.up_proj = linear(640, 2560)
+        layer.shared_expert.down_proj = linear(2560, 320)
+        layer.parallelism_config = SimpleNamespace(tp_size=2, ep_size=2, dp_size=1)
+        layer.config = SimpleNamespace(eplb_config=SimpleNamespace(enable_eplb=lambda: False))
+        layer.use_ep_shared_allreduce = True
+        layer.use_unified_tp_allreduce = False
+        layer.correction_bias = None
+        layer.fake_balance_expert = None
+        layer._sm90_mega_moe = None
+        moe = FusedMoe.__new__(FusedMoe)
+        torch.nn.Module.__init__(moe)
+        router = PureTpRouterFp8PerBlock.__new__(PureTpRouterFp8PerBlock)
+        router.config = SimpleNamespace(tp_size=2)
+        router.do_recompute_topk = True
+        moe.router = router
+        moe.fused_experts = DeepGemmMaskedExecutorV2.__new__(DeepGemmMaskedExecutorV2)
+        layer.fused_moe = moe
+        with patch.dict("os.environ", {"QWEN_MOE_EP_SHARED_OVERLAP": "1", "QWEN_MOE_EP_TBO": "1"}), patch.object(torch.cuda, "get_device_capability", return_value=(9, 0)):
+            layer._prepare_ep_shared_overlap()
+        self.assertIsNotNone(layer._ep_shared_stream)
+        self.assertIsNone(layer._ep_two_batch)
+
+    def test_ep_shared_schedule_matches_baseline_and_graph_replay(self):
+        # A single-GPU arithmetic test for the shared stream schedule. This
+        # does not replace a two-rank PureTP collective ordering test.
+        layer = make_layer()
+        layer.use_ep_shared_allreduce = True
+        layer._ep_shared_stream = torch.cuda.Stream()
+        layer._ep_shared_input_ready = torch.cuda.Event()
+        layer._ep_shared_output_ready = torch.cuda.Event()
+        layer.tp_all_reduce = lambda value, group: value * 2
+        for rows in (1, 4, 12, 32):
+            x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            for _ in range(3):
+                layer(x)
+            expected = GenericMoeLayer.forward(layer, x)
+            self.assertTrue(torch.equal(layer(x), expected))
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                result = layer(x)
+            for _ in range(3):
+                x.normal_()
+                expected = GenericMoeLayer.forward(layer, x)
+                graph.replay()
+                self.assertTrue(torch.equal(result, expected))
+            graph.reset()
+
     def test_shared_dense_mlp_fuses_activation_and_quant_before_down_gemm(self):
         import flashinfer
 
