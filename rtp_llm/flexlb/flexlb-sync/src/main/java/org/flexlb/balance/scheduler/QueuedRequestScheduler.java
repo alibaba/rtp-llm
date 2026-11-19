@@ -60,7 +60,7 @@ import static org.flexlb.dao.loadbalance.Response.buildErrorResponse;
  *
  * <p>Ready requests receive planning slots in FIFO/priority order, optionally ordered
  * by successful input tokens per new compute token within business priority. Higher-benefit
- * planning turns settle before lower-benefit contenders use spare slots; equal-benefit work stays parallel. A request
+ * planning turns normally settle first; the oldest peer can use a slot halfway to its deadline. A request
  * that cannot be admitted waits for a relevant capacity event; it does not fence
  * later requests from trying the same worker with different resource demands.
  * Planning is bounded and parallel; completed plans are published without waiting
@@ -83,7 +83,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private final boolean prefillCostOrder;
     /** Wait for higher-benefit in-flight planning to settle rather than spin on spare planner slots. */
     private boolean costOrderBlocked;
-    private final Set<GlobalQueueEntry> costOrderPending = Collections.newSetFromMap(new IdentityHashMap<>());
+    /** Wake a spare planner even if no new arrival or completion signals the decision thread. */
+    private long nextCostAgeCheckMs = Long.MAX_VALUE;
     // Decision-owner only. Estimates are advisory; exact generation capacity is checked at commit.
     private final Map<GlobalQueueEntry, WorkEstimate> costOrderEstimates = new IdentityHashMap<>();
     private record WorkEstimate(long atNanos, TokenEstimate tokens) { }
@@ -476,7 +477,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                         inFlight.add(probe);
                         slots--;
                     }
-                    candidates = closed.get() || slots == 0 ? List.of() : planningCandidates(slots);
+                    candidates = closed.get() || slots == 0 || costRefresh != null
+                            ? List.of() : planningCandidates(slots);
                     if (!prefillCostOrder) { inFlight.addAll(candidates); }
                 } finally { lock.unlock(); }
                 runControlActions(controls);
@@ -488,14 +490,16 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                     // Arrivals and plan publication use this same lock. Check work again
                     // after effects; a signal while effects ran must never be lost.
                     while (events.isEmpty() && controlInbox.isEmpty() && completedPlans.isEmpty()
-                            && (costRefresh == null || !costRefresh.result().isDone())
+                            && (costRefresh == null || !costRefresh.result().isDone() || inFlight.size() == plannerCount)
                             && (!closed.get() || drained && (!inFlight.isEmpty() || !pendingPreemptions.isEmpty()))
                             && (inFlight.size() == plannerCount || closed.get() || costOrderBlocked
-                                || (!orderedQueue.hasUnscannedRequests() && !waitingRequests.hasReadyRequests()
-                                    && (!prefillCostOrder || costOrderPending.isEmpty())))) {
+                                || (!orderedQueue.hasUnscannedRequests() && !waitingRequests.hasReadyRequests()))) {
                         try {
                             long wait = closed.get() || inFlight.size() == plannerCount
                                     ? Long.MAX_VALUE : waitingRequests.nanosUntilProbe();
+                            if (!closed.get() && inFlight.size() < plannerCount && nextCostAgeCheckMs != Long.MAX_VALUE) {
+                                wait = Math.min(wait, TimeUnit.MILLISECONDS.toNanos(nextCostAgeCheckMs - System.currentTimeMillis()));
+                            }
                             if (wait <= 0) { break; }
                             if (wait == Long.MAX_VALUE) { changed.await(); }
                             else { changed.awaitNanos(wait); }
@@ -676,7 +680,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 });
     }
 
-    /** Collect a complete ordering snapshot; cache lookup must not block the decision owner. */
+    /** Rank one bounded page. Later arrivals and ready retries cannot extend its asynchronous lookup. */
     private List<GlobalQueueEntry> rankCostCandidates(List<GlobalQueueEntry> page) {
         List<GlobalQueueEntry> ready;
         int availableSlots;
@@ -685,10 +689,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         lock.lock();
         try {
             costOrderBlocked = false;
-            costOrderPending.addAll(page);
+            nextCostAgeCheckMs = Long.MAX_VALUE;
             if (closed.get() || inFlight.size() == plannerCount) { return List.of(); }
-            costOrderPending.removeIf(entry -> entry.removed || inFlight.contains(entry)
-                    || waitingRequests.isWaiting(entry));
             if (costRefresh != null) {
                 if (!costRefresh.result().isDone()) {
                     costOrderBlocked = true;
@@ -706,8 +708,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 });
                 refreshCompleted = true;
             } else {
-                if (orderedQueue.hasUnscannedRequests() || waitingRequests.hasReadyRequests()) { return List.of(); }
-                ready = List.copyOf(costOrderPending);
+                ready = page;
             }
             ready = ready.stream().filter(entry -> !entry.removed && !inFlight.contains(entry)
                     && !waitingRequests.isWaiting(entry) && !entry.context.data().getFuture().isDone()).toList();
@@ -731,24 +732,45 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         var active = new ArrayList<PrefillCostOrder.Candidate<GlobalQueueEntry>>();
         for (var entry : running) { active.add(benefitCandidate(entry, costOrderEstimates.get(entry))); }
         var ranked = PrefillCostOrder.first(estimates, active, queueSettings.priorityOrdering(), availableSlots);
+        ranked = includeAgedWaiter(ready, running, ranked, availableSlots);
         var selected = new ArrayList<GlobalQueueEntry>();
         lock.lock();
         try {
             costOrderBlocked = ranked.isEmpty() && !ready.isEmpty() && !running.isEmpty();
-            int slots = plannerCount - inFlight.size();
             for (var entry : ranked) {
-                if (entry.removed || inFlight.contains(entry) || waitingRequests.isWaiting(entry)) {
-                    costOrderPending.remove(entry);
-                    continue;
-                }
+                if (entry.removed || inFlight.contains(entry) || waitingRequests.isWaiting(entry)) { continue; }
                 if (entry.context.data().getFuture().isDone()) { removeRequest(entry); continue; }
-                if (!closed.get() && selected.size() < slots) {
-                    costOrderPending.remove(entry);
+                if (!closed.get()) {
                     selected.add(entry);
                     inFlight.add(entry);
                 }
             }
+            // Return unselected entries to the priority/sequence index. Only this page needs estimates.
+            for (var entry : ready) {
+                if (!inFlight.contains(entry) && !waitingRequests.isWaiting(entry)) {
+                    orderedQueue.markRequestReadyForRetry(entry);
+                }
+            }
         } finally { lock.unlock(); }
+        return selected;
+    }
+
+    private List<GlobalQueueEntry> includeAgedWaiter(List<GlobalQueueEntry> ready, List<GlobalQueueEntry> running,
+            List<GlobalQueueEntry> ranked, int slots) {
+        if (ready.isEmpty()) { return ranked; }
+        // The ordered scan and its frozen refresh page retain business priority and original sequence.
+        var oldest = ready.getFirst();
+        if (ranked.contains(oldest) || (queueSettings.priorityOrdering()
+                && running.stream().anyMatch(entry -> entry.priority() > oldest.priority()))) { return ranked; }
+        var data = oldest.context.data();
+        long ageAt = data.getStartTime() + (data.getRequestExpiresAtMs() - data.getStartTime()) / 2;
+        if (System.currentTimeMillis() < ageAt) {
+            if (ranked.isEmpty()) { nextCostAgeCheckMs = ageAt; }
+            return ranked;
+        }
+        var selected = new ArrayList<GlobalQueueEntry>();
+        selected.add(oldest);
+        selected.addAll(ranked.subList(0, Math.min(ranked.size(), slots - 1)));
         return selected;
     }
 
@@ -1037,7 +1059,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             orderedQueue.remove(entry);
             waitingRequests.remove(entry);
             preemptionQuotaWaiters.remove(entry);
-            costOrderPending.remove(entry);
             costOrderEstimates.remove(entry);
             queuedEntries.remove(entry.context, entry);
             changed.signal();
@@ -1061,7 +1082,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             all.addAll(orderedQueue.drain());
             all.addAll(queuedEntries.values());
             waitingRequests.clear();
-            costOrderPending.clear();
             costOrderEstimates.clear();
             costRefresh = null;
             preemptionQuotaWaiters.clear();

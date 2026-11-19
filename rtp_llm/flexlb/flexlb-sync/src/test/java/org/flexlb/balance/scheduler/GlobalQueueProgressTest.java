@@ -42,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
@@ -151,6 +152,106 @@ class GlobalQueueProgressTest {
             assertFalse(f.admitted.contains(1802L));
             awaitCondition(() -> RequestProtocolTestSupport.queuedCount(f.scheduler) == 0);
         } finally { release.countDown(); }
+    }
+
+    @Test
+    void firstCostWindowStartsPlanningWhileLaterArrivalsStillNeedEstimates() throws Exception {
+        var firstLookup = new CountDownLatch(1);
+        var releaseFirstLookup = new CountDownLatch(1);
+        var releaseTail = new CountDownLatch(1);
+        var cheapStarted = new CountDownLatch(1);
+        var finishCheap = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            ReflectionTestUtils.setField(f.scheduler, "prefillCostOrder", true);
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                RequestContext context = call.getArgument(0);
+                long id = context.data().getRequestId();
+                if (id <= 4) { firstLookup.countDown(); await(releaseFirstLookup); }
+                else { await(releaseTail); }
+                return new org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate(1000L, id == 2 ? 900L : 0L);
+            });
+            f.onSelection = id -> {
+                if (id == 2) { cheapStarted.countDown(); await(finishCheap); }
+            };
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(f.scheduler, "lock");
+            try {
+                lock.lock();
+                try {
+                    for (int id = 1; id <= 8; id++) { f.submit(id, "b"); }
+                } finally { lock.unlock(); }
+                assertTrue(firstLookup.await(2, TimeUnit.SECONDS));
+                for (int id = 9; id <= 16; id++) { f.submit(id, "b"); }
+                releaseFirstLookup.countDown();
+                assertTrue(cheapStarted.await(2, TimeUnit.SECONDS), "the tail must not hold the first window");
+                assertFalse(f.selected.contains(1L), "the first window must still rank by cost");
+            } finally {
+                releaseFirstLookup.countDown();
+                releaseTail.countDown();
+                finishCheap.countDown();
+            }
+            awaitCondition(() -> f.admitted.size() == 16);
+            assertEquals(16, f.admissionOrder.size());
+        }
+    }
+
+    @Test
+    void refillingEveryScanPageCannotPostponeTheFirstAdmission() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            configureWorkCosts(f, true);
+            var queue = spy((OrderedRequestQueue) ReflectionTestUtils.getField(f.scheduler, "orderedQueue"));
+            var refills = new AtomicInteger();
+            var firstAdmission = new AtomicInteger(-1);
+            var nextId = new AtomicInteger(8);
+            int maxRefills = 8;
+            doAnswer(call -> {
+                var page = call.callRealMethod();
+                if (firstAdmission.get() < 0 && refills.get() < maxRefills) {
+                    refills.incrementAndGet();
+                    int budget = call.getArgument(1);
+                    for (int i = 0; i < budget; i++) { f.submit(nextId.incrementAndGet(), "b"); }
+                }
+                return page;
+            }).when(queue).scanForPlanningCandidates(anyInt(), anyInt(), any());
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(f.scheduler, "lock");
+            lock.lock();
+            try {
+                ReflectionTestUtils.setField(f.scheduler, "orderedQueue", queue);
+                f.onAdmission = id -> firstAdmission.compareAndSet(-1, refills.get());
+                for (int id = 1; id <= 8; id++) { f.submit(id, "b"); }
+            } finally { lock.unlock(); }
+            awaitCondition(() -> firstAdmission.get() >= 0);
+            assertTrue(firstAdmission.get() > 0 && firstAdmission.get() < maxRefills,
+                    "admission must start while every scan still receives a full page of arrivals");
+            awaitCondition(() -> f.admitted.size() == nextId.get());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {50, 90})
+    void oldestWaiterGetsSparePlannerOnlyWithinItsBusinessPriority(int runningPriority) throws Exception {
+        var hotStarted = new CountDownLatch(1);
+        var releaseHot = new CountDownLatch(1);
+        var coldStarted = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            configureWorkCosts(f, true);
+            f.onSelection = id -> {
+                if (id == 1801L) { hotStarted.countDown(); await(releaseHot); }
+                else { coldStarted.countDown(); }
+            };
+            try {
+                f.submit(1801L, "b", runningPriority);
+                assertTrue(hotStarted.await(2, TimeUnit.SECONDS));
+                f.submitUntil(1802L, "b", 50, System.currentTimeMillis() + 2000L);
+                if (runningPriority == 50) {
+                    assertTrue(coldStarted.await(1800, TimeUnit.MILLISECONDS),
+                            "a free planner must wake for the old waiter without another arrival");
+                } else {
+                    assertFalse(coldStarted.await(1200, TimeUnit.MILLISECONDS),
+                            "aging must respect higher business priority");
+                }
+            } finally { releaseHot.countDown(); }
+            awaitCondition(() -> f.admitted.size() == 2);
+        }
     }
 
     @Test
@@ -1087,10 +1188,14 @@ class GlobalQueueProgressTest {
         }
 
         private void submit(long id, String group, int priority) {
+            submitUntil(id, group, priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1));
+        }
+
+        private void submitUntil(long id, String group, int priority, long deadlineMs) {
             groups.put(id, group);
             RequestContext context = RequestProtocolTestSupport.context(config, id);
             context.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(
-                    priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
+                    priority, deadlineMs));
             scheduler.submit(context);
         }
 
