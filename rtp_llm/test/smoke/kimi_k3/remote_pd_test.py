@@ -21,6 +21,49 @@ import urllib.request
 from pathlib import Path
 
 ROLES = ("prefill", "decode")
+_CHECKPOINT_ROOT = "/mnt/fuse/smoke-test/hf"
+_SMOKE_DEFAULTS = {
+    "allow_checkpoint_root": _CHECKPOINT_ROOT,
+    "expected_draft_shards": 9,
+    "min_free_gib": 250.0,
+    "prefill_port": 27188,
+    "decode_port": 28188,
+    "prefill_moe_strategy": "mega_moe",
+    "decode_moe_strategy": "mega_moe_se",
+    "fp8_kv_cache": True,
+    "request_timeout_s": 3600,
+}
+_SMOKE_PROFILES = {
+    "k3": {
+        "checkpoint": (
+            f"{_CHECKPOINT_ROOT}/moonshotai--Kimi-K3--"
+            "9f62e4e9fffbd0a83ddd60e1c209d828994b3569"
+        ),
+        "draft_checkpoint": (
+            f"{_CHECKPOINT_ROOT}/moonshotai--Kimi-K3-MTP-HASS-iter_0001281--"
+            "8c8e4f12aa30713b38274f2d3e994f116b178328"
+        ),
+        "prefill_reserve_runtime_mem_mb": 20480,
+        "decode_reserve_runtime_mem_mb": 17000,
+        "fp8_gemm": True,
+        "warm_up": True,
+    },
+    "k31": {
+        "checkpoint": (
+            f"{_CHECKPOINT_ROOT}/rtp-ci--Kimi-K3.1-v0.1--"
+            "537a6ae4aa6a5a12df789d80b5f909564bad80ae"
+        ),
+        "draft_checkpoint": (
+            f"{_CHECKPOINT_ROOT}/rtp-ci--KimiK31-MTP-v5--"
+            "a958dd861c161f2185251836b427a53699564d37"
+        ),
+        "prefill_reserve_runtime_mem_mb": 14336,
+        "decode_reserve_runtime_mem_mb": 14336,
+        "decode_dp": 2,
+        "model_type": "kimi_k31",
+        "quantization": "KIMI_K31_NVFP4",
+    },
+}
 MAX_JSON_BYTES = 1024 * 1024
 FAILURE_LOG_TAIL_BYTES = 64 * 1024
 FAILURE_LOG_SCAN_BYTES = 128 * 1024 * 1024
@@ -664,7 +707,12 @@ def main(config):
 
 
 def parse_config(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__, argument_default=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--profile", choices=_SMOKE_PROFILES, help="Use a fixed CI smoke configuration"
+    )
     shared_keys = (
         "checkpoint",
         "draft_checkpoint",
@@ -673,36 +721,51 @@ def parse_config(argv=None):
         "min_free_gib",
         "allow_shared_accuracy",
     )
+    role_keys = {"port": int, "moe_strategy": str, "reserve_runtime_mem_mb": int}
+    switches = ("fp8_gemm", "fp8_kv_cache", "warm_up", "model_warm_up")
+    required = [*shared_keys[:3], "min_free_gib"]
     for key in shared_keys[:3]:
-        parser.add_argument("--" + key.replace("_", "-"), required=True)
+        parser.add_argument("--" + key.replace("_", "-"))
     parser.add_argument("--expected-draft-shards", type=int)
-    parser.add_argument("--min-free-gib", type=float, required=True)
+    parser.add_argument("--min-free-gib", type=float)
     parser.add_argument("--allow-shared-accuracy", action="store_true")
-    parser.add_argument("--decode-dp", type=int, choices=(1, 2), default=1)
-    parser.add_argument("--startup-timeout-s", type=int, default=3600)
-    parser.add_argument("--request-timeout-s", type=int, default=7200)
-    for key in ("fp8_gemm", "fp8_kv_cache", "warm_up", "model_warm_up"):
+    parser.add_argument("--decode-dp", type=int, choices=(1, 2))
+    parser.add_argument("--startup-timeout-s", type=int)
+    parser.add_argument("--request-timeout-s", type=int)
+    for key in switches:
         parser.add_argument("--" + key.replace("_", "-"), action="store_true")
     for role in ROLES:
-        for key, kind in (
-            ("port", int),
-            ("moe_strategy", str),
-            ("reserve_runtime_mem_mb", int),
-        ):
-            parser.add_argument(
-                f"--{role}-{key.replace('_', '-')}", type=kind, required=True
-            )
-    config = vars(parser.parse_args(argv))
+        for key, kind in role_keys.items():
+            name = f"{role}_{key}"
+            required.append(name)
+            parser.add_argument("--" + name.replace("_", "-"), type=kind)
+
+    options = vars(parser.parse_args(argv))
+    profile = options.pop("profile", None)
+    if profile is not None:
+        if options:
+            parser.error("--profile cannot be combined with explicit smoke parameters")
+        options = {**_SMOKE_DEFAULTS, **_SMOKE_PROFILES[profile]}
+    missing = ["--" + key.replace("_", "-") for key in required if key not in options]
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(missing))
+
+    config = {
+        **dict.fromkeys(switches, False),
+        "allow_shared_accuracy": False,
+        "expected_draft_shards": None,
+        "decode_dp": 1,
+        "startup_timeout_s": 3600,
+        "request_timeout_s": 7200,
+        **options,
+    }
     shared = {key: config.pop(key) for key in shared_keys}
     if shared["expected_draft_shards"] is None:
         del shared["expected_draft_shards"]
     for role in ROLES:
         config[role] = {
             **shared,
-            **{
-                key: config.pop(role + "_" + key)
-                for key in ("port", "moe_strategy", "reserve_runtime_mem_mb")
-            },
+            **{key: config.pop(role + "_" + key) for key in role_keys},
         }
     return config
 
