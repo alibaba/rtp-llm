@@ -33,7 +33,9 @@ def _signature(tensor, *, version=False):
 
 
 class MainGeometryReceipt:
-    def __init__(self, impl, cache, table, bases, lengths, page_size):
+    def __init__(
+        self, impl, cache, table, bases, lengths, page_size, device_lengths=None
+    ):
         self.owners = (cache, table, bases, lengths)
         self.inputs = impl.attn_inputs
         self.padded = bool(self.inputs.is_s_padded)
@@ -42,10 +44,15 @@ class MainGeometryReceipt:
             *(_signature(t, version=True) for t in (table, bases, lengths)),
         )
         self.page_size = page_size
+        self.head_geometry = (impl.kv_head_num, impl.head_dim)
+        self.device_lengths = device_lengths
 
     def matches(self, impl, cache, table, bases, lengths):
-        if self.inputs is not impl.attn_inputs or self.padded != bool(
-            impl.attn_inputs.is_s_padded
+        if (
+            self.inputs is not impl.attn_inputs
+            or self.padded != bool(impl.attn_inputs.is_s_padded)
+            or self.page_size != impl.attn_configs.kernel_tokens_per_block
+            or self.head_geometry != (impl.kv_head_num, impl.head_dim)
         ):
             return False
         try:
@@ -68,37 +75,48 @@ def main_geometry_preflight(entries):
         _validate_main_cache_layout,
     )
 
+    # Stage the current host values once per input and device. The FMHA layer
+    # can reuse these copies while its receipt matches the current inputs.
+    staged = {}
+
+    def stage(source, device):
+        key = (_signature(source, version=True), device)
+        if key not in staged:
+            staged[key] = source.to(device=device, non_blocking=True)
+        return staged[key]
+
     pending = []
-    flags = []
+    flags_by_device = {}
     for impl, cache, bases, lengths in entries:
-        table = impl.attn_inputs.kv_cache_kernel_block_id_device
+        attn_inputs = impl.attn_inputs
+        table = attn_inputs.kv_cache_kernel_block_id_device
         if getattr(impl, "_model_prefill_geometry", None) is not None:
             raise RuntimeError("Qwen4 Prefill geometry scopes must not overlap")
         page_size, pages = _validate_main_cache_layout(
             impl, cache, table, bases.numel(), cache.device
         )
-        receipt = MainGeometryReceipt(impl, cache, table, bases, lengths, page_size)
-        flags.append(
-            geometry_flags(
-                lengths.to(device=cache.device, non_blocking=True),
-                bases.to(device=cache.device, non_blocking=True),
-                table,
-                page_size,
-                pages,
-                receipt.padded,
-            )
+        ld, pd = stage(lengths, cache.device), stage(bases, cache.device)
+        receipt = MainGeometryReceipt(
+            impl, cache, table, bases, lengths, page_size, device_lengths=(ld, pd)
         )
+        # Physical IDs depend on pool capacity, not on the address of the pool.
+        # Each cache layout has already been checked and gets its own receipt.
+        flags = flags_by_device.setdefault(cache.device, {})
+        key = (receipt.signatures[1:], page_size, pages, receipt.padded)
+        if key not in flags:
+            flags[key] = geometry_flags(ld, pd, table, page_size, pages, receipt.padded)
         pending.append((impl, receipt))
-    if flags:
-        # A single acceptance boundary precedes embedding and all cache writes.
-        for verdict in torch.stack(flags).cpu().tolist():
+    for flags in flags_by_device.values():
+        # Accept every device's verdicts before publishing any receipt.
+        for verdict in torch.stack(tuple(flags.values())).cpu().tolist():
             raise_geometry_error(verdict)
     try:
         for impl, receipt in pending:
             receipts = getattr(impl, "_model_prefill_geometry", None)
             if receipts is None:
-                impl._model_prefill_geometry = receipts = []
-            receipts.append(receipt)
+                impl._model_prefill_geometry = receipts = {}
+            cache = receipt.owners[0]
+            receipts.setdefault((cache.device, cache.data_ptr()), []).append(receipt)
         yield True
     finally:
         for impl, _ in pending:

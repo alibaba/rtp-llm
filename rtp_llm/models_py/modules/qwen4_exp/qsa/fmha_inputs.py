@@ -12,7 +12,11 @@ from .fmha_plans import (
     PrefillRequest,
     _PrefillRequests,
 )
-from .fmha_validation import _validate_main_cache_layout, consume_main_geometry
+from .fmha_validation import (
+    _validate_main_cache_layout,
+    consume_main_geometry,
+    matching_model_prefill_geometry,
+)
 
 
 def _prepare_paged_inputs(
@@ -385,16 +389,10 @@ def _prepare_incremental_prefill_inputs(
 def _try_prepare_host_incremental_prefill(
     self, qkv, cache, selected, lengths, prefixes
 ):
-    """Derive request offsets on CPU and validate the device partition once.
-
-    All device contents are checked for this invocation. Nothing is cached across
-    layers or calls; in-place metadata updates still take effect before KV writes.
-    """
+    """Validate the device partition using the current host lengths."""
     from rtp_llm.models_py.kernels.cuda.qsa.prefill_validation import (
         validate_prefill_inputs,
     )
-
-    from .fmha_validation import _validate_main_cache_layout
 
     cu = self.attn_inputs.cu_seqlens_device
     tokens = int(qkv.shape[0])
@@ -431,12 +429,19 @@ def _try_prepare_host_incremental_prefill(
     # Keep int32 visible positions and device lengths inside their supported range.
     if any(p + s >= 2**31 for p, s in zip(prefix_host, lens)):
         raise ValueError("qwen4_exp incremental prefill visible KV exceeds int32 range")
-    ld = lengths.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
-    pd = prefixes.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
     table = self.attn_inputs.kv_cache_kernel_block_id_device
-    page_size, cache_blocks = _validate_main_cache_layout(
-        self, cache.kv_cache_base, table, batch, qkv.device
+    receipt = matching_model_prefill_geometry(
+        self, cache.kv_cache_base, table, prefixes, lengths, qkv.device
     )
+    if receipt is None:
+        page_size, cache_blocks = _validate_main_cache_layout(
+            self, cache.kv_cache_base, table, batch, qkv.device
+        )
+        ld = lengths.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
+        pd = prefixes.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
+    else:
+        page_size, cache_blocks = receipt.page_size, int(cache.kv_cache_base.shape[0])
+        ld, pd = (tensor.to(torch.int32) for tensor in receipt.device_lengths)
     visible = validate_prefill_inputs(
         selected,
         cu,
@@ -446,6 +451,7 @@ def _try_prepare_host_incremental_prefill(
         page_size,
         cache_blocks,
         bool(self.attn_inputs.is_s_padded),
+        check_pages=receipt is None,
     )
     requests = (
         [

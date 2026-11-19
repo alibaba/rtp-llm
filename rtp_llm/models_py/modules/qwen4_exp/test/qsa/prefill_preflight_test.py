@@ -5,12 +5,13 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig
+from rtp_llm.models_py.kernels.cuda.qsa import paged_validation, prefill_validation
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
     MainGeometryReceipt,
     main_geometry_preflight,
     prefill_geometry_scope,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation
+from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_inputs, fmha_validation
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
@@ -72,6 +73,152 @@ class PrefillPreflightTest(unittest.TestCase):
             cache.device,
         )
 
+    def test_preflight_and_fmha_share_current_host_uploads(self):
+        impl, cache, _, _ = self.fixture()
+        attn = impl.attn_inputs = PyAttentionInputs()
+        attn.is_s_padded = False
+        device = cache.device
+        other_pool = cache.clone()
+        table = torch.empty(2, 4, dtype=torch.int32, device=device)
+        for query, prefix, pages in (
+            ([4], [4], [[1, 2, 0, 0]]),
+            ([2, 3], [8, 0], [[2, 3, 1, 0], [4, 0, 0, 0]]),
+            ([1], [7], [[4, 2, 0, 0]]),
+        ):
+            with self.subTest(query=query, prefix=prefix):
+                batch = len(query)
+                lengths = attn.input_lengths = torch.tensor(query, dtype=torch.int32)
+                bases = attn.prefix_lengths = torch.tensor(prefix, dtype=torch.int32)
+                attn.kv_cache_kernel_block_id_device = table[:batch].copy_(
+                    torch.tensor(pages, dtype=torch.int32)
+                )
+                attn.cu_seqlens_device = torch.cat(
+                    (lengths.new_zeros(1), lengths.cumsum(0, dtype=torch.int32))
+                ).to(device)
+                qkv = torch.empty(sum(query), 1, device=device)
+                selected = torch.zeros(sum(query), 1, dtype=torch.int32, device=device)
+                entries = [(impl, pool, bases, lengths) for pool in (cache, other_pool)]
+
+                def prepare(pool=cache):
+                    return fmha_inputs._try_prepare_host_incremental_prefill(
+                        impl,
+                        qkv,
+                        SimpleNamespace(kv_cache_base=pool),
+                        selected,
+                        lengths,
+                        bases,
+                    )
+
+                with patch.object(
+                    paged_validation,
+                    "geometry_flags",
+                    wraps=paged_validation.geometry_flags,
+                ) as geometry, patch.object(
+                    prefill_validation,
+                    "validate_prefill_inputs",
+                    wraps=prefill_validation.validate_prefill_inputs,
+                ) as packed, patch.object(
+                    MainGeometryReceipt,
+                    "matches",
+                    autospec=True,
+                    side_effect=MainGeometryReceipt.matches,
+                ) as matches:
+                    with main_geometry_preflight(entries):
+                        plan = prepare()
+                        other_plan = prepare(other_pool)
+                    self.assertEqual(geometry.call_count, 1)
+                    self.assertEqual(matches.call_count, 2)
+                    ld, pd = geometry.call_args.args[:2]
+                    torch.testing.assert_close(ld.cpu(), lengths)
+                    torch.testing.assert_close(pd.cpu(), bases)
+                    self.assertEqual(packed.call_count, 2)
+                    for call in packed.call_args_list:
+                        self.assertIs(call.args[2], ld)
+                        self.assertIs(call.args[3], pd)
+                        self.assertFalse(call.kwargs["check_pages"])
+                    self.assertIs(plan.prefixes_device, pd)
+                    self.assertIs(other_plan.prefixes_device, pd)
+
+                with main_geometry_preflight(entries):
+                    for index, error in (
+                        (-2, "use -1"),
+                        (prefix[0] + 1, "outside the row's visible KV"),
+                    ):
+                        selected[0, 0] = index
+                        with self.assertRaisesRegex(ValueError, error):
+                            prepare()
+                    selected.zero_()
+                    attn.cu_seqlens_device[0] = 1
+                    with self.assertRaisesRegex(ValueError, "cu_seqlens"):
+                        prepare()
+                    attn.cu_seqlens_device[0] = 0
+                    with patch.object(impl, "head_dim", 32):
+                        with self.assertRaisesRegex(
+                            RuntimeError, "main-cache geometry"
+                        ):
+                            prepare()
+                table[0, (prefix[0] + query[0] - 1) // 4] = 0
+                with self.assertRaisesRegex(RuntimeError, "unallocated"):
+                    with main_geometry_preflight(entries):
+                        self.fail("Invalid page passed main preflight")
+                with self.assertRaisesRegex(RuntimeError, "unallocated"):
+                    prepare()
+
+    def test_shared_table_is_rechecked_for_smaller_pool(self):
+        impl, cache, bases, lengths = self.fixture()
+        with self.assertRaisesRegex(RuntimeError, "out-of-range physical block"):
+            with main_geometry_preflight(
+                [(impl, cache, bases, lengths), (impl, cache[:2], bases, lengths)]
+            ):
+                self.fail("Page 2 is outside the second pool")
+        self.assertIsNone(impl._model_prefill_geometry)
+        with main_geometry_preflight([(impl, cache, bases, lengths)]):
+            with self.assertRaisesRegex(RuntimeError, "out-of-range physical block"):
+                self.validate((impl, cache[:2], bases, lengths))
+
+    def test_current_host_lengths_win_over_stale_mirrors_and_receipts(self):
+        impl, cache, bases, lengths = self.fixture()
+        table = impl.attn_inputs.kv_cache_kernel_block_id_device
+        attn = impl.attn_inputs = PyAttentionInputs()
+        attn.is_prefill = True
+        attn.input_lengths = lengths
+        attn.prefix_lengths = bases
+        attn.kv_cache_kernel_block_id_device = table
+        stale_lengths = torch.tensor([3], dtype=torch.int32, device=cache.device)
+        stale_prefixes = torch.tensor([16], dtype=torch.int32, device=cache.device)
+        attn.cu_seqlens_device = torch.tensor(
+            [0, 4], dtype=torch.int32, device=cache.device
+        )
+        qkv = torch.empty(4, 1, device=cache.device)
+        selected = torch.zeros(4, 1, dtype=torch.int32, device=cache.device)
+
+        def prepare():
+            return fmha_inputs._try_prepare_host_incremental_prefill(
+                impl,
+                qkv,
+                SimpleNamespace(kv_cache_base=cache),
+                selected,
+                attn.input_lengths,
+                attn.prefix_lengths,
+            )
+
+        # Python can read the engine-owned mirrors but cannot assign them.
+        with patch.object(
+            PyAttentionInputs, "input_lengths_device", stale_lengths
+        ), patch.object(PyAttentionInputs, "prefix_lengths_device", stale_prefixes):
+            self.assertEqual(prepare().requests[0].kv_lens.tolist(), [[5, 6, 7, 8]])
+            with main_geometry_preflight([(impl, cache, bases, lengths)]):
+                self.assertEqual(prepare().requests[0].kv_lens.tolist(), [[5, 6, 7, 8]])
+                bases.fill_(3)
+                self.assertEqual(prepare().requests[0].kv_lens.tolist(), [[4, 5, 6, 7]])
+
+    def test_preflight_keeps_int64_validation(self):
+        impl, cache, _, lengths = self.fixture()
+        bases = torch.tensor([2**32 + 4], dtype=torch.int64)
+        with self.assertRaisesRegex(RuntimeError, "does not cover"):
+            with main_geometry_preflight([(impl, cache, bases, lengths)]):
+                self.fail("Int64 prefix was narrowed before validation")
+
     def test_receipts_are_forward_scoped_and_metadata_mutation_is_rechecked(self):
         entries = [self.fixture(), self.fixture()]
         with main_geometry_preflight(entries):
@@ -102,7 +249,7 @@ class PrefillPreflightTest(unittest.TestCase):
             with main_geometry_preflight(entries):
                 self.fail("Invalid page entered the model body")
         for impl, *_ in entries:
-            self.assertIsNone(getattr(impl, "_model_prefill_geometry", None))
+            self.assertIsNone(impl._model_prefill_geometry)
 
     def test_only_matching_model_receipt_allows_shared_prefill_checks(self):
         entry = self.fixture()
