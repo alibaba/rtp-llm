@@ -46,8 +46,9 @@ void expectEvictionTimeSamples(const std::shared_ptr<kmonitor::MetricsReporter>&
     tags.AddTag("trigger_type", trigger_type);
     tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     for (auto* metric : {metrics->evicted_block_lifetime_ms_metric, metrics->evicted_block_idletime_ms_metric}) {
-        auto* series = metric->DeclareMetric(&tags);
-        auto* gauge  = dynamic_cast<kmonitor::GaugeMetric*>(series);
+        const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+        auto*      series       = metric->DeclareMetric(&serving_tags);
+        auto*      gauge        = dynamic_cast<kmonitor::GaugeMetric*>(series);
         EXPECT_NE(gauge, nullptr);
         if (gauge != nullptr) {
             EXPECT_EQ(gauge->calculator_.Count(), count);
@@ -1094,9 +1095,10 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadCon
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDiscardsItsTarget) {
-    auto device_pool = makeStructuralDevicePool(0);
-    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
-    auto disk_pool   = makeDiskPool(
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    auto                                        device_pool = makeStructuralDevicePool(0);
+    auto                                        host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto                                        disk_pool   = makeDiskPool(
         /*payload_bytes=*/1, /*usable_count=*/4, std::make_unique<MemoryDiskBlockIO>());
     auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
 
@@ -1174,9 +1176,10 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndFailsForFallback) {
-    auto device_pool = makeStructuralDevicePool(0);
-    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
-    auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    auto                                        device_pool = makeStructuralDevicePool(0);
+    auto                                        host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
 
     BlockTreeCacheConfig config;
     config.enable_host_cache = true;
@@ -1277,9 +1280,10 @@ TEST_F(BlockTreeCacheIntegrationTest, AbortDetachedMultiGroupLoadDeletesPendingN
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsItsTarget) {
-    auto device_pool = makeStructuralDevicePool(0);
-    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
-    auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    auto                                        device_pool = makeStructuralDevicePool(0);
+    auto                                        host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
 
     BlockTreeCacheConfig config;
     config.enable_host_cache = true;
@@ -2499,7 +2503,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     }
     const CacheStats          candidates_before = environment->cache->getStats();
     const std::vector<size_t> host_free_before  = {environment->host_pools[0]->freeBlocksNum(),
-                                                  environment->host_pools[1]->freeBlocksNum()};
+                                                   environment->host_pools[1]->freeBlocksNum()};
 
     BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
@@ -2641,7 +2645,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
 
     const std::vector<GroupSetResource> resources_before = environment->resourcesForPathNode(0);
     const std::vector<size_t>           host_free_before = {environment->host_pools[0]->freeBlocksNum(),
-                                                  environment->host_pools[1]->freeBlocksNum()};
+                                                            environment->host_pools[1]->freeBlocksNum()};
     BlockTreeMatchResult                result           = environment->cache->match(environment->keys);
     std::shared_ptr<LoadAsyncContext>   context          = takeLoadContext(result);
     ASSERT_NE(context, nullptr);

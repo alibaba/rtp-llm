@@ -55,7 +55,12 @@ class TpsBinarySearchRunner:
         ).run()
 
     def _test_bs(
-        self, bs: int, queries: Any, trace_label: str = ""
+        self,
+        bs: int,
+        queries: Any,
+        trace_label: str = "",
+        *,
+        validate_responses: bool = False,
     ) -> Tuple[bool, float, float]:
         trace_name = f"bs{bs}_{trace_label}_decode" if trace_label else f"bs{bs}_decode"
         impl = BatchPerfImpl(
@@ -71,6 +76,8 @@ class TpsBinarySearchRunner:
             trace_name,
             log_path=self._log_path,
             log_flush_offset=self._log_flush_offset,
+            # Failed probe requests are a search signal, not a benchmark result.
+            validate_responses=validate_responses,
         )
         metric = impl.run(num_measures=self._num_measures)
         self._log_flush_offset = impl.log_flush_offset
@@ -121,6 +128,18 @@ class TpsBinarySearchRunner:
                 lo = mid_idx + 1
             else:
                 hi = mid_idx - 1
+
+        if best_bs > 0 and BatchPerfImpl.response_validator is not None:
+            # Revalidate the selected point with the specialized strict policy.
+            # This also validates warmup/profile batches before publishing throughput.
+            ok, best_tpot, sr = self._test_bs(
+                best_bs, queries_fn(best_bs), label, validate_responses=True
+            )
+            if not ok:
+                raise RuntimeError(
+                    f"TPS selected batch size {best_bs} failed final validation: "
+                    f"TPOT={best_tpot}, success_rate={sr}"
+                )
 
         if best_bs == 0:
             logging.warning(f"  [{label}] No BS satisfies target TPOT!")

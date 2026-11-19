@@ -378,6 +378,7 @@ class QuantizationConfig(ABC):
                             "is_quanted": True,
                             "mixed_attention": mixed_attention,
                             "exclude_modules": exclude_modules,
+                            "scale_fmt": quant_config.get("scale_fmt", None),
                         }
                     )
             else:
@@ -406,17 +407,19 @@ class QuantizationConfig(ABC):
                         "is_quanted": True,
                         "mixed_attention": mixed_attention,
                         "exclude_modules": exclude_modules,
+                        "scale_fmt": quant_config.get("scale_fmt", None),
                     }
                 )
 
-        result = cls.from_config(
-            {
-                "bits": bits,
-                "method": quant_method,
-                "group_size": group_size,
-                "is_quanted": True,
-            }
-        )
+        normalized_config = {
+            "bits": bits,
+            "method": quant_method,
+            "group_size": group_size,
+            "is_quanted": True,
+        }
+        if quant_config.get("scale_fmt") is not None:
+            normalized_config["scale_fmt"] = quant_config["scale_fmt"]
+        result = cls.from_config(normalized_config)
         if quant_config and "exclude" in quant_config:
             result.exclude_modules = set(quant_config["exclude"])
         return result
@@ -533,6 +536,7 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self.scale_fmt = kwargs.get("scale_fmt", None)
 
     @classmethod
     def get_method(cls) -> str:
@@ -834,7 +838,19 @@ class GPTQConfig(QuantizationConfig):
 
 
 class ModelOptFp4Config(QuantizationConfig):
-    """Config class for FP4."""
+    """Config class for FP4.
+
+    ``hybrid_attn_quant_method`` (default ``None``) lets the user request a
+    secondary quantization scheme for the *non-MoE* atomic weights (attention,
+    norms, etc.) while MoE w1/w2 still go through NVFP4 online quantization.
+    Supported values:
+      - ``None``                : default, non-MoE weights stay in compute dtype
+      - ``"FP8_PER_BLOCK"``     : online FP8 per-block (group_size=128) for
+                                  attention/non-MoE weights, like
+                                  ``--quantization FP8_PER_BLOCK``
+    """
+
+    SUPPORTED_HYBRID_ATTN_METHODS = ("FP8_PER_BLOCK",)
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
@@ -860,6 +876,18 @@ class ModelOptFp4Config(QuantizationConfig):
         self.require_contiguous_experts = kwargs.get(
             "require_contiguous_experts", qwen4_recipe
         )
+        self.scale_fmt = kwargs.get("scale_fmt", None)
+        hybrid_attn_quant_method = kwargs.get("hybrid_attn_quant_method", None)
+        if hybrid_attn_quant_method is not None:
+            method_norm = str(hybrid_attn_quant_method).upper()
+            if method_norm not in self.SUPPORTED_HYBRID_ATTN_METHODS:
+                raise ValueError(
+                    f"hybrid_attn_quant_method={hybrid_attn_quant_method} is not "
+                    f"supported. Supported: {self.SUPPORTED_HYBRID_ATTN_METHODS}"
+                )
+            self.hybrid_attn_quant_method = method_norm
+        else:
+            self.hybrid_attn_quant_method = None
         self.exclude_modules = set(kwargs.get("exclude_modules", []))
 
     @classmethod
@@ -1068,6 +1096,12 @@ DEFAULT_QUARK_MXFP4_QUANT_CONFIG = MXFp4QuarkQuantConfig(
 DEFAULT_MODELOPT_FP4_QUANT_CONFIG = ModelOptFp4Config(
     bits=4, group_size=16, is_quanted=False
 )
+DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG = ModelOptFp4Config(
+    bits=4,
+    group_size=16,
+    is_quanted=False,
+    hybrid_attn_quant_method="FP8_PER_BLOCK",
+)
 
 DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = W4a8Int4PerChannelQuantConfig(
     bits=4, group_size=128, is_quanted=False
@@ -1099,6 +1133,9 @@ preset_quant_config = {
     "QUARKMXFP4": DEFAULT_QUARK_MXFP4_QUANT_CONFIG,
     "MODELOPT_FP4": DEFAULT_MODELOPT_FP4_QUANT_CONFIG,
     "QWEN4_FP8_NVFP4": DEFAULT_QWEN4_FP8_NVFP4_QUANT_CONFIG,
+    "MODELOPT_FP4_HYBRID_FP8_PER_BLOCK": (
+        DEFAULT_MODELOPT_FP4_HYBRID_FP8_PER_BLOCK_QUANT_CONFIG
+    ),
     "W4A8_INT4_PER_CHANNEL": DEFAULT_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG,
     "W4A8_INT4_PER_CHANNEL_COMPRESSED": (
         DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG

@@ -305,6 +305,7 @@ class AccessLoggerTest(unittest.TestCase):
     def test_disabled_logging_preserves_error_and_cancellation_reporting(self):
         server = FrontendServer.__new__(FrontendServer)
         server.rank_id = server.server_id = "0"
+        server._metric_sources = set()
         server._access_logger = access_logger.AccessLogger(
             "unused", 1, disable_access_log=True
         )
@@ -314,7 +315,14 @@ class AccessLoggerTest(unittest.TestCase):
             ) as monitor:
                 response = server._handle_exception({request_id_field_name: 42}, error)
                 self.assertEqual(response.status_code, 500)
-                self.assertIn(str(error), json.loads(response.body)["message"])
+                self.assertEqual(
+                    json.loads(response.body)["message"],
+                    (
+                        "CANCELLED_ERROR"
+                        if isinstance(error, asyncio.CancelledError)
+                        else "UNKNOWN_ERROR"
+                    ),
+                )
                 monitor.report.assert_called_once()
 
 

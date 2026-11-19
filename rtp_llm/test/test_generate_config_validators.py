@@ -497,6 +497,32 @@ class TestRawGenerateConfigParsing(unittest.TestCase):
         self.assertEqual(values, {"enable_memory_cache": False})
         self.assertEqual(remain, {"enable_host_cache": True})
 
+    def test_frontend_metric_streaming_is_internal_only(self):
+        direct = GenerateConfig(frontend_metric_streaming=True)
+        self.assertFalse(direct.frontend_metric_streaming)
+
+        direct.update({"frontend_metric_streaming": True})
+        self.assertFalse(direct.frontend_metric_streaming)
+        self.assertEqual(
+            direct.update_and_pop({"frontend_metric_streaming": True}),
+            {},
+        )
+        self.assertFalse(direct.frontend_metric_streaming)
+
+        internal = direct.model_copy(update={"frontend_metric_streaming": True})
+        self.assertTrue(internal.frontend_metric_streaming)
+
+        extractor = RequestExtractor(GenerateConfig())
+        request, remain = extractor.extract_request(
+            {
+                "__request_id__": 1,
+                "prompt": "hello",
+                "generate_config": {"frontend_metric_streaming": True},
+            }
+        )
+        self.assertFalse(request.generate_configs[0].frontend_metric_streaming)
+        self.assertNotIn("frontend_metric_streaming", remain)
+
     def test_response_format_dict_is_validated(self):
         extractor = RequestExtractor(GenerateConfig(max_new_tokens=16))
         request_values = {

@@ -270,6 +270,12 @@ def _flashinfer_op_is_stale(op_dir: Path) -> bool:
         return True
     if any(not Path(path).exists() for path in include_paths):
         return True
+    # Ninja files survive changes to CC/CXX. FlashInfer reuses existing rules,
+    # so a removed toolchain must invalidate them just like a missing header.
+    compilers = re.findall(r"^\s*(?:cxx|nvcc)\s*=\s*(/\S+)", rules, re.MULTILINE)
+    compilers += re.findall(r"-ccbin(?:=|\s+)(/\S+)", rules)
+    if any(not Path(compiler).is_file() for compiler in compilers):
+        return True
     src_link = op_dir / "src"
     return src_link.is_symlink() and not src_link.exists()
 

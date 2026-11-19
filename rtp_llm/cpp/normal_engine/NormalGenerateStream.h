@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
 #include <deque>
+#include <optional>
 
 namespace rtp_llm {
 
@@ -23,6 +24,10 @@ public:
                        perf_test),
         request_id_(query->request_id) {}
 
+    bool                             beginFrontendMetricsStep() override;
+    void                             endFrontendMetricsStep() override;
+    bool                             publishFrontendMetrics(const FrontendMetricUpdate& update) override;
+    bool                             hasPendingFrontendMetrics() const override;
     bool                             hasOutput() override;
     ErrorResult<GenerateOutputs>     nextOutput(int64_t wait_timeout_ms = 0) override;
     void                             updateOutput(const StreamUpdateInfo& update_info) override;
@@ -38,6 +43,11 @@ private:
     void                   enqueueGenerateOutput(GenerateOutputs&& generate_results);
     bool                   consumerReadyWithoutLock() const override;
     torch::Tensor   selectLogits(const torch::Tensor& logits) const;
+    void                   fillFrontendTimingCounters(GenerateOutputs& generate_results);
+    void                   fillFrontendMetricCounters(GenerateOutputs& generate_results);
+    GenerateOutputs        prepareFrontendMetricOutput();
+    void                   enqueueLatestFrontendMetricOutput(GenerateOutputs&& generate_results);
+    GenerateOutputs        takeLatestFrontendMetricOutput(GenerateOutputs&& marker);
 
     static constexpr size_t kOutputCapacity = 1000;
 
@@ -45,7 +55,14 @@ private:
     bool                             finished_{false};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
-    std::deque<GenerateOutputs> generate_outputs_;
+    bool                                     frontend_timing_dirty_          = false;
+    size_t                                   frontend_metrics_pending_steps_ = 0;
+    uint64_t                                 frontend_sp_tpot_sequence_      = 0;
+    std::vector<std::pair<uint64_t, double>> frontend_sp_tpot_samples_;
+    bool                                     frontend_metric_marker_pending_ = false;
+    std::optional<GenerateOutputs>           latest_frontend_metric_output_;
+    std::function<void()>                    pending_prefill_publication_;
+    std::deque<GenerateOutputs>              generate_outputs_;
 };
 
 std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
