@@ -24,8 +24,8 @@ namespace rtp_llm {
 class CPSlotMapper;
 class CacheStore;
 class BroadcastManager;
-struct BlockTreeCacheLayout;
-using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>;
+struct BlockTreeCachePlan;
+using BlockTreeCachePlanConstPtr = std::shared_ptr<const BlockTreeCachePlan>;
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 
@@ -41,7 +41,7 @@ public:
                    const PDSepConfig&                 pd_sep_config                = PDSepConfig{},
                    const CacheStoreConfig&            cache_store_config           = CacheStoreConfig{},
                    bool                               use_device_malloc_block_pool = false,
-                   BlockTreeCacheLayoutConstPtr       block_tree_layout            = nullptr);
+                   BlockTreeCachePlanConstPtr         block_tree_plan              = nullptr);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -171,7 +171,7 @@ private:
     const PDSepConfig                  pd_sep_config_;
     const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
-    const BlockTreeCacheLayoutConstPtr block_tree_layout_;
+    const BlockTreeCachePlanConstPtr   block_tree_plan_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
     bool                               hasTailSparseReuseGroup() const;
     void                               initCacheEventPublisher();

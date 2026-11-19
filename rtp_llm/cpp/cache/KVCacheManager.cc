@@ -209,7 +209,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const PDSepConfig&                 pd_sep_config,
                                const CacheStoreConfig& /*cache_store_config*/,
                                bool                         use_device_malloc_block_pool,
-                               BlockTreeCacheLayoutConstPtr block_tree_layout):
+                               BlockTreeCachePlanConstPtr   block_tree_plan):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -219,7 +219,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     use_device_malloc_block_pool_(use_device_malloc_block_pool),
     warmup_(warmup),
-    block_tree_layout_(std::move(block_tree_layout)),
+    block_tree_plan_(std::move(block_tree_plan)),
     allocation_wait_state_(std::make_shared<KVCacheAllocationWaitState>()) {
     for (const auto& group : config_.topology().groups()) {
         RTP_LLM_CHECK_WITH_INFO(group.block_num > 0, "cache manager requires capacity-complete cache groups");
@@ -344,7 +344,7 @@ bool KVCacheManager::init() {
                                              std::move(storage_backend),
                                              broadcast_manager,
                                              metrics_reporter_,
-                                             block_tree_layout_);
+                                             block_tree_plan_);
     if (!block_tree_cache_) {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
@@ -757,9 +757,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
     }
     std::vector<TransferDescriptor> descriptors;
-    const bool                      allow_absent_group_sets = parallelism_config_.pp_size > 1;
     if (!BlockTransferRequestConverter::decodeTransfer(
-            request.mem_request(), descriptors, block_tree_cache_->groupSets(), allow_absent_group_sets)) {
+            request.mem_request(), descriptors, block_tree_cache_->groupSets())) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
         return true;
     }
@@ -778,7 +777,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     }
     const auto timeout =
         timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
-    const auto status = block_tree_cache_->executeTransfer(TransferTask(descriptors, timeout));
+    const auto status = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
     BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
     if (!status.ok()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");

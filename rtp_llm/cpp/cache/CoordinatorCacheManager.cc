@@ -1913,12 +1913,10 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
     size_t copy_nums[BatchCopyParams::TYPE_SIZE] = {};
     for (const auto& mapping : copy_mapping) {
         const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
-        RTP_LLM_CHECK_WITH_INFO(
-            static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
-        const auto copy_type =
-            BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
-                                           group_block_pools_[static_cast<size_t>(group_id)]->where());
-        for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
+        const auto layer_ids = config_.layerIdsForGroup(mapping.tag);
+        for (int layer_id : layer_ids) {
+            const auto where     = group_block_pools_[static_cast<size_t>(group_id)]->where();
+            const auto copy_type = BatchCopyParams::get_copy_type(where, where);
             const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;
         }
@@ -1931,13 +1929,10 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
 
     for (const auto& mapping : copy_mapping) {
         const auto group_id = static_cast<int>(groupIdForTag(mapping.tag));
-        RTP_LLM_CHECK_WITH_INFO(
-            static_cast<size_t>(group_id) < group_block_pools_.size(), "missing block pool for group %d", group_id);
-        const auto copy_type =
-            BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
-                                           group_block_pools_[static_cast<size_t>(group_id)]->where());
-
-        for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
+        const auto layer_ids = config_.layerIdsForGroup(mapping.tag);
+        for (int layer_id : layer_ids) {
+            const auto where     = group_block_pools_[static_cast<size_t>(group_id)]->where();
+            const auto copy_type = BatchCopyParams::get_copy_type(where, where);
             const auto&  physical_group      = config_.physicalGroupForLayer(layer_id, mapping.tag);
             const size_t kv_block_size_bytes = physical_group.kvBlockStrideBytes();
             const size_t scale_block_bytes   = physical_group.kvScaleStrideBytes();

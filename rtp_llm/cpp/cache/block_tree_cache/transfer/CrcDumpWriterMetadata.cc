@@ -8,7 +8,7 @@ namespace rtp_llm {
 CrcDumpWriter::Metadata CrcDumpWriter::dumpMetadata(const TransferDescriptor& descriptor, const GroupSet& group) {
     const bool              store = descriptor.source_tier == Tier::DEVICE;
     CrcDumpWriter::Metadata metadata{
-        {"device", std::to_string(group.devicePools().front()->deviceIndex())},
+        {"device", std::to_string(getLocalDeviceIndex(group))},
         {"operation", store ? "store" : "load"},
         {"direction", std::string(tierName(descriptor.source_tier)) + "->" + tierName(descriptor.target_tier)},
         {"copy_item", descriptor.debugString()},

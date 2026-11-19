@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -7,6 +8,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace rtp_llm {
+
+/** The first GroupSet member may have no local backing on a PP stage. */
+inline int getLocalDeviceIndex(const GroupSet& group) {
+    const auto& pools = group.devicePools();
+    const auto  local =
+        std::find_if(pools.begin(), pools.end(), [](const auto& pool) { return pool->config().allocate_storage; });
+    return (*local)->deviceIndex();
+}
 
 // Describes one contiguous slice of a backing without owning its device memory.
 // buffer contains the device address and the number of payload bytes to copy.

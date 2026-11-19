@@ -705,9 +705,8 @@ TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
     EXPECT_EQ(layout->sizing.group_sets[0].first_tag, config.groups().front().tag);
     EXPECT_EQ(layout->sizing.group_sets[0].pool_stride, layout->backing_layouts[0].pool_stride);
     EXPECT_EQ(layout->sizing.host_budget_bytes, 1024u * 1024u);
-    layout->block_nums.emplace();
-    layout->block_nums->host[CacheGroupType::FULL] = 5;
-    layout->block_nums->disk[CacheGroupType::FULL] = 7;
+    layout->block_counts.host[CacheGroupType::FULL] = 5;
+    layout->block_counts.disk[CacheGroupType::FULL] = 7;
 
     auto allocator = initAllocator<CoordinatorCacheManager>(config);
     auto cache     = createBlockTreeCache(
