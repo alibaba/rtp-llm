@@ -124,7 +124,7 @@ public class FlexlbGrpcServer {
         reportExecutorMetrics();
 
         server =
-                NettyServerBuilder.forPort(port)
+                createServerBuilder(port)
                         .channelType(NioServerSocketChannel.class)
                         .bossEventLoopGroup(bossGroup)
                         .workerEventLoopGroup(grpcServerEventLoopGroup)
@@ -210,6 +210,10 @@ public class FlexlbGrpcServer {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    protected NettyServerBuilder createServerBuilder(int port) {
+        return NettyServerBuilder.forPort(port);
     }
 
     private void registerMetrics() {

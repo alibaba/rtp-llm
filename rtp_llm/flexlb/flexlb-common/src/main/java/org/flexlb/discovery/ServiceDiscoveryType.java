@@ -11,7 +11,8 @@ import java.util.Arrays;
 public enum ServiceDiscoveryType {
     VIPSERVER("vipserver"),
     DASHSCOPE("dashscope"),
-    STATIC_ENV("static-env");
+    STATIC_ENV("static-env"),
+    LOCAL_FILE("local-file");
 
     private final String value;
 
