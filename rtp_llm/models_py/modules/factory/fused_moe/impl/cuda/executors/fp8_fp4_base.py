@@ -122,6 +122,9 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
             return output
         return output.to(dtype=output_dtype)
 
+    def _forward_routed(self, x, topk_weights, topk_ids, extra_expert_args):
+        return self.forward(x, topk_weights, topk_ids)
+
     def execute(
         self,
         payload: ExpertForwardPayload,
@@ -158,6 +161,8 @@ class Fp8Fp4ExecutorBase(FusedMoeExpertExecutor, torch.nn.Module):
         return CombineForwardPayload(
             fused_expert_output=self._restore_output_dtype(
                 payload,
-                self.forward(payload.expert_x, topk_weights, topk_ids),
+                self._forward_routed(
+                    payload.expert_x, topk_weights, topk_ids, extra_expert_args
+                ),
             )
         )

@@ -276,3 +276,27 @@ class CudaSm120DecodeStrategy(_CudaSm120Fp8Fp4Strategy):
         )
 
         return Sm120DecodeExecutor
+
+
+class CudaSm120GraphDecodeStrategy(_CudaSm120Fp8Fp4Strategy):
+    """Planned graph transport for dedicated DSv4 decode."""
+
+    strategy_name = "sm120_graph_decode"
+    requires_ep = True
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        checker.check(config.moe_strategy == cls.strategy_name)
+        checker.check(
+            getattr(getattr(config, "model_config", None), "model_type", None)
+            == "deepseek_v4"
+        )
+
+    @classmethod
+    def get_executor_class(cls) -> Type:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_graph_decode import (
+            Sm120GraphDecodeExecutor,
+        )
+
+        return Sm120GraphDecodeExecutor

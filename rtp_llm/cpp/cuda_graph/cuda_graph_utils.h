@@ -48,6 +48,8 @@ public:
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.engram_token_windows                      = inputs.engram_token_windows;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
+        py_model_inputs_.decode_execution                          = inputs.decode_execution;
+        py_model_inputs_.decode_row_validity                       = inputs.decode_row_validity;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;

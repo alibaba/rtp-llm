@@ -5,9 +5,21 @@ from unittest.mock import patch
 import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
-from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
+    DeepSeekV4DSparkModel,
+    mask_dspark_commit,
+)
+from rtp_llm.models_py.modules.dsv4.decode.forward import (
+    build_metadata_eager,
+    mask_decode_cache_writes,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.decode_plan import DecodeMoePlan
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
-from rtp_llm.ops.compute_ops import PyModelInputs
+from rtp_llm.ops.compute_ops import (
+    DecodeExecutionMode,
+    DecodeExecutionPhase,
+    PyModelInputs,
+)
 
 
 def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
@@ -25,6 +37,73 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_commit_masks_uneven_acceptance_before_swa_wrap(self) -> None:
+        req = torch.tensor([0] * 4 + [1] * 4 + [2] * 4, dtype=torch.int32)
+        positions = torch.tensor(
+            [127, 128, 129, 130, 255, 256, 257, 258, 0, 1, 2, 3],
+            dtype=torch.int32,
+        )
+        prefix = torch.tensor([127, 255, 0], dtype=torch.int32)
+        validity = torch.tensor(
+            [True, True, False, False, True, False, False, False] + [False] * 4
+        )
+        req, positions, ends = mask_dspark_commit(req, positions, prefix, validity)
+        self.assertEqual(req.tolist(), [0, 0, -1, -1, 1] + [-1] * 7)
+        self.assertEqual(positions.tolist(), [127, 128, -1, -1, 255] + [-1] * 7)
+        self.assertEqual(ends.tolist(), [129, 256, 0])
+
+    def test_decode_masks_write_slots_without_reallocating(self) -> None:
+        swa = torch.tensor([127, 0, 1, 2, 9, 10, 11, 12], dtype=torch.int64)
+        compressed = torch.tensor([15, -1, -1, -1, -1, -1, 20, -1], dtype=torch.int64)
+        state = torch.tensor([6, 7, 8, 9, 10, 11, 12, 13], dtype=torch.int64)
+        meta = SimpleNamespace(
+            pool_write_slot_mappings={"swa_kv": swa, "csa_kv": compressed},
+            compressor_state_slot_mappings={"csa_state": state},
+        )
+        pointer = swa.data_ptr()
+        validity = torch.tensor([True, True, False, False] + [False] * 4)
+        mask_decode_cache_writes(meta, validity)
+        self.assertEqual(swa.tolist(), [127, 0] + [-1] * 6)
+        self.assertEqual(compressed.tolist(), [15] + [-1] * 7)
+        self.assertEqual(state.tolist(), [6, 7] + [-1] * 6)
+        self.assertEqual(swa.data_ptr(), pointer)
+
+    def test_eager_mtp_commit_uses_planned_width_and_device_prefix(self) -> None:
+        attention = SimpleNamespace(
+            is_prefill=True,
+            is_target_verify=False,
+            prefix_lengths=torch.tensor([0, 0], dtype=torch.int32),
+            prefix_lengths_device=torch.tensor([126, 255], dtype=torch.int32),
+        )
+        args = SimpleNamespace(
+            max_seq_len=512,
+            window_size=128,
+            head_dim=512,
+            compress_ratios=[0],
+            n_layers=1,
+            index_topk=16,
+        )
+        plan = DecodeMoePlan(
+            DecodeExecutionMode.EAGER,
+            DecodeExecutionPhase.MTP_COMMIT,
+            0,
+            4,
+            torch.tensor([True, False, False, False, True, True, False, False]),
+        )
+        meta = build_metadata_eager(
+            args,
+            attention,
+            torch.device("cpu"),
+            {},
+            fp8_kv_cache=True,
+            decode_plan=plan,
+        )
+        self.assertEqual(meta.q_len_per_req, 4)
+        self.assertEqual(meta.start_pos.tolist(), [126, 255])
+        self.assertEqual(
+            meta.position_ids.tolist(), [126, 127, 128, 129, 255, 256, 257, 258]
+        )
+
     def test_aux_hidden_capture_and_cuda_graph_width_contract(self) -> None:
         target_layer_ids = [2, 6, 9]
         dim = 8

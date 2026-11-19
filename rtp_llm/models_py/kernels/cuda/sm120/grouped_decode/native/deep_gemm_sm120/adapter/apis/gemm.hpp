@@ -93,4 +93,52 @@ static void m_grouped_fp8_fp4_gemm_nt_contiguous(const std::pair<torch::Tensor, 
                             heuristics_runtime->get_mk_alignment_for_contiguous_layout());
 }
 
+static void m_grouped_fp8_fp4_gemm_nt_masked(const std::pair<torch::Tensor, torch::Tensor>& a,
+                                             const std::pair<torch::Tensor, torch::Tensor>& b,
+                                             const torch::Tensor&                           d,
+                                             const torch::Tensor&                           masked_m,
+                                             const int&                                     expected_m,
+                                             std::optional<std::tuple<int, int, int>>       recipe,
+                                             std::optional<std::tuple<int, int>>            recipe_a,
+                                             std::optional<std::tuple<int, int>>            recipe_b,
+                                             const std::string&                             compiled_dims,
+                                             const bool&                                    disable_ue8m0_cast) {
+    const c10::cuda::CUDAGuard device_guard(a.first.device());
+    DG_HOST_ASSERT(jit->device.get_arch_major() == 12);
+    for (const auto& t : {a.second, b.first, b.second, d, masked_m})
+        DG_HOST_ASSERT(t.is_cuda() and t.device() == a.first.device());
+    const auto major_a = get_major_type_ab(a.first);
+    const auto major_b = get_major_type_ab(b.first);
+    DG_HOST_ASSERT(major_a == cute::UMMA::Major::K and major_b == cute::UMMA::Major::K);
+    DG_HOST_ASSERT(masked_m.is_contiguous() and masked_m.scalar_type() == torch::kInt);
+    DG_HOST_ASSERT(a.second.scalar_type() == torch::kInt and b.second.scalar_type() == torch::kInt);
+    const auto [num_groups, m, k]     = check_grouped_ab_fp8_fp4(a.first, major_a, 12);
+    const auto [num_groups_, n, k_]   = check_grouped_ab_fp8_fp4(b.first, major_b, 12);
+    const auto [num_groups__, m_, n_] = get_shape<3>(d);
+    DG_HOST_ASSERT(num_groups == num_groups_ and num_groups == num_groups__
+                   and num_groups == static_cast<int>(masked_m.numel()));
+    DG_HOST_ASSERT(m == m_ and n == n_ and k == k_);
+    DG_HOST_ASSERT(expected_m > 0 and expected_m <= m and m > 0 and n > 0 and k > 0 and num_groups > 0);
+    DG_HOST_ASSERT(d.scalar_type() == torch::kBFloat16);
+    check_major_type_cd(d);
+    const auto [sfa, sfb, gran_k_a, gran_k_b] = transform_sf_pair_into_required_layout(
+        a.second, b.second, m, n, k, recipe, recipe_a, recipe_b, num_groups, num_groups, disable_ue8m0_cast);
+    sm120_m_grouped_fp8_fp4_gemm_masked_1d1d(a.first,
+                                             sfa,
+                                             b.first,
+                                             sfb,
+                                             d,
+                                             masked_m,
+                                             num_groups,
+                                             m,
+                                             n,
+                                             k,
+                                             expected_m,
+                                             gran_k_a,
+                                             gran_k_b,
+                                             major_a,
+                                             major_b,
+                                             compiled_dims);
+}
+
 } // namespace deep_gemm::sm120

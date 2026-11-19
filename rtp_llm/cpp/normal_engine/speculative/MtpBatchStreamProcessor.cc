@@ -1346,7 +1346,7 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkCommitInput(GptModelInputs& 
 }
 
 mtp::DraftInputLayout MtpBatchStreamProcessor::draftInputLayout() const {
-    return mtp::selectDraftInputLayout(useMtpDeviceState());
+    return mtp::selectDraftInputLayout(agreed_decode_ || useMtpDeviceState());
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

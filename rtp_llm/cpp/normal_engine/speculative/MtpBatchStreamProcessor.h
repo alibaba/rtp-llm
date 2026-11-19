@@ -17,13 +17,15 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up):
+                            bool                               warm_up,
+                            bool                               agreed_decode = false):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
-        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor),
+        agreed_decode_(agreed_decode) {}
 
     size_t positionIdLenFactor() const {
         return model_input_gatherer_config_.position_id_len_factor;
@@ -179,5 +181,6 @@ protected:
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
     // introduced on the scheduling thread.
     mtp::DSparkProposeInputBuffers dspark_propose_input_buffers_;
+    bool                           agreed_decode_ = false;
 };
 }  // namespace rtp_llm

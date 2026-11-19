@@ -55,30 +55,35 @@ void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
 
 void CudaGraphRunner::captureDecode() {
     RTP_LLM_LOG_INFO("Capture Decode Start");
-    // Pre-initialize all graph instances with keep_graph based on debug mode
-    for (int bs : capture_range_) {
-        graph_instances_.try_emplace(bs, enable_cuda_graph_debug_mode_);
-    }
+    prepareCaptureStage(0, false, [&] {
+        // Pre-initialize all graph instances with keep_graph based on debug mode
+        for (int bs : capture_range_) {
+            graph_instances_.try_emplace(bs, enable_cuda_graph_debug_mode_);
+        }
+    });
     int capture_range_size = capture_range_.size();
     for (int i = capture_range_size - 1; i >= 0; i--) {
-        int           bs = capture_range_[i];
-        PyModelInputs inputs;
-        // Prepare common inputs using shared function
-        prepareCaptureInputs(inputs, bs, bs * num_tokens_per_bs_);
+        int bs = capture_range_[i];
+        prepareCaptureStage(bs, false, [&] {
+            PyModelInputs inputs;
+            // Prepare common inputs using shared function
+            prepareCaptureInputs(inputs, bs, bs * num_tokens_per_bs_);
 
-        // calculate context_total_kv_length
-        int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
-        int max_prefix_len = 0;
-        if (inputs.attention_inputs.prefix_lengths.defined() && inputs.attention_inputs.prefix_lengths.numel() > 0) {
-            max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
-        }
-        inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
-        // capture-specific metadata above was written after prepareCaptureInputs synchronized the tag map.
-        refreshTaggedAttentionInputs(inputs);
+            // calculate context_total_kv_length
+            int max_input_len  = inputs.attention_inputs.input_lengths.max().item<int>();
+            int max_prefix_len = 0;
+            if (inputs.attention_inputs.prefix_lengths.defined()
+                && inputs.attention_inputs.prefix_lengths.numel() > 0) {
+                max_prefix_len = inputs.attention_inputs.prefix_lengths.max().item<int>();
+            }
+            inputs.attention_inputs.context_total_kv_length = bs * (max_input_len + max_prefix_len);
+            // capture-specific metadata above was written after prepareCaptureInputs synchronized the tag map.
+            refreshTaggedAttentionInputs(inputs);
 
-        graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
-        graph_instances_[bs].mem_hold_.attn_pyobj_ =
-            prepareFmhaImpl(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+            graph_instances_[bs].mem_hold_ = createCaptureMemoryHold(inputs, bs * num_tokens_per_bs_);
+            graph_instances_[bs].mem_hold_.attn_pyobj_ =
+                prepareFmhaImpl(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
+        });
         captureDecodeOneBatchSize(bs);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(bs, "batch size");

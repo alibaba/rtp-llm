@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
+from rtp_llm.models_py.modules.factory.fused_moe.defs.decode_plan import DecodeMoePlan
 from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import Gate
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.quantized_linear import (
@@ -293,6 +294,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         input_ids: Optional[torch.Tensor],
         observer: Optional[Callable[[str, torch.Tensor], None]] = None,
         out: Optional[torch.Tensor] = None,
+        decode_plan: Optional[DecodeMoePlan] = None,
     ) -> torch.Tensor:
         shape = x.shape
         x = x.reshape(-1, self.dim)
@@ -318,6 +320,12 @@ class Fp8Fp4MoeLayer(nn.Module):
             raise ValueError(
                 f"input_ids has {flat_ids.numel()} tokens, expected {x.size(0)}"
             )
+        if decode_plan is not None:
+            decode_plan.validate_rows(x)
+            # Keep padding out of the token-ID hash lookup and shared expert.
+            x = torch.where(decode_plan.valid_rows[:, None], x, 0.0)
+            if flat_ids is not None:
+                flat_ids = torch.where(decode_plan.valid_rows, flat_ids, 0)
         gate_payload = None
         topk_weights = None
         topk_ids = None
@@ -358,6 +366,11 @@ class Fp8Fp4MoeLayer(nn.Module):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 activation="silu",
+                **(
+                    {"extra_expert_args": {"decode_plan": decode_plan}}
+                    if decode_plan is not None
+                    else {}
+                ),
             )
 
         if self._shared_executor is None:

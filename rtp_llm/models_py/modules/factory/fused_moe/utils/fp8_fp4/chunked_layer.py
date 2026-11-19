@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.defs.decode_plan import DecodeMoePlan
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4._chunk_policy import (
     should_chunk_moe_input,
 )
@@ -431,6 +432,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         *,
         observer: Optional[Callable[[str, torch.Tensor], None]] = None,
         out: Optional[torch.Tensor] = None,
+        decode_plan: Optional[DecodeMoePlan] = None,
     ) -> torch.Tensor:
         with self._record_function_scope():
             return self._moe(
@@ -438,6 +440,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                 input_ids,
                 observer=observer,
                 out=out,
+                **({"decode_plan": decode_plan} if decode_plan is not None else {}),
             )
 
     def forward(
@@ -447,6 +450,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
         *,
         is_decode_forward: bool = False,
         positions: Optional[torch.Tensor] = None,
+        decode_plan: Optional[DecodeMoePlan] = None,
     ) -> torch.Tensor:
         is_decode_forward = is_decode_forward or moe_decode_forward()
         shape = x.shape
@@ -457,6 +461,12 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
                 f"input_ids has {flat_ids.numel()} tokens, expected {flat_x.size(0)}"
             )
         observer = self._observer(positions)
+        if decode_plan is not None:
+            # Captured layers must never reference the process-wide eager output
+            # cache. Let each capture retain the output used by its next layer.
+            return self._call_moe(
+                flat_x, flat_ids, observer=observer, decode_plan=decode_plan
+            ).view(shape)
         synchronized_tokens = self._synchronized_chunk_tokens(
             flat_x.size(0),
             flat_x.device,

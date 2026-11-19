@@ -67,7 +67,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                std::function<void()>                  profile_step_finish,
                                bool                                   allow_cuda_graph,
                                bool                                   accuracy_check_mode,
-                               bool                                   dynamic_decode_enabled):
+                               bool                                   dynamic_decode_enabled,
+                               AgreedDecodeExecution*                 agreed_decode_execution):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
@@ -174,6 +175,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
+    model_init_params.agreed_decode_execution        = agreed_decode_execution;
     model_init_params.owns_py_model                  = !warm_up_ && !accuracy_check_mode_;
     model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
@@ -575,6 +577,12 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
         tps_collector.addTokenSizeByPriority(token_counts_by_priority, tps_execute_time_us);
         tps_reporter_.report(&tps_collector);
         wall_tps_reporter_.report(&tps_collector);
+    }
+}
+
+void NormalExecutor::syncMutableStreamState() {
+    if (useStreamAsync()) {
+        dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
     }
 }
 

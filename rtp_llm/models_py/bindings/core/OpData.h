@@ -119,6 +119,9 @@ struct GptModelInputs {
     bool skip_run               = false;
     bool shutdown               = false;
     bool is_fake_stream         = false;
+    // Local SM120 decode lanes after speculation. No TP/PP consumer uses this
+    // field; all participating ranks build their own device mask.
+    torch::Tensor decode_row_validity;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.

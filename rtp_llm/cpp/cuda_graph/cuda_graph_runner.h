@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <limits>
 #include <optional>
@@ -59,6 +60,7 @@ public:
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         role_(graph_params.role),
+        agreed_decode_phase_(graph_params.agreed_decode_phase),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -104,6 +106,9 @@ public:
         draft_prefill_uses_request_lanes_ =
             isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
             && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
+        RTP_LLM_CHECK_WITH_INFO(!agreed_decode_phase_ || !is_prefill_cuda_graph_mode_
+                                    || usesFixedCapacityMtpDraftPrefillCudaGraph(),
+                                "Agreed decode graph requires decode or fixed request-lane geometry");
         if (role_ == CudaGraphRole::GENERATION_PREFILL) {
             RTP_LLM_CHECK_WITH_INFO(
                 request_max_seq_len_ > 0 && request_max_seq_len_ <= max_seq_len_,
@@ -129,6 +134,14 @@ public:
                                     && max_seq_len_ <= max_index && max_bs_ <= max_index / num_tokens_per_bs_
                                     && (isGenerationPrefillCudaGraph() || max_bs_ <= max_index / max_seq_len_),
                                 "CUDA graph capacities exceed int32 token/padding indexing limits");
+        if (agreed_decode_phase_ && enable_cuda_graph_) {
+            RTP_LLM_CHECK_WITH_INFO(num_tokens_per_bs_ <= max_seq_len_,
+                                    "Agreed decode graph token width exceeds its sequence capacity");
+            // The wrapper verifies this catalog across ranks before the
+            // runner warms or captures any collective.
+            agreed_decode_buckets_ = getDecodeBatchSizesToCapture();
+            max_bs_                = agreed_decode_buckets_.back();
+        }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
         // Optional model bookkeeping after eager warmup, capture and replay.
@@ -160,7 +173,7 @@ public:
         if (capture_session_may_be_dirty_.load(std::memory_order_acquire)) {
             RTP_LLM_LOG_ERROR("Skip CUDA graph runner drain because capture/session cleanup did not complete; "
                               "the caller must fail model initialization instead of continuing eager execution");
-        } else if (isGenerationPrefillCudaGraph()) {
+        } else if (isGenerationPrefillCudaGraph() || agreed_decode_phase_) {
             try {
                 cuda_graph::GraphStreamGuard stream_guard(capture_stream_);
                 cuda_graph::graphDeviceSynchronize();
@@ -174,25 +187,29 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
-    void           captureDecode();
-    void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
-    void           capturePrefillOneSeqLen(int seq_len);
-    void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
-    void           prepareAttentionInputs(const PyModelInputs& inputs,
-                                          CudaGraphState&      state,
-                                          bool                 skip_forward_event_sync = false) override;
-    void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
-    bool           canRun(const PyModelInputs& inputs,
-                          CudaGraphState&      state,
-                          CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
-    void           replayGraph(int key);
-    void           replayDecode(int bs);
-    void           replayPrefill(int seq_len);
-    int            getCurrentRealGraphSize(const CudaGraphState& state) const;
-    PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
-    void           initCapture() override;
+    void             captureDecode();
+    void             capturePrefill();
+    void             captureDecodeOneBatchSize(int bs);
+    void             capturePrefillOneSeqLen(int seq_len);
+    void             prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
+    void             prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
+    void             prepareAttentionInputs(const PyModelInputs& inputs,
+                                            CudaGraphState&      state,
+                                            bool                 skip_forward_event_sync = false) override;
+    void             updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
+    bool             canRun(const PyModelInputs& inputs,
+                            CudaGraphState&      state,
+                            CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) override;
+    std::vector<int> decodeCaptureBuckets() const override;
+    int              decodeTokenWidth() const override;
+    bool             prepareAgreedDecode(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void             discardAgreedDecodePreparation() override;
+    void             replayGraph(int key);
+    void             replayDecode(int bs);
+    void             replayPrefill(int seq_len);
+    int              getCurrentRealGraphSize(const CudaGraphState& state) const;
+    PyModelOutputs   forward(const PyModelInputs& inputs, CudaGraphState& state) override;
+    void             initCapture() override;
 
     bool captureSessionMayBeDirty() const override {
         return capture_session_may_be_dirty_.load(std::memory_order_acquire);
@@ -201,9 +218,12 @@ public:
     // Complete capture with one ownership/error path for every graph role. A
     // failed dirty capture intentionally retains the runner until process exit;
     // a clean failure destroys it before propagating the original exception.
-    static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
+    using CaptureReadiness = std::function<void(int key, bool before_capture, bool local_ok)>;
+    static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner, CaptureReadiness readiness = {});
 
 private:
+    void             prepareCaptureStage(int key, bool before_capture, const std::function<void()>& prepare);
+    CaptureReadiness capture_readiness_;
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
@@ -238,6 +258,7 @@ private:
     std::vector<int> getPrefillSequenceLengthsToCapture();
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state, bool observe_fallback);
+    bool tryGetAgreedDecodeGraph(const PyModelInputs& inputs, CudaGraphState& state, CudaGraphCheckMode mode) const;
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
     bool tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state, bool observe_fallback);
     bool validateComboPositionIds(const PyModelInputs&  inputs,
@@ -246,32 +267,34 @@ private:
                                   size_t&               copy_numel) const;
     bool
     canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state, CudaGraphCheckMode mode) const;
-    void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
-    void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
-    void                    initCaptureAttentionInputsPost();
-    py::object              py_forward_method_;
-    py::object              py_attn_pyobj_method_;
-    py::object              py_after_warmup_method_;
-    py::object              py_after_capture_method_;
-    py::object              py_after_replay_method_;
-    bool                    enable_cuda_graph_{false};
-    bool                    is_prefill_cuda_graph_mode_{false};
-    bool                    is_target_verify_{false};
-    bool                    draft_prefill_uses_request_lanes_{false};
-    CudaGraphRole           role_{CudaGraphRole::AUTO};
-    cuda_graph::GraphStream capture_stream_;
-    bool                    enable_cuda_graph_debug_mode_{false};
-    size_t                  max_bs_{1};
-    int                     num_tokens_per_bs_{1};
-    int                     max_num_token_{1};
-    int64_t                 max_kernel_block_table_width_{0};
-    int                     max_seq_len_{0};
-    int                     request_max_seq_len_{0};
-    int                     hidden_size_{0};
-    size_t                  input_hidden_size_{0};
-    std::vector<int>        capture_range_;
-    std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    void          initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
+    void          initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void          initCaptureAttentionInputsPost();
+    py::object    py_forward_method_;
+    py::object    py_attn_pyobj_method_;
+    py::object    py_after_warmup_method_;
+    py::object    py_after_capture_method_;
+    py::object    py_after_replay_method_;
+    bool          enable_cuda_graph_{false};
+    bool          is_prefill_cuda_graph_mode_{false};
+    bool          is_target_verify_{false};
+    bool          draft_prefill_uses_request_lanes_{false};
+    CudaGraphRole role_{CudaGraphRole::AUTO};
+    std::optional<DecodeExecutionPhase> agreed_decode_phase_;
+    cuda_graph::GraphStream             capture_stream_;
+    bool                                enable_cuda_graph_debug_mode_{false};
+    size_t                              max_bs_{1};
+    int                                 num_tokens_per_bs_{1};
+    int                                 max_num_token_{1};
+    int64_t                             max_kernel_block_table_width_{0};
+    int                                 max_seq_len_{0};
+    int                                 request_max_seq_len_{0};
+    int                                 hidden_size_{0};
+    size_t                              input_hidden_size_{0};
+    std::vector<int>                    capture_range_;
+    std::vector<int>                    prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int>                    decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    std::vector<int>                    agreed_decode_buckets_;  // Request capacity, including for request-lane graphs
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
@@ -304,8 +327,9 @@ private:
     // Used only by generation-prefill to protect its asynchronous staging copies.
     torch::Event generation_prefill_prepare_event_ = cuda_graph::makeGraphEvent();
 
-    std::atomic<bool> prepared_attention_inputs_    = false;
-    std::atomic<bool> capture_session_may_be_dirty_ = false;
+    std::atomic<bool>            prepared_attention_inputs_ = false;
+    AgreedDecodeGraphPreparation agreed_decode_preparation_;
+    std::atomic<bool>            capture_session_may_be_dirty_ = false;
 };
 
 }  // namespace rtp_llm

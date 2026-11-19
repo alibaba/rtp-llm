@@ -6,6 +6,13 @@ _CUDA13_ONLY = select({
     "//conditions:default": ["@platforms//:incompatible"],
 })
 
+py_test(
+    name = "test_sm120_decode_workspace",
+    srcs = ["test_sm120_decode_workspace.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
 dsv4_sm120_py_test(
     name = "test_sm120_decode_combine",
     deps = [
@@ -17,8 +24,17 @@ dsv4_sm120_py_test(
 
 dsv4_sm120_py_test(
     name = "test_sm120_moe_numerics",
+    args = ["-k", "not test_sm120_decode_graph_experts"],
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
     visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_graph_experts",
+    src = "test_sm120_moe_numerics.py",
+    args = ["-k", "test_sm120_decode_graph_experts"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    visibility = ["//visibility:public"],
 )
 
 dsv4_sm120_py_test(
@@ -40,6 +56,36 @@ dsv4_sm120_py_test(
     tags = ["multi_device"],
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
     visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_transport_8rank",
+    src = "test_sm120_decode_transport.py",
+    gpu_count = 8,
+    args = ["-k", "test_bounded_dispatch_with_real_nccl_8rank"],
+    tags = ["multi_device"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    visibility = ["//visibility:public"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_graph_transport_4rank",
+    src = "test_sm120_decode_transport.py",
+    gpu_count = 4,
+    args = ["-k", "test_fixed_dispatch_graph_with_real_nccl_4rank"],
+    tags = ["multi_device"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    visibility = ["//visibility:public"],
+)
+
+dsv4_sm120_py_test(
+    name = "test_sm120_decode_graph_transport_8rank",
+    src = "test_sm120_decode_transport.py",
+    gpu_count = 8,
+    args = ["-k", "test_fixed_dispatch_graph_with_real_nccl_8rank"],
+    tags = ["multi_device"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    visibility = ["//visibility:public"],
 )
 
 py_test(

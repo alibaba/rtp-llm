@@ -214,7 +214,7 @@ def _build_block(
 class V4Transformer(nn.Module):
     """Standalone V4 forward. No TP/EP/PP sharding (world_size=1)."""
 
-    def __init__(self, args: V4Args, mw):
+    def __init__(self, args: V4Args, mw, *, sm120_workspace=None):
         """``mw`` is the framework's ``ModelWeights`` (with ``.global_weights``
         ``Dict[str, Tensor]`` keyed by ``W.*`` enum and ``.weights[layer_id]``
         per-layer dicts).  Required — every dsv4 sub-module reads its
@@ -274,7 +274,7 @@ class V4Transformer(nn.Module):
             Sm120MoeWorkspace,
         )
 
-        self._sm120_moe_workspace = Sm120MoeWorkspace()
+        self._sm120_moe_workspace = sm120_workspace or Sm120MoeWorkspace()
         self.layers = nn.ModuleList(
             [
                 _build_block(

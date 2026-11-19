@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace rtp_llm {
@@ -76,24 +77,40 @@ struct GraphParams {
     // setting them after capture leaves the graph bound to undefined tensors.
     torch::Tensor position_encoding;
     torch::Tensor token_type_embedding;
+    // Optional phase identity for runtimes that agree on one graph before
+    // launching collective model execution.
+    std::optional<DecodeExecutionPhase> agreed_decode_phase;
 };
 
 class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
-    virtual void           initCapture()                                                 = 0;
-    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
-    virtual void           setPositionEncoding(torch::Tensor position_encoding)          = 0;
-    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)     = 0;
-    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)         = 0;
-    virtual bool           canRun(const PyModelInputs& inputs,
-                                  CudaGraphState&      state,
-                                  CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) = 0;
-    virtual bool           captureSessionMayBeDirty() const                              = 0;
-    virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
-                                                  CudaGraphState&      state,
-                                                  bool                 skip_forward_event_sync = false)  = 0;
+    virtual void             initCapture()                                                 = 0;
+    virtual PyModelOutputs   forward(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    virtual void             setPositionEncoding(torch::Tensor position_encoding)          = 0;
+    virtual void             setTokenTypeEmbedding(torch::Tensor token_type_embedding)     = 0;
+    virtual void             setInputEmbeddingScalar(float input_embedding_scalar)         = 0;
+    virtual bool             canRun(const PyModelInputs& inputs,
+                                    CudaGraphState&      state,
+                                    CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) = 0;
+    virtual bool             captureSessionMayBeDirty() const                              = 0;
+    virtual std::vector<int> decodeCaptureBuckets() const {
+        return {};
+    }
+    virtual int decodeTokenWidth() const {
+        return 0;
+    }
+    // A successful preparation stages the exact graph in state. The caller
+    // either forwards the same invocation or discards it after rank agreement.
+    virtual bool prepareAgreedDecode(const PyModelInputs&, CudaGraphState&) {
+        return false;
+    }
+    virtual void discardAgreedDecodePreparation() {}
+
+    virtual void prepareAttentionInputs(const PyModelInputs& inputs,
+                                        CudaGraphState&      state,
+                                        bool                 skip_forward_event_sync = false) = 0;
 
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.

@@ -19,6 +19,12 @@ cc_library(
 )
 
 cc_library(
+    name = "decode_execution",
+    hdrs = ["decode_execution.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "prepared_attention_inputs_guard",
     hdrs = ["prepared_attention_inputs_guard.h"],
     visibility = ["//visibility:public"],
@@ -49,6 +55,7 @@ filegroup(
         "combo_position_ids_validation.h",
         "generation_prefill_cuda_graph_replay_metadata.h",
         "cuda_graph_device_shims.h",
+        "decode_execution.h",
         "prepared_attention_inputs_guard.h",
         "cuda_graph_utils.h",
         "cuda_graph_runner.h",

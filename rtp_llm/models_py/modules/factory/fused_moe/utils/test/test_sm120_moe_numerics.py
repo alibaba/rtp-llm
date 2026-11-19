@@ -140,3 +140,103 @@ def test_executor_matches_unpacked_reference(layout, rows, backend, limit):
             captured = forward(x, weights, ids)
         graph.replay()
         check(captured)
+
+
+def test_sm120_decode_graph_experts():
+    from flashinfer import mxfp8_quantize
+
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_graph_decode import (
+        Sm120GraphDecodeExperts,
+        _fixed_payload_views,
+        pack_fixed_payload,
+        require_sm120_decode_graph_providers,
+    )
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.graph_decode import (
+        Sm120DecodeMoeGeometry,
+    )
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+        Sm120MoeWorkspace,
+    )
+    from rtp_llm.ops.compute_ops import DecodeExecutionMode
+
+    require_sm120_decode_graph_providers()
+    torch.manual_seed(1729)
+    device = torch.device("cuda", torch.cuda.current_device())
+    geometry = Sm120DecodeMoeGeometry(33, 4, 512, 512, 16, 2)
+    rows, dim, inter = geometry.rows, geometry.hidden, geometry.inter
+    experts, topk = geometry.local_experts, geometry.topk
+    cfg = SimpleNamespace(
+        n_routed_experts=experts,
+        n_activated_experts=topk,
+        dim=dim,
+        moe_inter_dim=inter,
+        moe_w1_layout="gate_up",
+        swiglu_limit=1.5,
+    )
+    layer_weights, dense = _weights(experts, dim, inter, cfg.moe_w1_layout)
+    executor = Sm120GraphDecodeExperts(cfg, layer_weights)
+    plan = SimpleNamespace(mode=DecodeExecutionMode.GRAPH)
+    pools = (Sm120MoeWorkspace(), Sm120MoeWorkspace())
+    for pool in pools:
+        pool.reserve_decode_graph_workspace(geometry, device)
+    capture_ws, eager_ws = (
+        pool.decode_graph_workspace(plan, geometry, device) for pool in pools
+    )
+    x = torch.randn(rows, dim, dtype=torch.bfloat16, device=device) * 0.2
+    # Every row targets a single expert; expert capacity must permit all N
+    # assignments. Duplicate IDs exercise the bound for hash routing.
+    ids = torch.zeros(rows, topk, dtype=torch.int64, device=device)
+    weights = torch.full((rows, topk), 0.5, device=device)
+    valid = torch.ones(rows, dtype=torch.bool, device=device)
+
+    def run_masked(ws):
+        pack_fixed_payload(x, weights, ids, valid, ws.gathered, geometry.total_experts)
+        q, scales, local_weights, local_ids = _fixed_payload_views(
+            ws.gathered, dim, topk
+        )
+        executor._forward_coalesced(
+            q, local_weights, local_ids, scales, geometry, 0, ws
+        )
+        return ws.partial
+
+    run_masked(capture_ws)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        output = run_masked(capture_ws)
+
+    for live, expert in ((rows, 0), (1, 1), (0, 2), (rows - 1, 2)):
+        x.copy_(torch.randn_like(x) * 0.2)
+        ids.fill_(expert)
+        valid.copy_(torch.arange(rows, device=device) < live)
+        graph.replay()
+        fixed = run_masked(eager_ws)
+        torch.testing.assert_close(output, fixed, rtol=0, atol=0)
+        torch.testing.assert_close(
+            output[live:], torch.zeros_like(output[live:]), rtol=0, atol=0
+        )
+        if live == 0:
+            continue
+
+        mxfp8, mxfp8_scale = mxfp8_quantize(x[:live], is_sf_swizzled_layout=False)
+        scales = mxfp8_scale.view(torch.uint8).reshape(live, -1)
+        restored = (
+            (
+                mxfp8.float().reshape(live, -1, 32)
+                * torch.exp2(scales.float() - 127).unsqueeze(-1)
+            )
+            .reshape(live, dim)
+            .to(torch.bfloat16)
+        )
+        contiguous = executor.forward_contiguous(
+            mxfp8, weights[:live], ids[:live], input_scale=scales
+        )
+        independent = _reference(
+            restored, weights[:live], ids[:live], dense, cfg.swiglu_limit
+        )
+        # FP8 rounding is measured separately from the masked-versus-
+        # contiguous kernel tolerance and the bitwise replay check.
+        compute_error = (output[:live] - independent).norm() / independent.norm()
+        layout_error = (output[:live] - contiguous).norm() / contiguous.norm()
+        assert compute_error < 0.08
+        assert layout_error < 0.01

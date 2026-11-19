@@ -1385,6 +1385,44 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {
     }
 }
 
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerCancelsWorkAndClosesAdmission) {
+    auto [cache_manager, resource_context, model_config, runtime_config] = makeBatchDecodeResources(
+        makeMhaCacheConfig(1, 11, 1, 4, 8, rtp_llm::DataType::TYPE_FP16), /*tokens_per_block=*/0);
+    ASSERT_TRUE(cache_manager->init());
+    BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
+    const auto           idle = scheduler.scheduleWithoutWaiting();
+    ASSERT_TRUE(idle.ok());
+    EXPECT_TRUE(idle->streams.empty());
+    auto first  = makeStream({1, 2}, model_config, runtime_config, resource_context, 2);
+    auto second = makeStream({3, 4}, model_config, runtime_config, resource_context, 2);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {first, second}));
+    const auto batch = scheduler.schedule();
+    ASSERT_TRUE(batch.ok());
+    ASSERT_EQ(batch->streams.size(), 2);
+    auto queued = makeStream({5, 6}, model_config, runtime_config, resource_context, 2);
+    ASSERT_TRUE(scheduler.enqueue(queued).ok());
+    ASSERT_EQ(scheduler.onflightStreams(), 3);
+
+    ASSERT_TRUE(scheduler.stop().ok());
+    EXPECT_EQ(scheduler.onflightStreams(), 3);
+    for (const auto& stream : {first, second, queued}) {
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+    }
+    auto single = makeStream({7, 8}, model_config, runtime_config, resource_context, 2);
+    EXPECT_TRUE(absl::IsCancelled(scheduler.enqueue(single)));
+    EXPECT_EQ(single->statusInfo().code(), ErrorCode::CANCELLED);
+    auto group = makeStream({9, 10}, model_config, runtime_config, resource_context, 2);
+    EXPECT_EQ(scheduler.enqueueGroup({group}).first, std::vector<bool>{false});
+    EXPECT_EQ(group->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(scheduler.onflightStreams(), 3);
+    scheduler.finalizeCancelledStreams();
+    EXPECT_EQ(scheduler.onflightStreams(), 0);
+    for (const auto& stream : {first, second, queued}) {
+        EXPECT_TRUE(stream->isFinished());
+    }
+    ASSERT_TRUE(scheduler.stop().ok());
+}
+
 TEST_F(FIFOSchedulerTest, testFIFOAdmissionModeStillIncludesRunningStream) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 32, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);

@@ -148,13 +148,44 @@ cc_test(
         }),
         exec_properties = {"gpu": "L20_CU13"},
         tags = ["L20_CU13"],
-        deps = [":mock_engine"] + cuda13_torch_link_deps,
+        deps = [
+            ":mock_engine",
+            "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+        ] + cuda13_torch_link_deps,
     )
     for mode, stream_async in [
         ("sync", "0"),
         ("async", "1"),
     ]
 ]
+
+cc_test(
+    name = "dsv4_dp_decode_policy_test",
+    srcs = ["Dsv4DpDecodePolicyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:dsv4_dp_decode_policy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "dsv4_dp_decode_runtime_test_bindings",
+    testonly = True,
+    srcs = ["Dsv4DpDecodeRuntimeTestBindings.cc"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/normal_engine:dsv4_dp_decode_runtime"] + torch_deps(),
+    linkshared = True,
+)
+
+py_test(
+    name = "dsv4_dp_decode_runtime_test",
+    srcs = ["dsv4_dp_decode_runtime_test.py"],
+    data = [":dsv4_dp_decode_runtime_test_bindings"],
+    deps = ["//rtp_llm:torch"],
+    size = "medium",
+)
 
 cc_test(
     name = "dsv4_dp_prefill_policy_test",

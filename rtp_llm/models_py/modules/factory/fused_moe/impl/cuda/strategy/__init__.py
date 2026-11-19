@@ -17,6 +17,7 @@ from .fp8_fp4 import (
     CudaMegaMoeStrategy,
     CudaSm120DecodeStrategy,
     CudaSm120FusedMoeStrategy,
+    CudaSm120GraphDecodeStrategy,
     CudaSm120GroupedFp4Strategy,
 )
 from .fp8_per_block import (
@@ -77,5 +78,6 @@ __all__ = [
     "CudaLocalLoopStrategy",
     "CudaSm120GroupedFp4Strategy",
     "CudaSm120FusedMoeStrategy",
+    "CudaSm120GraphDecodeStrategy",
     "CudaSm120DecodeStrategy",
 ]

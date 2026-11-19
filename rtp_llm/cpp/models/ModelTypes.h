@@ -57,6 +57,8 @@ enum class MtpIndexerRole : int32_t {
     REUSE  = 2,
 };
 
+class AgreedDecodeExecution;
+
 struct GptModelInitParams {
     const rtp_llm::Weights                       weights;
     const GptModelDescription                    description;
@@ -84,7 +86,8 @@ struct GptModelInitParams {
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
 
     // Warmup wrappers borrow the Python model later used by the real executor.
-    bool owns_py_model = true;
+    bool                   owns_py_model           = true;
+    AgreedDecodeExecution* agreed_decode_execution = nullptr;
 };
 
 enum GptModelInputIndex : size_t {

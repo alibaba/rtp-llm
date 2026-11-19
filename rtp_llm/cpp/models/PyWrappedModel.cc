@@ -815,7 +815,9 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
-    prepareAttentionInputs(inputs, false);
+    if (!agreed_decode_execution_) {
+        prepareAttentionInputs(inputs, false);
+    }
 }
 
 void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
@@ -890,7 +892,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                            torch_ext::BertEmbeddingInputs()});
     auto* runner          = selectGraphRunner(attention_inputs_);
     auto& state           = selectGraphState(attention_inputs_);
-    if (moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr
+    if (!agreed_decode_execution_ && moe_forward_allows_graph_ && enable_cuda_graph_ && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
@@ -939,27 +941,52 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
     } flag_guard{prepared_attention_inputs_};
 
-    if (hidden_state_capture_publisher_) {
-        hidden_state_capture_publisher_->beginForward();
-    }
-    cp_mtp_last_hidden_states_ = torch::Tensor();
-    holdInputsHostBuffers(inputs);
-    const bool capture_hidden_states = shouldCaptureHiddenStates(inputs);
-    const auto capture_input_ids     = capture_hidden_states ? inputs.combo_tokens : torch::Tensor();
-
-    const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-    // Packed hidden-state collection is eager, not a generation-prefill graph attempt.
-    GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
-        !capture_hidden_states && owns_generation_prefill_cuda_graph_ && !is_prefill_cuda_graph_mode_
-                && has_context_request ?
-            generation_prefill_cuda_graph_init_status_ :
-            GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
-    const auto with_generation_prefill_cuda_graph_status = [&](GptModelOutputs outputs) {
-        outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
-        return outputs;
+    std::optional<DecodeExecution> pending_decode_execution;
+    const auto                     report_decode_failure = [&] {
+        if (pending_decode_execution) {
+            (void)finishPendingDecodePreparation(
+                *agreed_decode_execution_, pending_decode_execution, DecodePreparationStatus::INVALID);
+        }
     };
 
     try {
+        if (agreed_decode_execution_) {
+            const int64_t rows     = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
+            const bool    verifies = agreed_decode_phase_ == DecodeExecutionPhase::TARGET_VERIFY
+                                  || agreed_decode_phase_ == DecodeExecutionPhase::DSPARK_PROPOSAL
+                                  || agreed_decode_phase_ == DecodeExecutionPhase::DSPARK_COMMIT;
+            const bool prefill_shape = verifies || agreed_decode_phase_ == DecodeExecutionPhase::MTP_COMMIT;
+            const bool valid         = rows > 0 && inputs.input_lengths.dim() == 1 && inputs.combo_tokens.defined()
+                               && inputs.combo_tokens.numel() / agreed_decode_token_width_ == rows
+                               && inputs.combo_tokens.numel() % agreed_decode_token_width_ == 0
+                               && inputs.is_target_verify == verifies && inputs.sequence_lengths.defined()
+                               && inputs.sequence_lengths.numel() == (prefill_shape ? 0 : rows);
+            const int64_t local_requests = valid ? (inputs.is_fake_stream ? 0 : rows) : -1;
+            const auto    planned        = agreed_decode_execution_->plan(
+                agreed_decode_phase_, agreed_decode_token_width_, local_requests, owns_py_model_);
+            pending_decode_execution = planned.execution;
+            RTP_LLM_CHECK_WITH_INFO(planned.valid_local_input,
+                                    "decode input geometry does not match the agreed scheduling round");
+        }
+        if (hidden_state_capture_publisher_) {
+            hidden_state_capture_publisher_->beginForward();
+        }
+        cp_mtp_last_hidden_states_ = torch::Tensor();
+        holdInputsHostBuffers(inputs);
+        const bool capture_hidden_states = shouldCaptureHiddenStates(inputs);
+        const auto capture_input_ids     = capture_hidden_states ? inputs.combo_tokens : torch::Tensor();
+        const bool has_context_request   = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        // Packed hidden-state collection is eager, not a generation-prefill graph attempt.
+        GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
+            !capture_hidden_states && owns_generation_prefill_cuda_graph_ && !is_prefill_cuda_graph_mode_
+                    && has_context_request ?
+                generation_prefill_cuda_graph_init_status_ :
+                GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
+        const auto with_generation_prefill_cuda_graph_status = [&](GptModelOutputs outputs) {
+            outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
+            return outputs;
+        };
+
         RTP_LLM_LOG_DEBUG("Calling forward method on Python object instance.");
 
         PyContextParallelParams cp_params;
@@ -1039,8 +1066,59 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
-                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        bool can_run_graph = false;
+        // The graph and fallback each prepare all rank-local inputs before a
+        // final readiness exchange. Only the resulting plan may launch work.
+        if (pending_decode_execution) {
+            if (inputs.is_fake_stream || !inputs.decode_row_validity.defined()) {
+                py_model_inputs.decode_row_validity =
+                    torch::full({token_ids.numel()}, !inputs.is_fake_stream, token_ids.options().dtype(torch::kBool));
+            } else {
+                const auto& validity = inputs.decode_row_validity;
+                RTP_LLM_CHECK_WITH_INFO(
+                    validity.device() == token_ids.device() && validity.scalar_type() == torch::kBool
+                        && validity.dim() == 1 && validity.is_contiguous() && validity.numel() == token_ids.numel(),
+                    "agreed decode row validity must be a contiguous device mask matching token rows");
+                py_model_inputs.decode_row_validity = validity;
+            }
+            const auto agreed = prepareAgreedDecodeExecution(
+                *agreed_decode_execution_,
+                pending_decode_execution,
+                [&](const DecodeExecution& planned) {
+                    py_model_inputs.decode_execution = planned;
+                    const bool locally_ready         = !capture_hidden_states && graph_runner != nullptr
+                                               && graph_runner->prepareAgreedDecode(py_model_inputs, graph_state);
+                    if (!locally_ready) {
+                        RTP_LLM_LOG_DEBUG("decode graph readiness phase=%d bucket=%d reason=%s",
+                                          static_cast<int>(planned.phase),
+                                          planned.bucket,
+                                          capture_hidden_states   ? "hidden_state_capture" :
+                                          graph_runner == nullptr ? "runner_unavailable" :
+                                                                    "graph_input_or_bucket_incompatible");
+                    }
+                    return locally_ready;
+                },
+                [&] {
+                    if (graph_runner != nullptr) {
+                        graph_runner->discardAgreedDecodePreparation();
+                    }
+                },
+                [&](const DecodeExecution& planned) {
+                    py_model_inputs.decode_execution = planned;
+                    py::gil_scoped_acquire gil;
+                    held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+                // Surface rank-local device preparation failures before
+                // every peer enters the eager EP collectives.
+#if USING_CUDA || USING_ROCM
+                    cuda_graph::graphGetCurrentStream().synchronize();
+#endif
+                });
+            py_model_inputs.decode_execution = agreed;
+            can_run_graph                    = agreed.mode == DecodeExecutionMode::GRAPH;
+        } else {
+            can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
+                            && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        }
         // The eager Python instance retains this wrapper's SEED/REUSE role and
         // shares its request-local TopK buffer with the graph clones. Batches
         // outside the captured buckets must use that same role eagerly.
@@ -1070,7 +1148,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            if (!agreed_decode_execution_) {
+                held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            }
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
@@ -1184,12 +1264,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
+        report_decode_failure();
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
+        report_decode_failure();
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
         RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
+        report_decode_failure();
         throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }
 }

@@ -28,8 +28,12 @@ def _configs(
     local_world_size=1,
     cp_enabled=False,
     spec_type=SpeculativeType.NONE,
+    speculative_width=3,
     moe_strategy="auto",
     cuda_graph=False,
+    buckets=(1, 4),
+    eplb=False,
+    multi_task_prompt_tokens=None,
 ):
     return SimpleNamespace(
         role_config=SimpleNamespace(role_type=role_type),
@@ -42,21 +46,32 @@ def _configs(
             local_world_size=local_world_size,
             prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp_enabled),
         ),
-        sp_config=SimpleNamespace(type=spec_type),
+        sp_config=SimpleNamespace(type=spec_type, gen_num_per_cycle=speculative_width),
         moe_config=SimpleNamespace(moe_strategy=moe_strategy),
-        py_hw_kernel_config=SimpleNamespace(enable_cuda_graph=cuda_graph),
+        py_hw_kernel_config=SimpleNamespace(
+            enable_cuda_graph=cuda_graph, decode_capture_batch_sizes=buckets
+        ),
+        concurrency_config=SimpleNamespace(concurrency_limit=8),
+        eplb_config=SimpleNamespace(enable_eplb=lambda: eplb),
+        kv_cache_config=SimpleNamespace(
+            multi_task_prompt_tokens=multi_task_prompt_tokens or {}
+        ),
     )
 
 
 class Sm120Dsv4WorkerProfileTest(TestCase):
     """Accepted profiles: PREFILL TP4/CP4/DP1/EP4/world4, DECODE
-    TP1/DP4/EP4/world4 CP-off, aligned PDFUSION TP1 DP=EP=world."""
+    TP1 DP=EP=world in {4, 8} CP-off, aligned PDFUSION TP1 DP=EP=world."""
 
     def _validate(self, configs, sm120=True):
-        with patch(
-            "rtp_llm.config.server_config_setup."
-            "_auto_deepep_supported_on_visible_devices",
-            return_value=not sm120,
+        with (
+            patch(
+                "rtp_llm.config.server_config_setup."
+                "_auto_deepep_supported_on_visible_devices",
+                return_value=not sm120,
+            ),
+            patch("torch.cuda.device_count", return_value=8),
+            patch("torch.cuda.get_device_capability", return_value=(12, 0)),
         ):
             _validate_sm120_dsv4_worker_profile(configs)
 
@@ -85,48 +100,137 @@ class Sm120Dsv4WorkerProfileTest(TestCase):
         self._validate(cfg)
         self.assertEqual(cfg.moe_config.moe_strategy, "sm120_a2a_decode")
 
-    def test_decode_eager_with_and_without_mtp_accepted(self):
-        # With graphs disabled the canonical sm120_a2a_decode backend runs
-        # eagerly for both auto-resolved and explicit strategies, with or
-        # without speculation.
-        for moe_strategy in ("auto", "sm120_a2a_decode"):
+    def test_decode_eager_profiles(self):
+        for world in (4, 8):
             for spec_type in (SpeculativeType.NONE, SpeculativeType.MTP):
-                with self.subTest(moe_strategy=moe_strategy, spec_type=spec_type):
-                    cfg = _configs(
-                        RoleType.DECODE,
-                        tp_size=1,
-                        dp_size=4,
-                        ep_size=4,
-                        world_size=4,
-                        local_world_size=4,
-                        spec_type=spec_type,
-                        moe_strategy=moe_strategy,
-                    )
-                    self._validate(cfg)
-                    self.assertEqual(cfg.moe_config.moe_strategy, "sm120_a2a_decode")
-
-    def test_decode_cuda_graph_rejected_before_backend(self):
-        # sm120_a2a_decode is eager-only: a valid TP1/DP4/EP4/world4 DECODE
-        # profile must fail at startup when CUDA graphs are enabled, whether
-        # the strategy is auto-resolved or explicit, with or without MTP.
-        for moe_strategy in ("auto", "sm120_a2a_decode"):
-            for spec_type in (SpeculativeType.NONE, SpeculativeType.MTP):
-                with self.subTest(moe_strategy=moe_strategy, spec_type=spec_type):
-                    cfg = _configs(
-                        RoleType.DECODE,
-                        tp_size=1,
-                        dp_size=4,
-                        ep_size=4,
-                        world_size=4,
-                        local_world_size=4,
-                        spec_type=spec_type,
-                        moe_strategy=moe_strategy,
-                        cuda_graph=True,
-                    )
-                    with self.assertRaisesRegex(ValueError, "sm120_a2a_decode") as ctx:
+                for strategy in ("auto", "sm120_a2a_decode"):
+                    with self.subTest(
+                        world=world, spec_type=spec_type, strategy=strategy
+                    ):
+                        cfg = _configs(
+                            RoleType.DECODE,
+                            dp_size=world,
+                            ep_size=world,
+                            world_size=world,
+                            local_world_size=world,
+                            spec_type=spec_type,
+                            moe_strategy=strategy,
+                        )
                         self._validate(cfg)
-                    self.assertIn("eager execution", str(ctx.exception))
-                    self.assertIn("collective protocol", str(ctx.exception))
+                        self.assertEqual(
+                            cfg.moe_config.moe_strategy, "sm120_a2a_decode"
+                        )
+
+    def test_multihost_decode_eager_profiles(self):
+        for strategy in ("auto", "sm120_a2a_decode"):
+            with self.subTest(strategy=strategy):
+                cfg = _configs(
+                    RoleType.DECODE,
+                    dp_size=4,
+                    ep_size=4,
+                    world_size=4,
+                    local_world_size=2,
+                    moe_strategy=strategy,
+                )
+                self._validate(cfg)
+                self.assertEqual(cfg.moe_config.moe_strategy, "sm120_a2a_decode")
+
+    def test_decode_graph_profiles(self):
+        for world in (4, 8):
+            for spec_type in (
+                SpeculativeType.NONE,
+                SpeculativeType.MTP,
+                SpeculativeType.DSPARK,
+            ):
+                for strategy in ("auto", "sm120_graph_decode"):
+                    with self.subTest(
+                        world=world, spec_type=spec_type, strategy=strategy
+                    ):
+                        cfg = _configs(
+                            RoleType.DECODE,
+                            dp_size=world,
+                            ep_size=world,
+                            world_size=world,
+                            local_world_size=world,
+                            spec_type=spec_type,
+                            moe_strategy=strategy,
+                            cuda_graph=True,
+                        )
+                        self._validate(cfg)
+                        self.assertEqual(
+                            cfg.moe_config.moe_strategy, "sm120_graph_decode"
+                        )
+
+    def test_decode_graph_rejects_incompatible_strategy_and_topology(self):
+        for changes, message in (
+            ({"buckets": (1, 1)}, "unique positive buckets"),
+            (
+                {"spec_type": SpeculativeType.MTP, "speculative_width": 0},
+                "positive speculative width",
+            ),
+            ({"moe_strategy": "sm120_a2a_decode"}, "requires eager execution"),
+            (
+                {"cuda_graph": False, "moe_strategy": "sm120_graph_decode"},
+                "enable_cuda_graph",
+            ),
+            ({"local_world_size": 4}, "single-host"),
+            ({"cp_enabled": True}, "CP off"),
+            ({"buckets": ()}, "DECODE_CAPTURE_CONFIG"),
+            ({"buckets": (1, 9)}, "CONCURRENCY_LIMIT"),
+            ({"eplb": True}, "fixed expert ownership"),
+            ({"multi_task_prompt_tokens": {"system": [1]}}, "local system prompts"),
+        ):
+            with self.subTest(changes=changes):
+                kwargs = dict(
+                    dp_size=8,
+                    ep_size=8,
+                    world_size=8,
+                    local_world_size=8,
+                    cuda_graph=True,
+                )
+                kwargs.update(changes)
+                with self.assertRaisesRegex(ValueError, message):
+                    self._validate(_configs(RoleType.DECODE, **kwargs))
+
+    def test_decode_graph_workspace_bounds_and_phase_accounting(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.graph_decode import (
+            Sm120DecodeMoeGeometry,
+            decode_workspace_geometry,
+        )
+
+        one = Sm120DecodeMoeGeometry(16, 8, 4096, 2048, 256, 6)
+        self.assertEqual(one.expert_capacity, 128)
+        self.assertEqual(one.local_experts, 32)
+        verify = Sm120DecodeMoeGeometry(64, 8, 4096, 2048, 256, 6)
+        self.assertEqual(verify.expert_capacity, 512)
+        self.assertEqual(
+            decode_workspace_geometry([16, 8], [1, 4, 4], 8, 4096, 2048, 256, 6),
+            verify,
+        )
+        with self.assertRaisesRegex(ValueError, "kernel extents"):
+            Sm120DecodeMoeGeometry(1 << 22, 8, 4096, 2048, 256, 6)
+        with self.assertRaisesRegex(ValueError, "geometry"):
+            Sm120DecodeMoeGeometry(16, 8, 4096, 2048, 254, 6)
+
+    def test_decode_graph_rejects_mixed_devices(self):
+        cfg = _configs(
+            RoleType.DECODE,
+            dp_size=4,
+            ep_size=4,
+            world_size=4,
+            local_world_size=4,
+            cuda_graph=True,
+        )
+        with (
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.device_count", return_value=4),
+            patch(
+                "torch.cuda.get_device_capability",
+                side_effect=lambda rank: (12, 0) if rank < 3 else (12, 1),
+            ),
+            self.assertRaisesRegex(ValueError, "homogeneous exact SM120"),
+        ):
+            _validate_sm120_dsv4_worker_profile(cfg)
 
     def test_pdfusion_non_mtp_profile_rejected_before_backend(self):
         # The exact retired profile: non-speculative sm120_a2a_decode PDFUSION
@@ -233,7 +337,7 @@ class Sm120Dsv4WorkerProfileTest(TestCase):
         )
         with self.assertRaisesRegex(ValueError, "tp=2") as ctx:
             self._validate(cfg)
-        self.assertIn("Required: TP1/DP4/EP4/world4", str(ctx.exception))
+        self.assertIn("Required: TP1 DECODE", str(ctx.exception))
 
     def test_pp_size_must_be_one(self):
         cfg = _configs(

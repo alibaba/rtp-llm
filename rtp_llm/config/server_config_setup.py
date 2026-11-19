@@ -10,12 +10,7 @@ import torch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
-from rtp_llm.ops import (
-    ParallelismConfig,
-    PrefillCPConfig,
-    RoleType,
-    SpeculativeType,
-)
+from rtp_llm.ops import ParallelismConfig, PrefillCPConfig, RoleType, SpeculativeType
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 RUN_AFFINITY_TIMEOUT_SEC = 10
@@ -268,8 +263,7 @@ def _apply_auto_deepep_config(
         is_multi_gpu = stage_size > 1
         stage_group = layout.group_of(Group.STAGE, parallelism_config.world_rank)
         is_multi_node = (
-            min(stage_group) // local_world_size
-            != max(stage_group) // local_world_size
+            min(stage_group) // local_world_size != max(stage_group) // local_world_size
         )
     else:
         is_single_gpu = world_size == 1
@@ -342,25 +336,28 @@ def _validate_sm120_dsv4_worker_profile(py_env_configs) -> None:
     architectures and roles keep main behavior. Accepted profiles:
 
       PREFILL : PP1, physical TP4 (CP4), DP1, EP4, world4, prefill CP enabled
-      DECODE  : PP1, TP1, DP4, EP4, world4, no local CP; eager execution
-                only (CUDA graphs are rejected)
+      DECODE  : single-host PP1, TP1, DP=EP=world in {4, 8}, no local CP;
+                the graph profile uses its own MoE strategy and finite buckets
       PDFUSION: PP1, TP1, DP == EP == world, no local CP; over DP > 1 the
                 sm120_a2a_decode backend runs eagerly only (CUDA graphs are
                 rejected), and non-speculative sm120_a2a_decode PDFUSION over
                 DP > 1 is unsupported (use active MTP or separate roles)
 
-    Keep this in sync with the C++ twin in
-    ``rtp_llm/cpp/normal_engine/Dsv4DpPrefillPolicy.h`` (engine-side
-    admission, needed because a wrong topology can hang inside NCCL before
-    Python error handling runs) and with the auto-selection table in
+    Keep this in sync with the C++ admission policies in
+    ``rtp_llm/cpp/normal_engine`` and with the auto-selection table in
     ``rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/strategy/fp8_fp4.py``.
     """
     role = py_env_configs.role_config.role_type
     if role not in {RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION}:
         return
     p = py_env_configs.parallelism_config
+    moe = py_env_configs.moe_config
+    current = getattr(moe, "moe_strategy", "auto") or "auto"
     if _auto_deepep_supported_on_visible_devices(p.local_world_size):
-        # No participating device is exact SM120; not the target lane.
+        if current == "sm120_graph_decode":
+            raise ValueError(
+                "sm120_graph_decode requires homogeneous exact SM120 devices"
+            )
         return
 
     cp_cfg = getattr(p, "prefill_cp_config", None)
@@ -395,12 +392,14 @@ def _validate_sm120_dsv4_worker_profile(py_env_configs) -> None:
     elif role == RoleType.DECODE:
         ok = (
             p.tp_size == 1
-            and p.dp_size == 4
-            and p.ep_size == 4
-            and p.world_size == 4
+            and p.dp_size in (4, 8)
+            and p.dp_size == p.ep_size == p.world_size
+            and (not graph_on or p.world_size == p.local_world_size)
             and not cp_on
         )
-        required = "TP1/DP4/EP4/world4 DECODE (CP off)"
+        required = "TP1 DECODE with DP=EP=world in {4, 8} (CP off)"
+        if graph_on:
+            required = f"single-host {required}"
     else:  # PDFUSION
         base = p.tp_size == 1 and p.dp_size == p.ep_size == p.world_size and not cp_on
         ok = base
@@ -413,13 +412,23 @@ def _validate_sm120_dsv4_worker_profile(py_env_configs) -> None:
 
     # Resolve the required MoE strategy at startup instead of letting an
     # unsupported `auto` surface during execution.
-    moe = py_env_configs.moe_config
     canonical = {
         RoleType.PREFILL: "sm120_fused_moe",
-        RoleType.DECODE: "sm120_a2a_decode",
+        RoleType.DECODE: "sm120_graph_decode" if graph_on else "sm120_a2a_decode",
         RoleType.PDFUSION: "sm120_a2a_decode" if p.dp_size > 1 else None,
     }[role]
-    current = getattr(moe, "moe_strategy", "auto") or "auto"
+    if current == "sm120_graph_decode" and canonical != current:
+        raise ValueError(
+            "sm120_graph_decode requires a dedicated SM120 DECODE worker with "
+            "enable_cuda_graph=true"
+        )
+    if current == "sm120_a2a_decode" and graph_on and role == RoleType.DECODE:
+        raise ValueError(
+            "sm120_a2a_decode requires eager execution; CUDA graphs use the "
+            "sm120_graph_decode collective protocol"
+        )
+    if canonical == "sm120_graph_decode":
+        _validate_sm120_decode_graph_config(py_env_configs, p.world_size)
     if canonical is not None:
         if current == "auto":
             moe.moe_strategy = canonical
@@ -461,6 +470,44 @@ def _validate_sm120_dsv4_worker_profile(py_env_configs) -> None:
             "unsupported for the exact-SM120 DSv4 DECODE and "
             "PDFUSION(DP>1) collective protocol; set enable_cuda_graph=false"
         )
+
+
+def _validate_sm120_decode_graph_config(configs, world: int) -> None:
+    if torch.cuda.device_count() < world or any(
+        torch.cuda.get_device_capability(rank) != (12, 0) for rank in range(world)
+    ):
+        raise ValueError("sm120_graph_decode requires homogeneous exact SM120 devices")
+    if configs.sp_config.type not in (
+        SpeculativeType.NONE,
+        SpeculativeType.MTP,
+        SpeculativeType.DSPARK,
+    ):
+        raise ValueError("sm120_graph_decode supports ordinary decode, MTP and DSpARK")
+    width = 1
+    if configs.sp_config.type != SpeculativeType.NONE:
+        width = int(configs.sp_config.gen_num_per_cycle) + 1
+        if width <= 1:
+            raise ValueError("sm120_graph_decode requires a positive speculative width")
+    buckets = configs.py_hw_kernel_config.decode_capture_batch_sizes
+    # Match the fixed-size startup control record and signed row-count bounds.
+    limit = min(
+        configs.concurrency_config.concurrency_limit,
+        (2**31 - 1) // (world * width),
+    )
+    if (
+        not buckets
+        or len(buckets) > 32
+        or len(set(buckets)) != len(buckets)
+        or any(bucket <= 0 or bucket > limit for bucket in buckets)
+    ):
+        raise ValueError(
+            "sm120_graph_decode requires DECODE_CAPTURE_CONFIG with up to 32 "
+            "unique positive buckets that fit CONCURRENCY_LIMIT and EP layout"
+        )
+    if configs.eplb_config.enable_eplb():
+        raise ValueError("sm120_graph_decode requires fixed expert ownership")
+    if configs.kv_cache_config.multi_task_prompt_tokens:
+        raise ValueError("sm120_graph_decode does not accept local system prompts")
 
 
 def set_parallelism_config(

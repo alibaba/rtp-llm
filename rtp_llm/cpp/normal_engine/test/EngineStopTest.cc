@@ -20,6 +20,7 @@
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #undef protected
 #undef private
+#include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "gtest/gtest.h"
 
 namespace rtp_llm {
@@ -246,13 +247,51 @@ TEST_P(EngineStopTest, StopWaitsForInFlightPrefillOnlyDispatch) {
     checkStopWaitsForDispatch(0);
 }
 
-TEST_P(EngineStopTest, SchedulerStopErrorStillReleasesExecutor) {
-    auto engine = createConfiguredEngine({}, [](EngineInitParams& params) {
-        params.runtime_config.use_batch_decode_scheduler = true;
-        // Keep the empty scheduler nonblocking so this exercises cleanup, not its idle timeout.
+TEST_P(EngineStopTest, BatchDecodeSchedulerStopsSuccessfully) {
+    CustomConfig config;
+    config.output_dispatcher_worker_count = GetParam();
+    auto engine                           = createConfiguredEngine(config, [](EngineInitParams& params) {
+        params.runtime_config.use_batch_decode_scheduler                                      = true;
         params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 0;
     });
-    EXPECT_TRUE(absl::IsUnimplemented(engine->stop()));
+    EXPECT_TRUE(engine->stop().ok());
+    EXPECT_EQ(engine->executor_, nullptr);
+}
+
+class FailingStopScheduler: public BatchDecodeScheduler {
+public:
+    using BatchDecodeScheduler::BatchDecodeScheduler;
+
+    absl::Status stop() override {
+        const auto status = BatchDecodeScheduler::stop();
+        EXPECT_TRUE(status.ok());
+        return absl::InternalError("injected scheduler stop failure");
+    }
+};
+
+TEST_P(EngineStopTest, SchedulerStopErrorStillReleasesExecutor) {
+    CustomConfig config;
+    config.output_dispatcher_worker_count = GetParam();
+    auto engine                           = createConfiguredEngine(config, [](EngineInitParams& params) {
+        params.runtime_config.use_batch_decode_scheduler                                      = true;
+        params.runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 0;
+    });
+    ASSERT_TRUE(engine->stop().ok());
+
+    // Replace the scheduler and executor while the original loop is joined.
+    auto               state = std::make_shared<FinishState>();
+    std::promise<void> release;
+    state->release = release.get_future().share();
+    release.set_value();
+    engine->executor_  = std::make_unique<GatedFinishExecutor>(state, engine->running_);
+    engine->scheduler_ = std::make_unique<FailingStopScheduler>(
+        engine->runtime_config, engine->resourceContext().cache_manager, nullptr);
+    ASSERT_TRUE(engine->startLoop().ok());
+
+    const auto status = engine->stop();
+    EXPECT_TRUE(absl::IsInternal(status));
+    EXPECT_EQ(status.message(), "injected scheduler stop failure");
+    EXPECT_TRUE(state->destroyed_after_finish);
     EXPECT_EQ(engine->executor_, nullptr);
 }
 

@@ -363,7 +363,13 @@ struct SpeculativeExecutionConfig {
     int64_t sp_dspark_mask_token_id = -1;
     // True: gamma query rows, including the anchor prediction. False:
     // one conditioning anchor followed by gamma prediction rows.
-    bool        sp_dspark_sample_from_anchor = true;
+    bool    sp_dspark_sample_from_anchor = true;
+    int64_t targetDecodeTokenWidth() const {
+        return type != SP_TYPE_NONE && gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 1;
+    }
+    int64_t dsparkProposalTokenWidth() const {
+        return gen_num_per_cycle + static_cast<int64_t>(!sp_dspark_sample_from_anchor);
+    }
     std::string to_string() const;
     size_t      speculativeReserveStep() const;
 

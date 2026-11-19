@@ -32,6 +32,7 @@ MOE_STRATEGY_CHOICES = (
     "local_loop",
     "sm120_fused_moe",
     "sm120_a2a_decode",
+    "sm120_graph_decode",
     "rocm_ep_normal",
     "rocm_ep_low_latency",
     "rocm_fp8_per_channel_no_dp",
@@ -210,7 +211,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "all-to-all 传输，仅支持 eager 执行，需设置 enable_cuda_graph=false）。"
             "在 SM120 上运行 DeepSeek-V4 时，启动阶段按角色解析 auto：PREFILL "
             "解析为 sm120_fused_moe；DECODE 以及 DP>1 的 PDFUSION（需启用 MTP "
-            "等投机解码）解析为 sm120_a2a_decode，PDFUSION 的 prefill 步骤同样"
+            "等投机解码）解析为 sm120_a2a_decode；专用 DECODE 启用 CUDA Graph 时解析为 sm120_graph_decode。PDFUSION 的 prefill 步骤同样"
             "走该传输。这些角色显式指定其他取值会在启动时被拒绝。"
         ),
     )

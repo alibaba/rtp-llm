@@ -59,6 +59,41 @@ def test_bound_grouped_adapter_preserves_output_and_rejects_psum():
     native.assert_not_called()
 
 
+def test_bound_masked_grouped_adapter_forwards_device_counts_and_output():
+    device = torch.device("cuda", 1)
+    data = SimpleNamespace(device=device)
+    packed_scale = torch.empty(1, dtype=torch.int32)
+    activations = weights = (data, packed_scale)
+    counts = torch.tensor([2, 0], dtype=torch.int32)
+    output = torch.ones(1, dtype=torch.bfloat16)
+    native = Mock(
+        side_effect=lambda _a, _b, out, _counts, _expected_m, **_: out.fill_(2)
+    )
+    binding = Mock(m_grouped_fp8_fp4_gemm_nt_masked=native)
+
+    grouped_decode._grouped_op_for_device.cache_clear()
+    try:
+        with (
+            patch.object(torch.cuda, "is_available", return_value=True),
+            patch.object(torch.cuda, "current_device", return_value=1),
+            patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)),
+            patch.object(grouped_decode, "_binding", return_value=binding),
+        ):
+            op = grouped_decode.grouped_op(device, masked=True)
+            assert grouped_decode.grouped_op("cuda", masked=True) is op
+            assert grouped_decode.grouped_op("cuda") is not op
+    finally:
+        grouped_decode._grouped_op_for_device.cache_clear()
+
+    recipes = dict(recipe_a=(1, 128), recipe_b=(1, 32))
+    assert op(activations, weights, output, counts, 1, **recipes) is None
+    native.assert_called_once_with(activations, weights, output, counts, 1, **recipes)
+    assert output.item() == 2
+    with TestCase().assertRaisesRegex(RuntimeError, "prepacked int32 scales"):
+        op((data, torch.ones(1)), weights, output, counts, 1, **recipes)
+    assert native.call_count == 1
+
+
 def test_grouped_decode_accumulates_into_caller_output():
     device = torch.device("cuda")
     op = grouped_decode.grouped_op(device)
@@ -105,5 +140,6 @@ def test_grouped_decode_accumulates_into_caller_output():
 
 if __name__ == "__main__":
     test_bound_grouped_adapter_preserves_output_and_rejects_psum()
+    test_bound_masked_grouped_adapter_forwards_device_counts_and_output()
     test_grouped_decode_accumulates_into_caller_output()
     print("PASS test_grouped_decode_accumulates_into_caller_output")

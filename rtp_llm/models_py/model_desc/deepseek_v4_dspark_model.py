@@ -65,13 +65,34 @@ from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.decode_plan import DecodeMoePlan
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import (
     DSparkProposerMixin,
+    device_metadata_tensor,
     optional_tensor,
 )
 from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+
+
+def mask_dspark_commit(
+    request_ids: torch.Tensor,
+    positions: torch.Tensor,
+    prefix: torch.Tensor,
+    valid_rows: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    valid = valid_rows & (request_ids >= 0) & (positions >= 0)
+    accepted = torch.zeros_like(prefix, dtype=torch.int32)
+    accepted.scatter_add_(0, request_ids.clamp_min(0).long(), valid.to(torch.int32))
+    # The SWA writer discards rows older than committed_end - window. Using the
+    # verify width here would prematurely evict valid history when acceptance
+    # shrinks between replays.
+    return (
+        torch.where(valid, request_ids, -1),
+        torch.where(valid, positions, -1),
+        prefix.to(torch.int32) + accepted,
+    )
 
 
 class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
@@ -608,6 +629,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if batch_size == 0 or int(main_x.shape[0]) == 0:
             return
         attention_inputs = inputs.attention_inputs
+        plan = DecodeMoePlan.from_inputs(inputs)
+        if plan is not None:
+            plan.validate_rows(main_x)
+            attn = primary_attention_inputs(attention_inputs, self.kv_cache)
+            prefix = device_metadata_tensor(attn, "prefix_lengths")
+            if prefix is None or prefix.numel() < batch_size:
+                raise RuntimeError("DSpARK decode commit requires a prefix per request")
+            context_req_ids, context_positions, committed_ends = mask_dspark_commit(
+                context_req_ids, context_positions, prefix[:batch_size], plan.valid_rows
+            )
         block_table = self._swa_block_table(attention_inputs, batch_size)
         tokens_per_block = int(require_pool_tokens_per_block(self.kv_cache, tag=SWA_KV))
         swa_attention_inputs = as_attention_inputs_by_tag(
@@ -734,6 +765,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
+        decode_plan: Optional[DecodeMoePlan] = None,
     ) -> torch.Tensor:
         hidden = self.v4._embed_target(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
@@ -742,6 +774,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # only the attention call is substituted with the non-causal
         # fixed-block variant.
         layer_forward_range = _profiler.make_layer_forward_range()
+        moe_kwargs = {"decode_plan": decode_plan} if decode_plan is not None else {}
         for layer_idx, layer in enumerate(self.v4.layers):
             with layer_forward_range(layer_idx):
                 hidden = layer.forward_decode(
@@ -758,6 +791,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         tokens_per_block,
                         graph_metadata,
                     ),
+                    **moe_kwargs,
                 )
 
         return hidden
@@ -799,6 +833,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             block_table,
             tokens_per_block,
             graph_metadata,
+            decode_plan=DecodeMoePlan.from_inputs(inputs),
         )
 
     def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:

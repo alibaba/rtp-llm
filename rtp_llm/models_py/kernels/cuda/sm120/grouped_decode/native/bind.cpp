@@ -38,4 +38,16 @@ PYBIND11_MODULE(rtp_dg120_grouped, m) {
           py::arg("ensure_zero_padding")        = true,
           py::arg("expected_m_for_psum_layout") = std::nullopt,
           py::arg("epilogue")                   = std::nullopt);
+    m.def("m_grouped_fp8_fp4_gemm_nt_masked",
+          &deep_gemm::sm120::m_grouped_fp8_fp4_gemm_nt_masked,
+          py::arg("a"),
+          py::arg("b"),
+          py::arg("d"),
+          py::arg("masked_m"),
+          py::arg("expected_m"),
+          py::arg("recipe")             = std::nullopt,
+          py::arg("recipe_a")           = std::nullopt,
+          py::arg("recipe_b")           = std::nullopt,
+          py::arg("compiled_dims")      = "nk",
+          py::arg("disable_ue8m0_cast") = false);
 }
