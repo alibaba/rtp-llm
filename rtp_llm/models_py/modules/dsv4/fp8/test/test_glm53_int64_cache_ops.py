@@ -24,7 +24,8 @@ class Int64CacheOpsTest(unittest.TestCase):
             + 1024
         )
         source.copy_(values)
-        destination = torch.full((384, 1), -1, device="cuda", dtype=torch.int32)
+        # Two 64-token blocks each consume a 128-row shared scale tile.
+        destination = torch.full((2 * 128, 1), -1, device="cuda", dtype=torch.int32)
         stage_shared_fp8_input_scales(source, destination, tokens, block_m=64)
         rows = shared_fp8_scale_row_indices(tokens, 64, source.device)
         expected = torch.zeros_like(destination)
@@ -32,6 +33,21 @@ class Int64CacheOpsTest(unittest.TestCase):
         torch.testing.assert_close(destination, expected, rtol=0, atol=0)
         torch.cuda.synchronize()
         print("shared FP8 scale source offset:", (tokens - 1) * stride, "passed")
+
+    def test_shared_fp8_scale_large_column_stride(self):
+        stride, tile_rows = (1 << 30) + 128, 128
+        storage = torch.empty(
+            2 * stride + tile_rows + 1, device="cuda", dtype=torch.int32
+        )
+        # Source and destination occupy disjoint rows in each of three distant columns.
+        source = storage.as_strided((1, 3), (1, stride), storage_offset=tile_rows)
+        destination = storage.as_strided((tile_rows, 3), (1, stride))
+        expected = torch.zeros((tile_rows, 3), device="cuda", dtype=torch.int32)
+        expected[0] = torch.arange(3, device="cuda", dtype=torch.int32) + 1024
+        source.copy_(expected[:1])
+        destination.fill_(-1)
+        stage_shared_fp8_input_scales(source, destination, 1, block_m=64)
+        torch.testing.assert_close(destination, expected, rtol=0, atol=0)
 
     def test_persistent_topk_large_row_offsets_and_stride(self):
         self.assertTrue(torch.cuda.is_available())
