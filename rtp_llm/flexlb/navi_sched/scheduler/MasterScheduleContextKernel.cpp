@@ -106,6 +106,7 @@ navi::ErrorCode MasterScheduleContextKernel::compute(navi::KernelComputeContext 
             schedulerConfig.config.queueOverloadFullCycleMultiplier;
         _timeCompression = schedulerConfig.config.agent.timeCompression;
         _peerCacheEnabled = schedulerConfig.config.peerCacheEnabled;
+        _cacheTouchEnabled = schedulerConfig.config.cacheTouchEnabled;
         if (_peerCacheReadyConfigGeneration != schedulerConfig.generation) {
             const auto &agents = schedulerConfig.config.peerCacheReadyAgents;
             _peerCacheReadyAgents =
@@ -329,6 +330,7 @@ void MasterScheduleContextKernel::buildReadyContexts(int64_t activationTimeUs)
             context->context->_scheduleId = _nextScheduleId++;
             context->context->_timeCompression = _timeCompression;
             context->context->_peerCacheEnabled = _peerCacheEnabled;
+            context->context->_cacheTouchEnabled = _cacheTouchEnabled;
             context->context->_peerCacheReadyAgents = _peerCacheReadyAgents;
         }
         auto waitTimeUs = std::max<int64_t>(0, currentTimeUs - request->enqueueTimeUs);

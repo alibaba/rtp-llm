@@ -359,6 +359,7 @@ private:
     uint64_t _scheduleId = 0;
     double _timeCompression = 1.0;
     bool _peerCacheEnabled = false;
+    bool _cacheTouchEnabled = true;
     // Supplier observations are frozen with the cache counts used by this decision.
     std::vector<std::string> _peerCacheSupplierGroups;
     std::vector<std::vector<uint8_t>> _peerCacheSupplierStates;
