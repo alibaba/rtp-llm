@@ -304,17 +304,16 @@ def _draft_incremental_prefill_geometry(
     state_pairs = []
     for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
         first_needed = prefix - (prefix % ratio)
-        logical_blocks = {
-            position // state_tokens_per_block
-            for position in range(first_needed, prefix + length)
-        }
-        for logical_block in logical_blocks:
-            if logical_block < 0 or logical_block >= state_table_width:
-                raise RuntimeError(
-                    "QSA cache 'indexer_state' block table does not cover the "
-                    "draft incremental tail"
-                )
-            state_pairs.append((request_idx, logical_block))
+        first_block = first_needed // state_tokens_per_block
+        last_block = (prefix + length - 1) // state_tokens_per_block
+        if last_block >= state_table_width:
+            raise RuntimeError(
+                "QSA cache 'indexer_state' block table does not cover the "
+                "draft incremental tail"
+            )
+        state_pairs.extend(
+            (request_idx, block) for block in range(first_block, last_block + 1)
+        )
     from .qsa_cache_views import _validate_state_pairs
 
     check_prefill_metadata_once(

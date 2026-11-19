@@ -14,6 +14,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_ROPE_POS_TAG,
 )
 from rtp_llm.models_py.model_desc.module_base import AttnImplFactory
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_cache_views
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     _same_tensor_metadata,
     _validate_required_blocks,
@@ -610,6 +611,66 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         context.indexer_state_inputs.kv_cache_block_id_device[0, 2] = 0
         with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
             plan(context)
+
+    def test_long_prefix_prefill_validates_only_written_state_pages(self):
+        self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        kv_pool = torch.zeros(65, 32 * self.D * 2, dtype=torch.uint8)
+        state_pool = torch.zeros(17, 2 * self.RATIO * self.D)
+        kv_table = torch.arange(1, 65, dtype=torch.int32).view(1, 64)
+        state_table = torch.zeros(1, 64, dtype=torch.int32)
+        state_table[0, 48:] = torch.arange(1, 17, dtype=torch.int32)
+        context = self._draft_incremental_context(
+            kv_pool,
+            state_pool,
+            prefixes=[6144],
+            lengths=[2048],
+            kv_table=kv_table,
+            state_table=state_table,
+            is_mtp_draft=False,
+        )
+        with patch.object(
+            qsa_cache_views,
+            "_validate_state_pairs",
+            wraps=qsa_cache_views._validate_state_pairs,
+        ) as validate:
+            context._draft_incremental_prefill_geometry(
+                indexer=self._decode_indexer(),
+                token_count=2048,
+                device=kv_pool.device,
+                rope_config=self.rope_config,
+                draft=False,
+            )
+        self.assertEqual(
+            validate.call_args.args[1], [(0, page) for page in range(48, 64)]
+        )
+
+    def test_draft_prefill_state_page_range_includes_history_and_last_token(self):
+        self.STATE_TOKENS_PER_BLOCK = 5
+        table = torch.tensor([[1, 2, 0], [0, 3, 4]], dtype=torch.int32)
+        context = self._draft_incremental_context(
+            self.kv_base,
+            self.state_base,
+            prefixes=[5, 9],
+            lengths=[3, 2],
+            state_table=table,
+        )
+        options = dict(
+            indexer=self._decode_indexer(),
+            token_count=5,
+            device=self.state_base.device,
+            rope_config=self._base_rope_config(3),
+        )
+        context._draft_incremental_prefill_geometry(**options)
+        for row, page in ((0, 0), (1, 2)):
+            with self.subTest(row=row, page=page):
+                original = table[row, page].item()
+                table[row, page] = 0
+                with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+                    context._draft_incremental_prefill_geometry(**options)
+                table[row, page] = original
+        context.indexer_state_inputs.kv_cache_block_id_device = table[:, :2]
+        with self.assertRaisesRegex(RuntimeError, "does not cover"):
+            context._draft_incremental_prefill_geometry(**options)
 
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
