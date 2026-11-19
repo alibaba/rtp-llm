@@ -21,6 +21,7 @@ from urllib3.exceptions import ProtocolError, ReadTimeoutError
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.metrics import GaugeMetrics
+from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
 from rtp_llm.multimodal.vit_metrics import (
     record_vit_preprocess_value,
     vit_preprocess_timer,
@@ -111,7 +112,7 @@ def load_image_source(
         except TimeoutError as error:
             raise FtRuntimeException(
                 ExceptionType.MM_DOWNLOAD_FAILED,
-                "Temporary multimodal download failure",
+                f"{MMErr.DL_TIMEOUT}: {media_error_detail(error)}",
             ) from error
         if content.getbuffer().nbytes > max_bytes:
             raise FtRuntimeException(
@@ -190,12 +191,17 @@ def _download_image_source(
                     TimeoutError,
                 ),
             )
+            detail = (
+                f"HTTP {status}"
+                if status is not None and status != 200
+                else media_error_detail(error)
+            )
             if not transient:
                 message = (
-                    "Multimodal file size is too large"
+                    MMErr.FILE_TOO_LARGE
                     if isinstance(error, ValueError)
-                    and str(error) == "Multimodal file size is too large"
-                    else "Failed to download multimodal content"
+                    and str(error) == MMErr.FILE_TOO_LARGE
+                    else f"{MMErr.DL_FAILED}: {detail}"
                 )
                 raise FtRuntimeException(
                     ExceptionType.INVALID_PARAMS, message
@@ -204,7 +210,7 @@ def _download_image_source(
             if attempt == 2 or remaining <= 0:
                 raise FtRuntimeException(
                     ExceptionType.MM_DOWNLOAD_FAILED,
-                    "Temporary multimodal download failure",
+                    f"Temporary multimodal download failure: {detail}",
                 ) from error
             delay = min(0.2 * 2**attempt, remaining)
             if cancellation_event is not None:

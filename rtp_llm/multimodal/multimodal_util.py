@@ -16,6 +16,7 @@ from typing import Any, List, Optional
 
 import requests
 import torch
+from urllib3.exceptions import ReadTimeoutError
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.mm_download_domains import check_download_urls, domain_checked_get
@@ -25,7 +26,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
+from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail, raise_mm
 from rtp_llm.multimodal.url_cache import URLDataCache
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.telemetry import vit_media
@@ -149,6 +150,15 @@ def get_base64_prefix(s):
     if not match:
         return 0
     return match.end()
+
+
+def _decode_base64_url(url: str) -> bytes:
+    try:
+        return base64.b64decode(url[get_base64_prefix(url) :])
+    except ValueError as error:
+        raise FtRuntimeException(
+            ExceptionType.MM_DOWNLOAD_FAILED, f"Invalid Base64 data: {error}"
+        ) from error
 
 
 FRAMES_PACK_URL_PREFIX = "frames-pack:base64,"
@@ -280,9 +290,12 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
             if response.status_code == 200:
                 res = response.content.decode("utf-8")
             else:
-                raise Exception(f"download failed, error code: {response.status_code}")
+                raise_mm(
+                    f"{MMErr.DL_FAILED}: HTTP {response.status_code}",
+                    ExceptionType.MM_DOWNLOAD_FAILED,
+                )
         elif get_base64_prefix(url) > 0:
-            bytes_data = base64.b64decode(url[get_base64_prefix(url) :])
+            bytes_data = _decode_base64_url(url)
             res = bytes_data.decode("utf-8")
         else:
             # treat url as local path
@@ -292,7 +305,10 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     except FtRuntimeException:
         raise
     except Exception as e:
-        raise Exception(f"download and load {url} error, exception {e}")
+        raise FtRuntimeException(
+            ExceptionType.MM_DOWNLOAD_FAILED,
+            f"{MMErr.DL_FAILED}: {media_error_detail(e)}",
+        ) from e
     finally:
         _record_download_time(load_start)
     return res
@@ -324,7 +340,10 @@ def _download_http_content(
                 url, headers, deadline=deadline, cancellation_event=cancellation_event
             )
         if response.status_code != 200:
-            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+            raise_mm(
+                f"{MMErr.DL_FAILED}: HTTP {response.status_code}",
+                ExceptionType.MM_DOWNLOAD_FAILED,
+            )
 
         if max_file_size_kb is not None and max_file_size_kb > 0:
             content_length = response.headers.get("Content-Length")
@@ -352,23 +371,38 @@ def _download_http_content(
         raise
     except concurrent.futures.CancelledError:
         raise
-    except (requests.exceptions.Timeout, TimeoutError):
-        raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
+    except (requests.exceptions.Timeout, TimeoutError) as error:
+        raise_mm(
+            f"{MMErr.DL_TIMEOUT}: {media_error_detail(error)}",
+            ExceptionType.MM_DOWNLOAD_FAILED,
+        )
     except requests.exceptions.ConnectionError as error:
         # Response.iter_content wraps urllib3 read timeout in ConnectionError.
         if error.args and isinstance(error.args[0], ReadTimeoutError):
-            raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
-        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+            raise_mm(
+                f"{MMErr.DL_TIMEOUT}: {media_error_detail(error)}",
+                ExceptionType.MM_DOWNLOAD_FAILED,
+            )
+        raise_mm(
+            f"{MMErr.DL_FAILED}: {media_error_detail(error)}",
+            ExceptionType.MM_DOWNLOAD_FAILED,
+        )
     except (
         requests.exceptions.InvalidURL,
         requests.exceptions.MissingSchema,
         requests.exceptions.InvalidSchema,
         requests.exceptions.URLRequired,
-    ):
-        raise_mm(MMErr.URL_INVALID, ExceptionType.MM_WRONG_FORMAT_ERROR)
-    except Exception:
+    ) as error:
+        raise_mm(
+            f"{MMErr.URL_INVALID} ({media_error_detail(error)})",
+            ExceptionType.MM_WRONG_FORMAT_ERROR,
+        )
+    except Exception as error:
         logger.exception("failed to download multimodal content")
-        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        raise_mm(
+            f"{MMErr.DL_FAILED}: {media_error_detail(error)}",
+            ExceptionType.MM_DOWNLOAD_FAILED,
+        )
     finally:
         if response is not None:
             response.close()
@@ -415,7 +449,7 @@ def get_bytes_io_from_url(
 
                 res = get_bytes_io_from_oss_path(url)
             elif get_base64_prefix(url) > 0:
-                res = BytesIO(base64.b64decode(url[get_base64_prefix(url) :]))
+                res = BytesIO(_decode_base64_url(url))
             else:
                 # treat url as local path
                 with open(url, "rb") as fh:
@@ -425,9 +459,12 @@ def get_bytes_io_from_url(
             _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
         except (FtRuntimeException, concurrent.futures.CancelledError, TimeoutError):
             raise
-        except Exception:
+        except Exception as error:
             logger.exception("failed to load multimodal content")
-            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+            raise_mm(
+                f"{MMErr.DL_FAILED}: {media_error_detail(error)}",
+                ExceptionType.MM_DOWNLOAD_FAILED,
+            )
         finally:
             _record_download_time(load_start)
         return res

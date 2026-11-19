@@ -161,6 +161,14 @@ def _abort_ft_runtime(context, error: FtRuntimeException) -> None:
     context.abort(status, format_mm_rpc_error(error))
 
 
+def _abort_unexpected(context, error: Exception) -> None:
+    logging.exception("Unexpected ViT RPC error")
+    message = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+    _abort_ft_runtime(
+        context, FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, message)
+    )
+
+
 class MultimodalRpcServer(MultimodalRpcServiceServicer):
     def __init__(
         self,
@@ -244,9 +252,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_ft_runtime(context, error)
         except Exception as error:
             self.engine.report_vit_error(error)
-            _abort_ft_runtime(
-                context, FtRuntimeException(ExceptionType.MM_PROCESS_ERROR, str(error))
-            )
+            _abort_unexpected(context, error)
         return MultimodalHashResponsePB()
 
     def AsyncSubmitEmbedding(self, multimodal_inputs: MultimodalInputsPB, context):
@@ -270,12 +276,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             _abort_ft_runtime(context, error)
         except Exception as error:
             self.engine.report_vit_error(error)
-            _mark_vit_error_reported(context)
-            logging.exception("AsyncSubmitEmbedding failed")
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
-            )
+            _abort_unexpected(context, error)
 
     def GetGreenNetVerdict(self, request, context):
         """Wait for work registered by hash routing and prefill on this worker."""
@@ -344,12 +345,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             return EmptyPB()
         except Exception as error:
             self.engine.report_vit_error(error)
-            _mark_vit_error_reported(context)
-            logging.exception("WaitGreenNetVerdict failed")
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
-            )
+            _abort_unexpected(context, error)
             return EmptyPB()
 
         try:
@@ -372,12 +368,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             # A malformed verdict or response-metadata failure is also an
             # exceptional result and must be visible in the error QPS.
             self.engine.report_vit_error(error)
-            _mark_vit_error_reported(context)
-            logging.exception("Failed to serialize ViT GreenNet verdict")
-            context.abort(
-                grpc.StatusCode.INTERNAL,
-                f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
-            )
+            _abort_unexpected(context, error)
             return EmptyPB()
         return EmptyPB()
 
@@ -505,8 +496,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 {"source": "vit_server", "reason": "exception"},
             )
             self.engine.report_vit_error(error)
-            _mark_vit_error_reported(context)
-            raise
+            _abort_unexpected(context, error)
         finally:
             if not callback_added:
                 _report_lifecycle()

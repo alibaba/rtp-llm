@@ -1251,8 +1251,8 @@ class RuntimeExceptionStatusTest(TestCase):
             ),
             (
                 RuntimeError,
-                grpc.StatusCode.UNKNOWN,
-                "Exception calling application: embedding failed",
+                grpc.StatusCode.INTERNAL,
+                "[MM_PROCESS_ERROR] RuntimeError: embedding failed",
             ),
         ) + tuple(
             (code, status, f"[{code.name}] embedding failed")
@@ -1307,6 +1307,7 @@ class RuntimeExceptionStatusTest(TestCase):
                                 MMSchedulerTimeoutError: ExceptionType.GENERATE_TIMEOUT,
                                 MMSchedulerRequestTooLargeError: ExceptionType.MM_WRONG_FORMAT_ERROR,
                                 TimeoutError: ExceptionType.GENERATE_TIMEOUT,
+                                RuntimeError: ExceptionType.MM_PROCESS_ERROR,
                             }
                             expected_type = (
                                 error_type
@@ -1324,7 +1325,7 @@ class RuntimeExceptionStatusTest(TestCase):
                                     )
                                     self.assertEqual(parsed.error_code, expected_type)
                                     self.assertEqual(
-                                        parsed.error_message, "embedding failed"
+                                        parsed.error_message, details.split("] ", 1)[1]
                                     )
                             self.assertEqual(
                                 [

@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     ResizeTables,
     prepare_resize_tables,
 )
-from rtp_llm.multimodal.mm_error_messages import MMErr
+from rtp_llm.multimodal.mm_error_messages import MMErr, media_error_detail
 from rtp_llm.multimodal.mm_preprocess_result import (
     ImageSourceIdentity,
     MMPreprocessResult,
@@ -632,7 +632,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                             results.append(_RuntimeImage(patches, vit_h, vit_w))
                 except OSError as error:
                     raise FtRuntimeException(
-                        ExceptionType.MM_WRONG_FORMAT_ERROR, MMErr.IMG_OPEN
+                        ExceptionType.MM_WRONG_FORMAT_ERROR,
+                        f"{MMErr.IMG_OPEN}: {media_error_detail(error)}",
                     ) from error
         # Preserve the original scalar contract; existing embedding interfaces
         # already accept ordered image groups for multi-media work items.

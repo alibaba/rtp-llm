@@ -1,9 +1,11 @@
 import base64
 import io
 import logging
+import multiprocessing
 import tempfile
 import time
 import unittest
+from concurrent.futures import ProcessPoolExecutor
 from unittest.mock import Mock, patch
 
 import requests
@@ -55,6 +57,18 @@ class TestMultiModalUtil(unittest.TestCase):
         error = FtRuntimeException(ExceptionType.MM_WRONG_FORMAT_ERROR, "invalid image")
         self.assertEqual(
             format_mm_rpc_error(error), "[MM_WRONG_FORMAT_ERROR] invalid image"
+        )
+
+    def test_base64_padding_error_survives_preprocess_process_boundary(self):
+        with ProcessPoolExecutor(
+            max_workers=1, mp_context=multiprocessing.get_context("spawn")
+        ) as pool:
+            failed = pool.submit(get_bytes_io_from_url, "data:image/png;base64,YQ")
+            with self.assertRaises(FtRuntimeException) as raised:
+                failed.result(timeout=60)
+        self.assertEqual(
+            format_mm_rpc_error(raised.exception),
+            "[MM_DOWNLOAD_FAILED] Invalid Base64 data: Incorrect padding",
         )
 
     def test_get_bytes(self):
@@ -251,7 +265,7 @@ class TestMultiModalUtil(unittest.TestCase):
         ):
             self.assert_mm_error(
                 ExceptionType.MM_DOWNLOAD_FAILED,
-                MMErr.DL_TIMEOUT,
+                f"{MMErr.DL_TIMEOUT}: Timeout",
                 lambda: get_bytes_io_from_url("https://example.com/timeout"),
             )
 
@@ -262,7 +276,7 @@ class TestMultiModalUtil(unittest.TestCase):
         ):
             self.assert_mm_error(
                 ExceptionType.MM_WRONG_FORMAT_ERROR,
-                MMErr.URL_INVALID,
+                f"{MMErr.URL_INVALID} (InvalidURL)",
                 lambda: get_bytes_io_from_url("https://example.com/invalid-url"),
             )
 
@@ -273,7 +287,7 @@ class TestMultiModalUtil(unittest.TestCase):
         ):
             self.assert_mm_error(
                 ExceptionType.MM_DOWNLOAD_FAILED,
-                MMErr.DL_FAILED,
+                f"{MMErr.DL_FAILED}: ConnectionError",
                 lambda: get_bytes_io_from_url("https://example.com/image"),
             )
 
@@ -290,8 +304,8 @@ class TestMultiModalUtil(unittest.TestCase):
             "rtp_llm.multimodal.multimodal_util.request_get", return_value=response
         ) as request_impl:
             self.assert_mm_error(
-                ExceptionType.MM_PROCESS_ERROR,
-                MMErr.DL_TIMEOUT,
+                ExceptionType.MM_DOWNLOAD_FAILED,
+                f"{MMErr.DL_TIMEOUT}: ReadTimeoutError",
                 lambda: get_bytes_io_from_url("https://example.com/stream-timeout"),
             )
 
@@ -304,8 +318,8 @@ class TestMultiModalUtil(unittest.TestCase):
             side_effect=requests.exceptions.InvalidURL(),
         ):
             self.assert_mm_error(
-                ExceptionType.MM_PROCESS_ERROR,
-                MMErr.URL_INVALID,
+                ExceptionType.MM_WRONG_FORMAT_ERROR,
+                f"{MMErr.URL_INVALID} (InvalidURL)",
                 lambda: get_bytes_io_from_url("https://example.invalid/malformed"),
             )
 
@@ -316,7 +330,7 @@ class TestMultiModalUtil(unittest.TestCase):
         ):
             self.assert_mm_error(
                 ExceptionType.MM_DOWNLOAD_FAILED,
-                MMErr.DL_FAILED,
+                f"{MMErr.DL_FAILED}: HTTP 404",
                 lambda: get_bytes_io_from_url("https://example.com/not-found"),
             )
         self.assertFalse(response.content_accessed)

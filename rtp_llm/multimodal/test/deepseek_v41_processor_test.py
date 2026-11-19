@@ -289,7 +289,9 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         result, elapsed_ms, requests = self.run_loader([503, 503, 503])
         self.assertIsInstance(result, FtRuntimeException)
         self.assertEqual(result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED)
-        self.assertEqual(result.message, "Temporary multimodal download failure")
+        self.assertEqual(
+            result.message, "Temporary multimodal download failure: HTTP 503"
+        )
         self.assertEqual(requests, 3)
         self.assertEqual(elapsed_ms, 375.0)
 
@@ -297,7 +299,9 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         result, elapsed_ms, requests = self.run_loader([404])
         self.assertIsInstance(result, FtRuntimeException)
         self.assertEqual(result.exception_type, ExceptionType.INVALID_PARAMS)
-        self.assertEqual(result.message, "Failed to download multimodal content")
+        self.assertEqual(
+            result.message, "Failed to download multimodal content: HTTP 404"
+        )
         self.assertEqual(requests, 1)
         self.assertEqual(elapsed_ms, 125.0)
 
@@ -342,7 +346,8 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
                     result.exception_type, ExceptionType.MM_DOWNLOAD_FAILED
                 )
                 self.assertEqual(
-                    result.message, "Temporary multimodal download failure"
+                    result.message,
+                    f"Temporary multimodal download failure: {type(error).__name__}",
                 )
                 self.assertIs(result.__cause__, error)
                 self.assertEqual(attempts, 3)
