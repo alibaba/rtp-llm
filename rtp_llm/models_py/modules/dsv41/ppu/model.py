@@ -153,6 +153,23 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         # legacy generic KV dtype hint used by the common constructor.
         self._v4_args.fp8_kv_cache = self.fp8_kv_cache = True
         self.materialize_modules()
+        if not self._is_decode_role and dist.is_initialized() and dist.get_world_size() == 8:
+            from rtp_llm.models_py.modules.dsv41.ppu.engram import LOCAL_PREFILL_ENGRAM_ROUNDS_ENV
+            from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import ENV, prepare_peer_shards
+            from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value
+
+            args = self._v4_args
+            prepare_peer_shards(
+                self._shared_ops._engram, self.v4.embed.weight.device,
+                flag=os.environ.get(ENV, "0"),
+                eligible=(
+                    not self._is_speculative
+                    and self.parallelism_config.tp_size == args.tp_size == self._prefill_cp_size == 1
+                    and args.dp_size == args.ep_size == 8
+                    and args.dp_rank == args.ep_rank == dist.get_rank()
+                    and env_value(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0") == "1"
+                ),
+            )
         self._bind_runtime_buffers(self.v4.embed.weight.device)
         self.shared_runtime = SharedNativeRuntime(self)
         if not self._is_decode_role and os.environ.get("RTP_V41_PPU_PTPC_WARMUP_MAX_ROWS", "0") != "0":

@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as
 
 
 DP_PREFILL_FORWARD_MEGA_CAPACITY_ENV = "RTP_V41_PPU_DP_PREFILL_FORWARD_MEGA_CAPACITY"
+PREFILL_ENTRY_CACHE_ENV = "RTP_V41_PPU_PREFILL_ENTRY_CACHE"
 
 
 def _dp_prefill_row_bound(lengths, actual_rows, *, idle=False):
@@ -97,6 +98,43 @@ class _DeferredGraphVerify:
     joint_checks: tuple | None
 
 
+@dataclass(frozen=True)
+class _PinnedEngramAllocation:
+    shard: object
+    peer: object
+    payload: torch.Tensor
+    scale: torch.Tensor
+    payload_storage: object
+    scale_storage: object
+    payload_pointer: int
+    scale_pointer: int
+
+    @classmethod
+    def capture(cls, shard):
+        from rtp_llm.models_py.modules.dsv41.ppu.engram import HostShard
+        from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import _PeerTable
+
+        if type(shard) is not HostShard:
+            return None
+        payload, scale = shard.payload, shard.scale
+        peer = shard._peer_table
+        if (type(peer) is not _PeerTable or not shard.pinned
+                or not payload.is_pinned() or not scale.is_pinned()):
+            return None
+        # Keep both storages alive so a replacement cannot reuse either
+        # allocation's address while this witness is live.
+        return cls(shard, peer, payload, scale, payload.untyped_storage(),
+                   scale.untyped_storage(), payload.data_ptr(), scale.data_ptr())
+
+    def matches(self, shard):
+        return (shard is self.shard and shard._peer_table is self.peer and shard.pinned
+                and shard.payload is self.payload and shard.scale is self.scale
+                and self.payload.untyped_storage()._cdata == self.payload_storage._cdata
+                and self.scale.untyped_storage()._cdata == self.scale_storage._cdata
+                and self.payload.data_ptr() == self.payload_pointer
+                and self.scale.data_ptr() == self.scale_pointer)
+
+
 class SharedNativeRuntime:
     def __init__(self, model):
         self._model = weakref.ref(model)
@@ -137,6 +175,24 @@ class SharedNativeRuntime:
         self.pending_idle_verify = None
         self._idle_verify_calls = 0
         self.device = model.v4.embed.weight.device if model.v4.embed is not None else model.main_proj.weight.device
+        self._prefill_entry_device: torch.device | None = None
+        self._prefill_entry_pins: tuple[_PinnedEngramAllocation, ...] = ()
+        if (os.environ.get(PREFILL_ENTRY_CACHE_ENV) == "1"
+                and not getattr(model, "_is_decode_role", True)
+                and not getattr(model, "_is_speculative", False)
+                and getattr(model, "_prefill_cp_size", None) == 1 and self.device.type == "cuda"
+                and self.device.index is not None and dist.is_initialized()
+                and dist.get_world_size(dist.group.WORLD) == 8):
+            from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+            if is_ppu() and torch.cuda.get_device_capability(self.device) == (8, 9):
+                self._prefill_entry_device = self.device
+                bindings = getattr(model._shared_ops, "_engram", {})
+                if all(layer in bindings for layer in (1, 14)):
+                    first = _PinnedEngramAllocation.capture(bindings[1][0])
+                    second = _PinnedEngramAllocation.capture(bindings[14][0])
+                    if first is not None and second is not None:
+                        self._prefill_entry_pins = (first, second)
         self.hash_params = None
         g = self.geometry
         if g.engram_enabled():
@@ -293,16 +349,24 @@ class SharedNativeRuntime:
             and bindings[layer][1].enp_size == 8 and bindings[layer][0].dim == 256
             for layer in (1, 14)
         )
-        pinned = bound and all(bindings[layer][0].pinned
-                               and bindings[layer][0].payload.is_pinned()
-                               and bindings[layer][0].scale.is_pinned() for layer in (1, 14))
+        cached_device = self.device == getattr(self, "_prefill_entry_device", None)
+        cached_pins = getattr(self, "_prefill_entry_pins", ())
+        pins_matched = bool(bound and cached_device and cached_pins and all(
+            pin.matches(bindings[layer][0]) for layer, pin in zip((1, 14), cached_pins)
+        ))
+        if cached_pins and not pins_matched:
+            self._prefill_entry_pins = ()
+        pinned = bound and (
+            pins_matched or all(bindings[layer][0].pinned and bindings[layer][0].payload.is_pinned()
+                                and bindings[layer][0].scale.is_pinned() for layer in (1, 14))
+        )
         supported = bool(
             topology and bound and pinned and not graph and not torch.is_grad_enabled()
             and not getattr(model, "_is_speculative", False)
             and not any(getattr(state, key, False) for key in ("verify", "proposal"))
             and (state.idle or (state.prefill and state.cache is not None and not state.cache.sharded))
-            and self.device.type == "cuda" and is_ppu()
-            and torch.cuda.get_device_capability(self.device) == (8, 9)
+            and self.device.type == "cuda"
+            and (cached_device or (is_ppu() and torch.cuda.get_device_capability(self.device) == (8, 9)))
         )
         native_bad = False
         if supported:
@@ -310,7 +374,7 @@ class SharedNativeRuntime:
                 supported = engram._triton_kernels() is not None
             except Exception:
                 supported, native_bad = False, True
-        return engram.prepare_local_prefill_engram_schedule(
+        schedule = engram.prepare_local_prefill_engram_schedule(
             self.device, requested=self._engram_requested, supported=bool(supported),
             epoch=self._engram_epoch, process_group=getattr(getattr(ops, "_enpm_group", None), "pg", None),
             fatal=(not self._engram_flag_valid or self._engram_incomplete
@@ -322,6 +386,9 @@ class SharedNativeRuntime:
             # their actual padded rows in the same agreement.
             local_flat_rows=state.inputs.input_ids.numel() * 24,
         )
+        if cached_device or cached_pins:
+            self._engram_evidence.update(entry_cache_device=cached_device, entry_cache_pins=pins_matched)
+        return schedule
 
     def _prepare_dp_prefill_mega_capacity(self, state):
         if not getattr(self, "dp_prefill_capacity_enabled", False):
@@ -338,7 +405,8 @@ class SharedNativeRuntime:
             or getattr(args, "dp_rank", None) != getattr(args, "ep_rank", None)
             or model._is_decode_role or model._is_speculative
             or model.shared_weight_views.quant_mode != MXFP4_FP8_PTPC
-            or not is_ppu() or torch.cuda.get_device_capability(self.device) != (8, 9)
+            or (self.device != getattr(self, "_prefill_entry_device", None)
+                and (not is_ppu() or torch.cuda.get_device_capability(self.device) != (8, 9)))
         )
         supported = (
             not any(getattr(state, name, False) for name in (

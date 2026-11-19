@@ -590,11 +590,13 @@ def _get_triton_kernels():
         def _mask_fake_routes_kernel(
             original_ids, pattern_ids, output_ids, output_weights, M,
             BLOCK: tl.constexpr, SLOTS: tl.constexpr = 8,
+            INPUT_SLOTS: tl.constexpr = 0,
         ):
             offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
             row, slot = offset // SLOTS, offset % SLOTS
             real_slot = (row < M) & (slot < 6)
-            original = tl.load(original_ids + offset, real_slot, other=-1)
+            input_slots: tl.constexpr = INPUT_SLOTS if INPUT_SLOTS else SLOTS
+            original = tl.load(original_ids + row * input_slots + slot, real_slot, other=-1)
             live = real_slot & (original >= 0)
             balanced = tl.load(pattern_ids + row * 6 + slot, live, other=0)
             # Preserve every original negative sentinel in the six real
@@ -1646,6 +1648,14 @@ class PPUMoE:
         )
         if self._fake_balance_policy not in ("rtp", "sail_round_robin"):
             raise ValueError("MegaMoE fake balance policy must be rtp or sail_round_robin")
+        self._dp_prefill_native_top6 = (
+            selection.get("RTP_V41_PPU_PREFILL_NATIVE_TOP6") == "1"
+            and selection.get("ROLE_TYPE", "").upper() == "PREFILL"
+            and selection.get("EPLB_MODE", "NONE").upper() == "NONE"
+            and (self.backend, self.precision, self.top_k) == ("megamoe", "w4a4", DEFAULT_TOP_K)
+            and (self.ep_size, self.num_routed_experts, self.num_physical_experts,
+                 self.num_local_experts) == (8, 384, 416, 52)
+        )
         self._prefill_fake_pattern = None
         self._prefill_fake_pattern_generation = None
         self._prefill_fake_pattern_builds = 0
@@ -1819,13 +1829,15 @@ class PPUMoE:
         admission propagate without retrying the legacy route chain.
         """
         config = self._fake_balance_config
+        compact = self._dp_prefill_native_top6
+        input_widths = (DEFAULT_TOP_K, COMM_SLOTS) if compact else (COMM_SLOTS,)
         if (self._fake_balance_policy != "rtp"
                 or config is None or not config[0] or config[1] != 6 or config[3] != 8
                 or not isinstance(receipt, _DPForwardMegaBuffer)
                 or (self.backend, self.precision, self.ep_size, self.num_routed_experts)
                 != ("megamoe", "w4a4", 8, 384)
                 or torch.is_grad_enabled()
-                or ids.ndim != 2 or ids.shape[1] != COMM_SLOTS or ids.shape != weights.shape
+                or ids.ndim != 2 or ids.shape[1] not in input_widths or ids.shape != weights.shape
                 or ids.dtype != torch.int64 or weights.dtype != torch.float32
                 or not ids.is_contiguous() or not weights.is_contiguous()
                 or ids.is_neg() or ids.is_conj() or weights.is_neg() or weights.is_conj()
@@ -1856,10 +1868,12 @@ class PPUMoE:
             # Do not remint a mutated/rebound cache within the same workspace
             # generation. Capacity growth/close drops it after the native drain.
             return None
-        output_ids = torch.empty_like(ids)
-        output_weights = torch.empty_like(weights)
-        operation[(kernels.triton.cdiv(ids.numel(), 256),)](
-            ids, pattern.ids, output_ids, output_weights, ids.shape[0], BLOCK=256,
+        slots = DEFAULT_TOP_K if compact else COMM_SLOTS
+        shape = (ids.shape[0], slots)
+        output_ids, output_weights = ids.new_empty(shape), weights.new_empty(shape)
+        widths = {"SLOTS": slots, "INPUT_SLOTS": ids.shape[1]} if compact else {}
+        operation[(kernels.triton.cdiv(output_ids.numel(), 256),)](
+            ids, pattern.ids, output_ids, output_weights, ids.shape[0], BLOCK=256, **widths,
         )
         self._prefill_fake_pattern_calls += 1
         return output_ids, output_weights

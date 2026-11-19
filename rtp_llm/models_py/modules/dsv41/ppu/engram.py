@@ -203,6 +203,7 @@ class HostShard:
     dim: int
     pinned: bool = False
     reads: int = field(default=0)
+    _peer_table: object = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.payload.ndim != 2 or self.payload.shape[1] != self.dim:
@@ -1148,7 +1149,7 @@ def engram_lookup(
     uniform_rank_rows: bool = False,
     round_schedule: Optional[LocalPrefillEngramSchedule] = None,
 ) -> torch.Tensor:
-    """Collective host-sharded Engram lookup -> bf16 ``[*rows.shape, dim]``.
+    """Sharded Engram lookup -> bf16 ``[*rows.shape, dim]``.
 
     ``rows`` holds int64 GLOBAL table row ids; invalid ids (-1 or >=
     num_embeddings) produce zero rows. Input query order is preserved and the
@@ -1162,7 +1163,6 @@ def engram_lookup(
         raise TypeError("engram row ids must be integral")
     if max_rows_per_round < 1:
         raise ValueError("max_rows_per_round must be positive")
-    flat = rows.detach().reshape(-1).to(torch.int64)
     device = rows.device
     adapter = _resolve_group(group, layout)
     record = None
@@ -1175,7 +1175,12 @@ def engram_lookup(
         elif not isinstance(round_schedule, LocalPrefillEngramSchedule) or uniform_rank_rows:
             raise RuntimeError("local Prefill Engram requires its independent padded schedule")
         record = round_schedule.claim(adapter, shard, layout, rows, layer_id)
+        if type(round_schedule) is LocalPrefillEngramSchedule and shard._peer_table is not None:
+            out = shard._peer_table.lookup(rows.detach(), shard, layout)
+            record.update(backend="peer_shards", reduce_scatter=False, complete=True)
+            return out
         max_rows_per_round = round_schedule.round_cap
+    flat = rows.detach().reshape(-1).to(torch.int64)
     if adapter is None:
         # Single-process direct lookup: the lone shard owns every valid row.
         out = _lookup_round(flat, shard.rank, shard, layout, device)
@@ -1346,8 +1351,7 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
     # ------------------------------------------------------------------
     # Adapted from sglang-for-sail
     # python/sglang/kernels/ops/embeddings/engram_gather.py (512b03d):
-    # software-E4M3 decode gather for device/pinned-host tables. The
-    # CUDA-VMM peer path (_PeerShards, engram_gather_peer) is NOT copied.
+    # software-E4M3 decode gather for device/pinned-host tables.
     # ------------------------------------------------------------------
     _E8M0_ZERO = 2.0**-127
 
@@ -1453,6 +1457,64 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
                 E8M0_ZERO=_E8M0_ZERO,
                 HAS_DST=dst is not None,
                 DECODE_E4M3_BYTES=decode_e4m3_bytes,
+            )
+        return out
+
+    @triton.jit
+    def _engram_gather_peer_kernel(
+        ids_ptr, ids_row_stride, ids_col_stride, weight_ptrs, scale_ptrs, out_ptr,
+        n_cols,
+        N_ROWS: tl.constexpr, ROWS_PER_SHARD: tl.constexpr,
+        DIM: tl.constexpr, BLK: tl.constexpr, HEADS: tl.constexpr,
+        E8M0_ZERO: tl.constexpr, DECODE_E4M3_BYTES: tl.constexpr,
+    ):
+        # As in Sail, query only the requesting rank's token IDs. RTP shards
+        # have equal aligned row ranges, so no shard-boundary search is needed.
+        token = tl.program_id(0).to(tl.int64)
+        heads = tl.program_id(1) * HEADS + tl.arange(0, HEADS)
+        head_valid = heads < n_cols
+        ids = tl.load(ids_ptr + token * ids_row_stride + heads * ids_col_stride,
+                      mask=head_valid, other=-1).to(tl.int64)
+        valid = head_valid & (ids >= 0) & (ids < N_ROWS)
+        safe_ids = tl.where(valid, ids, 0)
+        owner = (safe_ids // ROWS_PER_SHARD).to(tl.int32)
+        local_row = safe_ids - owner.to(tl.int64) * ROWS_PER_SHARD
+        offsets = tl.arange(0, DIM)
+        weight = tl.load(weight_ptrs + owner) + local_row * DIM
+        scales = tl.load(scale_ptrs + owner) + local_row * (DIM // BLK)
+        weight = weight[:, None] + offsets[None, :]
+        scales = scales[:, None] + offsets[None, :] // BLK
+        if DECODE_E4M3_BYTES:
+            vals = _e4m3fn_to_float(tl.load(weight.to(tl.pointer_type(tl.uint8)),
+                                            mask=valid[:, None], other=0))
+        else:
+            vals = tl.load(weight.to(tl.pointer_type(tl.float8e4nv)),
+                           mask=valid[:, None], other=0.0).to(tl.float32)
+        exps = tl.load(scales.to(tl.pointer_type(tl.uint8)),
+                       mask=valid[:, None], other=127).to(tl.int32)
+        scale = (exps << 23).to(tl.float32, bitcast=True)
+        scale = tl.where(exps == 0, E8M0_ZERO, scale)
+        scale = tl.where(exps == 255, float("nan"), scale)
+        value = tl.where(valid[:, None], vals * scale, 0.0).to(tl.bfloat16)
+        # The old distributed sum of one owner plus zero contributions
+        # produces positive zero, including for inputs rounded to BF16 zero.
+        bits = value.to(tl.uint16, bitcast=True)
+        value = tl.where(bits == 0x8000, 0, bits).to(tl.uint16).to(tl.bfloat16, bitcast=True)
+        dst = out_ptr + (token * n_cols + heads[:, None]) * DIM + offsets[None, :]
+        tl.store(dst, value, mask=head_valid[:, None])
+
+    def engram_gather_peer(ids, weight_ptrs, scale_ptrs, n_rows, rows_per_shard):
+        if ids.dtype not in (torch.int32, torch.int64):
+            raise TypeError("Engram peer lookup requires int32 or int64 IDs")
+        tokens, heads = ids.shape
+        out = torch.empty((tokens, heads, 256), dtype=torch.bfloat16, device=ids.device)
+        if tokens:
+            _engram_gather_peer_kernel[(tokens, triton.cdiv(heads, 8))](
+                ids, *ids.stride(), weight_ptrs, scale_ptrs, out, heads,
+                N_ROWS=n_rows, ROWS_PER_SHARD=rows_per_shard,
+                DIM=256, BLK=FP8_BLOCK_SIZE, HEADS=8,
+                E8M0_ZERO=_E8M0_ZERO,
+                DECODE_E4M3_BYTES=_software_decode_e4m3(), num_warps=4,
             )
         return out
 
@@ -2191,6 +2253,7 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         MODE_VERIFY=MODE_VERIFY,
         MODE_EXTEND=MODE_EXTEND,
         engram_gather=engram_gather,
+        engram_gather_peer=engram_gather_peer,
         engram_commit_history=engram_commit_history,
         engram_hash_ids=engram_hash_ids,
         engram_hash_ids_and_commit=engram_hash_ids_and_commit,

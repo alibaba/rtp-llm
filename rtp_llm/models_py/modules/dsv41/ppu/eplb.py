@@ -5,7 +5,35 @@ views borrow executor allocations, including their per-expert layout padding.
 """
 
 import math
+import os
 import struct
+
+from rtp_llm.eplb.runtime import EplbLayer
+
+
+class _StaticPrefillR32Layer(EplbLayer):
+    def map_ids(self, ids):
+        from .prefill_r32_remap import try_prefill_r32_remap
+
+        physical = try_prefill_r32_remap(ids, self.logical_to_physical, self.logical_count, self.replica_offset)
+        return super().map_ids(ids) if physical is None else physical
+
+
+def _static_prefill_r32_enabled(engine):
+    flags = {
+        "RTP_V41_PPU_PREFILL_R32_FUSED_REMAP": "1",
+        "ROLE_TYPE": "PREFILL",
+        "EPLB_MODE": "NONE",
+        "TP_SIZE": "1",
+        "DP_SIZE": "8",
+        "EP_SIZE": "8",
+        "PREFILL_CP_SIZE": "1",
+    }
+    return (
+        all(os.environ.get(key) == value for key, value in flags.items())
+        and (engine.num_routed_experts, engine.num_physical_experts, engine.num_local_experts) == (384, 416, 52)
+        and (engine.backend, engine.precision, engine.ep_size) == ("megamoe", "w4a4", 8)
+    )
 
 
 def physical_expert_geometry(logical, physical, ep_size):
@@ -62,8 +90,6 @@ def scalar_identity(value):
 
 def bind_layer(engine, layer_id, mapping, counts, *, raw_tensors=()):
     """Freeze raw AND processed consumers before RuntimeExpertBalancer/Graph."""
-    from rtp_llm.eplb.runtime import EplbLayer
-
     processed = engine._processed_weights(layer_id, mapping.device)
     # W4A8 preprocessing may choose a projection-wide exponent compensation.
     # The scalar GEMM ABI cannot express heterogeneous compensation after a
@@ -103,7 +129,8 @@ def bind_layer(engine, layer_id, mapping, counts, *, raw_tensors=()):
                 raise ValueError("partially overlapping EPLB views would shuffle executor bytes twice")
             regions.add(region)
             unique.append(view)
-    layer = EplbLayer(
+    layer_type = _StaticPrefillR32Layer if _static_prefill_r32_enabled(engine) else EplbLayer
+    layer = layer_type(
         layer_id, mapping, counts, unique,
         ep_rank=engine.ep_rank, replica_offset=engine.ep_rank,
     )
