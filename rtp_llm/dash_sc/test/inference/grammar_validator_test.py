@@ -19,13 +19,13 @@ from rtp_llm.dash_sc.inference.core_dump_control import (
     _configure_xgrammar_sandbox_core_dump_for_current_process,
 )
 from rtp_llm.dash_sc.inference.grammar_validator import (
+    _CRASH_CIRCUIT_MAX_ENTRIES,
     GrammarCheckOverloaded,
     GrammarCheckTimeout,
     GrammarCheckUnavailable,
     GrammarCompilationError,
     GrammarValidator,
     _compile_exception_reply,
-    _CRASH_CIRCUIT_MAX_ENTRIES,
     _DeferredDupFd,
     _enable_worker_faulthandler,
     _format_worker_exitcode,
@@ -50,13 +50,29 @@ class CompileExceptionReplyTest(unittest.TestCase):
         self.assertTrue(retire_after_reply)
         self.assertEqual(message, "MemoryError")
 
+    def test_native_allocation_failure_is_overloaded_and_retires_worker(self) -> None:
+        # tvm-ffi reports C++ std::bad_alloc as RuntimeError, so the text is the only
+        # signal that distinguishes exhaustion from a grammar rejection.
+        errors = (
+            RuntimeError("std::bad_alloc"),
+            RuntimeError("std::bad_alloc: out of memory"),
+            RuntimeError("Out Of Memory"),
+            OSError("cannot allocate memory"),
+            Exception("MemoryAllocation failed"),
+        )
+        for error in errors:
+            with self.subTest(error=error):
+                status, retire_after_reply, message = _compile_exception_reply(error)
+                self.assertIs(status, _WorkerStatus.OVERLOADED)
+                self.assertTrue(retire_after_reply)
+                self.assertEqual(message, str(error))
+
     def test_compile_errors_are_invalid_regardless_of_message(self) -> None:
         class CompilerError(RuntimeError):
             pass
 
         errors = (
             RuntimeError("unsupported constraint"),
-            RuntimeError("std::bad_alloc"),
             RuntimeError("thread creation failed"),
             RuntimeError(),
             CompilerError("internal compiler assertion"),
@@ -76,7 +92,6 @@ class CompileExceptionReplyTest(unittest.TestCase):
 
         for error in (
             OSError("invalid grammar"),
-            Exception("out of memory"),
             InvalidGrammarError("unsupported constraint"),
         ):
             with self.subTest(error=error):
@@ -84,6 +99,72 @@ class CompileExceptionReplyTest(unittest.TestCase):
                 self.assertIs(status, _WorkerStatus.UNAVAILABLE)
                 self.assertTrue(retire_after_reply)
                 self.assertEqual(message, str(error))
+
+    def test_sandbox_worker_compiles_without_cache(self) -> None:
+        validator = GrammarValidator.__new__(GrammarValidator)
+        validator._cache_limit_bytes = 1024
+        validator._tokenizer_info_json = "{}"
+
+        fake_xgr = MagicMock()
+        with patch.object(GrammarValidator, "_xgrammar", return_value=fake_xgr):
+            validator._build_backend()
+
+        worker_kwargs = fake_xgr.GrammarCompiler.call_args.kwargs
+        self.assertFalse(worker_kwargs["cache_enabled"])
+        self.assertEqual(worker_kwargs["cache_limit_bytes"], 1024)
+
+    def test_address_space_guard_detects_a_spent_worker(self) -> None:
+        validator = GrammarValidator.__new__(GrammarValidator)
+        cap = 1024 * 1024 * 1024
+        with patch.object(
+            grammar_validator_module.resource, "getrlimit", return_value=(cap, cap)
+        ):
+            with patch.object(GrammarValidator, "_current_vsz_bytes", return_value=cap):
+                self.assertTrue(validator._sandbox_address_space_exhausted())
+            with patch.object(
+                GrammarValidator, "_current_vsz_bytes", return_value=cap // 2
+            ):
+                self.assertFalse(validator._sandbox_address_space_exhausted())
+        with patch.object(
+            grammar_validator_module.resource,
+            "getrlimit",
+            return_value=(grammar_validator_module.resource.RLIM_INFINITY,) * 2,
+        ):
+            self.assertFalse(validator._sandbox_address_space_exhausted())
+
+    def test_spent_worker_is_retired_even_for_a_grammar_rejection(self) -> None:
+        class _FakeConn:
+            def __init__(self, messages):
+                self._messages = list(messages)
+                self.sent = []
+
+            def send(self, payload):
+                self.sent.append(payload)
+
+            def recv(self):
+                if not self._messages:
+                    raise EOFError
+                return self._messages.pop(0)
+
+        validator = GrammarValidator.__new__(GrammarValidator)
+        validator._worker_memory_limit_bytes = 0
+        validator._worker_fault_file = io.BytesIO()
+        validator._backend = object()
+
+        def reject(kind, spec_str):
+            raise RuntimeError("unsupported constraint")
+
+        validator._compile = reject
+        validator._sandbox_address_space_exhausted = lambda: True
+        conn = _FakeConn([("ebnf", 'root ::= "x"')])
+
+        validator._worker_loop(conn)
+
+        self.assertEqual(conn.sent[0], ("__ready__", True))
+        status, retire_after_reply, message = conn.sent[1]
+        self.assertIs(status, _WorkerStatus.OVERLOADED)
+        self.assertTrue(retire_after_reply)
+        self.assertIn("address space exhausted", message)
 
     def test_exit_code_format_includes_signal_name(self) -> None:
         self.assertEqual(
@@ -575,18 +656,24 @@ class GrammarValidatorTest(unittest.TestCase):
         self.assertIn(("ebnf", 'root ::= "x"'), self.validator._crash_circuit)
 
     def test_crash_circuit_is_keyed_bounded_and_expires(self) -> None:
-        with patch.object(grammar_validator_module.time, "monotonic", return_value=100.0):
+        with patch.object(
+            grammar_validator_module.time, "monotonic", return_value=100.0
+        ):
             for index in range(_CRASH_CIRCUIT_MAX_ENTRIES + 1):
                 self.validator._record_native_crash(("ebnf", f"root ::= {index}"))
 
         self.assertEqual(len(self.validator._crash_circuit), _CRASH_CIRCUIT_MAX_ENTRIES)
         self.assertNotIn(("ebnf", "root ::= 0"), self.validator._crash_circuit)
         active_key = ("ebnf", "root ::= 1")
-        with patch.object(grammar_validator_module.time, "monotonic", return_value=109.0):
+        with patch.object(
+            grammar_validator_module.time, "monotonic", return_value=109.0
+        ):
             with self.assertRaises(GrammarCheckUnavailable):
                 self.validator._raise_if_crash_circuit_open(active_key)
             self.validator._raise_if_crash_circuit_open(("ebnf", "different"))
-        with patch.object(grammar_validator_module.time, "monotonic", return_value=110.0):
+        with patch.object(
+            grammar_validator_module.time, "monotonic", return_value=110.0
+        ):
             self.validator._raise_if_crash_circuit_open(active_key)
         self.assertNotIn(active_key, self.validator._crash_circuit)
 
