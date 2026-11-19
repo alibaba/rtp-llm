@@ -6,22 +6,35 @@ also runs these checks alongside the real kernels and graph replay cases.
 """
 
 import ast
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 
+def patched_adapter_tree():
+    path = Path("atom/plugin/rtpllm/utils/linear_double_buffer.py")
+    patch = Path(__file__).resolve().with_name("atom.patch")
+    with tempfile.TemporaryDirectory() as root:
+        subprocess.run(
+            ["git", "apply", f"--include={path}", str(patch)], cwd=root, check=True
+        )
+        return ast.parse((Path(root) / path).read_text(), filename=str(path))
+
+
+ADAPTER = patched_adapter_tree()
+
+
 def load_functions(names, namespace=None):
-    source = Path(__file__).with_name("runtime_adapter.py")
-    tree = ast.parse(source.read_text(), filename=str(source))
     functions = [
         node
-        for node in tree.body
+        for node in ADAPTER.body
         if isinstance(node, ast.FunctionDef) and node.name in names
     ]
     namespace = {} if namespace is None else namespace
     exec(
-        compile(ast.Module(body=functions, type_ignores=[]), str(source), "exec"),
+        compile(ast.Module(body=functions, type_ignores=[]), "linear_double_buffer.py", "exec"),
         namespace,
     )
     return namespace

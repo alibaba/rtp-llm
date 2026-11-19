@@ -162,11 +162,15 @@ async def run(args):
     summary = {'requests': len(rows), 'correct': sum(r['correct'] for r in rows), 'feature_ok': sum(r['feature_ok'] for r in rows)}
     if args.reference:
         reference = json.loads(args.reference.read_text())
-        assert [(r['name'], r['phase'], r['request_sha256']) for r in reference] == [(r['name'], r['phase'], r['request_sha256']) for r in rows]
+        def request_keys(results):
+            return [(r['name'], r['phase'], r['request_sha256']) for r in results]
+        if request_keys(reference) != request_keys(rows):
+            raise ValueError('Reference and measured requests differ')
         summary['exact_text_matches'] = sum(a['text'] == b['text'] for a, b in zip(reference, rows))
     (args.result_dir / 'summary.json').write_text(json.dumps(summary, indent=2))
     print(summary, flush=True)
-    assert len(rows) == (42 if args.video_file else 36) and all(r['correct'] and r['feature_ok'] for r in rows), 'Multimodal regression failed; inspect per-request result.json'
+    if len(rows) != (42 if args.video_file else 36) or not all(r['correct'] and r['feature_ok'] for r in rows):
+        raise RuntimeError('Multimodal regression failed; inspect per-request result.json')
 
 
 if __name__ == '__main__':
