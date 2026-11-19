@@ -8,6 +8,7 @@
 #include <exception>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -363,26 +364,36 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
     scheduled_count        = 0;
     bool   processed       = false;
     size_t remaining_count = max_victim_count;
-    EvictionBatchContext eviction_batch_context;
-    while (remaining_count > 0) {
-        std::vector<size_t> used_before;
-        used_before.reserve(source_pools.size());
-        for (IBlockPool* pool : source_pools) {
-            used_before.push_back(pool->usedBlocksNum());
+    // Discard batch-local proofs and rejection data before settlement.
+    {
+        EvictionBatchContext                             context;
+        std::optional<EvictionHeap::RejectedPrefixScope> prefix;
+        while (remaining_count > 0) {
+            // Start from the current heap after the preceding drop has settled.
+            // The scope will prove the prefix during the next selection.
+            if (!prefix && !context.rejected_candidates.empty()) {
+                prefix.emplace(*heapFor(group_set_id, source_tier), context.rejected_candidates);
+                context.expect_rejected_prefix = true;
+            }
+            std::vector<size_t> used_before;
+            used_before.reserve(source_pools.size());
+            for (IBlockPool* pool : source_pools) {
+                used_before.push_back(pool->usedBlocksNum());
+            }
+            if (!dropLocked(group_set_id, source_tier, false, EvictionVictimTrigger::WATERMARK, &context)) {
+                break;
+            }
+            processed                  = true;
+            size_t physically_released = std::numeric_limits<size_t>::max();
+            for (size_t pool_index = 0; pool_index < source_pools.size(); ++pool_index) {
+                const size_t used_after = source_pools[pool_index]->usedBlocksNum();
+                physically_released = std::min(
+                    physically_released, used_before[pool_index] - std::min(used_before[pool_index], used_after));
+            }
+            scheduled_count += std::min(physically_released, remaining_count);
+            const size_t progress = std::min(std::max<size_t>(1, physically_released), remaining_count);
+            remaining_count -= progress;
         }
-        if (!dropLocked(group_set_id, source_tier, false, EvictionVictimTrigger::WATERMARK, &eviction_batch_context)) {
-            break;
-        }
-        processed                  = true;
-        size_t physically_released = std::numeric_limits<size_t>::max();
-        for (size_t pool_index = 0; pool_index < source_pools.size(); ++pool_index) {
-            const size_t used_after = source_pools[pool_index]->usedBlocksNum();
-            physically_released =
-                std::min(physically_released, used_before[pool_index] - std::min(used_before[pool_index], used_after));
-        }
-        scheduled_count += std::min(physically_released, remaining_count);
-        const size_t progress = std::min(std::max<size_t>(1, physically_released), remaining_count);
-        remaining_count -= progress;
     }
     if (processed) {
         settled_(false);
