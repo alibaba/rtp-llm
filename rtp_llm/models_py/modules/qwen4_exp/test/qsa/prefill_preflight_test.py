@@ -4,11 +4,12 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.qsa import paged_validation, prefill_validation
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
     MainGeometryReceipt,
     main_geometry_preflight,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation
+from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_inputs, fmha_validation
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 
@@ -44,6 +45,100 @@ class PrefillPreflightTest(unittest.TestCase):
             lengths,
             cache.device,
         )
+
+    def test_preflight_and_fmha_reuse_current_device_lengths(self):
+        impl, cache, _, _ = self.fixture()
+        attn = impl.attn_inputs
+        attn.is_cuda_graph = False
+        device = cache.device
+        kv_cache = SimpleNamespace(kv_cache_base=cache)
+        table = torch.empty(2, 4, dtype=torch.int32, device=device)
+        device_lengths = torch.empty(2, dtype=torch.int32, device=device)
+        device_prefixes = torch.empty_like(device_lengths)
+        # Native device mirrors are read-only in Python. Simulate their producer
+        # while running the same page and selected-token checks as eager Prefill.
+        with patch.object(fmha_validation, "PyAttentionInputs", SimpleNamespace):
+            for query, prefix, pages in (
+                ([4], [4], [[1, 2, 0, 0]]),
+                ([2, 3], [8, 0], [[2, 3, 1, 0], [4, 0, 0, 0]]),
+                ([1], [7], [[4, 2, 0, 0]]),
+            ):
+                with self.subTest(query=query, prefix=prefix):
+                    batch = len(query)
+                    lengths = torch.tensor(query, dtype=torch.int32)
+                    bases = torch.tensor(prefix, dtype=torch.int32)
+                    attn.input_lengths_device = device_lengths[:batch].copy_(lengths)
+                    attn.prefix_lengths_device = device_prefixes[:batch].copy_(bases)
+                    attn.kv_cache_kernel_block_id_device = table[:batch].copy_(
+                        torch.tensor(pages, dtype=torch.int32)
+                    )
+                    attn.cu_seqlens_device = torch.cat(
+                        (lengths.new_zeros(1), lengths.cumsum(0, dtype=torch.int32))
+                    ).to(device)
+                    qkv = torch.empty(sum(query), 1, device=device)
+                    selected = torch.zeros(
+                        sum(query), 1, dtype=torch.int32, device=device
+                    )
+                    entries = [(impl, cache, bases, lengths)]
+
+                    def prepare():
+                        return fmha_inputs._try_prepare_host_incremental_prefill(
+                            impl, qkv, kv_cache, selected, lengths, bases
+                        )
+
+                    with patch.object(
+                        paged_validation,
+                        "geometry_flags",
+                        wraps=paged_validation.geometry_flags,
+                    ) as geometry, patch.object(
+                        prefill_validation,
+                        "validate_prefill_inputs",
+                        wraps=prefill_validation.validate_prefill_inputs,
+                    ) as packed:
+                        with main_geometry_preflight(entries):
+                            plan = prepare()
+                        for ld, pd in (
+                            geometry.call_args.args[:2],
+                            packed.call_args.args[2:4],
+                        ):
+                            self.assertIs(ld, attn.input_lengths_device)
+                            self.assertIs(pd, attn.prefix_lengths_device)
+                        self.assertIs(plan.prefixes_device, attn.prefix_lengths_device)
+
+                    selected[0, 0] = prefix[0] + 1
+                    with self.assertRaisesRegex(
+                        ValueError, "outside the row's visible KV"
+                    ):
+                        prepare()
+                    selected.zero_()
+                    table[0, (prefix[0] + query[0] - 1) // 4] = 0
+                    with self.assertRaisesRegex(RuntimeError, "unallocated"):
+                        with main_geometry_preflight(entries):
+                            self.fail("Invalid page passed main preflight")
+                    with self.assertRaisesRegex(RuntimeError, "unallocated"):
+                        prepare()
+
+    def test_length_mirror_fallback_keeps_host_values_and_int64_validation(self):
+        impl, cache, _, lengths = self.fixture()
+        attn = impl.attn_inputs
+        attn.is_cuda_graph = False
+        with patch.object(fmha_validation, "PyAttentionInputs", SimpleNamespace):
+            for mirror in (
+                None,
+                torch.zeros_like(lengths),
+                torch.zeros(1, dtype=torch.int64, device=cache.device),
+                torch.zeros(2, dtype=torch.int32, device=cache.device),
+            ):
+                attn.input_lengths_device = mirror
+                uploaded = fmha_validation.prefill_length_to_device(
+                    attn, lengths, "input_lengths_device", cache.device
+                )
+                torch.testing.assert_close(uploaded.cpu(), lengths)
+            attn.prefix_lengths_device = lengths.to(cache.device)
+            bases = torch.tensor([2**32 + 4], dtype=torch.int64)
+            with self.assertRaisesRegex(RuntimeError, "does not cover"):
+                with main_geometry_preflight([(impl, cache, bases, lengths)]):
+                    self.fail("Int64 prefix was narrowed before validation")
 
     def test_receipts_are_forward_scoped_and_metadata_mutation_is_rechecked(self):
         entries = [self.fixture(), self.fixture()]

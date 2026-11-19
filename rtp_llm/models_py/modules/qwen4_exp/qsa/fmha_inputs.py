@@ -393,7 +393,7 @@ def _try_prepare_host_incremental_prefill(
         validate_prefill_inputs,
     )
 
-    from .fmha_validation import _validate_main_cache_layout
+    from .fmha_validation import _validate_main_cache_layout, prefill_length_to_device
 
     cu = self.attn_inputs.cu_seqlens_device
     tokens = int(qkv.shape[0])
@@ -430,8 +430,16 @@ def _try_prepare_host_incremental_prefill(
     # Keep int32 visible positions and device lengths inside their supported range.
     if any(p + s >= 2**31 for p, s in zip(prefix_host, lens)):
         raise ValueError("qwen4_exp incremental prefill visible KV exceeds int32 range")
-    ld = lengths.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
-    pd = prefixes.to(device=qkv.device, dtype=torch.int32, non_blocking=True)
+    ld = prefill_length_to_device(
+        self.attn_inputs, lengths, "input_lengths_device", qkv.device, dtype=torch.int32
+    )
+    pd = prefill_length_to_device(
+        self.attn_inputs,
+        prefixes,
+        "prefix_lengths_device",
+        qkv.device,
+        dtype=torch.int32,
+    )
     table = self.attn_inputs.kv_cache_kernel_block_id_device
     page_size, cache_blocks = _validate_main_cache_layout(
         self, cache.kv_cache_base, table, batch, qkv.device

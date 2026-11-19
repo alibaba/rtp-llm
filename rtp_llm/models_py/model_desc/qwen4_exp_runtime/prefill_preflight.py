@@ -62,12 +62,14 @@ def main_geometry_preflight(entries):
     )
     from rtp_llm.models_py.modules.qwen4_exp.qsa.fmha_validation import (
         _validate_main_cache_layout,
+        prefill_length_to_device,
     )
 
     pending = []
     flags = []
     for impl, cache, bases, lengths in entries:
-        table = impl.attn_inputs.kv_cache_kernel_block_id_device
+        attn_inputs = impl.attn_inputs
+        table = attn_inputs.kv_cache_kernel_block_id_device
         if getattr(impl, "_model_prefill_geometry", None) is not None:
             raise RuntimeError("Qwen4 Prefill geometry scopes must not overlap")
         page_size, pages = _validate_main_cache_layout(
@@ -76,8 +78,12 @@ def main_geometry_preflight(entries):
         receipt = MainGeometryReceipt(impl, cache, table, bases, lengths, page_size)
         flags.append(
             geometry_flags(
-                lengths.to(device=cache.device, non_blocking=True),
-                bases.to(device=cache.device, non_blocking=True),
+                prefill_length_to_device(
+                    attn_inputs, lengths, "input_lengths_device", cache.device
+                ),
+                prefill_length_to_device(
+                    attn_inputs, bases, "prefix_lengths_device", cache.device
+                ),
                 table,
                 page_size,
                 pages,

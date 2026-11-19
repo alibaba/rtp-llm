@@ -2,7 +2,31 @@
 
 import torch
 
+from rtp_llm.ops.compute_ops import PyAttentionInputs
+
 from .validation import DeviceChecks
+
+
+def prefill_length_to_device(attn_inputs, source, mirror_name, device, *, dtype=None):
+    # PyWrappedModel stages these int32 mirrors from the same host lengths and
+    # flushes the copies before eager forward. Graph inputs have their own ABI.
+    if (
+        isinstance(attn_inputs, PyAttentionInputs)
+        and not attn_inputs.is_cuda_graph
+        and source.device.type == "cpu"
+        and source.dtype == torch.int32
+        and dtype in (None, torch.int32)
+    ):
+        mirror = getattr(attn_inputs, mirror_name, None)
+        if (
+            isinstance(mirror, torch.Tensor)
+            and mirror.shape == source.shape
+            and mirror.dtype == torch.int32
+            and mirror.device == device
+            and mirror.is_contiguous()
+        ):
+            return mirror
+    return source.to(device=device, dtype=dtype, non_blocking=True)
 
 
 def main_geometry_checks(checks, bases, lengths, table, page_size, pages, padded):
