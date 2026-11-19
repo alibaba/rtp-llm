@@ -540,6 +540,64 @@ class TestContextParallelProcessor(unittest.TestCase):
 
 
 class TestHandleInputsWithHidden(unittest.TestCase):
+    def test_cpu_and_cuda_inputs_keep_multistream_token_hidden_alignment(self):
+        total_tokens = torch.tensor(
+            [10, 11, 12, 13, 14, 15, 20, 21, 22], dtype=torch.int32
+        )
+        input_lengths = torch.tensor([6, 3], dtype=torch.int32)
+        sequence_lengths = torch.empty((0,), dtype=torch.int32)
+        hidden_states = torch.arange(1, 19, dtype=torch.float32).reshape(9, 2)
+        expected_tokens = ([10, 11, 0, 0, 20, 0], [12, 13, 14, 15, 21, 22])
+        expected_shuffle = ([0, 1, 6, 7, 0, 3], [2, 3, 4, 5, 1, 2])
+        expected_hidden = (
+            [[1, 2], [3, 4], [0, 0], [0, 0], [13, 14], [0, 0]],
+            [[5, 6], [7, 8], [9, 10], [11, 12], [15, 16], [17, 18]],
+        )
+
+        for token_device in ("cpu", "cuda"):
+            for hidden_device in ("cpu", "cuda"):
+                for rank in range(2):
+                    with self.subTest(
+                        token_device=token_device, hidden_device=hidden_device, rank=rank
+                    ):
+                        tokens, lengths, hidden, shuffle = (
+                            cp_test.handle_inputs_with_hidden(
+                                total_tokens.to(token_device),
+                                input_lengths,
+                                sequence_lengths,
+                                hidden_states.to(hidden_device),
+                                rank,
+                                2,
+                            )
+                        )
+                        self.assertEqual(tokens.tolist(), expected_tokens[rank])
+                        self.assertEqual(lengths.tolist(), [4, 2])
+                        self.assertEqual(shuffle.tolist(), expected_shuffle[rank])
+                        torch.testing.assert_close(
+                            hidden,
+                            torch.tensor(expected_hidden[rank], dtype=torch.float32),
+                            rtol=0,
+                            atol=0,
+                        )
+
+    def test_padding_only_rank_preserves_local_hidden_for_cpu_and_cuda_tokens(self):
+        local_hidden = torch.tensor([[11.0, 12.0], [21.0, 22.0]], device="cuda")
+        for token_device in ("cpu", "cuda"):
+            with self.subTest(token_device=token_device):
+                tokens, lengths, hidden, shuffle = cp_test.handle_inputs_with_hidden(
+                    torch.tensor([42], dtype=torch.int32, device=token_device),
+                    torch.tensor([1], dtype=torch.int32),
+                    torch.empty((0,), dtype=torch.int32),
+                    local_hidden,
+                    2,
+                    4,
+                    prefer_local_hidden_states=True,
+                )
+                self.assertEqual(tokens.tolist(), [0, 0])
+                self.assertEqual(lengths.tolist(), [2])
+                self.assertEqual(shuffle.tolist(), [2, 5])
+                torch.testing.assert_close(hidden, local_hidden.cpu(), rtol=0, atol=0)
+
     def test_online_global_hidden_geometry_splits_even_with_local_preference(self):
         # Production regression: 772 real rows pad to 776 under CP4, so each
         # rank consumes 194 rows. Buffer capability must not reclassify the

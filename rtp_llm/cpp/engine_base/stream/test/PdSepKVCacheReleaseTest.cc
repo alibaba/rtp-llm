@@ -1410,14 +1410,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     }
 }
 
-// =============================================================================
-// Test: runtimeWriteCacheStore with pinned-host metadata + event sync
-// Verifies that when metadata tensors (input_lengths, prefix_lengths) are
-// prepared on pinned host via async D2H and a pre_created_event is attached,
-// runtimeWriteCacheStore waits for the event and reads metadata correctly —
-// the same path used by CacheStoreAsyncWriter, which avoids synchronous .cpu()
-// calls on background threads.
-// =============================================================================
+/** Async D2H metadata has its own readiness event. KV readiness alone does not
+ * guarantee that runtimeWriteCacheStore can read the pinned host metadata. */
 TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEvent) {
     auto config  = makeConfig();  // 3 layers, 16 blocks, 8 tokens/block, INT8
     auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
@@ -1479,10 +1473,9 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     input_lengths_host.copy_(input_lengths_device, /*non_blocking=*/true);
     prefix_lengths_host.copy_(prefix_lengths_device, /*non_blocking=*/true);
 
-    // Record event AFTER async D2H on the current stream.
-    auto event = runtimeCreateEvent();
+    /** Record metadata readiness after its D2H copies, independently of KV publication. */
+    auto metadata_ready_event = runtimeCreateEvent();
 
-    // --- Call runtimeWriteCacheStore (event->synchronize() inside) ---
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
     auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, "default").data()),
                                       {1, (int64_t)resource->blocks(0, "default").size()},
@@ -1493,10 +1486,10 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
     for (int layer_id = 0; layer_id < 3; ++layer_id) {
         auto inputs = makeDsv4WriteInputs(
             /*request_id=*/request_id_val, input_length, /*prefix_length=*/0, block_ids, cache_keys);
-        // The pinned-host metadata is deliberately left un-synchronized here;
-        // runtimeWriteCacheStore must wait on the event before reading it.
-        inputs.input_lengths_host  = input_lengths_host;
-        inputs.prefix_lengths_host = prefix_lengths_host;
+        /** Leave metadata pending for runtimeWriteCacheStore to wait on its readiness event. */
+        inputs.input_lengths_host   = input_lengths_host;
+        inputs.prefix_lengths_host  = prefix_lengths_host;
+        inputs.metadata_ready_event = metadata_ready_event;
 
         torch_ext::LayerKVCache layer_cache;
         layer_cache.kv_cache_base      = layout.at(static_cast<size_t>(layer_id)).kv_addr;
@@ -1511,7 +1504,7 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
                                /*cache_model_id=*/0,
                                /*cp_rank=*/0,
                                /*cp_size=*/1,
-                               event);
+                               /*pre_created_event=*/nullptr);
     }
 
     // Verify: cache store received correct request key for all 3 layers.

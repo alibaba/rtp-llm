@@ -489,20 +489,19 @@ public:
     }
 
 protected:
-    bool plan(const std::vector<int>& total_input_tokens,
-              std::vector<int>&       input_tokens,
-              std::vector<int>&       shuffle_indices,
+    bool plan(int               input_length,
+              const int*        cpu_src,
+              int*              cpu_dst,
+              std::vector<int>& shuffle_indices,
               int,
               int,
               int cp_chunk_size,
               int) override {
         for (int i = 0; i < cp_chunk_size; ++i) {
-            if (i < static_cast<int>(total_input_tokens.size())) {
-                input_tokens[static_cast<size_t>(i)]    = total_input_tokens[static_cast<size_t>(i)];
-                shuffle_indices[static_cast<size_t>(i)] = i;
-            } else {
-                input_tokens[static_cast<size_t>(i)]    = 0;
-                shuffle_indices[static_cast<size_t>(i)] = -1;
+            const bool valid = i < input_length;
+            shuffle_indices[static_cast<size_t>(i)] = valid ? i : -1;
+            if (cpu_src && valid) {
+                cpu_dst[i] = cpu_src[i];
             }
         }
         return true;

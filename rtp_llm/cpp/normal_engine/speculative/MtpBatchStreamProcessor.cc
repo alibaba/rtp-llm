@@ -1179,11 +1179,9 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
                                                           const GptModelOutputs& model_output,
                                                           const torch::Tensor&   draft_token_ids,
                                                           TensorHolder&          host_holder) {
-    mtp::advanceDraftInput(model_input,
-                           model_output.all_hidden_states,
-                           draft_token_ids,
-                           model_input_gatherer_config_.position_id_len_factor,
-                           host_holder);
+    /** The MTP model-input contract requires CUDA sequence lengths. */
+    model_input.sequence_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
+    mtp::advanceDraftInput(model_input, model_output.all_hidden_states, draft_token_ids);
 }
 
 void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroups&    stream_groups,
@@ -1209,7 +1207,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) { return stream->isMiddleChunk(); });
     auto tail_tokens = sampler_output.token_ids;
     if (has_middle_chunk) {
-        tail_tokens = tail_tokens.narrow(1, tail_tokens.size(1) - 1, 1).cpu().clone();
+        tail_tokens = tail_tokens.narrow(1, tail_tokens.size(1) - 1, 1).clone();
     }
     const size_t  position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     torch::Tensor next_position_ids;
@@ -1221,7 +1219,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         const bool middle_chunk = stream->isMiddleChunk();
         for (int stream_row = 0; stream_row < stream->nextBatchSize(); ++stream_row, ++row) {
             if (middle_chunk) {
-                tail_tokens.data_ptr<int>()[row] = stream->nextChunkBoundaryToken();
+                tail_tokens.narrow(0, row, 1).fill_(stream->nextChunkBoundaryToken());
             }
             if (next_position_ids.defined()) {
                 auto* positions = next_position_ids.data_ptr<int>() + row * position_id_len_factor;

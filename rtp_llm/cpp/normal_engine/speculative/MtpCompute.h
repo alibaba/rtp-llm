@@ -49,6 +49,9 @@ enum class DraftInputLayout {
 /** Fixed-width inputs avoid host synchronization on accept_len in device-state mode. */
 DraftInputLayout selectDraftInputLayout(bool device_state_enabled);
 
+/** Target work may still read prefill inputs while sampling is pending; build shift-and-append tokens on CUDA
+ * in separate storage and replace positions without modifying their source aliases.
+ * Leave input_lengths and prefix_lengths on their original devices; host-only position assembly stays pinned. */
 void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_input,
                                            const torch::Tensor& target_hidden_states,
                                            const torch::Tensor& sampled_token_ids,
@@ -79,11 +82,11 @@ void syncDraftPrefillAfterVerify(GptModelInputs&          draft_input,
                                  DraftInputLayout         layout,
                                  const ParallelismConfig& parallelism_config);
 
+/** Advance lengths and positions out of place to preserve tensors shared with the previous input.
+ * Keep their devices unchanged and CPU positions pinned; the caller handles transfers. */
 void advanceDraftInput(GptModelInputs&      draft_input,
                        const torch::Tensor& draft_hidden_states,
-                       const torch::Tensor& draft_token_ids,
-                       size_t               position_id_len_factor,
-                       TensorHolder&        host_holder);
+                       const torch::Tensor& draft_token_ids);
 
 /** Immutable state shared by proposal construction, sampling and target verification in one DSpARK round.
  * anchors [batch]: each request's newest committed token.
