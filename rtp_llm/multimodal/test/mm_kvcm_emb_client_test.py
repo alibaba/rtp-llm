@@ -19,6 +19,7 @@ from rtp_llm.multimodal.kvcm._config import RtpKvMetaObjectClientConfig
 
 class _ClientCode(IntEnum):
     ER_INVALID_GRPCSTATUS = 2
+    ER_SDK_TIMEOUT = 100
     ER_SDK_ERROR_BUFFER_SAFE = 119
     ER_SDK_TIMEOUT_BUFFER_SAFE = 120
     ER_SERVICE_WRITE_IN_PROGRESS = 61
@@ -77,53 +78,43 @@ def _kv_cache_config(**overrides):
 
 
 class RtpKvMetaObjectClientTest(unittest.TestCase):
-    def test_metadata_client_lock_wait_is_bounded_without_rpc(self):
-        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+    def test_endpoint_update_wait_is_bounded_without_sending_query(self):
+        client, native, *_ = self._create(
+            _client_config(vipserver_domain="emb.vipserver")
+        )
+        self.addCleanup(client.close)
+        with client._metadata_lock, patch(
+            "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
+            return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+        ):
+            with self.assertRaisesRegex(TimeoutError, "endpoint update lock"):
+                client.object_size("key", timeout_ms=10)
+        native.get_object_meta.assert_not_called()
 
-        client, *_ = self._create()
-        client._lookup_lock.acquire()
-        try:
-            with patch("rtp_llm.multimodal.kvcm.lookup.KvMetaLookup") as lookup:
-                with self.assertRaises(KvMetaLookupError) as caught:
-                    client.object_size("key", timeout_ms=10)
-                self.assertEqual(caught.exception.reason, "deadline")
-                lookup.assert_not_called()
-        finally:
-            client._lookup_lock.release()
-            client.close()
+    def test_native_lookup_uses_remaining_budget_and_reuses_client(self):
+        client, native, *_ = self._create()
+        self.addCleanup(client.close)
+        native.get_object_meta.return_value = SimpleNamespace(size_bytes=12)
+        with patch.object(kvcm_client.time, "monotonic", side_effect=[1, 1.025]):
+            self.assertEqual(client.object_size("key", trace_id="trace", timeout_ms=50), 12)
+        self.assertEqual(native.get_object_meta.call_args.args[0], "key")
+        self.assertGreater(native.get_object_meta.call_args.args[1], 0)
+        self.assertLessEqual(native.get_object_meta.call_args.args[1], 25)
+        self.assertEqual(native.get_object_meta.call_args.kwargs["trace_id"], "trace")
 
-    def test_metadata_setup_uses_one_deadline_and_keeps_client_reusable(self):
-        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+        native.get_object_meta.reset_mock()
+        with patch.object(kvcm_client.time, "monotonic", side_effect=[1, 1.060]):
+            with self.assertRaisesRegex(TimeoutError, "client setup"):
+                client.object_size("expired", timeout_ms=50)
+        native.get_object_meta.assert_not_called()
 
-        for setup_seconds in (0.025, 0.060):
-            with self.subTest(setup_seconds=setup_seconds):
-                client, native, *_ = self._create()
-                clock = [1.0]
-                lookup = MagicMock()
-                lookup.size.return_value = 12
-
-                def create_lookup(config):
-                    clock[0] += setup_seconds
-                    return lookup
-
-                with patch.object(kvcm_client.time, "monotonic", lambda: clock[0]):
-                    with patch(
-                        "rtp_llm.multimodal.kvcm.lookup.KvMetaLookup", create_lookup
-                    ):
-                        if setup_seconds > 0.050:
-                            with self.assertRaises(KvMetaLookupError) as caught:
-                                client.object_size("key", timeout_ms=50)
-                            self.assertEqual(caught.exception.reason, "deadline")
-                            lookup.size.assert_not_called()
-                        else:
-                            self.assertEqual(
-                                client.object_size("key", timeout_ms=50), 12
-                            )
-                            remaining = lookup.size.call_args.kwargs["timeout_ms"]
-                            self.assertTrue(0 < remaining <= 25)
-                        native.close.assert_not_called()
-                        self.assertEqual(client.object_size("next", timeout_ms=50), 12)
-                client.close()
+        native.get_object_meta.side_effect = _ClientError(_ClientCode.ER_SDK_TIMEOUT)
+        with self.assertRaisesRegex(TimeoutError, "ER_SDK_TIMEOUT"):
+            client.object_size("slow", timeout_ms=100)
+        native.get_object_meta.side_effect = None
+        native.get_object_meta.return_value = None
+        self.assertIsNone(client.object_size("missing"))
+        native.close.assert_not_called()
 
     def test_registered_buffer_reuse_requires_typed_code_and_native_completion(self):
         facade = object.__new__(RtpKvMetaObjectClient)
@@ -325,7 +316,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
                 self.assertTrue(closed.is_set())
             with self.assertRaisesRegex(RuntimeError, "closed"):
                 client.save_one("key", object())
-            resolver.assert_called_once()
+            self.assertEqual(resolver.call_count, 2)
         native.close.assert_called_once()
         native.save.assert_not_called()
 
@@ -672,6 +663,14 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
                 "kv_cache_manager.client.pybind": pybind_module,
             },
         ):
+            for capability in (None, 0, True, "1"):
+                native.KV_META_OBJECT_METADATA_VERSION = capability
+                with (
+                    self.subTest(metadata_capability=capability),
+                    self.assertRaisesRegex(RuntimeError, "native object metadata"),
+                ):
+                    kvcm_client._load_kvcm_client_types()
+            native.KV_META_OBJECT_METADATA_VERSION = 1
             for capability in (None, 0, True, "1"):
                 native.KV_META_OBJECT_ADDRESS_UPDATE_VERSION = capability
                 with (
