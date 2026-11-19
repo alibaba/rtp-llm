@@ -1,24 +1,24 @@
 {
   "schema_version": 1,
   "description": "ROCm ATOM request-owned SSM and indexed replay pools; apply after existing single-state patch",
-  "atom_version": "0.1.8+g9af739efc",
+  "atom_version": "0.1.1.dev1+g0189b3506",
   "aiter_version": "0.1.29+rocm7.2.0.git97d2389",
   "components": {
     "atom": {
       "patch": "atom.patch",
-      "patch_sha256": "9b8fc20ad37c91dbd4e85b8d5784681907290ba35d10cb5c5411e647e4433ab6",
+      "patch_sha256": "aafe8639c338da1963b2f412c87b88939f53cf40c52563adf6aa4fd178e39a15",
       "source_files_sha256": {
-        "atom/model_ops/attention_gdn.py": "f9c8f411016cfd945184ad45cd8d8ade28b25e07b42fecb936ed2adec5a69a07",
-        "atom/plugin/rtpllm/models/qwen4_exp.py": "4ecaaa091e397e59f96ffa4cf65f901847ee7965112094e2fa54d6939750e57a",
+        "atom/model_ops/attention_gdn.py": "e3932f1092aa1f917f53303258a7f6b3a8a91b52e1d5f7c56ccc2510e68a5369",
+        "atom/plugin/rtpllm/models/qwen4_exp.py": "2f860085353952643d71d357a0951991f1c07bb918974410591a677e91d2e092",
         "atom/plugin/rtpllm/utils/linear_double_buffer.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "6b3abe2f7650173437d9b009463b152aaf60242bd1c20635a813a8b008fd7d3f",
+        "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "43cb22bcf4c19f28ec28ecccaa1d2b6c599df5a5b08b327148b64b2e9781ad4f",
         "atom/plugin/rtpllm/utils/split_ssm_storage.py": "72c2d8a3b32feff982cd74ca62116eb723dd076b48957800153fdc2c722ea346"
       },
       "patched_files_sha256": {
-        "atom/model_ops/attention_gdn.py": "b6566837616344db1a2a4eae173195db05cc272c914da105581ea84109aa8b55",
-        "atom/plugin/rtpllm/models/qwen4_exp.py": "0877d0f101f60053d8ed700e9e65bc5928a950ba7f45a86dea356e8b65520aea",
+        "atom/model_ops/attention_gdn.py": "558d6049ecacdfe40ac1fc49c1937ce68908a64ba1f3634e5aee6a8fb7d462f3",
+        "atom/plugin/rtpllm/models/qwen4_exp.py": "c72cee844d7fe950035ea2b9e04f969064e649faae518306d58b86943b7b0535",
         "atom/plugin/rtpllm/utils/linear_double_buffer.py": "691011611834cf6c2aa6717b08e5a3a39f0f07fc135d50f848529fc836d46122",
-        "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "7ce25e3e28fac4ed4481fd59110ef1cefebce7a32a676d111b609b9768c363a5",
+        "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "d5d64c6b2646ee14d6c9b4f927380abcd1e3d714f29618ef370d2a4d735c358e",
         "atom/plugin/rtpllm/utils/split_ssm_storage.py": "06b4f73a4eedf0055cec0f1bf6c726b28686fcadbbfba85047f83102ecb8f5b0"
       }
     },

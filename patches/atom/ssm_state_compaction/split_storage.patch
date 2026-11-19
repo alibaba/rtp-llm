@@ -1,3 +1,189 @@
+diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
+index aa6e02e..ba01388 100644
+--- a/atom/model_ops/attention_gdn.py
++++ b/atom/model_ops/attention_gdn.py
+@@ -254,6 +254,8 @@ class GatedDeltaNet(nn.Module):
+         b = b[:num_actual_tokens]
+         a = a[:num_actual_tokens]
+
++        conv_metadata = getattr(gdn_metadata, "rtp_conv_metadata", gdn_metadata)
++
+         # 1. Convolution sequence transformation
+         conv_weights = self.conv1d.weight.view(
+             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+@@ -291,7 +293,7 @@ class GatedDeltaNet(nn.Module):
+                 mixed_qkv_spec,
+                 conv_state,
+                 conv_weights,
+-                gdn_metadata,
++                conv_metadata,
+                 num_accepted_tokens,
+                 use_replayssm,
+             )
+@@ -312,12 +314,12 @@ class GatedDeltaNet(nn.Module):
+                 activation=self.activation,
+                 conv_states=conv_state,
+                 has_initial_state=has_initial_state,
+-                cache_indices=non_spec_state_indices_tensor,
+-                cache_indices_in=non_spec_state_indices_in_tensor,
++                cache_indices=conv_metadata.non_spec_state_indices_tensor,
++                cache_indices_in=conv_metadata.non_spec_state_indices_in_tensor,
+                 query_start_loc=non_spec_query_start_loc,
+                 k_dim_size=self.num_k_heads * self.head_k_dim // self.tp_size,
+                 v_dim_size=self.num_v_heads * self.head_v_dim // self.tp_size,
+-                metadata=gdn_metadata,
++                metadata=conv_metadata,
+             )
+         elif gdn_metadata.num_decodes > 0:
+             query_non_spec, key_non_spec, value_non_spec = causal_conv1d_update(
+@@ -328,10 +330,10 @@ class GatedDeltaNet(nn.Module):
+                 self.num_v_heads * self.head_v_dim // self.tp_size,
+                 self.conv1d.bias,
+                 self.activation,
+-                conv_state_indices=non_spec_state_indices_tensor[
++                conv_state_indices=conv_metadata.non_spec_state_indices_tensor[
+                     : gdn_metadata.num_actual_tokens
+                 ],
+-                conv_state_indices_in=non_spec_state_indices_in_tensor[
++                conv_state_indices_in=conv_metadata.non_spec_state_indices_in_tensor[
+                     : gdn_metadata.num_actual_tokens
+                 ],
+                 validate_data=True,
+diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
+index b5c106c..8a7cdf5 100644
+--- a/atom/plugin/rtpllm/models/qwen4_exp.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp.py
+@@ -47,6 +47,8 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+             self, model_config, *args, **kwargs
+         )
+         max_batch = bound.arguments.get("max_generate_batch_size")
++        from atom.plugin.rtpllm.utils.split_ssm_storage import configure_request_capacity
++        configure_request_capacity(model_config, max_batch)
+         self._rtp_forward_context_cls = RTPQwen4ExpContext
+         super().__init__(model_config, *args, **kwargs)
+         self._rtp_model_config = model_config
+@@ -266,6 +268,8 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
+                 max_batch, device=device, dtype=torch.int32
+             )
+         self._cg_mtp_meta_bufs = mtp_buffers
++        from atom.plugin.rtpllm.utils.split_ssm_storage import warm_buffers
++        warm_buffers(self)
+
+     def _graph_buffers_for_inputs(self, attn_inputs):
+         if getattr(attn_inputs, "is_target_verify", False) or (
+@@ -679,6 +683,8 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
+                     tail = desc.tail or CacheTailPolicyDesc()
+                     tail.prefix_checkpoint_stride_blocks = 16
+                     desc.tail = tail
++        from atom.plugin.rtpllm.utils.split_ssm_storage import split_descs
++        model_config.kv_cache_spec_descs = split_descs(model_config.kv_cache_spec_descs)
+
+
+     @classmethod
+diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+index e2b9862..e9f39e0 100644
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -207,6 +207,7 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+         if seq_lens is None or seq_lens.numel() != batch_size:
+             raise ValueError("invalid Qwen4Exp MTP target-verify sequence lengths")
+         in_capture = torch.cuda.is_current_stream_capturing()
++        split_conv_slots = None
+         if in_capture:
+             if (
+                 triton is None
+@@ -242,21 +243,27 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                 raise RuntimeError(
+                     "Qwen4Exp MTP target Graph requires device prefix lengths"
+                 )
+-            _target_verify_state_slots_graph_kernel[(triton.cdiv(batch_size, 128),)](
+-                block_table,
+-                seq_lens,
+-                prefix_lengths,
+-                read_slots,
+-                write_slots,
+-                invalid_live_rows,
+-                batch_size,
+-                block_table.stride(0),
+-                block_table.stride(1),
+-                block_table.shape[1],
+-                seq_size_per_block,
+-                query_len,
+-                128,
++            from atom.plugin.rtpllm.utils.split_ssm_storage import target_slots
++            split_conv_slots = target_slots(
++                attn_inputs, block_table, seq_lens, prefix_lengths, read_slots,
++                write_slots, invalid_live_rows, batch_size, seq_size_per_block, query_len,
+             )
++            if split_conv_slots is None:
++                _target_verify_state_slots_graph_kernel[(triton.cdiv(batch_size, 128),)](
++                    block_table,
++                    seq_lens,
++                    prefix_lengths,
++                    read_slots,
++                    write_slots,
++                    invalid_live_rows,
++                    batch_size,
++                    block_table.stride(0),
++                    block_table.stride(1),
++                    block_table.shape[1],
++                    seq_size_per_block,
++                    query_len,
++                    128,
++                )
+             # The index kernel overwrites every active tile's flag on each
+             # replay. A bad live row must fail before GDN touches block 0.
+             valid_slots = (
+@@ -337,6 +344,8 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+         metadata.rtp_target_verify_block_map = block_table
+         metadata.rtp_target_verify_sequence_lengths = seq_lens.to(torch.int32)
+         metadata.rtp_seq_size_per_block = seq_size_per_block
++        from atom.plugin.rtpllm.utils.split_ssm_storage import attach_target_conv_metadata
++        attach_target_conv_metadata(metadata, split_conv_slots)
+         return metadata
+
+     @staticmethod
+@@ -349,14 +358,14 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+
+     @staticmethod
+     def _build_kv_cache_tensors(runtime: Any, layer_maps: Any) -> dict[str, Any]:
+-        caches = RTPForwardQwen35HybridContext._build_kv_cache_tensors(
+-            runtime, layer_maps
+-        )
++        from atom.plugin.rtpllm.utils.split_ssm_storage import enabled, build_caches
++        parent = RTPForwardQwen35HybridContext._build_kv_cache_tensors
++        caches = build_caches(runtime, layer_maps, parent) if enabled() else parent(runtime, layer_maps)
+         model_config = getattr(runtime, "_rtp_model_config", None)
+         if model_config is None:
+             model_config = getattr(runtime, "model_config", None)
+         linear_config = getattr(model_config, "linear_attention_config", None)
+-        if getattr(linear_config, "ssm_state_dtype", None) == DataType.TYPE_FP32:
++        if not enabled() and getattr(linear_config, "ssm_state_dtype", None) == DataType.TYPE_FP32:
+             for layer_num, layer in layer_maps[0].items():
+                 raw = runtime.kv_cache.get_layer_cache(layer_num).kv_cache_base
+                 base = raw.reshape(raw.shape[0], -1)
+@@ -683,7 +692,8 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+         cg_bufs: dict | None = None,
+     ) -> Iterator[None]:
+         resolved_layer_maps = layer_maps or cls.collect_layer_maps(model)
+-        with super().bind(
++        from atom.plugin.rtpllm.utils.split_ssm_storage import target_metadata_scope
++        with target_metadata_scope(runtime, inputs, cg_bufs), super().bind(
+             model=model,
+             runtime=runtime,
+             inputs=inputs,
+@@ -733,6 +743,8 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                     gdn_metadata.rtp_flydsl_read_indices = (
+                         gdn_metadata.spec_state_indices_in_tensor[:, 0].contiguous()
+                     )
++            from atom.plugin.rtpllm.utils.split_ssm_storage import bind_conv
++            bind_conv(cls, runtime, inputs, positions, gdn_metadata, cg_bufs)
+             prepare_metadata(runtime, gdn_metadata, forward_context.kv_cache_data, resolved_layer_maps[0])
+             cls._configure_gdn_backends(
+                 metadata.gdn_metadata,
+diff --git a/atom/plugin/rtpllm/utils/split_ssm_storage.py b/atom/plugin/rtpllm/utils/split_ssm_storage.py
+new file mode 100644
+index 0000000..af2a1c7
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/split_ssm_storage.py
 @@ -0,0 +1,264 @@
@@ -265,182 +451,3 @@
 +    conv.rtp_target_verify_block_map = slots[2]
 +    conv.rtp_attn_inputs = slots[3]
 +    metadata.rtp_conv_metadata = conv
---- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-+++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-@@ -212,6 +212,7 @@
-         if seq_lens is None or seq_lens.numel() != batch_size:
-             raise ValueError("invalid Qwen4Exp MTP target-verify sequence lengths")
-         in_capture = torch.cuda.is_current_stream_capturing()
-+        split_conv_slots = None
-         if in_capture:
-             if (
-                 triton is None
-@@ -247,21 +248,27 @@
-                 raise RuntimeError(
-                     "Qwen4Exp MTP target Graph requires device prefix lengths"
-                 )
--            _target_verify_state_slots_graph_kernel[(triton.cdiv(batch_size, 128),)](
--                block_table,
--                seq_lens,
--                prefix_lengths,
--                read_slots,
--                write_slots,
--                invalid_live_rows,
--                batch_size,
--                block_table.stride(0),
--                block_table.stride(1),
--                block_table.shape[1],
--                seq_size_per_block,
--                query_len,
--                128,
--            )
-+            from atom.plugin.rtpllm.utils.split_ssm_storage import target_slots
-+            split_conv_slots = target_slots(
-+                attn_inputs, block_table, seq_lens, prefix_lengths, read_slots,
-+                write_slots, invalid_live_rows, batch_size, seq_size_per_block, query_len,
-+            )
-+            if split_conv_slots is None:
-+                _target_verify_state_slots_graph_kernel[(triton.cdiv(batch_size, 128),)](
-+                    block_table,
-+                    seq_lens,
-+                    prefix_lengths,
-+                    read_slots,
-+                    write_slots,
-+                    invalid_live_rows,
-+                    batch_size,
-+                    block_table.stride(0),
-+                    block_table.stride(1),
-+                    block_table.shape[1],
-+                    seq_size_per_block,
-+                    query_len,
-+                    128,
-+                )
-             # The index kernel overwrites every active tile's flag on each
-             # replay. A bad live row must fail before GDN touches block 0.
-             valid_slots = (
-@@ -342,6 +349,8 @@
-         metadata.rtp_target_verify_block_map = block_table
-         metadata.rtp_target_verify_sequence_lengths = seq_lens.to(torch.int32)
-         metadata.rtp_seq_size_per_block = seq_size_per_block
-+        from atom.plugin.rtpllm.utils.split_ssm_storage import attach_target_conv_metadata
-+        attach_target_conv_metadata(metadata, split_conv_slots)
-         return metadata
-
-     @staticmethod
-@@ -354,14 +363,14 @@
-
-     @staticmethod
-     def _build_kv_cache_tensors(runtime: Any, layer_maps: Any) -> dict[str, Any]:
--        caches = RTPForwardQwen35HybridContext._build_kv_cache_tensors(
--            runtime, layer_maps
--        )
-+        from atom.plugin.rtpllm.utils.split_ssm_storage import enabled, build_caches
-+        caches = (build_caches(runtime, layer_maps, RTPForwardQwen35HybridContext._build_kv_cache_tensors)
-+                  if enabled() else RTPForwardQwen35HybridContext._build_kv_cache_tensors(runtime, layer_maps))
-         model_config = getattr(runtime, "_rtp_model_config", None)
-         if model_config is None:
-             model_config = getattr(runtime, "model_config", None)
-         linear_config = getattr(model_config, "linear_attention_config", None)
--        if getattr(linear_config, "ssm_state_dtype", None) == DataType.TYPE_FP32:
-+        if not enabled() and getattr(linear_config, "ssm_state_dtype", None) == DataType.TYPE_FP32:
-             for layer_num, layer in layer_maps[0].items():
-                 raw = runtime.kv_cache.get_layer_cache(layer_num, "linear").kv_cache_base
-                 base = raw.reshape(raw.shape[0], -1)
-@@ -719,7 +728,8 @@
-         cg_bufs: dict | None = None,
-     ) -> Iterator[None]:
-         resolved_layer_maps = layer_maps or cls.collect_layer_maps(model)
--        with super().bind(
-+        from atom.plugin.rtpllm.utils.split_ssm_storage import target_metadata_scope
-+        with target_metadata_scope(runtime, inputs, cg_bufs), super().bind(
-             model=model,
-             runtime=runtime,
-             inputs=inputs,
-@@ -763,6 +773,8 @@
-                 )
-             if gdn_metadata is not None and getattr(gdn_metadata, "rtp_flydsl_mtp", False):
-                 gdn_metadata.rtp_flydsl_read_indices = gdn_metadata.spec_state_indices_in_tensor[:, 0].contiguous()
-+            from atom.plugin.rtpllm.utils.split_ssm_storage import bind_conv
-+            bind_conv(cls, runtime, inputs, positions, gdn_metadata, cg_bufs)
-             from atom.plugin.rtpllm.utils.replay_hybrid import prepare_metadata as prepare_hybrid
-             prepare_hybrid(runtime, gdn_metadata, forward_context.kv_cache_data, resolved_layer_maps[0])
-             from atom.plugin.rtpllm.utils.replayssm_rtp import prepare_metadata
---- a/atom/plugin/rtpllm/models/qwen4_exp.py
-+++ b/atom/plugin/rtpllm/models/qwen4_exp.py
-@@ -65,6 +65,8 @@
-             self, model_config, *args, **kwargs
-         )
-         max_batch = bound.arguments.get("max_generate_batch_size")
-+        from atom.plugin.rtpllm.utils.split_ssm_storage import configure_request_capacity
-+        configure_request_capacity(model_config, max_batch)
-         self._rtp_forward_context_cls = RTPQwen4ExpContext
-         super().__init__(model_config, *args, **kwargs)
-         self._rtp_model_config = model_config
-@@ -282,6 +284,8 @@
-                     mtp_buffers["target_invalid_live_rows"]
-                 )
-         self._cg_mtp_meta_bufs = mtp_buffers
-+        from atom.plugin.rtpllm.utils.split_ssm_storage import warm_buffers
-+        warm_buffers(self)
-
-     def _graph_buffers_for_inputs(self, attn_inputs):
-         if getattr(attn_inputs, "is_target_verify", False) or (
-@@ -760,7 +764,8 @@
-                     tail = desc.tail or CacheTailPolicyDesc()
-                     tail.prefix_checkpoint_stride_blocks = GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
-                     desc.tail = tail
--        model_config.kv_cache_spec_descs = descs
-+        from atom.plugin.rtpllm.utils.split_ssm_storage import split_descs
-+        model_config.kv_cache_spec_descs = split_descs(descs)
-
-     @classmethod
-
---- a/atom/model_ops/attention_gdn.py
-+++ b/atom/model_ops/attention_gdn.py
-@@ -249,6 +249,8 @@
-         b = b[:num_actual_tokens]
-         a = a[:num_actual_tokens]
-
-+        conv_metadata = getattr(gdn_metadata, "rtp_conv_metadata", gdn_metadata)
-+
-         # 1. Convolution sequence transformation
-         conv_weights = self.conv1d.weight.view(
-             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-@@ -286,7 +288,7 @@
-                 mixed_qkv_spec,
-                 conv_state,
-                 conv_weights,
--                gdn_metadata,
-+                conv_metadata,
-                 num_accepted_tokens,
-                 use_replayssm,
-             )
-@@ -307,12 +309,12 @@
-                 activation=self.activation,
-                 conv_states=conv_state,
-                 has_initial_state=has_initial_state,
--                cache_indices=non_spec_state_indices_tensor,
--                cache_indices_in=non_spec_state_indices_in_tensor,
-+                cache_indices=conv_metadata.non_spec_state_indices_tensor,
-+                cache_indices_in=conv_metadata.non_spec_state_indices_in_tensor,
-                 query_start_loc=non_spec_query_start_loc,
-                 k_dim_size=self.num_k_heads * self.head_k_dim // self.tp_size,
-                 v_dim_size=self.num_v_heads * self.head_v_dim // self.tp_size,
--                metadata=gdn_metadata,
-+                metadata=conv_metadata,
-             )
-         elif gdn_metadata.num_decodes > 0:
-             query_non_spec, key_non_spec, value_non_spec = causal_conv1d_update(
-@@ -323,10 +325,10 @@
-                 self.num_v_heads * self.head_v_dim // self.tp_size,
-                 self.conv1d.bias,
-                 self.activation,
--                conv_state_indices=non_spec_state_indices_tensor[
-+                conv_state_indices=conv_metadata.non_spec_state_indices_tensor[
-                     : gdn_metadata.num_actual_tokens
-                 ],
--                conv_state_indices_in=non_spec_state_indices_in_tensor[
-+                conv_state_indices_in=conv_metadata.non_spec_state_indices_in_tensor[
-                     : gdn_metadata.num_actual_tokens
-                 ],
-                 validate_data=True,

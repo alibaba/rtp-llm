@@ -1,22 +1,22 @@
 {
-  "atom_version": "0.1.8+g9af739efc",
-  "patch_sha256": "b0b1161e0ef4e764e8730bf51fc1ceea3ef457f3d9b96a344a8f3ce182d4bf2e",
+  "atom_version": "0.1.1.dev1+g0189b3506",
+  "patch_sha256": "d08766b1a17d97e8fb61de164481a6d3860937092b3c36a9e08536111610adcc",
   "files": {
     "atom/plugin/rtpllm/utils/split_ssm_storage.py": {
       "source_sha256": null,
       "patched_sha256": "72c2d8a3b32feff982cd74ca62116eb723dd076b48957800153fdc2c722ea346"
     },
     "atom/plugin/rtpllm/utils/qwen4_exp_context.py": {
-      "source_sha256": "e3491986c275a06d4dbf355f970b17e4153b713d8e27a9f8e485f1ed82693d8d",
-      "patched_sha256": "6b3abe2f7650173437d9b009463b152aaf60242bd1c20635a813a8b008fd7d3f"
+      "source_sha256": "9d6818c73aee2992ffa37185a265fad03e0aaaeb5d5277490f53692bbd212dc7",
+      "patched_sha256": "43cb22bcf4c19f28ec28ecccaa1d2b6c599df5a5b08b327148b64b2e9781ad4f"
     },
     "atom/plugin/rtpllm/models/qwen4_exp.py": {
-      "source_sha256": "de62b9d5e401ba35957461c27670bbb802f7850ae36839601fbe45b1186304d1",
-      "patched_sha256": "4ecaaa091e397e59f96ffa4cf65f901847ee7965112094e2fa54d6939750e57a"
+      "source_sha256": "572f48f756fb641b49777339f741dab9229dc67995bbe564001e2b03539081c5",
+      "patched_sha256": "2f860085353952643d71d357a0951991f1c07bb918974410591a677e91d2e092"
     },
     "atom/model_ops/attention_gdn.py": {
-      "source_sha256": "8db24f4c126fd67b63ffaea1e9334f5de1373fb80767f9988fe7fb396708ea21",
-      "patched_sha256": "f9c8f411016cfd945184ad45cd8d8ade28b25e07b42fecb936ed2adec5a69a07"
+      "source_sha256": "60c72940d3bc2d3a89533f8d4b8441801818fffca1209a02e30435967e6d2c4a",
+      "patched_sha256": "e3932f1092aa1f917f53303258a7f6b3a8a91b52e1d5f7c56ccc2510e68a5369"
     }
   }
 }
