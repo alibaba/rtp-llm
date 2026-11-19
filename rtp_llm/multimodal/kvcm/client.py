@@ -8,7 +8,13 @@ from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Any, TypeVar
 
-from ._config import DEFAULT_MAX_OBJECT_BYTES, RtpKvMetaObjectClientConfig
+from . import lookup
+from ._config import (
+    DEFAULT_MAX_OBJECT_BYTES,
+    RtpKvMetaObjectClientConfig,
+    _resolve_vipserver_addresses,
+)
+from .lookup import KvMetaLookupError, KvMetaLookupTimeout
 
 _MISSING_WHEEL_MESSAGE = (
     "KVCM EMB storage requires the kvcm_py_client wheel with KVMeta object support"
@@ -44,6 +50,16 @@ def _load_kvcm_client_types(
         from kv_cache_manager.client.pybind import kvcm_py_client
     except ImportError as error:
         raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE) from error
+    metadata_version = getattr(kvcm_py_client, "KV_META_OBJECT_METADATA_VERSION", None)
+    if (
+        type(metadata_version) is not int
+        or metadata_version != 1
+        or not callable(getattr(KvMetaObjectClient, "get_object_meta", None))
+        or not callable(getattr(KvMetaObjectClient, "load_from_meta", None))
+    ):
+        raise RuntimeError(
+            "KVCM EMB storage requires native object metadata API version 1"
+        )
     if require_address_update and (
         type(getattr(kvcm_py_client, "KV_META_OBJECT_ADDRESS_UPDATE_VERSION", None))
         is not int
@@ -132,10 +148,8 @@ class RtpKvMetaObjectClient:
         self._client = client
         self._client_error_type = client_error_type
         self._not_found_code = not_found_code
-        self._lookup = None
-        self._lookup_lock = threading.Lock()
         self._metadata_lock = threading.Lock()
-        self._metadata_addresses = tuple(config.addresses)
+        self._metadata_addresses = frozenset(config.addresses)
         self._closed = False
 
     @classmethod
@@ -192,8 +206,6 @@ class RtpKvMetaObjectClient:
 
     def is_transfer_quiescent(self, error: BaseException) -> bool:
         """True when this failed call is known not to leave pending DMA."""
-        from .lookup import KvMetaLookupError
-
         if isinstance(error, KvMetaLookupError) and error.reason == "discovery":
             return True  # Refresh failed before submitting save/load to the SDK.
         return (
@@ -202,35 +214,46 @@ class RtpKvMetaObjectClient:
             and getattr(error, "data_transfer_may_be_inflight", True) is False
         )
 
-    def _refresh_metadata_addresses(self):
-        # Serialize discovery publication with Close, not with payload IO. The
-        # SDK atomically swaps metadata channels and retains the same consumer.
-        with self._metadata_lock:
+    def _discover_addresses(self):
+        try:
+            return _resolve_vipserver_addresses(
+                self._config.vipserver_domain, lookup._cached_vipserver_resolver
+            )
+        except Exception:
+            raise KvMetaLookupError("KVMeta service discovery unavailable") from None
+
+    def _refresh_metadata_addresses(self, deadline=None):
+        if self._closed:
+            raise RuntimeError("KVCM client is closed")
+        if not self._config.vipserver_domain:
+            return
+        # Stable endpoint reads don't take the address-update lock. The SDK
+        # keeps an immutable endpoint snapshot for each admitted RPC.
+        if frozenset(self._discover_addresses()) == self._metadata_addresses:
+            return
+        if deadline is None:
+            self._metadata_lock.acquire()
+        elif not self._metadata_lock.acquire(
+            timeout=max(0, deadline - time.monotonic())
+        ):
+            raise KvMetaLookupTimeout("KVMeta endpoint update lock deadline exceeded")
+        try:
             if self._closed:
                 raise RuntimeError("KVCM client is closed")
-            if not self._config.vipserver_domain:
-                return
-            from .lookup import (
-                KvMetaLookupError,
-                _cached_vipserver_resolver,
-                _resolve_vipserver_addresses,
-            )
-
-            try:
-                addresses = _resolve_vipserver_addresses(
-                    self._config.vipserver_domain, _cached_vipserver_resolver
-                )
-                if set(addresses) != set(self._metadata_addresses):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise KvMetaLookupTimeout("KVMeta endpoint update deadline exceeded")
+            # Re-read while holding the lock so an older snapshot can't
+            # overwrite a refresh published by another worker.
+            addresses = self._discover_addresses()
+            snapshot = frozenset(addresses)
+            if snapshot != self._metadata_addresses:
+                try:
                     self._client.update_addresses(addresses)
-                    self._metadata_addresses = tuple(addresses)
-            except Exception:
-                # No mutation or payload IO was submitted, and the SDK retains
-                # its old channel snapshot on failure. Never replay a mutation.
-                error = KvMetaLookupError(
-                    "KVMeta service discovery unavailable", reason="discovery"
-                )
-                error.data_transfer_may_be_inflight = False
-                raise error from None
+                except Exception:
+                    raise KvMetaLookupError("KVMeta endpoint update failed") from None
+                self._metadata_addresses = snapshot
+        finally:
+            self._metadata_lock.release()
 
     def save(
         self,
@@ -275,10 +298,13 @@ class RtpKvMetaObjectClient:
         self.load((key,), (tensor,), trace_id=trace_id)
         return tensor
 
+    def load_from_meta(self, meta, buffer: _TensorT, *, trace_id=None) -> _TensorT:
+        """Read directly from the native metadata for this request."""
+        self._client.load_from_meta(meta, buffer, trace_id=trace_id)
+        return buffer
+
     def buffer_safe_after_failure(self, error: Exception) -> bool:
         """Require the wheel's explicit completion contract, as in prefill."""
-        from .lookup import KvMetaLookupError
-
         if isinstance(error, KvMetaLookupError) and error.reason == "discovery":
             return True  # The native transfer has not been submitted.
         if not isinstance(error, self._client_error_type):
@@ -297,32 +323,30 @@ class RtpKvMetaObjectClient:
             and hasattr(codes, "ER_SDK_TIMEOUT_BUFFER_SAFE")
         )
 
-    def object_size(self, key: str, *, trace_id=None, timeout_ms=None):
-        """Return exact size or None from KVMeta Get; never expose a storage URI."""
-        from .lookup import KvMetaLookup, KvMetaLookupError
-
-        budget_ms = self._config.call_timeout_ms if timeout_ms is None else timeout_ms
-        deadline = time.monotonic() + budget_ms / 1000
-        if budget_ms <= 0 or not self._lookup_lock.acquire(
-            timeout=max(0, deadline - time.monotonic())
-        ):
-            raise KvMetaLookupError(
-                "KVMeta lookup client lock deadline exceeded", reason="deadline"
-            )
-        try:
-            if self._closed:
-                raise RuntimeError("KVCM client is closed")
-            if self._lookup is None:
-                self._lookup = KvMetaLookup(self._config)
-            lookup = self._lookup
-        finally:
-            self._lookup_lock.release()
+    def get_object_meta(self, key: str, *, trace_id=None, timeout_ms=None):
+        """Return native object metadata, or None for a cache miss."""
+        if timeout_ms is None:
+            timeout_ms = self._config.call_timeout_ms
+        deadline = time.monotonic() + timeout_ms / 1000
+        if timeout_ms <= 0:
+            raise KvMetaLookupTimeout("KVMeta lookup deadline exceeded")
+        self._refresh_metadata_addresses(deadline)
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
-            raise KvMetaLookupError(
-                "KVMeta lookup client setup deadline exceeded", reason="deadline"
+            raise KvMetaLookupTimeout(
+                "KVMeta lookup deadline exceeded during client setup"
             )
-        return lookup.size(key, trace_id=trace_id, timeout_ms=remaining_ms)
+        try:
+            return self._client.get_object_meta(key, remaining_ms, trace_id=trace_id)
+        except self._client_error_type as error:
+            if getattr(error.code, "name", None) == "ER_SDK_TIMEOUT":
+                raise KvMetaLookupTimeout("KVMeta Get returned ER_SDK_TIMEOUT") from error
+            raise
+
+    def object_size(self, key: str, *, trace_id=None, timeout_ms=None):
+        """Return exact size or None without exposing a storage location."""
+        meta = self.get_object_meta(key, trace_id=trace_id, timeout_ms=timeout_ms)
+        return meta.size_bytes if meta is not None else None
 
     def save_object(self, key: str, value: Any, *, devices=None, trace_id=None):
         """Save one complete tensor tree; synchronize GPU producer streams first."""
@@ -347,11 +371,11 @@ class RtpKvMetaObjectClient:
 
         from .tensor_object import unpack_object
 
-        size = self.object_size(key, trace_id=trace_id, timeout_ms=timeout_ms)
-        if size is None:
+        meta = self.get_object_meta(key, trace_id=trace_id, timeout_ms=timeout_ms)
+        if meta is None:
             return None
-        buffer = torch.empty(size, dtype=torch.uint8)
-        self.load_one(key, buffer, trace_id=trace_id)
+        buffer = torch.empty(meta.size_bytes, dtype=torch.uint8)
+        self.load_from_meta(meta, buffer, trace_id=trace_id)
         return unpack_object(
             buffer,
             cuda_device=cuda_device,
@@ -409,17 +433,8 @@ class RtpKvMetaObjectClient:
         """Release local KVCM resources; safe to call more than once."""
 
         with self._metadata_lock:
-            try:
-                self._client.close()
-            finally:
-                self._close_lookup()
-
-    def _close_lookup(self):
-        with self._lookup_lock:
             self._closed = True
-            lookup, self._lookup = self._lookup, None
-        if lookup is not None:
-            lookup.close()
+            self._client.close()
 
     def __enter__(self) -> RtpKvMetaObjectClient:  # noqa: PYI034 - Python 3.10.
         self._client.__enter__()
@@ -434,7 +449,5 @@ class RtpKvMetaObjectClient:
         # Cleanup must never turn a body failure into apparent success, even if
         # a future optional client accidentally returns a truthy value here.
         with self._metadata_lock:
-            try:
-                self._client.__exit__(exc_type, exc_value, traceback)
-            finally:
-                self._close_lookup()
+            self._closed = True
+            self._client.__exit__(exc_type, exc_value, traceback)

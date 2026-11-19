@@ -366,12 +366,15 @@ class VitConfig:
         # None retains legacy env compatibility when JSON omits these switches.
         self.mm_remote_cache_gdr_enable: Optional[bool] = None
         self.mm_remote_cache_gdr_num: int = 1
+        self.mm_remote_cache_metadata_workers: int = 32
+        self.mm_remote_cache_read_transfer_workers: Optional[int] = None
+        self.mm_remote_cache_write_transfer_workers: Optional[int] = None
         self.mm_remote_cache_audit: Optional[bool] = None
         self.mm_remote_cache_namespace: str = ""
         self.mm_remote_cache_write_timeout_ms: int = 1000
         self.mm_remote_cache_max_object_bytes: int = 256 * 1024**2
         self.mm_remote_cache_max_inflight_bytes: int = 1024**3
-        self.mm_remote_cache_max_pending: int = 8
+        self.mm_remote_cache_max_pending: int = 128
         self.mm_remote_cache_read_timeout_ms: int = 200
         self.mm_remote_cache_quarantine_ttl_seconds: int = 300
         self.url_cache_item_num: int = 100
@@ -496,6 +499,9 @@ class VitConfig:
             f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"
             f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
             f"mm_remote_cache_gdr_num: {self.mm_remote_cache_gdr_num}\n"
+            f"mm_remote_cache_metadata_workers: {self.mm_remote_cache_metadata_workers}\n"
+            f"mm_remote_cache_read_transfer_workers: {self.mm_remote_cache_read_transfer_workers}\n"
+            f"mm_remote_cache_write_transfer_workers: {self.mm_remote_cache_write_transfer_workers}\n"
             f"mm_remote_cache_max_pending: {self.mm_remote_cache_max_pending}\n"
             f"mm_remote_cache_read_timeout_ms: {self.mm_remote_cache_read_timeout_ms}\n"
             f"mm_remote_cache_quarantine_ttl_seconds: {self.mm_remote_cache_quarantine_ttl_seconds}\n"

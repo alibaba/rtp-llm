@@ -117,6 +117,9 @@ _EMBEDDING_CACHE_FIELDS = {
         "namespace": ("mm_remote_cache_namespace", str, None),
         "gdr_enable": ("mm_remote_cache_gdr_enable", bool, None),
         "gdr_num": ("mm_remote_cache_gdr_num", int, 1),
+        "metadata_workers": ("mm_remote_cache_metadata_workers", int, 1),
+        "read_transfer_workers": ("mm_remote_cache_read_transfer_workers", int, 1),
+        "write_transfer_workers": ("mm_remote_cache_write_transfer_workers", int, 1),
         "audit": ("mm_remote_cache_audit", bool, None),
         "read_timeout_ms": ("mm_remote_cache_read_timeout_ms", int, 1),
         "write_timeout_ms": ("mm_remote_cache_write_timeout_ms", int, 1),
@@ -612,7 +615,7 @@ def init_vit_group_args(parser, vit_config):
             1024**3,
             "远端缓存读写暂存内存预算bytes",
         ),
-        ("mm_remote_cache_max_pending", int, 8, "远端缓存最大未完成任务数"),
+        ("mm_remote_cache_max_pending", int, 128, "远端缓存最大未完成任务数"),
         (
             "mm_remote_cache_read_timeout_ms",
             int,

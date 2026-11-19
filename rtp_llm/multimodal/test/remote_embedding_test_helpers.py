@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+from types import SimpleNamespace
 
 from rtp_llm.multimodal.greennet_hook import (
     GreenNetHandle,
@@ -10,7 +11,16 @@ from rtp_llm.multimodal.greennet_hook import (
 )
 
 
-class Store:
+class MetadataReadMixin:
+    def get_object_meta(self, key, **kwargs):
+        size = self.object_size(key, **kwargs)
+        return None if size is None else SimpleNamespace(size_bytes=size, key=key)
+
+    def load_from_meta(self, meta, buffer, **kwargs):
+        return self.load_one(meta.key, buffer, **kwargs)
+
+
+class Store(MetadataReadMixin):
     def __init__(self, objects=None):
         self.objects = {} if objects is None else objects
         self.saved = threading.Event()
@@ -46,7 +56,7 @@ class Store:
         self.closed = True
 
 
-class FakeClient:
+class FakeClient(MetadataReadMixin):
     instance_id = "kve_unit"
 
     def __init__(self, storage):
