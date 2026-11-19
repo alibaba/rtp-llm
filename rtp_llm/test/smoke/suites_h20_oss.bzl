@@ -44,6 +44,49 @@ def h20_oss_suites():
                     "decode": "--warm_up 0 --reuse_cache 1 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
                 },
             ),
+            # Manual 2x2 diagnostic: change only KV sharding and cache reuse.
+            smoke_test(
+                name="p2p_cp2_decode_compare_no_kv_sharding",
+                tags=["manual"],
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
+                gpu_type=["H20_CU13"],
+                envs={
+                    "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 1 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --seq_size_per_block 64 --tp_size 2 --dp_size 1 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 0 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                    "decode": "--warm_up 0 --reuse_cache 1 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 0 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                },
+            ),
+            smoke_test(
+                name="p2p_cp2_decode_compare_no_cache_reuse",
+                tags=["manual"],
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
+                gpu_type=["H20_CU13"],
+                envs={
+                    "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 0 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --seq_size_per_block 64 --tp_size 2 --dp_size 1 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                    "decode": "--warm_up 0 --reuse_cache 0 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                },
+            ),
+            smoke_test(
+                name="p2p_cp2_decode_compare_no_kv_sharding_no_cache_reuse",
+                tags=["manual"],
+                task_info="data/model/glm5/glm_5_fp8_q_r_h20_cp.json",
+                gpu_type=["H20_CU13"],
+                envs={
+                    "prefill": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                    "decode": ["PYTHONUNBUFFERED=TRUE", "LOG_LEVEL=INFO"],
+                },
+                smoke_args={
+                    "prefill": "--warm_up 0 --reuse_cache 0 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --seq_size_per_block 64 --tp_size 2 --dp_size 1 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 0 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                    "decode": "--warm_up 0 --reuse_cache 0 --fp8_kv_cache 1 --act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --reserver_runtime_mem_mb 8192 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --prefill_cp_kv_cache_sharded 0 --prefill_cp_size 2 --load_cache_timeout_ms 120000",
+                },
+            ),
             smoke_test(
                 name="mla_kernel_block_size",
                 task_info="data/model/glm5/glm_5_fp8_q_r_h20.json",
