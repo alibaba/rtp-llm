@@ -1261,7 +1261,7 @@ index f721fa7..b8081bb 100644
              if kv_cache_base is None:
                  signature.append((int(layer_num), None))
 diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-index 17573c6..8a3774e 100644
+index 17573c6..ba46e5e 100644
 --- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
 +++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
 @@ -6,7 +6,6 @@ from collections.abc import Iterator
@@ -1626,7 +1626,7 @@ index 17573c6..8a3774e 100644
                      ratio,
                      128,
                  )
-@@ -830,9 +944,27 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -830,11 +944,30 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                      ratio,
                      compressed,
                  )
@@ -1653,9 +1653,13 @@ index 17573c6..8a3774e 100644
 -                os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
 +                envs.ATOM_QSA_FLYDSL_ATTN
                  and forward_context.context.is_prefill
-                 and not forward_context.context.is_draft
+-                and not forward_context.context.is_draft
++                and not runtime._rtp_model_config.is_mtp
++                and not getattr(full_inputs, "is_target_verify", False)
                  and not in_capture
-@@ -858,8 +990,6 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                 and full_inputs.input_lengths.device.type == "cpu"
+                 and full_inputs.prefix_lengths.device.type == "cpu"
+@@ -858,8 +991,6 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                          pages = full_blocks[requests, tokens // full_block_size].to(torch.int64)
                          context_slots = pages * full_block_size + tokens % full_block_size
              metadata.qsa_metadata = Qwen4ExpQSAMetadata(
@@ -1664,7 +1668,7 @@ index 17573c6..8a3774e 100644
                  block_tables=full_blocks,
                  slot_mapping=slots,
                  compressed_slot_mapping=compressed,
-@@ -872,12 +1002,81 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -872,12 +1003,81 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                  logical_positions=logical,
                  seq_lens=metadata.context_lens,
                  max_seq_len=int(metadata.max_seqlen_k),
