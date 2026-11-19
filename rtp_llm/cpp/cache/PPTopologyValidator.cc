@@ -55,8 +55,6 @@ void deriveConstructionInputs(PPValidationResult& result) {
     result.agreed.paged_block_num = paged_min;
 }
 
-using GroupSetMemberCountsByType = std::unordered_map<CacheGroupType, size_t>;
-
 CanonicalGroupEntry makeCanonicalGroupEntry(const StageCacheGroupSnapshot& group) {
     CanonicalGroupEntry entry;
     entry.tag                       = group.tag;
@@ -64,7 +62,7 @@ CanonicalGroupEntry makeCanonicalGroupEntry(const StageCacheGroupSnapshot& group
     entry.seq_size_per_block        = group.seq_size_per_block;
     entry.kernel_seq_size_per_block = group.kernel_seq_size_per_block;
     entry.cache_key_token_stride    = group.cache_key_token_stride;
-    entry.logical_block_num         = group.block_num;
+    entry.logical_block_num         = group.has_local_backing ? group.block_num : 0;
     entry.explicit_block_num        = group.explicit_block_num;
     entry.policy_fingerprint        = group.policy_fingerprint;
     return entry;
@@ -98,27 +96,9 @@ validateAndMergeCanonicalGroup(CanonicalGroupEntry& entry, const StageCacheGroup
         return "stage " + std::to_string(stage_index) + " group [" + group.tag + "] policy [" + group.policy_fingerprint
                + "] != canonical [" + entry.policy_fingerprint + "]";
     }
-    entry.logical_block_num = std::min(entry.logical_block_num, group.block_num);
-    return {};
-}
-
-std::string validateGroupSetStructure(size_t                            stage_index,
-                                      const GroupSetMemberCountsByType& canonical,
-                                      const GroupSetMemberCountsByType& local) {
-    for (const auto& [type, local_count] : local) {
-        const auto expected = canonical.find(type);
-        // Tags are unique, later stages are stage-0 subsets, and shared tags
-        // already agree on type and reuse policy. Equal non-zero counts
-        // therefore imply an identical group set.
-        const size_t expected_count = expected == canonical.end() ? 0 : expected->second;
-        // TODO(pp-partial-group-set): once the sender can project each
-        // CopyItem (including group_blocks) per target PP rank, allow a
-        // non-empty proper subset. A wholly absent group set is skipped receiver-side.
-        if (local_count != expected_count) {
-            return "stage " + std::to_string(stage_index) + " has " + std::to_string(local_count) + " of "
-                   + std::to_string(expected_count) + " group-set members for type "
-                   + std::to_string(static_cast<int>(type)) + "; partial group-set overlap is not supported yet";
-        }
+    if (group.has_local_backing) {
+        entry.logical_block_num =
+            entry.logical_block_num == 0 ? group.block_num : std::min(entry.logical_block_num, group.block_num);
     }
     return {};
 }
@@ -134,7 +114,7 @@ std::string validateTierSizing(const StageCacheSnapshot& stage, const BlockTreeC
     }
     std::unordered_set<CacheGroupType> remaining_types;
     for (const auto& group : stage.groups) {
-        if (group.block_tree_group_member) {
+        if (group.block_tree_group_member && group.has_local_backing) {
             remaining_types.insert(group.type);
         }
     }
@@ -159,60 +139,45 @@ void mergeMinBlockNums(TierBlockNumOverrides& counts, const TierBlockNumOverride
     }
 }
 
-BlockTreeCacheBlockNums computeStageTierBlockNums(const StageCacheSnapshot&               stage,
-                                                  const std::vector<CanonicalGroupEntry>& groups) {
-    const auto& sizing = stage.block_tree;
-    if (sizing.host_budget_bytes == 0 && sizing.disk_budget_bytes == 0) {
-        return {};
-    }
-    std::vector<CacheGroupType> types;
-    std::vector<size_t>         device_blocks;
-    std::vector<size_t>         strides;
-    for (const auto& group_set : sizing.group_sets) {
-        const auto group = std::find_if(
-            groups.begin(), groups.end(), [&](const auto& entry) { return entry.tag == group_set.first_tag; });
-        types.push_back(group->type);
-        device_blocks.push_back(group->logical_block_num);
-        strides.push_back(group_set.pool_stride);
-    }
-    const auto              host = sizing.host_budget_bytes > 0 ?
-                                       computeTierBlockCounts(sizing.host_budget_bytes, device_blocks, strides) :
-                                       std::vector<size_t>{};
-    const auto              disk = sizing.disk_budget_bytes > 0 ?
-                                       computeTierBlockCounts(sizing.disk_budget_bytes, device_blocks, strides) :
-                                       std::vector<size_t>{};
-    BlockTreeCacheBlockNums result;
-    for (size_t i = 0; i < types.size(); ++i) {
-        if (!host.empty()) {
-            result.host.emplace(types[i], host[i]);
-        }
-        if (!disk.empty()) {
-            result.disk.emplace(types[i], disk[i]);
-        }
-    }
-    return result;
-}
-
 }  // namespace
 
 StageCacheSnapshot StageCacheSnapshot::captureLocalStage(const CacheConfig&          config,
                                                          const BlockTreeCacheSizing& block_tree_sizing) {
+    /** Tier weights use the first reusable tag of each type in local layer order. */
+    std::unordered_set<std::string>                 local_tags;
+    std::unordered_map<CacheGroupType, std::string> first_local_tag;
+    for (const auto& layer : config.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            if (!local_tags.insert(tag).second) {
+                continue;
+            }
+            const auto& policy = config.group(tag).policy;
+            if (cacheGroupParticipatesInBlockTree(policy)) {
+                first_local_tag.try_emplace(policy.group_type, tag);
+            }
+        }
+    }
+
     StageCacheSnapshot snapshot;
     snapshot.groups.reserve(config.topology().groups().size());
     for (const auto& group : config.topology().groups()) {
         StageCacheGroupSnapshot captured;
         captured.tag                       = group.tag;
         captured.type                      = group.policy.group_type;
+        captured.has_local_backing         = local_tags.count(group.tag) != 0;
         captured.block_tree_group_member   = cacheGroupParticipatesInBlockTree(group.policy);
         captured.seq_size_per_block        = group.seqSizePerBlock();
         captured.kernel_seq_size_per_block = group.kernelSeqSizePerBlock();
         captured.cache_key_token_stride    = group.cacheKeyTokenStride();
-        captured.block_num                 = group.block_num;
+        captured.block_num                 = captured.has_local_backing ? group.block_num : 0;
         captured.explicit_block_num        = group.policy.explicit_block_num;
         captured.policy_fingerprint        = group.policy.policyFingerprint();
         snapshot.groups.push_back(std::move(captured));
     }
     snapshot.block_tree = block_tree_sizing;
+    for (auto& group_set : snapshot.block_tree.group_sets) {
+        group_set.first_tag = first_local_tag.at(config.group(group_set.first_tag).policy.group_type);
+    }
     return snapshot;
 }
 
@@ -304,13 +269,14 @@ std::string StageCacheSnapshot::serialize() const {
                "group-set first tag")
         << kFieldSep
         << joinGroupNums(block_tree.group_sets, [](const auto& group_set) { return group_set.pool_stride; })
-        << kFieldSep << block_tree.host_budget_bytes << kFieldSep << block_tree.disk_budget_bytes;
+        << kFieldSep << joinGroupNums(groups, [](const auto& group) { return group.has_local_backing; }) << kFieldSep
+        << block_tree.host_budget_bytes << kFieldSep << block_tree.disk_budget_bytes;
     return oss.str();
 }
 
 StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     const auto fields = splitFields(payload, kFieldSep);
-    RTP_LLM_CHECK_WITH_INFO(fields.size() == 13, "PP snapshot payload is malformed (field count)");
+    RTP_LLM_CHECK_WITH_INFO(fields.size() == 14, "PP snapshot payload is malformed (field count)");
     auto group_tags = splitFields(fields[0], kTagSep);
     if (fields[0].empty()) {
         group_tags.clear();
@@ -322,6 +288,7 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     const auto cache_key_token_strides     = parseNums<size_t>(fields[5], group_tags.size());
     const auto block_nums                  = parseNums<uint32_t>(fields[6], group_tags.size());
     const auto explicit_block_nums         = parseNums<uint32_t>(fields[7], group_tags.size());
+    const auto local_backing_flags         = parseNums<uint8_t>(fields[11], group_tags.size());
     auto       policy_fingerprints         = splitFields(fields[8], kTagSep);
     if (fields[8].empty()) {
         policy_fingerprints.clear();
@@ -342,6 +309,7 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
         group.tag                       = std::move(group_tags[i]);
         group.type                      = group_types[i];
         group.block_tree_group_member   = block_tree_group_membership[i] != 0;
+        group.has_local_backing         = local_backing_flags[i] != 0;
         group.seq_size_per_block        = seq_size_per_block[i];
         group.kernel_seq_size_per_block = kernel_seq_size_per_block[i];
         group.cache_key_token_stride    = cache_key_token_strides[i];
@@ -355,8 +323,8 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     for (size_t i = 0; i < first_tags.size(); ++i) {
         snapshot.block_tree.group_sets.push_back({std::move(first_tags[i]), strides[i]});
     }
-    snapshot.block_tree.host_budget_bytes = std::stoull(fields[11]);
-    snapshot.block_tree.disk_budget_bytes = std::stoull(fields[12]);
+    snapshot.block_tree.host_budget_bytes = std::stoull(fields[12]);
+    snapshot.block_tree.disk_budget_bytes = std::stoull(fields[13]);
     return snapshot;
 }
 
@@ -369,7 +337,6 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
     }
 
     std::unordered_map<std::string, size_t> canonical_index;
-    GroupSetMemberCountsByType              canonical_group_set_member_counts;
     for (size_t s = 0; s < stages.size(); ++s) {
         const auto& stage = stages[s];
         if (s == 0 && stage.groups.empty()) {
@@ -377,20 +344,15 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         }
 
         std::unordered_set<std::string> unique_tags;
-        GroupSetMemberCountsByType      local_group_set_member_counts;
         for (const auto& group : stage.groups) {
             if (group.tag.empty() || !unique_tags.emplace(group.tag).second) {
                 return fail("stage " + std::to_string(s) + " has an empty or duplicate cache group tag [" + group.tag
                             + "]");
             }
-            if (group.block_num == 0) {
+            if (group.has_local_backing && group.block_num < 2) {
                 return fail("stage " + std::to_string(s) + " group [" + group.tag
-                            + "] has 0 KV blocks; the group could not allocate a single block");
+                            + "] has invalid local block capacity " + std::to_string(group.block_num));
             }
-            if (group.block_tree_group_member) {
-                ++local_group_set_member_counts[group.type];
-            }
-
             if (s == 0) {
                 canonical_index.emplace(group.tag, result.canonical_groups.size());
                 result.canonical_groups.push_back(makeCanonicalGroupEntry(group));
@@ -399,11 +361,8 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
 
             const auto it = canonical_index.find(group.tag);
             if (it == canonical_index.end()) {
-                /** Stage 0 issues every block id, so later stages can only own its tags. */
-                return fail("stage " + std::to_string(s) + " owns cache group [" + group.tag
-                            + "] that is absent from stage 0 [" + joinTags(stages[0].groups)
-                            + "]; the leading PP stage must own every cache group (bookkeeping-only "
-                              "allocation is not supported)");
+                return fail("stage " + std::to_string(s) + " declares logical cache group [" + group.tag
+                            + "] that is absent from stage 0 [" + joinTags(stages.front().groups) + "]");
             }
             auto& entry = result.canonical_groups[it->second];
             if (const auto error = validateAndMergeCanonicalGroup(entry, group, s); !error.empty()) {
@@ -411,22 +370,33 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
             }
         }
 
-        if (s == 0) {
-            canonical_group_set_member_counts = std::move(local_group_set_member_counts);
-        } else if (const auto error =
-                       validateGroupSetStructure(s, canonical_group_set_member_counts, local_group_set_member_counts);
-                   !error.empty()) {
-            return fail(error);
+        if (unique_tags.size() != canonical_index.size()) {
+            return fail("stage " + std::to_string(s) + " logical cache groups [" + joinTags(stage.groups)
+                        + "] do not match stage 0 [" + joinTags(stages.front().groups) + "]");
         }
         if (const auto error = validateTierSizing(stage, stages.front().block_tree); !error.empty()) {
             return fail("stage " + std::to_string(s) + ": " + error);
         }
     }
 
+    for (const auto& group : result.canonical_groups) {
+        if (group.logical_block_num == 0) {
+            return fail("cache group [" + group.tag + "] has no PP stage with local backing");
+        }
+    }
     deriveConstructionInputs(result);
     for (size_t s = 0; s < stages.size(); ++s) {
+        const auto& sizing = stages[s].block_tree;
+        if (sizing.host_budget_bytes == 0 && sizing.disk_budget_bytes == 0) {
+            continue;
+        }
         try {
-            const auto counts = computeStageTierBlockNums(stages[s], result.canonical_groups);
+            std::vector<GroupSetPoolSizing> pools;
+            for (const auto& group_set : sizing.group_sets) {
+                const auto& group = result.canonical_groups[canonical_index.at(group_set.first_tag)];
+                pools.push_back({group.type, group.logical_block_num, group_set.pool_stride});
+            }
+            const auto counts = computeHostDiskBlockCounts(pools, sizing.host_budget_bytes, sizing.disk_budget_bytes);
             mergeMinBlockNums(result.agreed.block_tree.host, counts.host);
             mergeMinBlockNums(result.agreed.block_tree.disk, counts.disk);
         } catch (const std::exception& e) {

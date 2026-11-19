@@ -3132,24 +3132,22 @@ TEST_F(PPExecutorTpTest, MiddleTpLanesExecuteAndForwardCompleteInputsWithoutBroa
     }
 }
 
-/** A PP stage owns only part of the model's cache groups, so the [N,3] update mapping is
- * decoded by tag and rows whose tag is absent from the local topology are skipped. The raw
- * [N,3] tensor cannot go to the 2-column block-copy overload, which checks size(1) == 2. */
+/** PP receives updates for every group. Only groups with local layers need a block copy on this stage. */
 TEST_F(PPExecutorTest, MiddleStageDecodesCacheUpdateMappingByGroup) {
-    auto            params = makeStageParams(/*pp_rank=*/1);
+    auto       params       = makeStageParams(/*pp_rank=*/1);
+    auto       cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+    const auto peer         = test::makeSimpleLinearCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+    cache_config.setTopology({cache_config.group("default"), peer.group("linear")}, cache_config.topology().layers());
     ResourceContext resources;
-    resources.cache_manager = std::make_shared<KVCacheManager>(
-        test::makeSimpleMhaCacheConfig(/*layer_num=*/3, /*block_num=*/16, /*tokens_per_block=*/4, DataType::TYPE_FP16));
+    resources.cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(resources.cache_manager->init());
     PPExecutor executor(params, resources.cache_manager, false);
     auto*      wire = attachTransport(executor);
 
     auto plan = makePlan(params);
-    // Payload carries "default" (owned by this stage) and "foreign" (owned by another stage).
-    plan.model_input.kv_cache_group_tags      = {"default", "foreign"};
+    plan.model_input.kv_cache_group_tags      = {"default", "linear"};
     plan.model_input.kv_cache_block_id        = intTensor({1, 2, 3, 4}).reshape({2, 2, 1});
     plan.model_input.kv_cache_kernel_block_id = plan.model_input.kv_cache_block_id.clone();
-    // Row 0 -> tag row 0 ("default"): copy block 3 to 4. Row 1 -> tag row 1 ("foreign"): skipped.
     plan.model_input.kv_cache_update_mapping = intTensor({0, 3, 4, 1, 5, 6}).reshape({2, 3});
 
     enqueuePlan(*wire, plan);

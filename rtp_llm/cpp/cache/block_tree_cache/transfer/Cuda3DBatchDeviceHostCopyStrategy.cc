@@ -55,6 +55,9 @@ Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(const GroupSet& gro
     int                                 device_index = -1;
     for (size_t member = 0; member < pools.size(); ++member) {
         const auto& pool       = pools[member];
+        if (!pool->config().allocate_storage) {
+            continue;
+        }
         const auto& group_base = group.group(tags[member]);
         const auto  layer_ids  = group.topologyPtr()->layerIdsForGroup(tags[member]);
         if (!pool->getBaseAddress() || pool->deviceIndex() < 0 || group_base.kvScaleStrideBytes() != 0) {
@@ -123,7 +126,7 @@ StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<H
                                                                      TransferStatus::INVALID_ARGS);
         }
         const auto& blocks             = descriptors[i].blocksAt(Tier::DEVICE);
-        const int   group_device_index = pools.front()->deviceIndex();
+        const int   group_device_index = pools[templates.front().member_index]->deviceIndex();
         if (device_index >= 0 && device_index != group_device_index) {
             return StrategyResult::notApplicable();
         }

@@ -58,6 +58,7 @@ public:
         };
 
         const auto& group_layer_ids = cache_config.layerIdsForGroup(group.tag);
+        config.allocate_storage     = !group_layer_ids.empty();
         const auto  main_layer_num  = static_cast<uint32_t>(
             std::count_if(group_layer_ids.begin(), group_layer_ids.end(), [&cache_config](int layer_id) {
                 return layer_id >= 0 && static_cast<uint32_t>(layer_id) < cache_config.layer_num;
@@ -81,7 +82,6 @@ public:
                                 group.tag.c_str(),
                                 total_layout_layers,
                                 group_layer_ids.size());
-        RTP_LLM_CHECK_WITH_INFO(!config.memory_layouts.empty(), "group tag=%s has no layers", group.tag.c_str());
         config.total_size_bytes = current_offset;
         return config;
     }

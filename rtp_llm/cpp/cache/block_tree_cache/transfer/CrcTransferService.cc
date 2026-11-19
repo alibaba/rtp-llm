@@ -10,11 +10,6 @@
 
 namespace rtp_llm {
 
-int CrcTransferService::deviceFor(const GroupSet& group) {
-    // The factory enables CRC only for GPU-resident backings on this rank.
-    return group.devicePools().front()->deviceIndex();
-}
-
 CrcTransferService::CrcTransferService(const std::vector<GroupSetPtr>& groups,
                                        size_t                          max_batch,
                                        size_t                          workers,
@@ -38,10 +33,11 @@ CrcTransferService::CrcTransferService(const std::vector<GroupSetPtr>& groups,
             || (group->diskPool() && group->diskPool()->strideBytes() < group->storageBytes())) {
             throw std::invalid_argument("CRC pool stride cannot hold payload and footer");
         }
-        auto& shape   = geometry[deviceFor(*group)];
+        // The factory enables CRC only for GPU-resident backings on this rank.
+        auto& shape   = geometry[getLocalDeviceIndex(*group)];
         shape.payload = std::max(shape.payload, group->payloadBytes());
-        // Block zero is reserved but physically present in every pool. Inspect
-        // its layout without allocating or reading payload bytes.
+        // Block zero is reserved but physically present in every pool with local backing.
+        // Inspect its layout without allocating or reading payload bytes.
         const std::vector<BlockIdxType> geometry_blocks(group->devicePools().size(), 0);
         const size_t                    tiles = getDeviceHostCopyTiles(*group, geometry_blocks).size();
         shape.tiles                           = std::max(shape.tiles, tiles);
@@ -179,7 +175,8 @@ TransferResult CrcTransferService::copy(const std::vector<HostBufferView>&     h
         item.dump_metadata = [&, i] { return CrcDumpWriter::dumpMetadata(descriptors[i], *groups[i]); };
         items.push_back(std::move(item));
     }
-    return execute(deviceFor(*groups.front()), items, store ? Operation::STORE : Operation::LOAD, descriptors);
+    return execute(
+        getLocalDeviceIndex(*groups.front()), items, store ? Operation::STORE : Operation::LOAD, descriptors);
 }
 
 }  // namespace rtp_llm

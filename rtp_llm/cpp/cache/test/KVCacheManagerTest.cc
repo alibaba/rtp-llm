@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -1805,7 +1806,7 @@ public:
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsDeclaredGroupWithoutLocalLayersAndRejectsUnknownTag) {
     for (const int pp_size : {1, 2}) {
         SCOPED_TRACE(::testing::Message() << "pp_size=" << pp_size);
         auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
@@ -1817,8 +1818,27 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
         parallelism_config.pp_rank           = pp_size > 1 ? 1 : 0;
         parallelism_config.world_size        = pp_size;
         parallelism_config.world_rank        = parallelism_config.pp_rank;
-        auto manager =
-            std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config, parallelism_config);
+        if (pp_size > 1) {
+            const auto peer = makeSimpleLinearCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+            cache_config.setTopology({cache_config.group("default"), peer.group("linear")},
+                                     cache_config.topology().layers());
+        }
+        auto plan = planBlockTreeCacheLayout(cache_config, kv_cache_config);
+        ASSERT_NE(plan, nullptr);
+        for (const auto& group : cache_config.groups()) {
+            plan->block_counts.host.emplace(group.policy.group_type, 4);
+        }
+        auto manager = std::make_shared<KVCacheManager>(cache_config,
+                                                        false,
+                                                        nullptr,
+                                                        kv_cache_config,
+                                                        parallelism_config,
+                                                        RuntimeConfig{},
+                                                        SpeculativeExecutionConfig{},
+                                                        PDSepConfig{},
+                                                        CacheStoreConfig{},
+                                                        false,
+                                                        plan);
         ASSERT_TRUE(manager->init());
         auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
         manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
@@ -1829,10 +1849,10 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
         mem_request->set_timeout_ms(1000);
         for (const int block_id : {1, 2}) {
             auto* item = mem_request->add_copy_items();
-            item->add_group_tags("absent_group");
+            item->add_group_tags("linear");
             item->set_mem_block(block_id);
             auto* block = item->add_group_blocks();
-            block->set_tag("absent_group");
+            block->set_tag("linear");
             block->set_block_id(block_id);
         }
         FunctionResponsePB response;

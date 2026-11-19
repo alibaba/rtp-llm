@@ -108,7 +108,7 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
             if (pools.empty()) {
                 continue;
             }
-            const int device_index = pools.front()->deviceIndex();
+            const int device_index = getLocalDeviceIndex(*group_sets.front());
             if (device_index >= 0) {
                 std::call_once(copy_streams_once_,
                                [this, device_index] { copy_streams_ = acquireDeviceHostCopyStreams(device_index); });

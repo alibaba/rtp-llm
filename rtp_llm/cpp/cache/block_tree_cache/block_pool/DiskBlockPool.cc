@@ -22,6 +22,9 @@ std::shared_ptr<const BlockTreeDiskBlockPoolConfig>
 BlockTreeDiskBlockPool::normalizeConfig(const std::shared_ptr<const BlockTreeDiskBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DISK);
+    if (!config->allocate_storage) {
+        return config;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         config->stride_bytes > 0, "disk block pool [%s] stride_bytes must be > 0", config->pool_name.c_str());
 
@@ -77,6 +80,10 @@ BlockIOStatus BlockTreeDiskBlockPool::mapStatus(DiskBlockIOStatus status) {
 
 bool BlockTreeDiskBlockPool::init() {
     const auto& cfg = config();
+    if (!cfg.allocate_storage) {
+        markInitialized();
+        return true;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         cfg.payload_bytes > 0, "disk block pool [%s] payload_bytes must be > 0", cfg.pool_name.c_str());
     RTP_LLM_CHECK_WITH_INFO(cfg.stride_bytes >= cfg.payload_bytes,
