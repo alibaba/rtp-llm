@@ -67,7 +67,9 @@ class SharedDSparkGraphImpl:
         if not model._is_decode_role or model.kv_cache is None:
             raise ValueError("DSpark Graph requires D's native cache")
         self.mode, self.runtime = mode, runtime
-        self.visible_indexer = mode in ("dense", "packed") and enabled(GRAPH_VISIBLE_INDEXER_ENV)
+        self.visible_indexer = mode in ("dense", "packed") and enabled(
+            GRAPH_VISIBLE_INDEXER_ENV, default=runtime is not None and runtime.grouped is None,
+        )
         self._model = weakref.ref(model)
         self.device = model.shared_runtime.device
         attn = primary_attention_inputs(inputs.attention_inputs, model.kv_cache)

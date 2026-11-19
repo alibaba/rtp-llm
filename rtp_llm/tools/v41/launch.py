@@ -383,6 +383,8 @@ def preset_env(
                 env.update(DSPARK_OVERLAP_FLAGS)
                 for key, value in DSPARK_DECODE_DEFAULTS.items():
                     env.setdefault(key, value)
+                if eplb_mode == "NONE":
+                    env.setdefault("EPLB_METRICS_REPORT_INTERVAL", "0")
         if shared_grouped_graph or dspark_gamma:
             env.pop("GENERATION_PREFILL_CAPTURE_CONFIG", None)
     if not cp_prefill:

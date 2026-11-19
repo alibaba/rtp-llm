@@ -171,12 +171,21 @@ class SourceBoundaries(unittest.TestCase):
             runtime.DSPARK_DECODE_DEFAULTS,
         )
         self.assertNotIn(runtime.DSPARK_SIMULATED_ACCEPT_ENV, overlap)
+        self.assertEqual(overlap["EPLB_METRICS_REPORT_INTERVAL"], "0")
         opt_out = preset(
             "decode", "/weights", shared_decode_graph=True, dspark_gamma=3,
             parent={"RTP_V41_PPU_MOE_BACKEND": "megamoe",
-                    "RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER": "0"},
+                    "RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER": "0",
+                    "EPLB_METRICS_REPORT_INTERVAL": "25"},
         )
         self.assertEqual(opt_out["RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER"], "0")
+        self.assertEqual(opt_out["EPLB_METRICS_REPORT_INTERVAL"], "25")
+        stats = preset(
+            "decode", "/weights", shared_decode_graph=True, dspark_gamma=3,
+            shared_eplb=True, eplb_mode="STATS",
+            parent={"RTP_V41_PPU_MOE_BACKEND": "megamoe"},
+        )
+        self.assertNotIn("EPLB_METRICS_REPORT_INTERVAL", stats)
         self.assertEqual(runtime.V41RuntimeConfig.from_env(overlap).speculative, "DSPARK")
         for key, value in (
             (runtime.DSPARK_OVERLAP_ENV, "0"),
