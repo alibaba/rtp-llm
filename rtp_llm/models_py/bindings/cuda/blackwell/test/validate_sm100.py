@@ -200,8 +200,8 @@ def mhc():
     except (ImportError, OSError):
         pass
     from flashinfer.norm import rmsnorm
-    from tile_kernels.modeling.mhc.functional import mhc_post
-    from tile_kernels.modeling.mhc.ops.pre_big_fuse import mhc_pre_big_fuse
+
+    from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
 
     m = module("codex_glm53_mhc", package / "models_py/modules/glm53_mega_mhc.py")
     for rows in (48, 192, 240, 288):
@@ -210,7 +210,7 @@ def mhc():
         post = torch.randn(rows, 4, 1, device="cuda").sigmoid()
         comb = torch.randn(rows, 4, 4, device="cuda").softmax(-1)
         fn = torch.randn(24, 16384, device="cuda") * 0.001
-        unit = SimpleNamespace(
+        unit = TileLangHCUnit(
             hc_mult=4,
             dim=4096,
             fn=fn,
@@ -229,19 +229,10 @@ def mhc():
         ), "MegaMHC fast path rejected supported shape"
 
         def reference():
-            updated = mhc_post(x, residual, post, comb)
-            np, nc, y = mhc_pre_big_fuse(
-                updated,
-                fn,
-                unit.scale,
-                unit.base,
-                rms_eps=1e-6,
-                mhc_pre_eps=1e-6,
-                mhc_sinkhorn_eps=1e-6,
-                mhc_post_mult_value=2.0,
-                sinkhorn_repeat=10,
-            )
-            return updated, rmsnorm(y, norm.weight, eps=1e-6), np, nc
+            # The shared post operator reuses its residual buffer.
+            updated = unit.post(x, residual.clone(), post, comb)
+            y, next_post, next_comb = unit.pre(updated)
+            return updated, rmsnorm(y, norm.weight, eps=1e-6), next_post, next_comb
 
         def operation():
             return m.fused_post_pre_rms(x, residual, post, comb, unit, norm)
