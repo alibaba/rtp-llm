@@ -677,7 +677,7 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
                         ),
                     )
                     self.assertEqual(reply.json().get("error_code"), 605, reply.text)
-                    self.assertIn("partial", reply.text)
+                    self.assertEqual(reply.json().get("message"), "INVALID_PARAMS")
                     self.assertEqual(len(self.backend.calls), count)
 
     def test_invalid_partial_messages_cannot_change_protocol_state(self):
@@ -727,7 +727,7 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
                         json=self.payload(enable_thinking=False, **fields),
                     )
                     self.assertEqual(reply.json().get("error_code"), 605, reply.text)
-                    self.assertIn("partial", reply.text)
+                    self.assertEqual(reply.json().get("message"), "INVALID_PARAMS")
                     self.assertEqual(len(self.backend.calls), count)
 
     def test_custom_template_structured_partial_and_unsupported_tools_are_rejected(
