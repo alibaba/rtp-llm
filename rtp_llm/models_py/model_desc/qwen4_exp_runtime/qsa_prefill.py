@@ -18,9 +18,15 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+    build_aligned_prefill_write_layout,
+    try_write_aligned_prefill_cache,
+)
 
 from .qsa_cache_views import _block_table, _same_tensor_metadata, _typed_2d_pool
+from .qsa_plans import IncrementalPrefillPlan
 from .qsa_selection import select_qsa_paged_tokens
+from .step_metadata import cached_step_value
 
 
 def write_prefill_indexer_cache(
@@ -538,6 +544,62 @@ def select_draft_prefix_reuse_prefill_tokens(
     )
 
 
+def _try_write_aligned_prefix_cache(
+    self, raw_keys: torch.Tensor, plan: IncrementalPrefillPlan, indexer: Any
+) -> bool:
+    """Publish the side-cache transaction for an eager, page-aligned prefill."""
+    page_size = plan.kv_tokens_per_block
+    ring_entries = int(plan.state_pool.shape[1])
+    if (
+        self.main_inputs.is_s_padded
+        or plan.state_tokens_per_block != page_size
+        or page_size % ring_entries
+    ):
+        return False
+    if self._side_cache_undo is not None:
+        raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+
+    # The preflight verified the packed CU, prefix alignment, and both tables'
+    # logical coverage. Only the layout is shared across layers.
+    layout = cached_step_value(
+        self,
+        (
+            "aligned_prefill_write_layout",
+            tuple(plan.lengths),
+            tuple(plan.host_prefixes),
+            page_size,
+            plan.ratio,
+            ring_entries,
+            raw_keys.device,
+        ),
+        lambda: build_aligned_prefill_write_layout(
+            plan.lengths,
+            plan.host_prefixes,
+            page_size=page_size,
+            ratio=plan.ratio,
+            ring_entries=ring_entries,
+            device=raw_keys.device,
+        ),
+    )
+    undo = try_write_aligned_prefill_cache(
+        raw_keys,
+        plan.rope_cos,
+        plan.rope_sin,
+        indexer.k_norm_gamma,
+        plan.kv_pool,
+        plan.kv_table,
+        plan.state_pool,
+        plan.state_table,
+        layout,
+        ratio=plan.ratio,
+        norm_eps=float(indexer.norm_eps),
+    )
+    if undo is None:
+        return False
+    object.__setattr__(self, "_side_cache_undo", undo)
+    return True
+
+
 def _incremental_prefill_selection(
     self,
     q: torch.Tensor,
@@ -625,7 +687,11 @@ def _incremental_prefill_selection(
             norm_eps=float(indexer.norm_eps),
         )
         object.__setattr__(self, "_side_cache_undo", undo)
-    else:
+    elif (
+        draft
+        or draft_prefix_reuse
+        or not _try_write_aligned_prefix_cache(self, raw_keys, plan, indexer)
+    ):
         self._write_indexer_cache_transactional(
             raw_keys,
             plan.cu_seqlens,
@@ -641,6 +707,7 @@ def _incremental_prefill_selection(
             kv_tokens_per_block=int(plan.kv_tokens_per_block),
             state_tokens_per_block=int(plan.state_tokens_per_block),
             norm_eps=float(indexer.norm_eps),
+            collect_stats=False,
             rope_is_token_aligned=True,
         )
 

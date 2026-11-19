@@ -13,6 +13,7 @@ class IncrementalPrefillPlan:
     head_num: int
     ratio: int
     token_budget: int
+    host_prefixes: list[int]
     prefixes: torch.Tensor
     cu_seqlens: torch.Tensor
     current_cos: torch.Tensor

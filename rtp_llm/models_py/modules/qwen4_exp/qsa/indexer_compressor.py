@@ -56,7 +56,7 @@ def _capture_pool_slots(
         )
     )
     slots = torch.tensor(unique_slots, dtype=torch.long, device=pool.device)
-    original = pool.flatten(0, 1).index_select(0, slots).clone()
+    original = pool.flatten(0, 1).index_select(0, slots)
     return slots, original
 
 
@@ -121,12 +121,173 @@ def _last_write_per_slot(
     return slots.index_select(0, last_order), values.index_select(0, last_order)
 
 
-def _capture_tensor_slots(
-    pool: torch.Tensor, slots: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    unique_slots = torch.unique(slots)
-    original = pool.flatten(0, 1).index_select(0, unique_slots).clone()
-    return unique_slots, original
+def _commit_indexer_cache(
+    state_pool: torch.Tensor,
+    state_slots: torch.Tensor,
+    state_values: torch.Tensor,
+    kv_pool: torch.Tensor,
+    kv_slots: torch.Tensor,
+    kv_values: torch.Tensor,
+    *,
+    capture_undo: bool,
+) -> IndexerCacheUndo | None:
+    flat_state, flat_kv = state_pool.flatten(0, 1), kv_pool.flatten(0, 1)
+    undo = None
+    if capture_undo:
+        # The write slots are already unique. index_select owns the captured
+        # values, so subsequent writes cannot change either snapshot.
+        undo = IndexerCacheUndo(
+            state_pool=state_pool,
+            state_slots=state_slots,
+            original_state=flat_state.index_select(0, state_slots),
+            kv_pool=kv_pool,
+            kv_slots=kv_slots,
+            original_kv=flat_kv.index_select(0, kv_slots),
+        )
+    try:
+        flat_state.index_copy_(0, state_slots, state_values)
+        flat_kv.index_copy_(0, kv_slots, kv_values)
+    except BaseException:
+        if undo is not None:
+            restore_indexer_cache(undo)
+            if state_pool.is_cuda:
+                torch.cuda.current_stream(state_pool.device).synchronize()
+        raise
+    return undo
+
+
+@dataclass(frozen=True)
+class AlignedPrefillWriteLayout:
+    # Page tensors encode (request, logical page). Write tensors encode
+    # (index within the page tensor, slot offset, packed token row).
+    state_pages: torch.Tensor
+    kv_pages: torch.Tensor
+    state_writes: torch.Tensor
+    kv_writes: torch.Tensor
+
+
+def build_aligned_prefill_write_layout(
+    lengths: list[int],
+    prefixes: list[int],
+    *,
+    page_size: int,
+    ratio: int,
+    ring_entries: int,
+    device: torch.device,
+) -> AlignedPrefillWriteLayout:
+    """Build fixed-size write indices from a validated, page-aligned partition."""
+    state_pages, kv_pages, state_writes, kv_writes = [], [], [], []
+    packed_start = 0
+    for request, (prefix, length) in enumerate(zip(prefixes, lengths)):
+        for start in range(0, length, page_size):
+            page_length = min(page_size, length - start)
+            page_column = (prefix + start) // page_size
+            packed_page_start = packed_start + start
+            state_page = len(state_pages) // 2
+            state_pages.extend((request, page_column))
+            # These are the final writes to the ring, including a partial page.
+            for row in range(max(0, page_length - ring_entries), page_length):
+                state_writes.extend(
+                    (state_page, row % ring_entries, packed_page_start + row)
+                )
+            if page_length >= ratio:
+                kv_page = len(kv_pages) // 2
+                kv_pages.extend((request, page_column))
+                for row in range(ratio - 1, page_length, ratio):
+                    kv_writes.extend((kv_page, row // ratio, packed_page_start + row))
+        packed_start += length
+
+    parts = (state_pages, kv_pages, state_writes, kv_writes)
+    packed = torch.tensor(
+        [entry for part in parts for entry in part],
+        dtype=torch.long,
+        device="cpu",
+        pin_memory=True,
+    ).to(device=device, non_blocking=True)
+    state_pages, kv_pages, state_writes, kv_writes = packed.split(
+        [len(part) for part in parts]
+    )
+    return AlignedPrefillWriteLayout(
+        state_pages.reshape(-1, 2).T,
+        kv_pages.reshape(-1, 2).T,
+        state_writes.reshape(-1, 3).T,
+        kv_writes.reshape(-1, 3).T,
+    )
+
+
+def try_write_aligned_prefill_cache(
+    raw_keys: torch.Tensor,
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    k_norm_gamma: torch.Tensor,
+    kv_pool: torch.Tensor,
+    kv_table: torch.Tensor,
+    state_pool: torch.Tensor,
+    state_table: torch.Tensor,
+    layout: AlignedPrefillWriteLayout,
+    *,
+    ratio: int,
+    norm_eps: float,
+) -> IndexerCacheUndo | None:
+    """Use the validated partition and current layer's page tables.
+
+    The plan validates coverage of the logical pages. A bad or aliased
+    physical page sends the whole transaction to the general writer.
+    """
+    state_blocks = state_table[tuple(layout.state_pages.unbind(0))]
+    kv_blocks = kv_table[tuple(layout.kv_pages.unbind(0))]
+
+    def invalid_or_aliased(blocks, pool_size):
+        # Sort only the touched pages. The state/KV write rows are never sorted.
+        ordered = blocks.sort().values
+        return ((blocks <= 0) | (blocks >= pool_size)).any() | (
+            ordered[1:] == ordered[:-1]
+        ).any()
+
+    if bool(
+        (
+            invalid_or_aliased(state_blocks, state_pool.shape[0])
+            | invalid_or_aliased(kv_blocks, kv_pool.shape[0])
+        ).item()
+    ):
+        return None
+
+    state_pages, state_offsets, state_rows = layout.state_writes.unbind(0)
+    state_slots = (
+        state_blocks.to(torch.long).index_select(0, state_pages) * state_pool.shape[1]
+        + state_offsets
+    )
+    state_values = raw_keys.index_select(0, state_rows).float()
+    kv_pages, kv_offsets, group_ends = layout.kv_writes.unbind(0)
+    kv_slots = (
+        kv_blocks.to(torch.long).index_select(0, kv_pages) * kv_pool.shape[1]
+        + kv_offsets
+    )
+    kv_values = raw_keys.new_empty((0, raw_keys.shape[1]), dtype=torch.bfloat16)
+    if group_ends.numel():
+        source_offsets = torch.arange(
+            1 - ratio, 1, dtype=torch.long, device=raw_keys.device
+        )
+        source_rows = group_ends[:, None] + source_offsets
+        gathered = raw_keys.index_select(0, source_rows.flatten()).reshape(
+            -1, ratio, raw_keys.shape[1]
+        )
+        pooled = gathered.float().mean(dim=1).to(raw_keys.dtype)
+        pooled = exact_head_rms_norm(pooled, k_norm_gamma, norm_eps)
+        kv_values = apply_partial_rope(
+            pooled,
+            rope_cos.index_select(0, group_ends),
+            rope_sin.index_select(0, group_ends),
+        ).to(torch.bfloat16)
+    return _commit_indexer_cache(
+        state_pool,
+        state_slots,
+        state_values,
+        kv_pool,
+        kv_slots,
+        kv_values,
+        capture_undo=True,
+    )
 
 
 def _write_indexer_cache_vectorized(
@@ -149,6 +310,7 @@ def _write_indexer_cache_vectorized(
     capture_undo: bool,
     rope_is_token_aligned: bool,
     is_s_padded: bool = False,
+    collect_stats: bool = True,
 ) -> dict:
     """Device-vectorized writer used by the production CUDA path.
 
@@ -218,7 +380,12 @@ def _write_indexer_cache_vectorized(
         | torch.any(lengths < 0)
         | torch.any(starts < 0)
     )
-    if bool(invalid_cu.item()):
+    # Only the first completed group of an unaligned request can need
+    # committed keys. Carry this flag in the existing CU validation readback.
+    start_in_group = starts.remainder(ratio)
+    needs_history = ((start_in_group != 0) & (lengths >= ratio - start_in_group)).any()
+    verdict = int((invalid_cu.to(torch.int32) + 2 * needs_history).item())
+    if verdict & 1:
         raise ValueError(
             "cu_seqlens must be monotonic from 0 to raw_keys.shape[0], and "
             "start_positions must be non-negative"
@@ -298,45 +465,41 @@ def _write_indexer_cache_vectorized(
         completed_requests = request_ids.index_select(0, completed_indices)
         completed_positions = positions.index_select(0, completed_indices)
         block_starts = completed_positions - ratio + 1
-        source_positions = block_starts[:, None] + torch.arange(
-            ratio, dtype=torch.long, device=device
-        )
-        row_starts = starts.index_select(0, completed_requests)
-        row_lengths = lengths.index_select(0, completed_requests)
-        source_local = source_positions - row_starts[:, None]
-        source_in_current = (source_local >= 0) & (source_local < row_lengths[:, None])
-
-        source_requests = completed_requests[:, None].expand(-1, ratio)
-        source_logical = source_positions // state_tokens_per_block
-        source_blocks, source_allocated = _resolve(
-            state_block_table,
-            source_requests,
-            source_logical,
-            pool_blocks=int(state_pool.shape[0]),
-            tag="indexer_state source",
-            required=~source_in_current,
-        )
-        source_valid = source_in_current | source_allocated
-        group_sources_valid = torch.all(source_valid, dim=1)
-
-        raw_source_indices = (
-            cu.index_select(0, source_requests.reshape(-1)).view_as(source_requests)
-            + source_local
-        ).clamp(0, max(token_count - 1, 0))
-        state_source_slots = source_blocks.clamp(
-            0, int(state_pool.shape[0]) - 1
-        ) * state_ring_entries + source_positions.remainder(state_ring_entries)
-        gathered_raw = raw_keys.index_select(0, raw_source_indices.reshape(-1)).view(
-            -1, ratio, head_dim
-        )
-        gathered_state = (
-            state_pool.flatten(0, 1)
-            .index_select(0, state_source_slots.reshape(-1))
+        source_offsets = torch.arange(1 - ratio, 1, dtype=torch.long, device=device)
+        raw_source_indices = completed_indices[:, None] + source_offsets
+        if verdict & 2:
+            raw_source_indices = raw_source_indices.clamp_min(0)
+        gathered = (
+            raw_keys.index_select(0, raw_source_indices.flatten())
             .view(-1, ratio, head_dim)
+            .float()
         )
-        gathered = torch.where(
-            source_in_current.unsqueeze(-1), gathered_raw.float(), gathered_state
-        )
+        if verdict & 2:
+            source_positions = completed_positions[:, None] + source_offsets
+            row_starts = starts.index_select(0, completed_requests)
+            source_in_current = source_positions >= row_starts[:, None]
+            source_blocks, source_allocated = _resolve(
+                state_block_table,
+                completed_requests[:, None].expand(-1, ratio),
+                source_positions // state_tokens_per_block,
+                pool_blocks=int(state_pool.shape[0]),
+                tag="indexer_state source",
+                required=~source_in_current,
+            )
+            group_sources_valid = (source_in_current | source_allocated).all(dim=1)
+            state_source_slots = source_blocks.clamp(
+                0, int(state_pool.shape[0]) - 1
+            ) * state_ring_entries + source_positions.remainder(state_ring_entries)
+            gathered_state = (
+                state_pool.flatten(0, 1)
+                .index_select(0, state_source_slots.flatten())
+                .view(-1, ratio, head_dim)
+            )
+            gathered = torch.where(
+                source_in_current.unsqueeze(-1), gathered, gathered_state
+            )
+        else:
+            group_sources_valid = torch.ones_like(completed_indices, dtype=torch.bool)
 
         kv_logical = block_starts // kv_tokens_per_block
         kv_blocks, kv_allocated = _resolve(
@@ -378,38 +541,24 @@ def _write_indexer_cache_vectorized(
         kv_write_slots, kv_write_values
     )
 
-    undo = None
-    if capture_undo:
-        state_undo_slots, original_state = _capture_tensor_slots(
-            state_pool, state_write_slots
-        )
-        kv_undo_slots, original_kv = _capture_tensor_slots(kv_pool, kv_write_slots)
-        undo = IndexerCacheUndo(
-            state_pool=state_pool,
-            state_slots=state_undo_slots,
-            original_state=original_state,
-            kv_pool=kv_pool,
-            kv_slots=kv_undo_slots,
-            original_kv=original_kv,
-        )
-
-    try:
-        state_pool.flatten(0, 1).index_copy_(0, state_write_slots, state_write_values)
-        kv_pool.flatten(0, 1).index_copy_(0, kv_write_slots, kv_write_values)
-    except BaseException:
-        if undo is not None:
-            restore_indexer_cache(undo)
-            if state_pool.is_cuda:
-                torch.cuda.current_stream(device).synchronize()
-        raise
+    undo = _commit_indexer_cache(
+        state_pool,
+        state_write_slots,
+        state_write_values,
+        kv_pool,
+        kv_write_slots,
+        kv_write_values,
+        capture_undo=capture_undo,
+    )
 
     result = {
         "state_slots": state_slots,
         "kv_slots": kv_slots,
         "completed": completed,
-        "num_state_writes": int(state_write_mask.sum().item()),
-        "num_kv_writes": int((kv_slots >= 0).sum().item()),
     }
+    if collect_stats:
+        result["num_state_writes"] = int(state_write_mask.sum().item())
+        result["num_kv_writes"] = int((kv_slots >= 0).sum().item())
     if capture_undo:
         result["undo"] = undo
     return result
@@ -433,6 +582,7 @@ def write_indexer_cache(
     norm_eps: float = 1e-6,
     invalid_block_policy: InvalidBlockPolicy = "raise",
     capture_undo: bool = False,
+    collect_stats: bool = True,
     rope_is_token_aligned: bool = False,
     is_s_padded: bool = False,
 ) -> dict:
@@ -465,6 +615,8 @@ def write_indexer_cache(
     ``[B, max_position, rotary_dim]``. With ``rope_is_token_aligned=True``, they
     instead contain one ``[rotary_dim]`` block-start row for each packed input
     token; only rows that complete a compression group are consumed.
+
+    Set ``collect_stats=False`` when the host write counts are unused.
     """
     if invalid_block_policy not in ("raise", "skip"):
         raise ValueError(
@@ -566,6 +718,7 @@ def write_indexer_cache(
             norm_eps=norm_eps,
             invalid_block_policy=invalid_block_policy,
             capture_undo=capture_undo,
+            collect_stats=collect_stats,
             rope_is_token_aligned=rope_is_token_aligned,
             is_s_padded=is_s_padded,
         )
@@ -749,9 +902,10 @@ def write_indexer_cache(
         "state_slots": state_slots,
         "kv_slots": kv_slots,
         "completed": completed,
-        "num_state_writes": len(state_writes),
-        "num_kv_writes": len(kv_writes),
     }
+    if collect_stats:
+        result["num_state_writes"] = len(state_writes)
+        result["num_kv_writes"] = len(kv_writes)
     if capture_undo:
         result["undo"] = undo
     return result
