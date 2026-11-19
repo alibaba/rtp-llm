@@ -23,14 +23,13 @@ namespace {
 constexpr int kRowsPerLaunch    = 64;
 constexpr int kPrepareBlockSize = 256;
 
-constexpr int kBudgetMaxBatch  = 128;
-constexpr int kBudgetMaxGamma  = 8;
-constexpr int kBudgetSortItems = 4;
-constexpr int kBudgetCapacity  = kPrepareBlockSize * kBudgetSortItems;
+// Keep the four-item radix sort specialization for the common 128-row batches.
+constexpr int kBudgetSmallBatch = 128;
+constexpr int kBudgetMaxBatch   = 256;
+constexpr int kBudgetMaxGamma   = 8;
 
 struct DSparkBudgetedVerifyPrepare {
     const float*   rates;
-    int32_t        order[kBudgetMaxBatch];
     const int32_t *anchors, *proposals, *history, *bases, *prefixes;
     int32_t *      valid_lengths, *tokens, *query_lengths, *lm_indexes, *output_history, *positions;
     int32_t *      owned_proposals, *dense_tokens, *dense_positions, *sequence_lengths_plus_1;
@@ -41,7 +40,10 @@ struct DSparkBudgetedVerifyPrepare {
     int64_t        history_row_stride, history_col_stride, base_row_stride, base_col_stride, prefix_stride;
 };
 
-static_assert(sizeof(DSparkBudgetedVerifyPrepare) < 4096, "DSpARK budget launch arguments must fit legacy CUDA limit");
+template<int BatchCapacity>
+struct DSparkBudgetOrder {
+    int32_t rows[BatchCapacity];
+};
 
 // RTP's default nvcc flags flush subnormals. The planner must retain the
 // original Torch FP32 products and their ordering, including underflow ties.
@@ -63,17 +65,23 @@ __device__ __forceinline__ int32_t budgetVerifyToken(const DSparkBudgetedVerifyP
                        p.proposals[row * p.proposal_row_stride + (step - 1) * p.proposal_col_stride];
 }
 
-using BudgetSort = cub::BlockRadixSort<uint64_t, kPrepareBlockSize, kBudgetSortItems, uint32_t>;
 using BudgetScan = cub::BlockScan<int32_t, kPrepareBlockSize>;
-union BudgetScratch {
-    BudgetSort::TempStorage sort;
-    BudgetScan::TempStorage scan;
-};
 
-__global__ void mtpDSparkBudgetedVerifyPrepareKernel(DSparkBudgetedVerifyPrepare p) {
+template<int BatchCapacity>
+__global__ void mtpDSparkBudgetedVerifyPrepareKernel(DSparkBudgetedVerifyPrepare      p,
+                                                     DSparkBudgetOrder<BatchCapacity> order) {
+    constexpr int kCapacity  = BatchCapacity * kBudgetMaxGamma;
+    constexpr int kSortItems = kCapacity / kPrepareBlockSize;
+    static_assert(BatchCapacity <= kPrepareBlockSize && kCapacity % kPrepareBlockSize == 0);
+    using BudgetSort = cub::BlockRadixSort<uint64_t, kPrepareBlockSize, kSortItems, uint32_t>;
+    union BudgetScratch {
+        typename BudgetSort::TempStorage sort;
+        BudgetScan::TempStorage          scan;
+    };
+
     __shared__ BudgetScratch scratch;
-    __shared__ uint32_t      scores[kBudgetCapacity];
-    __shared__ int32_t       lengths[kBudgetMaxBatch];
+    __shared__ uint32_t      scores[kCapacity];
+    __shared__ int32_t       lengths[BatchCapacity];
     const int32_t            row = threadIdx.x;
     if (row < p.batch) {
         lengths[row] = 0;
@@ -111,22 +119,22 @@ __global__ void mtpDSparkBudgetedVerifyPrepareKernel(DSparkBudgetedVerifyPrepare
     }
     __syncthreads();
     if (p.budget > 0) {
-        uint64_t keys[kBudgetSortItems];
-        uint32_t candidates[kBudgetSortItems];
+        uint64_t keys[kSortItems];
+        uint32_t candidates[kSortItems];
 #pragma unroll
-        for (int item = 0; item < kBudgetSortItems; ++item) {
-            const int32_t  stable_index = threadIdx.x * kBudgetSortItems + item;
+        for (int item = 0; item < kSortItems; ++item) {
+            const int32_t  stable_index = threadIdx.x * kSortItems + item;
             const bool     live         = stable_index < p.batch * p.gamma;
-            const int32_t  source       = live ? p.order[stable_index / p.gamma] * p.gamma + stable_index % p.gamma : 0;
-            const uint32_t score        = live && (scores[source] & 0x7fffffffu) != 0 ? scores[source] : 0;
+            const int32_t  source = live ? order.rows[stable_index / p.gamma] * p.gamma + stable_index % p.gamma : 0;
+            const uint32_t score  = live && (scores[source] & 0x7fffffffu) != 0 ? scores[source] : 0;
             keys[item] =
                 live ? (static_cast<uint64_t>(score) << 32) | (0xffffffffu - static_cast<uint32_t>(stable_index)) : 0;
             candidates[item] = source;
         }
         BudgetSort(scratch.sort).SortDescending(keys, candidates);
 #pragma unroll
-        for (int item = 0; item < kBudgetSortItems; ++item) {
-            if (threadIdx.x * kBudgetSortItems + item < p.budget) {
+        for (int item = 0; item < kSortItems; ++item) {
+            if (threadIdx.x * kSortItems + item < p.budget) {
                 atomicAdd(lengths + candidates[item] / p.gamma, 1);
             }
         }
@@ -173,6 +181,17 @@ __global__ void mtpDSparkBudgetedVerifyPrepareKernel(DSparkBudgetedVerifyPrepare
             }
         }
     }
+}
+
+template<int BatchCapacity>
+void launchDSparkBudgetedVerifyPrepare(const DSparkBudgetedVerifyPrepare& params,
+                                       const std::vector<int64_t>&        stable_order,
+                                       cudaStream_t                       stream) {
+    static_assert(sizeof(params) + sizeof(DSparkBudgetOrder<BatchCapacity>) < 4096,
+                  "DSpARK budget launch arguments must fit legacy CUDA limit");
+    DSparkBudgetOrder<BatchCapacity> order{};
+    std::copy(stable_order.begin(), stable_order.end(), order.rows);
+    mtpDSparkBudgetedVerifyPrepareKernel<BatchCapacity><<<1, kPrepareBlockSize, 0, stream>>>(params, order);
 }
 
 struct DSparkVerifyPrepare {
@@ -574,9 +593,8 @@ MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Ten
         return {};
     }
     const int64_t batch = rates.size(0), gamma = rates.size(1);
-    if (batch < 2 || batch > kBudgetMaxBatch || gamma < 1 || gamma > kBudgetMaxGamma || batch * gamma > kBudgetCapacity
-        || total_draft_budget < 0 || total_draft_budget > batch * gamma
-        || (total_draft_budget == batch * gamma && !allow_full_budget)) {
+    if (batch < 2 || batch > kBudgetMaxBatch || gamma < 1 || gamma > kBudgetMaxGamma || total_draft_budget < 0
+        || total_draft_budget > batch * gamma || (total_draft_budget == batch * gamma && !allow_full_budget)) {
         return {};
     }
     auto eligible = [&](const torch::Tensor& tensor) {
@@ -630,10 +648,7 @@ MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Ten
         out.dense_positions  = torch::empty({batch * width * factor}, options);
     }
     DSparkBudgetedVerifyPrepare params{};
-    params.rates = rates.data_ptr<float>();
-    for (int64_t row = 0; row < batch; ++row) {
-        params.order[row] = static_cast<int32_t>(stable_order_host[row]);
-    }
+    params.rates           = rates.data_ptr<float>();
     params.anchors         = anchors.data_ptr<int32_t>();
     params.proposals       = proposals.data_ptr<int32_t>();
     params.history         = history.defined() ? history.data_ptr<int32_t>() : nullptr;
@@ -663,7 +678,11 @@ MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Ten
     params.base_row_stride         = has_positions ? position_bases.stride(0) : 0;
     params.base_col_stride         = has_positions ? position_bases.stride(1) : 0;
     params.prefix_stride           = prefix_lengths.stride(0);
-    mtpDSparkBudgetedVerifyPrepareKernel<<<1, kPrepareBlockSize, 0, stream>>>(params);
+    if (batch <= kBudgetSmallBatch) {
+        launchDSparkBudgetedVerifyPrepare<kBudgetSmallBatch>(params, stable_order_host, stream);
+    } else {
+        launchDSparkBudgetedVerifyPrepare<kBudgetMaxBatch>(params, stable_order_host, stream);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     const auto cuda_stream = c10::cuda::getStreamFromExternal(stream, anchors.get_device());
     for (const auto& source : {rates, anchors, proposals, history, position_bases, prefix_lengths}) {

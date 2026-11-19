@@ -827,7 +827,7 @@ TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyMatchesIndependentDyadicFrontier) 
 
 TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyMatchesOldPlannerAndPackingForShapesStridesAndOptions) {
     const auto i32 = cudaInt32(), fp32 = i32.dtype(torch::kFloat32);
-    for (int64_t batch : {2, 3, 31, 32, 47, 48, 49, 64, 128}) {
+    for (int64_t batch : {2, 3, 31, 32, 47, 48, 49, 64, 128, 129, 255, 256}) {
         for (int64_t gamma : {1, 5, 8}) {
             std::vector<int64_t> order(batch);
             std::iota(order.rbegin(), order.rend(), 0);
@@ -891,7 +891,7 @@ TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyPreservesFloatBoundarySubnormalAnd
 }
 
 TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyRejectsUnsupportedLayoutsAndMalformedIdentityOrder) {
-    for (const auto& shape : {std::make_pair(1, 5), std::make_pair(129, 5), std::make_pair(48, 9)}) {
+    for (const auto& shape : {std::make_pair(1, 5), std::make_pair(257, 5), std::make_pair(48, 9)}) {
         const auto           batch = shape.first, gamma = shape.second;
         std::vector<int64_t> order(batch);
         std::iota(order.begin(), order.end(), 0);
@@ -928,49 +928,56 @@ TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyRejectsUnsupportedLayoutsAndMalfor
 }
 
 TEST_F(MtpRoundHeadPrepareTest, BudgetedVerifyCaptureOwnsOrderAndReplayRefreshesEveryDeviceInput) {
-    const auto           i32   = cudaInt32();
-    constexpr int64_t    batch = 48, gamma = 5, budget = batch * 3;
-    auto                 rates     = torch::rand({batch, gamma}, i32.dtype(torch::kFloat32));
-    auto                 anchors   = torch::arange(batch, i32);
-    auto                 proposals = torch::arange(batch * gamma, i32).reshape({batch, gamma});
-    auto                 history   = torch::arange(batch * 4, i32).reshape({batch, 4});
-    auto                 bases     = torch::arange(batch * 3, i32).reshape({batch, 3});
-    auto                 prefixes  = torch::arange(batch, i32) + 100;
-    std::vector<int64_t> expected_order(batch);
-    std::iota(expected_order.rbegin(), expected_order.rend(), 0);
-    auto warm = tryMtpDSparkBudgetedVerifyPrepare(
-        rates, expected_order, anchors, proposals, history, bases, prefixes, budget, stream_, true);
-    ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
-    at::cuda::CUDAGraph           graph(true);
-    MtpDSparkBudgetedVerifyInputs captured;
-    {
-        auto temporary_order = expected_order;
-        graph.capture_begin();
-        captured = tryMtpDSparkBudgetedVerifyPrepare(
-            rates, temporary_order, anchors, proposals, history, bases, prefixes, budget, stream_, true);
-        graph.capture_end();
+    const auto        i32   = cudaInt32();
+    constexpr int64_t gamma = 5;
+    for (const int64_t batch : {48, 256}) {
+        SCOPED_TRACE(batch);
+        const auto           budget    = batch * 3;
+        auto                 rates     = torch::rand({batch, gamma}, i32.dtype(torch::kFloat32));
+        auto                 anchors   = torch::arange(batch, i32);
+        auto                 proposals = torch::arange(batch * gamma, i32).reshape({batch, gamma});
+        auto                 history   = torch::arange(batch * 4, i32).reshape({batch, 4});
+        auto                 bases     = torch::arange(batch * 3, i32).reshape({batch, 3});
+        auto                 prefixes  = torch::arange(batch, i32) + ((1 << 20) - batch - 64);
+        std::vector<int64_t> expected_order(batch);
+        std::iota(expected_order.rbegin(), expected_order.rend(), 0);
+        auto warm = tryMtpDSparkBudgetedVerifyPrepare(
+            rates, expected_order, anchors, proposals, history, bases, prefixes, budget, stream_, true);
+        ASSERT_TRUE(warm.packed.tokens.defined());
+        ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        at::cuda::CUDAGraph           graph(true);
+        MtpDSparkBudgetedVerifyInputs captured;
+        {
+            auto temporary_order = expected_order;
+            graph.capture_begin();
+            captured = tryMtpDSparkBudgetedVerifyPrepare(
+                rates, temporary_order, anchors, proposals, history, bases, prefixes, budget, stream_, true);
+            graph.capture_end();
+        }
+        ASSERT_TRUE(captured.packed.tokens.defined());
+        EXPECT_EQ(captured.packed.tokens.numel(), batch * 4);
+        size_t nodes = 0;
+        ASSERT_EQ(cudaGraphGetNodes(graph.raw_cuda_graph(), nullptr, &nodes), cudaSuccess);
+        EXPECT_EQ(nodes, 1);
+        for (int replay = 0; replay < 3; ++replay) {
+            rates.fill_(replay == 0 ? 1.0f : 0.5f);
+            rates.select(0, replay).fill_(std::numeric_limits<float>::quiet_NaN());
+            anchors.add_(37);
+            proposals.add_(71);
+            history.add_(101);
+            bases.add_(13);
+            prefixes.add_(17);
+            graph.replay();
+            auto expected =
+                oldBudgetedVerify(rates, expected_order, anchors, proposals, history, bases, prefixes, budget, stream_);
+            expectBudgetedVerifyEqual(captured, expected);
+        }
+        auto saved_tokens    = captured.dense_tokens.clone();
+        auto saved_proposals = captured.packed.proposals.clone();
+        proposals.fill_(-999);
+        EXPECT_TRUE(torch::equal(captured.dense_tokens, saved_tokens));
+        EXPECT_TRUE(torch::equal(captured.packed.proposals, saved_proposals));
     }
-    size_t nodes = 0;
-    ASSERT_EQ(cudaGraphGetNodes(graph.raw_cuda_graph(), nullptr, &nodes), cudaSuccess);
-    EXPECT_EQ(nodes, 1);
-    for (int replay = 0; replay < 3; ++replay) {
-        rates.fill_(replay == 0 ? 1.0f : 0.5f);
-        rates.select(0, replay).fill_(std::numeric_limits<float>::quiet_NaN());
-        anchors.add_(37);
-        proposals.add_(71);
-        history.add_(101);
-        bases.add_(13);
-        prefixes.add_(17);
-        graph.replay();
-        auto expected =
-            oldBudgetedVerify(rates, expected_order, anchors, proposals, history, bases, prefixes, budget, stream_);
-        expectBudgetedVerifyEqual(captured, expected);
-    }
-    auto saved_tokens    = captured.dense_tokens.clone();
-    auto saved_proposals = captured.packed.proposals.clone();
-    proposals.fill_(-999);
-    EXPECT_TRUE(torch::equal(captured.dense_tokens, saved_tokens));
-    EXPECT_TRUE(torch::equal(captured.packed.proposals, saved_proposals));
 }
 
 TEST_F(MtpRoundHeadPrepareTest, FullBudgetPackedIdentityCaptureRefreshesAllLiveInputsInOneKernel) {
