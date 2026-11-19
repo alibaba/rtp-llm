@@ -19,6 +19,14 @@ class DeviceChecks:
         self._flags.append(flags)
         self._checks.extend((message, error_type) for message in messages)
 
+    def extend(self, other):
+        if other._checks:
+            self.verified = False
+            offset = len(self._checks)
+            self._offsets.extend(offset + value for value in other._offsets)
+            self._flags.extend(other._flags)
+            self._checks.extend(other._checks)
+
     def verify(self, payload=None):
         self.verified = False
         if not self._checks:
