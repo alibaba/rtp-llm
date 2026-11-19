@@ -1476,23 +1476,6 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
     if (!enable_cuda_graph_) {
         return false;
     }
-    // Request-owned multimodal tensors are not refreshed in legacy captures.
-    // Keep generation-prefill's existing status/metrics path below unchanged.
-    if (!isGenerationPrefillCudaGraph()) {
-        const auto has_values = [](const torch::Tensor& tensor) { return tensor.defined() && tensor.numel() > 0; };
-        if (!inputs.multimodal_inputs.multimodal_features.empty() || !inputs.multimodal_inputs.mm_extra_input.empty()
-            || has_values(inputs.multimodal_inputs.mm_features_locs)
-            || has_values(inputs.embedding_inputs.text_tokens_mask)) {
-            if (observe_fallback) {
-                const auto tick = tickFallback(multimodal_input_fallback_count_);
-                if (tick.should_log) {
-                    RTP_LLM_LOG_WARNING("request-owned multimodal inputs require eager execution; fallback_count=%llu",
-                                        static_cast<unsigned long long>(tick.count));
-                }
-            }
-            return false;
-        }
-    }
     if (isGenerationPrefillCudaGraph()) {
         state.generation_prefill_status = GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
         auto fallback                   = [&](const char* reason, GenerationPrefillCudaGraphStatus status) {
