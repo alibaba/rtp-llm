@@ -129,7 +129,7 @@ index f45d811..b3cdcd2 100644
              state_indices_out.stride(0),
              num_accepted_tokens is not None,
 diff --git a/atom/model_ops/qwen4_exp/ops/qsa.py b/atom/model_ops/qwen4_exp/ops/qsa.py
-index 663171a..84ca32a 100644
+index 663171a..2a49752 100644
 --- a/atom/model_ops/qwen4_exp/ops/qsa.py
 +++ b/atom/model_ops/qwen4_exp/ops/qsa.py
 @@ -132,10 +132,13 @@ def _qsa_store_rows_fp8_kernel(
@@ -269,7 +269,7 @@ index 663171a..84ca32a 100644
          NUM_HEADS=values.shape[1],
          HEAD_DIM=head_dim,
          BLOCK_D=triton.next_power_of_2(head_dim),
-@@ -945,6 +957,319 @@ def qsa_compress_groups(
+@@ -945,6 +957,326 @@ def qsa_compress_groups(
      return pooled, first_positions
  
  
@@ -296,6 +296,8 @@ index 663171a..84ca32a 100644
 +    pos_table_stride_page,
 +    pos_table_width,
 +    pos_pages,
++    read_pages_stride,
++    position_read_pages_stride,
 +    raw_stride_row,
 +    raw_stride_dim,
 +    state_stride_page,
@@ -341,7 +343,7 @@ index 663171a..84ca32a 100644
 +                ).to(tl.float32)
 +            else:
 +                if SPEC:
-+                    page = tl.load(read_pages_ptr + request)
++                    page = tl.load(read_pages_ptr + request * read_pages_stride)
 +                else:
 +                    logical_page = source_pos // PAGE_SIZE
 +                    page = tl.load(
@@ -373,7 +375,7 @@ index 663171a..84ca32a 100644
 +                ).to(tl.int64)
 +            else:
 +                if SPEC:
-+                    pos_page = tl.load(position_read_pages_ptr + request)
++                    pos_page = tl.load(position_read_pages_ptr + request * position_read_pages_stride)
 +                else:
 +                    logical_page = first // PAGE_SIZE
 +                    pos_page = tl.load(
@@ -443,6 +445,8 @@ index 663171a..84ca32a 100644
 +    position_ptr,
 +    state_stride_page,
 +    state_stride_row,
++    candidate_stride_request,
++    candidate_stride_step,
 +    source_stride_request,
 +    source_stride_row,
 +    raw_stride_row,
@@ -454,7 +458,7 @@ index 663171a..84ca32a 100644
 +):
 +    request = tl.program_id(0)
 +    candidate = tl.program_id(1)
-+    page = tl.load(candidate_pages_ptr + request * QUERY + candidate)
++    page = tl.load(candidate_pages_ptr + request * candidate_stride_request + candidate * candidate_stride_step)
 +    end = tl.load(position_ptr + request * QUERY + candidate)
 +    start = tl.load(position_ptr + request * QUERY)
 +    ring = tl.arange(0, RING_ROWS)
@@ -550,6 +554,8 @@ index 663171a..84ca32a 100644
 +            position_table.stride(1) if has_coordinates else 0,
 +            position_table.shape[1] if has_coordinates else 0,
 +            position_cache.shape[0] if has_coordinates else 0,
++            state_read_pages.stride(0) if speculative else 0,
++            position_read_pages.stride(0) if has_coordinates and speculative else 0,
 +            raw_keys.stride(0), raw_keys.stride(2),
 +            state_cache.stride(0), state_cache.stride(1),
 +            state_table.stride(0), state_table.stride(1),
@@ -567,6 +573,7 @@ index 663171a..84ca32a 100644
 +                _qsa_commit_spec_state_ring_kernel[(requests, query_len)](
 +                    cache, source, candidate_pages, values,
 +                    logical_positions, cache.stride(0), cache.stride(1),
++                    candidate_pages.stride(0), candidate_pages.stride(1),
 +                    source.stride(0), source.stride(1), values.stride(0),
 +                    values.stride(2), query_len, ring_rows, width,
 +                    triton.next_power_of_2(width), num_warps=4,
@@ -1254,9 +1261,25 @@ index f721fa7..b8081bb 100644
              if kv_cache_base is None:
                  signature.append((int(layer_num), None))
 diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-index 17573c6..11ddc49 100644
+index 17573c6..8a3774e 100644
 --- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
 +++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -6,7 +6,6 @@ from collections.abc import Iterator
+ from contextlib import contextmanager
+ from typing import Any
+ 
+-import os
+ import numpy as np
+ 
+ import torch
+@@ -31,6 +30,7 @@ from atom.plugin.rtpllm.utils.forward_context import (
+     RTPForwardQwen35HybridContext,
+     _target_verify_state_slots_graph_kernel,
+ )
++from atom.utils import envs
+ from atom.utils.forward_context import get_forward_context
+ 
+ 
 @@ -46,6 +46,7 @@ def _qsa_graph_slots_kernel(
      table_stride_col,
      table_cols: tl.constexpr,
@@ -1443,7 +1466,7 @@ index 17573c6..11ddc49 100644
              module._rtp_qsa_cache_signature = signature
  
      @staticmethod
-@@ -613,41 +662,67 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -613,41 +662,62 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
          ple = ple_layers[0]
          if not gdn_layers:
              raise ValueError("PLE requires a GDN layer cache")
@@ -1501,15 +1524,13 @@ index 17573c6..11ddc49 100644
 -        cls, runtime: Any, model: Any, attn_metadata: Any, gdn_layers: dict[int, Any]
 +        cls,
 +        runtime: Any,
-+        model: Any,
 +        attn_metadata: Any,
-+        gdn_layers: dict[int, Any],
 +        ple_state_metadata: GDNAttentionMetadata | None = None,
 +        ngram_state_metadata: GDNAttentionMetadata | None = None,
      ) -> Qwen4ExpPLEMetadata | None:
-         ple = cls._bind_ple_caches(runtime, model, gdn_layers)
-         if ple is None:
-             return None
+-        ple = cls._bind_ple_caches(runtime, model, gdn_layers)
+-        if ple is None:
+-            return None
 -        gdn = attn_metadata.gdn_metadata
 +        gdn = ple_state_metadata
          if gdn is None or (
@@ -1526,7 +1547,7 @@ index 17573c6..11ddc49 100644
          spec_indices = (
              gdn.spec_state_indices_tensor
              if getattr(gdn, "rtp_target_verify_block_map", None) is not None
-@@ -656,9 +731,13 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -656,9 +726,13 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
          if spec_indices is not None:
              indices = spec_indices[:, -1]
              input_indices = gdn.spec_state_indices_in_tensor[:, 0]
@@ -1540,7 +1561,7 @@ index 17573c6..11ddc49 100644
          has_initial = gdn.has_initial_state
          if has_initial is None:
              if torch.cuda.is_current_stream_capturing():
-@@ -681,10 +760,15 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -681,10 +755,15 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
              state_indices_out=indices,
              has_initial_state=has_initial,
              conv_state=runtime._rtp_ple_conv,
@@ -1556,7 +1577,7 @@ index 17573c6..11ddc49 100644
          return metadata
  
      @classmethod
-@@ -794,6 +878,23 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -794,6 +873,23 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
              full_blocks = cls._resolve_qsa_block_table(
                  full_inputs, full_block_size, kernel_block_size, graph_buffers
              )
@@ -1580,7 +1601,7 @@ index 17573c6..11ddc49 100644
              if in_capture:
                  if graph_buffers is None:
                      raise RuntimeError("Qwen4Exp Graph requires prewarmed QSA buffers")
-@@ -810,6 +911,24 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -810,6 +906,24 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                      full_blocks.stride(1),
                      full_blocks.shape[1],
                      full_block_size,
@@ -1605,7 +1626,7 @@ index 17573c6..11ddc49 100644
                      ratio,
                      128,
                  )
-@@ -830,6 +949,24 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -830,9 +944,27 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                      ratio,
                      compressed,
                  )
@@ -1629,8 +1650,12 @@ index 17573c6..11ddc49 100644
 +                )
              host_lens = context_slots = None
              if (
-                 os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
-@@ -858,8 +995,6 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+-                os.getenv("ATOM_QSA_FLYDSL_ATTN", "0") == "1"
++                envs.ATOM_QSA_FLYDSL_ATTN
+                 and forward_context.context.is_prefill
+                 and not forward_context.context.is_draft
+                 and not in_capture
+@@ -858,8 +990,6 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                          pages = full_blocks[requests, tokens // full_block_size].to(torch.int64)
                          context_slots = pages * full_block_size + tokens % full_block_size
              metadata.qsa_metadata = Qwen4ExpQSAMetadata(
@@ -1639,7 +1664,7 @@ index 17573c6..11ddc49 100644
                  block_tables=full_blocks,
                  slot_mapping=slots,
                  compressed_slot_mapping=compressed,
-@@ -872,12 +1007,74 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+@@ -872,12 +1002,81 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                  logical_positions=logical,
                  seq_lens=metadata.context_lens,
                  max_seq_len=int(metadata.max_seqlen_k),
@@ -1658,6 +1683,14 @@ index 17573c6..11ddc49 100644
 +                host_lens=host_lens,
 +                context_slots=context_slots,
              )
++            # The MTP draft is a single QSA layer with no PLE cache groups.
++            # Keep its QSA metadata live through forward without binding PLE.
++            if runtime._rtp_model_config.is_mtp or cls._bind_ple_caches(
++                runtime, model, resolved_layer_maps[0]
++            ) is None:
++                metadata.ple_metadata = None
++                yield
++                return
 +            tagged_inputs = getattr(inputs, "attention_inputs_by_tag", {})
 +            ple_inputs = tagged_inputs.get("ple_conv_state")
 +            ngram_inputs = tagged_inputs.get("ple_ngram_ctx")
@@ -1691,8 +1724,7 @@ index 17573c6..11ddc49 100644
 +                    ngram_state_metadata = state_metadata
              metadata.ple_metadata = cls._ple_metadata(
 -                runtime, model, metadata, resolved_layer_maps[0]
-+                runtime, model, metadata, resolved_layer_maps[0],
-+                ple_state_metadata, ngram_state_metadata,
++                runtime, metadata, ple_state_metadata, ngram_state_metadata,
              )
              if metadata.ple_metadata is not None and gdn_metadata is not None:
 -                metadata.ple_metadata.rtp_checkpoint_targets = (

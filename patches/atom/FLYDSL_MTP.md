@@ -15,8 +15,9 @@ top-k 10 and 1–4 rows. Larger batches use the normal selector.
 `ATOM_RTP_TOPK512=0` disables the specialization.
 The MTP drafter uses fused hyper-connection operations on its ROCm RTP path.
 
-Set `RTP_LLM_MTP_DRAFT_LOOP_GRAPH=1` on a worker that runs decode to capture
-eligible draft forwards, LM heads, TP gathers and greedy sampling together.
+Eligible ROCm ATOM MTP decode workers capture draft forwards, LM heads, TP
+gathers and greedy sampling together by default. Set
+`RTP_LLM_MTP_DRAFT_LOOP_GRAPH=0` to disable draft-loop capture.
 Restart workers after changing these settings.
 
 Run these checks with the same Python interpreter and installed packages:
