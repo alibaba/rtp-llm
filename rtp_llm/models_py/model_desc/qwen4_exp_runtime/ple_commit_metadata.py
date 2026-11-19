@@ -123,7 +123,7 @@ def _verdict_channel(device):
         return channel
 
 
-def begin_accepted_pair_resolution(transaction, accept_len):
+def begin_accepted_pair_resolution(transaction, accept_len, *, workspace=None):
     """Launch the fused resolve kernel and stage its verdict for a late read.
 
     Returns an AcceptedPairResolution whose accepted/pending tensors can feed
@@ -171,7 +171,11 @@ def begin_accepted_pair_resolution(transaction, accept_len):
     ):
         return None
     batch = accept_len.numel()
-    payload = torch.empty(10 + 3 * batch, device=accept_len.device, dtype=torch.int64)
+    payload = workspace.metadata_payload(batch) if workspace is not None else None
+    if payload is None or payload.device != accept_len.device:
+        payload = torch.empty(
+            10 + 3 * batch, device=accept_len.device, dtype=torch.int64
+        )
     _resolve_accepted_pair[(1,)](
         accept_len,
         prefix,

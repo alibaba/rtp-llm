@@ -30,6 +30,7 @@ class PLETransactionCoordinator:
         self.fault_hook = fault_hook
         self.active_transaction: Optional[_PLETargetTransaction] = None
         self.captured_transactions: dict[int, _PLETargetTransaction] = {}
+        self._retired_workspaces = []
 
     def close(self) -> None:
         if self.active_transaction is not None:
@@ -38,6 +39,42 @@ class PLETransactionCoordinator:
             self._synchronize_ple_transaction(transaction)
         self.active_transaction = None
         self.captured_transactions.clear()
+        self._retired_workspaces.clear()
+
+    def _reclaim_retired_workspaces(self) -> None:
+        # The engine enters another target forward/replay only after the
+        # previous C++ finalize or rollback status consensus has succeeded.
+        # Local release alone must not make its outputs available for reuse.
+        for workspace in self._retired_workspaces:
+            workspace.busy = False
+        self._retired_workspaces.clear()
+
+    @staticmethod
+    def _acquire_commit_workspace(transaction, accept_len):
+        if not (
+            transaction.graph_key is not None
+            and 0 < transaction.batch_size <= 32
+            and 0 < transaction.query_len <= 32
+            and len(transaction.stages) == 1
+            and torch.version.hip is None
+            and accept_len.is_cuda
+            and accept_len.is_contiguous()
+            and next(iter(transaction.stages.values())).page_size > 0
+        ):
+            return None
+        workspace = transaction.prepare_workspace
+        if workspace is None:
+            if torch.cuda.get_device_capability(accept_len.device) != (12, 0):
+                return None
+            from .ple_commit_workspace import PLECommitWorkspace
+
+            workspace = PLECommitWorkspace(transaction)
+            transaction.prepare_workspace = workspace
+        if workspace.busy:
+            return None
+        workspace.busy = True
+        transaction.workspace_lease = workspace
+        return workspace
 
     _physical_blocks = staticmethod(PLECacheViews._physical_blocks)
     _commit_physical_blocks = staticmethod(PLECacheViews._commit_physical_blocks)
@@ -61,6 +98,8 @@ class PLETransactionCoordinator:
         live_rows: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute all target rows while leaving the persistent PLE pools intact."""
+        if self.active_transaction is None:
+            self._reclaim_retired_workspaces()
         if not bool(state_inputs.is_prefill):
             raise RuntimeError(
                 "qwen4_exp PLE target verification must use context-style prefill"
@@ -293,11 +332,15 @@ class PLETransactionCoordinator:
             raise RuntimeError("PLE target graph stage is missing for replay batch")
         if transaction.prepared_writes is not None or transaction.commit_started:
             raise RuntimeError("PLE target graph stage was not finalized")
+        self._reclaim_retired_workspaces()
         self.active_transaction = transaction
 
     def _release_ple_target_transaction(
         self, transaction: _PLETargetTransaction
     ) -> None:
+        if transaction.workspace_lease is not None:
+            self._retired_workspaces.append(transaction.workspace_lease)
+            transaction.workspace_lease = None
         if transaction.graph_key is not None:
             transaction.prepared_writes = None
             transaction.commit_started = False
@@ -431,11 +474,18 @@ class PLETransactionCoordinator:
                     for layer, stage in transaction.stages.items()
                 },
             )
+        # The captured owner retains the lease through prepare failures and
+        # rollback. Empty DP batches above never need prepare storage.
+        workspace = self._acquire_commit_workspace(owner, accept_len)
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_metadata import (
             begin_accepted_pair_resolution,
         )
 
-        resolution = begin_accepted_pair_resolution(transaction, accept_len)
+        resolution = begin_accepted_pair_resolution(
+            transaction, accept_len, workspace=workspace
+        )
+        if resolution is None:
+            workspace = None
         if resolution is not None:
             # The verdict read is deferred: the gather launches below run while
             # the device computes it, and verify() re-checks before publishing.
@@ -513,7 +563,13 @@ class PLETransactionCoordinator:
                 prepare_commit_values,
             )
 
-            selected = prepare_commit_values(stage, accepted, state_blocks, ctx_blocks)
+            selected = prepare_commit_values(
+                stage,
+                accepted,
+                state_blocks,
+                ctx_blocks,
+                workspace=(workspace.values(stage, "final") if workspace else None),
+            )
             if selected is None:
                 selected = self._prepare_ple_values_reference(
                     stage, accepted, state_blocks, ctx_blocks
@@ -536,6 +592,7 @@ class PLETransactionCoordinator:
                         ctx_blocks,
                         int(transaction.query_len),
                         graph_capture=transaction.graph_key is not None,
+                        workspace=workspace,
                     ),
                 )
             )
@@ -560,6 +617,7 @@ class PLETransactionCoordinator:
         query_len: int,
         *,
         graph_capture: bool = False,
+        workspace=None,
     ) -> list[_PLEBoundaryWrite]:
         """Stage the page checkpoints an accepted window completes on the way.
 
@@ -632,7 +690,11 @@ class PLETransactionCoordinator:
                 slot_ctx_blocks > 0, slot_ctx_blocks, ctx_blocks
             )
             selected = prepare_commit_values(
-                stage, base, slot_state_blocks, slot_ctx_blocks
+                stage,
+                base,
+                slot_state_blocks,
+                slot_ctx_blocks,
+                workspace=(workspace.values(stage, offset) if workspace else None),
             )
             if selected is None:
                 selected = self._prepare_ple_values_reference(
