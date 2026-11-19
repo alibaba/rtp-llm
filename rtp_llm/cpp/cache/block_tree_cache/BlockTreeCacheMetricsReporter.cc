@@ -39,6 +39,7 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
     BlockTreePoolMetricsSnapshot snapshot;
     snapshot.tier                       = tier;
     snapshot.pool_name                  = pool.poolName();
+    snapshot.shared_namespace           = pool.sharedArena() != nullptr;
     snapshot.block_size_bytes           = pool.blockSizeBytes();
     snapshot.total_blocks               = pool.totalBlocksNum();
     snapshot.free_blocks                = pool.freeBlocksNum();
@@ -68,8 +69,14 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
 std::vector<BlockTreePoolMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>&       group_sets,
                                                            std::chrono::steady_clock::time_point now) {
-    std::unordered_set<const IBlockPool*>     reported_device_pools;
-    std::vector<BlockTreePoolMetricsSnapshot> snapshots;
+    std::unordered_set<const IBlockPool*>       reported_device_pools;
+    std::unordered_set<const SharedBlockArena*> reported_arenas;
+    std::vector<BlockTreePoolMetricsSnapshot>   snapshots;
+    const auto add_arena_metrics = [&](BlockTreePoolMetricsSnapshot& snapshot, const IBlockPool& pool) {
+        if (pool.sharedArena() && reported_arenas.insert(pool.sharedArena().get()).second) {
+            snapshot.shared_arena_metrics = pool.sharedArena()->metrics();
+        }
+    };
     for (const GroupSetPtr& group_set : group_sets) {
         const std::vector<DeviceBlockPoolPtr>& device_pools = group_set->devicePools();
         for (const DeviceBlockPoolPtr& pool : device_pools) {
@@ -81,12 +88,16 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Gro
             if (!insert_result.second) {
                 continue;
             }
-            snapshots.push_back(makeDevicePoolMetricsSnapshot(*pool));
+            auto snapshot = makeDevicePoolMetricsSnapshot(*pool);
+            add_arena_metrics(snapshot, *pool);
+            snapshots.push_back(std::move(snapshot));
         }
 
         const std::shared_ptr<HostBlockPool> host_pool = group_set->hostPool();
         if (host_pool != nullptr) {
-            snapshots.push_back(makePoolMetricsSnapshot(Tier::HOST, *host_pool));
+            auto snapshot = makePoolMetricsSnapshot(Tier::HOST, *host_pool);
+            add_arena_metrics(snapshot, *host_pool);
+            snapshots.push_back(std::move(snapshot));
         }
 
         const std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = group_set->diskPool();
@@ -400,7 +411,8 @@ void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  s
     collector.error_type     = cacheCopyErrorName(result.copy_error);
     collector.copy_direction = source_tier == Tier::DEVICE ? "FROM_GPU" :
                                target_tier == Tier::DEVICE ? "TO_GPU" :
-                               target_tier == Tier::DISK   ? "TO_DISK" : "FROM_DISK";
+                               target_tier == Tier::DISK   ? "TO_DISK" :
+                                                             "FROM_DISK";
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheCopyErrorMetricsCollector>(nullptr, &collector);
 }
 

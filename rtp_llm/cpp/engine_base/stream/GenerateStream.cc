@@ -183,7 +183,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                                                             !resource_context.defer_grammar_to_pp_tail,
                                                                             output_vocab_size_ > 0);
     if (processors_result.ok()) {
-        auto processors = std::move(processors_result.value());
+        auto processors                   = std::move(processors_result.value());
         sampling_state_.logits_processors = std::move(processors);
     } else {
         const auto& err = processors_result.status();
@@ -240,6 +240,47 @@ absl::Status GenerateStream::initKVBlock() {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
     return ret;
+}
+
+CachePrepareResult GenerateStream::prepareCache() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    if (hasErrorWithoutLock() || hasEventWithoutLock(StreamEvents::CachePrepared)) {
+        reportEventWithoutLock(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+    RTP_LLM_CHECK_WITH_INFO(generate_status_->getStatus() == StreamState::WAITING && !chunkedPrefillEnabled(),
+                            "background cache preparation requires an unadmitted, unchunked stream");
+    if (!hasEventWithoutLock(StreamEvents::LoadInitiated)) {
+        recordWaitLatency();
+        const auto status = stream_cache_resource_->initKVBlock();
+        if (absl::IsUnavailable(status)) {
+            return CachePrepareResult::LACK_MEM;
+        }
+        if (!status.ok()) {
+            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, std::string(status.message()));
+            reportEventWithoutLock(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+        const bool loading = stream_cache_resource_->asyncLoadCache();
+        reportEventWithoutLock(StreamEvents::LoadInitiated);
+        if (loading) {
+            recordLoadingCacheStartTime();
+            return CachePrepareResult::WAIT;
+        }
+    } else {
+        if (!stream_cache_resource_->loadCacheDone()) {
+            return CachePrepareResult::WAIT;
+        }
+        // Main's failed allocator transaction can roll back and clear this
+        // event. Retry allocation later; never publish an aborted load as ready.
+        if (!hasEventWithoutLock(StreamEvents::LoadInitiated) && !hasErrorWithoutLock()) {
+            return CachePrepareResult::LACK_MEM;
+        }
+        recordLoadingCacheDoneTime();
+    }
+    reportEventWithoutLock(StreamEvents::CachePrepared);
+    return CachePrepareResult::DONE;
 }
 
 void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
@@ -736,7 +777,7 @@ int32_t GenerateStream::generateNextPositionId(int32_t* now_pos, std::optional<i
     // argument and would reintroduce a racy read for device-authoritative MTP.
     const int32_t effective_sequence_length = sequence_length.has_value() ? sequence_length.value() : seqLength();
     if (isMiddleChunk()) {
-        const auto position_ids          = generateContextPositionIds();
+        const auto position_ids           = generateContextPositionIds();
         const auto position_id_len_factor = mm_position_ids_style_ == PositionIdsStyle::MROPE ? 3 : 1;
         const auto boundary_pos           = prefixLength() + contextLength();
         std::memcpy(now_pos,
@@ -1402,8 +1443,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
     // update normal output buffer
     updateOutput({new_tokens,
                   num_new_tokens,
-                  torch::Tensor(),
-                  torch::Tensor(),
+                  update_info.target_hidden_states,
+                  update_info.target_logits,
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),

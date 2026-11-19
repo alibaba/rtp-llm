@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -50,6 +51,10 @@ struct KVCachePoolMetricsSnapshot {
     size_t      store_ref_blocks           = 0;
     size_t      frozen_ref_blocks          = 0;
     float       used_ratio                 = 0.0f;
+    // Shared block counts are namespace capacities; only arena metrics are
+    // additive physical byte counts. Append to preserve aggregate callers.
+    bool                                     shared_namespace = false;
+    std::optional<SharedBlockArena::Metrics> shared_arena_metrics;
 };
 
 class CoordinatorCacheManager: public std::enable_shared_from_this<CoordinatorCacheManager> {
@@ -226,6 +231,7 @@ protected:
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
+    std::shared_ptr<SharedBlockArena>  shared_arena_;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};
@@ -295,6 +301,8 @@ protected:
     size_t                                 minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
     size_t                                 totalReservableFreeBlocks() const;
     size_t                                 reserveBlocksForPool(size_t group_id) const;
+    size_t                                 sharedReferenceGroup() const;
+    int                                    equivalentSharedBlocks(const std::vector<size_t>& demand) const;
     std::vector<DeviceBlockPoolPtr>        group_block_pools_;
     RoleType                               role_type_{RoleType::PDFUSION};
     // Drain pending copies before releasing the cache groups and pools.

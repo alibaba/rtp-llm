@@ -133,9 +133,17 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.write_bytes                       = pool_snapshot.write_bytes;
     pool_collector.read_bandwidth_bytes_per_sec      = pool_snapshot.read_bandwidth_bytes_per_sec;
     pool_collector.write_bandwidth_bytes_per_sec     = pool_snapshot.write_bandwidth_bytes_per_sec;
+    if (pool_snapshot.shared_arena_metrics) {
+        pool_collector.shared_arena_total_bytes     = pool_snapshot.shared_arena_metrics->total_bytes;
+        pool_collector.shared_arena_free_bytes      = pool_snapshot.shared_arena_metrics->free_bytes;
+        pool_collector.shared_arena_available_bytes = pool_snapshot.shared_arena_metrics->available_bytes;
+    }
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);
     pool_tags.AddTag("tier", pool_snapshot.tier);
+    if (pool_snapshot.shared_namespace) {
+        pool_tags.AddTag("cache_backing", "shared_namespace");
+    }
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
 }
 
@@ -235,8 +243,11 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     // Decode retains every received FULL page on each TP rank. Its sharding
     // flag describes the upstream prefill layout for transport/state sizing,
     // not local allocation: applying the CP mapper here would underallocate by the CP factor.
-    if (cp_cfg.kv_cache_sharded && cp_cfg.is_enabled() && parallelism_config_.role_type != RoleType::DECODE
-        && parallelism_config_.tp_size > 1) {
+    // Prefill models can implement CP themselves and leave the shared
+    // forward CP path disabled. The allocator still owns rank-local pages.
+    const bool prefill_shards_cache = parallelism_config_.role_type == RoleType::PREFILL;
+    if (cp_cfg.kv_cache_sharded && (prefill_shards_cache || cp_cfg.is_enabled())
+        && parallelism_config_.role_type != RoleType::DECODE && parallelism_config_.tp_size > 1) {
         cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
                                                          static_cast<int>(config_.seq_size_per_block));
@@ -249,8 +260,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     if (pd_sep_config_.role_type == RoleType::PREFILL) {
-        prefill_cache_hit_metrics_reporter_ =
-            std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
+        prefill_cache_hit_metrics_reporter_ = std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
     }
 
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_size=%dB, seq_size_per_block=%zu",

@@ -221,6 +221,146 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class VitFrameBudgetArgumentsTest(TestCase):
+    def test_vit_frame_budget_uses_the_service_default_or_an_explicit_cli_value(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"MM_VIDEO_MAX_FRAMES": "128"}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.mm_video_max_frames,
+                VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES,
+            )
+            self.assertEqual(
+                server_args.setup_args(
+                    ["--mm_video_max_frames", "32"]
+                ).vit_config.mm_video_max_frames,
+                32,
+            )
+
+
+class SharedHybridCacheArgumentsTest(TestCase):
+    def test_policy_cli_and_transport(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env, args, expected in (
+            ({}, [], -1),
+            ({"RTP_LLM_SHARED_HYBRID_CACHE": "0"}, [], -1),
+            ({"SHARED_HYBRID_CACHE": "1"}, [], -1),
+            ({}, ["--shared_hybrid_cache", "1"], 1),
+            ({"RTP_LLM_SHARED_HYBRID_CACHE": "1"}, ["--shared_hybrid_cache", "0"], 0),
+        ):
+            with (
+                self.subTest(env=env, args=args),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                config = server_args.setup_args(args).kv_cache_config
+                self.assertEqual(config.shared_hybrid_cache, expected)
+                self.assertEqual(
+                    pickle.loads(pickle.dumps(config)).shared_hybrid_cache, expected
+                )
+
+    def test_legacy_transport_preserves_independent_pools(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        config.reuse_cache = True
+        config.linear_pool_blocks = 8
+        config.swa_pool_blocks = 16
+        state = list(config.__getstate__())
+        self.assertEqual(state[0:2], ["KVCacheConfig", 10])
+        state[1] = 9
+        legacy = KVCacheConfig.__new__(KVCacheConfig)
+        legacy.__setstate__(tuple(state[:-1]))
+        self.assertEqual(legacy.shared_hybrid_cache, 0)
+        self.assertTrue(legacy.reuse_cache)
+        self.assertEqual(legacy.linear_pool_blocks, 8)
+        self.assertEqual(legacy.swa_pool_blocks, 16)
+
+    def test_invalid_policy_is_rejected_by_parser_and_transport(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                server_args.setup_args(["--shared_hybrid_cache", "2"])
+        state = list(KVCacheConfig().__getstate__())
+        state[-1] = 2
+        config = KVCacheConfig.__new__(KVCacheConfig)
+        with self.assertRaisesRegex(RuntimeError, "invalid shared hybrid cache policy"):
+            config.__setstate__(tuple(state))
+
+
+class AsyncCachePrepareArgumentsTest(TestCase):
+    def test_removed_override_leaves_the_native_role_policy_in_control(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"RTP_LLM_ASYNC_PREPARE_CACHE": "1"}, clear=True):
+            config = server_args.setup_args([]).runtime_config.fifo_scheduler_config
+            self.assertFalse(config.async_cache_prepare)
+
+    def test_legacy_pickles_keep_preparation_disabled(self):
+        from rtp_llm.ops import FIFOSchedulerConfig
+
+        for state in (
+            (1, 8192),
+            (1, 8192, "", "1:1"),
+            (1, 8192, "", "1:1", True, 0),
+            (1, 8192, "", "1:1", True, 0, 2048),
+            (1, 8192, "", "1:1", True, 0, 2048, 128),
+        ):
+            with self.subTest(state=state):
+                config = FIFOSchedulerConfig.__new__(FIFOSchedulerConfig)
+                config.__setstate__(state)
+                self.assertFalse(config.async_cache_prepare)
+
+
+class CPRotateMethodArgumentsTest(TestCase):
+    def test_serialized_disabled_environment_matches_default(self):
+        from rtp_llm.ops import CPRotateMethod
+        from rtp_llm.server.server_args import server_args
+
+        for args in (None, [], ["--tp_size", "8"]):
+            with (
+                self.subTest(args=args),
+                patch("sys.argv", ["start_server.py"]),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                default = server_args.setup_args(args).prefill_cp_config.method
+                os.environ["CP_ROTATE_METHOD"] = "DISABLED"
+                explicit = server_args.setup_args(args).prefill_cp_config.method
+                self.assertEqual(default, CPRotateMethod.DISABLED)
+                self.assertEqual(explicit, default)
+
+    def test_disabled_cli_overrides_active_environment(self):
+        from rtp_llm.ops import CPRotateMethod
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("DISABLED", "disabled", "DiSaBlEd"):
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {"CP_ROTATE_METHOD": "ALL_GATHER"}, clear=True),
+            ):
+                config = server_args.setup_args(["--cp_rotate_method", value])
+                self.assertEqual(
+                    config.prefill_cp_config.method, CPRotateMethod.DISABLED
+                )
+
+    def test_invalid_rotation_method_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("DISABLE", "none", ""):
+            for args in (None, ["--cp_rotate_method", value]):
+                with (
+                    self.subTest(value=value, args=args),
+                    patch("sys.argv", ["start_server.py"]),
+                    patch.dict(os.environ, {"CP_ROTATE_METHOD": value}, clear=True),
+                    patch("sys.stderr", io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    server_args.setup_args(args)
+
+
 class DynamicDecodeArgumentsTest(TestCase):
     def test_dynamic_decode_backend_parser_and_default(self):
         from rtp_llm.server.server_args import server_args

@@ -132,6 +132,7 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
+        cli_only: bool = False,
         bind_to: Optional[
             Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
         ] = None,
@@ -143,6 +144,7 @@ class EnvArgumentGroup:
         Args:
             *args: 标准 argparse add_argument 参数
             env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
+            cli_only: 仅接受显式命令行配置，跳过环境变量映射。
             bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
                 'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
@@ -162,7 +164,8 @@ class EnvArgumentGroup:
             self._parser._register_config_binding(action, bind_to)
 
         # 保留 env 映射（用于兼容和日志）
-        self._parser._register_env_mapping(action, args, env_name)
+        if not cli_only:
+            self._parser._register_env_mapping(action, args, env_name)
         return action
 
     def __getattr__(self, name):

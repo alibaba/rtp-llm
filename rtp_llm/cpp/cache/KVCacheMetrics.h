@@ -28,10 +28,12 @@ struct CachePoolMetricsSnapshot {
     size_t      frozen_ref_blocks          = 0;
     float       used_ratio                 = 0.0f;
 
-    std::optional<int64_t> read_bytes;
-    std::optional<int64_t> write_bytes;
-    std::optional<double>  read_bandwidth_bytes_per_sec;
-    std::optional<double>  write_bandwidth_bytes_per_sec;
+    std::optional<int64_t>                   read_bytes;
+    std::optional<int64_t>                   write_bytes;
+    std::optional<double>                    read_bandwidth_bytes_per_sec;
+    std::optional<double>                    write_bandwidth_bytes_per_sec;
+    bool                                     shared_namespace = false;
+    std::optional<SharedBlockArena::Metrics> shared_arena_metrics;
 };
 
 // Allocator snapshots own device pool metrics. BlockTree pools missing from the allocator are appended,

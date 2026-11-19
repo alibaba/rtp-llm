@@ -79,6 +79,10 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    // Opt-in target output for ordinary MTP prefill. These owned host rows
+    // are distinct from the draft features retained for the next round.
+    torch::Tensor target_logits{};
+    torch::Tensor target_hidden_states{};
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -208,6 +212,8 @@ public:
     int                  reuseBlockSize() const;
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock();
+    // Prepare the initial allocator transaction without granting execution.
+    CachePrepareResult   prepareCache();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;

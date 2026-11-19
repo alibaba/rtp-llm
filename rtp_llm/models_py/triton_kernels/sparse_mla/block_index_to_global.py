@@ -17,6 +17,9 @@ def _convert_req_index_to_global_index_kernel(
     max_num_blocks_per_req: tl.constexpr,
     TOKENS_PER_BLOCK_FOR_BLOCK_TABLE: tl.constexpr,
     ENTRIES_PER_BLOCK: tl.constexpr,
+    PHYSICAL_ENTRIES_PER_BLOCK: tl.constexpr,
+    BLOCKS_PER_PHYSICAL_BLOCK: tl.constexpr,
+    NUM_TOPK_TOKENS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     # strides (in elements)
@@ -30,20 +33,21 @@ def _convert_req_index_to_global_index_kernel(
     # program_id(0) -> token_id (row)
     # program_id(1) -> tile index along columns
     token_id = tl.program_id(0).to(tl.int64)
-    tile_id = tl.program_id(1)
+    tile_id = tl.program_id(1).to(tl.int64)
 
     # Each program covers BLOCK_N consecutive columns
     indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    valid_column = True
+    if NUM_TOPK_TOKENS % BLOCK_N:
+        valid_column = indice_id < NUM_TOPK_TOKENS
 
     # Load request id for this token (no mask: grid is exact)
-    req = tl.load(req_id_ptr + token_id)
+    req = tl.load(req_id_ptr + token_id).to(tl.int64)
 
     # Load token indices for this tile
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-    tok = tl.load(ti_ptr)  # int32
+    tok = tl.load(ti_ptr, mask=valid_column, other=-1)
 
-    # Invalid local indices and unallocated block-table entries propagate as -1.
-    is_invalid_tok = tok < 0
     is_prefill = False
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
@@ -53,12 +57,17 @@ def _convert_req_index_to_global_index_kernel(
     inblock_off = tok % ENTRIES_PER_BLOCK
 
     # Guard block_table access
-    valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    is_invalid_tok |= ~valid_block
+    valid_block = (tok >= 0) & (block_id < max_num_blocks_per_req)
+    bt_ptr = block_table_ptr + req * bt_stride0 + block_id.to(tl.int64) * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
-    is_invalid_tok |= (base <= 0) & ~is_prefill
-    out_val = base * ENTRIES_PER_BLOCK + inblock_off
+    # The table names logical pages. Physical parent zero is reserved, including
+    # all of its child pages. Gaps after each parent are skipped by its pitch.
+    parent = base // BLOCKS_PER_PHYSICAL_BLOCK
+    child = base % BLOCKS_PER_PHYSICAL_BLOCK
+    is_invalid_tok = ~valid_block | ((parent <= 0) & ~is_prefill)
+    out_val = (
+        parent * PHYSICAL_ENTRIES_PER_BLOCK + child * ENTRIES_PER_BLOCK + inblock_off
+    )
 
     # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
@@ -71,7 +80,7 @@ def _convert_req_index_to_global_index_kernel(
 
     # Store results
     out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val)
+    tl.store(out_ptr_ij, out_val, mask=valid_column)
 
 
 def triton_convert_req_index_to_global_index(
@@ -81,17 +90,23 @@ def triton_convert_req_index_to_global_index(
     TOKENS_PER_BLOCK_FOR_BLOCK_TABLE: int,
     ENTRIES_PER_BLOCK: int,
     NUM_TOPK_TOKENS: int = 2048,
-    BLOCK_N: int = 128,  # tile width along columns
+    BLOCK_N: int | None = 128,
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
+    *,
+    PHYSICAL_ENTRIES_PER_BLOCK: int | None = None,
+    BLOCKS_PER_PHYSICAL_BLOCK: int = 1,
 ):
     """
-    out[token_id, indice_id] =
-        block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // TOKENS_PER_BLOCK_FOR_BLOCK_TABLE]
-            * ENTRIES_PER_BLOCK
-        + token_indices[token_id, indice_id] % ENTRIES_PER_BLOCK
+    Translate request-local indices into slots in a flat KV cache.
+    A block-table page covers TOKENS_PER_BLOCK_FOR_BLOCK_TABLE input tokens
+    and stores ENTRIES_PER_BLOCK cache slots. A physical block can contain
+    several such pages followed by padding. PHYSICAL_ENTRIES_PER_BLOCK is
+    the distance in slots between successive physical blocks.
+
+    An explicit BLOCK_N must divide NUM_TOPK_TOKENS. Pass None to choose a
+    power-of-two tile and mask the last tile for arbitrary semantic top-k widths.
 
     Negative token_indices propagate as -1. For safety, we also output -1
         if the derived block_id would be out-of-bounds, or if the block-table
@@ -115,9 +130,20 @@ def triton_convert_req_index_to_global_index(
     TOKENS_PER_BLOCK_FOR_BLOCK_TABLE = int(TOKENS_PER_BLOCK_FOR_BLOCK_TABLE)
     assert ENTRIES_PER_BLOCK > 0
     assert TOKENS_PER_BLOCK_FOR_BLOCK_TABLE > 0
-    assert (
-        NUM_TOPK_TOKENS % BLOCK_N == 0
-    ), f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
+    BLOCKS_PER_PHYSICAL_BLOCK = int(BLOCKS_PER_PHYSICAL_BLOCK)
+    assert BLOCKS_PER_PHYSICAL_BLOCK > 0
+    entries_per_parent = ENTRIES_PER_BLOCK * BLOCKS_PER_PHYSICAL_BLOCK
+    if PHYSICAL_ENTRIES_PER_BLOCK is None:
+        PHYSICAL_ENTRIES_PER_BLOCK = entries_per_parent
+    else:
+        PHYSICAL_ENTRIES_PER_BLOCK = int(PHYSICAL_ENTRIES_PER_BLOCK)
+        assert PHYSICAL_ENTRIES_PER_BLOCK >= entries_per_parent
+    if BLOCK_N is None:
+        BLOCK_N = min(128, triton.next_power_of_2(max(1, NUM_TOPK_TOKENS)))
+    else:
+        assert (
+            NUM_TOPK_TOKENS % BLOCK_N == 0
+        ), f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
 
     if HAS_PREFILL_WORKSPACE:
         assert prefill_workspace_request_ids is not None
@@ -127,7 +153,7 @@ def triton_convert_req_index_to_global_index(
 
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
+    tiles_per_row = triton.cdiv(NUM_TOPK_TOKENS, BLOCK_N)
 
     # Ensure contiguous tensors on the same device
     req_id_c = req_id.contiguous()
@@ -147,6 +173,9 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_request_ids.is_contiguous()
         assert prefill_workspace_starts.is_contiguous()
 
+    if num_tokens == 0 or NUM_TOPK_TOKENS == 0:
+        return out
+
     # Exact 2D grid: tokens × column tiles
     grid = (num_tokens, tiles_per_row)
 
@@ -161,6 +190,9 @@ def triton_convert_req_index_to_global_index(
         max_num_blocks_per_req,
         TOKENS_PER_BLOCK_FOR_BLOCK_TABLE,
         ENTRIES_PER_BLOCK,
+        PHYSICAL_ENTRIES_PER_BLOCK,
+        BLOCKS_PER_PHYSICAL_BLOCK,
+        NUM_TOPK_TOKENS,
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
         # strides

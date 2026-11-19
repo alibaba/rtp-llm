@@ -198,15 +198,16 @@ class BackendManagerStopTest(unittest.TestCase):
 
 class BackendManagerDeepEPTest(unittest.TestCase):
     def test_mega_moe_skips_deepep_but_other_strategies_initialize_it(self):
-        for strategy in (
-            "mega_moe",
-            "mega_moe_se",
-            "mega_moe_fp8",
-            "mega_moe_fp8_se",
-            "mega_moe_fused",
-            "auto",
+        for requested, effective in (
+            ("mega_moe", "mega_moe"),
+            ("mega_moe_se", "mega_moe_se"),
+            ("mega_moe_fp8", "mega_moe_fp8"),
+            ("mega_moe_fp8_se", "mega_moe_fp8_se"),
+            ("mega_moe_fused", "mega_moe_fused"),
+            ("auto", "auto"),
+            ("auto", "mega_moe_fp8_se"),
         ):
-            with self.subTest(strategy=strategy):
+            with self.subTest(requested=requested, effective=effective):
                 manager = BackendManager.__new__(BackendManager)
                 manager.py_env_configs = Mock()
                 manager._distributed_server = Mock()
@@ -216,9 +217,13 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                 config.moe_config.use_all_gather = False
                 config.moe_config.use_deepep_moe = True
                 config.moe_config.use_mori_ep = False
-                config.moe_config.moe_strategy = strategy
+                config.moe_config.moe_strategy = requested
                 factory = Mock()
-                factory.create_model_config.return_value.expert_num = 8
+                model_config = factory.create_model_config.return_value
+                model_config.expert_num = 8
+                model_config.prepare_moe_backend.side_effect = (
+                    lambda parallelism, moe: setattr(moe, "moe_strategy", effective)
+                )
                 init_deepep = Mock()
                 with (
                     patch.multiple(
@@ -240,13 +245,53 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                     ),
                 ):
                     manager.start()
-                if strategy == "auto":
+                model_config.prepare_moe_backend.assert_called_once_with(
+                    config.parallelism_config, config.moe_config
+                )
+                if effective == "auto":
                     init_deepep.assert_called_once_with(
                         config, factory.create_model_config.return_value
                     )
                 else:
                     init_deepep.assert_not_called()
                 factory.from_model_configs.assert_called_once()
+
+    def test_glm_loader_reuses_the_worker_decision_including_fallback(self):
+        from rtp_llm.config.mega_moe import MegaMoeExecutionPolicy
+        from rtp_llm.models.glm5_3_flash import Glm53Flash, Glm53FlashModelConfig
+
+        for policy in (None, MegaMoeExecutionPolicy(preserve_fp32_scales=True)):
+            with self.subTest(policy=policy):
+                model_config = Glm53FlashModelConfig()
+                model = Glm53Flash.__new__(Glm53Flash)
+                model.model_config = model_config
+                model.parallelism_config = Mock()
+                model.moe_config = Mock(moe_strategy="mega_moe_fp8_se")
+                with (
+                    patch(
+                        "rtp_llm.models.glm5_3_flash.resolve_moe_policy",
+                        return_value=policy,
+                    ) as resolve,
+                    patch(
+                        "rtp_llm.models.glm5_3_flash.use_dedicated_mla_cp",
+                        return_value=False,
+                    ),
+                    patch(
+                        "rtp_llm.models.base_model.BaseModel.create_model_loader"
+                    ) as make_loader,
+                ):
+                    make_loader.return_value.get_load_config.return_value.fp8_requant_preserve_fp32 = (
+                        True
+                    )
+                    model_config.prepare_moe_backend(
+                        model.parallelism_config, model.moe_config
+                    )
+                    load_config = model.create_model_loader().get_load_config()
+                resolve.assert_called_once_with(
+                    model_config, model.parallelism_config, model.moe_config
+                )
+                self.assertIs(model_config.mega_moe_policy, policy)
+                self.assertEqual(load_config.fp8_defer_moe_requant, policy is not None)
 
 
 if __name__ == "__main__":

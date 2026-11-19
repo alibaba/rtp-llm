@@ -25,6 +25,11 @@ struct MemoryLayoutConfig {
     size_t kv_scale_stride_bytes = 0;
     size_t block_stride_bytes    = 0;
 
+    // Nonzero for block-major shared backing. Offsets above then locate the
+    // first physical slot; each layer's payload is packed inside that slot.
+    // Payload byte counts remain independent of the distance between slots.
+    size_t block_slot_stride_bytes = 0;
+
     // For partitioning / kernels (KV separation info)
     size_t k_block_stride_bytes = 0;
     size_t v_block_stride_bytes = 0;

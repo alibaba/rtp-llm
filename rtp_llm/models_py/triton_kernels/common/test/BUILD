@@ -107,3 +107,13 @@ models_py_test(
     src = "vocab_lookup_test.py",
     gpu = "RTX_5000_PRO_CU13",
 )
+
+py_test(
+    name = "kda_checkpoint_test",
+    srcs = ["kda_checkpoint_test.py"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py/triton_kernels:common",
+    ],
+)

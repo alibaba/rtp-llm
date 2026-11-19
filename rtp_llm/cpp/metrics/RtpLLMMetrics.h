@@ -1093,6 +1093,9 @@ public:
     std::optional<int64_t> write_bytes;
     std::optional<double>  read_bandwidth_bytes_per_sec;
     std::optional<double>  write_bandwidth_bytes_per_sec;
+    std::optional<int64_t> shared_arena_total_bytes;
+    std::optional<int64_t> shared_arena_free_bytes;
+    std::optional<int64_t> shared_arena_available_bytes;
 };
 
 class RtpLLMCachePoolMetrics: public kmonitor::MetricsGroup {
@@ -1122,6 +1125,9 @@ public:
     kmonitor::MutableMetric* write_bytes_metric                   = nullptr;
     kmonitor::MutableMetric* read_bandwidth_bytes_per_sec_metric  = nullptr;
     kmonitor::MutableMetric* write_bandwidth_bytes_per_sec_metric = nullptr;
+    kmonitor::MutableMetric* shared_arena_total_bytes_metric      = nullptr;
+    kmonitor::MutableMetric* shared_arena_free_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* shared_arena_available_bytes_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

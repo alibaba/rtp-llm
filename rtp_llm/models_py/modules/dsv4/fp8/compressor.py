@@ -444,6 +444,8 @@ class CompressorFP8(PoolBackedModule):
     layer's ratio (typically 4, overlap=True).
     """
 
+    _prefill_request_index_dtype = torch.long
+
     def __init__(
         self,
         dim: int,
@@ -456,6 +458,7 @@ class CompressorFP8(PoolBackedModule):
         norm_eps: float = 1e-6,
         rotate: bool = False,
         compressor_weights: Optional[Dict[str, torch.Tensor]] = None,
+        overlap: Optional[bool] = None,
     ):
         """``compressor_weights`` is a 4-key dict ``{"ape", "wkv", "wgate",
         "norm"}`` extracted by the caller from ``layer_weights[W.v4_*compressor_*]``."""
@@ -483,7 +486,7 @@ class CompressorFP8(PoolBackedModule):
         self._cp_role = cp_role
         self.rope_head_dim = rope_head_dim
         self.compress_ratio = compress_ratio
-        self.overlap = compress_ratio == 4
+        self.overlap = compress_ratio == 4 if overlap is None else bool(overlap)
         self.rotate = rotate
         self.norm_eps = norm_eps
         coff = 1 + self.overlap
@@ -1215,17 +1218,13 @@ class CompressorFP8(PoolBackedModule):
             score_flat = fused_flat[:, out_dim:]
         if meta is None:
             with record_function_range("dsv4.fp8.compressor.prefill.build_meta"):
-                positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
-                meta = self.prepare_metadata(
-                    positions,
-                    b_idx,
-                    has_prefix=sp > 0,
-                    seq_start_per_req=torch.tensor(
-                        [sp], dtype=torch.long, device=device
-                    ),
-                    cu_seq_per_req=torch.tensor(
-                        [0, seqlen], dtype=torch.long, device=device
-                    ),
+                meta = build_prefill_metadata(
+                    self,
+                    sp,
+                    bsz,
+                    seqlen,
+                    device,
+                    request_index_dtype=self._prefill_request_index_dtype,
                 )
         # Varlen prefill carries per-request raw arrays, so ``_launch`` routes
         # through the kernel's BATCHED branch even when CP has only one
@@ -1334,7 +1333,13 @@ def _build_prefill_positions(
 
 
 def build_prefill_metadata(
-    compressor: "CompressorFP8", sp: int, bsz: int, seqlen: int, device: torch.device
+    compressor: "CompressorFP8",
+    sp: int,
+    bsz: int,
+    seqlen: int,
+    device: torch.device,
+    *,
+    request_index_dtype: torch.dtype = torch.long,
 ) -> CompressorMeta:
     """Convenience: build positions/b_idx + ``CompressorMeta`` in one call."""
     positions, b_idx = _build_prefill_positions(sp, bsz, seqlen, device)
@@ -1342,8 +1347,10 @@ def build_prefill_metadata(
         positions,
         b_idx,
         has_prefix=sp > 0,
-        seq_start_per_req=torch.tensor([sp], dtype=torch.long, device=device),
-        cu_seq_per_req=torch.tensor([0, seqlen], dtype=torch.long, device=device),
+        seq_start_per_req=torch.tensor([sp], dtype=request_index_dtype, device=device),
+        cu_seq_per_req=torch.tensor(
+            [0, seqlen], dtype=request_index_dtype, device=device
+        ),
     )
 
 

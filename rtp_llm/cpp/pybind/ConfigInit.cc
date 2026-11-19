@@ -475,6 +475,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<KVCacheConfig>(m, "KVCacheConfig")
         .def(py::init<>())
         .def_readwrite("reuse_cache", &KVCacheConfig::reuse_cache)
+        .def_readwrite("shared_hybrid_cache", &KVCacheConfig::shared_hybrid_cache)
         .def_readwrite("enable_remote_cache", &KVCacheConfig::enable_remote_cache)
         .def_readwrite("enable_device_cache", &KVCacheConfig::enable_device_cache)
         .def_readwrite("enable_crc", &KVCacheConfig::enable_crc)
@@ -576,7 +577,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      9,
+                                      10,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -646,9 +647,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
                                       self.linear_pool_blocks,
-                                      self.swa_pool_blocks);
+                                      self.swa_pool_blocks,
+                                      self.shared_hybrid_cache);
             },
             [](py::tuple t) {
+                const py::tuple shared_state = t;
+                const bool      has_shared_policy =
+                    t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_shared_policy) {
+                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
+                }
                 const py::tuple tail_state = t;
                 const bool has_tail_fields = t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
                 if (has_tail_fields) {
@@ -693,6 +702,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                // Older senders did not opt into the new allocator. Preserve
+                // their independent pools through a rolling version change.
+                c.shared_hybrid_cache = has_shared_policy ? shared_state[72].cast<int>() : 0;
+                if (c.shared_hybrid_cache < -1 || c.shared_hybrid_cache > 1) {
+                    throw std::runtime_error("invalid shared hybrid cache policy");
+                }
                 // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
                 const auto value = [&](size_t index) {
                     return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
@@ -1413,6 +1428,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_prefill_ratio", &FIFOSchedulerConfig::decode_prefill_ratio)
         .def_readwrite("cp_force_single_prefill", &FIFOSchedulerConfig::cp_force_single_prefill)
         .def_readwrite("max_inited_kv_cache_streams", &FIFOSchedulerConfig::max_inited_kv_cache_streams)
+        .def_readwrite("async_cache_prepare", &FIFOSchedulerConfig::async_cache_prepare)
         .def_readwrite("max_batch_tokens_without_cache", &FIFOSchedulerConfig::max_batch_tokens_without_cache)
         .def_readwrite("prefill_chunk_size", &FIFOSchedulerConfig::prefill_chunk_size)
         .def("to_string", &FIFOSchedulerConfig::to_string)
@@ -1425,10 +1441,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.cp_force_single_prefill,
                                       self.max_inited_kv_cache_streams,
                                       self.max_batch_tokens_without_cache,
-                                      self.prefill_chunk_size);
+                                      self.prefill_chunk_size,
+                                      self.async_cache_prepare);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 6 && t.size() != 7 && t.size() != 8 && t.size() != 9)
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
@@ -1447,6 +1464,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 8) {
                         c.prefill_chunk_size = t[7].cast<int64_t>();
+                    }
+                    if (t.size() >= 9) {
+                        c.async_cache_prepare = t[8].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());
@@ -1775,6 +1795,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
         .def_readwrite("indexer_head_num", &AttentionConfigs::indexer_head_num)
         .def_readwrite("indexer_topk", &AttentionConfigs::indexer_topk)
+        .def_readwrite("indexer_compress_ratio", &AttentionConfigs::indexer_compress_ratio)
+        .def_readwrite("indexer_compressor_overlap", &AttentionConfigs::indexer_compressor_overlap)
+        .def_readwrite("sparse_attention_topk", &AttentionConfigs::sparse_attention_topk)
+        .def_readwrite("indexer_layer_ids", &AttentionConfigs::indexer_layer_ids)
         .def_readwrite("dtype", &AttentionConfigs::dtype)
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
@@ -1872,17 +1896,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reservable", &CacheCapacityPolicyDesc::reservable)
         .def_readwrite("explicit_block_num", &CacheCapacityPolicyDesc::explicit_block_num)
         .def_readwrite("charge_to_paged_budget", &CacheCapacityPolicyDesc::charge_to_paged_budget)
+        .def_readwrite("match_decode_token_capacity", &CacheCapacityPolicyDesc::match_decode_token_capacity)
         .def(py::pickle(
-            [](const CacheCapacityPolicyDesc& self) {
+            [](const CacheCapacityPolicyDesc& self) -> py::tuple {
+                if (self.match_decode_token_capacity) {
+                    return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget, true);
+                }
                 return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget);
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
-                if (t.size() != 3)
+                if (t.size() != 3 && t.size() != 4)
                     throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
                 c.reservable             = t[0].cast<std::optional<bool>>();
                 c.explicit_block_num     = t[1].cast<std::optional<uint32_t>>();
                 c.charge_to_paged_budget = t[2].cast<std::optional<bool>>();
+                if (t.size() == 4) {
+                    c.match_decode_token_capacity = t[3].cast<bool>();
+                }
                 return c;
             }));
 
@@ -2067,6 +2098,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("moe_normalize_expert_scale", &ModelConfig::moe_normalize_expert_scale)
         .def_readwrite("scoring_func", &ModelConfig::scoring_func)
         .def_readwrite("hc_mult", &ModelConfig::hc_mult)
+        .def_readwrite("index_share_for_mtp_iteration", &ModelConfig::index_share_for_mtp_iteration)
         .def_readwrite("hc_sinkhorn_iters", &ModelConfig::hc_sinkhorn_iters)
         .def_readwrite("hc_eps", &ModelConfig::hc_eps)
         .def_readwrite("swiglu_limit", &ModelConfig::swiglu_limit)

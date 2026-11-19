@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <grpcpp/server_context.h>
 
@@ -27,6 +28,7 @@ struct ExpandedOutput {
     torch::Tensor token_type_ids;
     torch::Tensor text_tokens_mask;
     torch::Tensor locs;
+    std::map<int, int> multimodal_lengths;
     ExpandedOutput(torch::Tensor expanded_ids     = {},
                    torch::Tensor token_type_ids   = {},
                    torch::Tensor text_tokens_mask = {},
@@ -70,7 +72,8 @@ private:
                                                                  int64_t                 request_id,
                                                                  grpc::ServerContext*    server_context);
 
-    ErrorInfo getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb);
+    ErrorInfo
+    getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb, const torch::Tensor* precomputed = nullptr);
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                               std::string                                 ip_port = "",
@@ -81,8 +84,18 @@ private:
     expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
                    const torch::Tensor&                             token_ids,
                    const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
-                   torch::Tensor                                    token_type_ids = {},
-                   const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
+                   torch::Tensor                                    token_type_ids     = {},
+                   const std::optional<std::vector<torch::Tensor>>& feature_hashes     = std::nullopt,
+                   const std::vector<torch::Tensor>*                interleaved_layout = nullptr);
+
+    ErrorResult<ExpandedOutput>
+    expandInterleavedTokenIds(const std::vector<torch::Tensor>&                features,
+                              const torch::Tensor&                             token_ids,
+                              const torch::Tensor&                             token_type_ids,
+                              const std::vector<MultimodalInput>&              mm_inputs,
+                              const std::vector<std::pair<int32_t, int32_t>>&  spans,
+                              const std::optional<std::vector<torch::Tensor>>& feature_hashes,
+                              const std::vector<torch::Tensor>&                layouts);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 

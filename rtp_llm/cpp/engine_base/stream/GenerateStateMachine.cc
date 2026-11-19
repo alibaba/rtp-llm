@@ -105,6 +105,12 @@ void GenerateStateMachine::handleWaiting() {
 
     // Decode streams, including PREFILL-role streams after fallback, must keep
     // cache block tables aligned with the growing sequence length.
+    // A background-prepared initial context already owns its complete reserve.
+    // Admission remains here; subsequent decode growth uses the normal path.
+    if (events_.has(StreamEvents::CachePrepared) && stream_cache_resource_->isContextStream()) {
+        transitionToRunning();
+        return;
+    }
     auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
         error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
@@ -151,7 +157,7 @@ void GenerateStateMachine::handleRunning() {
     int             seq_len_override = -1;
     GenerateStream* stream           = stream_cache_resource_->stream();
     if (stream != nullptr) {
-        const bool  pending   = stream->hasPendingAsyncBookkeeping();
+        const bool pending   = stream->hasPendingAsyncBookkeeping();
         const auto mtp_state = stream->getMtpAsyncDeviceState();
         if (pending && GenerateStream::hasMtpCacheSnapshot(mtp_state) && mtp_state.next_seq_len_upper_bound > 0
             && stream_cache_resource_->singleBatchNeedBlocks(mtp_state.next_seq_len_upper_bound,

@@ -1,4 +1,5 @@
 import pickle
+from itertools import product
 from unittest import TestCase, main
 
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_FIELD_VALUES
@@ -15,16 +16,18 @@ class KVCacheConfigPickleTest(TestCase):
         config.disk_cache_paths = "/tmp/cache"
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
-        for enable_crc in (False, True):
-            with self.subTest(enable_crc=enable_crc):
+        for enable_crc, shared_policy in product((False, True), (-1, 0, 1)):
+            with self.subTest(enable_crc=enable_crc, shared_policy=shared_policy):
                 config.enable_crc = enable_crc
+                config.shared_hybrid_cache = shared_policy
                 state = config.__getstate__()
-                self.assertEqual(len(state), 72)
-                self.assertEqual(state[:2], ("KVCacheConfig", 9))
+                self.assertEqual(len(state), 73)
+                self.assertEqual(state[:2], ("KVCacheConfig", 10))
                 self.assertEqual(
                     state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                 )
                 self.assertIs(state[69], enable_crc)
+                self.assertEqual(state[72], shared_policy)
                 # Normalizing old fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -33,12 +36,41 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(direct.__getstate__(), original_state)
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertIs(restored.enable_crc, enable_crc)
+                self.assertEqual(restored.shared_hybrid_cache, shared_policy)
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertTrue(restored.enable_disk_cache)
                 self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
                 for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
                     self.assertEqual(getattr(restored, name), value, name)
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
+
+    def test_version_nine_retains_independent_pools_during_upgrade(self):
+        source = KVCacheConfig()
+        source.shared_hybrid_cache = 1
+        source.reuse_cache_tail_blocks = 13
+        source.linear_pool_blocks = 31
+        source.swa_pool_blocks = 17
+        source.enable_crc = False
+        state = source.__getstate__()
+        previous = (state[0], 9, *state[2:72])
+        original = tuple(list(previous))
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(previous, original)
+        self.assertEqual(restored.shared_hybrid_cache, 0)
+        self.assertEqual(restored.reuse_cache_tail_blocks, 13)
+        self.assertEqual(restored.linear_pool_blocks, 31)
+        self.assertEqual(restored.swa_pool_blocks, 17)
+        self.assertFalse(restored.enable_crc)
+
+    def test_invalid_shared_policies_are_rejected(self):
+        state = KVCacheConfig().__getstate__()
+        for policy in (-2, 2):
+            with self.subTest(policy=policy), self.assertRaisesRegex(
+                RuntimeError, "invalid shared hybrid cache policy"
+            ):
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__((*state[:-1], policy))
 
     def test_version_seven_preserves_events_and_enables_crc_by_default(self):
         source = KVCacheConfig()

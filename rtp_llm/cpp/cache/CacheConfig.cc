@@ -379,8 +379,7 @@ const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::str
             sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
         const auto first_layer_id =
             mtpGlobalLayerId(layer_num, static_cast<int>(module_index), sub_config->layer_num, 0);
-        if (first_layer_id != std::numeric_limits<uint32_t>::max()
-            && static_cast<uint64_t>(layer_id) >= first_layer_id
+        if (first_layer_id != std::numeric_limits<uint32_t>::max() && static_cast<uint64_t>(layer_id) >= first_layer_id
             && static_cast<uint64_t>(layer_id) - first_layer_id < sub_config->layer_num) {
             return sub_config->topology().groupForLayer(layer_id - static_cast<int>(first_layer_id), tag);
         }
@@ -478,10 +477,10 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
     auto groups = topology().groups();
     for (auto& group : groups) {
         const auto explicit_independent_blocks = group.policy.explicit_block_num;
-        uint32_t   rule_blocks                 = global_block_num;
-        if (explicit_independent_blocks > 0) {
-            rule_blocks = explicit_independent_blocks;
-        }
+        uint32_t   rule_blocks =
+            explicit_independent_blocks > 0 ?
+                  explicit_independent_blocks :
+                  projectCacheBlockCount(global_block_num, group.blockCountDivisor(seq_size_per_block));
         if (pp_overrides != nullptr) {
             const auto it = pp_overrides->find(group.tag);
             RTP_LLM_CHECK_WITH_INFO(
@@ -516,6 +515,8 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     os << indent1 << "# Block Configuration:\n";
     OUTPUT_FIELD(seq_size_per_block);
+    OUTPUT_FIELD(use_shared_block_pool);
+    OUTPUT_FIELD(shared_cache_bytes);
     os << "\n";
 
     os << indent1 << "# Block Sizing Information:\n";

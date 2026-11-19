@@ -41,14 +41,19 @@ setup_logging()
 class GracefulShutdownProxyServer(Server):
     """支持优雅关闭的代理服务器"""
 
+    proxy_server: Optional[VitProxyServer] = None
+
     def set_proxy_server(self, proxy_server: VitProxyServer):
         self.proxy_server = proxy_server
 
     @override
     async def shutdown(self, sockets: Optional[list[socket.socket]] = None) -> None:
-        if hasattr(self, "proxy_server") and self.proxy_server:
-            self.proxy_server.stop()
-        await super().shutdown(sockets)
+        if self.proxy_server is None:
+            await super().shutdown(sockets)
+            return
+        await asyncio.gather(
+            super().shutdown(sockets), asyncio.to_thread(self.proxy_server.stop)
+        )
 
 
 def vit_proxy_start_server(

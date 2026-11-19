@@ -121,6 +121,7 @@ void KVCacheConfig::insertMultiTaskPromptTokens(std::string task_id, std::vector
 std::string KVCacheConfig::to_string() const {
     std::ostringstream oss;
     oss << "reuse_cache: " << reuse_cache << "\n"
+        << "shared_hybrid_cache: " << shared_hybrid_cache << "\n"
         << "multi_task_prompt: " << multi_task_prompt << "\n"
         << "multi_task_prompt_str: " << multi_task_prompt_str << "\n"
         << "multi_task_prompt_tokens: " << (multi_task_prompt_tokens.empty() ? "empty" : "non-empty") << "\n"
@@ -403,6 +404,7 @@ std::string FIFOSchedulerConfig::to_string() const {
         << "decode_prefill_ratio: " << decode_prefill_ratio << "\n"
         << "cp_force_single_prefill: " << cp_force_single_prefill << "\n"
         << "max_inited_kv_cache_streams: " << max_inited_kv_cache_streams << "\n"
+        << "async_cache_prepare: " << async_cache_prepare << "\n"
         << "max_batch_tokens_without_cache: " << max_batch_tokens_without_cache << "\n"
         << "prefill_chunk_size: " << prefill_chunk_size;
     return oss.str();

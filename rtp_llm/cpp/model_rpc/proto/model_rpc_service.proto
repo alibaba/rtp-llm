@@ -443,6 +443,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
     INVALID_PARAMS = 26;
     EXECUTION_EXCEPTION = 27;
+    // Added on main after the feature branch froze its wire enum at 26.
+    LOAD_KV_CACHE_FAILED = 28;
     GENERATE_TIMEOUT = 603;
     GET_CONNECTION_FAILED = 8201;
     RPC_FINISH_FAILED = 8210;
@@ -493,6 +495,8 @@ message GenerateRequestPB {
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
     repeated StagePeerGroupPB stage_peer_groups = 12;
+    // Request-scoped expanded raw-token MTP indexer selection from Prefill.
+    TensorPB propose_mtp_indexer_topk = 14;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

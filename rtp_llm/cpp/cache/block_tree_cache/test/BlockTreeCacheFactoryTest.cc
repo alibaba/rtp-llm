@@ -19,6 +19,8 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/FullCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -27,6 +29,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -108,18 +111,18 @@ CacheConfig makeSwaConfig(int block_size = 4) {
     return config;
 }
 
-CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
+CacheConfig makeHybridConfig(bool disable_linear_reuse = false, int linear_dim = 1) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 4;
-    config.seq_size_per_block = 4;
+    config.dtype                   = DataType::TYPE_FP16;
+    config.layer_num               = 4;
+    config.seq_size_per_block      = 4;
     config.reuse_cache_tail_blocks = 2;
 
     auto linear_spec = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
                                                     /*local_num_k_heads=*/1,
                                                     /*local_num_v_heads=*/1,
-                                                    /*head_k_dim=*/1,
-                                                    /*head_v_dim=*/1,
+                                                    /*head_k_dim=*/linear_dim,
+                                                    /*head_v_dim=*/linear_dim,
                                                     /*conv_kernel_dim=*/2,
                                                     /*seq_size_per_block=*/4,
                                                     DataType::TYPE_FP16,
@@ -318,9 +321,9 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
 
 CacheConfig makeCompatibleLinearGroupsConfig(uint32_t second_active_tail_blocks) {
     CacheConfig config;
-    config.dtype              = DataType::TYPE_FP16;
-    config.layer_num          = 2;
-    config.seq_size_per_block = 4;
+    config.dtype                   = DataType::TYPE_FP16;
+    config.layer_num               = 2;
+    config.seq_size_per_block      = 4;
     config.reuse_cache_tail_blocks = 2;
 
     std::shared_ptr<LinearKVCacheSpec> first         = test::makeResolvedLinearSpec(DataType::TYPE_FP16,
@@ -690,16 +693,16 @@ TEST(BlockTreeCacheFactoryUtilityTest, TierBlockCountsUseWideIntermediateProduct
 }
 
 TEST_F(BlockTreeCacheFactoryTest, FactoryConsumesNegotiatedBlockCounts) {
-    const auto    config = makeSingleConfig();
+    const auto                               config = makeSingleConfig();
     block_transfer_engine_test::TempDirGuard disk_dir("negotiated_tier_counts");
-    KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache  = true;
-    kv_cache_config.memory_cache_size_mb = 1;
+    KVCacheConfig                            kv_cache_config;
+    kv_cache_config.enable_memory_cache    = true;
+    kv_cache_config.memory_cache_size_mb   = 1;
     kv_cache_config.enable_disk_cache      = true;
     kv_cache_config.disk_cache_size_mb     = 1;
     kv_cache_config.disk_cache_paths       = disk_dir.path;
     kv_cache_config.disk_cache_buffered_io = true;
-    auto layout                          = planBlockTreeCacheLayout(config, kv_cache_config);
+    auto layout                            = planBlockTreeCacheLayout(config, kv_cache_config);
     ASSERT_NE(layout, nullptr);
     ASSERT_EQ(layout->sizing.group_sets.size(), 1u);
     EXPECT_EQ(layout->sizing.group_sets[0].first_tag, config.groups().front().tag);
@@ -1088,6 +1091,256 @@ TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguou
         EXPECT_EQ(via_group.kv_addr, via_backing.kv_addr);
         pool->decRef(*block);
     }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SharedHybridPoolsUseOneBackingWithHeterogeneousSlotPitches) {
+    auto config = makeHybridConfig(false, 8);
+    DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, 16384 + 13, RuntimeConfig{});
+    EXPECT_EQ(config.shared_cache_bytes, 16384u);
+    auto       allocator = initAllocator<CoordinatorCacheManager>(config);
+    const auto groups    = allocator->cacheGroups();
+    ASSERT_EQ(groups.size(), 2u);
+    const auto& first  = groups[0]->blockPool();
+    const auto& second = groups[1]->blockPool();
+    ASSERT_NE(first->sharedBacking(), nullptr);
+    EXPECT_EQ(first->sharedBacking(), second->sharedBacking());
+    EXPECT_EQ(first->getBaseAddress(), second->getBaseAddress());
+    const auto arena = first->sharedBacking()->arena();
+    EXPECT_NE(arena->stride(0), arena->stride(1));
+    EXPECT_EQ(allocator->totalBlocksNum(), arena->usableBytes() / std::max(arena->stride(0), arena->stride(1)));
+    EXPECT_LT(allocator->equivalentSharedBlocks({0, 3}), 3);
+    std::vector<BlockIndicesType> allocated;
+    for (size_t id = 0; id < groups.size(); ++id) {
+        auto blocks = groups[id]->blockPool()->malloc(2);
+        ASSERT_TRUE(blocks.has_value());
+        groups[id]->blockPool()->incRef(*blocks);
+        allocated.push_back(*blocks);
+        EXPECT_EQ(config.groups()[id].block_num, arena->slotCount(id));
+        for (int layer : config.layerIdsForGroup(groups[id]->tag())) {
+            for (auto block : *blocks) {
+                writeDevicePattern(groups[id]->convertIndexToAddr(layer, block).kv_addr,
+                                   config.physicalGroupForLayer(layer, groups[id]->tag()).kvBlockStrideBytes(),
+                                   static_cast<uint8_t>(0x20 + layer));
+            }
+        }
+    }
+    for (size_t id = 0; id < groups.size(); ++id) {
+        for (int layer : config.layerIdsForGroup(groups[id]->tag())) {
+            for (auto block : allocated[id]) {
+                expectDevicePattern(groups[id]->convertIndexToAddr(layer, block).kv_addr,
+                                    config.physicalGroupForLayer(layer, groups[id]->tag()).kvBlockStrideBytes(),
+                                    static_cast<uint8_t>(0x20 + layer));
+            }
+        }
+        groups[id]->blockPool()->decRef(allocated[id]);
+    }
+    EXPECT_EQ(arena->freeBytes(), arena->usableBytes());
+    size_t arena_reports = 0;
+    for (const auto& snapshot : allocator->poolMetricsSnapshots()) {
+        EXPECT_TRUE(snapshot.shared_namespace);
+        if (snapshot.shared_arena_metrics) {
+            ++arena_reports;
+            EXPECT_EQ(snapshot.shared_arena_metrics->total_bytes, arena->bytes());
+            EXPECT_EQ(snapshot.shared_arena_metrics->free_bytes, arena->usableBytes());
+            EXPECT_EQ(snapshot.shared_arena_metrics->available_bytes, arena->usableBytes());
+        }
+    }
+    EXPECT_EQ(arena_reports, 1u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SharedHybridPoolsPreserveModelManagedCpSlotMapping) {
+    constexpr int cp_size         = 8;
+    constexpr int block_tokens    = 4;
+    constexpr int sequence_length = 3 * cp_size * block_tokens + 1;
+    for (int rank = 0; rank < cp_size; ++rank) {
+        SCOPED_TRACE(rank);
+        auto config = makeHybridConfig(false, 8);
+        DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, 65536, RuntimeConfig{});
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(rank, cp_size, block_tokens));
+        const auto& pools = allocator->groupBlockPools();
+        ASSERT_EQ(pools.size(), 2u);
+        ASSERT_NE(pools[0]->sharedBacking(), nullptr);
+        ASSERT_EQ(pools[0]->sharedBacking(), pools[1]->sharedBacking());
+        const auto arena      = pools[0]->sharedBacking()->arena();
+        const auto free_bytes = arena->freeBytes();
+        MallocInfo info;
+        info.reuse_cache                  = false;
+        info.enable_cache_lookup          = false;
+        info.enable_remove_skipped_blocks = false;
+        info.batch_kv_cache_resource      = std::make_shared<BatchKVCacheResource>();
+        info.batch_kv_cache_resource->resetBatchSize(1);
+        info.batch_kv_cache_resource->initGroups(config.topologyPtr());
+        info.complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, sequence_length + 64, block_tokens);
+        auto input              = std::make_shared<GenerateInput>();
+        input->input_ids        = torch::arange(1, sequence_length + 1, torch::kInt32);
+        input->generate_config  = std::make_shared<GenerateConfig>();
+        info.complete_token_ids->init(input);
+        ASSERT_TRUE(allocator->malloc(info).success);
+        // Four local FULL slots cover the partial fourth 8-rank stripe.
+        EXPECT_EQ(info.batch_kv_cache_resource->blocksNum(0, "group1"), 4u);
+        EXPECT_LT(arena->freeBytes(), free_bytes);
+        for (const auto& group : config.groups()) {
+            for (const int layer : config.layerIdsForGroup(group.tag)) {
+                for (const auto block : info.batch_kv_cache_resource->blocks(0, group.tag)) {
+                    if (block == NULL_BLOCK_IDX) {
+                        EXPECT_EQ(group.policy.group_type, CacheGroupType::LINEAR);
+                        continue;  // Unmaterialized recurrent checkpoints have no storage.
+                    }
+                    ASSERT_GT(block, 0);
+                    writeDevicePattern(allocator->convertIndexToAddr(layer, group.tag, block).kv_addr,
+                                       group.kvBlockStrideBytes(),
+                                       static_cast<uint8_t>(0x20 + layer));
+                }
+            }
+        }
+        for (const auto& group : config.groups()) {
+            for (const int layer : config.layerIdsForGroup(group.tag)) {
+                for (const auto block : info.batch_kv_cache_resource->blocks(0, group.tag)) {
+                    if (block == NULL_BLOCK_IDX) {
+                        EXPECT_EQ(group.policy.group_type, CacheGroupType::LINEAR);
+                        continue;
+                    }
+                    expectDevicePattern(allocator->convertIndexToAddr(layer, group.tag, block).kv_addr,
+                                        group.kvBlockStrideBytes(),
+                                        static_cast<uint8_t>(0x20 + layer));
+                }
+            }
+        }
+        allocator->free(FreeInfo{info.batch_kv_cache_resource, info.complete_token_ids});
+        EXPECT_EQ(arena->freeBytes(), free_bytes);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SharedHybridHostPoolsPreservePackedTransferAcrossGroupSets) {
+    auto config = makeHybridConfig(false, 8);
+    DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, 16384, RuntimeConfig{});
+    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
+    KVCacheConfig options;
+    options.enable_memory_cache  = true;
+    options.memory_cache_size_mb = 1;
+    auto cache                   = createBlockTreeCache(config, options, allocator);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 2u);
+    const auto host_backing = cache->groupSets()[0]->hostPool()->sharedBacking();
+    ASSERT_NE(host_backing, nullptr);
+    EXPECT_EQ(host_backing, cache->groupSets()[1]->hostPool()->sharedBacking());
+    EXPECT_EQ(host_backing->arena()->bytes(), 1024u * 1024u);
+    const auto cache_groups = allocator->cacheGroups();
+    for (const auto& group_set : cache->groupSets()) {
+        auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group_set, 1);
+        ASSERT_EQ(device_blocks.size(), 1u);
+        auto host_block = group_set->hostPool()->malloc();
+        ASSERT_TRUE(host_block.has_value());
+        group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::STORE);
+        const auto& tag   = group_set->groupTags().front();
+        const auto& group = *std::find_if(cache_groups.begin(),
+                                          cache_groups.end(),
+                                          [&tag](const SingleTypeCacheManagerPtr& g) { return g->tag() == tag; });
+        const auto  bytes = config.group(tag).kvBlockStrideBytes();
+        for (int layer : config.layerIdsForGroup(tag)) {
+            writeDevicePattern(group->convertIndexToAddr(layer, device_blocks[0][0]).kv_addr, bytes, 0x61 + layer);
+        }
+        ASSERT_TRUE(cache
+                        ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                            {TransferDescriptor::deviceToHost(group_set->groupSetId(), device_blocks[0], *host_block)}))
+                        .ok());
+        for (int layer : config.layerIdsForGroup(tag)) {
+            writeDevicePattern(group->convertIndexToAddr(layer, device_blocks[0][0]).kv_addr, bytes, 0);
+        }
+        ASSERT_TRUE(cache
+                        ->executeTransfer(block_transfer_engine_test::makeTransferTask(
+                            {TransferDescriptor::hostToDevice(group_set->groupSetId(), *host_block, device_blocks[0])}))
+                        .ok());
+        for (int layer : config.layerIdsForGroup(tag)) {
+            expectDevicePattern(group->convertIndexToAddr(layer, device_blocks[0][0]).kv_addr, bytes, 0x61 + layer);
+        }
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, device_blocks);
+        group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::STORE);
+    }
+    EXPECT_EQ(host_backing->arena()->freeBytes(), host_backing->arena()->usableBytes());
+    size_t device_arena_reports = 0;
+    size_t host_arena_reports   = 0;
+    for (const auto& snapshot :
+         mergeCachePoolMetricsSnapshots(allocator->poolMetricsSnapshots(), cache->poolMetricsSnapshots())) {
+        EXPECT_TRUE(snapshot.shared_namespace);
+        if (snapshot.shared_arena_metrics) {
+            if (snapshot.tier == "DEVICE") {
+                ++device_arena_reports;
+                EXPECT_EQ(snapshot.shared_arena_metrics->total_bytes, config.shared_cache_bytes);
+            } else if (snapshot.tier == "HOST") {
+                ++host_arena_reports;
+                EXPECT_EQ(snapshot.shared_arena_metrics->total_bytes, 1024u * 1024u);
+            } else {
+                ADD_FAILURE() << "unexpected shared arena tier: " << snapshot.tier;
+            }
+        }
+    }
+    EXPECT_EQ(device_arena_reports, 1u);
+    EXPECT_EQ(host_arena_reports, 1u);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SharedPressureReclaimsOtherGroupsWithoutDroppingRequestHolds) {
+    auto config = makeHybridConfig(false, 8);
+    DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, 8192, RuntimeConfig{});
+    auto allocator = initAllocator<CoordinatorCacheManager>(config);
+    auto cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    ASSERT_NE(cache, nullptr);
+    allocator->attachBlockTreeCache(cache);
+    const auto blocks = insertOneKeyThroughAllocator(config, allocator, 9701);
+    const auto groups = allocator->cacheGroups();
+    groups[0]->blockPool()->decRef(blocks[0]);
+    const auto full_pool = groups[1]->blockPool();
+    auto       occupied  = full_pool->malloc(full_pool->freeBlocksNum());
+    ASSERT_TRUE(occupied.has_value());
+    full_pool->incRef(*occupied);
+    EXPECT_EQ(full_pool->freeBlocksNum(), 0u);
+    EXPECT_GT(cache->evictForGroup(groups[1]->tag(), 1), 0);
+    EXPECT_GT(full_pool->freeBlocksNum(), 0u);
+    EXPECT_TRUE(full_pool->isAllocated(blocks[1]));
+    EXPECT_EQ(full_pool->refCount(blocks[1]), 1u);
+    EXPECT_FALSE(groups[0]->blockPool()->isAllocated(blocks[0]));
+    full_pool->decRef(*occupied);
+    full_pool->decRef(blocks[1]);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SharedAdmissionRejectsJointDemandAndRollsBackAllNamespaces) {
+    auto config = makeHybridConfig();
+    DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, 4096, RuntimeConfig{});
+    auto       allocator = initAllocator<CoordinatorCacheManager>(config);
+    const auto arena     = allocator->groupBlockPools()[0]->sharedBacking()->arena();
+    const int  length    = static_cast<int>(allocator->cacheGroups()[1]->blockPool()->totalBlocksNum()) * 4;
+    auto       make_info = [&](int sequence_length) {
+        MallocInfo info;
+        info.reuse_cache                  = false;
+        info.enable_cache_lookup          = false;
+        info.enable_remove_skipped_blocks = false;
+        info.batch_kv_cache_resource      = std::make_shared<BatchKVCacheResource>();
+        info.batch_kv_cache_resource->resetBatchSize(1);
+        info.batch_kv_cache_resource->initGroups(config.topologyPtr());
+        info.complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, sequence_length + 64, 4);
+        auto input              = std::make_shared<GenerateInput>();
+        input->input_ids        = torch::arange(1, sequence_length + 1, torch::kInt32);
+        input->generate_config  = std::make_shared<GenerateConfig>();
+        info.complete_token_ids->init(input);
+        return info;
+    };
+    auto too_large = make_info(length);
+    for (const auto& group : allocator->cacheGroups()) {
+        const auto need = group->getNeedBlocks(length, length, 0, 0, false);
+        ASSERT_LE(static_cast<size_t>(need.common_blocks + need.extra_blocks), group->blockPool()->totalBlocksNum());
+    }
+    const auto before = arena->freeBytes();
+    EXPECT_EQ(allocator->evaluateInitCapacity(too_large, 0, CoordinatorCacheManager::InitCapacityMode::TOTAL_ONLY),
+              MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+    const auto rejected = allocator->malloc(too_large);
+    EXPECT_FALSE(rejected.success);
+    EXPECT_EQ(rejected.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(arena->freeBytes(), before);
+    auto small = make_info(8);
+    ASSERT_TRUE(allocator->malloc(small).success);
+    allocator->free(FreeInfo{small.batch_kv_cache_resource, small.complete_token_ids});
+    EXPECT_EQ(arena->freeBytes(), before);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguousGlobalLayerProjectionRoundTrip) {

@@ -39,8 +39,7 @@ protected:
         ASSERT_TRUE(rtp_llm::isRuntimeInitialized());
     }
 
-    void TearDown() override {
-    }
+    void TearDown() override {}
 
     struct TestKVCacheSpec: public KVCacheSpec {
         TestKVCacheSpec(): KVCacheSpec("default", 1, 1, 1) {}
@@ -210,7 +209,6 @@ protected:
                                          BufferInitMode       init_mode     = BufferInitMode::Zeros) {
         return createTestContext(createTestConfig(k_block_bytes, v_block_bytes), device, init_mode);
     }
-
 };
 
 TEST_F(MemoryLayoutStrategyTest, Initialization) {
@@ -334,6 +332,59 @@ TEST_F(MemoryLayoutStrategyTest, SparseMlaAndIndexerKeepByteScaleLayout) {
         EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, 128, 8}));
         EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
     }
+}
+
+TEST_F(MemoryLayoutStrategyTest, MlaModelKeepsOpaqueStateAsPhysicalPages) {
+    auto spec  = createTestKvCacheSpec(1, DataType::TYPE_FP32, 1, 1024, 1024, 0);
+    spec->type = KVCacheSpecType::OpaqueState;
+    CacheConfig cache_config;
+    cache_config.layer_num          = 1;
+    cache_config.use_mla            = true;
+    cache_config.dtype              = DataType::TYPE_FP32;
+    cache_config.seq_size_per_block = 1024;
+    initializeSingleGroup(cache_config, spec, 4);
+
+    const auto    pool = DeviceBlockPoolConfigHelper::createConfigForGroup(cache_config, cache_config.group("default"));
+    const auto&   layout = pool.memory_layouts.front();
+    auto          kv     = torch::zeros({static_cast<int64_t>(layout.kv_block_pool_size_bytes)}, torch::kUInt8);
+    torch::Tensor scales;
+    MemoryLayoutStrategy strategy;
+    ASSERT_TRUE(strategy.init(layout, kv, scales, kv.data_ptr()));
+    EXPECT_EQ(strategy.getLayerCacheTensors().front().sizes().vec(), (std::vector<int64_t>{layout.block_num, 256}));
+}
+
+TEST_F(MemoryLayoutStrategyTest, LinearCacheTransferPartitionsEachHistoryChannelRange) {
+    LinearAttentionConfig linear;
+    linear.linear_num_key_heads   = 8;
+    linear.linear_num_value_heads = 16;
+    linear.linear_key_head_dim    = 16;
+    linear.linear_value_head_dim  = 16;
+    linear.linear_conv_kernel_dim = 4;
+    linear.ssm_state_dtype        = DataType::TYPE_FP32;
+    linear.conv_state_dtype       = DataType::TYPE_BF16;
+    KVCacheSpecDesc desc;
+    desc.tag        = "linear";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    ParallelismConfig parallelism;
+    SpecBuildContext  ctx;
+    ctx.dtype                   = DataType::TYPE_BF16;
+    ctx.linear_attention_config = &linear;
+    ctx.parallelism_config      = &parallelism;
+    const auto decode           = std::dynamic_pointer_cast<LinearKVCacheSpec>(LinearKVCacheSpec::build(desc, ctx));
+    parallelism.tp_size         = 8;
+    const auto prefill          = std::dynamic_pointer_cast<LinearKVCacheSpec>(LinearKVCacheSpec::build(desc, ctx));
+    const auto source           = prefill->transferSegments(1, 0);
+    ASSERT_EQ(source.size(), 10u);
+    for (size_t rank = 0; rank < 8; ++rank) {
+        const auto destination = decode->transferSegments(8, rank);
+        ASSERT_EQ(destination.size(), source.size());
+        for (size_t segment = 0; segment < source.size(); ++segment) {
+            EXPECT_EQ(destination[segment].bytes, source[segment].bytes);
+            EXPECT_EQ(destination[segment].offset, 8 * source[segment].offset + rank * source[segment].bytes);
+        }
+        EXPECT_LE(destination.back().offset + destination.back().bytes, decode->block_size_bytes());
+    }
+    EXPECT_EQ(decode->block_size_bytes(), 8 * prefill->block_size_bytes());
 }
 
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
@@ -792,6 +843,98 @@ TEST_F(MemoryLayoutStrategyTest, LargeConfiguration) {
 
     auto layer_tensors = strategy->getLayerCacheTensors();
     EXPECT_EQ(layer_tensors.size(), ctx.config.layer_num);
+}
+
+TEST_F(MemoryLayoutStrategyTest, SharedSlotViewsPreserveOffsetsPaddingAndStorageOwner) {
+    for (const auto device : {torch::Device(torch::kCPU), torch::Device(torch::kCUDA, 0)}) {
+        MemoryLayoutConfig config;
+        config.layer_num                = 2;
+        config.block_num                = 5;
+        config.dtype                    = TYPE_FP32;
+        config.kv_block_stride_bytes    = 64;
+        config.kv_scale_stride_bytes    = 16;
+        config.kv_block_pool_size_bytes = 2 * 5 * 64;
+        config.kv_scale_pool_size_bytes = 2 * 5 * 16;
+        config.kv_scale_offset_bytes    = 128;
+        config.block_slot_stride_bytes  = 512;
+        config.enable_kv_scale          = true;
+        auto          backing  = torch::full({4096}, 117, torch::TensorOptions().dtype(torch::kUInt8).device(device));
+        auto*         base     = static_cast<char*>(backing.data_ptr());
+        auto          strategy = std::make_unique<MemoryLayoutStrategy>();
+        torch::Tensor unused_scale;
+        ASSERT_TRUE(strategy->init(config, backing, unused_scale, base));
+        auto kv     = strategy->getLayerCacheTensors();
+        auto scales = strategy->getLayerScaleCacheTensors();
+        ASSERT_EQ(kv.size(), 2u);
+        ASSERT_EQ(scales.size(), 2u);
+        EXPECT_EQ(kv[0].stride(0), 128);
+        EXPECT_EQ(scales[0].stride(0), 128);
+        EXPECT_EQ(kv[0].data_ptr(), base);
+        EXPECT_EQ(kv[1].data_ptr(), base + 64);
+        EXPECT_EQ(scales[0].data_ptr(), base + 128);
+        EXPECT_EQ(scales[1].data_ptr(), base + 144);
+        EXPECT_TRUE(backing.eq(117).all().item<bool>());  // init must not clear overlapping views.
+        kv[0][1].fill_(2.0);
+        kv[1][1].fill_(3.0);
+        scales[0][1].fill_(5.0);
+        scales[1][1].fill_(7.0);
+        EXPECT_TRUE(kv[0][1].eq(2).all().item<bool>());
+        EXPECT_TRUE(kv[1][1].eq(3).all().item<bool>());
+        EXPECT_TRUE(scales[0][1].eq(5).all().item<bool>());
+        EXPECT_TRUE(scales[1][1].eq(7).all().item<bool>());
+        EXPECT_TRUE(backing.narrow(0, 512 + 160, 352).eq(117).all().item<bool>());
+        const auto buffers = strategy->convertIndexToBuffer(1, 1);
+        ASSERT_EQ(buffers.size(), 2u);
+        EXPECT_EQ(buffers[0].addr, base + 512 + 64);
+        EXPECT_EQ(buffers[0].size_bytes, 64u);
+        EXPECT_EQ(buffers[1].addr, base + 512 + 144);
+        EXPECT_EQ(buffers[1].size_bytes, 16u);
+        strategy.reset();
+        backing = torch::Tensor{};
+        // No remaining owning pool tensor: model views must still own storage.
+        EXPECT_TRUE(kv[0][1].eq(2).all().item<bool>());
+        scales[1][1].fill_(11.0);
+        EXPECT_TRUE(scales[1][1].eq(11).all().item<bool>());
+    }
+}
+
+TEST_F(MemoryLayoutStrategyTest, SharedMlaViewsUsePhysicalPitchAndRejectPackedKernelPages) {
+    MemoryLayoutConfig config;
+    config.layer_num                = 1;
+    config.block_num                = 5;
+    config.dtype                    = TYPE_FP16;
+    config.kv_block_stride_bytes    = 64;
+    config.kv_scale_stride_bytes    = 8;
+    config.kv_block_pool_size_bytes = 5 * 64;
+    config.kv_scale_pool_size_bytes = 5 * 8;
+    config.kv_cache_offset_bytes    = 256;
+    config.kv_scale_offset_bytes    = 320;
+    config.block_slot_stride_bytes  = 512;
+    config.seq_size_per_block       = 2;
+    config.enable_kv_scale          = true;
+    config.use_mla                  = true;
+    config.is_mla                   = true;
+    auto backing = torch::zeros({4096}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    MemoryLayoutStrategy strategy;
+    torch::Tensor        unused_scale;
+    ASSERT_TRUE(strategy.init(config, backing, unused_scale, backing.data_ptr()));
+    const auto kv    = strategy.getLayerCacheTensors().front();
+    const auto scale = strategy.getLayerScaleCacheTensors().front();
+    EXPECT_EQ(kv.sizes(), torch::IntArrayRef({5, 2, 16}));
+    EXPECT_EQ(kv.strides(), torch::IntArrayRef({256, 16, 1}));
+    EXPECT_EQ(scale.sizes(), torch::IntArrayRef({5, 2, 4}));
+    EXPECT_EQ(scale.strides(), torch::IntArrayRef({512, 4, 1}));
+    kv[2].fill_(13);
+    scale[2].fill_(17);
+    const auto addr = strategy.convertIndexToAddr(0, 2);
+    auto*      base = static_cast<char*>(backing.data_ptr());
+    EXPECT_EQ(addr.kv_addr, base + 2 * 512 + 256);
+    EXPECT_EQ(addr.kv_scale_addr, base + 2 * 512 + 320);
+    EXPECT_TRUE(kv[2].eq(13).all().item<bool>());
+    EXPECT_TRUE(scale[2].eq(17).all().item<bool>());
+    config.kernel_blocks_per_kv_block = 2;
+    MemoryLayoutStrategy unsupported;
+    EXPECT_ANY_THROW(unsupported.init(config, backing, unused_scale, backing.data_ptr()));
 }
 
 }  // namespace test

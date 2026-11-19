@@ -122,6 +122,14 @@ void            enter_graph_capture(GraphNcclCaptureContext* ctx);
 void            exit_graph_capture(GraphNcclCaptureContext* ctx);
 void            finish_capture_session();
 void            graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind kind, void* stream);
+void            graphMemcpy2DAsync(void*           dst,
+                                   size_t          dst_pitch,
+                                   const void*     src,
+                                   size_t          src_pitch,
+                                   size_t          width,
+                                   size_t          height,
+                                   GraphMemcpyKind kind,
+                                   void*           stream);
 void            graphDeviceSynchronize();
 void            graphMemGetInfo(size_t* free_bytes, size_t* total_bytes);
 size_t          graphReservedBytes();

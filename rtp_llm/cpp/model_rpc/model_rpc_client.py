@@ -35,6 +35,7 @@ from rtp_llm.server.request_headers import (
     dashscope_greennet_metadata,
     extract_correlation_request_id,
     extract_trace_id,
+    vit_source_request_metadata,
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -1268,9 +1269,12 @@ class ModelRpcClient(object):
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
-        self._options = []
-        for key, value in client_config.items():
-            self._options.append((key, value))
+        # A backend can return on the same address after several minutes of
+        # downtime. Bound the retained channel's reconnect backoff so it can
+        # discover the listener promptly, even for calls without a deadline.
+        self._options = list(
+            {"grpc.max_reconnect_backoff_ms": 2000, **client_config}.items()
+        )
         logging.info(f"client options: {self._options}")
 
         # Initialize the channel pool
@@ -1448,6 +1452,10 @@ class ModelRpcClient(object):
             if effective_ms > 0:
                 grpc_kwargs["timeout"] = effective_ms / 1000.0
             identity_metadata = dashscope_greennet_metadata(input_py.headers)
+            if input_pb.multimodal_inputs or input_pb.HasField("v41_inputs"):
+                identity_metadata += vit_source_request_metadata(
+                    input_pb.request_info.request_id
+                )
             trace_metadata = tuple(trace_metadata or ()) + tuple(identity_metadata)
             if trace_metadata:
                 # One injection point covers both channels: W3C traceparent
@@ -1899,7 +1907,8 @@ class ModelRpcClient(object):
                 await stub.WaitGreenNetVerdict(
                     mm_inputs_pb,
                     timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
-                    metadata=dashscope_greennet_metadata(input_py.headers),
+                    metadata=dashscope_greennet_metadata(input_py.headers)
+                    + vit_source_request_metadata(input_pb.request_info.request_id),
                 )
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()

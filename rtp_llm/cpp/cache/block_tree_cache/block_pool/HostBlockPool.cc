@@ -3,7 +3,9 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <sstream>
+#include <utility>
 
 #include <sys/mman.h>
 #include <unistd.h>
@@ -14,6 +16,11 @@
 namespace rtp_llm {
 
 namespace {
+
+size_t checkedSharedHostBytes(const std::shared_ptr<SharedBlockArena>& arena) {
+    RTP_LLM_CHECK_WITH_INFO(arena != nullptr, "shared host backing requires a byte allocator");
+    return arena->bytes();
+}
 
 std::shared_ptr<const HostBlockPoolConfig>
 validateHostBlockPoolConfig(const std::shared_ptr<const HostBlockPoolConfig>& config) {
@@ -71,6 +78,13 @@ void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
 
 }  // namespace
 
+SharedHostBlockBacking::SharedHostBlockBacking(std::shared_ptr<SharedBlockArena> arena,
+                                               size_t                            alignment,
+                                               const std::string&                name):
+    arena_(std::move(arena)), backing_(checkedSharedHostBytes(arena_), alignment, name) {
+    markHostBlockPoolDontDump(name.c_str(), backing_.data(), arena_->bytes());
+}
+
 HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config):
     IBlockPool(validateHostBlockPoolConfig(config)) {
     RTP_LLM_CHECK(config != nullptr);
@@ -100,9 +114,32 @@ bool HostBlockPool::init() {
                             cfg.alignment);
 
     // block 0's slot is allocated as backing but is never handed out by malloc().
-    const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
-    backing_.emplace(total_bytes, cfg.alignment, cfg.pool_name);
-    markHostBlockPoolDontDump(cfg.pool_name.c_str(), backing_->data(), total_bytes);
+    size_t total_bytes;
+    void*  base;
+    if (cfg.shared_arena) {
+        RTP_LLM_CHECK_WITH_INFO(!initialized(), "shared host pool cannot be initialized twice");
+        RTP_LLM_CHECK_WITH_INFO(cfg.stride_bytes == cfg.shared_arena->stride(cfg.shared_arena_group),
+                                "shared host pool stride differs from its allocation namespace");
+        if (cfg.shared_backing) {
+            RTP_LLM_CHECK_WITH_INFO(cfg.shared_backing->arena() == cfg.shared_arena,
+                                    "host pools cannot share storage with independent allocators");
+            shared_backing_ = cfg.shared_backing;
+        } else {
+            shared_backing_ = std::make_shared<SharedHostBlockBacking>(cfg.shared_arena, cfg.alignment, cfg.pool_name);
+        }
+        total_bytes = cfg.shared_arena->bytes();
+        base        = shared_backing_->data();
+        RTP_LLM_CHECK_WITH_INFO(reinterpret_cast<uintptr_t>(base) % cfg.alignment == 0,
+                                "shared host backing does not meet pool alignment");
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(!cfg.shared_backing, "shared host backing requires a shared allocator");
+        RTP_LLM_CHECK_WITH_INFO(cfg.physical_block_count <= std::numeric_limits<size_t>::max() / cfg.stride_bytes,
+                                "host pool byte budget overflows");
+        total_bytes = cfg.physical_block_count * cfg.stride_bytes;
+        backing_.emplace(total_bytes, cfg.alignment, cfg.pool_name);
+        base = backing_->data();
+        markHostBlockPoolDontDump(cfg.pool_name.c_str(), base, total_bytes);
+    }
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
                      "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f ptr=%p",
@@ -112,7 +149,7 @@ bool HostBlockPool::init() {
                      cfg.physical_block_count,
                      total_bytes,
                      static_cast<double>(total_bytes) / kBytesPerMB,
-                     backing_->data());
+                     base);
 
     markInitialized();
     return true;
@@ -122,7 +159,8 @@ HostBlockBuffer HostBlockPool::blockBuffer(BlockIdxType block) const {
     RTP_LLM_CHECK(initialized());
     RTP_LLM_CHECK(validBlock(block));
     const auto& cfg  = config();
-    void*       addr = backing_->data() + static_cast<size_t>(block) * cfg.stride_bytes;
+    auto*       base = shared_backing_ ? shared_backing_->data() : backing_->data();
+    void*       addr = base + static_cast<size_t>(block) * cfg.stride_bytes;
     return HostBlockBuffer{block, addr, cfg.payload_bytes, cfg.stride_bytes};
 }
 

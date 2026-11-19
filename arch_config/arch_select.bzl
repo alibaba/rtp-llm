@@ -1,3 +1,4 @@
+load("@rtp_blackwell_config//:pins.bzl", "DEEP_GEMM_WHEEL", "FLASH_MLA_REQUIREMENT", "LINEAR_ATTENTION_REQUIREMENTS")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
 
 # to wrapper target relate with different system config
@@ -7,6 +8,7 @@ load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requi
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13 = "requirement")
+load("@pip_glm53_deepgemm//:requirements.bzl", requirement_glm53 = "requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("@pip_ppu_torch//:requirements.bzl", requirement_ppu = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
@@ -96,19 +98,22 @@ def requirement(names):
                 visibility = ["//visibility:public"],
             )
             continue
+        platform_deps = {
+            "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
+            "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+            "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
+            "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
+            "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
+            "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
+            "@rtp_llm//:using_arm": [requirement_arm(name)],
+            "@rtp_llm//:using_ppu": ppu_deps,
+            "//conditions:default": [requirement_cpu(name)],
+        }
+        if name in ["deep-gemm", "deep_gemm"]:
+            platform_deps["@rtp_llm//:using_glm53_cuda13_x86"] = [requirement_glm53("deep-gemm")]
         native.py_library(
             name = name,
-            deps = select({
-                "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
-                "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
-                "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
-                "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
-                "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
-                "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
-                "@rtp_llm//:using_arm": [requirement_arm(name)],
-                "@rtp_llm//:using_ppu": ppu_deps,
-                "//conditions:default": [requirement_cpu(name)],
-            }),
+            deps = select(platform_deps),
             visibility = ["//visibility:public"],
         )
 
@@ -128,6 +133,8 @@ def subscribe_deps():
             "//conditions:default": "@rtp_llm//rtp_llm/cpp/disaggregate/load_balancer/subscribe:subscribe_service_impl",
         }),
     )
+
+_CUDA13_X86_FLASH_MLA = "flash-mla==1.0.0+49e2000.cu132"
 
 def whl_deps():
     return select({
@@ -156,8 +163,6 @@ def whl_deps():
             "torch==2.11.0+cu130",
             "torchvision==0.26.0+cu130",
             # GLM5 kernels shared by the CUDA13 inference paths.
-            "deep-gemm==2.8.0+6d6aaad.cu132",
-            "flash-mla==1.0.0+49e2000.cu132",
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
@@ -267,6 +272,13 @@ def whl_deps():
             "fastsafetensors==0.3.4.dev20260908+ali.fuseshm.gfb2c381b.aone70048596",
         ],
         "//conditions:default": ["torch==2.1.2"],
+    }) + select({
+        "@rtp_llm//:using_glm53_cuda13_x86": [
+            "deep-gemm @ {}#sha256={}".format(DEEP_GEMM_WHEEL.url, DEEP_GEMM_WHEEL.sha256),
+            FLASH_MLA_REQUIREMENT or _CUDA13_X86_FLASH_MLA,
+        ] + LINEAR_ATTENTION_REQUIREMENTS,
+        "@rtp_llm//:using_cuda13_x86": ["deep-gemm==2.8.0+6d6aaad.cu132", _CUDA13_X86_FLASH_MLA],
+        "//conditions:default": [],
     })
 
 def ml_pin_reqs():

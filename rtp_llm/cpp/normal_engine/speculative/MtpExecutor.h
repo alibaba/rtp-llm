@@ -211,9 +211,10 @@ protected:
                                                    size_t               stream_count,
                                                    std::vector<int32_t> row_priorities);
 
-    void prepareStreams(const std::list<GenerateStreamPtr>& streams,
-                        std::list<GenerateStreamPtr>&       prefill_streams,
-                        std::list<GenerateStreamPtr>&       decode_streams);
+    void        prepareStreams(const std::list<GenerateStreamPtr>& streams,
+                               std::list<GenerateStreamPtr>&       prefill_streams,
+                               std::list<GenerateStreamPtr>&       decode_streams);
+    static void publishMtpIndexerSeeds(const StreamGroups& stream_groups, const torch::Tensor& seeds);
 
     // Env-gated stream-async switch. Default off unless
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
@@ -296,7 +297,11 @@ private:
     size_t   propose_step_;
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
-    bool is_dspark_ = false;
+    bool    is_dspark_                           = false;
+    bool    mtp_indexer_share_enabled_           = false;
+    bool    mtp_indexer_prefill_seed_enabled_    = false;
+    bool    mtp_indexer_graph_choice_world_sync_ = false;
+    int64_t mtp_indexer_topk_                    = 0;
     // Dedicated PREFILL workers only seed DSpARK's draft feature KV and must
     // not construct proposal wrappers or require proposal-only Markov weights.
     bool          dspark_prefill_commit_only_ = false;
@@ -308,8 +313,6 @@ private:
     // parameters to the same two slots.
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       seed_decode_draft_model_;
-    bool                                             mtp_indexer_share_enabled_ = false;
-    int64_t                                          mtp_indexer_topk_          = 0;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;

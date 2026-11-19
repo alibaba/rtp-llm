@@ -648,6 +648,9 @@ void RtpLLMCacheOperationMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_total_bytes_metric, "rtp_llm_kv_cache_shared_arena_total_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_free_bytes_metric, "rtp_llm_kv_cache_shared_arena_free_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_available_bytes_metric, "rtp_llm_kv_cache_shared_arena_available_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(block_size_bytes_metric, "rtp_llm_kv_cache_block_size_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(free_blocks_metric, "rtp_llm_kv_cache_free_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_blocks_metric, "rtp_llm_kv_cache_used_blocks");
@@ -673,6 +676,15 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector) {
+    if (collector->shared_arena_total_bytes) {
+        RTP_REPORT_MUTABLE_METRIC(shared_arena_total_bytes_metric, *collector->shared_arena_total_bytes);
+    }
+    if (collector->shared_arena_free_bytes) {
+        RTP_REPORT_MUTABLE_METRIC(shared_arena_free_bytes_metric, *collector->shared_arena_free_bytes);
+    }
+    if (collector->shared_arena_available_bytes) {
+        RTP_REPORT_MUTABLE_METRIC(shared_arena_available_bytes_metric, *collector->shared_arena_available_bytes);
+    }
     RTP_REPORT_MUTABLE_METRIC(block_size_bytes_metric, collector->block_size_bytes);
     RTP_REPORT_MUTABLE_METRIC(free_blocks_metric, collector->free_blocks);
     RTP_REPORT_MUTABLE_METRIC(used_blocks_metric, collector->used_blocks);

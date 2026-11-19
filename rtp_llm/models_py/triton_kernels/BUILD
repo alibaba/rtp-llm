@@ -49,6 +49,22 @@ py_library(
 )
 
 py_library(
+    name = "kda_fp32_state",
+    srcs = glob(["kimi_kda/fp32_state/*.py"]),
+    deps = [
+        ":autotune_cache",
+        ":common",
+        ":fla",
+        ":kimi_kda",
+        "//rtp_llm/models_py:dsv4_forward_metadata",
+    ],
+    visibility = [
+        "//rtp_llm/models_py/triton_kernels/kimi_kda/fp32_state/test:__pkg__",
+        "//rtp_llm/models_py/triton_kernels/test:__pkg__",
+    ],
+)
+
+py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
     deps = ["//rtp_llm/models_py:utils"],
@@ -89,12 +105,18 @@ py_library(
 
 py_library(
     name = "triton_kernels",
-    srcs = ["legacy_fp8_indexer_score.py"],
+    srcs = [
+        "glm53_indexer_gate_quant.py",
+        "glm53_router_split.py",
+        "glm53_router_splitk.py",
+        "legacy_fp8_indexer_score.py",
+    ],
     deps = [
         ":attention",
         ":autotune_cache",
         ":fla",
         ":kimi_kda",
+        ":kda_fp32_state",
         ":causal_conv1d",
         ":moe",
         ":common",

@@ -75,6 +75,37 @@ def _had128_inline(x, BLOCK_M: tl.constexpr, HEAD_DIM: tl.constexpr):
     return x
 
 
+@triton.jit
+def _hadamard_transform_128_kernel(x_ptr, out_ptr, HAD_SCALE: tl.constexpr):
+    """Apply the same 128-point butterfly used by the fused K path."""
+    row = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, 128)
+    x = tl.load(x_ptr + row * 128 + offsets).to(tl.float32)
+    x = _had128_inline(x.reshape(1, 128), 1, 128)
+    tl.store(
+        out_ptr + row * 128 + offsets, (x.reshape(128) * HAD_SCALE).to(tl.bfloat16)
+    )
+
+
+def hadamard_transform_128(x: torch.Tensor) -> torch.Tensor:
+    """Normalized Hadamard transform for contiguous BF16 tensors with D=128.
+
+    This is the standalone form of the transform used by the fused sparse-MLA
+    K path.  It intentionally covers only the GLM/DSV indexer head dimension;
+    callers must retain their existing fallback for other dimensions.
+    """
+    assert x.dtype == torch.bfloat16, f"expected bfloat16, got {x.dtype}"
+    assert x.is_cuda, "hadamard_transform_128 requires a CUDA tensor"
+    assert x.shape[-1] == 128, f"expected last dimension 128, got {x.shape[-1]}"
+    assert x.is_contiguous(), "hadamard_transform_128 requires contiguous input"
+
+    out = torch.empty_like(x)
+    rows = x.numel() // 128
+    if rows:
+        _hadamard_transform_128_kernel[(rows,)](x, out, HAD_SCALE=128**-0.5)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Main fused kernel
 # ---------------------------------------------------------------------------
@@ -103,7 +134,7 @@ def _fused_rope_qk_had_k_kernel(
     IS_NEOX=False (interleaved / GPT-J):  pairs (x[2i], x[2i+1])
     """
     t = tl.program_id(0).to(tl.int64)
-    pos = tl.load(pos_ptr + t)
+    pos = tl.load(pos_ptr + t).to(tl.int64)
 
     rope_idx = tl.arange(0, ROPE_HALF)
     full_idx = tl.arange(0, HEAD_DIM)
@@ -114,7 +145,7 @@ def _fused_rope_qk_had_k_kernel(
     )
 
     # ===== Q RoPE in-place (all H heads) =====
-    head_offs = tl.arange(0, H)
+    head_offs = tl.arange(0, H).to(tl.int64)
     if IS_NEOX:
         q_first = tl.load(
             q_ptr + t * stride_qt + head_offs[:, None] * stride_qh + rope_idx[None, :]

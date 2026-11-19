@@ -226,6 +226,7 @@ class PyAttentionInputs:
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int
+    context_total_kv_length_device: torch.Tensor | None
     cu_kv_seqlens_device: torch.Tensor
     cu_seqlens_device: torch.Tensor
     cu_seqlens: torch.Tensor

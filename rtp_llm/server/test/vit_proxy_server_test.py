@@ -11,6 +11,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    EmptyPB,
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
@@ -29,12 +30,14 @@ from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerTimeoutError,
 )
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
+from rtp_llm.server.request_headers import VIT_SOURCE_REQUEST_ID_METADATA
 from rtp_llm.server.vit_proxy_server import (
     DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
     STATUS_CHECK_TIMEOUT_SEC,
     VIT_WORKER_RPC_TIMEOUT_MARGIN_SECONDS,
     LoadBalancer,
     VitProxyRpcServer,
+    VitProxyServer,
     WorkerConnectionPool,
     _resolve_forwarding_deadline_seconds,
     _resolve_rpc_timeout_seconds,
@@ -219,6 +222,48 @@ class LoadBalancerRoundRobinTest(TestCase):
 
 
 class RpcTimeoutTest(TestCase):
+    def test_shutdown_drains_before_closing_worker_channels(self):
+        entered = threading.Event()
+        finished = threading.Event()
+        pool = futures.ThreadPoolExecutor(max_workers=2)
+        server = grpc.server(pool)
+        draining = threading.Event()
+
+        def echo(request, context):
+            entered.set()
+            if not draining.wait(4):
+                context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "drain did not start")
+            finished.set()
+            return request
+
+        handler = grpc.method_handlers_generic_handler(
+            "test", {"Echo": grpc.unary_unary_rpc_method_handler(echo)}
+        )
+        server.add_generic_rpc_handlers((handler,))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        self.addCleanup(pool.shutdown)
+        self.addCleanup(lambda: server.stop(0).wait())
+        proxy = VitProxyServer([], 0, default_rpc_timeout_seconds=4)
+        proxy.rpc_server = MagicMock(wraps=server)
+        proxy.connection_pool.close_all = MagicMock(
+            side_effect=lambda: self.assertTrue(finished.is_set())
+        )
+
+        def begin_drain(grace):
+            stopped = server.stop(grace)
+            draining.set()
+            return stopped
+
+        proxy.rpc_server.stop.side_effect = begin_drain
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = channel.unary_unary("/test/Echo").future(b"active", timeout=5)
+            self.assertTrue(entered.wait(3))
+            proxy.stop()
+            self.assertTrue(finished.is_set())
+            self.assertEqual(call.result(timeout=1), b"active")
+            proxy.connection_pool.close_all.assert_called_once_with()
+
     def test_default_timeout_adds_worker_completion_margin(self):
         self.assertEqual(
             resolve_default_rpc_timeout_seconds(3500),
@@ -792,6 +837,39 @@ class VitProxyRpcServerStatusTest(TestCase):
 
 
 class VitProxyRpcServerForwardingTest(TestCase):
+    def test_request_identity_crosses_proxy_without_unrelated_headers(self):
+        metadata = (
+            ("x-dashscope-uid", "test-uid"),
+            ("x-dashscope-service", "test-service"),
+            (VIT_SOURCE_REQUEST_ID_METADATA, "source-请求#attempt2".encode()),
+        )
+        for method in (
+            "RemoteMultimodalEmbedding",
+            "WaitGreenNetVerdict",
+            "AsyncSubmitEmbedding",
+        ):
+            with self.subTest(method=method):
+                stub = MagicMock()
+                rpc = getattr(stub, method)
+                if method == "AsyncSubmitEmbedding":
+                    rpc.return_value = EmptyPB()
+                    forwarded = rpc
+                else:
+                    response = (
+                        MultimodalOutputPB()
+                        if method == "RemoteMultimodalEmbedding"
+                        else EmptyPB()
+                    )
+                    rpc.future.return_value = FakeGrpcFuture(response=response)
+                    forwarded = rpc.future
+                server = self._make_server({"worker": stub})
+                context = FakeContext()
+                context.invocation_metadata = lambda: metadata + (
+                    ("authorization", "do-not-forward"),
+                )
+                getattr(server, method)(MultimodalInputsPB(), context)
+                self.assertEqual(forwarded.call_args.kwargs["metadata"], metadata)
+
     def _make_status_stub(self, worker_status=None, error=None, done=True):
         stub = MagicMock()
         stub.GetWorkerStatus.future.return_value = FakeGrpcFuture(

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -133,7 +134,8 @@ public:
                   bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
-    int evictForGroup(std::string_view group_tag, size_t num_blocks);
+    int  evictForGroup(std::string_view group_tag, size_t num_blocks);
+    bool ensureSharedDeviceSlots(const std::shared_ptr<SharedBlockArena>& arena, const std::vector<size_t>& demand);
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
@@ -194,9 +196,9 @@ private:
     mutable std::mutex                             mutex_;
     BlockTreeEvictor                               evictor_;
     bool                                           initialized_{false};
-    BlockTreeLoader                             loader_;
-    BlockTreeStorer                             storer_;
-    std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;
+    BlockTreeLoader                                loader_;
+    BlockTreeStorer                                storer_;
+    std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

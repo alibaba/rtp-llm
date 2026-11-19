@@ -39,20 +39,31 @@ bool modelHasMultipleCacheGroups(const ModelConfig& model_config) {
 // kernel block passes it and then produces a partial compression unit.
 constexpr uint32_t kCompressedKernelSeqSizeAlignment = 128;
 
+bool consumeBlockBudget(uint32_t count, size_t bytes_per_block, size_t& remaining) {
+    if (bytes_per_block > 0 && static_cast<size_t>(count) > remaining / bytes_per_block) {
+        return false;
+    }
+    remaining -= static_cast<size_t>(count) * bytes_per_block;
+    return true;
+}
+
 bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
     if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
         return false;
     }
 
     size_t remaining = total_budget_bytes - budget.explicit_pool_reserve_bytes;
-    if (budget.paged_block_bytes > 0) {
-        if (static_cast<size_t>(block_num) > remaining / budget.paged_block_bytes) {
+    if (!consumeBlockBudget(block_num, budget.paged_block_bytes, remaining)
+        || !consumeBlockBudget(block_num, budget.swa_block_bytes, remaining)) {
+        return false;
+    }
+    for (const auto& pool : budget.projected_pools) {
+        const auto count = projectCacheBlockCount(block_num, pool.block_count_divisor);
+        if (!consumeBlockBudget(count, pool.bytes_per_block, remaining)) {
             return false;
         }
-        remaining -= static_cast<size_t>(block_num) * budget.paged_block_bytes;
     }
-
-    return budget.swa_block_bytes == 0 || static_cast<size_t>(block_num) <= remaining / budget.swa_block_bytes;
+    return true;
 }
 
 void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
@@ -99,6 +110,11 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
             if (policy.charge_to_paged_budget) {
                 addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
             }
+            continue;
+        }
+        const auto divisor = group.blockCountDivisor(config.seq_size_per_block);
+        if (divisor > 1) {
+            budget.projected_pools.push_back({group_bytes, divisor});
             continue;
         }
         switch (policy.group_type) {
@@ -230,7 +246,8 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
 void populateGroups(CacheConfig&                 config,
                     const LayerKVCacheSpecDescs& descs_by_layer,
                     const LayerKVCacheSpecs&     specs_by_layer,
-                    const ModelConfig&           model_config) {
+                    const ModelConfig&           model_config,
+                    RoleType                     role) {
     struct BuildState {
         KVCacheSpecPtr   spec;
         std::string      fingerprint;
@@ -258,6 +275,8 @@ void populateGroups(CacheConfig&                 config,
                                     layer_id,
                                     spec->tag.c_str());
             auto policy = SpecBuilder::groupPolicy(desc);
+            policy.match_base_token_capacity =
+                role == RoleType::DECODE && desc.capacity.has_value() && desc.capacity->match_decode_token_capacity;
             checkGroupResidencyBudget(policy, spec->tag);
             if (policy.group_type == CacheGroupType::SWA) {
                 RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.sliding_window >= 0,
@@ -320,7 +339,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
+    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config, parallelism_config.role_type);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
@@ -335,7 +354,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
 }  // namespace
 
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
-    if (budget.paged_block_bytes == 0 && budget.swa_block_bytes == 0) {
+    if (budget.paged_block_bytes == 0 && budget.swa_block_bytes == 0 && budget.projected_pools.empty()) {
         return budget.explicit_pool_reserve_bytes <= total_budget_bytes ? 1u : 0u;
     }
 
@@ -561,6 +580,111 @@ uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size
     const auto confirmed = *std::min_element(candidates, candidates + count);
     RTP_LLM_CHECK_WITH_INFO(confirmed > 0, "cross-rank cache block count must be positive");
     return static_cast<uint32_t>(confirmed);
+}
+
+bool CacheConfigCreator::useSharedBlockPool(const CacheConfig&       config,
+                                            const ModelConfig&       model_config,
+                                            const ParallelismConfig& parallelism_config,
+                                            const KVCacheConfig&     kv_cache_config) {
+    const int policy = kv_cache_config.shared_hybrid_cache;
+    RTP_LLM_CHECK_WITH_INFO(policy >= -1 && policy <= 1, "shared hybrid cache policy must be -1, 0 or 1");
+    if (policy == 0
+        || (policy == -1
+            && (model_config.model_type != "glm5_3_flash" || parallelism_config.role_type == RoleType::DECODE))) {
+        return false;
+    }
+
+    const auto& cp = parallelism_config.prefill_cp_config;
+    // GLM53 can shard Prefill KV pages through CPSlotMapper while its model
+    // owns the forward communication. Sharing rank-local byte storage does
+    // not change that mapping or enable the framework CP forward path.
+    const bool supported_cp = cp.method == CPRotateMethod::DISABLED && cp.prefill_cp_size <= 1
+                              && (!cp.kv_cache_sharded || parallelism_config.role_type == RoleType::PREFILL);
+    bool supported = model_config.model_type == "glm5_3_flash" && !kv_cache_config.enable_disk_cache
+                     && parallelism_config.pp_size == 1 && supported_cp && config.groupNums() > 1;
+    bool       has_linear = false;
+    bool       has_full   = false;
+    const auto compatible = [](const CacheConfig& owner) {
+        return std::all_of(owner.groups().begin(), owner.groups().end(), [](const GroupBase& group) {
+            return group.kernelBlocksPerKvBlock() == 1 && group.policy.explicit_block_num == 0
+                   && group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
+        });
+    };
+    supported = supported && compatible(config);
+    for (const auto& child : config.mtp_sub_configs) {
+        supported = supported && child != nullptr && compatible(*child);
+    }
+    for (const auto& group : config.groups()) {
+        has_linear = has_linear || group.policy.group_type == CacheGroupType::LINEAR;
+        has_full   = has_full || group.policy.group_type == CacheGroupType::FULL;
+    }
+    supported = supported && has_linear && has_full;
+    RTP_LLM_CHECK_WITH_INFO(
+        policy != 1 || supported,
+        "shared hybrid cache requires recurrent hybrid groups, PP=1, disabled framework CP, one kernel "
+        "page per physical block, disabled disk cache and no independently sized or host-placed device pools");
+    if (!supported) {
+        RTP_LLM_LOG_INFO("shared hybrid cache auto policy retained independent pools: model=%s pp=%zu "
+                         "framework_cp=%d kv_cache_sharded=%d prefill_cp_size=%ld groups=%zu disk=%d",
+                         model_config.model_type.c_str(),
+                         static_cast<size_t>(parallelism_config.pp_size),
+                         static_cast<int>(cp.method),
+                         cp.kv_cache_sharded,
+                         cp.prefill_cp_size,
+                         config.groupNums(),
+                         kv_cache_config.enable_disk_cache);
+    }
+    return supported;
+}
+
+uint64_t CacheConfigCreator::computeLocalCacheBytes(const CacheConfig&                               config,
+                                                    const ModelConfig&                               model_config,
+                                                    const RuntimeConfig&                             runtime_config,
+                                                    const KVCacheConfig&                             kv_cache_config,
+                                                    const ParallelismConfig&                         parallelism_config,
+                                                    const std::optional<WarmUpResult>&               warm_up_result,
+                                                    const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    if (kv_cache_config.test_block_num > 0) {
+        // Preserve TEST_BLOCK_NUM's existing independent-pool byte ledger. It
+        // constrains the common budget, rather than capping every namespace.
+        const auto budget = blockBudgetForConfig(config);
+        size_t     bytes  = budget.explicit_pool_reserve_bytes;
+        addBudgetBytes(bytes, budget.paged_block_bytes, static_cast<size_t>(kv_cache_config.test_block_num));
+        addBudgetBytes(bytes, budget.swa_block_bytes, static_cast<size_t>(kv_cache_config.test_block_num));
+        for (const auto& pool : budget.projected_pools) {
+            addBudgetBytes(bytes,
+                           pool.bytes_per_block,
+                           projectCacheBlockCount(kv_cache_config.test_block_num, pool.block_count_divisor));
+        }
+        return bytes;
+    }
+    return MemoryEvaluationHelper::getKVCacheMemorySize(
+        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+}
+
+uint64_t CacheConfigCreator::synchronizeCacheBytes(uint64_t local_bytes, const ParallelismConfig& parallelism_config) {
+    RTP_LLM_CHECK_WITH_INFO(local_bytes > 0
+                                && local_bytes <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                            "shared cache byte budget must fit positive int64");
+    const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto count  = static_cast<size_t>(layout.laneStride());
+    if (count == 1) {
+        return local_bytes;
+    }
+    auto  bytes  = torch::empty({static_cast<int64_t>(count)}, torch::kInt64).pin_memory();
+    auto* values = bytes.data_ptr<int64_t>();
+    values[static_cast<size_t>(layout.stageRank())] = static_cast<int64_t>(local_bytes);
+    execAllGather({{bytes}, ParallelMode::STAGE});
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+    return selectConfirmedCacheBytes(values, count);
+}
+
+uint64_t CacheConfigCreator::selectConfirmedCacheBytes(const int64_t* candidates, size_t count) {
+    RTP_LLM_CHECK_WITH_INFO(candidates != nullptr && count > 0, "cross-rank cache byte budgets must not be empty");
+    const auto bytes = *std::min_element(candidates, candidates + count);
+    RTP_LLM_CHECK_WITH_INFO(bytes > 0, "cross-rank cache byte budgets must be positive");
+    return static_cast<uint64_t>(bytes);
 }
 
 }  // namespace rtp_llm

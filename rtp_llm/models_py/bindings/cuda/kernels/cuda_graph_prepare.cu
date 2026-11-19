@@ -515,8 +515,7 @@ __global__ void prepareTargetVerifyWriteKernel(const int32_t* __restrict__ input
         batch_indice[t] = 0;
         positions[t]    = 0;
         if (slot_mapping != nullptr) {
-            if (slot_mapping != nullptr)
-                slot_mapping[t] = -1;
+            slot_mapping[t] = -1;
         }
         if (has_sparse) {
             expanded_seq_lens[t]   = 0;

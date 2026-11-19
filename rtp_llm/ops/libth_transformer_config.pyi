@@ -89,6 +89,10 @@ class AttentionConfigs:
     indexer_head_dim: int
     indexer_head_num: int
     indexer_topk: int
+    indexer_compress_ratio: int
+    indexer_compressor_overlap: int
+    sparse_attention_topk: int
+    indexer_layer_ids: list[int]
     is_causal: bool
     is_sparse: bool
     kv_cache_dtype: KvCacheDataType
@@ -1091,6 +1095,7 @@ class ModelConfig:
     moe_style: int
     moe_topk_group: int
     hc_mult: int
+    index_share_for_mtp_iteration: bool
     hc_sinkhorn_iters: int
     hc_eps: float
     swiglu_limit: float

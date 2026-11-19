@@ -33,7 +33,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
-from rtp_llm.server.request_headers import dashscope_greennet_metadata
+from rtp_llm.server.request_headers import vit_forwarding_metadata
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 # Proxy forwarding includes transport and serialization after the worker's
@@ -534,7 +534,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                     worker_call = stub.RemoteMultimodalEmbedding.future(
                         request,
                         timeout=attempt_timeout_s,
-                        metadata=dashscope_greennet_metadata(
+                        metadata=vit_forwarding_metadata(
                             dict(context.invocation_metadata() or ())
                         ),
                     )
@@ -780,7 +780,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             worker_call = stub.WaitGreenNetVerdict.future(
                 request,
                 timeout=timeout_s,
-                metadata=dashscope_greennet_metadata(
+                metadata=vit_forwarding_metadata(
                     dict(context.invocation_metadata() or ())
                 ),
             )
@@ -821,7 +821,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             return stub.AsyncSubmitEmbedding(
                 request,
                 timeout=5.0,
-                metadata=dashscope_greennet_metadata(
+                metadata=vit_forwarding_metadata(
                     dict(context.invocation_metadata() or ())
                 ),
             )
@@ -1001,7 +1001,9 @@ class VitProxyServer:
         """停止代理服务器"""
         kmonitor.set_serving(False)
         if self.rpc_server:
-            self.rpc_server.stop(grace=None)
+            # Keep forwarding channels alive until admitted RPCs finish or
+            # exhaust the same budget used when forwarding to the workers.
+            self.rpc_server.stop(grace=self.default_rpc_timeout_seconds).wait()
             logging.info("VIT Proxy Server stopped")
         if self.proxy_servicer:
             self.proxy_servicer.cancel_status_probes()

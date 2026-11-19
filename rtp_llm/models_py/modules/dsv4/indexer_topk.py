@@ -18,6 +18,57 @@ _FAST_TOPK_VALUES = (2048,)
 _PERSISTENT_TOPK_VALUES = (512, 1024, 2048)
 
 
+def select_stable_window_topk(
+    scores: torch.Tensor,
+    starts: torch.Tensor,
+    ends: torch.Tensor,
+    out: torch.Tensor,
+    native_selector=None,
+) -> None:
+    """Select window-relative indices, preferring the lower index on ties."""
+    rows, width = scores.shape
+    k = out.shape[1]
+    if out.shape[0] != rows or starts.numel() != rows or ends.numel() != rows:
+        raise ValueError("Top-K requires one start, end and output row per score row")
+    if not (scores.device == starts.device == ends.device == out.device):
+        raise ValueError("window scores, bounds and output must share a device")
+    if not rows or not k:
+        return
+    if (
+        native_selector is not None
+        and scores.is_cuda
+        and torch.version.hip is None
+        and scores.dtype == torch.float32
+        and scores.stride(1) == 1
+        and width > 0
+        and k in _PERSISTENT_TOPK_VALUES
+        and out.is_contiguous()
+        and out.dtype == torch.int32
+        and starts.dtype == ends.dtype == torch.int32
+    ):
+        native_selector(scores, starts.contiguous(), ends.contiguous(), out, k, width)
+        return
+    out.fill_(-1)
+    if not width:
+        return
+    starts = starts.reshape(-1, 1).clamp(0, width)
+    lengths = (ends.reshape(-1, 1).clamp(0, width) - starts).clamp_min(0)
+    columns = torch.arange(width, device=scores.device)
+    count = min(width, k)
+    # Bound the temporary gather and int64 sort indices for long ragged inputs.
+    rows_per_chunk = max(1, (1 << 20) // width)
+    for begin in range(0, rows, rows_per_chunk):
+        chunk = slice(begin, begin + rows_per_chunk)
+        length = lengths[chunk]
+        # Valid keys form a prefix so an in-window -inf beats masked padding.
+        window = scores[chunk].gather(1, (starts[chunk] + columns).clamp_max(width - 1))
+        window.masked_fill_(columns >= length, float("-inf"))
+        indices = window.argsort(dim=1, descending=True, stable=True)[:, :count]
+        # The native kernel emits relative positions directly when all keys fit.
+        indices = torch.where(length <= k, columns[:count], indices)
+        out[chunk, :count].copy_(indices.masked_fill(columns[:count] >= length, -1))
+
+
 def _flatten_score(score: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
     shape = tuple(score.shape)
     if score.dim() == 2:

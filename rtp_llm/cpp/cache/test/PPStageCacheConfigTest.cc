@@ -98,6 +98,17 @@ KVCacheSpecDesc makeOpaqueStateDesc(const std::string& tag) {
 
 }  // namespace
 
+TEST(ConfigAggregateCompatibilityTest, LegacyAggregateConfigRetainsTokenBudgets) {
+    FIFOSchedulerConfig config{4, 8192, "ratio", "2", false, 8, 2048, 128};
+    EXPECT_EQ(config.max_inited_kv_cache_streams, 8);
+    EXPECT_EQ(config.max_batch_tokens_without_cache, 2048);
+    EXPECT_EQ(config.prefill_chunk_size, 128);
+    EXPECT_FALSE(config.async_cache_prepare);
+    KVCacheConfig cache_config{true};
+    EXPECT_TRUE(cache_config.reuse_cache);
+    EXPECT_EQ(cache_config.shared_hybrid_cache, -1);
+}
+
 TEST(PPStageCacheConfigTest, PpOneKeepsWholeModel) {
     const auto model  = makeHybridModelConfig(8);
     const auto staged = CacheConfigCreator::stageScopedModelConfig(model, ParallelismConfig{});
@@ -167,7 +178,7 @@ TEST(PPStageCacheConfigTest, WarmupUsesStageLocalTopologyAndSmallFinalizedPools)
     const auto    model = makeHybridModelConfig(8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.reuse_cache_tail_blocks = 4;
-    kv_cache_config.linear_pool_blocks     = 16;
+    kv_cache_config.linear_pool_blocks      = 16;
     const auto config = CacheConfigCreator::createWarmupConfig(model, makePpConfig(8, 2, 1), kv_cache_config, 0);
     EXPECT_EQ(config.layer_num, 4u);
     EXPECT_EQ(config.global_layer_begin, 4u);
@@ -291,6 +302,103 @@ TEST(PPStageCacheConfigTest, MissingPerTagOverrideFails) {
     auto                config = CacheConfigCreator::createConfig(model, makePpConfig(8, 2, 0), KVCacheConfig{});
     PPBlockNumOverrides incomplete{{"full", 60u}};
     EXPECT_THROW(config.finalizeBlockNums(60, RuntimeConfig{}, &incomplete), std::exception);
+}
+
+TEST(SharedCacheConfigTest, Glm53PrefillPolicyKeepsFullExpertParallelism) {
+    auto model                 = makeHybridModelConfig(8);
+    model.model_type           = "glm5_3_flash";
+    model.attn_config.head_num = model.attn_config.kv_head_num = 8;
+    model.linear_attention_config.linear_num_key_heads = model.linear_attention_config.linear_num_value_heads = 8;
+    ParallelismConfig parallel;
+    parallel.role_type = RoleType::PREFILL;
+    parallel.tp_size = parallel.ep_size = parallel.world_size = parallel.local_world_size = 8;
+    const KVCacheConfig options;
+    const auto          config = CacheConfigCreator::createConfig(model, parallel, options);
+    EXPECT_TRUE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+
+    parallel.role_type = RoleType::DECODE;
+    EXPECT_FALSE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+    parallel.role_type = RoleType::PREFILL;
+    model.model_type   = "another_hybrid_model";
+    EXPECT_FALSE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+}
+
+TEST(SharedCacheConfigTest, UnsupportedExplicitPoliciesFailBeforeAllocation) {
+    auto model       = makeHybridModelConfig(8);
+    model.model_type = "glm5_3_flash";
+    ParallelismConfig parallel;
+    const auto        config = CacheConfigCreator::createConfig(model, parallel, KVCacheConfig{});
+    KVCacheConfig     options;
+    options.shared_hybrid_cache = 1;
+    EXPECT_TRUE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+    for (const auto method : {CPRotateMethod::ALL_GATHER, CPRotateMethod::PREFILL_CP}) {
+        parallel.prefill_cp_config.method = method;
+        EXPECT_THROW(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options), std::exception);
+        options.shared_hybrid_cache = -1;
+        EXPECT_FALSE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+        options.shared_hybrid_cache = 1;
+    }
+    parallel.prefill_cp_config.method = CPRotateMethod::DISABLED;
+    parallel.pp_size                  = 2;
+    EXPECT_THROW(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options), std::exception);
+    parallel.pp_size           = 1;
+    options.linear_pool_blocks = 32;
+    const auto independent     = CacheConfigCreator::createConfig(model, parallel, options);
+    EXPECT_THROW(CacheConfigCreator::useSharedBlockPool(independent, model, parallel, options), std::exception);
+    options.shared_hybrid_cache = 0;
+    EXPECT_FALSE(CacheConfigCreator::useSharedBlockPool(independent, model, parallel, options));
+}
+
+TEST(SharedCacheConfigTest, ModelManagedPrefillKvShardingRetainsSharedHybridPolicy) {
+    auto model                 = makeHybridModelConfig(8);
+    model.model_type           = "glm5_3_flash";
+    model.attn_config.head_num = model.attn_config.kv_head_num = 8;
+    model.linear_attention_config.linear_num_key_heads = model.linear_attention_config.linear_num_value_heads = 8;
+    ParallelismConfig parallel;
+    parallel.role_type = RoleType::PREFILL;
+    parallel.tp_size = parallel.ep_size = parallel.world_size = parallel.local_world_size = 8;
+    parallel.prefill_cp_config.kv_cache_sharded                                           = true;
+    ASSERT_FALSE(parallel.prefill_cp_config.is_enabled());
+    KVCacheConfig options;
+    const auto    config = CacheConfigCreator::createConfig(model, parallel, options);
+    EXPECT_TRUE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+    options.shared_hybrid_cache = 1;
+    EXPECT_TRUE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+    parallel.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    EXPECT_THROW(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options), std::exception);
+    options.shared_hybrid_cache = -1;
+    EXPECT_FALSE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+}
+
+TEST(SharedCacheConfigTest, ByteBudgetAgreementRetainsMoreThanInt32Bytes) {
+    constexpr int64_t gib          = int64_t{1} << 30;
+    const int64_t     candidates[] = {80 * gib + 256, 52 * gib, 64 * gib};
+    EXPECT_EQ(CacheConfigCreator::selectConfirmedCacheBytes(candidates, 3), 52 * gib);
+    EXPECT_EQ(CacheConfigCreator::synchronizeCacheBytes(52 * gib, ParallelismConfig{}), 52 * gib);
+    const int64_t invalid[] = {52 * gib, 0};
+    EXPECT_THROW(CacheConfigCreator::selectConfirmedCacheBytes(invalid, 2), std::exception);
+    EXPECT_THROW(CacheConfigCreator::selectConfirmedCacheBytes(nullptr, 0), std::exception);
+    EXPECT_THROW(CacheConfigCreator::synchronizeCacheBytes(uint64_t{1} << 63, ParallelismConfig{}), std::exception);
+}
+
+TEST(SharedCacheConfigTest, TestBlockBudgetMatchesExistingPhysicalOwnerLedger) {
+    const auto model                = makeHybridModelConfig(8);
+    auto       draft                = makeSingleModelConfig(2);
+    draft.attn_config.size_per_head = 32;
+    SpeculativeExecutionConfig speculative;
+    speculative.type              = SP_TYPE_MTP;
+    speculative.gen_num_per_cycle = 2;
+    KVCacheConfig options;
+    options.test_block_num = 19;
+    auto config =
+        CacheConfigCreator::createConfig(model, ParallelismConfig{}, options, speculative, &draft, true, false);
+    config.finalizeBlockNums(19, RuntimeConfig{});
+    uint64_t expected_bytes = 0;
+    for (const auto& group : config.groups()) {
+        expected_bytes += config.blockSizeBytesForGroup(group.tag) * group.block_num;
+    }
+    EXPECT_EQ(CacheConfigCreator::computeLocalCacheBytes(config, model, {}, options, {}, std::nullopt, speculative),
+              expected_bytes);
 }
 
 }  // namespace rtp_llm::test

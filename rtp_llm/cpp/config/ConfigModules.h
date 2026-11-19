@@ -249,6 +249,9 @@ struct KVCacheConfig {
     int         kvcm_get_broadcast_timeout           = 15000;
     int         kvcm_put_broadcast_timeout           = 15000;
     std::string kvcm_client_config                   = "";
+    // Append configuration fields to preserve existing C++ aggregate callers.
+    // -1: model policy; 0: independent pools; 1: require shared hybrid arenas.
+    int         shared_hybrid_cache = -1;
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -465,7 +468,8 @@ struct FIFOSchedulerConfig {
     int64_t     max_batch_tokens_without_cache = 0;
     // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
     // Config injection requires at least one seq_size_per_block and floor-aligns larger values.
-    int64_t     prefill_chunk_size = 0;
+    int64_t     prefill_chunk_size  = 0;
+    bool        async_cache_prepare = false;
     std::string to_string() const;
 };
 
