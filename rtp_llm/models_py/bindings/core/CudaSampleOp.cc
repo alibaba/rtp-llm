@@ -879,7 +879,13 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         auto probs_t = torch::softmax(params.logits, -1);
         auto output  = torch::empty_like(probs_t);
         if (no_k) {
-            top_p_renorm_probs(probs_t, output, top_p, 1.0, (int64_t)cur_stream);
+            top_p_renorm_probs(probs_t,
+                               output,
+                               top_p,
+                               1.0,
+                               (int64_t)cur_stream,
+                               params.deferred_filter_caps,
+                               params.deferred_filter_rows);
         } else {
             std::transform(k, k + batch_size, k, [](int32_t value) { return value <= 0 ? 1 << 30 : value; });
             if (no_p) {
@@ -887,7 +893,13 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             } else {
                 auto temporary = torch::empty_like(probs_t);
                 top_k_renorm_probs(probs_t, temporary, top_k, 0, (int64_t)cur_stream);
-                top_p_renorm_probs(temporary, output, top_p, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temporary,
+                                   output,
+                                   top_p,
+                                   1.0,
+                                   (int64_t)cur_stream,
+                                   params.deferred_filter_caps,
+                                   params.deferred_filter_rows);
             }
         }
         params.logits.copy_(output.log(), true);

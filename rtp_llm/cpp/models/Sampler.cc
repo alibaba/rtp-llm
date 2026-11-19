@@ -186,6 +186,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             auto generator            = std::vector<at::Generator>{inputs.generator.begin() + from_batch_idx_in,
                                                                    inputs.generator.begin() + from_batch_idx_in + batch_size_in};
 
+            const bool whole_batch = from_batch_idx_in == 0 && batch_size_in == inputs.batch_size;
             RTP_LLM_PROFILE_SCOPE("sampler.forward.execSampleGreedy");
             auto greedy_output = execSampleGreedy(
                 {logits,
@@ -212,11 +213,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  use_optimized_sampling_ && inputs.skip_logits_probs_restore,
                  inputs.defer_token_sampling,
                  inputs.phase == LogitsProcessorPhase::MTP_VERIFY,
-                 from_batch_idx_in == 0 && batch_size_in == inputs.batch_size,
+                 whole_batch,
                  inputs.rejection_generators,
-                 from_batch_idx_in == 0 && batch_size_in == inputs.batch_size && !inputs.rejection_generators.empty() ?
-                     inputs.rejection_rows :
-                     0});
+                 whole_batch && !inputs.rejection_generators.empty() ? inputs.rejection_rows : 0,
+                 whole_batch ? inputs.deferred_filter_caps : torch::Tensor(),
+                 whole_batch ? inputs.deferred_filter_rows : 0});
             deferred_token_sampling = greedy_output.deferred_token_sampling;
             if (greedy_output.deferred_logits.defined()) {
                 compact_logits         = greedy_output.deferred_logits;

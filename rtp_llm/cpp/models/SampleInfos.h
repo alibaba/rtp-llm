@@ -91,6 +91,9 @@ public:
     bool                               defer_token_sampling = false;
     std::vector<at::Generator>         rejection_generators       = {};
     int64_t                            rejection_rows             = 0;
+    // Adaptive verify only. Row offsets above the cap have no target logits.
+    torch::Tensor                      deferred_filter_caps      = {};
+    int64_t                            deferred_filter_rows      = 0;
 };
 
 struct SamplerOutput {

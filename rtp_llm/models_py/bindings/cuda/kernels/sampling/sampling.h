@@ -60,11 +60,14 @@ void top_k_top_p_sampling_from_probs(torch::Tensor                probs,
                                      uint64_t                     offset_val,
                                      int64_t                      cuda_stream = 0);
 
+// For large-vocabulary adaptive verify, rows above each inclusive cap are copied through.
 void top_p_renorm_probs(torch::Tensor                probs,
                         torch::Tensor                renorm_probs,
                         std::optional<torch::Tensor> maybe_top_p_arr,
                         double                       top_p_val,
-                        int64_t                      cuda_stream = 0);
+                        int64_t                      cuda_stream = 0,
+                        const torch::Tensor&          row_caps = {},
+                        int64_t                      rows_per_request = 0);
 
 void top_k_renorm_probs(torch::Tensor                probs,
                         torch::Tensor                renorm_probs,

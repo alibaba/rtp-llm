@@ -303,7 +303,9 @@ void top_p_renorm_probs(torch::Tensor                probs,
                         torch::Tensor                renorm_probs,
                         std::optional<torch::Tensor> maybe_top_p_arr,
                         double                       top_p_val,
-                        int64_t                      cuda_stream) {
+                        int64_t                      cuda_stream,
+                        const torch::Tensor&          row_caps,
+                        int64_t                      rows_per_request) {
     check_renorm_inputs(probs, renorm_probs);
     TORCH_CHECK(probs.scalar_type() == at::kFloat, "top_p_renorm_probs currently expects float32 probs");
 
@@ -327,6 +329,18 @@ void top_p_renorm_probs(torch::Tensor                probs,
         return;
     }
 
+    const int32_t* caps = nullptr;
+    if (row_caps.defined()) {
+        TORCH_CHECK(rows_per_request > 0 && rows_per_request <= batch_size
+                        && batch_size % rows_per_request == 0,
+                    "invalid adaptive TopP rows per request");
+        TORCH_CHECK(row_caps.device() == probs.device() && row_caps.scalar_type() == at::kInt
+                        && row_caps.dim() == 1 && row_caps.is_contiguous()
+                        && row_caps.numel() == batch_size / rows_per_request,
+                    "adaptive TopP caps must be contiguous CUDA int32 with one cap per request");
+        caps = row_caps.data_ptr<int32_t>();
+    }
+
     constexpr bool deterministic = false;
     const auto     workspace_size = air_top_p_workspace_size<deterministic, float>(batch_size, vocab_size);
     auto workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
@@ -339,7 +353,9 @@ void top_p_renorm_probs(torch::Tensor                probs,
         static_cast<float>(top_p_val),
         vocab_size,
         workspace.data_ptr(),
-        stream);
+        stream,
+        caps,
+        caps ? static_cast<uint32_t>(rows_per_request) : 0);
     check_cuda_status(status, "AirTopPRenormProb");
 }
 

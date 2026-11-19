@@ -349,6 +349,8 @@ struct GreedyParams {
     bool                         allow_compact_deferred_output     = false;
     std::vector<at::Generator>   deferred_rejection_generators     = {};
     int64_t                      deferred_rejection_rows           = 0;
+    torch::Tensor                deferred_filter_caps              = {};
+    int64_t                      deferred_filter_rows              = 0;
 };
 
 struct GreedyOutput {

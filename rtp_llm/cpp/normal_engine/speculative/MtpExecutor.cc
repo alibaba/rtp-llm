@@ -2773,6 +2773,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                                  torch::minimum(sampler_input.spec_cap_gpu, adaptive_caps) :
                                                  adaptive_caps;
             }
+            if (compacted_verify) {
+                recordSpecTensorUseOnCurrentStream(adaptive_caps);
+                sampler_input.deferred_filter_caps = adaptive_caps;
+                sampler_input.deferred_filter_rows = propose_step_ + 1;
+            }
             if (sampler_input.defer_token_sampling && draft_sampler_output.draft_point_mass) {
                 // Filtering does not consume RNG. Reserve rejection state after its
                 // kernels are submitted, in the same order as batchSample below.

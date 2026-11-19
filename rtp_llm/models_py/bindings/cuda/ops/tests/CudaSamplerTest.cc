@@ -540,6 +540,116 @@ TEST_F(CudaSamplerTest, testDeferredLogitTopKTopPMatchesDense) {
     EXPECT_TRUE(torch::equal(unsupported, original));
 }
 
+TEST_F(CudaSamplerTest, testDeferredDenseAirTopPSkipsInactiveAdaptiveRows) {
+    initializeSamplerPython();
+    constexpr int batch = 15, rows = 6, vocab = 154880, count = batch * rows;
+    auto          options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const std::vector<int32_t> caps{0, 5, 1, 4, 2, 3, 0, 5, 1, 4, 2, 3, 2, 4, 5};
+    auto caps_d = cudaIntTensor(caps, {batch});
+
+    std::vector<int32_t> top_k;
+    std::vector<float>   top_p;
+    std::vector<int64_t> active, inactive;
+    constexpr int32_t    request_top_k[] = {0, 256, 1024};
+    constexpr float      request_top_p[] = {0.7306f, 0.81f, 0.9203f};
+    for (int b = 0; b < batch; ++b) {
+        for (int row = 0; row < rows; ++row) {
+            top_k.push_back(request_top_k[b % 3]);
+            top_p.push_back(request_top_p[b % 3]);
+            (row <= caps[b] ? active : inactive).push_back(b * rows + row);
+        }
+    }
+    ASSERT_EQ(active.size(), 56u);
+    ASSERT_EQ(inactive.size(), 34u);
+    auto active_d   = torch::tensor(active, options.dtype(torch::kInt64));
+    auto inactive_d = torch::tensor(inactive, options.dtype(torch::kInt64));
+
+    // adaptive_unpack initializes absent rows to zero. Make one inactive row
+    // nonuniform as a sentinel, so processing it accidentally cannot pass the
+    // test merely because the old threshold happens to retain all tied values.
+    auto original      = torch::zeros({count, vocab}, options);
+    auto populated_row = torch::full({vocab}, -12.0f, options);
+    populated_row.slice(0, 0, 2048).copy_(torch::linspace(6.0, -4.0, 2048, options));
+    original.index_copy_(0, active_d, populated_row.repeat({static_cast<int64_t>(active.size()), 1}));
+    original.select(0, inactive.front()).copy_(populated_row);
+
+    GreedyParams unmasked;
+    unmasked.logits                       = original.clone();
+    unmasked.input_lengths                = torch::ones({count}, options.dtype(torch::kInt32));
+    unmasked.sequence_lengths             = unmasked.input_lengths;
+    unmasked.token_ids                    = pinnedIntTensor(std::vector<int32_t>(count * 2, 0)).reshape({count, 2});
+    unmasked.step                         = 1;
+    unmasked.top_k                        = pinnedIntTensor(top_k);
+    unmasked.top_p                        = pinnedFloatTensor(top_p);
+    unmasked.temperature                  = pinnedFloatTensor(std::vector<float>(count, 1.0f));
+    unmasked.defer_token_sampling         = true;
+    unmasked.allow_compact_deferred_output = true;
+    auto masked                           = unmasked;
+    masked.logits                         = original.clone();
+    masked.deferred_filter_caps           = caps_d;
+    masked.deferred_filter_rows           = rows;
+
+    // Mixed K/P must exercise the real dense fallback, not the compact filter.
+    auto old_output = execSampleGreedy(unmasked);
+    auto new_output = execSampleGreedy(masked);
+    ASSERT_TRUE(old_output.deferred_token_sampling);
+    ASSERT_TRUE(new_output.deferred_token_sampling);
+    ASSERT_FALSE(old_output.deferred_logits.defined());
+    ASSERT_FALSE(new_output.deferred_logits.defined());
+
+    auto reference = unmasked.logits.index_select(0, active_d).exp();
+    auto actual    = masked.logits.index_select(0, active_d).exp();
+    EXPECT_TRUE(torch::equal(reference > 0, actual > 0));
+    EXPECT_TRUE(torch::allclose(actual, reference, 3e-5, 2e-7));
+
+    // Dense AirTopP must initialize every excluded row to its input probability.
+    for (auto& k : top_k) {
+        if (k == 0) {
+            k = 1 << 30;
+        }
+    }
+    auto pre_top_p = torch::empty_like(original);
+    const auto stream = reinterpret_cast<int64_t>(at::cuda::getCurrentCUDAStream().stream());
+    top_k_renorm_probs(torch::softmax(original, -1), pre_top_p, pinnedIntTensor(top_k), 0, stream);
+    auto inactive_output = masked.logits.index_select(0, inactive_d).exp();
+    auto inactive_input  = pre_top_p.index_select(0, inactive_d);
+    EXPECT_TRUE(torch::allclose(inactive_output, inactive_input, 3e-5, 2e-7));
+    EXPECT_EQ(unmasked.logits[inactive.front()][vocab - 1].exp().item<float>(), 0.0f);
+    EXPECT_GT(masked.logits[inactive.front()][vocab - 1].exp().item<float>(), 0.0f);
+
+    RejectionSamplingParams reject;
+    reject.draft_token_ids_d           = torch::zeros({batch, rows - 1}, options.dtype(torch::kInt32));
+    reject.do_sample_d                 = torch::ones({batch}, options.dtype(torch::kBool));
+    reject.acceptance_cap              = caps_d;
+    reject.output_token_ids_d          = torch::empty({batch, rows}, options.dtype(torch::kInt32));
+    reject.output_accepted_token_num_d = torch::empty({batch}, options.dtype(torch::kInt32));
+    reject.deferred_token_sampling     = true;
+    reject.draft_point_mass            = true;
+    for (int b = 0; b < batch; ++b) {
+        reject.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+        reject.generator.back().set_current_seed(12345 + b);
+        reject.generator.back().set_offset(0);
+    }
+    reject.target_logits_d = unmasked.logits.reshape({batch, rows, vocab});
+    execRejectionSampling(reject);
+    auto expected_ids     = reject.output_token_ids_d.clone();
+    auto expected_lengths = reject.output_accepted_token_num_d.clone();
+    for (auto& generator : reject.generator) {
+        EXPECT_EQ(generator.get_offset(), 32u);
+        generator.set_offset(0);
+    }
+    reject.target_logits_d = masked.logits.reshape({batch, rows, vocab});
+    execRejectionSampling(reject);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    EXPECT_TRUE(torch::equal(reject.output_token_ids_d, expected_ids));
+    EXPECT_TRUE(torch::equal(reject.output_accepted_token_num_d, expected_lengths));
+    EXPECT_TRUE(torch::all(expected_lengths <= caps_d + 1).item<bool>());
+    EXPECT_EQ(expected_lengths[0].item<int>(), 1);
+    for (const auto& generator : reject.generator) {
+        EXPECT_EQ(generator.get_offset(), 32u);
+    }
+}
+
 TEST_F(CudaSamplerTest, testCompactDeferredGumbelMatchesDense) {
     initializeSamplerPython();
     const auto* properties = at::cuda::getCurrentDeviceProperties();

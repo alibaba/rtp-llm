@@ -406,20 +406,26 @@ __global__ void AirTopPRenormRadixKernel(Counter<T>* counters, HisT<IsDeterminis
 template <typename T, typename HisT_>
 __global__ void AirTopPRenormInitKernel(Counter<T>* counters, int len, T const* in,
                                         float* top_p_arr, float top_p_val, HisT_* histograms,
-                                        IdxT* countHistograms) {
+                                        IdxT* countHistograms, const int32_t* rowCaps,
+                                        uint32_t rowsPerRequest) {
   auto const batchIdx = blockIdx.x;
+  // The cap row is used to sample the recovery or bonus token.
+  const bool active = !rowCaps ||
+      static_cast<int32_t>(batchIdx % rowsPerRequest) <= rowCaps[batchIdx / rowsPerRequest];
+  const int activeLen = active ? len : 0;
   Counter<T>* counter = counters + batchIdx;
   if (threadIdx.x == 0) {
     counter->in = in + batchIdx * len;
-    counter->len = len;
-    counter->oriLen = len;
-    counter->previousLen = len;
+    counter->len = activeLen;
+    counter->oriLen = activeLen;
+    counter->previousLen = activeLen;
     counter->p = top_p_arr ? top_p_arr[batchIdx] : top_p_val;
     counter->sum = 0;
     counter->kthValueBits = 0;
     counter->finishedBlockCnt = 0;
     counter->filterCnt = 0;
   }
+  if (!active) return;
   HisT_* hist = histograms + batchIdx * NUM_BUCKETS;
   IdxT* cntHist = countHistograms + batchIdx * NUM_BUCKETS;
   for (int i = threadIdx.x; i < NUM_BUCKETS; i += blockDim.x) {
@@ -435,6 +441,13 @@ __global__ void AirTopPRenormApplyKernel(T const* probs, T* renormedProbs, Count
                                          int vocabSize) {
   int const batchId = blockIdx.x;
   int const tid = threadIdx.x;
+  if (counters[batchId].oriLen == 0) {
+    // Keep an initialized dense tensor for subsequent log and rejection kernels.
+    for (int i = tid; i < vocabSize; i += blockDim.x) {
+      renormedProbs[batchId * vocabSize + i] = probs[batchId * vocabSize + i];
+    }
+    return;
+  }
   T const threshold = twiddleOut<T>(counters[batchId].kthValueBits, false);
   float threadSum = 0.0f;
   for (int i = tid; i < vocabSize; i += blockDim.x) {
@@ -492,7 +505,8 @@ uint32_t CalcAirTopPBlockNum(int batchSize, int len, int smCnt) {
 template <bool IsDeterministic, typename DType>
 cudaError_t AirTopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_arr,
                               uint32_t batch_size, float top_p_val, uint32_t d, void* workspace,
-                              cudaStream_t stream = 0) {
+                              cudaStream_t stream = 0, const int32_t* row_caps = nullptr,
+                              uint32_t rows_per_request = 0) {
   using HisT_ = HisT<IsDeterministic, DType>;
 
   int dev, smCnt;
@@ -515,7 +529,8 @@ cudaError_t AirTopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_a
   DType* buf2 = reinterpret_cast<DType*>(ws + countersSize + histSize + countHistSize + buf1Size);
 
   AirTopPRenormInitKernel<DType, HisT_><<<batch_size, 256, 0, stream>>>(
-      counters, d, probs, top_p_arr, top_p_val, histograms, countHistograms);
+      counters, d, probs, top_p_arr, top_p_val, histograms, countHistograms, row_caps,
+      rows_per_request);
 
   dim3 grid(blockNum, batch_size);
   constexpr int numPasses = NUM_PASSES<DType>;
