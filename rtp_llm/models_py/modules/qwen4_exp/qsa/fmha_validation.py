@@ -211,6 +211,8 @@ def _validate_main_paged_geometry(
         return page_size
     for receipt in getattr(self, "_model_prefill_geometry", None) or ():
         if receipt.matches(self, cache, block_table, sequence_bases, query_lengths):
+            if checks is not None:
+                checks.prefill_metadata_readonly = True
             return receipt.page_size
     page_size = _try_validate_main_paged_geometry(
         self,
