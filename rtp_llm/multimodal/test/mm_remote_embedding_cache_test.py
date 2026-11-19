@@ -323,6 +323,17 @@ class RemoteCacheTest(unittest.TestCase):
         return result
 
     def metric_values(self, reporter, metric):
+        stages = GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC
+        if metric is AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC:
+            return [(1, tags) for _, tags in self.metric_values(reporter, stages)]
+        if metric is AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC:
+            return [
+                (
+                    int(tags["status"] in ("error", "timeout")),
+                    {"operation": tags["operation"], "stage": tags["stage"]},
+                )
+                for _, tags in self.metric_values(reporter, stages)
+            ]
         return [
             (c.args[1], c.args[2])
             for c in reporter.call_args_list
@@ -1001,9 +1012,9 @@ class RemoteCacheTest(unittest.TestCase):
             report, AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC
         )
         self.assertEqual(len(creations), 1)
-        self.assertEqual(creations[0][1]["status"], "success")
+        self.assertEqual(creations[0][0], 1)
         stages = self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC)
-        self.assertEqual(sum(v for v, t in stages if t["stage"] == "client_acquire"), 5)
+        self.assertFalse(any(t["stage"] == "client_acquire" for _, t in stages))
         self.assertFalse(any(t["stage"] == "client_init" for _, t in stages))
 
     def test_local_validation_does_not_retire_healthy_client(self):
@@ -1169,19 +1180,11 @@ class RemoteCacheTest(unittest.TestCase):
         creations = self.metric_values(
             report, AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC
         )
-        self.assertEqual([t["status"] for _, t in creations], ["error", "success"])
+        self.assertEqual([v for v, _ in creations], [1, 1])
         errors = self.metric_values(
             report, AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC
         )
         self.assertEqual([v for v, _ in errors], [1, 0])
-        self.assertEqual(
-            len(
-                self.metric_values(
-                    report, GaugeMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_RT_METRIC
-                )
-            ),
-            2,
-        )
 
     def test_metadata_outcomes_do_not_confuse_lookup_with_payload_hit(self):
         payload = pack_object(plan_object((torch.ones(3, 4), None)))
@@ -1270,10 +1273,7 @@ class RemoteCacheTest(unittest.TestCase):
             if tags["operation"] == "read":
                 self.assertEqual(tags["stage"], "all")
                 counts[tags["status"]] = counts.get(tags["status"], 0) + value
-        self.assertEqual(counts, dict(total=4, success=2, error=1, skipped=1))
-        self.assertEqual(
-            counts["total"], sum(counts[k] for k in ("success", "error", "skipped"))
-        )
+        self.assertEqual(counts, dict(success=2, error=1, skipped=1))
 
     def test_payload_budget_rejection_is_one_skipped_call_not_a_failure(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))
@@ -1289,9 +1289,7 @@ class RemoteCacheTest(unittest.TestCase):
             )
             if t["operation"] == "read"
         ]
-        self.assertEqual(
-            values, [(1, "total"), (0, "success"), (0, "error"), (1, "skipped")]
-        )
+        self.assertEqual(values, [(1, "skipped")])
 
     def test_remote_read_metrics_separate_hit_miss_and_error(self):
         data = pack_object(plan_object((torch.ones(3, 4), None)))
@@ -1561,20 +1559,19 @@ class RemoteCacheTest(unittest.TestCase):
                         report, AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC
                     ),
                 )
-                for label, expected in (
-                    ("total", 1),
-                    ("skipped", int(skipped)),
-                    ("error", int(not skipped)),
-                ):
-                    self.assertIn(
-                        (
-                            expected,
-                            {"operation": "write", "stage": "all", "status": label},
-                        ),
-                        self.metric_values(
-                            report, AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC
-                        ),
-                    )
+                self.assertIn(
+                    (
+                        1,
+                        {
+                            "operation": "write",
+                            "stage": "all",
+                            "status": "skipped" if skipped else "error",
+                        },
+                    ),
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC
+                    ),
+                )
 
     def test_sdk_timeout_types_are_classified_in_write_and_stage_metrics(self):
         for error_type in (TimeoutError, concurrent.futures.TimeoutError):
@@ -3312,14 +3309,14 @@ class GdrStartupLifetimeTest(unittest.TestCase):
                 )
             # The later server initialization neither resets nor re-registers.
             reporter.init()
-            self.assertEqual(backend.register_acc_metric.call_count, len(AccMetrics))
+            self.assertEqual(backend.register_acc_metric.call_count, len(AccMetrics) - 3)
             clock.time.return_value = 101.0
             points = reporter._matic_map[
                 AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC.value
             ].fetch_reported_data()
             self.assertEqual(
-                {p.tags["status"]: p.value for p in points},
-                {"success": 1.0, "timeout": 1.0},
+                {p.tags["transport"]: p.value for p in points},
+                {"gdr": 2.0},
             )
             errors = reporter._matic_map[
                 AccMetrics.VIT_REMOTE_EMB_CLIENT_CREATE_ERROR_QPS_METRIC.value
@@ -3389,15 +3386,15 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             ]
             self.assertEqual(
                 [(c.args[1], c.args[2]) for c in created],
-                [(1, {"transport": "gdr", "status": "success"})],
+                [(1, {"transport": "gdr"})],
             )
             acquired = [
                 c
                 for c in report.call_args_list
-                if c.args[0] == AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC
+                if c.args[0] == GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC
                 and c.args[2]["stage"] == "client_acquire"
             ]
-            self.assertEqual(len(acquired), 2)
+            self.assertEqual(acquired, [])
 
 
 class V41CppPlaceholderTest(unittest.TestCase):
