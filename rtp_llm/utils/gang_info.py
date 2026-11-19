@@ -10,10 +10,14 @@ if TYPE_CHECKING:
 
 def get_gang_member(gang_info: dict[str, Any], node_rank: int) -> dict[str, Any] | None:
     """Use RTP's C2 member naming rule for both master and local-node lookup."""
-    for name, info in gang_info.items():
-        if name.endswith(f"part{node_rank}") or name.endswith(f"-rank-{node_rank}"):
-            return info
-    return None
+    members = {
+        name: info
+        for name, info in gang_info.items()
+        if name.endswith(f"part{node_rank}") or name.endswith(f"-rank-{node_rank}")
+    }
+    if len(members) > 1:
+        raise ValueError(f"ambiguous gang members for node_rank={node_rank}: {sorted(members)}")
+    return next(iter(members.values()), None)
 
 
 class GangInfoReader:

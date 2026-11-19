@@ -144,6 +144,10 @@ diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp a
 diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
 --- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
 +++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
+@@ -15,1 +15,3 @@
+ #include <vector>
++#include <map>
++#include <set>
 @@ -39,6 +39,8 @@
      MetricsSystem &operator=(const MetricsSystem &) = delete;
 

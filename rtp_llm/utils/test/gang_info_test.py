@@ -42,6 +42,19 @@ class GangInfoTest(unittest.TestCase):
                 self.assertIs(get_gang_member(rows, 1), second)
                 self.assertIsNone(get_gang_member(rows, 2))
 
+    def test_member_lookup_rejects_duplicate_ranks_in_either_key_order(self):
+        for names in (
+            ("prefill_part0", "prefill-rank-0"),
+            ("prefill_part0", "decode_part0"),
+        ):
+            for ordered in (names, names[::-1]):
+                with self.subTest(names=ordered):
+                    rows = {name: {"ip": f"192.0.2.{i + 1}"} for i, name in enumerate(ordered)}
+                    with self.assertRaisesRegex(ValueError, "ambiguous gang members") as error:
+                        get_gang_member(rows, 0)
+                    for name in names:
+                        self.assertIn(name, str(error.exception))
+
     def test_member_lookup_distinguishes_part1_from_part10(self):
         rows = {"prefill_part10": {"ip": "22.0.1.12"}}
         self.assertIsNone(get_gang_member(rows, 1))
