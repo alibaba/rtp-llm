@@ -96,6 +96,10 @@ public final class KvcmGrpcClient implements AutoCloseable {
         return standby;
     }
 
+    public synchronized HealthSnapshot healthSnapshot() {
+        return new HealthSnapshot(leader != null, standby, queryFailures, heartbeatFailures, recoverySuccesses);
+    }
+
     public Map<String, Integer> findMatchingEngines(List<Long> keys, long blockSize, List<String> candidates) {
         return lookup(keys, blockSize, candidates).localMatches();
     }
@@ -315,4 +319,10 @@ public final class KvcmGrpcClient implements AutoCloseable {
      * Local matches drive routing; global matches are collected only for telemetry.
      */
     public record MatchObservation(Map<String, Integer> localMatches, Map<String, Long> globalMatches) {}
+
+    /**
+     * Captures the local client's failover counters without probing KVCM.
+     */
+    public record HealthSnapshot(boolean leaderKnown, boolean standbyRecommended, int consecutiveQueryFailures,
+                                 int consecutiveHeartbeatFailures, int recoverySuccesses) {}
 }

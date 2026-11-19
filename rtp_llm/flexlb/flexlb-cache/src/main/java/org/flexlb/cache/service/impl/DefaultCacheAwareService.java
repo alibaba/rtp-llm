@@ -2,6 +2,8 @@ package org.flexlb.cache.service.impl;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.KvCacheManager;
+import org.flexlb.cache.domain.CacheMatchStatus;
+import org.flexlb.cache.domain.CacheMatchStatus.Source;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
@@ -85,6 +87,21 @@ public class DefaultCacheAwareService implements CacheAwareService {
             reportFindLatency(role, started, FIND_METRIC_FAILURE);
             throw failure;
         }
+    }
+
+    public CacheMatchStatus status() {
+        if (kvcm == null || !kvcm.enabled()) {
+            return new CacheMatchStatus(false, false, Source.LOCAL_SYNC, false, Source.LOCAL_SYNC,
+                    null, false, false, 0, 0, 0, 0, 0);
+        }
+        var health = kvcm.healthSnapshot();
+        boolean autoSwitch = standby.autoSwitch();
+        Source source = autoSwitch && health.standbyRecommended() ? Source.LOCAL_STANDBY : Source.KVCM;
+        return new CacheMatchStatus(true, true, Source.KVCM, autoSwitch, source,
+                source == Source.KVCM ? Source.LOCAL_STANDBY : null,
+                health.leaderKnown(), health.standbyRecommended(), health.consecutiveQueryFailures(),
+                health.consecutiveHeartbeatFailures(), health.recoverySuccesses(),
+                standby.mappingCount(), standby.maximumEntryCount());
     }
 
     @Override

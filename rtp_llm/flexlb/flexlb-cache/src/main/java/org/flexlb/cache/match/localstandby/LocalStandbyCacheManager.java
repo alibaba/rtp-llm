@@ -57,6 +57,14 @@ public class LocalStandbyCacheManager {
         return config.isAutoSwitch();
     }
 
+    public long mappingCount() {
+        return index.mappingCount();
+    }
+
+    public long maximumEntryCount() {
+        return index.maximumEntryCount();
+    }
+
     public void observe(WorkerStatus worker) {
         if (updates != null && worker.isActiveGeneration()) {
             workers.put(worker.getIpPort(), worker);
