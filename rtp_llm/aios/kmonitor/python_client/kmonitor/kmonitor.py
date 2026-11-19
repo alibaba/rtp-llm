@@ -30,10 +30,17 @@ class KMonitor(object):
         metric_tags = self.default_tags.copy()
         metric_tags.update(tags)
         metric = MetricFactory.create_metric(type, name, metric_tags)
+        logging.debug("kmonitor registered metric [%s][%s]", type, name)
+        return self._register_metric(metric)
+
+    def register_custom_metric(self, metric: MetricBase) -> MetricBase:
+        metric.tags = dict(self.default_tags, **metric.tags)
+        return self._register_metric(metric)
+
+    def _register_metric(self, metric: MetricBase) -> MetricBase:
         self.report_worker.register_metric(metric)
         with self.lock:
-            self.metrics[name] = metric
-        logging.debug("kmonitor registered metric [%s][%s]", type, name)
+            self.metrics[metric.name] = metric
         return metric
 
     def register_gauge_metric(self, name: str, tags: Dict[str, str] = {}) -> MetricBase:
