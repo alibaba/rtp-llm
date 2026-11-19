@@ -364,6 +364,14 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     auto generate_stream        = engine_->makeStream(input);
     decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
     decode_context.setStream(generate_stream);
+    if (generate_stream->hasError()) {
+        // The scheduler has not taken ownership; settle the stream before reporting the admission error to P.
+        decode_context.error_info = generate_stream->statusInfo();
+        generate_stream->moveToNext();
+        decode_context.error_status =
+            serializeErrorMsg(decode_context.request_key, decode_context.request_info, decode_context.error_info);
+        return;
+    }
 
     auto cache_manager = engine_->getCacheManager();
     RTP_LLM_CHECK_WITH_INFO(cache_manager != nullptr, "decode cache manager is null");

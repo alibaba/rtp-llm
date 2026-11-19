@@ -76,6 +76,7 @@ public:
     AllocationErrorCacheManager(const CacheConfig& config, ErrorInfo error):
         CoordinatorCacheManager(config), error_(std::move(error)) {}
 
+    size_t allocation_calls{0};
     size_t allocated_blocks{0};
     size_t released_blocks{0};
 
@@ -86,6 +87,7 @@ public:
 
 protected:
     MallocResult initMallocForCommonLen(const MallocInfo& info) override {
+        ++allocation_calls;
         auto result = CoordinatorCacheManager::initMallocForCommonLen(info);
         if (result.success) {
             auto coordinator = std::make_shared<LoadContextCoordinator>([](const auto&) { return true; }, [](auto&) {});
@@ -99,6 +101,7 @@ protected:
     }
 
     MallocResult incrMalloc(const MallocInfo& info) override {
+        ++allocation_calls;
         auto result      = CoordinatorCacheManager::incrMalloc(info);
         allocated_blocks = info.batch_kv_cache_resource->curBlocksNum();
         return result;
@@ -135,6 +138,9 @@ public:
         const auto params = parameters();
         stream            = std::make_shared<NormalGenerateStream>(
             input, params.model_config_, params.runtime_config, resource_context_, nullptr);
+        if (admission_error.hasError()) {
+            stream->reportError(admission_error.code(), admission_error.ToString());
+        }
         return stream;
     }
     GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
@@ -156,6 +162,7 @@ public:
 
     std::shared_ptr<KVCacheManager>              cache;
     std::shared_ptr<AllocationErrorCacheManager> allocator;
+    ErrorInfo                                    admission_error;
     GenerateStreamPtr                            stream;
 };
 
@@ -673,6 +680,35 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 }
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
+
+TEST_F(PrefillCompletionRpcTest, AdmissionErrorReturnsBeforeKvAllocation) {
+    auto engine = std::make_shared<AllocationErrorEngine>(ErrorInfo::OkStatus());
+    engine->admission_error = ErrorInfo(ErrorCode::INVALID_PARAMS, "DSpark does not support return_all_probs");
+    DecodeRpcServer server;
+    server.engine_ = engine;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeGenerateContext        context(rpc_context, 0, nullptr, reporter, meta);
+    context.request_key = "invalid-before-allocation";
+    auto* input = context.allocate_request.mutable_input();
+    input->add_token_ids(1);
+    auto* config = input->mutable_generate_config();
+    config->set_max_new_tokens(8);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
+
+    server.allocateResource(context);
+
+    EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(context.error_info.code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(context.error_info.ToString(), engine->admission_error.ToString());
+    ASSERT_NE(engine->stream, nullptr);
+    EXPECT_TRUE(engine->stream->isFinished());
+    EXPECT_EQ(engine->allocator->allocation_calls, 0u);
+    EXPECT_EQ(context.retry_times, 0);
+    context.markRpcHandlingCompleted();
+}
 
 TEST_F(PrefillCompletionRpcTest, AllocationLoadTimeoutPreservesDeadlineAndReleasesResources) {
     for (bool timeout : {false, true}) {
