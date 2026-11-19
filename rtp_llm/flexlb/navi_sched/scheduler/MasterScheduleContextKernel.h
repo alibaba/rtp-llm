@@ -88,6 +88,7 @@ private:
     int64_t _queueOverloadFullCycleMultiplier = 30;
     double _timeCompression = 1.0;
     bool _peerCacheEnabled = false;
+    bool _cacheTouchEnabled = true;
     uint64_t _peerCacheReadyConfigGeneration = 0;
     std::shared_ptr<const std::unordered_set<std::string>> _peerCacheReadyAgents;
     int64_t _requestPipeGeneration = 0;

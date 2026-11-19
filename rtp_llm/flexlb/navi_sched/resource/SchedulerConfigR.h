@@ -53,6 +53,7 @@ public:
 
         CostSchedulerConfig cost;
         bool peerCacheEnabled = false;
+        bool cacheTouchEnabled = true;
         std::vector<std::string> peerCacheReadyAgents;
         size_t maxWaitScheduleCount = 30;
         int64_t maxWaitScheduleTimeMs = 30;
