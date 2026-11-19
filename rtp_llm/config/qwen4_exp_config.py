@@ -269,6 +269,12 @@ def build_qwen4_quant_config(quantization, source_fp8):
             is_quanted=False,
             activation_amax=32.0,
             online_cache_dir=getattr(requested, "online_cache_dir", None),
+            decode_b12x_max_rows=getattr(requested, "decode_b12x_max_rows", 16),
+            decode_cutlass_profile_ids=getattr(
+                requested, "decode_cutlass_profile_ids", None
+            ),
+            decode_shared_gemm_nk=getattr(requested, "decode_shared_gemm_nk", False),
+            decode_lsa_timeout_ms=getattr(requested, "decode_lsa_timeout_ms", 0),
             prefill_library=getattr(requested, "prefill_library", None),
             prefill_library_sha256=getattr(requested, "prefill_library_sha256", None),
             source_fp8_block_size=128,

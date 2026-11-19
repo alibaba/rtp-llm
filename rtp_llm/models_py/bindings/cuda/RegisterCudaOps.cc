@@ -4,6 +4,13 @@
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/common/CpuTpStatus.h"
 
+#ifdef RTP_ENABLE_SM120_LSA
+#include "rtp_llm/models_py/kernels/cuda/qwen38_moe/reduce_gate.h"
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#endif
+
 #if defined(ENABLE_FP4)
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp4_quant.h"
 #endif
@@ -13,7 +20,86 @@
 
 namespace rtp_llm {
 
+#ifdef RTP_ENABLE_SM120_LSA
+namespace {
+void checkLsa(int status) {
+    if (status)
+        throw std::runtime_error(qwen38_lsa_error());
+}
+
+void registerLsaBindings(py::module& ops) {
+    auto m = ops.def_submodule("_qwen38_lsa");
+    m.def("device", [](int ordinal) {
+        char bus_id[32];
+        checkLsa(qwen38_lsa_device(ordinal, bus_id, sizeof(bus_id)));
+        return std::string(bus_id);
+    });
+    m.def("check_peer", [](int ordinal, const std::string& peer) {
+        checkLsa(qwen38_lsa_peer(ordinal, peer.c_str()));
+    });
+    m.def("unique_id", []() {
+        std::string uid(qwen38_lsa_uid_size(), '\0');
+        checkLsa(qwen38_lsa_unique_id(uid.data()));
+        return py::bytes(uid);
+    });
+    m.def("allocate", [](int device, int hidden) {
+        void* handle = nullptr;
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_allocate(device, hidden, &handle));
+        return reinterpret_cast<uintptr_t>(handle);
+    });
+    m.def("set_timeout", [](uintptr_t handle, int timeout_ms) {
+        checkLsa(qwen38_lsa_set_timeout(reinterpret_cast<void*>(handle), timeout_ms));
+    });
+    m.def("connect", [](uintptr_t handle, int rank, const py::bytes& value) {
+        const std::string uid = value;
+        if (uid.size() != static_cast<size_t>(qwen38_lsa_uid_size()))
+            throw std::invalid_argument("Invalid LSA NCCL unique ID size");
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_connect(reinterpret_cast<void*>(handle), rank, uid.data()));
+    });
+    m.def("check_capability", [](uintptr_t handle) {
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_check_capability(reinterpret_cast<void*>(handle)));
+    });
+    m.def("activate", [](uintptr_t handle) {
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_activate(reinterpret_cast<void*>(handle)));
+    });
+    m.def("apply", [](uintptr_t handle,
+                      uintptr_t partial,
+                      uintptr_t shared,
+                      uintptr_t gate,
+                      uintptr_t output,
+                      int rows,
+                      uintptr_t stream) {
+        checkLsa(qwen38_lsa_apply(reinterpret_cast<void*>(handle),
+                                 reinterpret_cast<const void*>(partial),
+                                 reinterpret_cast<const void*>(shared),
+                                 reinterpret_cast<const void*>(gate),
+                                 reinterpret_cast<void*>(output),
+                                 rows,
+                                 reinterpret_cast<void*>(stream)));
+    });
+    m.def("reference", [](uintptr_t handle, uintptr_t partial, uintptr_t output, int rows, uintptr_t stream) {
+        checkLsa(qwen38_lsa_reference(reinterpret_cast<void*>(handle),
+                                     reinterpret_cast<const void*>(partial),
+                                     reinterpret_cast<void*>(output),
+                                     rows,
+                                     reinterpret_cast<void*>(stream)));
+    });
+    m.def("destroy", [](uintptr_t handle) {
+        py::gil_scoped_release release;
+        qwen38_lsa_destroy(reinterpret_cast<void*>(handle));
+    });
+}
+}  // namespace
+#endif
+
 void registerPyModuleOps(py::module& rtp_ops_m) {
+#ifdef RTP_ENABLE_SM120_LSA
+    registerLsaBindings(rtp_ops_m);
+#endif
     rtp_ops_m.def("cpu_status_size", &cpu_status_size, py::arg("world_size") = 2);
     rtp_ops_m.def(
         "cpu_status_initialize",

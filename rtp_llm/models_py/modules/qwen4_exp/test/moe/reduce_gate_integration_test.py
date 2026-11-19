@@ -1,0 +1,521 @@
+"""Run with torchrun --standalone --nproc_per_node=2 with the CUDA 13 native extension."""
+
+import gc
+import json
+import os
+import statistics
+import tempfile
+import time
+import unittest
+import weakref
+from pathlib import Path
+from types import MethodType, SimpleNamespace
+from unittest.mock import patch
+
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+from rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate import (
+    prepare_model_reduce,
+)
+from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
+from rtp_llm.models_py.triton_kernels.common.moe_gating import (
+    sigmoid_gate_scale_add_triton,
+)
+
+
+def main():
+    if "LOCAL_RANK" in os.environ:
+        run_worker(int(os.environ["LOCAL_RANK"]))
+    else:
+        if torch.cuda.device_count() < 2:
+            raise RuntimeError("The LSA regression requires two CUDA devices")
+        with tempfile.TemporaryDirectory() as tmp:
+            mp.spawn(run_worker, args=(f"file://{tmp}/rendezvous",), nprocs=2)
+
+
+def run_worker(rank, rendezvous=None):
+    torch.cuda.set_device(rank)
+    group_options = (
+        {}
+        if rendezvous is None
+        else dict(init_method=rendezvous, rank=rank, world_size=2)
+    )
+    if os.environ.get("RTP_TEST_LSA_MISSING_PEER") == "1":
+        run_missing_peer(rank, group_options)
+        return
+    dist.init_process_group("nccl", **group_options)
+    device = torch.device("cuda", rank)
+    results = []
+    for hidden_size in (8, 264, 2048, 2560, 4096, 8192):
+        results.extend(run_hidden_size(device, rank, hidden_size))
+    result_path = os.environ.get("RTP_QWEN4_MOE_LSA_RESULTS")
+    if rank == 0 and result_path:
+        Path(result_path).write_text(json.dumps(results, indent=2) + "\n")
+    dist.destroy_process_group()
+    if rank == 0:
+        print("LSA_MODEL_ENTRY_DONE", flush=True)
+
+
+def run_missing_peer(rank, group_options):
+    from rtp_llm.ops import rtp_llm_ops
+
+    dist.init_process_group("gloo", **group_options)
+    ops = rtp_llm_ops._qwen38_lsa
+    ids = [ops.unique_id() if rank == 0 else None]
+    dist.broadcast_object_list(ids, src=0)
+    hidden = 2560
+    handle = ops.allocate(rank, hidden)
+    ops.set_timeout(handle, 1000)
+    ops.connect(handle, rank, ids[0])
+    ops.check_capability(handle)
+    ops.activate(handle)
+    value = torch.zeros(1, hidden, device="cuda", dtype=torch.bfloat16)
+    output = torch.full_like(value, float("nan"))
+    gate = torch.zeros(1, 1, device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.current_stream()
+    dist.barrier()
+    if rank == 0:
+        start = time.monotonic()
+        ops.apply(
+            handle,
+            value.data_ptr(),
+            value.data_ptr(),
+            gate.data_ptr(),
+            output.data_ptr(),
+            1,
+            stream.cuda_stream,
+        )
+        with unittest.TestCase().assertRaisesRegex(
+            RuntimeError, "unspecified launch failure"
+        ):
+            stream.synchronize()
+        elapsed = time.monotonic() - start
+        assert 0.5 <= elapsed < 15, f"LSA nominal 1s timeout was {elapsed}s"
+        print(
+            f"LSA_MISSING_PEER_TIMEOUT nominal_ms=1000 elapsed_s={elapsed:.6f}",
+            flush=True,
+        )
+    dist.barrier()
+    # A timeout makes the CUDA context unusable. Let the subprocess exit
+    # without attempting to reuse or destroy the test communicator.
+    os._exit(0)
+
+
+def check_startup_fallback(model, config, parallelism, rank, device):
+    from rtp_llm.ops import rtp_llm_ops
+
+    ops = rtp_llm_ops._qwen38_lsa
+    for stage in ("allocate", "check_capability"):
+        with (
+            patch.object(ops, "allocate", wraps=ops.allocate) as allocate,
+            patch.object(ops, "connect", wraps=ops.connect) as connect,
+            patch.object(ops, "check_capability", wraps=ops.check_capability) as check,
+            patch.object(ops, "activate", wraps=ops.activate) as activate,
+            patch.object(ops, "destroy", wraps=ops.destroy) as destroy,
+        ):
+            if rank == 1:
+                failing = allocate if stage == "allocate" else check
+                failing.side_effect = RuntimeError(
+                    f"injected local LSA {stage} failure"
+                )
+            assert prepare_model_reduce(model, config, parallelism) is None
+            assert all(
+                not hasattr(layer.mlp, "_reduce_shared_gate") for layer in model.layers
+            )
+            allocate.assert_called_once_with(device.index, config.hidden_size)
+            if stage == "allocate":
+                connect.assert_not_called()
+                check.assert_not_called()
+            else:
+                connect.assert_called_once()
+                check.assert_called_once()
+            activate.assert_not_called()
+            if stage == "allocate" and rank == 1:
+                destroy.assert_not_called()
+            else:
+                destroy.assert_called_once()
+                assert destroy.call_args.args[0] > 0
+
+        # The original TP communicator is still usable on both ranks.
+        value = torch.full((1,), rank + 1, device=device, dtype=torch.bfloat16)
+        dist.all_reduce(value)
+        assert value.item() == 3
+        if rank == 0:
+            print(f"LSA_STARTUP_SYMMETRIC_FALLBACK {stage}", flush=True)
+
+
+def check_shared_packing(rank, device):
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+        CudaF16Linear,
+    )
+    from rtp_llm.models_py.modules.qwen4_exp.moe import shared_gemm
+    from rtp_llm.utils.model_weight import W
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
+
+    for fail_rank in (0, 1):
+        for failure in ("memory", "layout", "mid_pack", None):
+            torch.manual_seed(816)
+            sources = [
+                {
+                    W.ffn_w13: torch.randn(
+                        2560, 1280, device=device, dtype=torch.bfloat16
+                    ),
+                    W.ffn_w2: torch.randn(
+                        640, 2560, device=device, dtype=torch.bfloat16
+                    ),
+                }
+                for _ in range(2)
+            ]
+            layers = [
+                SimpleNamespace(
+                    mlp=SimpleNamespace(
+                        shared_expert=SimpleNamespace(
+                            up_proj=CudaF16Linear(source[W.ffn_w13]),
+                            down_proj=CudaF16Linear(source[W.ffn_w2]),
+                        )
+                    )
+                )
+                for source in sources
+            ]
+            original = [
+                (layer.mlp.shared_expert.up_proj, layer.mlp.shared_expert.down_proj)
+                for layer in layers
+            ]
+            if rank == fail_rank and failure == "layout":
+                sources[0][W.ffn_w13] = sources[0][W.ffn_w13].clone()
+            pack = shared_gemm._PackedSharedLinear
+            count = 0
+            packed_refs = []
+
+            def allocate(*args):
+                nonlocal count
+                count += 1
+                if rank == fail_rank and failure == "mid_pack" and count == 3:
+                    raise torch.OutOfMemoryError("injected shared packing OOM")
+                result = pack(*args)
+                packed_refs.append(weakref.ref(result.packed_weight))
+                return result
+
+            memory = torch.cuda.mem_get_info(device)
+            with (
+                patch.object(shared_gemm, "_PackedSharedLinear", side_effect=allocate),
+                patch(
+                    "torch.cuda.mem_get_info",
+                    return_value=(
+                        (0, memory[1])
+                        if rank == fail_rank and failure == "memory"
+                        else memory
+                    ),
+                ),
+            ):
+                # Qualification still needs the real projection type.
+                success = shared_gemm.prepare_shared_gemm(
+                    layers, sources, group=dist.group.WORLD
+                )
+            assert success == (failure is None), (rank, fail_rank, failure)
+            if not success:
+                gc.collect()
+                assert all(
+                    ref() is None for ref in packed_refs
+                ), "Failed packing retained a private copy"
+            for layer, source, before in zip(layers, sources, original):
+                shared = layer.mlp.shared_expert
+                for index, key in enumerate((W.ffn_w13, W.ffn_w2)):
+                    assert (
+                        bool(
+                            getattr(
+                                source[key], "_rtp_requires_restart_for_update", False
+                            )
+                        )
+                        == success
+                    )
+                    projection = (shared.up_proj, shared.down_proj)[index]
+                    if not success:
+                        assert projection is before[index]
+                value = torch.ones(4, 2560, device=device, dtype=torch.bfloat16)
+                output = shared.up_proj(value)
+                other = output.clone()
+                dist.broadcast(other, src=0)
+                assert torch.equal(other, output), (rank, fail_rank, failure)
+            manager = ModelWeights(2, str(device), torch.bfloat16)
+            manager.weights = sources
+            for index, source in enumerate(sources):
+                before = source[W.ffn_w13].clone()
+                replacement = torch.zeros_like(before)
+                if success:
+                    with unittest.TestCase().assertRaises(PermissionError):
+                        manager.update_layer_weight(index, W.ffn_w13, replacement)
+                    assert torch.equal(source[W.ffn_w13], before)
+                else:
+                    manager.update_layer_weight(index, W.ffn_w13, replacement)
+                    assert torch.equal(source[W.ffn_w13], replacement)
+            dist.barrier()
+            if rank == 0:
+                print(
+                    "SHARED_PACKING_AGREEMENT", fail_rank, failure, success, flush=True
+                )
+
+
+def run_hidden_size(device, rank, hidden_size):
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+        PureTpRouterNvfp4Cutlass,
+    )
+
+    mlp = SimpleNamespace(
+        fused_moe=SimpleNamespace(
+            router=PureTpRouterNvfp4Cutlass.__new__(PureTpRouterNvfp4Cutlass)
+        ),
+        shared_expert=object(),
+        shared_expert_gate=SimpleNamespace(
+            weight=torch.empty(1, hidden_size, device=device, dtype=torch.bfloat16)
+        ),
+        use_ep_shared_allreduce=False,
+        use_unified_tp_allreduce=False,
+        _shared_stream=None,
+    )
+    model = SimpleNamespace(layers=[SimpleNamespace(mlp=mlp)])
+    config = SimpleNamespace(
+        is_mtp=False,
+        hidden_size=hidden_size,
+        _qwen4_dense_storage="source_bf16",
+        eplb_config=SimpleNamespace(enable_eplb=lambda: False),
+    )
+    parallelism = SimpleNamespace(
+        role_type="DECODE",
+        tp_size=2,
+        ep_size=2,
+        dp_size=1,
+        pp_size=1,
+        local_world_size=2,
+        get_ffn_tp_size=lambda: 1,
+    )
+    with patch.object(collective_torch, "_get_group", return_value=dist.group.WORLD):
+        if hidden_size == 2560:
+            with patch.dict(os.environ, {"NCCL_P2P_DISABLE": str(rank)}):
+                assert prepare_model_reduce(model, config, parallelism) is None
+            # Decline before native communicator creation on either rank.
+            if rank == 1:
+                with patch("torch.cuda.mem_get_info", return_value=(0, 0)):
+                    assert prepare_model_reduce(model, config, parallelism) is None
+            else:
+                assert prepare_model_reduce(model, config, parallelism) is None
+        # A single rank declining must prevent either from creating a communicator.
+        parallelism.ep_size = 4 if rank == 1 else 2
+        assert prepare_model_reduce(model, config, parallelism) is None
+        parallelism.ep_size = 2
+        config.hidden_size = hidden_size + 8 * rank
+        mlp.shared_expert_gate.weight = torch.empty(
+            1, config.hidden_size, device=device, dtype=torch.bfloat16
+        )
+        assert prepare_model_reduce(model, config, parallelism) is None
+        config.hidden_size = hidden_size
+        mlp.shared_expert_gate.weight = torch.empty(
+            1, hidden_size, device=device, dtype=torch.bfloat16
+        )
+        if hidden_size == 2560:
+            config.quant_config = SimpleNamespace(decode_lsa_timeout_ms=1000 * rank)
+            assert prepare_model_reduce(model, config, parallelism) is None
+            config.quant_config = SimpleNamespace(decode_shared_gemm_nk=bool(rank))
+            assert prepare_model_reduce(model, config, parallelism) is None
+            config.quant_config = SimpleNamespace(decode_lsa_timeout_ms=2000)
+            check_startup_fallback(model, config, parallelism, rank, device)
+            check_shared_packing(rank, device)
+        owner = prepare_model_reduce(model, config, parallelism)
+    assert owner is not None, "SM120 CUDA 13 native LSA unavailable"
+    assert mlp._reduce_shared_gate is owner
+    assert not owner.supports(
+        torch.empty(33, hidden_size, device=device, dtype=torch.bfloat16)
+    )
+    assert not owner.supports(
+        torch.empty(1, hidden_size + 8, device=device, dtype=torch.bfloat16)
+    )
+    for invalid_hidden in (0, 7, (2**31 - 1) // 32 + 1):
+        with unittest.TestCase().assertRaisesRegex(RuntimeError, "hidden size"):
+            owner.ops.allocate(device.index, invalid_hidden)
+    results = []
+    for rows in (1, 2, 4, 8, 16, 32):
+        torch.manual_seed(300 + rank + rows)
+        partial = torch.randn(rows, hidden_size, device=device, dtype=torch.bfloat16)
+        shared = torch.randn_like(partial)
+        gate = torch.randn(rows, 1, device=device, dtype=torch.bfloat16)
+        hidden = torch.zeros_like(partial)
+
+        class Shared(torch.nn.Module):
+            def forward(self, value, *, skip_allreduce):
+                assert skip_allreduce
+                return shared.clone()
+
+        class Gate(torch.nn.Module):
+            weight = gate
+
+            def forward(self, value):
+                return gate.clone()
+
+        layer = Qwen4MoeLayer.__new__(Qwen4MoeLayer)
+        torch.nn.Module.__init__(layer)
+        layer.shared_expert = Shared()
+        layer.shared_expert_gate = Gate()
+        layer._reduce_shared_gate = owner
+        layer.parallelism_config = parallelism
+        layer.prepare_reduce_gate_overlap()
+
+        def routed(self, value, *, skip_tp_allreduce=False):
+            assert skip_tp_allreduce
+            return partial
+
+        layer._forward_routed = MethodType(routed, layer)
+
+        def baseline():
+            output = torch.empty_like(partial, memory_format=torch.contiguous_format)
+            reference_partial = partial.contiguous()
+            owner.ops.reference(
+                owner.handle,
+                reference_partial.data_ptr(),
+                output.data_ptr(),
+                rows,
+                torch.cuda.current_stream().cuda_stream,
+            )
+            reference_shared = (
+                shared
+                if shared.is_contiguous() and shared.data_ptr() % 16 == 0
+                else shared.clone(memory_format=torch.contiguous_format)
+            )
+            return sigmoid_gate_scale_add_triton(gate, reference_shared, output)
+
+        def fused():
+            return layer(hidden)
+
+        if rows in (2, 4):
+            aligned_partial, aligned_shared, aligned_hidden = partial, shared, hidden
+            if rank == 1:
+                partial, shared, hidden = (
+                    torch.empty(
+                        rows * hidden_size + 1, device=device, dtype=torch.bfloat16
+                    )[1:].view(rows, hidden_size)
+                    for _ in range(3)
+                )
+                if rows == 4:
+                    partial, shared, hidden = (
+                        torch.empty(
+                            hidden_size, rows, device=device, dtype=torch.bfloat16
+                        ).t()
+                        for _ in range(3)
+                    )
+                    assert all(
+                        not value.is_contiguous() for value in (partial, shared, hidden)
+                    )
+                else:
+                    assert all(
+                        value.data_ptr() % 16 for value in (partial, shared, hidden)
+                    )
+            for value in (partial, shared, gate):
+                value.normal_()
+            assert owner.supports(hidden)
+            expected = baseline()
+            actual = fused()
+            torch.cuda.synchronize()
+            assert torch.equal(actual, expected), (
+                rank,
+                hidden_size,
+                rows,
+                "offset or strided eager",
+            )
+            offset_graph = torch.cuda.CUDAGraph()
+            dist.barrier()
+            with torch.cuda.graph(offset_graph):
+                captured_offset = fused()
+            for value in (partial, shared, gate):
+                value.normal_()
+            expected = baseline()
+            offset_graph.replay()
+            torch.cuda.synchronize()
+            assert torch.equal(captured_offset, expected), (
+                rank,
+                hidden_size,
+                "offset graph",
+            )
+            offset_graph.reset()
+            partial, shared, hidden = aligned_partial, aligned_shared, aligned_hidden
+
+        if hidden_size == 2560 and rows == 1:
+            # A legal late arrival below the opt-in deadline must not fault.
+            expected = baseline()
+            dist.barrier()
+            if rank == 1:
+                time.sleep(0.1)
+            actual = fused()
+            torch.cuda.synchronize()
+            assert torch.equal(actual, expected)
+            if rank == 0:
+                print(
+                    "LSA_DELAYED_PEER_PASSED timeout_ms=2000 delay_ms=100", flush=True
+                )
+
+        for pattern in range(12):
+            partial.normal_(mean=pattern / 10)
+            shared.normal_()
+            gate.normal_(std=pattern + 1)
+            reference = baseline()
+            actual = fused()
+            torch.cuda.synchronize()
+            assert torch.equal(actual, reference), (rank, rows, pattern)
+        graph = torch.cuda.CUDAGraph()
+        dist.barrier()
+        with torch.cuda.graph(graph):
+            captured = fused()
+        for _ in range(12):
+            partial.normal_()
+            shared.normal_()
+            gate.normal_(std=4)
+            reference = baseline()
+            graph.replay()
+            torch.cuda.synchronize()
+            assert torch.equal(captured, reference), (rank, rows, "dynamic graph")
+        timings = {}
+        for name, call in (("nccl_triton", baseline), ("staged_lsa_fused", fused)):
+            dist.barrier()
+            for _ in range(5):
+                call()
+            torch.cuda.synchronize()
+            timed = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(timed):
+                for _ in range(64):
+                    output = call()
+            samples = []
+            for _ in range(15):
+                dist.barrier()
+                start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+                    enable_timing=True
+                )
+                start.record()
+                timed.replay()
+                end.record()
+                end.synchronize()
+                duration = torch.tensor(
+                    start.elapsed_time(end) * 1000 / 64, device=device
+                )
+                dist.all_reduce(duration, op=dist.ReduceOp.MAX)
+                samples.append(duration.item())
+            timings[name] = statistics.median(samples)
+        results.append(
+            dict(hidden_size=hidden_size, rows=rows, bitwise=True, times_us=timings)
+        )
+        if rank == 0:
+            print("LSA_MODEL_ENTRY_CASE", json.dumps(results[-1]), flush=True)
+    # Model close retains contexts until process exit. Tests explicitly destroy
+    # only after both ranks synchronize and all graph users have finished.
+    torch.cuda.synchronize()
+    dist.barrier()
+    owner.ops.destroy(owner.handle)
+    owner.handle = None
+    owner.close()
+    with unittest.TestCase().assertRaisesRegex(RuntimeError, "closed"):
+        owner.prepare_output(hidden)
+    return results
+
+
+if __name__ == "__main__":
+    main()

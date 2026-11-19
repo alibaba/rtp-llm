@@ -24,6 +24,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
     _shared_stream = None
     _reused_shared_stream = None
+    _reduce_gate_shared_stream = None
 
     def prepare_shared_expert_overlap(self) -> None:
         """Allocate streams only for the explicitly qualified Qwen4 layout."""
@@ -31,6 +32,9 @@ class Qwen4MoeLayer(GenericMoeLayer):
         from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
             CutlassNvfp4Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.nvfp4_hybrid_executor import (
+            Nvfp4HybridExecutor,
         )
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
             PureTpRouterNvfp4Cutlass,
@@ -55,7 +59,8 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and type(shared) is DenseMLP
             and type(self.fused_moe) is FusedMoe
             and type(self.fused_moe.router) is PureTpRouterNvfp4Cutlass
-            and type(self.fused_moe.fused_experts) is CutlassNvfp4Executor
+            and type(self.fused_moe.fused_experts)
+            in (CutlassNvfp4Executor, Nvfp4HybridExecutor)
             and type(shared.up_proj) is Fp8Linear
             and type(shared.down_proj) is Fp8Linear
             and type(self.shared_expert_gate) is Fp8Linear
@@ -75,7 +80,31 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._shared_input_ready = torch.cuda.Event()
         self._shared_output_ready = torch.cuda.Event()
 
+    def prepare_reduce_gate_overlap(self) -> None:
+        role = str(getattr(self.parallelism_config, "role_type", "")).rsplit(".", 1)[-1]
+        if role != "DECODE":
+            return
+        # The reduce-gate owner is attached only after both ranks agree
+        # on a local shared expert and no shared-branch collective.
+        device = self.shared_expert_gate.weight.device
+        self._reduce_gate_shared_stream = _shared_stream_for_device(device.index)
+        self._shared_input_ready = torch.cuda.Event()
+        self._shared_output_ready = torch.cuda.Event()
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        reduce_shared = getattr(self, "_reduce_shared_gate", None)
+        if reduce_shared is not None and reduce_shared.supports(hidden_states):
+            output = reduce_shared.prepare_output(hidden_states)
+            stream = self._reduce_gate_shared_stream
+            if stream is None:
+                experts = self._forward_routed(hidden_states, skip_tp_allreduce=True)
+                shared = self.shared_expert(hidden_states, skip_allreduce=True)
+                gate = self.shared_expert_gate(hidden_states)
+            else:
+                experts, shared, gate = self._overlap_shared_branch(
+                    hidden_states, stream, skip_tp_allreduce=True
+                )
+            return reduce_shared(experts, shared, gate, output)
         stream = self._shared_stream
         # Larger shapes did not improve in the complete TP2 consumer. Keep
         # their established schedule and each layer's distinct event pair.
@@ -97,6 +126,13 @@ class Qwen4MoeLayer(GenericMoeLayer):
         ):
             return super().forward(hidden_states)
 
+        experts, shared, gate = self._overlap_shared_branch(hidden_states, stream)
+        self.sigmoid_gate_scale_add(gate, shared, experts)
+        return experts
+
+    def _overlap_shared_branch(
+        self, hidden_states: torch.Tensor, stream, *, skip_tp_allreduce: bool = False
+    ):
         main = torch.cuda.current_stream(hidden_states.device)
         capturing = torch.cuda.is_current_stream_capturing()
         self._shared_input_ready.record(main)
@@ -110,12 +146,14 @@ class Qwen4MoeLayer(GenericMoeLayer):
                     gate = self.shared_expert_gate(hidden_states)
                 finally:
                     self._shared_output_ready.record(stream)
-            experts = self._forward_routed(hidden_states)
+            if skip_tp_allreduce:
+                experts = self._forward_routed(hidden_states, skip_tp_allreduce=True)
+            else:
+                experts = self._forward_routed(hidden_states)
         finally:
             # Also join on an exception: callers may release/reuse the input.
             self._shared_output_ready.wait(main)
         if not capturing:
             shared.record_stream(main)
             gate.record_stream(main)
-        self.sigmoid_gate_scale_add(gate, shared, experts)
-        return experts
+        return experts, shared, gate
