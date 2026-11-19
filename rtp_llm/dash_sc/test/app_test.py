@@ -220,7 +220,11 @@ class BindBarrierTest(TestCase):
                     app.server_config.ip = "192.0.2.2"
 
                 validator = Mock(side_effect=lambda *_args: events.append("grammar"))
-                servicer = Mock(side_effect=lambda **_kwargs: events.append("servicer"))
+                inference = Mock()
+                inference.start_metrics.side_effect = lambda: events.append("metrics")
+                servicer = Mock(
+                    side_effect=lambda **_kwargs: events.append("servicer") or inference
+                )
                 app._grpc_server.start_on_loop.side_effect = (
                     lambda *_args, **_kwargs: events.append("listen")
                 )
@@ -254,7 +258,7 @@ class BindBarrierTest(TestCase):
                         continue
                     app.start(on_prebind=prebind if mode == "restore" else None)
 
-                expected = ["loop", "visitor", "grammar", "servicer", "listen"]
+                expected = ["loop", "visitor", "grammar", "servicer", "listen", "metrics"]
                 if mode == "restore":
                     expected.insert(0, "barrier")
                 self.assertEqual(events, expected)
