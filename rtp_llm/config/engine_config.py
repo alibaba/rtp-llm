@@ -289,6 +289,7 @@ def configure_batch_invariant_model(
     model_type = model_config.model_type
     hybrid = model_type == "qwen35_moe"
     uses_moe = hybrid or model_type == "qwen_3_moe"
+    dp_ep = parallel.tp_size == 1 and parallel.dp_size == parallel.ep_size > 1
     conflicts = []
     if not is_cuda() or torch.cuda.get_device_capability() != (10, 3):
         conflicts.append("requires an SM103 CUDA GPU")
@@ -316,21 +317,21 @@ def configure_batch_invariant_model(
         conflicts.append(f"requires one of these architectures: {supported}")
     else:
         name, tp = model
+        topology = (parallel.world_size, parallel.dp_size, parallel.ep_size)
+        supported_topologies = [(tp, 1, 1)]
+        if uses_moe:
+            supported_topologies.append((4, 4 // tp, 4))
         if (
-            (
-                parallel.world_size,
-                parallel.local_world_size,
-                parallel.tp_size,
-                parallel.ffn_tp_size,
-            )
-            != (tp, tp, tp, tp)
-            or (parallel.dp_size, parallel.ep_size, parallel.pp_size) != (1, 1, 1)
+            topology not in supported_topologies
+            or parallel.local_world_size != parallel.world_size
+            or (parallel.tp_size, parallel.ffn_tp_size, parallel.pp_size) != (tp, tp, 1)
             or parallel.prefill_cp_config.is_enabled()
             or parallel.prefill_cp_config.is_prefill_enabled()
         ):
+            ep4 = f" or DP_SIZE={4 // tp}/EP_SIZE=4 on one node" if uses_moe else ""
             conflicts.append(
-                f"{name} requires WORLD_SIZE=LOCAL_WORLD_SIZE=TP_SIZE={tp}, "
-                "DP_SIZE=EP_SIZE=PP_SIZE=1 and CP disabled"
+                f"{name} requires TP_SIZE={tp}, PP_SIZE=1, CP disabled and "
+                f"DP_SIZE=EP_SIZE=1{ep4}"
             )
     quant = model_config.quant_config
     quant_method = quant.get_method() if quant is not None else None
@@ -371,19 +372,33 @@ def configure_batch_invariant_model(
         conflicts.append("speculative decoding and MTP must be disabled")
     if engine_config.runtime_config.use_batch_decode_scheduler:
         conflicts.append("USE_BATCH_DECODE_SCHEDULER must be disabled")
-    moe_strategies = (
-        ("auto", "fp8_per_block_no_dp") if fp8_block else ("auto", "no_quant_cpp")
+    if dp_ep:
+        moe_strategies = (
+            ("auto", "fp8_per_block_pure_dp", "fp8_per_block_ep_normal")
+            if fp8_block
+            else ("auto", "no_auant_dp_normal", "no_quant_pure_dp")
+        )
+    else:
+        moe_strategies = (
+            ("auto", "fp8_per_block_no_dp") if fp8_block else ("auto", "no_quant_cpp")
+        )
+    needs_all_gather = fp8_block or parallel.ep_size > 1
+    uses_unstable_router = not dp_ep and (
+        moe.use_deepep_moe or (needs_all_gather and not moe.use_all_gather)
     )
     if uses_moe and (
         moe.moe_strategy not in moe_strategies
-        or (fp8_block and not moe.use_all_gather)
-        or moe.use_deepep_moe
+        or uses_unstable_router
         or moe.use_mori_ep
         or moe.fake_balance_expert
         or model_config.eplb_config.phy_exp_num(model_config.expert_num)
         != model_config.expert_num
     ):
-        if fp8_block:
+        if dp_ep:
+            conflicts.append(
+                "requires the eager all-gather MoE path for DP/EP without expert remapping"
+            )
+        elif fp8_block:
             conflicts.append(
                 "FP8_PER_BLOCK requires the local DeepGEMM MoE strategy "
                 "(MOE_STRATEGY=auto or fp8_per_block_no_dp, USE_ALL_GATHER enabled) "
@@ -418,6 +433,14 @@ def configure_batch_invariant_model(
     if conflicts:
         raise ValueError("RTP_BATCH_INVARIANT=1:\n" + "\n".join(conflicts))
 
+    if dp_ep:
+        # Ordinary DP/EP auto-selection uses DeepEP. Move the same shards over
+        # the stage group in BI, where the combine order is fixed.
+        moe.moe_strategy = "fp8_per_block_pure_dp" if fp8_block else "no_quant_pure_dp"
+        moe.use_all_gather = True
+        moe.use_deepep_moe = False
+        moe.use_deepep_low_latency = False
+        moe.use_deepep_internode = False
     if hybrid:
         # Keep the text weights and partial MRoPE parameters of the hybrid checkpoint.
         model_config.mm_model_config.is_multimodal = False

@@ -134,6 +134,12 @@ public:
     void setStepDurationUs(int64_t step_duration_us) {
         record_["step_duration_us"] = step_duration_us;
     }
+    void setDpForward(int64_t dp_rank, int64_t step, int64_t start_us, int64_t end_us) {
+        record_["dp_rank"]          = dp_rank;
+        record_["forward_step"]     = step;
+        record_["forward_start_us"] = start_us;
+        record_["forward_end_us"]   = end_us;
+    }
     std::vector<RecordedTokenTiming> timings;
 
 private:
