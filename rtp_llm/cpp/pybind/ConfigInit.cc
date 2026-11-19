@@ -1128,10 +1128,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_transfer_not_done_resource_hold_ms",
                        &CacheStoreConfig::p2p_transfer_not_done_resource_hold_ms)
         .def_readwrite("p2p_lease_query_timeout_ms", &CacheStoreConfig::p2p_lease_query_timeout_ms)
-        .def_readwrite("p2p_kv_leak_exit_threshold_min_percent",
-                       &CacheStoreConfig::p2p_kv_leak_exit_threshold_min_percent)
-        .def_readwrite("p2p_kv_leak_exit_threshold_max_percent",
-                       &CacheStoreConfig::p2p_kv_leak_exit_threshold_max_percent)
+        .def_readwrite("p2p_kv_force_release_timeout_ms", &CacheStoreConfig::p2p_kv_force_release_timeout_ms)
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
         .def_readwrite("p2p_cancelled_keys_ttl_ms", &CacheStoreConfig::p2p_cancelled_keys_ttl_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
@@ -1173,13 +1170,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_rdma_staging_total_bytes,
                                       self.p2p_prefill_sender_thread_count,
                                       self.p2p_prefill_sender_queue_size,
-                                      self.p2p_kv_leak_exit_threshold_min_percent,
-                                      self.p2p_kv_leak_exit_threshold_max_percent,
                                       self.rdma_transfer_wait_timeout_ms,
                                       self.p2p_read_steal_before_deadline_ms,
                                       self.p2p_read_return_before_deadline_ms,
                                       self.p2p_resource_store_timeout_check_interval_ms,
-                                      self.p2p_layer_cache_buffer_store_timeout_ms);
+                                      self.p2p_layer_cache_buffer_store_timeout_ms,
+                                      self.p2p_kv_force_release_timeout_ms);
             },
             [](py::tuple t) {
                 if (t.size() == 18) {
@@ -1208,7 +1204,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     return c;
                 }
-                if (t.size() != 29) {
+                if (t.size() != 27 && t.size() != 28 && t.size() != 29) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -1234,13 +1230,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_rdma_staging_total_bytes = t[19].cast<int64_t>();
                 c.p2p_prefill_sender_thread_count = t[20].cast<int>();
                 c.p2p_prefill_sender_queue_size = t[21].cast<int>();
-                c.p2p_kv_leak_exit_threshold_min_percent = t[22].cast<int>();
-                c.p2p_kv_leak_exit_threshold_max_percent = t[23].cast<int>();
-                c.rdma_transfer_wait_timeout_ms = t[24].cast<int64_t>();
-                c.p2p_read_steal_before_deadline_ms = t[25].cast<int64_t>();
-                c.p2p_read_return_before_deadline_ms = t[26].cast<int64_t>();
-                c.p2p_resource_store_timeout_check_interval_ms = t[27].cast<int>();
-                c.p2p_layer_cache_buffer_store_timeout_ms = t[28].cast<int64_t>();
+                // Older pickles include two retired threshold fields before this suffix.
+                const auto tail = t.size() == 29 ? 24 : 22;
+                c.rdma_transfer_wait_timeout_ms = t[tail].cast<int64_t>();
+                c.p2p_read_steal_before_deadline_ms = t[tail + 1].cast<int64_t>();
+                c.p2p_read_return_before_deadline_ms = t[tail + 2].cast<int64_t>();
+                c.p2p_resource_store_timeout_check_interval_ms = t[tail + 3].cast<int>();
+                c.p2p_layer_cache_buffer_store_timeout_ms = t[tail + 4].cast<int64_t>();
+                if (t.size() == 28) {
+                    c.p2p_kv_force_release_timeout_ms = t[27].cast<int>();
+                }
                 return c;
             }));
 

@@ -45,7 +45,8 @@ public:
     // Timeout or close does not guarantee a callback for an already posted read.
     virtual void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
                       RdmaReadCallback callback,
-                      uint64_t deadline_ms) = 0;
+                      uint64_t deadline_ms,
+                      std::function<bool()> is_cancelled = {}) = 0;
 };
 
 class IRdmaClient {

@@ -1,13 +1,4 @@
-import argparse
-
 from rtp_llm.server.server_args.util import str2bool
-
-
-def _kv_leak_threshold_percent(value):
-    try:
-        return int(value)
-    except (TypeError, ValueError) as error:
-        raise argparse.ArgumentTypeError("KV leak threshold must be an integer") from error
 
 
 def init_cache_store_group_args(parser, cache_store_config):
@@ -103,7 +94,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         default=10000,
         help=(
             "RDMA：传输超时后等待该时长再关闭相关连接（毫秒）。"
-            "已派发的读操作若缺少完成回调，Decode 会继续保留目标 KV，并计入滞留退出阈值。"
+            "已派发的读操作若缺少完成回调，Decode 会将目标 KV 保留至收到停写确认或隔离满 5 分钟。"
         ),
     )
     cache_store_group.add_argument(
@@ -115,22 +106,12 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="Decode：单轮 lease 查询的超时上限（毫秒），内部最多等待 500ms；未确认停止则继续持有 KV 并重试。",
     )
     cache_store_group.add_argument(
-        "--p2p_kv_leak_exit_threshold_min_percent",
-        env_name="P2P_KV_LEAK_EXIT_THRESHOLD_MIN_PERCENT",
-        bind_to=(cache_store_config, "p2p_kv_leak_exit_threshold_min_percent"),
-        type=_kv_leak_threshold_percent,
-        choices=range(101),
-        default=30,
-        help="Decode：滞留 KV 退出阈值的随机区间下界。上下界均设为 0 时关闭阈值退出。",
-    )
-    cache_store_group.add_argument(
-        "--p2p_kv_leak_exit_threshold_max_percent",
-        env_name="P2P_KV_LEAK_EXIT_THRESHOLD_MAX_PERCENT",
-        bind_to=(cache_store_config, "p2p_kv_leak_exit_threshold_max_percent"),
-        type=_kv_leak_threshold_percent,
-        choices=range(101),
-        default=70,
-        help="Decode：滞留 KV 退出阈值的随机区间上界。上下界相同时使用固定阈值。",
+        "--p2p_kv_force_release_timeout_ms",
+        env_name="P2P_KV_FORCE_RELEASE_TIMEOUT_MS",
+        bind_to=(cache_store_config, "p2p_kv_force_release_timeout_ms"),
+        type=int,
+        default=300000,
+        help="Decode：单请求 KV 隔离多久后强制回收（毫秒，必须为正数）。",
     )
 
     cache_store_group.add_argument(

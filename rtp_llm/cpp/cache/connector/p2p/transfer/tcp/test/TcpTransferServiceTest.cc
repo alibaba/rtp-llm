@@ -302,24 +302,44 @@ TEST_F(TcpTransferServiceTest, B1_ContextTimeout_NoMatchingRecvTask) {
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
 }
 
-// B3: Preserve the observed transfer error even if the task deadline has elapsed.
-TEST_F(TcpTransferServiceTest, B3_BufferMismatchIsNotReclassifiedByElapsedTaskDeadline) {
+// B3: An expired matched task must be rejected before validation or copy starts.
+TEST_F(TcpTransferServiceTest, B3_ExpiredMatchedTaskTimesOutBeforeBufferValidation) {
     char dummy[64]{};
-
-    // Task has expired deadline but done_=false, so waitCheckProc still matches it.
-    auto task = task_store_->addTask("k_b3", makeBlocks(1, dummy, 64),
-                                     currentTimeMs() - 1);  // expired
+    auto task = task_store_->addTask("k_b3", makeBlocks(1, dummy, sizeof(dummy)), currentTimeMs() - 1);
     ASSERT_NE(task, nullptr);
 
-    // Request uses size=32 → mismatch prevents actual GPU copy, keeping the test GPU-free.
     auto req = makeRequest("k_b3", currentTimeMs() + 5000);
     addRequestBlock(req, 1, {{32, std::string(32, 'X')}});
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    auto                                          closure = issueTransfer(&req, &resp);
 
+    ASSERT_TRUE(closure->waitFor(kWait));
+    EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_TRUE(task->done());
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::TIMEOUT);
+    for (char byte : dummy) {
+        EXPECT_EQ(byte, 0);
+    }
+}
+
+// B4: A live task reaches validation and reports its actual size mismatch.
+TEST_F(TcpTransferServiceTest, B4_LiveTaskBufferMismatchDoesNotCopy) {
+    char dummy[64]{};
+    auto task = task_store_->addTask("k_b4", makeBlocks(1, dummy, sizeof(dummy)), currentTimeMs() + 5000);
+    ASSERT_NE(task, nullptr);
+
+    auto req = makeRequest("k_b4", currentTimeMs() + 5000);
+    addRequestBlock(req, 1, {{32, std::string(32, 'X')}});
     ::tcp_transfer::TcpLayerBlockTransferResponse resp;
     auto                                          closure = issueTransfer(&req, &resp);
 
     ASSERT_TRUE(closure->waitFor(kWait));
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_BUFFER_MISMATCH);
+    EXPECT_TRUE(task->done());
+    EXPECT_EQ(task->errorCode(), TransferErrorCode::BUFFER_MISMATCH);
+    for (char byte : dummy) {
+        EXPECT_EQ(byte, 0);
+    }
 }
 
 // ===========================================================================

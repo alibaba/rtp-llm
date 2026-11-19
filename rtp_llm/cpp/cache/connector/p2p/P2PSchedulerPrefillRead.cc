@@ -190,6 +190,7 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     // no_transfer 时 rank_routes 为空 ⇒ 所有 worker 收到同一份不带传输计划的请求。
     params.routes      = std::move(rank_routes);
     params.plan_digest = plan_digest;
+    params.is_cancelled = is_cancelled;
 
     const auto                                  broadcast_start_us = currentTimeUs();
     std::shared_ptr<P2PBroadcastClient::Result> result;

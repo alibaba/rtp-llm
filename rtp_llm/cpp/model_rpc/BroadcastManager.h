@@ -286,7 +286,10 @@ public:
 
     template<typename RequestPB, typename ResponsePB, typename RpcCall>
     std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>>
-    broadcast(const std::vector<RequestPB>& requests, int timeout_ms, const RpcCall& rpc_call) const {
+    broadcast(const std::vector<RequestPB>& requests,
+              int timeout_ms,
+              const RpcCall& rpc_call,
+              const std::function<grpc::Status(RequestPB&)>& before_dispatch = {}) const {
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
             RTP_LLM_LOG_WARNING(
@@ -325,6 +328,14 @@ public:
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx = result->worker_contexts_.at(rank);
             try {
+                if (before_dispatch) {
+                    auto status = before_dispatch(ctx->request);
+                    if (!status.ok()) {
+                        ctx->status = std::move(status);
+                        result->finishRank(static_cast<size_t>(rank), true);
+                        continue;
+                    }
+                }
                 auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
                 RTP_LLM_CHECK_WITH_INFO(reader != nullptr, "broadcast rpc call returned null reader, rank=%d", rank);
                 auto tag = std::make_unique<CompletionTag<ResultT>>(result, static_cast<size_t>(rank));

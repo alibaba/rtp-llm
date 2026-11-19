@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/config/ConfigModules.h"
+
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
@@ -36,7 +38,9 @@ public:
                                  int64_t                                              lease_query_timeout_ms,
                                  bool                                                 no_transfer          = false,
                                  int64_t                                              request_deadline_ms  = 0,
-                                 int64_t                                              transfer_deadline_ms = 0):
+                                 int64_t                                              transfer_deadline_ms = 0,
+                                 int                                                  kv_force_release_timeout_ms =
+                                     CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs):
         resource_(resource),
         unique_key_(std::move(unique_key)),
         collector_(collector),
@@ -45,6 +49,7 @@ public:
         request_deadline_ms_(request_deadline_ms),
         transfer_deadline_ms_(transfer_deadline_ms),
         transfer_stop_at_ms_(localTransferDeadline(transfer_deadline_ms)),
+        kv_force_release_timeout_ms_(kv_force_release_timeout_ms),
         done_(false),
         success_(false),
         error_code_(ErrorCode::NONE_ERROR) {}
@@ -115,7 +120,7 @@ public:
     void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
     bool needLeasePoll() const {
-        if (!calls_ready_.load(std::memory_order_acquire)
+        if (lease_query_timeout_ms_ <= 0 || !calls_ready_.load(std::memory_order_acquire)
             || !lease_hold_pending_.load(std::memory_order_acquire)) {
             return false;
         }
@@ -184,6 +189,8 @@ private:
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
     void              applyMergedReadOutcome(const MergedReadOutcome& outcome);
     void              beginLeaseHold();
+    bool              expireLeaseHoldIfNeeded(int64_t now_us);
+    void              releaseLeaseHoldLocked(bool all_ranks_stopped, int64_t now_us);
     std::function<void()> completionCallback() const;
     void                  registerReadCompletionCallbacksLocked();
     void                  notify() const;
@@ -199,6 +206,7 @@ private:
     const int64_t request_deadline_ms_;
     const int64_t transfer_deadline_ms_;  // original wire deadline/identity
     const int64_t transfer_stop_at_ms_;   // anchored once in the local steady-clock domain
+    const int64_t kv_force_release_timeout_ms_{CacheStoreConfig::kDefaultP2PKvForceReleaseTimeoutMs};
 
     static int64_t localTransferDeadline(int64_t wall_deadline_ms) {
         if (wall_deadline_ms <= 0) {
@@ -217,6 +225,7 @@ private:
     ErrorCode               error_code_;
     std::string             error_message_;
     std::atomic<int64_t>                         lease_hold_start_us_{0};  // steady clock
+    bool                                         lease_released_{false};  // guarded by state_mutex_
     std::atomic<bool>       lease_hold_pending_{false};
     std::atomic<bool>                            tp_cancel_broadcast_triggered_{false};
     std::shared_ptr<P2PBroadcastClient::Result> cancel_result_;  // guarded by state_mutex_
@@ -294,10 +303,7 @@ private:
     size_t                               control_capacity_{0};
     std::map<std::string, size_t>                              group_block_bytes_;
     size_t                                                     total_kv_bytes_{0};
-    int                                                        kv_leak_exit_threshold_bps_{3000};
-    bool                                                       kv_leak_exit_enabled_{true};
     int64_t                                                    last_leak_log_ms_{0};
-    int64_t                                                    retained_kv_over_threshold_since_ms_{0};
 };
 
 }  // namespace rtp_llm

@@ -130,7 +130,12 @@ public:
 
     void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& pairs,
               RdmaReadCallback cb,
-              uint64_t) override {
+              uint64_t,
+              std::function<bool()> is_cancelled) override {
+        if (is_cancelled && is_cancelled()) {
+            cb(TransferErrorCode::CANCELLED, "mock RDMA read cancelled before submission");
+            return;
+        }
         if (!success_) {
             cb(TransferErrorCode::RDMA_FAILED, "mock RDMA read failed");
             return;
@@ -199,7 +204,12 @@ public:
 
     void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>&,
               RdmaReadCallback cb,
-              uint64_t) override {
+              uint64_t,
+              std::function<bool()> is_cancelled) override {
+        if (is_cancelled && is_cancelled()) {
+            cb(TransferErrorCode::CANCELLED, "mock RDMA read cancelled before submission");
+            return;
+        }
         std::lock_guard<std::mutex> lock(mu_);
         held_callbacks_.push_back(std::move(cb));
     }
