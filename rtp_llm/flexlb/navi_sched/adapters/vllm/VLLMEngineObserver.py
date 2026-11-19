@@ -3562,9 +3562,14 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                     ],
                 )
             self._initialize_agent(scheduler)
-            scheduler.kv_cache_manager.block_pool.cache_observer = VLLMCacheObserver(
-                self.on_block_lifecycle_event
-            )
+            block_pool = scheduler.kv_cache_manager.block_pool
+            set_listener = getattr(block_pool, "set_block_lifecycle_listener", None)
+            if callable(set_listener):
+                set_listener(self.on_block_lifecycle_event)
+            else:
+                block_pool.cache_observer = VLLMCacheObserver(
+                    self.on_block_lifecycle_event
+                )
             lifecycle_supported = hasattr(scheduler, "request_observer")
             if lifecycle_supported:
                 scheduler.request_observer = VLLMSchedulerObserver(
