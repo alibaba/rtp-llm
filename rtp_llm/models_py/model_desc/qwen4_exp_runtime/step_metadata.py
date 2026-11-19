@@ -6,6 +6,7 @@ lengths and prefixes and its callers restrict it to eager execution.
 """
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import NamedTuple
 
 import torch
@@ -34,11 +35,26 @@ def cached_step_value(context, key, factory):
 class PrefillRequestGeometry:
     prefixes: torch.Tensor
     cu_seqlens: torch.Tensor
-    cu_kv_seqlens: torch.Tensor
     logical_positions: torch.Tensor
     visible_lengths: torch.Tensor
     compressed_lengths: torch.Tensor
-    final_compressed_lengths: torch.Tensor
+    _device_lengths: torch.Tensor
+    _ratio: int
+
+    # These references are used only when the corresponding validation runs.
+    @cached_property
+    def _visible_ends(self) -> torch.Tensor:
+        return self.prefixes + self._device_lengths
+
+    @cached_property
+    def cu_kv_seqlens(self) -> torch.Tensor:
+        cu_kv = torch.zeros_like(self.cu_seqlens)
+        cu_kv[1:] = self._visible_ends.to(torch.int32).cumsum(0)
+        return cu_kv
+
+    @cached_property
+    def final_compressed_lengths(self) -> torch.Tensor:
+        return (self._visible_ends // self._ratio).to(torch.int32)
 
 
 class _PrefillGeometryEntry(NamedTuple):
@@ -59,9 +75,6 @@ def cached_prefill_geometry(context, lengths, prefixes, ratio, device):
         device_lengths = torch.tensor(lengths, dtype=torch.int64, device=device)
         cu = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=device)
         cu[1:] = device_lengths.cumsum(0)
-        visible_ends = device_prefixes + device_lengths
-        cu_kv = torch.zeros_like(cu)
-        cu_kv[1:] = visible_ends.to(torch.int32).cumsum(0)
         logical = torch.cat(
             [
                 torch.arange(prefix, prefix + length, dtype=torch.int64, device=device)
@@ -74,11 +87,11 @@ def cached_prefill_geometry(context, lengths, prefixes, ratio, device):
         geometry = PrefillRequestGeometry(
             device_prefixes,
             cu,
-            cu_kv,
             logical,
             visible,
             (visible // ratio).to(torch.int32),
-            (visible_ends // ratio).to(torch.int32),
+            device_lengths,
+            ratio,
         )
         # Retain native tensor owners along with derived values for this
         # invocation, even if a layer-local context is released first.
