@@ -249,7 +249,7 @@ class DraftPrefillGraphReplay(Mapping):
                         min(pages) <= 0 or max(pages) >= pool_size
                     )
                 else:
-                    invalid = ((visible <= 0) | (visible >= pool_size)).any()
+                    invalid = int(visible.min()) <= 0 or int(visible.max()) >= pool_size
                 if invalid:
                     raise RuntimeError(
                         "QSA draft graph live row resolves to an unallocated or out-of-range physical block"
