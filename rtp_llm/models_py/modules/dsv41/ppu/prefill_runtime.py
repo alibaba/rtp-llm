@@ -1366,6 +1366,28 @@ class SharedForwardState:
         self._cp_metadata_evidence["step_constructs"] += 1
         return self._remember_cp_metadata(entry, context, rows, "step", value)
 
+    def cp_prefill_cached_attention_rows(self, context, *, builder):
+        """Borrow a row tuple and its StepContext from one validated entry."""
+        if type(self) is not SharedForwardState:
+            return None
+        if (RowScope is not _CP_ROW_SCOPE or RowScope.__init__ is not _CP_ROW_SCOPE_INIT
+                or RowView is not _CP_ROW_VIEW or RowView.__init__ is not _CP_ROW_VIEW_INIT
+                or RowView.as_rows is not _CP_ROW_VIEW_AS_ROWS
+                or any(name in vars(self) or vars(SharedForwardState).get(name) is not original
+                       for name, original in _CP_CACHED_ATTENTION_METHODS)):
+            return None
+        cached = self._cp_metadata_entries.get(bool(self.compacted))
+        if cached is None or cached.builder is not builder or "step" not in cached.values:
+            return None
+        entry = self._cp_metadata_entry(context, None)
+        if entry is not cached:
+            return None
+        self._cp_metadata_evidence["row_hits"] += 1
+        self._cp_metadata_evidence["step_hits"] += 1
+        hits = self._cp_metadata_evidence.get("attention_pair_hits", 0)
+        self._cp_metadata_evidence["attention_pair_hits"] = hits + 1
+        return entry.record.rows, entry.values["step"][0]
+
     def cp_prefill_positions32(self, context, rows):
         """A same-stream private cast for the authenticated all-live Mega reader."""
         entry = self._cp_metadata_entry(context, rows)
@@ -2214,3 +2236,17 @@ class SharedForwardState:
                 int(self.valid_output_rows.sum()) if self.valid_output_rows is not None else None
             ),
         }
+
+
+_CP_ROW_SCOPE = RowScope
+_CP_ROW_SCOPE_INIT = RowScope.__init__
+_CP_ROW_VIEW = RowView
+_CP_ROW_VIEW_INIT = RowView.__init__
+_CP_ROW_VIEW_AS_ROWS = RowView.as_rows
+_CP_CACHED_ATTENTION_METHODS = tuple(
+    (name, vars(SharedForwardState)[name])
+    for name in (
+        "rows", "row_view", "_describe_rows", "_rows_legacy", "_local_row_cache_key",
+        "cp_prefill_step_context", "_cp_metadata_entry", "_cp_row_record", "_cp_metadata_epoch",
+    )
+)

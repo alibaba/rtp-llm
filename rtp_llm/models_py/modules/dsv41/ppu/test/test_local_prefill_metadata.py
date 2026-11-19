@@ -349,6 +349,49 @@ class LocalPrefillMetadataCPU(unittest.TestCase):
                 with patch.dict(os.environ, {"RTP_V41_PPU_PACKED_ATTENTION": flag}):
                     self.assertFalse(attention_layer._local_step_context_consumer(attn))
 
+    def test_cp8_attention_rows_use_one_verified_entry_and_respect_custom_reader(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import attention_layer, ops
+        from rtp_llm.models_py.modules.dsv41.ppu.test.test_cp8_metadata_reuse import (
+            CP8MetadataReuseContracts, _activate, _fixture, _plan,
+        )
+
+        fixture = CP8MetadataReuseContracts()
+        self.addCleanup(fixture.doCleanups)
+        fixture.setUp()
+        state, cp = _fixture(rank=0)
+        attn = attention_layer.SharedPPUAttention.__new__(attention_layer.SharedPPUAttention)
+        torch.nn.Module.__init__(attn)
+        attn.ops = ops.PPUOps.__new__(ops.PPUOps)
+        attn.runtime = state.runtime
+        lookup = attention_layer._attention_rows_and_context
+        flag = attention_layer.CP8_REUSE_ATTENTION_METADATA_ENV
+
+        with patch.dict(os.environ):
+            os.environ.pop(flag, None)
+            full_rows, full_context = lookup(attn, state, cp)
+            self.assertEqual(state._cp_metadata_evidence.get("attention_pair_hits", 0), 0)
+            rows, context = lookup(attn, state, cp)
+            self.assertIs(rows, full_rows)
+            self.assertIs(context, full_context)
+            self.assertEqual(state._cp_metadata_evidence["attention_pair_hits"], 1)
+            with patch.dict(os.environ, {flag: "0"}):
+                self.assertIs(lookup(attn, state, cp)[1], full_context)
+            self.assertEqual(state._cp_metadata_evidence["attention_pair_hits"], 1)
+            with patch.object(state, "rows", wraps=state.rows) as custom:
+                self.assertIs(lookup(attn, state, cp)[1], full_context)
+                custom.assert_called_once_with(cp)
+            self.assertEqual(state._cp_metadata_evidence["attention_pair_hits"], 1)
+
+            _activate(state, _plan(state))
+            compact_rows, compact_context = lookup(attn, state, state.context)
+            self.assertIsNot(compact_context, full_context)
+            self.assertIsNot(compact_rows, full_rows)
+            self.assertIs(lookup(attn, state, state.context)[1], compact_context)
+            self.assertEqual(state._cp_metadata_evidence["attention_pair_hits"], 2)
+            compact_rows[1].add_(1)
+            self.assertIsNot(lookup(attn, state, state.context)[1], compact_context)
+            self.assertTrue(state._cp_metadata_invalid)
+
     def test_local_metadata_mega_readonly_binding_rejects_unknown_and_changed_consumers(self):
         import importlib.metadata
         import tempfile

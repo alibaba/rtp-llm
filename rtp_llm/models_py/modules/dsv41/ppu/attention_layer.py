@@ -91,6 +91,7 @@ PREFILL_DENSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_DENSE_FP4_SCORE"
 PREFILL_SPARSE_FP4_SCORE_ENV = "RTP_V41_PPU_PREFILL_SPARSE_FP4_SCORE"
 CP8_WO_A_BMM_ENV = "RTP_V41_PPU_CP8_WO_A_BMM"
 CP8_GROUPED_QO_ROPE_ENV = "RTP_V41_PPU_CP8_GROUPED_QO_ROPE"
+CP8_REUSE_ATTENTION_METADATA_ENV = "RTP_V41_PPU_CP8_REUSE_ATTENTION_METADATA"
 CP8_INDEXER_REQUEST_SLICES_ENV = "RTP_V41_PPU_CP8_INDEXER_REQUEST_SLICES"
 CP8_INDEXER_TILE_PREP_ENV = "RTP_V41_PPU_CP8_INDEXER_TILE_PREP"
 LOCAL_PREFILL_WORKSPACE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE"
@@ -453,6 +454,18 @@ def _local_step_context(attn, state, cp, rows):
         else:
             state._local_metadata_invalid = True
     return build_step_context(rows[0], rows[1], rows[2], valid_mask=rows[3])
+
+
+def _attention_rows_and_context(attn, state, cp):
+    if isinstance(cp, CPContext) and cp.cp_size == 8 and enabled(CP8_REUSE_ATTENTION_METADATA_ENV):
+        from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+        if type(state) is SharedForwardState and _local_step_context_consumer(attn):
+            cached = state.cp_prefill_cached_attention_rows(cp, builder=build_step_context)
+            if cached is not None:
+                return cached
+    rows = tuple(state.rows(cp))
+    return rows, _local_step_context(attn, state, cp, rows)
 
 
 def _optimized_focus_layers(rank):
@@ -1358,8 +1371,7 @@ class SharedPPUAttention(PPUAttentionProjections):
         if state.idle:
             return torch.zeros_like(x).reshape(shape)
         cp = self._cp_ctx if state.prefill else None
-        positions, requests, cu, valid = state.rows(cp)
-        context = _local_step_context(self, state, cp, (positions, requests, cu, valid))
+        (positions, requests, cu, valid), context = _attention_rows_and_context(self, state, cp)
         diagnostic = None
         if optimized_diagnostics_enabled():
             diagnostic = getattr(self.runtime, "n5_diagnostics", None)
@@ -1731,8 +1743,7 @@ class SharedPPUAttention(PPUAttentionProjections):
             cp = state.context
             # L20 reads exact SWA from the full writes above. The bounded SWA
             # start from the compact context is for the subsequent layers.
-            positions, requests, cu, valid = state.rows(cp)
-            context = _local_step_context(self, state, cp, (positions, requests, cu, valid))
+            (positions, requests, cu, valid), context = _attention_rows_and_context(self, state, cp)
             frequency_table = self.runtime.freqs_for(self.layer_id)
             sg_rope_positions = (
                 _local_sg_rope_positions(state, cp, (positions, requests, cu, valid), frequency_table)
