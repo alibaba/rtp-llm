@@ -15,6 +15,8 @@ import org.flexlb.mock.frontend.FrontendProtocol.*;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 /**
  * Verifies indexed request reconstruction and replay from one shared dataset.
@@ -181,6 +183,21 @@ class IndexedTrafficReaderTest {
                 assertEquals(20, plan.at("/warmup/duration_ms").intValue());
                 assertEquals(0.25, plan.at("/warmup/rate_scale").doubleValue());
             }
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource({"request page index, 132", "prefix chain page index, 160", "media, 172", "output cap, 180"})
+    void rejectsCorruptedTableRecordChecksum(String table, int recordEnd) throws Exception {
+        var path = fixture();
+        byte[] data = Files.readAllBytes(path);
+        // The fixture has one record per table after the 112-byte header.
+        data[recordEnd - 1] ^= 1;
+        Files.write(path, data);
+
+        try (var dataset = new IndexedTrafficReader(path)) {
+            var error = assertThrows(IOException.class, () -> dataset.entry(0, 0));
+            assertTrue(error.getMessage().contains("record checksum mismatch"), table + ": " + error.getMessage());
         }
     }
 
