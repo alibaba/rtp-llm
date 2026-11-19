@@ -118,6 +118,7 @@ void SchedulerConfigR::Config::Jsonize(JsonWrapper &json)
     }
     cost.Jsonize(json);
     json.Jsonize("peer_cache_enabled", peerCacheEnabled, peerCacheEnabled);
+    json.Jsonize("cache_touch_enabled", cacheTouchEnabled, cacheTouchEnabled);
     json.Jsonize("peer_cache_ready_agents", peerCacheReadyAgents, peerCacheReadyAgents);
     json.Jsonize("max_wait_schedule_count", maxWaitScheduleCount, maxWaitScheduleCount);
     json.Jsonize("max_wait_schedule_time_ms", maxWaitScheduleTimeMs,
@@ -950,6 +951,7 @@ bool SchedulerConfigR::applyPatch(const Config &current, const std::string &conf
         "min_loop_count",
         "optimization_time_budget_us",
         "peer_cache_enabled",
+        "cache_touch_enabled",
         "peer_cache_ready_agents",
         "parallelism",
         "latency_weight_concavity",

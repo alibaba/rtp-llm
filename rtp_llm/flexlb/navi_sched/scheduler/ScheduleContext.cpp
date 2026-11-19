@@ -657,7 +657,7 @@ std::vector<NaviSchedTarget> NaviSchedScheduleContext::getCacheTouchTargets(
     size_t requestIndex, int64_t hitTokenCount) const
 {
     std::vector<NaviSchedTarget> targets;
-    if (requestIndex >= _selectedNodeIndexes.size() ||
+    if (!_cacheTouchEnabled || requestIndex >= _selectedNodeIndexes.size() ||
         requestIndex >= _peerCacheRequestKeyIndexes.size() || hitTokenCount <= 0) {
         return targets;
     }
