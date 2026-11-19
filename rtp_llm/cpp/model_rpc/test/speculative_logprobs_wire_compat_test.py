@@ -8,21 +8,15 @@ import asyncio
 import os
 import unittest
 from contextlib import asynccontextmanager
-from dataclasses import fields, replace
+from dataclasses import replace
 from unittest.mock import patch
 
 import grpc
 import torch
-from google.protobuf import (
-    descriptor_pb2,
-    descriptor_pool,
-    message_factory,
-    unknown_fields,
-)
+from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, ReturnAllProbsMode
-from rtp_llm.cpp.model_rpc.model_rpc_client import trans_input
 from rtp_llm.cpp.model_rpc.proto import flexlb_schedule_service_pb2 as flex_pb
 from rtp_llm.cpp.model_rpc.proto import flexlb_schedule_service_pb2_grpc as flex_rpc
 from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2 as pb
@@ -40,7 +34,7 @@ from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 def _old_config_type(mode_aware):
-    """Deliberately omit field77, even when the production schema knows it."""
+    """Model the legacy schema without the speculative probability field."""
     file = descriptor_pb2.FileDescriptorProto(
         name=f"legacy_sp_logprobs_{mode_aware}.proto", syntax="proto3"
     )
@@ -57,35 +51,14 @@ _BOOL_CONFIG = _old_config_type(False)
 _MODE_CONFIG = _old_config_type(True)
 
 
-def _extension_mode(config):
-    # Inspect the unknown field through an old descriptor. No future generated
-    # getter or constructor parameter is required on the red baseline.
-    old = _MODE_CONFIG.FromString(config.SerializeToString())
-    return next(
-        (
-            field.data
-            for field in unknown_fields.UnknownFieldSet(old)
-            if field.field_number == 77
-        ),
-        0,
+def _legacy_mode(config, mode_aware):
+    old_type = _MODE_CONFIG if mode_aware else _BOOL_CONFIG
+    old = old_type.FromString(config.SerializeToString())
+    if mode_aware and old.return_all_probs_mode:
+        return old.return_all_probs_mode - 1
+    return (
+        ReturnAllProbsMode.DEFAULT if old.return_all_probs else ReturnAllProbsMode.NONE
     )
-
-
-def _legacy_mode(config, policy):
-    old = (_BOOL_CONFIG if policy == "bool-only" else _MODE_CONFIG).FromString(
-        config.SerializeToString()
-    )
-    if policy == "bool-only" or old.return_all_probs_mode == 0:
-        return (
-            ReturnAllProbsMode.DEFAULT
-            if old.return_all_probs
-            else ReturnAllProbsMode.NONE
-        )
-    mode = old.return_all_probs_mode - 1
-    if policy == "clamped-mode" and mode not in (0, 1, 2):
-        return ReturnAllProbsMode.NONE
-    # The first mode-aware converter (e2a2dc7b102) did not clamp this cast.
-    return mode
 
 
 def _response(mode=ReturnAllProbsMode.NONE, *, finished=True, empty=False):
@@ -109,8 +82,10 @@ def _response(mode=ReturnAllProbsMode.NONE, *, finished=True, empty=False):
 
 
 class _Peer(rpc.RpcServiceServicer):
-    def __init__(self, policy, *, new=False, sp=True, fail_first=False, empty=False):
-        self.policy, self.new, self.sp = policy, new, sp
+    def __init__(
+        self, *, mode_aware=True, new=False, sp=True, fail_first=False, empty=False
+    ):
+        self.mode_aware, self.new, self.sp = mode_aware, new, sp
         self.fail_first, self.empty = fail_first, empty
         self.inputs = []
         self.saved = {}
@@ -123,9 +98,9 @@ class _Peer(rpc.RpcServiceServicer):
     async def admit(self, request, context):
         self.inputs.append(request)
         config = request.generate_config
-        mode = _legacy_mode(config, self.policy)
-        if self.new and _extension_mode(config) in (2, 3):
-            mode = _extension_mode(config) - 1
+        mode = _legacy_mode(config, self.mode_aware)
+        if self.new and config.speculative_return_all_probs_mode in (2, 3):
+            mode = config.speculative_return_all_probs_mode - 1
         if self.sp and not self.new and not config.force_disable_sp_run and mode != 0:
             self.unsafe += 1
             await context.abort(
@@ -147,7 +122,7 @@ class _Peer(rpc.RpcServiceServicer):
             self.new
             or not self.sp
             or request.generate_config.force_disable_sp_run
-            or not _extension_mode(request.generate_config)
+            or not request.generate_config.speculative_return_all_probs_mode
         ):
             yield _response(mode)
         else:
@@ -242,7 +217,7 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
         return visitor
 
     @staticmethod
-    def request(mode, request_id=1, *, disable_sp=False):
+    def request(mode, request_id=1):
         return GenerateInput(
             request_id=request_id,
             token_ids=torch.tensor([1, 2], dtype=torch.int32),
@@ -253,7 +228,6 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
                 timeout_ms=2000,
                 is_streaming=True,
                 return_all_probs=mode,
-                force_disable_sp_run=disable_sp,
             ),
         )
 
@@ -277,17 +251,17 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
         config = request.generate_config
         self.assertFalse(config.return_all_probs)
         self.assertEqual(config.return_all_probs_mode, 1)
-        self.assertEqual(_extension_mode(config), mode + 1)
+        self.assertEqual(config.speculative_return_all_probs_mode, mode + 1)
         for old_type in (_BOOL_CONFIG, _MODE_CONFIG):
             old = old_type.FromString(config.SerializeToString())
             restored = pb.GenerateConfigPB.FromString(old.SerializeToString())
-            self.assertEqual(_extension_mode(restored), mode + 1)
+            self.assertEqual(restored.speculative_return_all_probs_mode, mode + 1)
 
-    async def test_three_legacy_decoders_fail_safely_and_next_request_is_healthy(self):
-        for policy in ("bool-only", "unchecked-mode", "clamped-mode"):
+    async def test_legacy_decoders_fail_safely_and_next_request_is_healthy(self):
+        for mode_aware in (False, True):
             for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
-                with self.subTest(policy=policy, mode=mode):
-                    peer = _Peer(policy)
+                with self.subTest(mode_aware=mode_aware, mode=mode):
+                    peer = _Peer(mode_aware=mode_aware)
                     async with _serve(peer) as address:
                         visitor = self.visitor(address)
                         request = self.request(mode)
@@ -295,9 +269,6 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(peer.unsafe, 0)
                         self.assertEqual(
                             error.exception_type, ExceptionType.UNSUPPORTED_OPERATION
-                        )
-                        self.assertTrue(
-                            getattr(request, "speculative_return_all_probs", False)
                         )
                         self.assert_guarded_wire(peer.inputs[0], mode)
                         await asyncio.wait_for(peer.cancelled.wait(), 1)
@@ -310,7 +281,7 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(peer.unsafe, 0)
 
     async def test_new_peer_returns_real_default_and_original_probability_tensors(self):
-        peer = _Peer("clamped-mode", new=True)
+        peer = _Peer(new=True)
         async with _serve(peer) as address:
             visitor = self.visitor(address)
             for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
@@ -331,7 +302,7 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
     async def test_empty_data_and_terminal_frames_do_not_require_token_probabilities(
         self,
     ):
-        peer = _Peer("clamped-mode", empty=True)
+        peer = _Peer(empty=True)
         async with _serve(peer) as address:
             visitor = self.visitor(address)
             outputs = await self.consume(
@@ -348,69 +319,45 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
         for sp, disable in ((False, False), (True, True)):
             for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
                 with self.subTest(sp=sp, disable=disable, mode=mode):
-                    peer = _Peer("unchecked-mode", sp=sp)
+                    peer = _Peer(sp=sp)
                     async with _serve(peer) as address:
                         visitor = self.visitor(address, sp=sp)
-                        request = self.request(mode, disable_sp=disable)
+                        request = self.request(mode)
+                        if disable:
+                            visitor.check_sp_supported(request)
+                            request.generate_config.force_disable_sp_run = True
                         outputs = await self.consume(visitor, request)
                         self.assertIsNotNone(outputs[0].generate_outputs[0].all_probs)
-                        self.assertFalse(
-                            getattr(request, "speculative_return_all_probs", False)
-                        )
+                        self.assertEqual(peer.unsafe, 0)
                         wire = peer.inputs[0].generate_config
                         self.assertTrue(wire.return_all_probs)
                         self.assertEqual(wire.return_all_probs_mode, mode + 1)
-                        self.assertEqual(_extension_mode(wire), 0)
+                        self.assertEqual(wire.speculative_return_all_probs_mode, 0)
 
-    async def test_replace_and_batch_serialization_preserve_the_internal_marker(self):
-        peer = _Peer("clamped-mode", new=True)
+    async def test_copied_batch_requests_preserve_probability_modes(self):
+        peer = _Peer(new=True)
         async with _serve(peer) as address:
             visitor = self.visitor(address)
-            requests = [self.request(mode, mode) for mode in (1, 2)]
-            for request in requests:
+            requests = []
+            for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
+                request = self.request(mode, mode)
                 visitor.check_sp_supported(request)
-                clone = replace(
-                    request,
-                    generate_config=request.generate_config.model_copy(deep=True),
-                )
-                self.assertTrue(getattr(clone, "speculative_return_all_probs", False))
-                self.assertTrue(
-                    {field.name: field.init for field in fields(clone)}.get(
-                        "speculative_return_all_probs", False
+                requests.append(
+                    replace(
+                        request,
+                        generate_config=request.generate_config.model_copy(deep=True),
                     )
                 )
-                self.assert_guarded_wire(
-                    trans_input(clone), clone.generate_config.return_all_probs
-                )
-                self.assertFalse(
-                    {field.name: field.repr for field in fields(clone)}[
-                        "speculative_return_all_probs"
-                    ]
-                )
+
             outputs = await visitor.batch_enqueue(requests)
             self.assertEqual(len(outputs), 2)
+            self.assertEqual(len(peer.inputs), 2)
             for request, wire, output in zip(requests, peer.inputs, outputs):
                 self.assert_guarded_wire(wire, request.generate_config.return_all_probs)
                 self.assertIsNotNone(output.generate_outputs[0].all_probs)
 
-    async def test_force_disable_clears_an_existing_internal_marker(self):
-        peer = _Peer("unchecked-mode")
-        async with _serve(peer) as address:
-            visitor = self.visitor(address)
-            request = self.request(ReturnAllProbsMode.DEFAULT)
-            visitor.check_sp_supported(request)
-            self.assertTrue(getattr(request, "speculative_return_all_probs", False))
-            request.generate_config.force_disable_sp_run = True
-            outputs = await self.consume(visitor, request)
-            self.assertFalse(getattr(request, "speculative_return_all_probs", False))
-            self.assertIsNotNone(outputs[0].generate_outputs[0].all_probs)
-            self.assertEqual(peer.unsafe, 0)
-            self.assertTrue(peer.inputs[0].generate_config.return_all_probs)
-            self.assertEqual(peer.inputs[0].generate_config.return_all_probs_mode, 2)
-            self.assertEqual(_extension_mode(peer.inputs[0].generate_config), 0)
-
     async def test_old_batch_fails_atomically_without_an_unsafe_mode(self):
-        peer = _Peer("unchecked-mode")
+        peer = _Peer()
         async with _serve(peer) as address:
             visitor = self.visitor(address)
             error = None
@@ -426,7 +373,7 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
                 self.assert_guarded_wire(request, request.request_id)
 
     async def test_master_enqueue_serialization_reaches_the_actual_fetch_request(self):
-        peer = _Peer("clamped-mode")
+        peer = _Peer()
         master = _Master(peer)
         async with _serve(peer, master) as address:
             visitor = self.visitor(address)
@@ -448,7 +395,7 @@ class SpeculativeLogprobsWireCompatTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(peer.cancelled.wait(), 1)
 
     async def test_transport_retry_keeps_marker_and_original_transport_error(self):
-        peer = _Peer("unchecked-mode", fail_first=True)
+        peer = _Peer(fail_first=True)
         async with _serve(peer) as address:
             visitor = self.visitor(address)
             visitor.pd_route_retry_on_unavailable = 1

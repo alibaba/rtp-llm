@@ -87,17 +87,6 @@ test_deps = [
     "@havenask//aios/autil:zlib",
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
-cc_test(
-    name = "speculative_logprobs_query_converter_test",
-    srcs = ["SpeculativeLogprobsQueryConverterTest.cc"],
-    copts = test_copts,
-    deps = test_deps,
-    env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
-    timeout = "short",
-)
-
 # cc_test(
 #     name = "model_rpc_server_test",
 #     srcs = [

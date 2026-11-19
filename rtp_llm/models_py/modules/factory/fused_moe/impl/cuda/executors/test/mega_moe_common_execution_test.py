@@ -65,6 +65,7 @@ class CommonMegaMoeExecutionTest(unittest.TestCase):
             max_tokens_per_rank=8,
             warmup_include_capacity=False,
             swiglu_limit=7.0,
+            activation_type="swiglu",
             route_scale=1.5,
             mega_moe_policy=MegaMoeExecutionPolicy() if prepared else None,
         )

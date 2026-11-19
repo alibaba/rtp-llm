@@ -741,30 +741,32 @@ class OpenaiGenerateConfigTest(TestCase):
             )
 
     def test_default_renderer_does_not_accept_forced_message_tools(self):
+        renderer = CustomChatRenderer.__new__(CustomChatRenderer)
         for choice in (
             "required",
             {"type": "function", "function": {"name": "lookup"}},
         ):
             with self.subTest(choice=choice):
-                with self.assertRaisesRegex(ValueError, "requires non-empty tools"):
-                    ChatCompletionRequest(
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "",
-                                "tools": [
-                                    {
-                                        "type": "function",
-                                        "function": {
-                                            "name": "lookup",
-                                            "parameters": {},
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                        tool_choice=choice,
-                    )
+                request = ChatCompletionRequest(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "lookup",
+                                        "parameters": {},
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    tool_choice=choice,
+                )
+                with self.assertRaisesRegex(FtRuntimeException, "selected renderer"):
+                    OpenaiEndpoint._validate_renderer_tool_choice(request, renderer)
 
     def test_text_response_format_is_finalized_before_generation(self):
         config = self._generate_config_with_stop_word(response_format={"type": "text"})

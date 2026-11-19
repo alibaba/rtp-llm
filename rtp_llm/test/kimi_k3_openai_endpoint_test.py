@@ -22,6 +22,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.frontend.frontend_app import FrontendApp
+from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
 from rtp_llm.frontend.frontend_server import FrontendServer
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
@@ -230,6 +231,7 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
         self.assertIsInstance(endpoint.chat_renderer, KimiK3Renderer)
         frontend = FrontendServer.__new__(FrontendServer)
         frontend._openai_endpoint = endpoint
+        frontend._request_metrics = FrontendRequestMetrics()
         frontend._frontend_worker = SimpleNamespace(
             is_streaming=lambda request: bool(request.get("stream", False))
         )

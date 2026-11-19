@@ -44,8 +44,9 @@ class KimiK31CapacityContractTest(unittest.TestCase):
             weight=object(),
             fmha_config=object(),
             moe_config=object(),
+            _configure_prefill_kv_workspace=lambda: None,
         )
-        # Only weight/model allocation is replaced. The production startup
+        # Only model/workspace allocation is replaced. The production startup
         # capacity calculation and production row planner/validator run intact.
         with (
             patch("rtp_llm.models_py.model_desc.kimi_k3.KimiK3Model") as construct,

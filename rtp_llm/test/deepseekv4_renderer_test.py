@@ -19,6 +19,7 @@ from rtp_llm.openai.api_datatype import (
     RoleEnum,
     ToolCall,
 )
+from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
 from rtp_llm.openai.renderers.deepseekv4_renderer import DeepseekV4Renderer
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
@@ -202,16 +203,21 @@ class DeepseekV4ToolChoiceConstraintTest(TestCase):
                         tools=tools,
                         tool_choice=choice,
                     )
+                    request = ChatCompletionRequest(**fields)
                     if choice == "required" and tools:
-                        request = ChatCompletionRequest(**fields)
+                        OpenaiEndpoint._validate_renderer_tool_choice(
+                            request, self.renderer
+                        )
                         self.renderer.apply_chat_completion_constraints(
                             request, GenerateConfig()
                         )
                     else:
                         with self.assertRaisesRegex(
-                            ValueError, "requires non-empty tools|is not in tools"
+                            FtRuntimeException, "selected renderer"
                         ):
-                            ChatCompletionRequest(**fields)
+                            OpenaiEndpoint._validate_renderer_tool_choice(
+                                request, self.renderer
+                            )
 
     def test_named_tool_choice_filters_structural_tag_tools(self):
         request = ChatCompletionRequest(

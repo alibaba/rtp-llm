@@ -951,13 +951,14 @@ TEST_F(NormalEngineTest, testPpChunkedPrefillWarmupUsesStageCacheAndChunkShapes)
         RoleType                  role;
         std::vector<ForwardShape> shapes;
     };
+    // Row-heavy shapes share the global chunk budget across all three rows.
     const WarmupCase cases[] = {
         {4, SP_TYPE_NONE, RoleType::PDFUSION,
-         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {12, 14, 3}, {7, 0, 1}}},
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {3, 18, 3}, {7, 0, 1}}},
         {5, SP_TYPE_MTP, RoleType::PDFUSION,
-         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {15, 14, 3}, {7, 0, 1}}},
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {3, 18, 3}, {7, 0, 1}}},
         {5, SP_TYPE_MTP, RoleType::PREFILL,
-         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {15, 14, 3}, {7, 0, 1}}},
+         {{4, 0, 1}, {4, 4, 1}, {4, 8, 1}, {4, 12, 1}, {3, 16, 1}, {3, 18, 3}, {7, 0, 1}}},
         {std::numeric_limits<int>::max(), SP_TYPE_NONE, RoleType::PREFILL,
          {{19, 0, 1}, {57, 0, 3}, {7, 0, 1}}},
     };

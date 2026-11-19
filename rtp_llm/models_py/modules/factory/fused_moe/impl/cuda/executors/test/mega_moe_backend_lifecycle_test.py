@@ -1,3 +1,4 @@
+import sys
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -42,6 +43,14 @@ CHUNK_MODULE = "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunke
 
 
 class MegaMoeLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        vendor_patch = patch.dict(
+            sys.modules,
+            {"deep_gemm": SimpleNamespace(get_block_m_for_mega_moe_fp8=Mock())},
+        )
+        vendor_patch.start()
+        self.addCleanup(vendor_patch.stop)
+
     def test_routed_arena_is_cached_per_collective_group(self):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe import buffer
 
@@ -59,7 +68,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         )
         with patch.dict(buffer._MEGA_BUF_CACHE, {}, clear=True):
             with patch(
-                "deep_gemm.get_symm_buffer_for_mega_moe", return_value=arena
+                "deep_gemm.get_symm_buffer_for_mega_moe",
+                return_value=arena,
+                create=True,
             ) as allocate:
                 generic = buffer._get_or_create_mega_buf(**params)
                 cached = buffer._get_or_create_mega_buf(**params)
@@ -107,6 +118,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
             local_expert_start=0,
             local_expert_end=4,
             activation_clamp=5.0,
+            activation_type="swiglu",
             fast_math=False,
             swiglu_limit=5.0,
             route_scale=1.0,
@@ -126,6 +138,8 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         nn.Module.__init__(model)
         FusedMoeExpertExecutor.__init__(model, cfg, FusedMoEQuantConfig(), {})
         model.cfg = cfg
+        model.activation = cfg.activation_type
+        model._activation_kwargs = {}
         model._is_decode_role = False
         model._num_shared_experts = 0
         model._mega_group = object()
@@ -370,6 +384,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                     with patch(
                         "deep_gemm.transform_weights_for_mega_moe",
                         return_value=((w1, sf), (w2, sf)),
+                        create=True,
                     ) as fp4_transform:
                         with patch(
                             "deep_gemm.transform_weights_for_mega_moe_fp8",
