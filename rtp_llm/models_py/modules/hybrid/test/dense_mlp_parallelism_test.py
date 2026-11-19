@@ -7,6 +7,7 @@ from torch import nn
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
 from rtp_llm.ops import ActivationType, ParallelismConfig
+from rtp_llm.utils.model_weight import W
 
 
 class GeluProjection(nn.Identity):
@@ -35,20 +36,23 @@ class DenseMLPParallelismTest(unittest.TestCase):
         self.assertIs(kwargs["input_scales"], scales)
 
     def make_mlp(self, activation, tp_size):
-        # Exercise the actual forward with CPU projections: only the collective
-        # is mocked, so no process group or GPU is needed for this contract.
-        mlp = DenseMLP.__new__(DenseMLP)
-        nn.Module.__init__(mlp)
-        mlp.parallelism_config = ParallelismConfig()
-        mlp.parallelism_config.tp_size = tp_size
-        mlp.parallelism_config.ffn_tp_size = tp_size
-        mlp.parallelism_config.ep_size = 1
-        mlp.activation_type = activation
-        mlp.is_gated = activation == ActivationType.Swiglu
-        mlp.up_proj = GeluProjection()
-        mlp.down_proj = nn.Identity()
+        parallelism = ParallelismConfig()
+        parallelism.tp_size = tp_size
+        parallelism.ffn_tp_size = tp_size
+        parallelism.ep_size = 1
+        factory = Mock()
+        factory.create_linear_from_weights.side_effect = [
+            GeluProjection(),
+            nn.Identity(),
+        ]
+        mlp = DenseMLP(
+            activation,
+            parallelism,
+            {W.ffn_w13: torch.empty(0)},
+            quant_config=None,
+            linear_factory=factory,
+        )
         mlp.act_fn = nn.SiLU()
-        mlp._fuse_silu_quant = False
         return mlp
 
     def test_sharded_outputs_use_tp_collective(self):
