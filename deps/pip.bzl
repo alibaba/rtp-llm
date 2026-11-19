@@ -60,6 +60,7 @@ CUDA13_ANNOTATIONS["nvidia-nccl-cu13"] = package_annotation(
     additive_build_content = """
 cc_library(
     name = "nccl_device",
+    visibility = ["//visibility:public"],
     hdrs = glob([
         "site-packages/nvidia/nccl/include/**/*.h",
         "site-packages/nvidia/nccl/include/**/*.cuh",
@@ -69,6 +70,9 @@ cc_library(
 )
 """,
 )
+
+CUDA13_ARM_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS)
+CUDA13_ARM_ANNOTATIONS["nvidia-nccl-cu13"] = CUDA13_ANNOTATIONS["nvidia-nccl-cu13"]
 
 def pip_deps():
     pip_parse(
@@ -143,7 +147,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_cuda13_arm_torch",
-        annotations = CUDA13_ANNOTATIONS,
+        annotations = CUDA13_ARM_ANNOTATIONS,
         requirements_lock = "@rtp_pip_deps//:requirements_lock_cuda13_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + PIP_INDEX_ARGS,

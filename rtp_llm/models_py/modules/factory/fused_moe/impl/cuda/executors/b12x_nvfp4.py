@@ -1,5 +1,6 @@
 """Dimension-derived adapter for FlashInfer static b12x NVFP4 MoE."""
 
+import builtins
 from dis import get_instructions
 from functools import cache
 from hashlib import sha256
@@ -21,19 +22,104 @@ _STATIC_KERNEL_SHA256 = (
     "bd1b3cd2cfcc76c84a15c4198df6783b422090c8202c11ffed2312f61ef6209d"
 )
 _SCALE_UTILS_SHA256 = "df35130f8c8c867a440d7ff3392ac23b19c8628429a7b65177c80bd0410c75cf"
+# Official PyPI wheel sha256 548a3ea1f9057025ace0a21b298824f8de049eb4b6c5c458f763309509e2ae40.
+# Cover the dispatcher callees, all CuTe DSL helpers and the JIT build code.
+_STATIC_SOURCES_SHA256 = (
+    "14f7183343168b25899d866914710f7502e9c2ad30196c142e2449c2db738f5b"
+)
 
 
 @cache
 def _matches_static_sources(dispatch_path, scale_utils_path):
     dispatch = Path(dispatch_path)
-    return all(
+    if not all(
         sha256(path.read_bytes()).hexdigest() == expected
         for path, expected in (
             (dispatch, _DISPATCH_SHA256),
             (dispatch.with_name("moe_static_kernel.py"), _STATIC_KERNEL_SHA256),
             (Path(scale_utils_path), _SCALE_UTILS_SHA256),
         )
+    ):
+        return False
+    root = dispatch.parents[3]
+    paths = []
+    for directory in ("fused_moe/cute_dsl/blackwell_sm12x", "cute_dsl", "jit"):
+        paths.extend((root / directory).rglob("*.py"))
+    paths.extend(
+        root / name
+        for name in (
+            "utils.py",
+            "api_logging.py",
+            "artifacts.py",
+            "compilation_context.py",
+        )
     )
+    digest = sha256()
+    for path in sorted(paths):
+        digest.update(
+            ("flashinfer/" + path.relative_to(root).as_posix()).encode() + b"\0"
+        )
+        digest.update(sha256(path.read_bytes()).digest())
+    return digest.hexdigest() == _STATIC_SOURCES_SHA256
+
+
+def _static_launcher(launch):
+    """Bind the pinned static entry once; leave other callers' globals intact."""
+    if not isinstance(launch, FunctionType) or launch.__dict__ or launch.__closure__:
+        raise RuntimeError("Unrecognized FlashInfer static MoE launcher")
+    pending, seen = [launch], set()
+    reads_backend = False
+    bindings = []
+    while pending:
+        function = pending.pop()
+        if function in seen:
+            continue
+        seen.add(function)
+        bindings.append((id(function), "__code__", id(function.__code__)))
+        for instruction in get_instructions(function):
+            if instruction.opname != "LOAD_GLOBAL":
+                continue
+            name = instruction.argval
+            if name == "_FORCED_BACKEND":
+                if function is not launch:
+                    raise RuntimeError(
+                        "A FlashInfer callee reselects the static backend"
+                    )
+                reads_backend = True
+            if name not in function.__globals__:
+                if not hasattr(builtins, name):
+                    raise RuntimeError(f"Unbound FlashInfer global: {name}")
+                continue
+            value = function.__globals__[name]
+            bindings.append((id(function), name, id(value)))
+            if (
+                isinstance(value, FunctionType)
+                and value.__module__ == launch.__module__
+            ):
+                pending.append(value)
+    if not reads_backend:
+        raise RuntimeError("FlashInfer launcher does not read its backend directly")
+    bindings.extend(
+        (id(launch), "default", id(value)) for value in (launch.__defaults__ or ())
+    )
+    bindings.extend(
+        (id(launch), name, id(value))
+        for name, value in (launch.__kwdefaults__ or {}).items()
+    )
+    return _bind_static_launcher(launch, tuple(sorted(bindings)))
+
+
+@cache
+def _bind_static_launcher(launch, bindings):
+    private = FunctionType(
+        launch.__code__,
+        dict(launch.__globals__, _FORCED_BACKEND=_STATIC_BACKEND),
+        launch.__name__,
+        launch.__defaults__,
+        launch.__closure__,
+    )
+    private.__kwdefaults__ = dict(launch.__kwdefaults__ or {})
+    return private
 
 
 class _WorkspacePool:
@@ -55,15 +141,7 @@ class B12xNvfp4MoE:
                 "b12x NVFP4 requires the verified FlashInfer static sources "
                 "from 0.7.3 (7fa5c3b909a7)."
             )
-        launch = moe_dispatch.launch_sm120_static_moe
-        # In the pinned dispatcher this function reads the flag directly in
-        # both micro-selection branches. Its callees do not arbitrate either
-        # branch again. Reject wrappers with a different binding contract.
-        if not isinstance(launch, FunctionType) or not any(
-            op.opname == "LOAD_GLOBAL" and op.argval == "_FORCED_BACKEND"
-            for op in get_instructions(launch)
-        ):
-            raise RuntimeError("Unrecognized FlashInfer static MoE launcher")
+        _static_launcher(moe_dispatch.launch_sm120_static_moe)
         return utils.convert_sf_to_mma_layout, moe_dispatch
 
     @classmethod
@@ -74,21 +152,18 @@ class B12xNvfp4MoE:
         except (ImportError, RuntimeError, OSError, AttributeError, TypeError) as error:
             logger.info("SM120 b12x unavailable: %s", error)
             return False
+        from importlib.metadata import version
+
+        logger.info(
+            "SM120 b12x verified: FlashInfer=%s static_sources=%s",
+            version("flashinfer-python"),
+            _STATIC_SOURCES_SHA256,
+        )
         return True
 
     def __init__(self, w1, w2, scales, ep_rank, model_config, top_k):
         convert_sf_to_mma_layout, moe_dispatch = self._runtime()
-        launch = moe_dispatch.launch_sm120_static_moe
-        # This launcher uses the flag locally for both micro branches. Keep
-        # the override private so other FlashInfer callers keep their dispatch.
-        self.launch = FunctionType(
-            launch.__code__,
-            dict(launch.__globals__, _FORCED_BACKEND=_STATIC_BACKEND),
-            launch.__name__,
-            launch.__defaults__,
-            launch.__closure__,
-        )
-        self.launch.__kwdefaults__ = launch.__kwdefaults__
+        self.launch = _static_launcher(moe_dispatch.launch_sm120_static_moe)
         self.dispatch = moe_dispatch
         self.device = w1.device
         self.ep_rank = ep_rank
@@ -125,6 +200,7 @@ class B12xNvfp4MoE:
             # FlashInfer 7fa5c3b909a7, cute_dsl/utils.py:
             # convert_sf_to_mma_layout consumes already-swizzled block16
             # storage and returns a strided view over those bytes.
+            # https://github.com/flashinfer-ai/flashinfer/blob/7fa5c3b909a7/flashinfer/cute_dsl/utils.py#L367
             return convert_sf_to_mma_layout(
                 scale.contiguous().view(torch.float8_e4m3fn),
                 m=rows,

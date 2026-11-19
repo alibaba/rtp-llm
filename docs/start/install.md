@@ -70,19 +70,45 @@ does not change Bazel's PyTorch archive. The pinned FlashInfer 0.6.9 fork
 also contains the FMHA v2 CUDA Graph CPU-scale fix. A migration to an
 upstream wheel must verify or port that fix and run the attention regressions.
 
-The adapter checks the verified FlashInfer dispatcher, static kernel and scale
-utility sources and checks the launcher's direct backend flag binding. The
-workspace and launcher use the same static backend. The adapter initializes
-the local partial to zero. In the pinned kernel, negative IDs are skipped and
-every launch resets routing scratch before work on the serialized Decode
-stream. This scratch-only contract permits sharing workspace across layers
-and successive Graph replays. The scale utility views existing CUTLASS
-swizzled bytes in the MMA layout. A wheel with different sources uses CUTLASS.
-[FlashInfer 0.7.3 static MoE source](https://github.com/flashinfer-ai/flashinfer/blob/7fa5c3b909a74c435a5b89d1bec82ce012cd3ca1/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_static_kernel.py)
+The adapter verifies three entry files, then an aggregate digest over 338 Python
+sources in `fused_moe/cute_dsl/blackwell_sm12x/`, `cute_dsl/`, `jit/`, and the
+root `utils.py`, `api_logging.py`, `artifacts.py`, `compilation_context.py`.
+The reference is the official PyPI `flashinfer_python-0.7.3-py3-none-any.whl`
+(SHA256 `548a3ea1f9057025ace0a21b298824f8de049eb4b6c5c458f763309509e2ae40`).
+The source digest is
+`14f7183343168b25899d866914710f7502e9c2ad30196c142e2449c2db738f5b`:
+sort paths, then hash each `flashinfer/<relative-path>`, a NUL byte, and its
+binary SHA256. This validates the adapter's FlashInfer Python dependency
+surface, not the compiler binaries or all of FlashInfer. Keep the deployment
+lock for Torch, CUTLASS DSL and Triton; rerun the deployment gate on changes.
+A source mismatch selects CUTLASS and records the reason in the startup log.
+A verified runtime records its actual package version and source digest.
 
-Run the b12x regression before deploying the optional wheel. The manual
-`nvfp4_hybrid_sm120_gpu_test` Bazel target reserves one SM120 GPU and requires
-the matching CUDA 13 dependency lock. From the matching source runtime:
+The pinned launcher has no backend parameter. A cached private function binds
+its direct backend flag to `static`; its direct and same-module dependency
+bindings are checked before reuse. It does not mutate FlashInfer's globals.
+Workspace allocation and this launcher therefore use the same backend.
+The GPU regression intercepts the micro/direct-micro compiler entries and
+requires actual static compiler calls for M1/2/4/8/16 on both EP rank layouts.
+
+The scale utility accepts **already-swizzled** CUTLASS block16 bytes and
+returns a strided MMA view of the same storage; it must not unswizzle first.
+See [the conversion contract](https://github.com/flashinfer-ai/flashinfer/blob/7fa5c3b909a74c435a5b89d1bec82ce012cd3ca1/flashinfer/cute_dsl/utils.py#L367).
+In the pinned static kernel, [negative route IDs are skipped](https://github.com/flashinfer-ai/flashinfer/blob/7fa5c3b909a74c435a5b89d1bec82ce012cd3ca1/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_static_kernel.py#L1749).
+The adapter initializes each local output to zero; the regression poisons it
+with NaNs to prove the kernel overwrites remote-only and mixed-slot rows.
+[The prologue](https://github.com/flashinfer-ai/flashinfer/blob/7fa5c3b909a74c435a5b89d1bec82ce012cd3ca1/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_static_kernel.py#L1686)
+clears scratch when needed; [finalize](https://github.com/flashinfer-ai/flashinfer/blob/7fa5c3b909a74c435a5b89d1bec82ce012cd3ca1/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_static_kernel.py#L3250)
+restores routing counters and publishes the clean marker. A model-owned pool
+shares scratch only across serialized layers/Graph replays on its Decode
+stream. Weight views stay layer-owned. Concurrent launches on that pool are
+unsupported; any failed launch requires worker restart before scratch reuse.
+
+Run the mandatory deployment gate in the matching CUDA 13 dependency lock:
+`//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:nvfp4_hybrid_sm120_regression`.
+This explicit suite includes the CPU contract and one-SM120 GPU target; the
+GPU target fails if the pinned ABI is missing. It is manual because the stock
+0.6.9 lock cannot run the optional 0.7.3 ABI. From the matching source runtime:
 
 ```bash
 RTP_TEST_B12X_NVFP4_GPU=1 python -m \
@@ -115,23 +141,46 @@ its grid. The grid has at most 64 CTAs. Each CTA uses its block index as
 one of the 64 reserved barrier slots, and the final barrier protects the
 symmetric input window until both peers have finished reading it.
 The acquire/release barriers publish the staged partial before peer reads
-and retire peer reads before the next layer reuses the window. A missing
-peer triggers a CUDA launch failure at the timed barrier (nominally 10
-seconds). A rank-local failure after route reduction has been suppressed
-requires a restart of the TP group.
-[NCCL local AllReduce using LSA](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/deviceapi.html#local-allreduce-using-lsa)
-[NCCL 2.30.4 timed LSA barrier](https://github.com/NVIDIA/nccl/blob/v2.30.4-1/src/include/nccl_device/impl/lsa_barrier__funcs.h#L168)
+and retire peer reads before the next layer reuses the window. NCCL 2.30.4
+stores [an epoch per barrier index](https://github.com/NVIDIA/nccl/blob/v2.30.4-1/src/include/nccl_device/impl/lsa_barrier__funcs.h#L30).
+Unused reserved slots do not participate. Both peers must use identical
+logical M and H, hence identical grids; every CTA index is checked to fit the
+64-slot reservation. This is an ordinary CUDA launch, as in NCCL's
+[local LSA AllReduce example](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/deviceapi.html#local-allreduce-using-lsa).
+
+`decode_lsa_timeout_ms` in the ModelOpt FP4 config defaults to 0: use NCCL's
+abort-flag-driven wait, as for the standard TP collective. Both ranks agree
+on the value before creating the communicator. A positive value opts into
+NCCL's timed barrier and a fatal CUDA trap. Its cycles are milliseconds times
+`cudaDevAttrClockRate` (peak kHz); NCCL uses `clock64()`, so clock throttling
+can lengthen the wall time. It is a nominal device deadline, not a precise
+wall-clock watchdog. Leave it at 0 to use the service's normal TP supervisor
+policy; choose a positive deadline only with a matching worker restart policy.
+[The NCCL polling implementation](https://github.com/NVIDIA/nccl/blob/v2.30.4-1/src/include/nccl_device/impl/lsa_barrier__funcs.h#L94)
+contains both abort-driven and timed waits.
+
+Aligned staging buffers are allocated during group-agreed initialization;
+each output is allocated before suppressing the routed collective, with
+independent ownership for each forward/Graph node. A local failure after
+suppressing that collective is fatal to the TP group: the supervisor must
+restart both workers. Never switch one rank to a different collective or
+reuse a failed CUDA context. Model close retains native contexts until
+process exit while captured Graph addresses may still reference them.
 
 Run `//rtp_llm/models_py/modules/qwen4_exp/test:reduce_gate_integration_test`
-on CUDA 13. The test reserves two local SM120 GPUs and includes one-rank\nallocation and capability failures before evaluating the fused result. It is included in\n`qwen4_moe`. The source-runtime invocation is:
+on CUDA 13. It reserves two SM120 GPUs and is included in `qwen4_moe`.
+It injects one-rank allocation/capability failures and shared-weight packing
+failures, verifies delayed arrival, and compares M1–32 across H8–8192 in
+repeated eager/Graph calls. The source invocation is:
 
 ```bash
 NCCL_P2P_DISABLE=0 python -m \
   rtp_llm.models_py.modules.qwen4_exp.test.moe.reduce_gate_integration_test
 ```
 
-The manual `reduce_gate_missing_peer_test` target makes rank 1 omit the
-collective and checks the resulting CUDA fault on rank 0.
+The manual `reduce_gate_missing_peer_test` opts into a nominal 1-second
+deadline, makes rank 1 omit the collective, checks rank 0's CUDA fault and
+wall-clock bounds, and exits both workers without reusing the faulted context.
 
 On the admitted BF16 Decode path, the shared projections and gate run on
 an auxiliary CUDA stream and join the routed result before the LSA epilogue.
@@ -140,8 +189,16 @@ ModelOpt FP4 quantization config to also pack contiguous BF16 shared
 projection weights. The measured shapes use packed weights for up at
 physical M1–16 and down at M2–32. A 48-layer Qwen3.8-Flash-Next worker
 uses an additional 450 MiB per rank. This option defaults to false.
-Updating packed weights requires restarting the model and rebuilding the
-CUDA Graphs.
+Both ranks preflight the layout and memory, then build private copies and
+agree again before replacing modules or marking source weights immutable.
+If either fails, both release private copies, retain the original projections
+and keep their original update policy. Updating successfully packed weights
+requires restarting the model and rebuilding the CUDA Graphs.
+
+FP8 Dense keeps its existing shared-expert overlap qualification for both
+CUTLASS and Hybrid routed executors. BF16 Dense uses the separate model-owned
+LSA qualification above. Unsupported model layouts retain their original
+collective and shared computation path.
 
 ## Method 3: Using docker
 More Docker versions can be obtained from [RTP-LLM Release](../release/index.rst)
