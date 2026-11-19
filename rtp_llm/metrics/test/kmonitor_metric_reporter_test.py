@@ -131,7 +131,11 @@ class MetricReporterTest(unittest.TestCase):
             clock.return_value = 13.0
             second = metric.fetch_reported_data()
             clock.return_value = 14.0
-            self.assertEqual(metric.fetch_reported_data(), [])
+            idle = metric.fetch_reported_data()
+            self.assertTrue(idle)
+            self.assertTrue(
+                all(p.metric_name.endswith("_qps") and p.value == 0 for p in idle)
+            )
 
         self.assertEqual(
             sum(p.value for p in first + second if p.metric_name == rt + "_count"), 4
@@ -153,7 +157,7 @@ class MetricReporterTest(unittest.TestCase):
             [
                 (p.tags["status"], p.value)
                 for p in first + second
-                if p.metric_name == qps
+                if p.metric_name == qps and p.value
             ],
             [("success", 0.5), ("timeout", 3)],
         )
@@ -209,7 +213,9 @@ class MetricReporterTest(unittest.TestCase):
             outcomes.extend(counters.fetch_reported_data())
             latencies.extend(waits.fetch_reported_data())
             clock.return_value = 6.0
-            self.assertFalse(counters.fetch_reported_data())
+            idle = counters.fetch_reported_data()
+            self.assertEqual(len(idle), 4)
+            self.assertTrue(all(p.value == 0 for p in idle))
             self.assertFalse(waits.fetch_reported_data())
         for status in ("total", "success", "error", "skipped"):
             self.assertEqual(
