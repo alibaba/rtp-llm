@@ -44,6 +44,14 @@ class DoubleBufferPatchTest(unittest.TestCase):
             def hashes():
                 return {path: APPLIER.digest(self.root / path) for path in paths}
 
+            if not env and name == "atom" and hashes() not in (paths, spec["patched_files_sha256"]):
+                # The image applies the shared native PD overlay last. Undo its
+                # overlapping hunks in scratch before validating the pinned ABI.
+                sidecar = HERE.parent / "main_0189b3506" / "native_pd_cache.patch"
+                subprocess.run(
+                    ["git", "apply", "--reverse", *(f"--include={path}" for path in paths), str(sidecar)],
+                    cwd=self.root, check=True,
+                )
             if hashes() == spec["patched_files_sha256"]:
                 subprocess.run(
                     ["git", f"--work-tree={self.root}", "apply", "--reverse", str(HERE / spec["patch"])],
