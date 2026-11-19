@@ -133,14 +133,15 @@ def worker(rank, rendezvous, point_mass):
             selected = indexes(rows)
             for compact in (False, True):
                 vocab = cols * 2 if compact else cols * 2 - 3
-                for enabled in ("0", "1"):
+                for enabled in ("0", "1", None):
                     with patch.dict(
                         os.environ,
-                        {
-                            "RTP_LLM_BF16_LOGITS": policy,
-                            "RTP_LLM_MTP_SHARDED_TOP1": enabled,
-                        },
+                        {"RTP_LLM_BF16_LOGITS": policy},
                     ):
+                        if enabled is None:
+                            os.environ.pop("RTP_LLM_MTP_SHARDED_TOP1", None)
+                        else:
+                            os.environ["RTP_LLM_MTP_SHARDED_TOP1"] = enabled
                         head = make_head(
                             weights[rank * cols : (rank + 1) * cols],
                             tp_size=2,
@@ -166,9 +167,9 @@ def worker(rank, rendezvous, point_mass):
                         assert all_result["tokens"] is None
                         assert all_result["all_logits"] is not None
                 del head
-            # Target wrappers ignore the switch; compact padded output retains
-            # its existing full-vocabulary contract.
-            with patch.dict(os.environ, {"RTP_LLM_MTP_SHARDED_TOP1": "1"}):
+            # Check the target and compact padded fallback under the default.
+            with patch.dict(os.environ):
+                os.environ.pop("RTP_LLM_MTP_SHARDED_TOP1", None)
                 target = make_head(
                     weights[rank * cols : (rank + 1) * cols], tp_size=2, tp_rank=rank
                 )

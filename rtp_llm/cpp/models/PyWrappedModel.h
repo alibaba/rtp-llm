@@ -95,9 +95,9 @@ public:
     bool                  supportsMtpDraftGraph(int steps) const override {
         return steps > 0 && graph_runner_ && graph_runner_->mtpDraftSteps() == steps;
     }
-    GptModelOutputs            forwardMtpDraft(const GptModelInputs& inputs, int steps) override;
-    void                       releaseBuffers() override;
-    py::object&                getPyModel() {
+    GptModelOutputs forwardMtpDraft(const GptModelInputs& inputs, int steps) override;
+    void            releaseBuffers() override;
+    py::object&     getPyModel() {
         return py_model_;
     }
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
@@ -296,15 +296,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
     RTP_LLM_LOG_INFO("MTP point-mass draft enabled: %d (model_id=%zu)", mtp_point_mass_, params.model_id);
 
+    bool enable_mtp_sharded_top1 = true;
     if (const char* value = std::getenv("RTP_LLM_MTP_SHARDED_TOP1")) {
         const std::string policy(value);
         TORCH_CHECK(policy == "0" || policy == "1", "RTP_LLM_MTP_SHARDED_TOP1 must be 0 or 1");
-#if USING_CUDA
-        mtp_sharded_top1_ = policy == "1" && params.sp_config.type == SP_TYPE_MTP && params.model_id > 0
-                            && dspark_model_role_ == DSparkModelRole::NONE && pp_size_ == 1 && device_props_.tp_size > 1
-                            && !check_nan_;
-#endif
+        enable_mtp_sharded_top1 = policy == "1";
     }
+#if USING_CUDA
+    mtp_sharded_top1_ = enable_mtp_sharded_top1 && params.sp_config.type == SP_TYPE_MTP && params.model_id > 0
+                        && dspark_model_role_ == DSparkModelRole::NONE && pp_size_ == 1 && device_props_.tp_size > 1
+                        && !check_nan_;
+#else
+    (void)enable_mtp_sharded_top1;
+#endif
 
     const auto& generation_prefill_cuda_graph_buckets =
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
