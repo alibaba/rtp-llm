@@ -57,7 +57,7 @@ _SMOKE_PROFILES = {
             f"{_CHECKPOINT_ROOT}/rtp-ci--KimiK31-MTP-v5--"
             "a958dd861c161f2185251836b427a53699564d37"
         ),
-        "prefill_reserve_runtime_mem_mb": 14336,
+        "prefill_reserve_runtime_mem_mb": 20480,
         "decode_reserve_runtime_mem_mb": 14336,
         "decode_dp": 2,
         "model_type": "kimi_k31",
