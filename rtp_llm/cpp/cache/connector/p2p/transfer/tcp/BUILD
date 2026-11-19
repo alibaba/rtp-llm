@@ -8,8 +8,10 @@ cc_library(
     srcs = ["CudaCopyUtil.cc"],
     deps = [
         "//:rtp_compute_ops",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:time_util",
     ] + torch_deps() + no_block_copy_link_deps(),
     visibility = ["//visibility:public"],
 )

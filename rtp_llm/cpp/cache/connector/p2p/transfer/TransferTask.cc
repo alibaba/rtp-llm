@@ -45,6 +45,7 @@ void TransferTask::cancel() {
         if (done_) {
             return;
         }
+        cancel_requested_ = true;
         cancel_callbacks.swap(cancel_callbacks_);
         if (in_flight_ == 0) {
             // PENDING: fast fail，立即终止
@@ -57,7 +58,6 @@ void TransferTask::cancel() {
             done_callback       = std::move(done_callback_);
         } else {
             // TRANSFERRING: 仅记录取消意图，等待 notifyDone() 真正结束
-            cancel_requested_ = true;
             if (error_code_ == TransferErrorCode::OK) {
                 error_code_ = TransferErrorCode::CANCELLED;
                 error_msg_  = "TransferTask cancelled during transfer";
@@ -94,6 +94,11 @@ bool TransferTask::startTransfer() {
     return true;
 }
 
+bool TransferTask::isCancelled() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return cancel_requested_;
+}
+
 void TransferTask::forceCancel() {
     std::function<void()> done_callback;
     {
@@ -101,6 +106,7 @@ void TransferTask::forceCancel() {
         if (done_) {
             return;
         }
+        cancel_requested_   = true;
         done_               = true;
         if (error_code_ == TransferErrorCode::OK) {
             error_code_ = TransferErrorCode::CANCELLED;

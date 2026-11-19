@@ -163,22 +163,19 @@ class EngineConfigTest(TestCase):
         self.assertEqual(config.p2p_prefill_sender_queue_size, 10000)
         config.p2p_prefill_sender_thread_count = 8
         config.p2p_prefill_sender_queue_size = 20000
-        self.assertEqual(config.p2p_kv_leak_exit_threshold_min_percent, 30)
-        self.assertEqual(config.p2p_kv_leak_exit_threshold_max_percent, 70)
-        config.p2p_kv_leak_exit_threshold_min_percent = 40
-        config.p2p_kv_leak_exit_threshold_max_percent = 45
         config.rdma_transfer_wait_timeout_ms = 5678
         config.p2p_resource_store_timeout_check_interval_ms = 123
         state = config.__getstate__()
-        self.assertEqual(len(state), 29)
+        self.assertEqual(len(state), 28)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
         self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
-        self.assertEqual(restored.p2p_kv_leak_exit_threshold_min_percent, 40)
-        self.assertEqual(restored.p2p_kv_leak_exit_threshold_max_percent, 45)
         self.assertEqual(restored.rdma_transfer_wait_timeout_ms, 5678)
         self.assertEqual(restored.p2p_resource_store_timeout_check_interval_ms, 123)
+        legacy = CacheStoreConfig.__new__(CacheStoreConfig)
+        legacy.__setstate__(state[:22] + (40, 45) + state[22:-1])
+        self.assertEqual(legacy.__getstate__(), state)
 
     def test_cache_store_config_preserves_rdma_h2d_staging_total_bytes(self):
         config = CacheStoreConfig()

@@ -191,6 +191,10 @@ bool RdmaTaskContext::isTimeout() const {
     return static_cast<uint64_t>(currentTimeMs()) >= getDeadlineMs();
 }
 
+bool RdmaTaskContext::isCancelled() const {
+    return task_ && task_->isCancelled();
+}
+
 uint64_t RdmaTaskContext::getDeadlineMs() const {
     const auto effective_deadline_ms = task_ ? std::min(deadline_ms_, task_->deadlineMs()) : deadline_ms_;
     return static_cast<uint64_t>(std::max<int64_t>(0, effective_deadline_ms));
