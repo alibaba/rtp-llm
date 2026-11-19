@@ -1523,6 +1523,13 @@ public:
 
     void cleanupExpiredMissing() {
         read_registry_->cleanupExpiredMissing();
+        std::unordered_set<std::string> retries;
+        {
+            std::lock_guard<std::mutex> lock(recovery_discard_mutex_);
+            retries.swap(pending_recovery_discards_);
+        }
+        for (const auto& trace_id : retries)
+            discardReadRecovery(trace_id);
     }
 
     const TransferTaskRegistry& taskRegistry() const {
@@ -1559,22 +1566,24 @@ public:
         completion_cleanup_ = std::move(cleanup);
     }
 
+    void discardReadRecovery(const std::string& trace_id) {
+        try {
+            if (client_wrapper_)
+                client_wrapper_->discardReadRecovery(trace_id);
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(recovery_discard_mutex_);
+            pending_recovery_discards_.insert(trace_id);
+            RTP_LLM_LOG_WARNING("KVCM READ recovery discard failed trace=%s", trace_id.c_str());
+        }
+    }
+
     TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id, bool released) {
-        const auto result = read_registry_->forget(trace_id);
+        const auto result = read_registry_->forget(trace_id, released);
         if (result == TransferTaskRegistry::ForgetResult::INVALID) {
             RTP_LLM_LOG_WARNING("KVCM READ completion forget rejected rank=%ld trace=%s reason=empty_trace",
                                 static_cast<long>(parallelism_config_.world_rank), trace_id.c_str());
-        } else if (released && result == TransferTaskRegistry::ForgetResult::RUNNING &&
-                   read_registry_->blockReadRecoveryPublication(trace_id)) {
-            // Keep unproven evidence until unfreeze. A missing record can be taken
-            // as evidence that the READ never started.
-            try {
-                if (client_wrapper_)
-                    client_wrapper_->discardReadRecovery(trace_id);
-                return read_registry_->forget(trace_id, /*read_recovery_discarded=*/true);
-            } catch (...) {
-                RTP_LLM_LOG_WARNING("KVCM READ recovery discard failed trace=%s", trace_id.c_str());
-            }
+        } else if (released) {
+            discardReadRecovery(trace_id);
         }
         return result;
     }
@@ -1602,7 +1611,7 @@ public:
         execution->trace_id = request.trace_id();
         execution->proof = std::make_shared<TransferBufferSafety>(
             [registry = read_registry_, trace_id = execution->trace_id] { registry->finish(trace_id, true); });
-        if (kvcm::kSupportsReadRecoveryCancellation && kv_cache_config_.block_tree_frozen_recovery_interval_ms > 0 &&
+        if (kvcm::kSupportsReadRecoveryDiscard && kv_cache_config_.block_tree_frozen_recovery_interval_ms > 0 &&
             parallelism_config_.role_type != RoleType::DECODE &&
             std::all_of(request.uris().begin(), request.uris().end(),
                         [](const auto& uri) { return uri.compare(0, 7, "pace://") == 0; })) {
@@ -1717,9 +1726,10 @@ public:
                 return;
             if (response.payload_buffer_safe()) {
                 execution->proof->report(true);
-            } else {
-                // The READ has returned from all SDK calls that can insert recovery records.
-                read_registry_->markReadExited(execution->trace_id);
+            }
+            if constexpr (!kvcm::kSupportsReadRecoveryCancellation) {
+                if (execution->recovery_cancelled && execution->recovery_cancelled->load())
+                    discardReadRecovery(execution->trace_id);
             }
         });
         response.set_sdk_failed(false);
@@ -2945,6 +2955,8 @@ private:
     SpeculativeExecutionConfig           sp_config_;
     std::shared_ptr<BroadcastManager>                    broadcast_manager_;
     std::shared_ptr<TransferTaskRegistry>                 read_registry_{std::make_shared<TransferTaskRegistry>()};
+    std::mutex                                           recovery_discard_mutex_;
+    std::unordered_set<std::string>                      pending_recovery_discards_;
     std::shared_ptr<TransferCompletionCleanup>            completion_cleanup_;
     mutable std::atomic<size_t>                           next_registry_warning_{4096};
     mutable std::mutex                                   frozen_mutex_;

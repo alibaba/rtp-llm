@@ -64,7 +64,7 @@ public:
             return false;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto inserted = records_.emplace(trace_id, Record{State::RUNNING, false, std::move(read_recovery_cancelled)});
+        const auto inserted = records_.emplace(trace_id, Record{State::RUNNING, std::move(read_recovery_cancelled)});
         if (!inserted.second && inserted.first->second.state == State::REJECTED) {
             // The fence has intercepted its sole possible late execution. Consume
             // it atomically, but reject this arrival without admitting any I/O.
@@ -112,40 +112,16 @@ public:
         return trace_id != 0 && finish(std::to_string(trace_id), buffer_safe);
     }
 
-    // A KVCM READ can stop publishing recovery records before its buffer is safe.
-    void markReadExited(const std::string& trace_id) noexcept {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = records_.find(trace_id);
-        if (it != records_.end() && it->second.state == State::RUNNING)
-            it->second.read_exited = true;
-    }
-
-    // Called only for an already force-released READ. SDKs without cancellation
-    // support can discard only after the original call has exited.
-    bool blockReadRecoveryPublication(const std::string& trace_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = records_.find(trace_id);
-        if (it == records_.end() || it->second.state != State::RUNNING)
-            return true;
-        const auto& record = it->second;
-        if (!record.read_recovery_cancelled)
-            return record.read_exited;
-        record.read_recovery_cancelled->store(true);
-        return true;
-    }
-
-    // KVCM may forget an already force-released READ once SDK recovery publication
-    // is blocked and the SDK entry was discarded. Preserve missing admission
-    // fences. A late completion cannot recreate an erased record.
-    ForgetResult forget(const std::string& trace_id, bool read_recovery_discarded = false) {
+    ForgetResult forget(const std::string& trace_id, bool force = false) {
         if (trace_id.empty()) {
             logEvent("forget", trace_id, State::UNKNOWN, "invalid");
             return ForgetResult::INVALID;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto                  it = records_.find(trace_id);
-        if (it == records_.end()) {
-            logEvent("forget", trace_id, State::UNKNOWN, "already_missing");
+        const auto [it, inserted] = records_.try_emplace(trace_id, Record{State::REJECTED});
+        if (inserted) {
+            touchMissing(trace_id, "forget");
+            logEvent("forget", trace_id, State::REJECTED, "missing_admission_closed");
             return ForgetResult::DONE;
         }
         const auto& record = it->second;
@@ -154,19 +130,20 @@ public:
             logEvent("forget", trace_id, State::REJECTED, "fence_retained_cleanup_acknowledged");
             return ForgetResult::DONE;
         }
-        const bool discarded = read_recovery_discarded &&
-            (record.read_exited || (record.read_recovery_cancelled && record.read_recovery_cancelled->load()));
-        if (state != State::BUFFER_SAFE && !discarded) {
+        if (state != State::BUFFER_SAFE && !force) {
             logEvent("forget", trace_id, state, "retained");
             return ForgetResult::RUNNING;
         }
+        if (force && record.read_recovery_cancelled)
+            record.read_recovery_cancelled->store(true);
         records_.erase(it);
-        logEvent("forget", trace_id, state, "removed");
+        logged_query_states_.erase(trace_id);
+        logEvent("forget", trace_id, state, state == State::RUNNING ? "force_removed" : "removed");
         return ForgetResult::DONE;
     }
 
-    ForgetResult forget(uint64_t trace_id) {
-        return trace_id == 0 ? ForgetResult::INVALID : forget(std::to_string(trace_id));
+    ForgetResult forget(uint64_t trace_id, bool force = false) {
+        return trace_id == 0 ? ForgetResult::INVALID : forget(std::to_string(trace_id), force);
     }
 
     // Recovery queries close admission for missing identities atomically with
@@ -264,7 +241,6 @@ public:
 private:
     struct Record {
         State state;
-        bool read_exited{false};
         std::shared_ptr<std::atomic<bool>> read_recovery_cancelled{};
     };
 

@@ -41,8 +41,8 @@ RegistryState registryState(const KVCMStorageBackend& backend, const std::string
 }
 
 TransferCompletionCleanup::Summary drainLocalCleanup(TransferCompletionCleanup& cleanup, KVCMStorageBackend& backend) {
-    TransferCompletionForget forget(nullptr, [&](const TransferExecutionTrace& trace) {
-        return backend.forgetReadCompletion(std::get<std::string>(trace));
+    TransferCompletionForget forget(nullptr, [&](const TransferExecutionTrace& trace, bool force) {
+        return backend.forgetReadCompletion(std::get<std::string>(trace), force);
     });
     return cleanup.drain([&](const auto& target, const auto& traces, int timeout_ms) {
         return forget.forget(target, traces, timeout_ms);

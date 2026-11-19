@@ -69,8 +69,8 @@ public:
         return task_registry_->queryAndBlockMissing(std::vector<uint64_t>{trace_id}).front();
     }
 
-    TransferTaskRegistry::ForgetResult forgetLocalCompletion(uint64_t trace_id) const {
-        return task_registry_->forget(trace_id);
+    TransferTaskRegistry::ForgetResult forgetLocalCompletion(uint64_t trace_id, bool force = false) const {
+        return task_registry_->forget(trace_id, force);
     }
 
     // Initialization only, before any coordinator execution can be submitted.

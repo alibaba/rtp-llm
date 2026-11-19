@@ -9,11 +9,9 @@ namespace rtp_llm {
 
 class BroadcastManager;
 
-// Deletes only worker evidence which is already BUFFER_SAFE. It never changes
-// frozen references, business results or a worker's RUNNING execution.
 class TransferCompletionForget {
 public:
-    using LocalForget = std::function<TransferTaskRegistry::ForgetResult(const TransferExecutionTrace&)>;
+    using LocalForget = std::function<TransferTaskRegistry::ForgetResult(const TransferExecutionTrace&, bool)>;
 
     explicit TransferCompletionForget(std::shared_ptr<BroadcastManager> broadcast_manager,
                                        LocalForget local_forget = {});

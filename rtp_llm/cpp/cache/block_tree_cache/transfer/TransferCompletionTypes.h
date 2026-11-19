@@ -22,6 +22,7 @@ struct TransferCompletionTarget {
     bool                                remote{false};
     std::vector<TransferCompletionPeer> peers;
     bool                                kvcm_read_released{false};
+    bool                                transfer_released{false};
 };
 
 struct TransferCompletionRankResult {

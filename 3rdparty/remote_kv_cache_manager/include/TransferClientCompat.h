@@ -41,10 +41,12 @@ struct HasReadRecoveryCancellation<Trace, std::void_t<decltype(&Trace::read_reco
 
 }  // namespace detail
 
-inline constexpr bool kSupportsReadRecoveryCancellation =
-    detail::HasReadRecoveryCancellation<kv_cache_manager::TransferTraceInfo>::value &&
+inline constexpr bool kSupportsReadRecoveryDiscard =
     detail::HasDiscardReadRecovery<kv_cache_manager::TransferClient>::value &&
     detail::HasLateReadSafety<kv_cache_manager::TransferClient, kv_cache_manager::TransferTraceInfo>::value;
+
+inline constexpr bool kSupportsReadRecoveryCancellation =
+    kSupportsReadRecoveryDiscard && detail::HasReadRecoveryCancellation<kv_cache_manager::TransferTraceInfo>::value;
 
 template<typename Trace, typename Client = kv_cache_manager::TransferClient>
 void setSdkReadExecutionId(std::shared_ptr<Trace>&                       trace,

@@ -175,8 +175,7 @@ bool FrozenTask::unfreeze(bool forced) noexcept {
     for (const auto& target : targets_) {
         target.release();
     }
-    // Authorize discarding unproven KVCM recovery only after a forced release.
-    cleanup_.submit(/*kvcm_read_released=*/forced && std::holds_alternative<std::string>(execution_.trace_id));
+    cleanup_.submit(forced);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         released_at_us_ = wallTimeUs();
