@@ -91,15 +91,10 @@ py_test(
     srcs = ["service_startup_test.py"],
     data = ["//:th_transformer_config"],
     deps = [
-        "//rtp_llm:config_ops",
+        "//rtp_llm:device",
+        "//rtp_llm:rtp_llm_lib",
         "//rtp_llm:sdk",
-        "//rtp_llm:structure",
-        "//rtp_llm:utils",
-        "//rtp_llm/access_logger:access_logger",
-        "//rtp_llm/metrics:metrics",
-        "//rtp_llm/models_py/distributed:collective_torch",
-        "//rtp_llm/distribute:distribute",
-        "//rtp_llm/server:server",
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
     ],
 )
 

@@ -40,6 +40,7 @@ class HostReactor:
                 f"vipserver domain update thread stopped. to refresh domains: {self.refresh_cache_domain_srv_lst}"
             )
 
+        self.update_domain_thread.join()
         if self.proxy.started:
             self.proxy.close()
 

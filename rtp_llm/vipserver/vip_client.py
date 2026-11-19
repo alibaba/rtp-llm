@@ -1,5 +1,4 @@
 import random
-import threading
 
 from rtp_llm.vipserver.host_reactor import HostReactor
 from rtp_llm.vipserver.vipserver_proxy import VIPServerProxy
@@ -9,14 +8,8 @@ class VipClient:
 
     def __init__(self, host_reactor: HostReactor):
         self.host_reactor = host_reactor
-        self._start_lock = threading.Lock()
-
-    def _ensure_started(self):
-        # Import and construction are safe before a template checkpoint. The
-        # first discovery request starts fresh network state after release.
-        with self._start_lock:
-            if not self.host_reactor.started:
-                self.host_reactor.start()
+        if not self.host_reactor.started:
+            self.host_reactor.start()
 
     def get_host_list_by_domain_now(self, domain: str):
         """
@@ -24,7 +17,6 @@ class VipClient:
         :param domain: vipserver domain
         :return: host list
         """
-        self._ensure_started()
         return self.host_reactor.get_host_list_by_domain_now(domain)
 
     def get_host_list_by_domain(self, domain: str):
@@ -33,7 +25,6 @@ class VipClient:
         :param domain: vipserver domain
         :return: host list
         """
-        self._ensure_started()
         return self.host_reactor.get_host_list_by_domain(domain)
 
     def get_one_validate_host_now(self, domain: str):

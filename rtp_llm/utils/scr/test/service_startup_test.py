@@ -1,64 +1,64 @@
-"""Verify the resources actually present at the pre-service template boundary."""
+"""Keep discovery out of imports performed before the template barrier."""
 
-import os
+import subprocess
+import sys
+import textwrap
 import unittest
-from unittest.mock import patch
-
-from rtp_llm.config.generate_config import RoleType
-from rtp_llm.server.host_service import HostService, HostServiceArgs, VipServerWrapper
-from rtp_llm.vipserver.host import Host
-from rtp_llm.vipserver.host_reactor import HostReactor
-from rtp_llm.vipserver.vip_client import VipClient
-from rtp_llm.vipserver.vipserver_proxy import VIPServerProxy
 
 
 class ScrServiceStartupTest(unittest.TestCase):
-    def test_role_lookup_uses_current_namespace_ip(self):
-        # Each restore of a service-preparation template starts from empty
-        # discovery state; it does not inherit another clone's served requests.
-        for suffix in (20, 30):
-            reactor = HostReactor(VIPServerProxy())
-            client = VipClient(reactor)
-            self.assertFalse(reactor.started)
-            self.assertFalse(reactor.proxy.started)
-            self.assertFalse(reactor.domain_map)
-            ip = f"192.0.2.{suffix}"
-            with patch.dict(
-                os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"}
-            ), patch(
-                "rtp_llm.vipserver.vip_client.global_vip_client", client
-            ), patch.object(
-                reactor, "start", side_effect=lambda: setattr(reactor, "started", True)
-            ) as start, patch.object(
-                reactor.proxy,
-                "req_api",
-                return_value={"hosts": [{"valid": True, "ip": ip, "port": "9000"}]},
-            ) as query, patch(
-                "rtp_llm.vipserver.host_reactor.NetUtils.get_ip_addr", return_value=ip
-            ):
-                service = HostService(HostServiceArgs(decode_domain="decode.vip"))
-                self.addCleanup(service.master_service._probe_executor.shutdown)
-                roles = service.get_backend_role_addrs([RoleType.DECODE])
-                self.assertEqual([(r.ip, r.grpc_port) for r in roles], [(ip, 9001)])
-                self.assertEqual(query.call_args.args[1]["clientIP"], ip)
-                service.get_backend_role_addrs([RoleType.DECODE])
-                start.assert_called_once()
+    def test_service_imports_leave_discovery_until_first_lookup(self):
+        # A fresh interpreter prevents another test's imports from hiding an
+        # eager VIPServer dependency in the pre-barrier service import graph.
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                textwrap.dedent(
+                    """
+                    import sys
+                    import threading
+                    from unittest.mock import Mock, patch
 
-    def test_normal_startup_keeps_eager_role_discovery(self):
-        with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}), patch(
-            "rtp_llm.vipserver.get_host_list_by_domain",
-            return_value=[Host("192.0.2.10", "9000")],
-        ) as discover:
-            vip = VipServerWrapper("decode.vip")
-        discover.assert_called_once_with("decode.vip")
-        self.assertEqual(vip.hosts[0].ip, "192.0.2.10")
+                    import rtp_llm.server.backend_manager
+                    import rtp_llm.frontend.frontend_app
+                    import rtp_llm.dash_sc.app
+                    from rtp_llm.server.host_service import VipServerWrapper
 
-    def test_unused_discovery_can_close_without_starting_threads(self):
-        reactor = HostReactor(VIPServerProxy())
-        VipClient(reactor)
-        reactor.close()
-        self.assertFalse(reactor.started)
-        self.assertFalse(reactor.proxy.started)
+                    assert not any(
+                        name == "rtp_llm.vipserver" or name.startswith("rtp_llm.vipserver.")
+                        for name in sys.modules
+                    ), "pre-barrier service imports loaded VIPServer"
+
+                    # This lookup is reached by service initialization after
+                    # prebind. Exercise the original eager client with no real
+                    # network or background threads in this unit test.
+                    response = Mock(
+                        text="192.0.2.1",
+                        json=Mock(return_value={"hosts": [
+                            {"valid": True, "ip": "192.0.2.10", "port": "9000"}
+                        ]}),
+                    )
+                    with patch("requests.get", return_value=response) as request, patch.object(
+                        threading.Thread, "start"
+                    ) as start:
+                        service = VipServerWrapper("decode.vip")
+                        assert [(host.ip, host.port) for host in service.hosts] == [
+                            ("192.0.2.10", "9000")
+                        ]
+                        assert start.call_count == 2, "VIPServer refresh threads did not start"
+                        assert request.call_count == 2, "first lookup did not query VIPServer"
+                        service.get_hosts()
+                        assert start.call_count == 2
+                        assert request.call_count == 2
+                    """
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
