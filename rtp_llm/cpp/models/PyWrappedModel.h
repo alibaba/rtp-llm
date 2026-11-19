@@ -591,7 +591,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
 #if USING_ROCM
         const char* mtp_loop_env = std::getenv("RTP_LLM_MTP_DRAFT_LOOP_GRAPH");
-        if (mtp_loop_env && std::string(mtp_loop_env) == "1" && params.model_id == 1
+        if ((!mtp_loop_env || std::string(mtp_loop_env) == "1") && params.model_id == 1
             && graph_params.role == CudaGraphRole::DECODE && params.sp_config.gen_num_per_cycle > 1 && !check_nan_
             && py::hasattr(py_instance, "prepare_mtp_draft_graph_step")
             && py::hasattr(py_instance, "supports_mtp_draft_loop_graph")
