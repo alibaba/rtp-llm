@@ -312,6 +312,16 @@ class BaseModel(object):
             return
         torch.distributed.barrier()
 
+    @property
+    def resident_initialize_gpu_growth_bytes(self) -> int:
+        """GPU memory the attached record gained in its cold start's initialize(), else 0.
+
+        This start holds it before the engine sizes the KV cache; see
+        KVCacheConfig.target_initialize_gpu_growth_bytes.
+        """
+        manager = self._resident_weights
+        return 0 if manager is None else manager.initialize_gpu_growth_bytes
+
     def _finish_resident_weights(self) -> None:
         if self._resident_weights is not None:
             self._resident_weights.finalize_after_initialize(self.py_model)

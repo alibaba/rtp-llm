@@ -291,6 +291,8 @@ class _ColdRecorder:
     init_scalars: Dict[ScopeKey, Dict[str, ScalarValue]] = field(default_factory=dict)
     weight_dicts: List[WeightDict] = field(default_factory=list)
     excluded_names: FrozenSet[str] = frozenset()
+    # Resident GPU bytes when the loaded model went to the engine, before initialize().
+    gpu_bytes_at_engine_start: Optional[int] = None
 
 
 @dataclass
@@ -355,6 +357,8 @@ class ResidentWeights:
         self._published = False
         self._finalized = False
         self._verify_against: Optional[SlotRecord] = None
+        # The attached record's initialize_gpu_growth_bytes; 0 on a cold start.
+        self.initialize_gpu_growth_bytes = 0
         _managers.add(self)
 
     # ---- store access -------------------------------------------------------------------
@@ -432,6 +436,7 @@ class ResidentWeights:
         self._replay = None
         self._attached = False
         self._allocation_refs.clear()
+        self.initialize_gpu_growth_bytes = 0
         self._drop_quietly()
 
     # ---- restart ------------------------------------------------------------------------
@@ -488,11 +493,14 @@ class ResidentWeights:
         self.eplb_placement = {
             int(k): v for k, v in record.eplb_placement.items()
         } or None
+        self.initialize_gpu_growth_bytes = record.initialize_gpu_growth_bytes
         logging.info(
-            "attached resident weights %s: %.2f GiB in %d allocations",
+            "attached resident weights %s: %.2f GiB in %d allocations; the cold start's "
+            "initialize() changed resident GPU memory by %+.2f GiB",
             self.slot_key,
             record.total_bytes / (1 << 30),
             len(record.manifest.allocations),
+            record.initialize_gpu_growth_bytes / (1 << 30),
         )
         return loaded
 
@@ -930,10 +938,24 @@ class ResidentWeights:
         ``py_model`` is None when this engine has no python model at all, and for the roles
         that skip building one; there is nothing left to wait for, so publish immediately.
         """
+        if self._recorder is not None:
+            self._recorder.gpu_bytes_at_engine_start = self._live_gpu_bytes()
         if py_model is None:
             self.finalize()
         else:
             self._wrap_model_initialize(py_model)
+
+    def _live_gpu_bytes(self) -> int:
+        """Size of the resident GPU allocations some tensor of this cold start still views."""
+        recorder = self._recorder
+        assert recorder is not None
+        gc.collect()
+        allocations: List[_Allocation] = []
+        for tracked in recorder.storages:
+            allocation = tracked.allocation()
+            if isinstance(allocation, VmmAllocation) and allocation not in allocations:
+                allocations.append(allocation)
+        return sum(a.size_bytes for a in allocations)
 
     def _wrap_model_initialize(self, py_model) -> None:
         """Publish after the first successful ``initialize()``, when the model holds its final
@@ -1017,6 +1039,10 @@ class ResidentWeights:
                 logging.exception("resident weights %s not published", self.slot_key)
                 return
             total_bytes = sum(a.size_bytes for a in allocations)
+            gpu_bytes = sum(
+                a.size_bytes for a in manifest.allocations if a.kind is MemoryKind.CUDA
+            )
+            engine_start = recorder.gpu_bytes_at_engine_start
             record = SlotRecord(
                 fingerprint=self.fingerprint,
                 fingerprint_text=self.fingerprint_text,
@@ -1024,6 +1050,9 @@ class ResidentWeights:
                 total_bytes=total_bytes,
                 publisher_pid=os.getpid(),
                 manifest=manifest,
+                initialize_gpu_growth_bytes=(
+                    0 if engine_start is None else gpu_bytes - engine_start
+                ),
             )
             if self.verify:
                 self._compare_with_store(manifest)
