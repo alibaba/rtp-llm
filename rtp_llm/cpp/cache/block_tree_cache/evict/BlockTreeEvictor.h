@@ -117,6 +117,11 @@ private:
         std::unordered_map<TreeNode*, bool> endpoint_matchable;
     };
 
+    struct PreparedVictims {
+        std::vector<TransferDescriptor>    descriptors;
+        std::vector<EvictionTimingMetrics> timings;
+    };
+
     struct BatchEvictResult {
         bool   direct_progress{false};
         bool   async_submitted{false};
@@ -152,6 +157,19 @@ private:
                                                    EvictionBatchContext* eviction_batch_context = nullptr,
                                                    EvictionVictimTrigger trigger = EvictionVictimTrigger::WATERMARK,
                                                    DropScope             scope   = DropScope::CASCADE);
+    // Caller holds the cache mutex. Select and immediately reserve a demote
+    // batch in one ordered pass; return aligned descriptors and timing snapshots.
+    // Target allocation, submission and rollback happen after this call returns.
+    PreparedVictims chooseAndReserveVictims(size_t group_set_id, Tier source_tier, size_t max_victim_count);
+    // Shared uncached qualification. Heap membership and metrics stay with the
+    // caller, which checks isEvictable only after these protections pass.
+    std::optional<EvictionVictimSkipReason> victimRejectionReason(TreeNode*             node,
+                                                                  size_t                group_set_id,
+                                                                  Tier                  tier,
+                                                                  bool                  force_drop,
+                                                                  const GroupSet&       group_set,
+                                                                  EvictionBatchContext* eviction_batch_context,
+                                                                   DropScope             scope) const;
     bool                              canReclaimDeviceDrop(const TransferDescriptor& desc,
                                                            EvictionBatchContext*     eviction_batch_context,
                                                            DropScope                 scope) const;

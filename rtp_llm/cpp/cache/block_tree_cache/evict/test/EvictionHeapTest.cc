@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <functional>
+#include <memory>
+#include <vector>
+
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 
 namespace rtp_llm {
@@ -334,6 +338,112 @@ TEST(EvictionHeapTest, UpsertNullNodeIgnored) {
     EvictionHeap heap(EvictionPolicy::LRU);
     heap.upsert(nullptr, makeMeta(1, 1, 0));
     EXPECT_EQ(heap.size(), 0u);
+}
+
+TEST(EvictionHeapTest, OrderedTraversalPreservesPolicyAndTieBreakOrderWhileErasingCurrentEntries) {
+    for (const auto policy : {EvictionPolicy::LRU, EvictionPolicy::LFU, EvictionPolicy::FIFO}) {
+        SCOPED_TRACE(static_cast<int>(policy));
+        EvictionHeap                           expected(policy);
+        EvictionHeap                           actual(policy);
+        std::vector<std::unique_ptr<TreeNode>> nodes;
+        for (const CacheKeyType key : {9, 5, 5, 1}) {
+            nodes.emplace_back(makeNode(key));
+        }
+        const std::vector<CandidateMeta> metadata = {
+            makeMeta(30, 1, 2), makeMeta(10, 3, 1), makeMeta(10, 3, 1), makeMeta(10, 3, 1)};
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            expected.upsert(nodes[i].get(), metadata[i]);
+            actual.upsert(nodes[i].get(), metadata[i]);
+        }
+
+        const auto& ordered  = actual;
+        auto        position = ordered.begin();
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            const auto old_entry = expected.best([](TreeNode*) { return true; });
+            ASSERT_TRUE(old_entry.has_value());
+            ASSERT_NE(position, ordered.end());
+            const auto new_entry = *position++;
+            EXPECT_EQ(new_entry.node, old_entry->node);
+            EXPECT_EQ(new_entry.primary_key, old_entry->primary_key);
+            EXPECT_EQ(new_entry.secondary_key, old_entry->secondary_key);
+            EXPECT_EQ(new_entry.cache_key, old_entry->cache_key);
+            expected.erase(old_entry->node);
+            actual.erase(new_entry.node);
+        }
+        EXPECT_EQ(position, ordered.end());
+        EXPECT_EQ(actual.size(), 0u);
+    }
+}
+
+TEST(EvictionHeapTest, OrderedTraversalVisitsRejectedPrefixOnceAndNewPassRetriesIt) {
+    EvictionHeap                           heap(EvictionPolicy::FIFO);
+    std::vector<std::unique_ptr<TreeNode>> nodes;
+    for (CacheKeyType key = 1; key <= 5; ++key) {
+        nodes.emplace_back(makeNode(key));
+        heap.upsert(nodes.back().get(), makeMeta(0, key, 0));
+    }
+    size_t visits = 0;
+    {
+        const auto& ordered  = heap;
+        auto        position = ordered.begin();
+        size_t      selected = 0;
+        while (position != ordered.end()) {
+            const auto entry = *position++;
+            ++visits;
+            if (entry.node->cache_key <= 2) {
+                continue;
+            }
+            EXPECT_EQ(entry.node, nodes[selected + 2].get());
+            ++selected;
+            heap.erase(entry.node);
+        }
+        EXPECT_EQ(selected, 3u);
+        EXPECT_EQ(position, ordered.end());
+    }
+    EXPECT_EQ(visits, 5u);
+    EXPECT_EQ(heap.size(), 2u);
+    const auto& ordered = heap;
+    const auto  retry   = ordered.begin();
+    ASSERT_NE(retry, ordered.end());
+    EXPECT_EQ(retry->node, nodes.front().get());
+}
+
+TEST(EvictionHeapTest, OrderedTraversalErasesRejectedCurrentEntries) {
+    EvictionHeap                           heap(EvictionPolicy::FIFO);
+    std::vector<std::unique_ptr<TreeNode>> nodes;
+    for (CacheKeyType key = 1; key <= 3; ++key) {
+        nodes.emplace_back(makeNode(key));
+        heap.upsert(nodes.back().get(), makeMeta(0, key, 0));
+    }
+    const auto&                  ordered  = heap;
+    auto                         position = ordered.begin();
+    std::optional<EvictionEntry> selected;
+    while (position != ordered.end()) {
+        const auto entry = *position++;
+        if (entry.node->cache_key < 3) {
+            heap.erase(entry.node);
+            continue;
+        }
+        selected = entry;
+        break;
+    }
+    ASSERT_TRUE(selected.has_value());
+    EXPECT_EQ(selected->node, nodes.back().get());
+    EXPECT_EQ(heap.size(), 1u);
+    heap.erase(selected->node);
+    EXPECT_EQ(position, ordered.end());
+}
+
+TEST(EvictionHeapTest, EmptyOrderedTraversalVisitsNoEntries) {
+    EvictionHeap heap(EvictionPolicy::LRU);
+    const auto&  ordered = heap;
+    EXPECT_EQ(ordered.begin(), ordered.end());
+    size_t visits = 0;
+    for (const auto& entry : ordered) {
+        (void)entry;
+        ++visits;
+    }
+    EXPECT_EQ(visits, 0u);
 }
 
 }  // namespace
