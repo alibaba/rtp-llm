@@ -3,7 +3,6 @@ import asyncio
 import json
 import random
 import statistics
-import sys
 import time
 from pathlib import Path
 
@@ -21,10 +20,7 @@ WORDS = ('amber', 'bridge', 'copper', 'delta', 'ember', 'forest', 'garden', 'har
          'planet', 'quartz', 'river', 'silver', 'tunnel', 'violet', 'window',
          'yellow', 'zenith')
 TASKS = {
-    'story': 'Write an original short story with vivid scenes and natural dialogue. Keep the plot moving, avoid repetitive lists, and continue for at least 500 words.',
-    'explain': 'Explain how a large distributed database recovers from a network partition. Discuss tradeoffs, examples, and failure cases in natural prose for at least 500 words.',
-    'compare': 'Compare three plausible designs for a high throughput inference service. Give concrete pros and cons, then recommend one. Write at least 500 words in natural prose.',
-    'creative': 'Invent a fictional travel guide to a city on a distant planet. Include landmarks, food, customs, and one surprising event. Write at least 500 words.',
+    'tutorial': 'Write a hands-on Python tutorial for building a tiny search engine. Include short code examples, careful explanations, common mistakes, and test cases. Continue for at least 500 words.',
     'reason': 'Solve a sequence of varied reasoning questions about probability, scheduling, and logic. Show each step in natural language with explanations, continuing for at least 500 words.',
 }
 
@@ -89,22 +85,21 @@ async def request(session, text, kind, seed, temperature):
         raise RuntimeError(f'incomplete {kind}/{seed}: {error}, {usage}, {aux}')
     out = usage['completion_tokens']; rounds = aux.get('speculative_draft_rounds',0)
     accepted = aux.get('speculative_accepted_tokens_per_pos') or []
+    if usage.get('prompt_tokens') != INPUT or out != OUTPUT or aux.get('pd_sep') is not True:
+        raise RuntimeError(f'{kind}/{seed}: expected P/D input={INPUT}, output={OUTPUT}; got {usage}, {aux}')
+    if kind != 'prime' and aux.get('reuse_len') != 5120:
+        raise RuntimeError(f"{kind}/{seed}: expected 5120 reused tokens; got {aux.get('reuse_len')}")
+    if rounds <= 0 or len(accepted) != 3:
+        raise RuntimeError(f'{kind}/{seed}: expected three MTP proposal positions; got {rounds=}, {accepted=}')
     return {
         'kind':kind,'seed':seed,'temperature':temperature,
         'input_tokens':usage.get('prompt_tokens'),'output_tokens':out,
         'reuse_len':aux.get('reuse_len'),'pd_sep':aux.get('pd_sep'),
         'draft_rounds':rounds,'accepted_per_pos':accepted,
-        'draft_accept_rate':sum(accepted)/(3*rounds) if rounds else None,
+        'draft_accept_rate':sum(accepted)/(3*rounds),
         'ttft_ms':(first-start)*1000,'tpot_ms':(end-first)*1000/max(1,out-1),
         'latency_ms':(end-start)*1000,
     }
-
-
-TASKS = {
-    'reason': TASKS['reason'],
-    'tutorial': 'Write a hands-on Python tutorial for building a tiny search engine. Include short code examples, careful explanations, common mistakes, and test cases. Continue for at least 500 words.',
-}
-
 
 
 async def main():

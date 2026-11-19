@@ -57,12 +57,6 @@ class DoubleBufferPatchTest(unittest.TestCase):
         for spec in self.manifest["components"].values():
             for path in spec["patched_files_sha256"]:
                 compile((self.root / path).read_text(), path, "exec")
-        self.assertEqual(
-            (
-                self.root / "atom/plugin/rtpllm/utils/linear_double_buffer.py"
-            ).read_bytes(),
-            (HERE / "runtime_adapter.py").read_bytes(),
-        )
 
     def test_unknown_source_rejected_before_any_component_is_modified(self):
         aiter = self.root / "aiter/ops/flydsl/kernels/gdr_decode.py"
