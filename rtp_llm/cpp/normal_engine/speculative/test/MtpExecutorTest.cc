@@ -2366,7 +2366,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     EXPECT_TRUE(sampled_q.gt(0).all().item<bool>());
 }
 
-TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
+TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesPointMassWithStableTies) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
 
@@ -2386,7 +2386,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
     stream->generateConfig()->temperature = 0.0f;
     StreamGroups stream_groups({stream});
 
-    auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f, 0.2f, 0.4f, 0.3f})
+    auto base_logits = torch::tensor({0.1f, 0.2f, 0.4f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f, 0.2f, 0.4f, 0.3f})
                            .reshape({1, gamma, vocab_size})
                            .to(torch::kCUDA);
     auto anchors = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
@@ -2394,16 +2394,12 @@ TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
     auto output =
         components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
 
-    ASSERT_FALSE(output.token_ids_are_point_mass);
-    ASSERT_EQ((std::vector<int64_t>{1, gamma, vocab_size}), output.all_probs.sizes().vec());
-    auto expected_q = torch::softmax(base_logits / 1.0e-6f, -1);
-    EXPECT_TRUE(torch::allclose(output.all_probs, expected_q));
-    EXPECT_TRUE(torch::isfinite(output.all_probs).all().item<bool>());
-    EXPECT_TRUE(torch::allclose(output.all_probs.sum(-1).cpu(), torch::ones({1, gamma})));
-    EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
+    EXPECT_TRUE(output.token_ids_are_point_mass);
+    EXPECT_FALSE(output.all_probs.defined());
+    EXPECT_EQ((std::vector<int32_t>{2, 0, 2}), toVec<int32_t>(output.token_ids.cpu()));
 }
 
-TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
+TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsUsePointMass) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
 
@@ -2419,7 +2415,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
                            .reshape({1, gamma, vocab_size})
                            .to(torch::kCUDA);
     auto anchors    = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto expected_q = torch::softmax(base_logits / 1.0e-6f, -1);
+    auto expected_ids = base_logits.argmax(-1).to(torch::kInt32).cpu();
 
     // do_sample=false is greedy even with a hot request temperature: the target
     // takes its argmax and acceptance requires an exact token match.
@@ -2432,8 +2428,9 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
 
         auto output =
             components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
-        EXPECT_TRUE(torch::allclose(output.all_probs, expected_q));
-        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
+        EXPECT_TRUE(output.token_ids_are_point_mass);
+        EXPECT_FALSE(output.all_probs.defined());
+        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_ids));
     }
 
     // top_k=1 is greedy as well regardless of do_sample/temperature.
@@ -2447,8 +2444,42 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
 
         auto output =
             components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
-        EXPECT_TRUE(torch::allclose(output.all_probs, expected_q));
-        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
+        EXPECT_TRUE(output.token_ids_are_point_mass);
+        EXPECT_FALSE(output.all_probs.defined());
+        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_ids));
+    }
+}
+
+TEST_F(MtpExecutorTest, testDSparkMixedGreedyAndStochasticBatchRetainsExactQ) {
+    constexpr int32_t     gamma = 2, vocab_size = 4;
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size           = vocab_size;
+    test_config.gen_num_per_cycle    = gamma;
+    test_config.vocab_size_override  = vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    auto components                  = createMtpExecutorComponents(test_config);
+    auto greedy =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1});
+    auto random =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {2});
+    greedy->generateConfig()->do_sample   = false;
+    random->generateConfig()->do_sample   = true;
+    random->generateConfig()->top_k       = 0;
+    random->generateConfig()->temperature = 0.5f;
+    StreamGroups groups({greedy, random});
+    auto         options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+    auto         logits  = torch::arange(2 * gamma * vocab_size, options).reshape({2 * gamma, vocab_size});
+    auto         anchors = torch::zeros({2}, options.dtype(torch::kInt32));
+    auto         out     = components.executor->sampleDSparkDraft(groups, logits, anchors);
+    ASSERT_FALSE(out.token_ids_are_point_mass);
+    auto    ordered = groups.allStreams();
+    int64_t row     = 0;
+    for (const auto& stream : ordered) {
+        auto slices   = logits.narrow(0, row * gamma, gamma);
+        auto expected = torch::softmax(slices / (stream == greedy ? 1.0e-6f : 0.5f), -1);
+        EXPECT_TRUE(torch::allclose(out.all_probs.select(0, row), expected));
+        ++row;
     }
 }
 
@@ -2533,6 +2564,11 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     EXPECT_EQ((std::vector<int32_t>{5, 5}), toVec<int32_t>(output.token_ids.cpu()));
     auto expected_second_q = torch::softmax(torch::tensor({-100.0f, 0.0f, 100.0f}), -1);
     EXPECT_TRUE(torch::allclose(output.all_probs[0][1].cpu(), expected_second_q));
+
+    auto greedy = sampler.sampleDSparkDraft(base_logits, anchors, {}, markov_w1, markov_w2, draft_vocab_size);
+    EXPECT_TRUE(greedy.token_ids_are_point_mass);
+    EXPECT_FALSE(greedy.all_probs.defined());
+    EXPECT_EQ((std::vector<int32_t>{5, 5}), toVec<int32_t>(greedy.token_ids.cpu()));
 }
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {

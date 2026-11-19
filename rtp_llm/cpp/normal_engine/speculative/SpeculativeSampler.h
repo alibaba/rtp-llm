@@ -55,6 +55,7 @@ public:
                                              SamplerOutput&                      draft_sampler_output,
                                              SamplerOutput&                      target_sampler_output);
 
+    // Undefined temperature selects an all-argmax draft. Mixed/stochastic batches pass exact temperatures.
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
                                     const torch::Tensor& temperature,
