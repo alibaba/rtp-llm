@@ -1,0 +1,158 @@
+{
+  "aiter_patch_sha256": "1f294c677feaae3a25363e946be3429764ef7aa4bb3f6468cd5ae5863e5f70d4",
+  "aiter_version": "0.1.29+rocm7.2.0.git97d2389",
+  "atom_patch_sha256": "3c776914106bfb1539f632465a06ab7d53815c5293a4237a21f3c125465ed39b",
+  "atom_patched_files_sha256": {
+    "atom/model_ops/attentions/qwen4_exp_attn.py": "907ef333584669a21c010432da09c1fb68f4f5e5d0ca8fec521415138d0249c0",
+    "atom/model_ops/fla_ops/replayssm.py": "84f6570a425d69179e3225d295b0b9ec978e93c899abe0d926cfa8b8a06c7a6b",
+    "atom/model_ops/qwen4_exp/qsa_attention.py": "a9fcd02272264a65f375e647bb8f9aea3b9e0bdbc89807552d04d7218247c6ee",
+    "atom/model_ops/topK.py": "ec4459a695f0fc778be527021ec2fe8a80fd63f17ce2de1834212f6a57157885",
+    "atom/plugin/rtpllm/models/qwen4_exp.py": "e38f63c2921d185282e32bd2d315227c00651a2dc5cb0c1c6c9ef6c3f3e2c799",
+    "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "e3491986c275a06d4dbf355f970b17e4153b713d8e27a9f8e485f1ed82693d8d",
+    "atom/plugin/rtpllm/utils/replayssm_rtp.py": "4606420c7dc9614380f5eb15fdc5c61c6f2a956b3c1d0d141e39c5a45577a87a",
+    "atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py": "4f6a0f940d2ed15684fd16483f46e896636d567c30893d6a8b93e2e93c0883f9",
+    "atom/model_ops/attention_gdn.py": "8db24f4c126fd67b63ffaea1e9334f5de1373fb80767f9988fe7fb396708ea21",
+    "atom/model_ops/fla_ops/gdn_flydsl.py": "fe98278780d0e85342c21180e6dfc2ae8032f66d5744ba1660488ef33d30c6a1",
+    "atom/plugin/rtpllm/utils/replay_hybrid.py": "8864542e137735d8b8a13f694bc00b2aa2d7cb9dc63a4cde0f689cd20d42a19c",
+    "atom/plugin/rtpllm/utils/replay_policy.py": "fb498cf76628a4cb2b6743cd4c6288b0835d526e2967fc842e52ccd99fcdfa2a"
+  },
+  "atom_source_files_sha256": {
+    "atom/model_ops/attentions/qwen4_exp_attn.py": "871dda629901a152bbcbad8284ef897eb269a82d4958b4fdaefc6526f3b9c197",
+    "atom/model_ops/fla_ops/replayssm.py": "8fe6868912f5152bd15908042419609c77557bffc1bdb84611a063de2ca851a6",
+    "atom/model_ops/qwen4_exp/qsa_attention.py": "48868718f44dd884ae15b836c0a9172035c07ecf4d5945cd1f50761866557e13",
+    "atom/model_ops/topK.py": "969ccdf514f5cd25282da5f743ac422dcf65e20febacfe5ec2b92f686bd2b9d9",
+    "atom/plugin/rtpllm/models/qwen4_exp.py": "1c07b955a57cbdec11ebd7b036ce7442427c7a9dd613676082e1454cf8afe8bf",
+    "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "0ba7eb3581a141c1aba9b1e850b765dcf5a33be2e2ed0b04b6370b978635dd58",
+    "atom/plugin/rtpllm/utils/replayssm_rtp.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "atom/model_ops/attention_gdn.py": "353a23fc8064f10ba75a7f98bfb7da2a5cc2b55d1cbab525efdb47cbcf32ee8d",
+    "atom/model_ops/fla_ops/gdn_flydsl.py": "bdd7df6992d1b7541ccc769dca8ab0c156844276df6383566c85bd6b9eab7b1b",
+    "atom/plugin/rtpllm/utils/replay_hybrid.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "atom/plugin/rtpllm/utils/replay_policy.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "flydsl_version": "0.4.2",
+  "flydsl_wheel_sha256": "7cc611464424c6949ef7c5b4839e85c0e567669016e653eae888ebe4a457a071",
+  "hipblaslt_library": "libhipblaslt.so.1.2.70200",
+  "patched_sha256": "535916baacfe8212f4498520b01ce6d85f390c6731a58c0186c2d52fe9956634",
+  "solutions": {
+    "1,324,10240": 197004,
+    "1,48,2560": -1,
+    "1,513,2560": 204213,
+    "1,640,2560": -1,
+    "1024,10240,320": 204220,
+    "1024,324,10240": 196660,
+    "1024,48,2560": 204186,
+    "1024,513,2560": 204207,
+    "1024,640,2560": 204316,
+    "128,10240,320": 204169,
+    "128,324,10240": 197080,
+    "128,48,2560": -1,
+    "128,513,2560": 204204,
+    "128,640,2560": 204186,
+    "16,10240,320": 197610,
+    "16,324,10240": 197004,
+    "16,48,2560": -1,
+    "16,513,2560": 204213,
+    "16,640,2560": 196975,
+    "16384,10240,320": 204220,
+    "16384,324,10240": 196940,
+    "16384,48,2560": 204316,
+    "16384,513,2560": 204406,
+    "16384,640,2560": 204241,
+    "2,10240,320": 197611,
+    "2,324,10240": 197004,
+    "2,48,2560": -1,
+    "2,513,2560": -1,
+    "2,640,2560": -1,
+    "2048,10240,320": 204220,
+    "2048,324,10240": 197298,
+    "2048,48,2560": 204320,
+    "2048,513,2560": 195908,
+    "2048,640,2560": 196666,
+    "256,10240,320": 204220,
+    "256,324,10240": 197106,
+    "256,48,2560": -1,
+    "256,513,2560": 204208,
+    "256,640,2560": 204208,
+    "32,10240,320": 204355,
+    "32,324,10240": 197019,
+    "32,48,2560": -1,
+    "32,513,2560": 196975,
+    "32,640,2560": 196976,
+    "4,10240,320": 204235,
+    "4,324,10240": 197004,
+    "4,48,2560": 204213,
+    "4,513,2560": 204214,
+    "4,640,2560": 196976,
+    "4096,10240,320": 204224,
+    "4096,324,10240": 204374,
+    "4096,48,2560": -1,
+    "4096,513,2560": 204388,
+    "4096,640,2560": 204409,
+    "512,10240,320": 204220,
+    "512,324,10240": 197182,
+    "512,48,2560": -1,
+    "512,513,2560": 204352,
+    "512,640,2560": 204261,
+    "64,10240,320": 204289,
+    "64,324,10240": 197077,
+    "64,48,2560": -1,
+    "64,513,2560": 204195,
+    "64,640,2560": 204196,
+    "8,10240,320": 197064,
+    "8,324,10240": 197008,
+    "8,48,2560": -1,
+    "8,513,2560": -1,
+    "8,640,2560": -1,
+    "8192,10240,320": 204220,
+    "8192,324,10240": 197421,
+    "8192,48,2560": 204316,
+    "8192,513,2560": 204349,
+    "8192,640,2560": 204409
+  },
+  "source_sha256": "6d6647ff16af4289547faf65f7663b59de0957ec39f90cef377b0c689a627897",
+  "atom_previous_added_files_sha256": {
+    "atom/plugin/rtpllm/utils/replayssm_rtp.py": [
+      "f26a06c896b09a1ce5862be9d87383aea4fbbb882e67cb18c77a128be2634330",
+      "8ee981c65a678feb3cb1b5be5cd7713dc2bb63392ccf9bacbbbd901914f7dc36"
+    ],
+    "atom/plugin/rtpllm/utils/replayssm_rtp_fused_copy.py": [
+      "4f6a0f940d2ed15684fd16483f46e896636d567c30893d6a8b93e2e93c0883f9",
+      "0db5be297a2a61600cbe7decf1725394fdeaa0d844aa1177c7a988b3431a279b"
+    ],
+    "atom/plugin/rtpllm/utils/replay_hybrid.py": [
+      "aec10379d0a853fdb555875ac38527b8c422c175efcd1753ca326eb5413bec7d",
+      "459fb274e91016219c5a9c2b762827b2c50c93c7774a944ff9ea70e81cb38914"
+    ],
+    "atom/plugin/rtpllm/utils/replay_policy.py": [
+      "43ce3907a5563ac07e2ba44df38a8b32b86fbc5ef108ee7b1c339724cc017426"
+    ]
+  },
+  "aiter_gdn_patch_sha256": "d2699d41bf52e22e394a3f71b8e333aa4ac2f381ed0b2a060503a038e1eee9b8",
+  "aiter_gdn_source_files_sha256": {
+    "aiter/ops/flydsl/kernels/gdr_decode.py": "22971591a79700c9faca17b08241a39f38a433119d6bfd2adee0d05e1e1f7461",
+    "aiter/ops/flydsl/linear_attention_kernels.py": "733c18bd2fc80bffb20a9eb6f564804ebd55be411ebb7a7e6cb522c2c693c2b2"
+  },
+  "aiter_gdn_patched_files_sha256": {
+    "aiter/ops/flydsl/kernels/gdr_decode.py": "ff7f5a61d70f72d794f01d89e3ce010d6d4e6a015fc72bcf21461074334262d8",
+    "aiter/ops/flydsl/linear_attention_kernels.py": "54cc3f930f2d2548ad00ea519f4e790d5cad6659aaefbf3f7bf972618d1799b6"
+  },
+  "aiter_compat_patch_sha256": "85598d49a35f0d67dec64512c21bcccc91217524b76d1bcddc07ac8a72778136",
+  "aiter_compat_source_files_sha256": {
+    "aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py": "babc257aa9abfa207d364d859f36248d4ee85f91e5ec3e2cc31cb622ad548aa9",
+    "aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16.py": "9930f7b489e89c8ceeeda9bc3c08361b0f126ae34fb43cb9a0cc71ba594f9d2b",
+    "aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16_persistent.py": "d0012b7424b839070afe6088a824892101df82dbbf9c8616e805f0de07628564"
+  },
+  "aiter_compat_patched_files_sha256": {
+    "aiter/ops/triton/_triton_kernels/gemm/batched/batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant.py": "7e1a7e8ede7d3f4554ab947c608260f6265051308a8033364549b9825e359d47",
+    "aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16.py": "0c875e258ac8476fb6fdabfb0f8239223c5c82f7e9f2df868993943e06144312",
+    "aiter/ops/triton/_triton_kernels/gemm/basic/gemm_a16w16_persistent.py": "b59b4ceba781672ebbb00cf11f476f0806b5e1a1365dd425e884880efb1073f5"
+  },
+  "aiter_gemm_patch_sha256": "4f01e1086b1ecd57d30e68e8c5ac96df2cc299bec0cff44a3d7c733cedf3405c",
+  "aiter_gemm_source_files_sha256": {
+    "aiter/tuned_gemm.py": "76ec88e9d89156aabc1a7487ba0276ba3bbf50038af8ef309e758e1d724def08"
+  },
+  "aiter_gemm_patched_files_sha256": {
+    "aiter/tuned_gemm.py": "386d9fa2c86edd44b8aee548d44fd506838f889c447ebc7d6ad54d58b5032c85"
+  }
+}
