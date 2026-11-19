@@ -268,19 +268,30 @@ class CostBasedPrefillSelectionMetricTest {
         }
     }
 
-    @Test
-    void kvcmGlobalIsCarriedForTelemetryButCannotChangeTheLocalWinner() {
+    @ParameterizedTest
+    @CsvSource(value = {"default,true,1,2,280", "0,true,1,1,200", "0.5,true,0,2,500",
+            "default,false,1,1,200"}, nullValues = "default")
+    void onlyKvcmRemoteMatchesContributeTheConfiguredDiscount(
+            Double discount, boolean kvcm, int secondLocalBlocks, int winner, long effectiveTokens) {
         publish("10.0.0.2", 8080);
+        if (discount != null) {
+            var affinity = new RoutingConfig.CacheAffinityConfig();
+            affinity.setRemoteDiscount(discount);
+            config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
+        }
         context.getRequest().setCacheKeyBlockSize(100L);
-        context.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L, 4L, 5L));
+        context.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L));
         when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(
-                new CacheMatch(Map.of("10.0.0.1:8080", 2, "10.0.0.2:8080", 1), true,
-                        Map.of("10.0.0.1:8080", 3L, "10.0.0.2:8080", 5L)));
+                new CacheMatch(Map.of("10.0.0.1:8080", 2, "10.0.0.2:8080", secondLocalBlocks), kvcm,
+                        Map.of("10.0.0.1:8080", 3L, "10.0.0.2:8080", 10L)));
         try (SelectedRole selected = select()) {
-            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("10.0.0." + winner, selected.serverStatus().getServerIp());
             var copy = ServerStatus.copyOf(selected.serverStatus());
-            assertEquals(2, copy.getKvcmMatchedBlocks());
-            assertEquals(300L, copy.getKvcmGlobalMatchTokens());
+            assertEquals(kvcm ? Integer.valueOf(winner == 1 ? 2 : secondLocalBlocks) : null,
+                    copy.getKvcmMatchedBlocks());
+            assertEquals(kvcm ? Long.valueOf(winner == 1 ? 300L : 1000L) : null,
+                    copy.getKvcmGlobalMatchTokens());
+            verify(reporter).reportRoutingSelectedCacheMatchMetrics(RoleType.PREFILL, effectiveTokens, 1000L);
         }
     }
 

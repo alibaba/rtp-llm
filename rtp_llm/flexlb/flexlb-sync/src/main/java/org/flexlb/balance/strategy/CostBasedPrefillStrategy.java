@@ -73,7 +73,7 @@ public class CostBasedPrefillStrategy {
         }
         Map<String, Integer> rejections = new java.util.HashMap<>();
         PrefillCandidateSet survivors = evaluateCandidates(
-                discovery, balanceContext, cacheMatch == null ? Map.of() : cacheMatch.matches(), rejections);
+                discovery, balanceContext, cacheMatch, rejections);
         if (survivors.size() == 0) {
             return blockedWithDiagnostics(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
                     new PlacementKey(roleType, group), discovery.candidates().size(), rejections);
@@ -353,9 +353,12 @@ public class CostBasedPrefillStrategy {
     private PrefillCandidateSet evaluateCandidates(
             EndpointDiscovery discovery,
             BalanceContext balanceContext,
-            Map<String, Integer> cacheMatchResults,
+            CacheAwareService.CacheMatch cacheMatchResults,
             Map<String, Integer> rejections) {
         Request request = balanceContext.getRequest();
+        var affinity = balanceContext.getConfig().getRouter().getRoles().getPrefill().getCacheAffinity();
+        double remoteDiscount = affinity == null
+                ? RoutingConfig.CacheAffinityConfig.DEFAULT_REMOTE_DISCOUNT : affinity.getRemoteDiscount();
         int eligibleSize = discovery.candidates().size();
         PrefillCandidateSet candidates = CANDIDATES.get();
         candidates.reset(eligibleSize);
@@ -376,7 +379,7 @@ public class CostBasedPrefillStrategy {
             PrefillEndpoint ep = routingEntry.endpoint();
             String endpointAddress = routingEntry.address();
             CacheTokenMatch cacheMatch =
-                    calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request);
+                    calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request, remoteDiscount);
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
             RouteProjection.Inputs projectionInputs =
@@ -434,17 +437,22 @@ public class CostBasedPrefillStrategy {
     private CacheTokenMatch calculateCacheMatch(
             PrefillEndpoint ep,
             String endpointAddress,
-            Map<String, Integer> cacheMatchResults,
-            Request request) {
-        if (cacheMatchResults == null || cacheMatchResults.isEmpty() || request == null) {
+            CacheAwareService.CacheMatch cacheMatchResults,
+            Request request,
+            double remoteDiscount) {
+        if (cacheMatchResults == null || request == null) {
             return CacheTokenMatch.NONE;
         }
         long seqLen = request.getSeqLen();
         if (seqLen <= 0L) {
             return CacheTokenMatch.NONE;
         }
-        Integer prefixMatchLength = cacheMatchResults.get(endpointAddress);
-        if (prefixMatchLength == null || prefixMatchLength <= 0) {
+        long localBlocks = Math.max(0, cacheMatchResults.matches().getOrDefault(endpointAddress, 0));
+        long remoteBlocks = cacheMatchResults.kvcm()
+                ? Math.max(localBlocks, cacheMatchResults.globalMatches().getOrDefault(endpointAddress, localBlocks))
+                        - localBlocks
+                : 0L;
+        if (localBlocks == 0 && (remoteBlocks == 0 || remoteDiscount == 0)) {
             return CacheTokenMatch.NONE;
         }
         long blockSize = request.getCacheKeyBlockSize();
@@ -457,11 +465,10 @@ public class CostBasedPrefillStrategy {
             return CacheTokenMatch.NONE;
         }
         long rawHit;
-        try {
-            rawHit = Math.multiplyExact(
-                    blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            rawHit = seqLen;
+        if (remoteBlocks > 0 && remoteDiscount > 0) {
+            rawHit = Math.round(blockSize * (localBlocks + remoteBlocks * remoteDiscount));
+        } else {
+            rawHit = localBlocks > seqLen / blockSize ? seqLen : blockSize * localBlocks;
         }
         long routingHit = Math.min(seqLen, Math.max(0L, rawHit));
         long effectiveHit = rawHit >= seqLen

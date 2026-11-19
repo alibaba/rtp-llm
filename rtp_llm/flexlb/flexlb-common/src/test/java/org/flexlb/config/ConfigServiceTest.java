@@ -300,6 +300,7 @@ class ConfigServiceTest {
         assertEquals(90L, config.fixedWindowDecision().getMaxPredictedExecutionMs());
         assertEquals(4, config.getDispatcher().getMaxInflightPerPrefillWorker());
         assertEquals(25L, config.getRouter().getRoles().getPrefill().getCacheAffinity().getMaxExtraTtftMs());
+        assertEquals(0.2, config.getRouter().getRoles().getPrefill().getCacheAffinity().getRemoteDiscount());
         assertEquals(128L, config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
         assertEquals("/home/admin/ai-whale/logs/master_theory_hit.log",
@@ -588,6 +589,8 @@ class ConfigServiceTest {
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"executionTimeEstimator\":{\"expression\":\"sum(unknownTokens)\"}}}}}", "expression");
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"maxExtraTtftMs\":-1}}}}}", "maxExtraTtftMs");
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"minPrefixHitPercent\":100.1}}}}}", "minPrefixHitPercent");
+        assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"remoteDiscount\":-0.1}}}}}", "remoteDiscount");
+        assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"remoteDiscount\":1.1}}}}}", "remoteDiscount");
         FlexlbConfig config = ConfigTestFixtures.parse("{}");
         for (double invalid : new double[]{Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
             config.getRequestLifecycle().getDecision().setLifetime(invalid);

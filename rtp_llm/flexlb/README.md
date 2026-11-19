@@ -435,6 +435,10 @@ and projected TTFT stays within `maxExtraTtftMs` of the best candidate; otherwis
 the best projected TTFT wins. Equal cache hits preserve the best-TTFT candidate.
 The prefix percentage uses predictor-effective reusable tokens; the final cache block
 remains compute work. Omit `cacheAffinity` to disable that preference.
+For KVCM, the predictor counts local matches in full and weights the remote-only
+matches (`max(global - local, 0)`) by `router.roles.prefill.cacheAffinity.remoteDiscount`.
+The default is `0.2`, even when `cacheAffinity` is omitted. Set it to `0` to use
+only local matches for scoring. The accepted range is `[0, 1]`.
 The projection uses a frozen snapshot of current work and cannot predict future arrivals.
 
 Decode freezes each route attempt's request identity, priority, complete prompt-plus-output

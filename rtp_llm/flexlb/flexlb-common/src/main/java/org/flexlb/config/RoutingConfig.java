@@ -6,6 +6,9 @@ import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.balance.prediction.DecodeCostFormula;
 
+/**
+ * Configures worker selection and cost estimation for each routing role.
+ */
 @Getter
 @Setter
 public final class RoutingConfig {
@@ -54,14 +57,20 @@ public final class RoutingConfig {
         LEARNING
     }
 
+    /**
+     * Controls cache-leader preference and the weight of remote KVCM hits.
+     */
     @Getter
     @Setter
     public static final class CacheAffinityConfig {
+        public static final double DEFAULT_REMOTE_DISCOUNT = 0.2;
+
         /** Maximum TTFT penalty accepted for choosing a cache leader. */
         private long maxExtraTtftMs;
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;
+        private double remoteDiscount = DEFAULT_REMOTE_DISCOUNT;
     }
 
     @Getter
