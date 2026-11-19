@@ -29,11 +29,6 @@ void drainPpuCopy(cudaStream_t stream, const char* phase) noexcept {
     }
 }
 
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
-}
-
 }  // namespace
 
 std::shared_ptr<DeviceHostCopyStreams> acquireDeviceHostCopyStreams(int device_index) {
@@ -46,7 +41,7 @@ void execNoBlockCopy(const MultiCopyParams& params) {
                             params.multi_src.size(),
                             params.multi_dst.size());
 
-    auto stream = getNoBlockCopyStream().stream();
+    const auto stream = getNoBlockCopyStream(at::cuda::current_device()).stream();
 
     bool attempted = false;
     try {

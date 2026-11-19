@@ -224,7 +224,10 @@ cc_library(
     hdrs = ["transfer/TransferWorkLoop.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
-    deps = [":transfer_common"],
+    deps = [
+        ":transfer_common",
+        "//rtp_llm/models_py/bindings:no_block_copy_hdr",
+    ] + torch_deps() + no_block_copy_link_deps(),
 )
 
 cc_library(

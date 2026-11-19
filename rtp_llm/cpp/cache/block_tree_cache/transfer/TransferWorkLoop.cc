@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 #include <limits>
 #include <pthread.h>
 #include <stdexcept>
@@ -12,6 +13,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+
+#if defined(USE_PPU) && USE_PPU
+#include <c10/cuda/CUDAGuard.h>
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
+#include "rtp_llm/models_py/bindings/NoBlockCopy.h"
+#endif
 
 namespace rtp_llm {
 
@@ -72,8 +79,8 @@ TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_
     result(TransferResult::emptyAggregate(this->task.descriptors().size())),
     before_complete(std::move(before_complete)) {}
 
-bool TransferWorkLoop::isCrc(Step step) {
-    return step == Step::CRC_LOAD || step == Step::CRC_EVICT;
+bool TransferWorkLoop::isDeviceCopy(Step step) {
+    return step == Step::CRC_LOAD || step == Step::CRC_EVICT || step == Step::PPU_HOST_COPY;
 }
 
 TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
@@ -293,6 +300,13 @@ bool TransferWorkLoop::plan(Entry& entry) {
                  first.source_tier == Tier::DEVICE ? Step::CRC_EVICT :
                  first.target_tier == Tier::DISK   ? Step::DISK_WRITE :
                                                      Step::CRC_LOAD;
+#if defined(USE_PPU) && USE_PPU
+    if (((first.source_tier == Tier::DEVICE && first.target_tier == Tier::HOST)
+         || (first.source_tier == Tier::HOST && first.target_tier == Tier::DEVICE))
+        && !group(entry)->crcEnabled()) {
+        entry.step = Step::PPU_HOST_COPY;
+    }
+#endif
     if (combined) {
         if (!staging_.pools[stagingIndex(entry)])
             throw std::invalid_argument("async disk staging is unavailable");
@@ -400,7 +414,13 @@ void TransferWorkLoop::tryStep(Entry& entry) {
                                     CacheCopyError::NOT_EXECUTED)));
             return;
         }
-        if (isCrc(entry.step))
+#if defined(USE_PPU) && USE_PPU
+        if (entry.step == Step::PPU_HOST_COPY) {
+            submitPpuHostCopy(entry);
+            return;
+        }
+#endif
+        if (isDeviceCopy(entry.step))
             submitCrc(entry);
         else
             submitDisk(entry);
@@ -414,7 +434,7 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
     // Settle the stable Entry and intrusive indexes. Optional observations use
     // the existing task span and preallocated profiling buffer.
     CrcCopyExecutor::DoneCallback done = [this, &entry, &waiting](TransferResult result) noexcept {
-        assert(isCrc(entry.step));
+        assert(entry.step == Step::CRC_LOAD || entry.step == Step::CRC_EVICT);
         const auto& timing = entry.crc_timing;
         if (timing.completed_us && result.ok()) {
             const auto& trace             = entry.task_timer.trace();
@@ -473,6 +493,72 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
         has_crc_pending_ = true;
     }
 }
+
+#if defined(USE_PPU) && USE_PPU
+void TransferWorkLoop::submitPpuHostCopy(Entry& entry) {
+    const auto& descriptors = entry.task.descriptors();
+    const bool  to_device   = descriptors.front().target_tier == Tier::DEVICE;
+    const Tier  source      = to_device ? Tier::HOST : Tier::DEVICE;
+    const Tier  target      = to_device ? Tier::DEVICE : Tier::HOST;
+    const auto& owner       = *group(entry);
+    const auto  reject      = [&] { fail(entry, unsubmittedResult(TransferStatus::INVALID_ARGS)); };
+    if (!isPpuPlainHostTransferGroup(owner, disk_io_executor_ != nullptr) || entry.hosts.size() != descriptors.size()) {
+        reject();
+        return;
+    }
+
+    const auto                device_index = owner.devicePools().front()->deviceIndex();
+    const auto                device       = torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_index));
+    const c10::cuda::CUDAGuard device_guard(device);
+    const auto                bytes_on_host   = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+    const auto                bytes_on_device = torch::TensorOptions().dtype(torch::kUInt8).device(device);
+    MultiCopyParams copy;
+    startStepTimer(entry, to_device ? "h2d" : "d2h");
+    // Build and validate every view before enqueuing any device access.
+    for (size_t i = 0; i < descriptors.size(); ++i) {
+        const auto& descriptor = descriptors[i];
+        const auto& host       = entry.hosts[i];
+        if (descriptor.source_tier != source || descriptor.target_tier != target
+            || !isValidHostBufferView(host, owner.payloadBytes(), owner.payloadBytes())) {
+            reject();
+            return;
+        }
+        for (const auto& tile : getDeviceHostCopyTiles(owner, descriptor.blocksAt(Tier::DEVICE))) {
+            const auto& pool    = *owner.devicePools()[tile.member_group_id];
+            const auto  base    = reinterpret_cast<uintptr_t>(pool.getBaseAddress());
+            const auto  address = reinterpret_cast<uintptr_t>(tile.buffer.addr);
+            const auto  size    = pool.getTotalSizeBytes();
+            if (!tile.buffer.is_cuda || tile.buffer.device_index != device_index
+                || tile.buffer.size_bytes > static_cast<size_t>(std::numeric_limits<int64_t>::max())
+                || address < base || address - base > size || tile.buffer.size_bytes > size - (address - base)) {
+                reject();
+                return;
+            }
+            const auto shape       = static_cast<int64_t>(tile.buffer.size_bytes);
+            auto       host_view   = torch::from_blob(
+                static_cast<uint8_t*>(host.base) + tile.host_offset, {shape}, bytes_on_host);
+            auto       device_view = torch::from_blob(tile.buffer.addr, {shape}, bytes_on_device);
+            copy.multi_src.push_back(to_device ? std::move(host_view) : std::move(device_view));
+            copy.multi_dst.push_back(to_device ? std::move(device_view) : std::move(host_view));
+        }
+    }
+    if (entry.task.expired()) {
+        fail(entry,
+             unsubmittedResult(
+                 TransferResult(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired before stage submission"),
+                                CacheCopyError::NOT_EXECUTED)));
+        return;
+    }
+
+    // PPU's copy helper drains both success and partial submission failures.
+    // It aborts if completion cannot be proved, before this Entry can settle.
+    execNoBlockCopy(copy);
+    TransferResult result(TransferStatus::OK);
+    result.buffer_safe = true;
+    recordResult(entry, std::move(result));
+    completed_.push(entry);
+}
+#endif
 
 void TransferWorkLoop::submitDisk(Entry& entry) {
     startStepTimer(entry, entry.step == Step::DISK_READ ? "disk_read" : "disk_write");
@@ -589,7 +675,7 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
         entry.batch_timer.finishAtSteady(end_us, false);
         entry.task_timer.finishAtSteady(end_us, false);
         const auto& descriptor = entry.task.descriptors().front();
-        if (!isCrc(entry.step))
+        if (!isDeviceCopy(entry.step))
             terminal.status = transferStatusToErrorInfo(terminal.copy_error == CacheCopyError::INVALID_REQUEST ?
                                                             TransferStatus::INVALID_ARGS :
                                                             TransferStatus::DISK_IO_ERROR);
@@ -725,7 +811,7 @@ void TransferWorkLoop::run() {
         while (auto* entry = ready.pop()) {
             withEntry(*entry, [&] {
                 if (plan(*entry))
-                    (isCrc(entry->step) ? cuda_work : disk_work).push(*entry);
+                    (isDeviceCopy(entry->step) ? cuda_work : disk_work).push(*entry);
             });
         }
         auto submit = [&](Queue& work) {

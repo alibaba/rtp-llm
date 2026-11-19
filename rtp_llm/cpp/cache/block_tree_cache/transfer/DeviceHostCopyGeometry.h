@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -7,6 +8,27 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace rtp_llm {
+
+inline constexpr bool supportsPpuPlainHostTransfer(bool enable_disk_cache) {
+#if defined(USE_PPU) && USE_PPU
+    return !enable_disk_cache;
+#else
+    (void)enable_disk_cache;
+    return false;
+#endif
+}
+
+inline bool isPpuPlainHostTransferGroup(const GroupSet& group, bool enable_disk_cache) {
+    const auto& pools = group.devicePools();
+    if (!supportsPpuPlainHostTransfer(enable_disk_cache) || group.crcEnabled() || !group.hostPool()
+        || group.diskPool() || group.storageBytes() != group.payloadBytes() || pools.empty() || !pools.front()) {
+        return false;
+    }
+    const int device = pools.front()->deviceIndex();
+    return device >= 0 && std::all_of(pools.begin(), pools.end(), [device](const auto& pool) {
+        return pool && pool->deviceIndex() == device;
+    });
+}
 
 // Describes one contiguous slice of a backing without owning its device memory.
 // buffer contains the device address and the number of payload bytes to copy.

@@ -113,7 +113,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_crc"),
         type=str2bool,
         default=True,
-        help="本地 HOST/DISK KV cache 要求开启 CRC 校验，并使用支持 CRC 的 CUDA13 构建。启动时配置。",
+        help="本地 HOST/DISK KV cache 使用 CUDA13 CRC 校验。PPU 的 HOST-only 缓存使用普通拷贝。"
+        "启动时配置。",
     )
     kv_cache_group.add_argument(
         "--reuse_cache",

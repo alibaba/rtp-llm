@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 
 #include <exception>
 #include <iterator>
@@ -385,8 +386,12 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
     }
     if ((source == Tier::DISK || target == Tier::DISK) && !enable_disk_cache_)
         return invalidTransferContext(task);
-    if ((source == Tier::DEVICE || target == Tier::DEVICE) && !group_set->crcEnabled())
-        return invalidTransferContext(task);
+    if ((source == Tier::DEVICE || target == Tier::DEVICE) && !group_set->crcEnabled()) {
+        const bool device_host = (source == Tier::DEVICE && target == Tier::HOST)
+                                 || (source == Tier::HOST && target == Tier::DEVICE);
+        if (!device_host || !isPpuPlainHostTransferGroup(*group_set, enable_disk_cache_))
+            return invalidTransferContext(task);
+    }
     auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : evict_loops_;
     auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_evict_;
     const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();

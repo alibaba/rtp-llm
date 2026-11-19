@@ -94,7 +94,8 @@ private:
         DISK_READ,
         DISK_WRITE,
         CRC_LOAD,
-        CRC_EVICT
+        CRC_EVICT,
+        PPU_HOST_COPY
     };
     // Constructed by the submitter; otherwise owned by the WorkLoop. While a Disk
     // operation is pending, its callback exclusively writes result; the owner
@@ -133,6 +134,9 @@ private:
     size_t             stagingIndex(const Entry& entry) const;
     void               tryStep(Entry& entry);
     void               submitCrc(Entry& entry);
+#if defined(USE_PPU) && USE_PPU
+    void               submitPpuHostCopy(Entry& entry);
+#endif
     void               submitDisk(Entry& entry);
     void               publishDisk(Entry& entry, BlockIOStatus status) noexcept;
     void               pollOnce();
@@ -146,7 +150,7 @@ private:
     void               removeWaiter(Entry& entry);
     void               expireResourceWaiters();
     const GroupSetPtr& group(const Entry& entry) const;
-    static bool        isCrc(Step step);
+    static bool        isDeviceCopy(Step step);
     // An explicit start_us backfills the interval for both observers.
     TransferStageTimer timer(const TransferTask&     task,
                              const char*             stage,
@@ -169,8 +173,8 @@ private:
         }
     }
 
-    // CRC and disk submission throw only before accepting I/O. Accepted work
-    // completes through their callbacks, including partial submission failures.
+    // A submission can throw only before I/O or after a confirmed drain.
+    // Accepted asynchronous work settles through its completion callback.
     template<typename Action>
     void withEntry(Entry& entry, Action&& action) noexcept {
         try {
