@@ -188,6 +188,16 @@ class BertModel(GptModelBase):
         fmha_impl: FMHAImplBase = None,
         output_rows: Optional[torch.Tensor] = None,
     ) -> PyModelOutputs:
+        hidden_states = self.embed_inputs(inputs)
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        if output_rows is None:
+            return PyModelOutputs(self.forward_encoder(hidden_states, fmha_impl))
+        return PyModelOutputs(
+            self.forward_encoder(hidden_states, fmha_impl, output_rows)
+        )
+
+    def embed_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
         # MultimodalProcessor writes arbitrary signed int32 feature hashes into
@@ -236,13 +246,7 @@ class BertModel(GptModelBase):
             multimodal_locs,
         )
 
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-        if output_rows is None:
-            return PyModelOutputs(self.forward_encoder(hidden_states, fmha_impl))
-        return PyModelOutputs(
-            self.forward_encoder(hidden_states, fmha_impl, output_rows)
-        )
+        return hidden_states
 
     def forward_encoder(
         self,
