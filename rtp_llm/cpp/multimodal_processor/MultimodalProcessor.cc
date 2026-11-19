@@ -414,15 +414,19 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     return ErrorInfo::OkStatus();
 }
 
-ErrorResult<MultimodalFeature> MultimodalProcessor::getMultimodalFeatures(
-    const torch::Tensor& input_ids, const std::vector<rtp_llm::MultimodalInput>& mm_inputs, bool hash_features) {
+ErrorResult<MultimodalFeature>
+MultimodalProcessor::getMultimodalFeatures(const torch::Tensor&                         input_ids,
+                                           const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
     MultimodalFeature mm_features;
     CHECK_AND_RETURN_REF(mm_embedding_res, MultimodalEmbedding(mm_inputs));
     mm_features.features = std::move(mm_embedding_res.mm_features);
-    CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(
-            mm_features.features, input_ids, mm_inputs, {}, mm_embedding_res.mm_feature_hashes, hash_features));
+    CHECK_AND_RETURN_REF(expanded_ids,
+                         expandTokenIds(mm_features.features,
+                                        input_ids,
+                                        mm_inputs,
+                                        {},
+                                        mm_embedding_res.mm_feature_hashes,
+                                        hash_embedding_features_));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;

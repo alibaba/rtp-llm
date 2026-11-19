@@ -87,6 +87,77 @@ class EmbeddingLookupOpTest(TestCase):
         ):
             self._generic_embedding(output_dtype=torch.float16)
 
+    def _bert_inputs(self, tokens=4):
+        ids = torch.arange(tokens, dtype=torch.int32, device=self.device)
+        return dict(
+            output=torch.empty_like(self.weight[:tokens]),
+            input=ids,
+            weight=self.weight,
+            combo_position_ids=ids,
+            position_encoding=self.weight,
+            combo_tokens_type_ids=torch.zeros_like(ids),
+            token_type_embedding=self.weight[:1],
+        )
+
+    def test_bert_lookup_rejects_invalid_inputs(self):
+        args = self._bert_inputs()
+        cases = [
+            ("input", args["input"].long(), "input_ids must be int32"),
+            ("output", args["output"].float(), "output dtype must match"),
+        ]
+        for name in ("combo_position_ids", "combo_tokens_type_ids"):
+            ids = args[name]
+            cases.extend(
+                [
+                    (name, ids[:-1], f"{name} must have at least one id per token"),
+                    (name, ids.cpu(), f"{name} must be a CUDA tensor"),
+                ]
+            )
+        for name in ("position_encoding", "token_type_embedding"):
+            table = args[name]
+            cases.extend(
+                [
+                    (name, table[:0], "embedding table must not be empty"),
+                    (name, table.cpu(), f"{name} must be a CUDA tensor"),
+                    (name, table.float(), f"{name} dtype must match"),
+                    (name, table[:, :-1].contiguous(), rf"{name}\.size\(1\)"),
+                ]
+            )
+        for name, value, message in cases:
+            with self.subTest(name=name, message=message):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    rtp_llm_ops.embedding_bert(**{**args, name: value})
+
+    def test_bert_lookup_rejects_invalid_masks(self):
+        args = self._bert_inputs()
+        mask = torch.ones_like(args["input"])
+        for invalid, message in (
+            (mask.bool(), "must be int32"),
+            (mask.cpu(), "must be a CUDA tensor"),
+            (mask.repeat(2)[::2], "must be contiguous"),
+            (mask.reshape(2, 2), "must be a 1D tensor"),
+            (mask[:-1], "must have one id per token"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(
+                    RuntimeError, f"text_tokens_mask {message}"
+                ):
+                    rtp_llm_ops.embedding_bert(**args, text_tokens_mask=invalid)
+
+    def test_bert_lookup_absent_empty_and_all_masked(self):
+        args = self._bert_inputs(tokens=1)
+        args["input"] = torch.ones_like(args["input"])
+        mask = torch.zeros_like(args["input"])
+        for value in (None, mask[:0]):
+            with self.subTest(mask=value):
+                rtp_llm_ops.embedding_bert(**args, text_tokens_mask=value)
+                torch.testing.assert_close(
+                    args["output"][0], self.weight[1] + 2 * self.weight[0]
+                )
+        args["input"].fill_(123456)
+        rtp_llm_ops.embedding_bert(**args, text_tokens_mask=mask)
+        torch.testing.assert_close(args["output"][0], 2 * self.weight[0])
+
     def test_embedding_bert_bf16_multiwarp_rows_remain_distinct(self):
         token_count = 65
         input_ids = (
@@ -154,19 +225,23 @@ class EmbeddingLookupOpTest(TestCase):
 
         for dtype in (torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype):
-                weight = self.weight.to(dtype)
+                # Exercise multiple warps per row at the BERT hidden size.
+                hidden_size = 768
+                weight = self.weight.to(dtype).repeat(
+                    1, hidden_size // self.weight.size(1)
+                )
                 position_table = (
                     torch.arange(8, dtype=torch.float32, device=self.device)
                     .unsqueeze(1)
-                    .expand(-1, 32)
+                    .expand(-1, hidden_size)
                     / 32
                 ).to(dtype)
                 token_type_table = (
                     torch.tensor([[0.125], [0.875]], dtype=dtype, device=self.device)
-                    .expand(-1, 32)
+                    .expand(-1, hidden_size)
                     .contiguous()
                 )
-                output = torch.empty((8, 32), dtype=dtype, device=self.device)
+                output = torch.empty((8, hidden_size), dtype=dtype, device=self.device)
 
                 rtp_llm_ops.embedding_bert(
                     output,
