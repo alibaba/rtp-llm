@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Dict, Optional
 
 import torch
@@ -14,6 +15,7 @@ from rtp_llm.models_py.modules import (
     EmbeddingBert,
     FMHAImplBase,
     LayerNorm,
+    MultimodalEmbeddingInjector,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
@@ -62,30 +64,82 @@ class BertDecoderLayer(nn.Module):
             eps=config.layernorm_eps,
         )
 
+        hidden_size = weights[W.post_ln_gamma].numel()
+        supports_fused_width = hidden_size <= 1024 and hidden_size % 128 == 0
+        # The fused norms emit UE8M0 scales for their consuming blockwise linear.
+        self.quantize_mlp_input = (
+            supports_fused_width
+            and self.mlp.up_proj.supports_prequantized_activation
+            and getattr(self.mlp.up_proj, "scale_ue8m0", False)
+            and hasattr(self.input_layernorm, "forward_quantized")
+        )
+        self.accepts_quantized_input = (
+            self.self_attn.qkv_proj.supports_prequantized_activation
+            and getattr(self.self_attn.qkv_proj, "scale_ue8m0", False)
+        )
+        self.can_quantize_output = supports_fused_width and hasattr(
+            self.post_attention_layernorm, "forward_quantized"
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
-    ) -> torch.Tensor:
-        empty_bias = torch.empty(
-            0, device=hidden_states.device, dtype=hidden_states.dtype
+        quantized_hidden_states: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        quantize_output: bool = False,
+        output_rows: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
+        residual = (
+            hidden_states
+            if output_rows is None
+            else hidden_states.index_select(0, output_rows)
         )
-
-        residual = hidden_states
-        hidden_states = self.self_attn(
+        hidden_states, attention_bias = self.self_attn.forward_without_output_bias(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
+            quantized_hidden_states=quantized_hidden_states,
+            **({"output_rows": output_rows} if output_rows is not None else {}),
         )
-        hidden_states = self.input_layernorm(hidden_states, residual, empty_bias)
+        attention_bias_tensor = (
+            attention_bias.to(hidden_states.dtype)
+            if attention_bias is not None
+            else hidden_states.new_empty((0,))
+        )
+        if self.quantize_mlp_input:
+            hidden_states, mlp_input, mlp_input_scales = (
+                self.input_layernorm.forward_quantized(
+                    hidden_states, residual, attention_bias_tensor
+                )
+            )
+            quantized_mlp_input = (mlp_input, mlp_input_scales)
+        else:
+            hidden_states = self.input_layernorm(
+                hidden_states, residual, attention_bias_tensor
+            )
+            quantized_mlp_input = None
 
         residual = hidden_states
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_attention_layernorm(
-            hidden_states, residual, empty_bias
+        hidden_states, ffn_bias = self.mlp.forward_without_output_bias(
+            hidden_states, quantized_mlp_input
         )
-        return hidden_states
+        ffn_bias_tensor = (
+            ffn_bias.to(hidden_states.dtype)
+            if ffn_bias is not None
+            else hidden_states.new_empty((0,))
+        )
+        if quantize_output and self.can_quantize_output:
+            hidden_states, output_fp8, output_scales = (
+                self.post_attention_layernorm.forward_quantized(
+                    hidden_states, residual, ffn_bias_tensor
+                )
+            )
+            return hidden_states, (output_fp8, output_scales)
+        hidden_states = self.post_attention_layernorm(
+            hidden_states, residual, ffn_bias_tensor
+        )
+        return hidden_states, None
 
 
 class BertModel(GptModelBase):
@@ -115,6 +169,7 @@ class BertModel(GptModelBase):
             beta=weights.get_global_weight(W.pre_decoder_ln_beta),
             eps=config.layernorm_eps,
         )
+        self.multimodal_embedding_injector = MultimodalEmbeddingInjector()
         self.layers = nn.ModuleList(
             [
                 BertDecoderLayer(
@@ -128,11 +183,79 @@ class BertModel(GptModelBase):
             ]
         )
 
+    @property
+    def supports_pooled_embedding(self) -> bool:
+        if not self.layer_num:
+            return False
+        layer = self.layers[-1]
+        return (
+            layer.self_attn.tp_size == 1
+            and self.parallelism_config.get_ffn_tp_size() == 1
+            and all(
+                getattr(proj, "supports_output_rows", False)
+                for proj in (
+                    layer.self_attn.o_proj,
+                    layer.mlp.up_proj,
+                    layer.mlp.down_proj,
+                )
+            )
+        )
+
+    def get_pooled_embedding_forward(self, handler):
+        select_rows = getattr(handler, "pooled_row_indices", None)
+        if callable(select_rows) and self.supports_pooled_embedding:
+            return partial(self._forward_selected_rows, select_rows)
+        return None
+
+    def _forward_selected_rows(self, select_rows, inputs, fmha_impl=None):
+        rows = select_rows(inputs.attention_inputs.input_lengths)
+        return self.forward(
+            inputs, fmha_impl, rows.to(inputs.input_ids.device, non_blocking=True)
+        )
+
     def forward(
-        self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: FMHAImplBase = None,
+        output_rows: Optional[torch.Tensor] = None,
     ) -> PyModelOutputs:
+        hidden_states = self.embed_inputs(inputs)
+        if fmha_impl is None:
+            fmha_impl = self.prepare_fmha_impl(inputs)
+        if output_rows is None:
+            return PyModelOutputs(self.forward_encoder(hidden_states, fmha_impl))
+        return PyModelOutputs(
+            self.forward_encoder(hidden_states, fmha_impl, output_rows)
+        )
+
+    def embed_inputs(self, inputs: PyModelInputs) -> torch.Tensor:
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
+        # MultimodalProcessor writes arbitrary signed int32 feature hashes into
+        # image slots for prefix-cache keys. The image features replace these
+        # rows below, but embedding lookup runs first and must only see valid IDs.
+        multimodal_features = inputs.multimodal_inputs.multimodal_features
+        multimodal_locs = inputs.multimodal_inputs.mm_features_locs
+        text_tokens_mask = inputs.embedding_inputs.text_tokens_mask
+        has_text_tokens_mask = (
+            text_tokens_mask is not None and text_tokens_mask.numel() != 0
+        )
+        has_multimodal_features = bool(multimodal_features)
+        has_multimodal_locs = (
+            multimodal_locs is not None and multimodal_locs.numel() != 0
+        )
+        # This is Bert-specific: image slots hold feature hashes before the
+        # word-table lookup, while feature/location pairing belongs to the
+        # shared injector below. Keep the check here, before any device lookup.
+        if not (has_multimodal_features == has_multimodal_locs == has_text_tokens_mask):
+            raise ValueError(
+                "multimodal features, locations, and text_tokens_mask must be "
+                "provided together: "
+                f"features={len(multimodal_features)}, "
+                f"locations={multimodal_locs.numel() if has_multimodal_locs else 0}, "
+                f"mask_tokens={text_tokens_mask.numel() if has_text_tokens_mask else 0}"
+            )
+
         inputs_embeds = self.embed_tokens(
             input_ids,
             bert_embedding_inputs.combo_position_ids,
@@ -140,14 +263,47 @@ class BertModel(GptModelBase):
             bert_embedding_inputs.combo_tokens_type_ids,
             bert_embedding_inputs.token_type_embedding,
             bert_embedding_inputs.input_embedding_scalar,
+            text_tokens_mask if has_text_tokens_mask else None,
         )
         hidden_states = self.pre_decoder_layernorm(inputs_embeds)
-        if fmha_impl is None:
-            fmha_impl = self.prepare_fmha_impl(inputs)
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            hidden_states = decoder_layer(
+
+        # Producer contract: every multimodal feature is already projected to
+        # hidden_size and normalized in the first decoder layer's input space.
+        # Replace image rows after the text pre-LN so producer-owned features do
+        # not inherit text position/type embeddings or get normalized twice.
+        hidden_states = self.multimodal_embedding_injector(
+            hidden_states,
+            multimodal_features,
+            multimodal_locs,
+        )
+
+        return hidden_states
+
+    def forward_encoder(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        output_rows: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if self.layer_num == 0 and output_rows is not None:
+            return hidden_states.index_select(0, output_rows)
+        quantized_hidden_states = None
+        for i in range(self.layer_num):
+            decoder_layer = self.layers[i]
+            next_layer_uses_quantized_input = (
+                i + 1 < self.layer_num and self.layers[i + 1].accepts_quantized_input
+            )
+            row_args = (
+                {"output_rows": output_rows}
+                if output_rows is not None and i + 1 == self.layer_num
+                else {}
+            )
+            hidden_states, quantized_hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                quantized_hidden_states=quantized_hidden_states,
+                quantize_output=next_layer_uses_quantized_input,
+                **row_args,
             )
-        return PyModelOutputs(hidden_states)
+        return hidden_states

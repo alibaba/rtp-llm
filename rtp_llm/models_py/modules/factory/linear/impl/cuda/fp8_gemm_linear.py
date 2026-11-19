@@ -11,6 +11,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear impo
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
     CudaFp8FlashinferLinear,
 )
+from rtp_llm.models_py.utils.arch import is_sm120
 from rtp_llm.ops import HWKernelConfig
 
 
@@ -19,6 +20,10 @@ class CudaFp8GEMMLinear(LinearBase):
 
     FLASHINFER_M_THRESHOLD = CudaFp8FlashinferLinear.FLASHINFER_M_THRESHOLD
     supports_fused_silu_quant = True
+    supports_deferred_bias = True
+    supports_fused_bias_gelu_quant = True
+    supports_prequantized_activation = True
+    fused_activation_quant_format = "fp8_ue8m0_block128_colmajor"
 
     @classmethod
     def can_handle(
@@ -90,6 +95,15 @@ class CudaFp8GEMMLinear(LinearBase):
         self.cached_scales = getattr(self._deepgemm_linear, "cached_scales", None)
         self.cached_scales_max_len = getattr(
             self._deepgemm_linear, "cached_scales_max_len", 0
+        )
+
+    @property
+    def supports_output_rows(self) -> bool:
+        # A change in M must stay on the validated blockwise DeepGEMM path.
+        return (
+            self._flashinfer_linear is None
+            and self.scale_ue8m0
+            and is_sm120(self.weight.device)
         )
 
     def _create_flashinfer_backend(
@@ -169,3 +183,37 @@ class CudaFp8GEMMLinear(LinearBase):
         if self._should_use_flashinfer(gate_up[:, : self.K]):
             return None
         return self._deepgemm_linear.forward_silu_and_mul_quantized(gate_up)
+
+    def forward_without_bias(self, input: torch.Tensor) -> torch.Tensor:
+        if not self._should_use_flashinfer(input):
+            return self._deepgemm_linear.forward_without_bias(input)
+        return self._flashinfer_linear.forward_without_bias(input)
+
+    def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
+        if not self._should_use_flashinfer(input):
+            return self._deepgemm_linear.forward_with_bias_gelu(input)
+        return self._flashinfer_linear.forward_with_bias_gelu(input)
+
+    def forward_with_bias_gelu_quantized(
+        self, input: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        if self._should_use_flashinfer(input):
+            return None
+        return self._deepgemm_linear.forward_with_bias_gelu_quantized(input)
+
+    def forward_quantized(
+        self,
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        apply_bias: bool = True,
+    ) -> torch.Tensor:
+        return self._deepgemm_linear.forward_quantized(
+            input, input_scales, apply_bias=apply_bias
+        )
+
+    def forward_quantized_with_bias_gelu_quantized(
+        self, input: torch.Tensor, input_scales: torch.Tensor
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
+        return self._deepgemm_linear.forward_quantized_with_bias_gelu_quantized(
+            input, input_scales
+        )

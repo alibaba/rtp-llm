@@ -17,6 +17,7 @@ from .qwen3_5_moe.qwen3_5_moe_mixin import Qwen3_5MoeMixin
 from .qwen3_vl_mixin import Qwen3_VLMixin
 from .qwen4_exp_mixin import Qwen4ExpMixin
 from .qwen_vl.qwen_vl_mixin import QwenVLMixin
+from .vision_bert_mixin import VisionBertMixin
 
 if has_internal_source():
     import internal_source.rtp_llm.multimodal_mixins.internal_init

@@ -50,11 +50,15 @@ int64_t EmbeddingStream::inputLength() const {
 
 void EmbeddingStream::waitFinish() {
     unique_lock<mutex> lock(lock_);
-    while (stream_state_ != StreamState::FINISHED) {
-        cond_.wait_for(lock, std::chrono::milliseconds(5));
-    }
+    cond_.wait(lock, [this] { return stream_state_ == StreamState::FINISHED; });
     if (!embedding_output_->error_info.ok()) {
         throw std::runtime_error("run stream failed: " + embedding_output_->error_info.ToString());
+    }
+    const auto ready = result_ready_;
+    lock.unlock();
+    if (ready) {
+        ready->synchronize();
+        reportMetrics();
     }
 }
 
@@ -69,21 +73,27 @@ void EmbeddingStream::reportMetrics() {
 }
 
 void EmbeddingStream::setError(const std::string& error_info) {
+    lock_guard<mutex> lock(lock_);
     embedding_output_->setError(ErrorCode::UNKNOWN_ERROR, error_info);
     stream_state_ = StreamState::FINISHED;
     reportMetrics();
+    cond_.notify_all();
 }
 
 void EmbeddingStream::setStart() {
+    lock_guard<mutex> lock(lock_);
     wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
     stream_state_ = StreamState::RUNNING;
 }
 
-void EmbeddingStream::updateTensorOutput(torch::Tensor t) {
+void EmbeddingStream::updateTensorOutput(torch::Tensor t, std::shared_ptr<c10::Event> ready) {
     lock_guard<mutex> lock(lock_);
     embedding_output_->setTensorOutput(t);
+    result_ready_ = std::move(ready);
     stream_state_ = StreamState::FINISHED;
-    reportMetrics();
+    if (!result_ready_) {
+        reportMetrics();
+    }
     cond_.notify_all();
 }
 

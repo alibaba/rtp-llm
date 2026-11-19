@@ -6,6 +6,7 @@ namespace rtp_llm {
 
 class FakeMultimodalProcessor: public MultimodalProcessor {
 public:
+    using MultimodalProcessor::MultimodalProcessor;
     FakeMultimodalProcessor(py::object                               mm_process_engine,
                             const std::vector<std::vector<int64_t>>& sep_token_ids,
                             bool                                     include_sep_tokens,

@@ -35,11 +35,12 @@ enum TaskType {
 
 class MMModelConfig {
 public:
-    bool                              is_multimodal         = false;
-    std::vector<std::vector<int64_t>> mm_sep_tokens         = {};
-    bool                              include_sep_tokens    = false;
-    int64_t                           mm_padding_size       = 0;
-    int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    bool                              is_multimodal           = false;
+    std::vector<std::vector<int64_t>> mm_sep_tokens           = {};
+    bool                              include_sep_tokens      = false;
+    int64_t                           mm_padding_size         = 0;
+    int64_t                           mm_position_ids_style   = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
+    bool                              hash_embedding_features = true;
 };
 
 class ModelConfig {
