@@ -45,6 +45,11 @@ local_repository(
 )
 
 local_repository(
+    name = "rtp_blackwell_config",
+    path = "3rdparty/blackwell/config",
+)
+
+local_repository(
     name = "arch_config",
     path = "arch_config",
 )
@@ -68,6 +73,10 @@ load("@rtp_deps//:git.bzl", "git_deps")
 
 git_deps()
 
+load("//3rdparty/blackwell:repositories.bzl", "blackwell_repositories")
+
+blackwell_repositories()
+
 load("//3rdparty/xgrammar:repositories.bzl", "xgrammar_deps")
 
 xgrammar_deps()
@@ -88,7 +97,7 @@ load("@rules_python//python:pip.bzl", "pip_parse")
 
 pip_parse(
     name = "pip_glm53_deepgemm",
-    requirements_lock = "@rtp_pip_deps//:glm53_deepgemm_lock.txt",
+    requirements_lock = "@rtp_blackwell_wheel_lock//:requirements.txt",
     python_interpreter = "/opt/conda310/bin/python3",
 )
 

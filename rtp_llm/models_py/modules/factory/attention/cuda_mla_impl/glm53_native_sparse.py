@@ -7,17 +7,18 @@ from pathlib import Path
 
 import torch
 
-_ENABLED = os.environ.get("GLM53_NATIVE_SPARSE", "1") == "1"
-_INVARIANT = os.environ.get("GLM53_NATIVE_SPARSE_BATCH_INVARIANT", "0") == "1"
+# Batch-invariant FlashMLA disables split-KV and changes the reduction order.
+_BATCH_INVARIANT = os.environ.get("GLM53_NATIVE_SPARSE_BATCH_INVARIANT", "0") == "1"
 
 
-@functools.lru_cache(maxsize=None)
-def _load_native(library):
-    if not library or not Path(library).is_file():
+@functools.lru_cache(maxsize=1)
+def _load_native():
+    library = Path(__file__).parents[5] / "libs/flash_mla_glm53_22.abi3.so"
+    if not library.is_file():
         logging.info("GLM53 native sparse MLA unavailable; using selected-KV fallback")
         return None
     try:
-        torch.ops.load_library(library)
+        torch.ops.load_library(str(library))
         op = torch.ops.flash_mla_glm53_22.sparse_decode_fwd
     except (OSError, RuntimeError, AttributeError) as error:
         logging.warning(
@@ -42,18 +43,12 @@ def native_query_length(attn_inputs, query_rows, requests):
 
 
 class Glm53NativeSparse:
-    def __init__(self):
+    def __init__(self, *, batch_invariant: bool = _BATCH_INVARIANT):
+        self._batch_invariant = batch_invariant
         self.schedulers = {}
         self.native = None
-        if (
-            _ENABLED
-            and torch.cuda.is_available()
-            and torch.cuda.get_device_capability() == (10, 0)
-        ):
-            default = Path(__file__).parents[5] / "libs/flash_mla_glm53_22.abi3.so"
-            self.native = _load_native(
-                os.environ.get("GLM53_NATIVE_SPARSE_LIBRARY", str(default))
-            )
+        if torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0):
+            self.native = _load_native()
 
     def supports(self, q, src):
         # Reject large Prefill/TP shapes before the caller allocates padded
@@ -90,7 +85,7 @@ class Glm53NativeSparse:
         tokens = tokens_per_request
         query = q.reshape(rows // tokens, tokens, heads, width)
         indices = physical_indices.reshape(rows // tokens, tokens, -1)
-        key = (rows, tokens, q.device.index, _INVARIANT)
+        key = (rows, tokens, q.device.index, self._batch_invariant)
         metadata, splits = self.schedulers.get(key, (None, None))
         # Actual kernel failures are propagated: the fallback handles explicit
         # applicability/dependency misses, not incorrect results or bad launches.
@@ -107,7 +102,7 @@ class Glm53NativeSparse:
             None,
             512,
             scale,
-            _INVARIANT,
+            self._batch_invariant,
         )
         if key not in self.schedulers:
             self.schedulers[key] = (result[2], result[3])

@@ -207,18 +207,8 @@ class SparseMlaOp(object):
                 "GLM53_SPARSE_MLA_NATIVE_Q_CHUNK", str(self.bf16_q_chunk_rows)
             )
         )
-        self.bf16_backend = os.environ.get("GLM53_SPARSE_MLA_BF16_BACKEND", "auto")
         if self.bf16_q_chunk_rows <= 0 or self.native_q_chunk_rows <= 0:
             raise ValueError("GLM53_SPARSE_MLA_BF16_Q_CHUNK must be positive")
-        if self.bf16_backend not in (
-            "auto",
-            "flashmla",
-            "tilelang",
-            "flashinfer",
-        ):
-            raise ValueError(
-                "GLM53_SPARSE_MLA_BF16_BACKEND must be auto|tilelang|flashinfer|flashmla"
-            )
         self.kernel_num_heads = next(
             (
                 supported_heads
@@ -275,9 +265,7 @@ class SparseMlaOp(object):
         topk = topk_2d.shape[1]
         assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
         output_topk = topk
-        if _PREFILL_PAD_TOPK and (
-            self.num_heads != 8 or self.bf16_backend == "flashmla"
-        ):
+        if _PREFILL_PAD_TOPK and self.num_heads != 8:
             from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
 
             if metadata_cache() is not None:
@@ -399,50 +387,26 @@ class SparseMlaOp(object):
             and q.shape[-1] == 512
             and q.dtype == kv.dtype == torch.bfloat16
         )
-        if self.bf16_backend in ("tilelang", "flashinfer") and not small_head:
-            raise ValueError(
-                "small-head backends require BF16 NoPE MLA with 8 heads and latent dim 512"
-            )
-        selected_backend = self.bf16_backend
-        if small_head and selected_backend == "auto":
+        if small_head:
             from rtp_llm.models_py.triton_kernels.sparse_mla.flashinfer_bf16_small_head import (
+                flashinfer_sparse_fwd,
                 flashinfer_sparse_supported,
             )
 
-            selected_backend = (
-                "flashinfer" if flashinfer_sparse_supported(q.device) else "flashmla"
-            )
-        if small_head and selected_backend in ("tilelang", "flashinfer"):
-            if selected_backend == "tilelang":
-                from rtp_llm.models_py.triton_kernels.sparse_mla.sglang_bf16_small_head import (
-                    tilelang_sparse_fwd,
-                )
-
-                backend = tilelang_sparse_fwd
-            else:
-                from rtp_llm.models_py.triton_kernels.sparse_mla.flashinfer_bf16_small_head import (
-                    flashinfer_sparse_fwd,
-                )
-
-                backend = flashinfer_sparse_fwd
-            tokens = int(q.shape[0])
-            if tokens <= self.bf16_q_chunk_rows:
+            if flashinfer_sparse_supported(q.device):
                 indices = global_indices[:, :, : self.top_k]
-                if selected_backend == "tilelang":
-                    indices = _pad_flashmla_topk(
-                        indices, ((self.top_k + 63) // 64) * 64
+                tokens = int(q.shape[0])
+                if tokens <= self.bf16_q_chunk_rows:
+                    return flashinfer_sparse_fwd(q, kv, indices, self.scale)
+                out = torch.empty_like(q, memory_format=torch.contiguous_format)
+                for begin in range(0, tokens, self.bf16_q_chunk_rows):
+                    end = min(begin + self.bf16_q_chunk_rows, tokens)
+                    out[begin:end].copy_(
+                        flashinfer_sparse_fwd(
+                            q[begin:end], kv, indices[begin:end], self.scale
+                        )
                     )
-                return backend(q, kv, indices, self.scale)
-            out = torch.empty_like(q, memory_format=torch.contiguous_format)
-            for begin in range(0, tokens, self.bf16_q_chunk_rows):
-                end = min(begin + self.bf16_q_chunk_rows, tokens)
-                indices = global_indices[begin:end, :, : self.top_k]
-                if selected_backend == "tilelang":
-                    indices = _pad_flashmla_topk(
-                        indices, ((self.top_k + 63) // 64) * 64
-                    )
-                out[begin:end].copy_(backend(q[begin:end], kv, indices, self.scale))
-            return out
+                return out
 
         tokens = int(q.shape[0])
         chunk_rows = (

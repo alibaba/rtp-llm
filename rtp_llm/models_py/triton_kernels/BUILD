@@ -49,16 +49,17 @@ py_library(
 )
 
 py_library(
-    name = "glm53_kda",
-    srcs = glob(["glm53_kda/*.py"]),
+    name = "kda_fp32_state",
+    srcs = glob(["kimi_kda/fp32_state/*.py"]),
     deps = [
         ":autotune_cache",
         ":common",
         ":fla",
+        ":kimi_kda",
         "//rtp_llm/models_py:dsv4_forward_metadata",
     ],
     visibility = [
-        "//rtp_llm/models_py/triton_kernels/glm53_kda/test:__pkg__",
+        "//rtp_llm/models_py/triton_kernels/kimi_kda/fp32_state/test:__pkg__",
         "//rtp_llm/models_py/triton_kernels/test:__pkg__",
     ],
 )
@@ -115,7 +116,7 @@ py_library(
         ":autotune_cache",
         ":fla",
         ":kimi_kda",
-        ":glm53_kda",
+        ":kda_fp32_state",
         ":causal_conv1d",
         ":moe",
         ":common",

@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.glm5_mega_moe.shared_fp8_scale import (
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
     shared_fp8_scale_row_indices,
     stage_shared_fp8_input_scales,
 )

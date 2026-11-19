@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+from torch import nn
+
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.dsv4.forward_metadata import (
@@ -18,7 +20,6 @@ from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
@@ -61,11 +62,7 @@ def _build_tp_cache_shard_context(
     page owner rank and pool readers still need all-gather restore metadata,
     but compressor projections must not be gathered a second time.
     """
-    cache = (
-        metadata_cache()
-        if os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") != "0"
-        else None
-    )
+    cache = metadata_cache()
     key = (
         "tp_cache_shard_context",
         tp_size,
@@ -221,12 +218,6 @@ class Indexer(nn.Module):
                 compressor_pre_norm_weight=weights[W.mla_indexer_k_norm_w],
                 compressor_pre_norm_bias=weights[W.mla_indexer_k_norm_b],
                 rotate_q=True,
-                prefill_topk_backend=os.environ.get(
-                    "GLM53_PREFILL_INDEXER_TOPK_BACKEND", "topk_v3_tie_break"
-                ),
-                decode_topk_backend=os.environ.get(
-                    "GLM53_DECODE_INDEXER_TOPK_BACKEND", "topk_v3_tie_break"
-                ),
             )
             return
 
@@ -556,14 +547,6 @@ class Indexer(nn.Module):
                     position_ids=positions if q_len > 1 else None,
                     compressor_meta=compressor_meta,
                 ).reshape(-1, self.index_topk)
-                # Radix selection fixes the set, but its atomic output order
-                # can vary. Honor the existing canonicalization flag during
-                # GLM decode too, before group expansion and attention reduce.
-                from rtp_llm.models_py.modules.dsv4.fp8.glm53_indexer import (
-                    canonicalize_topk_output,
-                )
-
-                canonicalize_topk_output(topk)
             return None if use_fast_path else topk
         finally:
             self.compressed_indexer.clear_pool_context()

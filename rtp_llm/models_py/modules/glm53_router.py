@@ -1,16 +1,15 @@
 """Batched GLM53 routing with compensated BF16 weight decomposition."""
 
-import logging
-import os
-
 import torch
 import torch.nn.functional as F
+from torch import nn
+
 from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
 from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     metadata_cache,
     tokenwise_router_enabled,
 )
-from torch import nn
+from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 
 _PREFILL_PROJECTION_ROWS = 256
 
@@ -26,24 +25,7 @@ class Glm53FP32Router(nn.Module):
             raise ValueError("router chunk_rows must be positive")
         self.register_buffer("weight", weight.T.contiguous())
         self.chunk_rows = chunk_rows
-        self.split_parts = int(os.environ.get("GLM53_ROUTER_BF16_PARTS", "2"))
-        if self.split_parts not in (0, 2, 3):
-            raise ValueError("GLM53_ROUTER_BF16_PARTS must be 0, 2, or 3")
-        self.prefill_split_parts = int(
-            os.environ.get("GLM53_PREFILL_ROUTER_BF16_PARTS", str(self.split_parts))
-        )
-        if self.prefill_split_parts not in (0, 2, 3):
-            raise ValueError("GLM53_PREFILL_ROUTER_BF16_PARTS must be 0, 2, or 3")
-        if (self.split_parts or self.prefill_split_parts) and self.weight.shape in (
-            (256, 4096),
-            (288, 4096),
-        ):
-            logging.info(
-                "[GLM53 router opt] BF16 parts decode=%d prefill=%d weight_shape=%s",
-                self.split_parts,
-                self.prefill_split_parts,
-                tuple(self.weight.shape),
-            )
+        if self.weight.shape in ((256, 4096), (288, 4096)):
             from rtp_llm.models_py.triton_kernels.glm53_router_split import (
                 split_weights,
             )
@@ -53,8 +35,7 @@ class Glm53FP32Router(nn.Module):
 
     def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if (
-            self.split_parts
-            and hidden_states.is_cuda
+            hidden_states.is_cuda
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.ndim == 2
             and hidden_states.is_contiguous()
@@ -66,9 +47,7 @@ class Glm53FP32Router(nn.Module):
             in ((10, 0), (10, 3))
         ):
             if (
-                os.environ.get("GLM53_ROUTER_SPLIT_K", "1") == "1"
-                and self.split_parts == 2
-                and hidden_states.shape[0] in (48, 192, 240, 288)
+                hidden_states.shape[0] in (48, 192, 240, 288)
                 and self.weight.shape[0] == 288
             ):
                 from rtp_llm.models_py.triton_kernels.glm53_router_splitk import router
@@ -82,7 +61,7 @@ class Glm53FP32Router(nn.Module):
             return router(
                 hidden_states,
                 (self.split_weight_0, self.split_weight_1, self.split_weight_2),
-                parts=self.split_parts,
+                parts=2,
             )
         return F.linear(hidden_states.float(), self.weight)
 
@@ -91,10 +70,7 @@ class Glm53FP32Router(nn.Module):
     ):
         """Optional GEMM epilogue path; unsupported configurations use forward."""
         if (
-            os.environ.get("GLM53_ROUTER_REDUCE_TOPK", "1") != "1"
-            or metadata_cache() is not None
-            or self.split_parts != 2
-            or os.environ.get("GLM53_ROUTER_SPLIT_K", "1") != "1"
+            metadata_cache() is not None
             or torch.backends.cuda.matmul.allow_tf32
             or not hidden_states.is_cuda
             or hidden_states.dtype != torch.bfloat16
@@ -123,6 +99,7 @@ class Glm53FP32Router(nn.Module):
         ):
             return False
         import triton
+
         from rtp_llm.models_py.modules.glm53_router_topk import fused_splitk_router_topk
         from rtp_llm.models_py.triton_kernels.glm53_router_splitk import gemm
 
@@ -166,8 +143,7 @@ class Glm53FP32Router(nn.Module):
 
     def _project_prefill(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if not (
-            self.prefill_split_parts
-            and hidden_states.is_cuda
+            hidden_states.is_cuda
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.ndim == 2
             and hidden_states.is_contiguous()
@@ -190,7 +166,7 @@ class Glm53FP32Router(nn.Module):
                 hidden_states,
                 (self.split_weight_0, self.split_weight_1, self.split_weight_2),
                 config=(128, 64, 64, 4, 3),
-                parts=self.prefill_split_parts,
+                parts=2,
             )
 
         logits = hidden_states.new_empty(
@@ -198,42 +174,17 @@ class Glm53FP32Router(nn.Module):
         )
         bf16_gemm_nt(hidden_states, self.split_weight_0, logits)
         bf16_gemm_nt(hidden_states, self.split_weight_1, logits, c=logits)
-        if self.prefill_split_parts == 3:
-            bf16_gemm_nt(hidden_states, self.split_weight_2, logits, c=logits)
         return logits
 
     def _fixed_projection(self, hidden_states: torch.Tensor, rows: int) -> torch.Tensor:
-        # The final cuBLAS chunk otherwise changes M with the request batch.
-        # Fixed 256-row GEMMs preserve the FP32 reduction at every token,
-        # including shard boundaries, and avoid the less accurate large-M path.
-        from rtp_llm.models_py.modules.glm53_fixed_projection_graph import (
-            fixed_projection_graph,
+        return fixed_m_linear(
+            lambda chunk: F.linear(chunk.float(), self.weight), hidden_states, rows
         )
-
-        projected = fixed_projection_graph(hidden_states, self.weight, rows)
-        if projected is not None:
-            return projected
-        tokens = hidden_states.shape[0]
-        output = hidden_states.new_empty(
-            (tokens, self.weight.shape[0]), dtype=torch.float32
-        )
-        for begin in range(0, tokens, rows):
-            count = min(rows, tokens - begin)
-            chunk = hidden_states.narrow(0, begin, count)
-            if count < rows:
-                padded = hidden_states.new_zeros((rows, hidden_states.shape[1]))
-                padded[:count].copy_(chunk)
-                chunk = padded
-            output[begin : begin + count].copy_(
-                F.linear(chunk.float(), self.weight)[:count]
-            )
-        return output
 
     def forward_fixed_rows(self, hidden_states: torch.Tensor, rows: int):
         if rows > self.chunk_rows or metadata_cache() is None:
             return None
-        # Preserve explicit fixed-M overrides independently of the native
-        # Prefill policy, including when projection graph replay is disabled.
+        # Explicit fixed-M callers use FP32 projections on the same padded rows.
         return self._fixed_projection(hidden_states, rows)
 
     def forward_shard(

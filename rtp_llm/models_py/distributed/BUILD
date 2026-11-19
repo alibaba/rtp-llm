@@ -17,7 +17,6 @@ py_library(
         "all_reduce.py",
         "glm53_collective_gemm.py",
         "glm53_mla_cp.py",
-        "pynccl_cp.py",
         "rocm_rccl.py",
         "sequence_parallel.py",
         "symm_mem.py",

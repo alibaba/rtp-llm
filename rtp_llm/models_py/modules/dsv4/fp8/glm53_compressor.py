@@ -753,7 +753,6 @@ class CompressorFP8(PoolBackedModule):
             self.kpool_mode
             and is_decode
             and seq_start is None
-            and os.environ.get("GLM53_INDEXER_POOL_FUSED", "1") != "0"
             and meta.seq_start_per_req is not None
             and meta.cu_seq_per_req is not None
         )

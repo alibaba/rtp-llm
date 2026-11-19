@@ -7,21 +7,18 @@
 
 import os
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.triton_kernels.common.host_math import ceil_div, next_power_of_2
 
 PAD_SLOT_ID = -1
 BLOCK_M = 8
 BLOCK_N = 256
-_COMPILED_PREFILL_DISPATCH = (
-    os.environ.get("GLM53_CAUSAL_CONV_COMPILED_DISPATCH", "0") == "1"
-)
 
 from rtp_llm.models_py.triton_kernels.causal_conv1d.op import cal_block_idx
 
@@ -552,14 +549,6 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                 )
 
 
-@lru_cache(maxsize=128)
-def _compiled_prefill_runner(device, dtypes, launch_values, grid):
-    # Retain compiled code only. The returned launcher resolves the current
-    # CUDA stream on every call, preserving the model's asynchronous ordering.
-    kernel = _causal_conv1d_fwd_kernel.warmup(*dtypes, *launch_values, grid=grid)
-    return kernel[grid]
-
-
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -782,21 +771,7 @@ def causal_conv1d_fn(
     )
     grid = (grid_x, ceil_div(dim, BLOCK_N))
     present = tuple(t for t in pointers if t is not None)
-    if (
-        _COMPILED_PREFILL_DISPATCH
-        and torch.version.hip is None
-        and all(t.device == x.device and t.data_ptr() % 16 == 0 for t in present)
-        and x.device.index == torch.cuda.current_device()
-        and not torch.cuda.is_current_stream_capturing()
-    ):
-        _compiled_prefill_runner(
-            x.device.index,
-            tuple(None if t is None else t.dtype for t in pointers),
-            launch_values,
-            (*grid, 1),
-        )(*pointers, *launch_values)
-    else:
-        _causal_conv1d_fwd_kernel[grid](*pointers, *launch_values)
+    _causal_conv1d_fwd_kernel[grid](*pointers, *launch_values)
     return out.to(original_x_dtype)
 
 

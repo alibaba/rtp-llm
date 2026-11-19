@@ -5,6 +5,7 @@ Prefill also owns the small BF16 symmetric-memory AG path. Other execution
 modes and unsupported payloads retain their existing collective dispatch.
 """
 
+import logging
 import os
 import socket
 import threading
@@ -24,8 +25,6 @@ class _State:
     all_gather: bool
     deep_gemm: Any = None
     workspace: Any = None
-    gemm_reduce_scatter: bool = False
-    stable_reduce_scatter: bool = False
     peer_pointers: Optional[torch.Tensor] = None
     data_offset_bytes: int = 0
     reduce_partials: Any = None
@@ -35,6 +34,8 @@ class _State:
 
 _STATE: Optional[_State] = None
 _MIN_TOKENS = 32768
+_DEFAULT_MAX_TOKENS = 1 << 20
+_ORDERED_RS_BUFFER_BYTES = 64 << 20
 
 
 class _NativeAllGather:
@@ -110,6 +111,8 @@ def _native_ag_contract(group, parallelism, enable_cuda_graph):
     from rtp_llm.models_py.distributed.symm_mem import torch_symm_mem_available
 
     try:
+        if not torch_symm_mem_available or dist.get_backend(group) != "nccl":
+            return {"admitted": False}
         world = dist.get_world_size(group)
         member = dist.get_rank(group)
         ranks = [dist.get_global_rank(group, rank) for rank in range(world)]
@@ -127,8 +130,8 @@ def _native_ag_contract(group, parallelism, enable_cuda_graph):
         ]
         device = torch.cuda.current_device()
         admitted = (
-            torch_symm_mem_available
-            and bool(node[1])
+            bool(node[1])
+            and torch.cuda.get_device_capability(device) in ((10, 0), (10, 3))
             and role == "PREFILL"
             and not enable_cuda_graph
             and world in (2, 4, 8)
@@ -140,6 +143,11 @@ def _native_ag_contract(group, parallelism, enable_cuda_graph):
             and ranks[member] == parallelism.world_rank == dist.get_rank()
             and member == parallelism.tp_rank
             and device == parallelism.local_rank == parallelism.world_rank % local_world
+            and all(
+                torch.cuda.can_device_access_peer(device, rank % local_world)
+                for rank in ranks
+                if rank != parallelism.world_rank
+            )
         )
         return {
             "admitted": bool(admitted),
@@ -160,123 +168,171 @@ def _native_ag_contract(group, parallelism, enable_cuda_graph):
         return {"admitted": False}
 
 
-def _configure_native_all_gather(group, parallelism, enable_cuda_graph):
-    from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
-    from rtp_llm.models_py.distributed.symm_mem import TorchSymmMemCommunicator
-
-    local = _native_ag_contract(group, parallelism, enable_cuda_graph)
-    peers = exchange_group_state(group, local, "glm53_native_all_gather")
-    if not (
+def _native_group_agrees(local, peers):
+    return (
         all(peer.get("admitted", False) for peer in peers)
         and all(peer["shared"] == local["shared"] for peer in peers)
         and len({peer["device"] for peer in peers}) == len(peers)
-    ):
-        return None
-    communicator = TorchSymmMemCommunicator(group, local["device"])
+    )
+
+
+def _configure_native_all_gather(group, device):
+    from rtp_llm.models_py.distributed.symm_mem import TorchSymmMemCommunicator
+
+    communicator = TorchSymmMemCommunicator(group, device)
     if communicator.disabled:
         return None
     return _NativeAllGather(communicator)
 
 
-def configure_glm53_collective_gemm(
-    group, hidden: int, parallelism, *, enable_cuda_graph: bool
-) -> None:
-    """Initialize collectively after model/distributed initialization, before forward."""
-    global _STATE
-    ag = os.environ.get("GLM53_PREFILL_AG_GEMM", "0") == "1"
-    rs = os.environ.get("GLM53_PREFILL_GEMM_RS", "0") == "1"
-    stable_rs = os.environ.get("GLM53_PREFILL_STABLE_RS", "0") == "1"
-    if not ag and not rs and not stable_rs:
-        return
-    initialization = _initialization_key(parallelism, enable_cuda_graph)
-    max_tokens = int(os.environ.get("GLM53_COLLECTIVE_MAX_TOKENS", "1048576"))
-    if max_tokens <= 0 or max_tokens % group.size():
-        raise ValueError(
-            "GLM collective token capacity must be positive and TP divisible"
-        )
-    if group.size() not in (2, 4, 8) or torch.cuda.get_device_capability() not in (
-        (10, 0),
-        (10, 3),
-    ):
-        raise RuntimeError("GLM collective-GEMM requires SM100/103 and TP2/4/8")
-    if _STATE is not None:
-        if (
-            _STATE.group is not group
-            or _STATE.max_tokens != max_tokens
-            or _STATE.hidden != hidden
-            or _STATE.all_gather != ag
-            or _STATE.gemm_reduce_scatter != rs
-            or _STATE.stable_reduce_scatter != stable_rs
-            or _STATE.initialization != initialization
-        ):
-            raise RuntimeError(
-                "GLM collective-GEMM was already initialized differently"
-            )
-        return
-    import torch.distributed._symmetric_memory as symm_mem
-
-    symm_mem.enable_symm_mem_for_group(group.group_name)
-    deep_gemm = workspace = None
-    peer_pointers = None
-    data_offset_bytes = 0
-    reduce_partials = None
-    if rs or stable_rs:
+def _local_collective_features(device, max_tokens, hidden):
+    try:
+        import torch.distributed._symmetric_memory as symm_mem
+    except (ImportError, OSError):
+        return None, None, None, 0
+    ag = (
+        symm_mem
+        if callable(getattr(symm_mem, "enable_symm_mem_for_group", None))
+        and callable(getattr(torch.ops.symm_mem, "fused_all_gather_matmul", None))
+        else None
+    )
+    if hidden % 8:
+        return ag, None, None, 0
+    try:
         import deep_gemm
 
-        if not hasattr(deep_gemm, "GemmRSBuffer") or not hasattr(
-            deep_gemm, "bf16_gemm_rs_nn"
-        ):
-            raise RuntimeError("GLM GEMM/RS requires the K3 DeepGEMM GEMM/RS build")
-        workspace = deep_gemm.GemmRSBuffer(
-            group, max_m=max_tokens, n=hidden, device=torch.cuda.current_device()
+        native = getattr(deep_gemm, "_C", None)
+        reduce = getattr(native, "gemm_rs_reduce", None) or getattr(
+            native, "bf16_gemm_rs_reduce", None
         )
-        if stable_rs:
-            # Both supported workspace ABIs store the rank-major BF16 payload
-            # after the control region. Do not depend on a private Python field
-            # removed in DeepGEMM 2.8.2.
-            data_offset_bytes = (
-                workspace.num_bytes - max_tokens * hidden * torch.bfloat16.itemsize
+        size = getattr(deep_gemm, "get_bf16_gemm_rs_workspace_size", None) or getattr(
+            native, "get_bf16_gemm_rs_workspace_size", None
+        )
+        if not all(
+            callable(op)
+            for op in (
+                getattr(deep_gemm, "GemmRSBuffer", None),
+                getattr(deep_gemm, "bf16_gemm_rs_nn", None),
+                size,
+                reduce,
             )
-            if data_offset_bytes < 128 or data_offset_bytes % 128:
-                raise RuntimeError("Unsupported GLM stable RS workspace layout")
-            reduce_partials = getattr(deep_gemm._C, "gemm_rs_reduce", None)
-            if reduce_partials is None:
-                reduce_partials = getattr(deep_gemm._C, "bf16_gemm_rs_reduce", None)
-            if not callable(reduce_partials):
-                raise RuntimeError("DeepGEMM is missing the GEMM/RS reduction binding")
-            peer_pointers = torch.tensor(
-                workspace.buffer_ptrs, dtype=torch.uint64, device=workspace.device
-            )
-            # The first model forward may use another stream. Reuse the same
-            # handoff contract as GEMM/RS for pointer-table initialization.
-            stream = torch.cuda.current_stream(workspace.device)
-            completion = getattr(workspace, "_completion_event", None)
-            if completion is not None:
-                completion.record(stream)
-            else:
-                workspace._last_stream = stream
-    # Preserve existing DeepGEMM workspace initialization and group order.
-    # This optional communicator is owned by this GLM Prefill state, never by
-    # the permanently disabled global AllReduce/symm communicator.
+        ):
+            return ag, None, None, 0
+        required = size(max_tokens, hidden)
+        offset = required - max_tokens * hidden * torch.bfloat16.itemsize
+        if (
+            offset < 128
+            or offset % 128
+            or required > torch.cuda.mem_get_info(device)[0]
+        ):
+            return ag, None, None, 0
+    except (ImportError, OSError, RuntimeError):
+        return ag, None, None, 0
+    return ag, deep_gemm, reduce, required
+
+
+def configure_glm53_collective_gemm(
+    group,
+    hidden: int,
+    parallelism,
+    *,
+    enable_cuda_graph: bool,
+    max_batch_tokens: int = 0
+) -> None:
+    """Agree on optional collectives on every TP rank before allocating buffers."""
+    from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
+
+    global _STATE
+    world = group.size()
+    requested = max_batch_tokens or _DEFAULT_MAX_TOKENS
+    max_tokens = (min(requested, _DEFAULT_MAX_TOKENS) + world - 1) // world * world
+    initialization = _initialization_key(parallelism, enable_cuda_graph)
+    eager_prefill = initialization[-2:] == ("PREFILL", False)
+    local = _native_ag_contract(group, parallelism, enable_cuda_graph)
+    configured = _STATE is not None
+    existing_matches = not configured or (
+        _STATE.group is group
+        and _STATE.max_tokens == max_tokens
+        and _STATE.hidden == hidden
+        and _STATE.initialization == initialization
+    )
+    ag = deep_gemm = reduce = None
+    required = 0
+    if local["admitted"] and not configured and max_tokens > 0 and hidden > 0:
+        ag, deep_gemm, reduce, required = _local_collective_features(
+            local["device"], max_tokens, hidden
+        )
+    local.update(
+        eager_prefill=eager_prefill,
+        shape=[hidden, max_tokens],
+        configured=configured,
+        matches=existing_matches,
+        ag=ag is not None,
+        rs_bytes=required,
+    )
+    peers = exchange_group_state(group, local, "glm53_prefill_collectives")
+    if any(peer["configured"] != configured or not peer["matches"] for peer in peers):
+        raise RuntimeError("GLM collective-GEMM was already initialized differently")
+    if configured or not all(peer["eager_prefill"] for peer in peers):
+        return
+    if (
+        hidden <= 0
+        or max_tokens <= 0
+        or any(peer["shape"] != local["shape"] for peer in peers)
+    ):
+        raise ValueError(
+            "GLM TP ranks must agree on positive hidden size and token capacity"
+        )
+    native_group = _native_group_agrees(local, peers)
+    use_ag = native_group and all(peer["ag"] for peer in peers)
+    use_rs = (
+        native_group
+        and required > 0
+        and all(peer["rs_bytes"] == required for peer in peers)
+    )
+    workspace = peer_pointers = None
+    data_offset_bytes = 0
+    if use_ag:
+        ag.enable_symm_mem_for_group(group.group_name)
+    if use_rs:
+        workspace = deep_gemm.GemmRSBuffer(
+            group, max_m=max_tokens, n=hidden, device=local["device"]
+        )
+        if workspace.num_bytes != required:
+            raise RuntimeError("GLM GEMM/RS workspace size changed after TP agreement")
+        data_offset_bytes = required - max_tokens * hidden * torch.bfloat16.itemsize
+        peer_pointers = torch.tensor(
+            workspace.buffer_ptrs, dtype=torch.uint64, device=workspace.device
+        )
+        stream = torch.cuda.current_stream(workspace.device)
+        completion = getattr(workspace, "_completion_event", None)
+        if completion is not None:
+            completion.record(stream)
+        else:
+            workspace._last_stream = stream
     native_all_gather = (
-        _configure_native_all_gather(group, parallelism, enable_cuda_graph)
-        if ag
-        else None
+        _configure_native_all_gather(group, local["device"]) if use_ag else None
     )
     _STATE = _State(
         group,
         max_tokens,
         hidden,
-        ag,
-        deep_gemm,
+        use_ag,
+        deep_gemm if use_rs else None,
         workspace,
-        gemm_reduce_scatter=rs,
-        stable_reduce_scatter=stable_rs,
         peer_pointers=peer_pointers,
         data_offset_bytes=data_offset_bytes,
-        reduce_partials=reduce_partials,
+        reduce_partials=reduce if use_rs else None,
         initialization=initialization,
         native_all_gather=native_all_gather,
+    )
+    logging.info(
+        "GLM Prefill TP%d tokens=%d AG/GEMM=%s GEMM/RS=%s native AG=%s",
+        world,
+        max_tokens,
+        use_ag,
+        use_rs,
+        native_all_gather is not None,
     )
 
 
@@ -333,6 +389,42 @@ def all_gather_trim(tensor: torch.Tensor, logical_tokens: int, group):
     return gathered.narrow(0, 0, logical_tokens)
 
 
+def _ordered_reduce_scatter(tensor: torch.Tensor, group) -> torch.Tensor:
+    """Exchange equal BF16 token shards, then add local partials in source-rank order."""
+    rows, hidden = tensor.shape
+    world = group.size()
+    shard_rows = (rows + world - 1) // world
+    output = tensor.new_empty((shard_rows, hidden))
+    if not shard_rows:
+        return output
+    # Keep the two BF16 transport buffers and one FP32 accumulator bounded.
+    bytes_per_row = hidden * (
+        2 * world * tensor.element_size() + torch.float32.itemsize
+    )
+    chunk_rows = min(shard_rows, max(1, _ORDERED_RS_BUFFER_BYTES // bytes_per_row))
+    send_buffer = tensor.new_empty((world * chunk_rows, hidden))
+    recv_buffer = torch.empty_like(send_buffer)
+    sum_buffer = torch.empty(
+        (chunk_rows, hidden), device=tensor.device, dtype=torch.float32
+    )
+    for offset in range(0, shard_rows, chunk_rows):
+        count = min(chunk_rows, shard_rows - offset)
+        send = send_buffer[: world * count].view(world, count, hidden)
+        received = recv_buffer[: world * count].view_as(send)
+        send.zero_()
+        for dest in range(world):
+            start = dest * shard_rows + offset
+            valid = min(count, rows - start)
+            if valid > 0:
+                send[dest, :valid].copy_(tensor.narrow(0, start, valid))
+        dist.all_to_all_single(received, send, group=group)
+        accumulator = sum_buffer[:count].zero_()
+        for partial in received.unbind(0):
+            accumulator.add_(partial)
+        output.narrow(0, offset, count).copy_(accumulator)
+    return output
+
+
 def reduce_scatter_glm53(tensor: torch.Tensor) -> torch.Tensor:
     """Reduce TP partials in a destination-independent FP32 addition order.
 
@@ -342,30 +434,31 @@ def reduce_scatter_glm53(tensor: torch.Tensor) -> torch.Tensor:
     Only dedicated GLM Prefill SP callers select this function.
     """
     state = _STATE
-    if state is None or not state.stable_reduce_scatter:
+    if state is None:
         from rtp_llm.models_py.distributed.collective_torch import (
             Group,
             reduce_scatter_padded,
         )
 
         return reduce_scatter_padded(tensor, Group.TP)
-    workspace = state.workspace
     world = state.group.size()
-    if workspace.buffer is None:
-        raise RuntimeError("GLM stable RS workspace has been destroyed")
-    if torch.cuda.is_current_stream_capturing():
-        raise RuntimeError("GLM Prefill stable RS does not support CUDA Graph")
     if (
         tensor.ndim != 2
         or tensor.dtype != torch.bfloat16
-        or tensor.device != workspace.device
         or tensor.shape[1] != state.hidden
     ):
-        raise ValueError("GLM stable RS expects BF16 [tokens, hidden] on its device")
+        raise ValueError("GLM stable RS expects BF16 [tokens, hidden]")
+    if tensor.is_cuda and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("GLM Prefill stable RS does not support CUDA Graph")
     logical = tensor.shape[0]
     physical = (logical + world - 1) // world * world
-    if physical > state.max_tokens:
-        raise ValueError("GLM stable RS exceeds its configured token capacity")
+    if state.reduce_partials is None or physical > state.max_tokens:
+        return _ordered_reduce_scatter(tensor, state.group)
+    workspace = state.workspace
+    if workspace.buffer is None:
+        raise RuntimeError("GLM stable RS workspace has been destroyed")
+    if tensor.device != workspace.device:
+        raise ValueError("GLM stable RS input must be on the workspace device")
     workspace_begin = workspace.buffer.data_ptr()
     if workspace_begin <= tensor.data_ptr() < workspace_begin + workspace.num_bytes:
         raise ValueError("GLM stable RS input must not alias its workspace")
@@ -439,7 +532,7 @@ def can_fuse_input(projections, logical_tokens: int) -> bool:
     return (
         _STATE is not None
         and _STATE.all_gather
-        and logical_tokens >= _MIN_TOKENS
+        and _MIN_TOKENS <= logical_tokens <= _STATE.max_tokens
         and all(canonical_bf16_weight(p) is not None for p in projections)
     )
 
@@ -498,34 +591,10 @@ def all_gather_packed_kda_projections(
     return packed.split(widths, dim=-1)
 
 
-def all_gather_kda_projections(local_x, projections, logical_tokens: int):
-    """Compute replicated low-rank weights only for local tokens.
-
-    QKV/beta retain fused AG/GEMM. Separate gathers produce contiguous low-rank
-    outputs directly, avoiding packing and unpacking copies on the large path.
-    """
-    if len(projections) != 4:
-        raise ValueError("Local KDA requires QKV, beta, f_a and g_a projections")
-    _all_gather_weights(local_x, projections, logical_tokens)
-    qkv_proj, beta_proj, f_a_proj, g_a_proj = projections
-    with torch.profiler.record_function("RTP::glm53.prefill.local_low_rank"):
-        local_low = (f_a_proj(local_x), g_a_proj(local_x))
-        physical = local_x.shape[0] * _STATE.group.size()
-        low = []
-        for local in local_low:
-            gathered = local.new_empty((physical, local.shape[1]))
-            dist.all_gather_into_tensor(gathered, local, group=_STATE.group)
-            low.append(gathered[:logical_tokens])
-    projected_qkv, beta_input = all_gather_projections(
-        local_x, (qkv_proj, beta_proj), logical_tokens
-    )
-    return projected_qkv, beta_input, *low
-
-
 def project_reduce_scatter(x, projection):
     """Return None for ordinary GEMM/RS; never fall back after collective launch."""
     state = _STATE
-    if state is None or not state.gemm_reduce_scatter or x.shape[0] < _MIN_TOKENS:
+    if state is None or state.workspace is None or x.shape[0] < _MIN_TOKENS:
         return None
     weight = canonical_bf16_weight(projection)
     if weight is None:
@@ -536,7 +605,7 @@ def project_reduce_scatter(x, projection):
     logical = x.shape[0]
     physical = (logical + world - 1) // world * world
     if physical > state.max_tokens:
-        raise ValueError("GLM GEMM/RS exceeds its configured token capacity")
+        return None
     if (
         x.ndim != 2
         or x.dtype != torch.bfloat16

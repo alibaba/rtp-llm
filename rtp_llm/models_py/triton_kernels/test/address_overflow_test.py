@@ -39,17 +39,17 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
 from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
 )
-from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_intra import (
+from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk_intra import (
     chunk_kda_fwd_kernel_inter_solve_fused,
     chunk_kda_fwd_kernel_intra_sub_chunk,
 )
-from rtp_llm.models_py.triton_kernels.glm53_kda.chunk_intra_token_parallel import (
+from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk_intra_token_parallel import (
     chunk_kda_fwd_kernel_intra_token_parallel,
 )
-from rtp_llm.models_py.triton_kernels.glm53_kda.gate import (
+from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.gate import (
     kda_gate_chunk_cumsum_vector_kernel,
 )
-from rtp_llm.models_py.triton_kernels.glm53_kda.wy_fast import (
+from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.wy_fast import (
     recompute_w_u_fwd_kda_kernel,
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (

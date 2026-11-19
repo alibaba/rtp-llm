@@ -510,12 +510,16 @@ class ModelFactory:
         propose_model_args = ModelArgs()
         propose_model_args.ckpt_path = sp_config.checkpoint_path
         propose_model_args.tokenizer_path = model_args.tokenizer_path
-        propose_model_args.model_type = sp_config.model_type
+        # Older deployments use the GLM-5 draft alias with both checkpoint families.
+        draft_type = sp_config.model_type
+        if draft_type == "glm_5_mtp" and model_config.model_type == "glm5_3_flash":
+            draft_type = "glm5_3_flash_mtp"
+        propose_model_args.model_type = draft_type
         propose_model_args.act_type = model_args.act_type
         propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
 
         # Create propose ModelConfig using _create_config
-        propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)
+        propose_model_cls = ModelFactory.get_model_cls(draft_type)
         propose_model_config = propose_model_cls._create_config(
             sp_config.checkpoint_path
         )

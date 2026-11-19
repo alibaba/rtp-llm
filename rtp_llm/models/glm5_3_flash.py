@@ -27,8 +27,8 @@ from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
 from rtp_llm.models.glm53_cache_policy import configure_decode_request_state_pool
 from rtp_llm.models.glm53_prefill_parallel import (
-    mla_cp_enabled,
-    shared_expert_local_enabled,
+    resolve_moe_policy,
+    use_dedicated_mla_cp,
 )
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.ops import (
@@ -172,8 +172,13 @@ def _glm53_indexer_compressor_weight_info() -> List[WeightModule]:
 class Glm53FlashModelConfig(ModelConfig):
     """Model config with checkpoint-mandated KDA cache precision."""
 
+    mega_moe_policy = None
+    prefill_mla_cp = False
+
     _python_fields = ModelConfig._python_fields | {
         "glm53_hc_mult",
+        "mega_moe_policy",
+        "prefill_mla_cp",
         "indexer_types",
         "is_glm53_mtp",
         "kda_gate_lower_bound",
@@ -368,6 +373,17 @@ def _merge_conv1d(tensors: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat(tensors, dim=0)
 
 
+def replicate_prefill_shared_weights(weights, policy):
+    if policy is None or not policy.replicate_shared_weights:
+        return
+    for weight in weights:
+        if isinstance(weight, FfnWeight):
+            weight.config.replicate_for_prefill_tokens = True
+            for atomic in weight.sub_weights.values():
+                if isinstance(atomic, FfnAtomicWeight):
+                    atomic.config.replicate_for_prefill_tokens = True
+
+
 class Glm53FlashWeight(DeepSeekV2Weight):
     """GLM-5.3 manifest reusing the DeepSeek MLA, MoE and FP8 loaders."""
 
@@ -441,7 +457,7 @@ class Glm53FlashWeight(DeepSeekV2Weight):
             weights.extend(self._get_hf_ffn_layer_weight_info(layer_id))
         else:
             weights = super()._get_hf_layer_weight_info(layer_id)
-            if mla_cp_enabled(self.model_config.model_type, self.role_type):
+            if self.model_config.prefill_mla_cp:
                 for weight in weights:
                     if (
                         isinstance(weight, MlaAttnAtomicWeight)
@@ -454,15 +470,8 @@ class Glm53FlashWeight(DeepSeekV2Weight):
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         weights = super()._get_hf_ffn_layer_weight_info(layer_id)
-        if layer_id in self.moe_layer_index_ and shared_expert_local_enabled(
-            self.model_config.model_type, self.role_type
-        ):
-            for weight in weights:
-                if isinstance(weight, FfnWeight):
-                    weight.config.replicate_for_prefill_tokens = True
-                    for atomic in weight.sub_weights.values():
-                        if isinstance(atomic, FfnAtomicWeight):
-                            atomic.config.replicate_for_prefill_tokens = True
+        if layer_id in self.moe_layer_index_:
+            replicate_prefill_shared_weights(weights, self.model_config.mega_moe_policy)
         return weights
 
     def _get_kda_weight_info(self) -> List[WeightModule]:
@@ -611,11 +620,20 @@ class Glm53Flash(BaseModel):
             logging.info("GLM53 Decode request-state pool: %d physical blocks", blocks)
 
     def create_model_loader(self) -> ModelLoader:
+        from rtp_llm.config.mega_moe import FP8_MEGA_MOE_STRATEGIES
+
+        self.model_config.mega_moe_policy = resolve_moe_policy(
+            self.model_config, self.parallelism_config, self.moe_config
+        )
+        self.model_config.prefill_mla_cp = use_dedicated_mla_cp(
+            self.model_config, self.parallelism_config
+        )
         loader = super().create_model_loader()
         load_config = loader.get_load_config()
         load_config.fp8_defer_moe_requant = (
             load_config.fp8_requant_preserve_fp32
-            and self.moe_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
+            and self.model_config.mega_moe_policy is not None
+            and self.moe_config.moe_strategy in FP8_MEGA_MOE_STRATEGIES
         )
         return loader
 

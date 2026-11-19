@@ -1,15 +1,18 @@
-"""CPU control tests; these do not establish CUDA/multirank kernel correctness."""
+"""CPU dispatch and real multi-rank Gloo tests for GLM Prefill collectives."""
 
 import contextlib
 import copy
-import os
+import datetime
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
 
-from rtp_llm.models_py.distributed import collective_torch, collective_utils
+from rtp_llm.models_py.distributed import collective_utils
 from rtp_llm.models_py.distributed import glm53_collective_gemm as glm
 from rtp_llm.models_py.distributed import symm_mem
 from rtp_llm.models_py.modules.dsv4 import forward_metadata
@@ -37,7 +40,7 @@ class NativeAdmissionTest(unittest.TestCase):
         self.group = MagicMock()
         self.group.size.return_value = 4
 
-    def contract(self, pc, members=None, graph=False):
+    def contract(self, pc, members=None, graph=False, sm=(10, 3)):
         members = members or list(
             range(
                 pc.world_rank // pc.tp_size * pc.tp_size,
@@ -45,6 +48,7 @@ class NativeAdmissionTest(unittest.TestCase):
             )
         )
         with (
+            patch.object(glm.dist, "get_backend", return_value="nccl"),
             patch.object(
                 glm.dist,
                 "get_world_size",
@@ -63,6 +67,8 @@ class NativeAdmissionTest(unittest.TestCase):
                 glm.dist, "get_global_rank", side_effect=lambda g, rank: members[rank]
             ),
             patch.object(glm.torch.cuda, "current_device", return_value=pc.local_rank),
+            patch.object(glm.torch.cuda, "get_device_capability", return_value=sm),
+            patch.object(glm.torch.cuda, "can_device_access_peer", return_value=True),
             patch.object(glm.socket, "gethostname", return_value="same-node"),
             patch.object(glm.Path, "read_text", return_value="same-boot"),
             patch.object(symm_mem, "torch_symm_mem_available", True),
@@ -83,6 +89,7 @@ class NativeAdmissionTest(unittest.TestCase):
             ]
         )
         self.assertFalse(self.contract(parallelism(), graph=True)["admitted"])
+        self.assertFalse(self.contract(parallelism(), sm=(9, 0))["admitted"])
         self.assertFalse(self.contract(parallelism(role="DECODE"))["admitted"])
 
     def test_any_peer_miss_or_disagreement_declines_before_construction(self):
@@ -100,80 +107,141 @@ class NativeAdmissionTest(unittest.TestCase):
         peers[1]["shared"][-2] = True
         cases.append(peers)
         for peers in cases:
-            with self.subTest(peers=peers), patch.object(
-                glm, "_native_ag_contract", return_value=local
-            ), patch.object(
-                collective_utils, "exchange_group_state", return_value=peers
-            ), patch.object(
-                symm_mem, "TorchSymmMemCommunicator"
-            ) as constructor:
-                self.assertIsNone(
-                    glm._configure_native_all_gather(self.group, parallelism(), False)
-                )
-                constructor.assert_not_called()
+            with self.subTest(peers=peers):
+                self.assertFalse(glm._native_group_agrees(local, peers))
+        self.assertTrue(glm._native_group_agrees(local, good))
 
-    def test_unanimous_graph_configuration_never_constructs_native(self):
-        local = self.contract(parallelism(), graph=True)
-        with patch.object(glm, "_native_ag_contract", return_value=local), patch.object(
-            collective_utils, "exchange_group_state", return_value=[local] * 4
-        ), patch.object(symm_mem, "TorchSymmMemCommunicator") as constructor:
-            self.assertIsNone(
-                glm._configure_native_all_gather(self.group, parallelism(), True)
-            )
-            constructor.assert_not_called()
-
-    def test_rendezvous_exception_is_not_a_local_fallback(self):
-        local = self.contract(parallelism())
-        peers = [dict(local, device=rank) for rank in range(4)]
-        with patch.object(glm, "_native_ag_contract", return_value=local), patch.object(
-            collective_utils, "exchange_group_state", return_value=peers
-        ), patch.object(
+    def test_rendezvous_exception_and_group_disable(self):
+        with patch.object(
             symm_mem,
             "TorchSymmMemCommunicator",
             side_effect=RuntimeError("rendezvous failed"),
         ):
             with self.assertRaisesRegex(RuntimeError, "rendezvous failed"):
-                glm._configure_native_all_gather(self.group, parallelism(), False)
-
-    def test_communicator_collective_disable_retains_fallback(self):
-        local = self.contract(parallelism())
-        peers = [dict(local, device=rank) for rank in range(4)]
-        with patch.object(glm, "_native_ag_contract", return_value=local), patch.object(
-            collective_utils, "exchange_group_state", return_value=peers
-        ), patch.object(
+                glm._configure_native_all_gather(self.group, 0)
+        with patch.object(
             symm_mem,
             "TorchSymmMemCommunicator",
             return_value=SimpleNamespace(disabled=True),
-        ), patch.object(
-            glm, "_NativeAllGather"
-        ) as owner:
-            self.assertIsNone(
-                glm._configure_native_all_gather(self.group, parallelism(), False)
-            )
-            owner.assert_not_called()
+        ):
+            self.assertIsNone(glm._configure_native_all_gather(self.group, 0))
 
-    def test_ag_gate_off_does_not_initialize_native(self):
-        with patch.dict(
-            os.environ,
-            {
-                "GLM53_PREFILL_AG_GEMM": "0",
-                "GLM53_PREFILL_GEMM_RS": "0",
-                "GLM53_PREFILL_STABLE_RS": "0",
-            },
-        ), patch.object(glm, "_configure_native_all_gather") as factory:
+    def configure_for_peers(
+        self, pc, *, alter=None, features=(None, None, None, 0), graph=False
+    ):
+        local = self.contract(pc, graph=graph)
+
+        def exchange(group, vote, tag):
+            peers = [dict(copy.deepcopy(vote), device=i) for i in range(4)]
+            if alter is not None:
+                alter(peers[-1])
+            return peers
+
+        with patch.object(glm, "_native_ag_contract", return_value=local), patch.object(
+            glm, "_local_collective_features", return_value=features
+        ), patch.object(collective_utils, "exchange_group_state", side_effect=exchange):
             glm.configure_glm53_collective_gemm(
-                self.group, 4096, parallelism(), enable_cuda_graph=False
+                self.group, 128, pc, enable_cuda_graph=graph, max_batch_tokens=7
             )
-            self.assertIsNone(glm._STATE)
-            factory.assert_not_called()
 
-    def test_idempotence_and_existing_workspace_order_before_publication(self):
-        calls = []
-        workspace = object()
-        deep_gemm = SimpleNamespace(
-            GemmRSBuffer=lambda *a, **kw: calls.append("workspace") or workspace,
-            bf16_gemm_rs_nn=object(),
+    def test_decode_pdfusion_and_cuda_graph_remain_unconfigured(self):
+        with patch.object(glm, "_configure_native_all_gather") as construct:
+            for role, graph in (
+                ("DECODE", False),
+                ("PDFUSION", False),
+                ("PREFILL", True),
+            ):
+                self.configure_for_peers(parallelism(role=role), graph=graph)
+                self.assertIsNone(glm._STATE)
+            construct.assert_not_called()
+
+    def test_one_rank_without_native_features_declines_for_every_rank(self):
+        features = (MagicMock(), MagicMock(), MagicMock(), 2176)
+        with patch.object(glm, "_configure_native_all_gather") as construct:
+            self.configure_for_peers(
+                parallelism(),
+                alter=lambda p: p.update(ag=False, rs_bytes=0),
+                features=features,
+            )
+            self.assertFalse(glm._STATE.all_gather)
+            self.assertIsNone(glm._STATE.reduce_partials)
+            self.assertIsNone(glm._STATE.workspace)
+            construct.assert_not_called()
+            features[1].GemmRSBuffer.assert_not_called()
+
+    def test_capacity_disagreement_before_allocation(self):
+        with self.assertRaisesRegex(ValueError, "agree"):
+            self.configure_for_peers(
+                parallelism(), alter=lambda p: p.update(shape=[128, 64])
+            )
+        self.assertIsNone(glm._STATE)
+
+    def test_probe_requires_reducer_memory_and_supported_workspace_layout(self):
+        import torch.distributed._symmetric_memory as symm_mem_ops
+
+        reducer = MagicMock()
+        native = SimpleNamespace(bf16_gemm_rs_reduce=reducer)
+        size = MagicMock(return_value=2176)
+        gemm = SimpleNamespace(
+            _C=native,
+            GemmRSBuffer=MagicMock(),
+            bf16_gemm_rs_nn=MagicMock(),
+            get_bf16_gemm_rs_workspace_size=size,
         )
+        with patch.dict(sys.modules, {"deep_gemm": gemm}), patch.object(
+            torch.cuda, "mem_get_info", return_value=(4096, 8192)
+        ):
+            self.assertEqual(
+                glm._local_collective_features(0, 8, 128),
+                (symm_mem_ops, gemm, reducer, 2176),
+            )
+            for nbytes in (2048, 2112, 8192):
+                size.return_value = nbytes
+                self.assertEqual(
+                    glm._local_collective_features(0, 8, 128),
+                    (symm_mem_ops, None, None, 0),
+                )
+            del native.bf16_gemm_rs_reduce
+            self.assertEqual(
+                glm._local_collective_features(0, 8, 128), (symm_mem_ops, None, None, 0)
+            )
+            gemm.GemmRSBuffer.assert_not_called()
+
+    def test_committed_workspace_error_propagates_before_publication(self):
+        gemm = SimpleNamespace(
+            GemmRSBuffer=MagicMock(
+                side_effect=RuntimeError("workspace construction failed")
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "workspace construction failed"):
+            self.configure_for_peers(
+                parallelism(), features=(None, gemm, object(), 2176)
+            )
+        self.assertIsNone(glm._STATE)
+        gemm.GemmRSBuffer.assert_called_once()
+
+    def test_transport_error_propagates_without_reduction_retry(self):
+        with patch.object(
+            glm, "_STATE", glm._State(self.group, 8, 4, False)
+        ), patch.object(
+            glm.dist,
+            "all_to_all_single",
+            side_effect=RuntimeError("group transport failed"),
+        ) as send:
+            with self.assertRaisesRegex(RuntimeError, "group transport failed"):
+                glm.reduce_scatter_glm53(torch.zeros((5, 4), dtype=torch.bfloat16))
+            send.assert_called_once()
+
+    def test_idempotence_and_workspace_before_publication(self):
+        calls = []
+        workspace = SimpleNamespace(
+            num_bytes=2176, buffer_ptrs=[1, 2, 3, 4], device=torch.device("cpu")
+        )
+        ag = SimpleNamespace(enable_symm_mem_for_group=lambda g: calls.append("group"))
+        gemm = SimpleNamespace(
+            GemmRSBuffer=lambda *a, **kw: calls.append("workspace") or workspace
+        )
+        reducer = object()
         native = object()
 
         def initialize_native(*args):
@@ -181,46 +249,29 @@ class NativeAdmissionTest(unittest.TestCase):
             calls.append("native")
             return native
 
-        with patch.dict(
-            os.environ,
-            {
-                "GLM53_PREFILL_AG_GEMM": "1",
-                "GLM53_PREFILL_GEMM_RS": "1",
-                "GLM53_PREFILL_STABLE_RS": "0",
-            },
-        ), patch.dict("sys.modules", {"deep_gemm": deep_gemm}), patch.object(
-            torch.cuda, "get_device_capability", return_value=(10, 3)
-        ), patch.object(
-            torch.cuda, "current_device", return_value=0
-        ), patch(
-            "torch.distributed._symmetric_memory.enable_symm_mem_for_group",
-            side_effect=lambda *args: calls.append("group"),
-        ), patch.object(
+        with patch.object(
             glm, "_configure_native_all_gather", side_effect=initialize_native
-        ) as factory:
-            pc = parallelism()
-            glm.configure_glm53_collective_gemm(
-                self.group, 4096, pc, enable_cuda_graph=False
-            )
+        ), patch.object(torch.cuda, "current_stream"):
+            self.configure_for_peers(parallelism(), features=(ag, gemm, reducer, 2176))
             state = glm._STATE
             self.assertIs(state.workspace, workspace)
             self.assertIs(state.native_all_gather, native)
-            self.assertEqual(calls, ["group", "workspace", "native"])
-            glm.configure_glm53_collective_gemm(
-                self.group, 4096, pc, enable_cuda_graph=False
-            )
+            self.assertIs(state.reduce_partials, reducer)
+            self.assertEqual(state.max_tokens, 8)
+            self.configure_for_peers(parallelism())
             self.assertIs(glm._STATE, state)
-            factory.assert_called_once()
+            self.assertEqual(calls, ["group", "workspace", "native"])
             with self.assertRaisesRegex(
                 RuntimeError, "already initialized differently"
             ):
-                glm.configure_glm53_collective_gemm(
-                    self.group, 4096, pc, enable_cuda_graph=True
-                )
+                self.configure_for_peers(parallelism(), graph=True)
 
 
 class NativeRoutingTest(unittest.TestCase):
     def setUp(self):
+        from rtp_llm.models_py.distributed import collective_torch
+
+        self.collective = collective_torch
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
         self.metadata = self.stack.enter_context(
@@ -230,7 +281,7 @@ class NativeRoutingTest(unittest.TestCase):
             patch.object(torch.cuda, "is_current_stream_capturing", return_value=False)
         )
         self.fallback = self.stack.enter_context(
-            patch.object(collective_torch, "all_gather")
+            patch.object(self.collective, "all_gather")
         )
         # Use the real communicator eligibility policy with a CPU stand-in;
         # numerical GPU communication remains the responsibility of integration.
@@ -245,14 +296,14 @@ class NativeRoutingTest(unittest.TestCase):
         shard = torch.arange(1, 9, dtype=torch.bfloat16).reshape(2, 4)
         gathered = torch.cat((shard, shard + 10))
         self.native.gather.return_value = gathered
-        output = glm.all_gather_trim(shard, 3, collective_torch.Group.TP)
+        output = glm.all_gather_trim(shard, 3, self.collective.Group.TP)
         self.assertTrue(torch.equal(output, gathered[:3]))
         self.assertEqual(output.shape, (3, 4))
         self.assertEqual(output.dtype, torch.bfloat16)
         self.fallback.assert_not_called()
         for logical in (-1, 5):
             with self.assertRaisesRegex(ValueError, "logical token count"):
-                glm.all_gather_trim(shard, logical, collective_torch.Group.TP)
+                glm.all_gather_trim(shard, logical, self.collective.Group.TP)
 
     def test_typed_payload_and_capacity_misses_use_ordinary_path(self):
         values = [
@@ -267,18 +318,16 @@ class NativeRoutingTest(unittest.TestCase):
             with self.subTest(dtype=value.dtype, shape=value.shape):
                 sentinel = object()
                 self.fallback.return_value = sentinel
-                self.assertIs(
-                    glm.all_gather(value, collective_torch.Group.TP), sentinel
-                )
-                self.fallback.assert_called_with(value, collective_torch.Group.TP)
+                self.assertIs(glm.all_gather(value, self.collective.Group.TP), sentinel)
+                self.fallback.assert_called_with(value, self.collective.Group.TP)
         self.native.gather.assert_not_called()
         self.native.communicator.max_size = (
             32  # gathered bytes equal capacity: strict miss
         )
         value = torch.ones(2, 4, dtype=torch.bfloat16)
-        glm.all_gather(value, collective_torch.Group.TP)
+        glm.all_gather(value, self.collective.Group.TP)
         self.native.gather.assert_not_called()
-        self.fallback.assert_called_with(value, collective_torch.Group.TP)
+        self.fallback.assert_called_with(value, self.collective.Group.TP)
 
     def test_vector_alignment_misses_preserve_ordinary_path(self):
         # Even when total gathered bytes are 16-aligned, an 8-byte shard
@@ -291,18 +340,16 @@ class NativeRoutingTest(unittest.TestCase):
                 )
                 sentinel = object()
                 self.fallback.return_value = sentinel
-                self.assertIs(
-                    glm.all_gather(value, collective_torch.Group.TP), sentinel
-                )
-                self.fallback.assert_called_with(value, collective_torch.Group.TP)
+                self.assertIs(glm.all_gather(value, self.collective.Group.TP), sentinel)
+                self.fallback.assert_called_with(value, self.collective.Group.TP)
         self.native.gather.assert_not_called()
 
     def test_uninitialized_and_decode_verify_contexts_never_use_native(self):
         value = torch.ones(2, 4, dtype=torch.bfloat16)
         for state, metadata, group in (
-            (None, {}, collective_torch.Group.TP),
-            (self.state, None, collective_torch.Group.TP),
-            (self.state, {}, collective_torch.Group.DP),
+            (None, {}, self.collective.Group.TP),
+            (self.state, None, self.collective.Group.TP),
+            (self.state, {}, self.collective.Group.DP),
         ):
             with patch.object(glm, "_STATE", state), patch.object(
                 forward_metadata, "metadata_cache", return_value=metadata
@@ -314,11 +361,11 @@ class NativeRoutingTest(unittest.TestCase):
         value = torch.tensor([1, 255], dtype=torch.uint8)
         with patch("rtp_llm.models_py.distributed.pynccl_cp.all_gather") as cp:
             self.assertIs(
-                glm.all_gather(value, collective_torch.Group.TP, role="mla_history"),
+                glm.all_gather(value, self.collective.Group.TP, role="mla_history"),
                 cp.return_value,
             )
             cp.assert_called_once_with(
-                value, group=collective_torch.Group.TP, role="mla_history"
+                value, group=self.collective.Group.TP, role="mla_history"
             )
         self.native.gather.assert_not_called()
         self.fallback.assert_not_called()
@@ -327,7 +374,7 @@ class NativeRoutingTest(unittest.TestCase):
         self.capture.return_value = True
         with self.assertRaisesRegex(RuntimeError, "non-Graph Prefill"):
             glm.all_gather(
-                torch.ones(2, 4, dtype=torch.bfloat16), collective_torch.Group.TP
+                torch.ones(2, 4, dtype=torch.bfloat16), self.collective.Group.TP
             )
         self.native.gather.assert_not_called()
         self.fallback.assert_not_called()
@@ -428,6 +475,77 @@ class NativeBufferLifetimeTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "previously failed"):
                 owner.gather(value)
         comm.all_gather.assert_called_once()
+
+
+def _ordered_worker(rank, world, store):
+    import torch.distributed as dist
+
+    dist.init_process_group(
+        "gloo",
+        init_method="file://" + store,
+        rank=rank,
+        world_size=world,
+        timeout=datetime.timedelta(seconds=45),
+    )
+    try:
+        group = dist.group.WORLD
+        glm.configure_glm53_collective_gemm(
+            group,
+            4,
+            parallelism(rank=rank, tp=world, local=world),
+            enable_cuda_graph=False,
+            max_batch_tokens=8,
+        )
+        assert glm._STATE.reduce_partials is None
+        cancellation = torch.tensor(
+            [
+                [2**24, 1, 256, 0.5],
+                [1, 256, 1, 0.5],
+                [-(2**24), -256, -256, 0.5],
+                [3, 0.5, 0.5, 0.5],
+            ]
+        )
+
+        def partial(source, rows):
+            storage = torch.empty((rows, 8), dtype=torch.bfloat16)
+            values = storage[:, ::2]
+            values.copy_(cancellation[source].expand(rows, 4))
+            if rows:
+                values[:, 3].copy_(torch.arange(rows) + source)
+            return values
+
+        # Force multiple stripes for both the no-native and over-capacity paths.
+        with patch.object(glm, "_ORDERED_RS_BUFFER_BYTES", 160):
+            for rows in (0, 1, 4, 5, 17, 33):
+                source = partial(rank, rows)
+                original = source.clone()
+                expected = torch.zeros((rows, 4), dtype=torch.float32)
+                for peer in range(world):
+                    expected.add_(partial(peer, rows).float())
+                shard = (rows + world - 1) // world
+                padded = torch.zeros(shard * world, 4, dtype=torch.bfloat16)
+                padded[:rows].copy_(expected)
+                reference = padded[rank * shard : (rank + 1) * shard]
+                actual = glm.reduce_scatter_glm53(source)
+                torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+                torch.testing.assert_close(source, original, rtol=0, atol=0)
+                if rows > glm._STATE.max_tokens:
+                    with patch.object(glm._STATE, "reduce_partials", object()):
+                        overflow = glm.reduce_scatter_glm53(source)
+                    torch.testing.assert_close(overflow, reference, rtol=0, atol=0)
+    finally:
+        dist.destroy_process_group()
+
+
+class OrderedReduceScatterTest(unittest.TestCase):
+    def test_four_gloo_ranks_fp32_order_chunking_and_zero_padding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            torch.multiprocessing.spawn(
+                _ordered_worker,
+                args=(4, str(Path(directory) / "store")),
+                nprocs=4,
+                join=True,
+            )
 
 
 if __name__ == "__main__":

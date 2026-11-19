@@ -5,3 +5,6 @@
 *.bin binary
 *.model binary
 *.safetensors binary
+
+# A unified diff marks an empty context line with one space.
+patches/blackwell/*.patch whitespace=-blank-at-eol

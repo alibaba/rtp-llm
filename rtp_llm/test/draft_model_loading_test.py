@@ -100,6 +100,31 @@ class DraftModelLoadingTest(unittest.TestCase):
                     engine.parallelism_config.pp_stage_layer_counts, expected
                 )
 
+    def test_legacy_glm_draft_alias_uses_the_target_checkpoint_family(self):
+        for target, requested, expected in (
+            ("glm_5", "glm_5_mtp", "glm_5_mtp"),
+            ("glm5_3_flash", "glm_5_mtp", "glm5_3_flash_mtp"),
+            ("glm5_3_flash", "glm5_3_flash_mtp", "glm5_3_flash_mtp"),
+        ):
+            with self.subTest(target=target, requested=requested):
+                engine = make_engine_config(SpeculativeType.EAGLE, 1, 0)
+                engine.sp_config.checkpoint_path = "draft"
+                engine.sp_config.model_type = requested
+                engine.sp_config.quantization = None
+                engine.profiling_debug_logging_config = MagicMock()
+                with patch.object(ModelFactory, "get_model_cls") as lookup, patch(
+                    "rtp_llm.model_factory.build_model_config"
+                ) as build_config:
+                    ModelFactory.create_propose_model_config(
+                        engine,
+                        SimpleNamespace(model_type=target, max_seq_len=128),
+                        ModelArgs(),
+                    )
+                lookup.assert_called_once_with(expected)
+                self.assertEqual(
+                    build_config.call_args.kwargs["model_args"].model_type, expected
+                )
+
     def test_factory_sets_draft_role_before_building_config(self):
         for sp_type in (
             SpeculativeType.MTP,

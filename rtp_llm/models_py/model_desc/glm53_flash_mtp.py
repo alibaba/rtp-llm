@@ -6,7 +6,7 @@ from typing import Any, Optional
 import torch
 from torch import nn
 
-from rtp_llm.models.glm53_prefill_parallel import MlaCPParallelismView, mla_cp_enabled
+from rtp_llm.models.glm53_prefill_parallel import MlaCPParallelismView
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather_trim
 from rtp_llm.models_py.distributed.glm53_mla_cp import prepare_glm53_fmha
@@ -55,9 +55,7 @@ class Glm53FlashMtpModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
         )
-        self.prefill_mla_cp = mla_cp_enabled(
-            config.model_type, parallelism.role_type, is_glm53_mtp=True
-        )
+        self.prefill_mla_cp = config.prefill_mla_cp
         self.mla_parallelism = (
             MlaCPParallelismView(parallelism) if self.prefill_mla_cp else parallelism
         )
@@ -91,6 +89,9 @@ class Glm53FlashMtpModel(GptModelBase):
                 hw_kernel_config=py_hw_kernel_config,
             )
             for i in range(self.layer_num)
+        )
+        self.requires_ep_sync = any(
+            getattr(layer.mlp, "requires_ep_sync", False) for layer in self.layers
         )
         self.norm = RMSResNorm(
             weights.get_global_weight(W.multi_tokens_predict_final_ln_gamma),

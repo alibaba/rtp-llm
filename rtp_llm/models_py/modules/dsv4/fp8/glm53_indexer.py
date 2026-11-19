@@ -57,6 +57,8 @@ from rtp_llm.models_py.modules.dsv4.fp8.glm53_indexer_score import (
     fp8_paged_indexer_score,
 )
 from rtp_llm.models_py.modules.dsv4.glm53_prefill_workspace import PrefillWorkspace
+from rtp_llm.models_py.modules.dsv4.indexer_topk import select_stable_window_topk
+from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.indexer_grouping import completed_group_lengths_i32
 
 
@@ -80,37 +82,6 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
 
-# Persistent radix-select TopK — vendored CUDA kernel binding. Same gate
-# as the BF16 class so a single env knob disables both paths.
-_PERSISTENT_TOPK_OK = hasattr(rtp_llm_ops, "dsv4_persistent_topk")
-_FAST_PREFILL_TOPK_OK = hasattr(rtp_llm_ops, "fast_topk_v2_variable")
-_PERSISTENT_TOPK_WORKSPACE_SIZE = 1024 * 1024  # 1 MB
-_FAST_PREFILL_TOPK_MAX_INPUT_TOKENS = 12 * 1024
-_persistent_topk_workspace_cache: Dict[torch.device, torch.Tensor] = {}
-
-
-def _persistent_topk_enabled() -> bool:
-    if not _PERSISTENT_TOPK_OK:
-        return False
-    return os.environ.get("DSV4_PERSISTENT_TOPK", "1") != "0"
-
-
-def _fp8_prefill_fast_topk_enabled() -> bool:
-    if not _FAST_PREFILL_TOPK_OK:
-        return False
-    return os.environ.get("DSV4_PREFILL_FAST_TOPK", "1") != "0"
-
-
-def _fp8_prefill_topk_force_radix_sort() -> bool:
-    return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
-
-
-def _fp8_prefill_topk_use_torch() -> bool:
-    return (
-        os.environ.get("DSV4_INDEXER_TOPK_BACKEND", "auto").strip().lower() == "torch"
-    )
-
-
 def _topk_canonicalize_enabled() -> bool:
     return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
         "1",
@@ -120,23 +91,12 @@ def _topk_canonicalize_enabled() -> bool:
     )
 
 
-_FUSED_PREFILL_TOPK_CANONICALIZE = (
-    os.environ.get("GLM53_PREFILL_FUSED_TOPK_CANONICALIZE", "0") == "1"
-)
-_FUSED_DECODE_TOPK_CANONICALIZE = (
-    os.environ.get("GLM53_DECODE_FUSED_TOPK_CANONICALIZE", "1") == "1"
-)
-
-
 def canonicalize_topk_output(out: torch.Tensor) -> None:
     """Sort valid token indices in-place while preserving ``-1`` padding."""
     if not _topk_canonicalize_enabled():
         return
     if (
-        (
-            (_FUSED_PREFILL_TOPK_CANONICALIZE and metadata_cache() is not None)
-            or (_FUSED_DECODE_TOPK_CANONICALIZE and metadata_cache() is None)
-        )
+        metadata_cache() is None
         and out.dtype == torch.int32
         and out.ndim == 2
         and (
@@ -165,136 +125,9 @@ def canonicalize_topk_output(out: torch.Tensor) -> None:
     )
 
 
-def _run_decode_topk(
-    logits: torch.Tensor,
-    lengths: torch.Tensor,
-    out: torch.Tensor,
-    backend: str,
-) -> None:
-    """Select decode indices with the same stable tie rule as GLM53 prefill."""
-    topk, width = out.shape[1], logits.shape[1]
-    k_eff = min(topk, width)
-    native_topk = k_eff > 0 and topk in (512, 1024, 2048) and _persistent_topk_enabled()
-    # Native selectors fully overwrite the output, including short-row padding.
-    # Keep initialization for the torch fallback and retain stable tie selection.
-    if not (native_topk and os.environ.get("GLM53_INDEXER_SKIP_TOPK_FILL", "1") == "1"):
-        out.fill_(-1)
-    stable = backend == "topk_v3_tie_break"
-    if native_topk:
-        if stable:
-            # The ragged selector also accepts decode rows: their windows
-            # start at zero and end at the live, graph-updated context lengths.
-            rtp_llm_ops.topk_v3_tie_break(
-                logits, torch.zeros_like(lengths), lengths, out, topk, width
-            )
-        else:
-            op = (
-                rtp_llm_ops.topk_v3
-                if backend == "topk_v3"
-                else rtp_llm_ops.dsv4_persistent_topk
-            )
-            op(logits, lengths, out, _get_topk_workspace(logits.device), topk, width)
-    elif k_eff > 0:
-        columns = torch.arange(width, device=logits.device).view(1, width)
-        masked = torch.where(
-            columns < lengths.view(-1, 1),
-            logits,
-            torch.full_like(logits, float("-inf")),
-        )
-        if stable:
-            indices = torch.argsort(masked, dim=-1, descending=True, stable=True)[
-                :, :k_eff
-            ]
-        else:
-            indices = masked.topk(k_eff, dim=-1)[1]
-        out[:, :k_eff].copy_(indices.to(torch.int32))
-        ranks = torch.arange(topk, device=out.device).view(1, topk)
-        out.masked_fill_(ranks >= lengths.view(-1, 1), -1)
-    # Native selectors return an unordered set, even when its membership is
-    # stable. Give sparse attention a fixed reduction order in decode too.
-    canonicalize_topk_output(out)
-
-
-def _run_prefill_topk_torch(
-    logits: torch.Tensor,
-    row_starts: torch.Tensor,
-    row_ends: torch.Tensor,
-    out: torch.Tensor,
-    topk: int,
-) -> None:
-    M, T = logits.shape
-    out.fill_(-1)
-    col = torch.arange(T, device=logits.device, dtype=torch.int32).unsqueeze(0)
-    ks = row_starts.unsqueeze(1)
-    ke = row_ends.unsqueeze(1)
-    mask = (col >= ks) & (col < ke)
-    masked = torch.where(mask, logits, torch.full_like(logits, float("-inf")))
-    k_eff = min(topk, T)
-    _, indices = masked.topk(k_eff, dim=-1)
-    indices = indices.to(torch.int32) - row_starts.unsqueeze(1)
-    lengths = (row_ends - row_starts).unsqueeze(1)
-    indices = torch.where(indices < lengths, indices, torch.full_like(indices, -1))
-    out[:, :k_eff].copy_(indices)
-    canonicalize_topk_output(out)
-
-
-def _run_prefill_topk(
-    logits: torch.Tensor,
-    row_starts: torch.Tensor,
-    row_ends: torch.Tensor,
-    out: torch.Tensor,
-    topk: int,
-    compress_ratio: int,
-    backend: str = "legacy",
-) -> None:
-    # Every backend may leave padded lanes untouched. Initialize the full
-    # destination so invalid compressed indices can never escape as stale data.
-    out.fill_(-1)
-    if _fp8_prefill_topk_use_torch():
-        _run_prefill_topk_torch(logits, row_starts, row_ends, out, topk)
-        return
-
-    if backend == "topk_v3_tie_break":
-        rtp_llm_ops.topk_v3_tie_break(
-            logits,
-            row_starts,
-            row_ends,
-            out,
-            int(topk),
-            # The model's static attention max_seq_len can still be 32K when
-            # the engine accepts 128K. Use the materialized K width as a safe
-            # dispatch bound; row_starts/row_ends retain request-local causal
-            # limits without truncating valid compressed keys.
-            logits.shape[1],
-        )
-        canonicalize_topk_output(out)
-        return
-
-    # ``logits`` is over compressed K tokens. Convert back to input-token
-    # length so the 16k policy matches the user-visible prefill length.
-    estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
-    if (
-        _fp8_prefill_fast_topk_enabled()
-        and int(topk) in (512, 1024, 2048)
-        and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
-    ):
-        lengths = (row_ends - row_starts).contiguous()
-        rtp_llm_ops.fast_topk_v2_variable(
-            logits, out, lengths, row_starts.contiguous(), int(topk)
-        )
-        canonicalize_topk_output(out)
-        return
-
-    rtp_llm_ops.dsv4_top_k_per_row_prefill(
-        logits,
-        row_starts,
-        row_ends,
-        out,
-        logits.size(0),
-        logits.stride(0),
-        logits.stride(1),
-        int(topk),
-        _fp8_prefill_topk_force_radix_sort(),
+def _select_topk(logits, starts, ends, out):
+    select_stable_window_topk(
+        logits, starts, ends, out, getattr(rtp_llm_ops, "topk_v3_tie_break", None)
     )
     canonicalize_topk_output(out)
 
@@ -311,16 +144,6 @@ def _fp8_prefill_score_chunk_rows() -> int:
         "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS",
         min_value=0,
     )
-
-
-def _get_topk_workspace(device: torch.device) -> torch.Tensor:
-    ws = _persistent_topk_workspace_cache.get(device)
-    if ws is None:
-        ws = torch.empty(
-            _PERSISTENT_TOPK_WORKSPACE_SIZE, dtype=torch.uint8, device=device
-        )
-        _persistent_topk_workspace_cache[device] = ws
-    return ws
 
 
 class _IndexerFP8PrefillMeta(NamedTuple):
@@ -396,41 +219,6 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     max_request_keys: Optional[int] = None
 
 
-def _linear_fixed_rows(
-    x: torch.Tensor, weight: torch.Tensor, rows: int
-) -> torch.Tensor:
-    """Fix the FP32 GEMM shape across cold/cached/batched query rows.
-
-    The native cuBLAS FP32 projection can move a BF16 rounding boundary when
-    M changes. Padding only independent rows keeps each real dot product's
-    inputs intact and uses the same GEMM shape for every chunk.
-    """
-    flat = x.reshape(-1, x.shape[-1])
-    from rtp_llm.models_py.modules.glm53_fixed_projection_graph import (
-        fixed_projection_graph,
-    )
-
-    result = (
-        fixed_projection_graph(flat, weight, rows)
-        if metadata_cache() is not None
-        else None
-    )
-    if result is not None:
-        return result.view(*x.shape[:-1], weight.shape[0])
-    output = torch.empty(
-        (flat.shape[0], weight.shape[0]), device=x.device, dtype=weight.dtype
-    )
-    for begin in range(0, flat.shape[0], rows):
-        end = min(begin + rows, flat.shape[0])
-        block = flat[begin:end].to(weight.dtype)
-        if end - begin < rows:
-            padded = block.new_zeros((rows, block.shape[1]))
-            padded[: end - begin].copy_(block)
-            block = padded
-        output[begin:end].copy_(F.linear(block, weight)[: end - begin])
-    return output.view(*x.shape[:-1], weight.shape[0])
-
-
 class IndexerFP8(PoolBackedModule):
     """FP8 lightning indexer. DeepGEMM-only score; nested
     ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
@@ -455,8 +243,6 @@ class IndexerFP8(PoolBackedModule):
         compressor_pre_norm_weight: Optional[torch.Tensor] = None,
         compressor_pre_norm_bias: Optional[torch.Tensor] = None,
         rotate_q: bool = False,
-        prefill_topk_backend: str = "legacy",
-        decode_topk_backend: str = "dsv4_persistent",
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
@@ -482,11 +268,6 @@ class IndexerFP8(PoolBackedModule):
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
         self.rotate_q = bool(rotate_q)
-        self._glm_gate_quant = (
-            compressor_kpool_mode
-            and self.rotate_q
-            and os.environ.get("GLM53_INDEXER_GATE_QUANT_FUSION", "1") == "1"
-        )
         self._glm_weights_chunk_rows = (
             int(os.environ.get("GLM53_INDEXER_WEIGHTS_CHUNK_ROWS", "0"))
             if compressor_kpool_mode
@@ -494,19 +275,6 @@ class IndexerFP8(PoolBackedModule):
         )
         if self._glm_weights_chunk_rows < 0:
             raise ValueError("GLM53_INDEXER_WEIGHTS_CHUNK_ROWS must be nonnegative")
-        if prefill_topk_backend not in ("legacy", "topk_v3_tie_break"):
-            raise ValueError(
-                f"Unsupported Prefill TopK backend: {prefill_topk_backend}"
-            )
-        if decode_topk_backend not in (
-            "dsv4_persistent",
-            "topk_v3",
-            "topk_v3_tie_break",
-        ):
-            raise ValueError(f"Unsupported Decode TopK backend: {decode_topk_backend}")
-        self.prefill_topk_backend = prefill_topk_backend
-        self.decode_topk_backend = decode_topk_backend
-
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
 
@@ -573,15 +341,15 @@ class IndexerFP8(PoolBackedModule):
         weight = self.weights_proj
         rows = getattr(self, "_glm_weights_chunk_rows", 0)
         if rows and weight.dtype == torch.float32:
-            return _linear_fixed_rows(x, weight, rows)
+            flat = x.reshape(-1, x.shape[-1])
+            projected = fixed_m_linear(
+                lambda chunk: F.linear(chunk.to(weight.dtype), weight), flat, rows
+            )
+            return projected.view(*x.shape[:-1], weight.shape[0])
         return F.linear(x if x.dtype == weight.dtype else x.to(weight.dtype), weight)
 
     def _fuse_glm_q_quant(self) -> bool:
-        return (
-            self.compressor.kpool_mode
-            and self.rotate_q
-            and os.environ.get("GLM53_INDEXER_FUSED_Q_QUANT", "1") == "1"
-        )
+        return self.compressor.kpool_mode and self.rotate_q
 
     def _quantize_q(self, q: torch.Tensor, weights: torch.Tensor):
         # GLM53 projects head gates in FP32 to distinguish near-tie scores.
@@ -611,11 +379,7 @@ class IndexerFP8(PoolBackedModule):
                 else meta.T
             )
             request_bound = getattr(meta, "max_request_keys", None)
-            if (
-                segments is None
-                and request_bound is not None
-                and os.environ.get("GLM53_INDEXER_LOCAL_SCORE_SPAN", "1") != "0"
-            ):
+            if segments is None and request_bound is not None:
                 max_keys = request_bound
             if max_keys == 0:
                 out.fill_(-1)
@@ -653,14 +417,11 @@ class IndexerFP8(PoolBackedModule):
                         max_seqlen_k=max_keys,
                     )
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    _run_prefill_topk(
+                    _select_topk(
                         logits,
                         starts[begin:end],
                         ends[begin:end],
                         out[begin:end],
-                        self.index_topk,
-                        self.compress_ratio,
-                        backend=self.prefill_topk_backend,
                     )
                 del logits
             return out
@@ -692,14 +453,11 @@ class IndexerFP8(PoolBackedModule):
                         clean_logits=False,
                     )
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
-                    _run_prefill_topk(
+                    _select_topk(
                         logits,
                         starts[begin:end],
                         ends[begin:end],
                         out[begin:end],
-                        self.index_topk,
-                        self.compress_ratio,
-                        backend=self.prefill_topk_backend,
                     )
                 del logits
         return out
@@ -944,8 +702,7 @@ class IndexerFP8(PoolBackedModule):
                 ).to(dtype=torch.int32)
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             fuse_gate_quant = (
-                self._glm_gate_quant
-                and self._fuse_glm_q_quant()
+                self._fuse_glm_q_quant()
                 and not self._glm_weights_chunk_rows
                 and x.is_contiguous()
                 and x.dtype == torch.bfloat16
@@ -1001,11 +758,12 @@ class IndexerFP8(PoolBackedModule):
             )  # [B*q_len, T_max] fp32
             score = logits.view(bsz, q_len, T_max)
 
-            _run_decode_topk(
+            lengths = compressed_len.view(bsz * q_len)
+            _select_topk(
                 score.view(bsz * q_len, T_max),
-                compressed_len.view(bsz * q_len),
+                torch.zeros_like(lengths),
+                lengths,
                 out_topk_buffer.view(bsz * q_len, K),
-                self.decode_topk_backend,
             )
             return out_topk_buffer
         finally:
@@ -1237,7 +995,6 @@ class IndexerFP8(PoolBackedModule):
             and self.compressor.kpool_mode
             and getattr(cp_ctx, "sequence_parallel", False)
             and cp_ctx.chunk_lengths_per_req is not None
-            and os.environ.get("GLM53_INDEXER_REQUEST_CHUNKS", "0") == "1"
         ):
             # CPContext guarantees [request0 front/back, request1 front/back,
             # ...], including each request's padding. Only B+1 offsets cross

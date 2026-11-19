@@ -12,7 +12,7 @@ from pathlib import Path
 
 import torch
 
-_ROOT = Path(__file__).resolve().parents[3] / "libs/fp8_mqa_isolated"
+_ROOT = Path(__file__).parents[3] / "libs/fp8_mqa_isolated"
 
 
 def _binary():

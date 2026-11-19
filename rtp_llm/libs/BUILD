@@ -1,7 +1,32 @@
 load("@arch_config//:arch_select.bzl", "copy_all_so")
+load("@rules_python//python:defs.bzl", "py_test")
+load("//3rdparty/blackwell:extensions.bzl", "blackwell_extensions")
 load("//bazel:defs.bzl", "copy_files", "copy_so")
 
 package(default_visibility = ["//rtp_llm:__subpackages__"])
+
+exports_files(["glm53_extension_check.py"])
+
+blackwell_extensions(name = "blackwell_extensions")
+
+py_test(
+    name = "blackwell_abi_test",
+    srcs = ["glm53_extension_check.py"],
+    main = "glm53_extension_check.py",
+    args = ["--allow-cuda-stub"],
+    data = [":blackwell_extensions"],
+    deps = ["//rtp_llm:numpy", "//rtp_llm:torch"],
+    tags = ["manual"],
+    target_compatible_with = select({
+        "//:using_glm53_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+_SM100_EXTENSIONS = select({
+    "//:using_glm53_cuda13_x86": [":blackwell_extensions"],
+    "//conditions:default": [],
+})
 
 copy_all_so()
 
@@ -62,7 +87,7 @@ filegroup(
         ":copy_remote_kv_cache_manager_client_libs",
         ":libmm_rdma_exporter_so",
         ":librtp_compute_ops_so",
-    ],
+    ] + _SM100_EXTENSIONS,
 )
 
 filegroup(
@@ -78,5 +103,5 @@ filegroup(
         ":libth_grammar_tokenizer_info_so",
         ":libth_transformer_config_so",
         ":libth_transformer_so",
-    ],
+    ] + _SM100_EXTENSIONS,
 )
