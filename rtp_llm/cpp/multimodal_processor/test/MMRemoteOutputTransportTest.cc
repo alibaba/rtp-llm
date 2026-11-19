@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -5,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -495,9 +497,33 @@ TEST(MMRemoteOutputTransportTest, typedRequestBudgetDoesNotExtendConfiguredRpcBu
 class MMGrpcTraceTest: public ::testing::Test {
 protected:
     class Service: public MultimodalRpcService::Service {
+    public:
+        std::atomic<int>      claims{0};
+        std::atomic<int>      releases{0};
+        std::mutex            release_mutex;
+        std::set<std::string> acknowledged;
+        grpc::Status          ClaimRdmaLease(grpc::ServerContext*, const ReleaseLeasePB* request, EmptyPB*) override {
+            ++claims;
+            return request->lease_id_size() == 1 && request->lease_id(0) == "offered" ?
+                                grpc::Status::OK :
+                                grpc::Status(grpc::StatusCode::NOT_FOUND, "expired offer");
+        }
+        grpc::Status ReleaseRdmaLease(grpc::ServerContext*, const ReleaseLeasePB* request, EmptyPB*) override {
+            if (++releases == 1) {
+                return grpc::Status(grpc::StatusCode::UNAVAILABLE, "retry release");
+            }
+            std::lock_guard<std::mutex> lock(release_mutex);
+            acknowledged.insert(request->lease_id().begin(), request->lease_id().end());
+            return grpc::Status::OK;
+        }
         grpc::Status RemoteMultimodalEmbedding(grpc::ServerContext*      context,
                                                const MultimodalInputsPB* request,
-                                               MultimodalOutputPB*) override {
+                                               MultimodalOutputPB*       receipt) override {
+            if (request->support_rdma() && context->client_metadata().count("x-rtp-rdma-claim")) {
+                receipt->set_rdma_claim_required(true);
+                auto* slot = receipt->add_output_rdma_slots()->mutable_rdma_descriptor();
+                slot->set_lease_id(request->request_id() == 1 ? "offered" : "expired");
+            }
             grpc::Status                   status = request->request_id() == 43 ?
                                                         grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, "private error") :
                                                         grpc::Status::OK;
@@ -530,6 +556,26 @@ protected:
         telemetry::TelemetryRuntime::shutdown(5000);
     }
 };
+
+TEST_F(MMGrpcTraceTest, ClaimBeforeReadAndRetryFailedReleaseIndependentlyOfRequestBudget) {
+    {
+        auto               client   = createGrpcMMControlClient(std::make_shared<MMTransportMetrics>(nullptr), 1000);
+        const auto         endpoint = "127.0.0.1:" + std::to_string(port_);
+        MultimodalInputsPB request;
+        request.set_support_rdma(true);
+        DeadlineBudget budget(3000);
+        request.set_request_id(1);
+        EXPECT_TRUE(client->request(endpoint, request, budget).ok());
+        DeadlineBudget expired(0);
+        client->release(endpoint, {"offered"}, expired);
+        request.set_request_id(2);
+        EXPECT_FALSE(client->request(endpoint, request, budget).ok());
+    }
+    EXPECT_EQ(service_.claims.load(), 2);
+    EXPECT_GE(service_.releases.load(), 2);
+    std::lock_guard<std::mutex> lock(service_.release_mutex);
+    EXPECT_EQ(service_.acknowledged, (std::set<std::string>{"expired", "offered"}));
+}
 
 TEST_F(MMGrpcTraceTest, ScopedVitParentCrossesRealTransportAndPreservesFailures) {
     namespace trace = opentelemetry::trace;

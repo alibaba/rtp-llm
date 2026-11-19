@@ -475,7 +475,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(control_config, "release_timeout_ms"),
         type=_positive_int,
         default=1000,
-        help="读取侧 ReleaseRdmaLease RPC 的 deadline（毫秒），位于推理路径上需保持较短，超时由导出侧 slot GC 兜底",
+        help="读取侧每次 ReleaseRdmaLease RPC 的超时（毫秒）",
     )
     vit_group.add_argument(
         "--mm_rdma_slot_gc_timeout_ms",
@@ -483,7 +483,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(rdma_config, "slot_gc_timeout_ms"),
         type=_positive_int,
         default=60 * 1000,
-        help="encoder 侧 slot 在无 Release 时强制回收的超时（毫秒）",
+        help="ViT 回收尚未被读取方认领的 RDMA slot 的超时（毫秒）；已认领的 slot 等待读取方释放",
     )
     vit_group.add_argument(
         "--mm_rdma_max_slot_bytes",

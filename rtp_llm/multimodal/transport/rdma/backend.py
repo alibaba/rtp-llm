@@ -91,6 +91,14 @@ class RdmaOutputBackend(MMTransportBackend):
                 f"invalid RDMA descriptor: {parse_error}"
             ) from parse_error
 
+        try:
+            return self._make_receipt(res, slots)
+        except Exception:
+            self._roll_back(slots)
+            raise
+
+    @staticmethod
+    def _make_receipt(res, slots):
         receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
         role_bytes: Dict[int, int] = {}
         for slot in slots:
@@ -115,13 +123,16 @@ class RdmaOutputBackend(MMTransportBackend):
             return
         try:
             self._exporter.release(handles)
-        except Exception:  # noqa: BLE001 - exporter GC is the final backstop
+        except Exception:
             logging.exception(
                 "[VIT] failed to roll back RDMA slots after descriptor parse failure"
             )
 
+    def offer(self, handles: List[str]) -> bool:
+        return self._exporter.offer(handles)
+
+    def claim(self, handles: List[str]) -> bool:
+        return self._exporter.claim(handles)
+
     def release(self, handles: List[str]) -> None:
-        try:
-            self._exporter.release(handles)
-        except Exception as e:  # noqa: BLE001 - slot GC is the backstop
-            logging.warning("[VIT] RDMA release failed: %s", e)
+        self._exporter.release(handles)

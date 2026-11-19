@@ -263,6 +263,8 @@ message MultimodalOutputPB {
     repeated MMRdmaSlotPB output_rdma_slots = 5;
     // Compact CPU row hashes stay inline for either transport.
     TensorPB multimodal_feature_hash = 7;
+    // A negotiated offer must be claimed before posting any NIC READ.
+    bool rdma_claim_required = 8;
 }
 
 message ReleaseLeasePB {
@@ -1242,6 +1244,7 @@ service MultimodalRpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
     // Best-effort release after the LLM finishes reading remote slots.
+    rpc ClaimRdmaLease(ReleaseLeasePB) returns (EmptyPB);
     rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
     rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
     rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);

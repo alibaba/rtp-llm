@@ -73,6 +73,14 @@ public:
     // Production adapters serialize provider calls. Release must remain idempotent: duplicate,
     // unknown, or already expired leases are ignored.
     virtual void release(const std::vector<std::string>& lease_ids) = 0;
+    // Optional offer/claim handshake. Unclaimed offers may expire; once claimed,
+    // the producer must retain the buffer until release. Older providers use direct leases.
+    virtual bool offer(const std::vector<std::string>&) {
+        return false;
+    }
+    virtual bool claim(const std::vector<std::string>&) {
+        return false;
+    }
 };
 
 class RdmaRead {

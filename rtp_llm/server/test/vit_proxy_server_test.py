@@ -1464,7 +1464,8 @@ class MMOutputProxyRouterTest(TestCase):
 
         router.record_receipt("worker-a", response)
         router.record_receipt("worker-b", response)
-        router.release(ReleaseLeasePB(lease_id=["same"]), FakeContext([1.0]))
+        with self.assertRaisesRegex(ValueError, "conflicting owners"):
+            router.release(ReleaseLeasePB(lease_id=["same"]), FakeContext([1.0]))
 
         connection_pool.get_stub.assert_not_called()
         reasons = [
@@ -1483,7 +1484,8 @@ class MMOutputProxyRouterTest(TestCase):
             "worker", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")])
         )
 
-        router.release(ReleaseLeasePB(lease_id=["handle"]), FakeContext([0.0]))
+        with self.assertRaises(TimeoutError):
+            router.release(ReleaseLeasePB(lease_id=["handle"]), FakeContext([0.0]))
 
         connection_pool.get_stub.assert_not_called()
         reasons = [
@@ -1529,7 +1531,10 @@ class MMOutputProxyRouterTest(TestCase):
             MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle-b")]),
         )
 
-        router.release(ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock())
+        with self.assertRaisesRegex(RuntimeError, "not acknowledged"):
+            router.release(
+                ReleaseLeasePB(lease_id=["handle-a", "handle-b"]), MagicMock()
+            )
 
         forwarded = stub_b.ReleaseRdmaLease.call_args.args[0]
         self.assertEqual(list(forwarded.lease_id), ["handle-b"])
@@ -1555,40 +1560,53 @@ class MMOutputProxyRouterTest(TestCase):
         self.assertEqual(list(request.lease_id), ["handle"])
         self.assertEqual(stub.ReleaseRdmaLease.call_count, 1)
 
-    def test_concurrent_release_atomically_claims_route(self):
-        entered = threading.Event()
-        unblock = threading.Event()
+    def test_failed_concurrent_release_does_not_restore_an_acknowledged_route(self):
+        entered, resume = threading.Event(), threading.Event()
+        pool = MagicMock()
 
-        class BlockingStub:
-            def __init__(self):
-                self.calls = 0
-
-            def ReleaseRdmaLease(self, request, timeout):
-                self.calls += 1
+        def fail_first(request, timeout):
+            if not entered.is_set():
                 entered.set()
-                unblock.wait(timeout=1.0)
+                resume.wait(2)
+                raise RuntimeError("lost acknowledgement")
 
-        stub = BlockingStub()
-        connection_pool = MagicMock()
-        connection_pool.get_stub.return_value = stub
-        router = MMOutputProxyRouter(connection_pool)
+        pool.get_stub.return_value.ReleaseRdmaLease.side_effect = fail_first
+        router = MMOutputProxyRouter(pool)
         router.record_receipt(
-            "worker",
-            MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")]),
+            "a", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("one")])
         )
-        request = ReleaseLeasePB(lease_id=["handle"])
-        first = threading.Thread(
-            target=router.release, args=(request, FakeContext([1.0]))
+        request = ReleaseLeasePB(lease_id=["one"])
+        with futures.ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(router.release, request, FakeContext([1.0]))
+            try:
+                self.assertTrue(entered.wait(1))
+                router.release(request, FakeContext([1.0]))
+            finally:
+                resume.set()
+            with self.assertRaises(RuntimeError):
+                first.result()
+        self.assertNotIn("one", router._handle_routes)
+
+    def test_late_release_after_route_cleanup_reaches_original_worker(self):
+        pool = MagicMock()
+        router = MMOutputProxyRouter(pool, worker_addresses=["a", "b"])
+        router.release(ReleaseLeasePB(lease_id=["old"]), FakeContext([1.0]))
+        self.assertEqual([c.args[0] for c in pool.get_stub.call_args_list], ["a", "b"])
+
+    def test_claim_is_forwarded_only_to_the_owner(self):
+        pool = MagicMock()
+        router = MMOutputProxyRouter(pool)
+        router.record_receipt(
+            "a", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("one")])
         )
-        first.start()
-        self.assertTrue(entered.wait(timeout=1.0))
-
-        router.release(request, FakeContext([1.0]))
-        unblock.set()
-        first.join(timeout=1.0)
-
-        self.assertFalse(first.is_alive())
-        self.assertEqual(stub.calls, 1)
+        request = ReleaseLeasePB(lease_id=["one"])
+        router.claim(request, FakeContext([1.0]))
+        pool.get_stub.assert_called_once_with("a")
+        self.assertEqual(
+            pool.get_stub.return_value.ClaimRdmaLease.call_args.args, (request,)
+        )
+        with self.assertRaises(ValueError):
+            router.claim(ReleaseLeasePB(lease_id=["unknown"]), FakeContext([1.0]))
 
 
 if __name__ == "__main__":

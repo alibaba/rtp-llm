@@ -79,7 +79,7 @@ public:
     virtual ErrorResult<MultimodalOutputPB>
     request(const std::string& endpoint, MultimodalInputsPB& request_pb, DeadlineBudget& budget) = 0;
 
-    // Best-effort; encoder slot GC is the backstop.
+    // Cleanup has its own lifetime, independent of the inference deadline.
     virtual void
     release(const std::string& endpoint, const std::vector<std::string>& handles, DeadlineBudget& budget) = 0;
 

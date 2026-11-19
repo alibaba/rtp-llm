@@ -41,6 +41,7 @@ from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
 )
 from rtp_llm.multimodal.transport import create_mm_output_transport
+from rtp_llm.multimodal.transport.base import RDMA_CLAIM_HEADER
 from rtp_llm.server.mm_cache_metadata import (
     MM_CACHE_SNAPSHOT_MAX_BYTES,
     get_mm_cache_keys,
@@ -426,13 +427,24 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
             res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
-            add_multimodal_feature_hashes(output_pb, res.embeddings, res.feature_hashes)
-            kmonitor.report(
-                GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
-                _now_us() - start_us,
-                tags,
-            )
-            return output_pb
+            try:
+                add_multimodal_feature_hashes(
+                    output_pb, res.embeddings, res.feature_hashes
+                )
+                kmonitor.report(
+                    GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
+                    _now_us() - start_us,
+                    tags,
+                )
+                if (
+                    dict(context.invocation_metadata() or ()).get(RDMA_CLAIM_HEADER)
+                    == "1"
+                ):
+                    self._transport.offer(output_pb)
+                return output_pb
+            except Exception:
+                self._transport.rollback(output_pb)
+                raise
         except MMSchedulerOverloadError as e:
             # Backpressure, not a server fault: map to a defined, ret/backoff-able
             # status instead of a generic error. abort() raises to end the call.
@@ -500,6 +512,13 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
         finally:
             if not callback_added:
                 _report_lifecycle()
+
+    def ClaimRdmaLease(self, request: ReleaseLeasePB, context):
+        if not self._transport.claim(request):
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, "RDMA offer expired or unknown"
+            )
+        return EmptyPB()
 
     def ReleaseRdmaLease(self, request: ReleaseLeasePB, context):
         self._transport.release(request)

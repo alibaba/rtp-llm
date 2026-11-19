@@ -18,7 +18,7 @@ struct RdmaConfig {
     // Independent read providers per LLM worker. Each provider is borrowed by at
     // most one concurrent read; waiting and reading share one timeout window.
     uint32_t read_provider_count = 4;
-    // Reclaim exported slots that were not released.
+    // Expiry for unclaimed offers. Direct and claimed leases require explicit release.
     int64_t slot_gc_timeout_ms = 60 * 1000;
     // Larger outputs are split across slots.
     int64_t max_slot_bytes = 1024L * 1024 * 1024;

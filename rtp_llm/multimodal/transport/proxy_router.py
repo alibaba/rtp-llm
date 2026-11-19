@@ -40,8 +40,9 @@ def _context_deadline_seconds(context, max_timeout_seconds: float) -> Optional[f
 class MMOutputProxyRouter:
     """Routes transport-owned leases through a multi-worker ViT proxy."""
 
-    def __init__(self, connection_pool, transport_config=None):
+    def __init__(self, connection_pool, transport_config=None, worker_addresses=()):
         self._connection_pool = connection_pool
+        self._worker_addresses = tuple(worker_addresses)
         self._handle_routes: dict[str, tuple[str, float, int]] = {}
         self._handle_collisions: dict[str, float] = {}
         self._handle_generations: dict[str, int] = {}
@@ -63,9 +64,7 @@ class MMOutputProxyRouter:
                 0.001, transport_config.control.release_timeout_ms / 1000.0
             )
 
-    def record_receipt(
-        self, worker_address: str, receipt: MultimodalOutputPB
-    ) -> None:
+    def record_receipt(self, worker_address: str, receipt: MultimodalOutputPB) -> None:
         handles = list(
             dict.fromkeys(
                 slot.rdma_descriptor.lease_id
@@ -104,108 +103,72 @@ class MMOutputProxyRouter:
             )
             self._report_error("rdma_handle_collision")
 
-    def release(self, request: ReleaseLeasePB, context) -> None:
-        handles_by_worker: dict[str, list[str]] = defaultdict(list)
-        selected_routes: dict[str, tuple[str, float, int]] = {}
-        skipped_routes: list[tuple[str, str]] = []
-        now = time.monotonic()
+    def claim(self, request: ReleaseLeasePB, context) -> None:
+        # One embedding receipt always belongs to one worker. Claim it atomically there.
         with self._lock:
-            for handle in dict.fromkeys(request.lease_id):
-                if self._handle_collisions.pop(handle, None) is not None:
-                    self._handle_generations.pop(handle, None)
-                    skipped_routes.append((handle, "release_handle_collision"))
-                    continue
-                route = self._handle_routes.pop(handle, None)
-                if route is None:
-                    skipped_routes.append((handle, "release_handle_unknown"))
-                    continue
-                if now - route[1] > self._route_ttl_seconds:
-                    if self._handle_generations.get(handle) == route[2]:
-                        self._handle_generations.pop(handle, None)
-                    skipped_routes.append((handle, "release_handle_expired"))
-                    continue
-                handles_by_worker[route[0]].append(handle)
-                selected_routes[handle] = route
+            owners = {
+                self._handle_routes[h][0] if h in self._handle_routes else None
+                for h in request.lease_id
+            }
+        if len(owners) != 1 or None in owners:
+            raise ValueError("RDMA offer route is unknown or ambiguous")
+        deadline = _context_deadline_seconds(context, self._release_timeout_seconds)
+        if deadline is None:
+            raise TimeoutError("RDMA claim deadline exhausted")
+        timeout = deadline - time.monotonic()
+        if timeout <= 0:
+            raise TimeoutError("RDMA claim deadline exhausted")
+        self._connection_pool.get_stub(owners.pop()).ClaimRdmaLease(
+            request, timeout=timeout
+        )
+
+    def release(self, request: ReleaseLeasePB, context) -> None:
+        groups: dict[str, list[str]] = defaultdict(list)
+        routes = {}
+        with self._lock:
+            now = time.monotonic()
             if now - self._last_cleanup >= HANDLE_ROUTE_CLEANUP_INTERVAL_SECONDS:
                 self._sweep_locked(now)
-
-        for handle, reason in skipped_routes:
-            logging.warning(
-                "Cannot route RDMA handle %s (%s); worker GC will reclaim it",
-                handle,
-                reason,
-            )
-            self._report_error(reason)
+            for handle in dict.fromkeys(request.lease_id):
+                if handle in self._handle_collisions:
+                    self._report_error("release_handle_collision")
+                    raise ValueError("RDMA release handle has conflicting owners")
+                route = self._handle_routes.get(handle)
+                if route is not None:
+                    groups[route[0]].append(handle)
+                    routes[handle] = route
+                else:
+                    # A claim can outlive its proxy route or a proxy restart. Native
+                    # lease IDs are globally unique and releasing an unknown ID is a no-op.
+                    for worker in self._worker_addresses:
+                        groups[worker].append(handle)
 
         deadline = _context_deadline_seconds(context, self._release_timeout_seconds)
-        if deadline is None and handles_by_worker:
-            skipped_count = sum(len(handles) for handles in handles_by_worker.values())
-            logging.warning(
-                "RDMA release deadline exhausted; skipping %d handles", skipped_count
-            )
-            self._report_error("release_deadline_exhausted", skipped_count)
-            self._restore_claims(selected_routes)
-            return
-
-        release_groups = list(handles_by_worker.items())
-        for group_index, (worker_address, handles) in enumerate(release_groups):
+        failure = None
+        for worker, handles in groups.items():
+            timeout = deadline - time.monotonic() if deadline is not None else 0
+            if timeout <= 0:
+                self._report_error("release_deadline_exhausted")
+                raise TimeoutError("RDMA release deadline exhausted")
             try:
-                timeout = (
-                    deadline - time.monotonic()
-                    if deadline is not None
-                    else self._release_timeout_seconds
-                )
-                if timeout <= 0:
-                    skipped_count = sum(
-                        len(group_handles)
-                        for _, group_handles in release_groups[group_index:]
-                    )
-                    logging.warning(
-                        "RDMA release deadline exhausted; "
-                        "skipping remaining %d handles",
-                        skipped_count,
-                    )
-                    self._report_error("release_deadline_exhausted", skipped_count)
-                    remaining_handles = [
-                        handle
-                        for _, group_handles in release_groups[group_index:]
-                        for handle in group_handles
-                    ]
-                    self._restore_claims(
-                        {handle: selected_routes[handle] for handle in remaining_handles}
-                    )
-                    break
-                stub = self._connection_pool.get_stub(worker_address)
-                stub.ReleaseRdmaLease(
+                self._connection_pool.get_stub(worker).ReleaseRdmaLease(
                     ReleaseLeasePB(lease_id=handles), timeout=timeout
                 )
-                self._complete_claims(handles, selected_routes)
-            except Exception:  # noqa: BLE001 - worker GC is the backstop
-                logging.exception(
-                    "Failed to release RDMA handles on VIT worker %s; "
-                    "worker GC will reclaim them",
-                    worker_address,
-                )
-                self._restore_claims(
-                    {handle: selected_routes[handle] for handle in handles}
-                )
-
-    def _complete_claims(self, handles, selected_routes) -> None:
-        with self._lock:
-            for handle in handles:
-                route = selected_routes[handle]
-                if self._handle_generations.get(handle) == route[2]:
-                    self._handle_generations.pop(handle, None)
-
-    def _restore_claims(self, selected_routes) -> None:
-        with self._lock:
-            for handle, route in selected_routes.items():
-                if (
-                    self._handle_generations.get(handle) == route[2]
-                    and handle not in self._handle_routes
-                    and handle not in self._handle_collisions
-                ):
-                    self._handle_routes[handle] = route
+            except Exception as exc:
+                failure = exc
+                continue
+            with self._lock:
+                for handle in handles:
+                    if (
+                        handle in routes
+                        and self._handle_routes.get(handle) == routes[handle]
+                    ):
+                        del self._handle_routes[handle]
+                        self._handle_generations.pop(handle, None)
+        if failure is not None:
+            raise RuntimeError(
+                "RDMA release was not acknowledged by every worker"
+            ) from failure
 
     def _sweep_locked(self, now: float) -> None:
         cutoff = now - self._route_ttl_seconds

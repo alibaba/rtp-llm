@@ -31,6 +31,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
+from rtp_llm.multimodal.transport.base import RDMA_CLAIM_HEADER
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
 from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
@@ -413,7 +414,9 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.profiler = MMProfiler()
-        self._transport_router = MMOutputProxyRouter(connection_pool, transport_config)
+        self._transport_router = MMOutputProxyRouter(
+            connection_pool, transport_config, load_balancer.worker_addresses
+        )
         kmonitor.init()
         self._status_probes: dict[str, _WorkerStatusProbe] = {}
         self._status_probes_lock = threading.Lock()
@@ -541,12 +544,14 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                         f"timeout: {attempt_timeout_s}s"
                     )
                     worker_rpc_start_us = _now_us()
+                    metadata = dict(context.invocation_metadata() or ())
+                    worker_metadata = list(dashscope_greennet_metadata(metadata))
+                    if metadata.get(RDMA_CLAIM_HEADER) == "1":
+                        worker_metadata.append((RDMA_CLAIM_HEADER, "1"))
                     worker_call = stub.RemoteMultimodalEmbedding.future(
                         request,
                         timeout=attempt_timeout_s,
-                        metadata=dashscope_greennet_metadata(
-                            dict(context.invocation_metadata() or ())
-                        ),
+                        metadata=tuple(worker_metadata),
                     )
                     if not context.add_callback(worker_call.cancel):
                         worker_call.cancel()
@@ -905,6 +910,10 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                 if worker_address
                 else None
             )
+
+    def ClaimRdmaLease(self, request: ReleaseLeasePB, context) -> EmptyPB:
+        self._transport_router.claim(request, context)
+        return EmptyPB()
 
     def ReleaseRdmaLease(self, request: ReleaseLeasePB, context) -> EmptyPB:
         self._transport_router.release(request, context)

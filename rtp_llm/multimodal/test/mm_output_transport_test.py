@@ -112,6 +112,13 @@ class RdmaOutputBackendTest(TestCase):
         self.exporter = MagicMock()
         self.backend = RdmaOutputBackend(self.exporter)
 
+    def test_worker_propagates_native_release_failure(self):
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import ReleaseLeasePB
+
+        self.exporter.release.side_effect = RuntimeError("release failed")
+        with self.assertRaisesRegex(RuntimeError, "release failed"):
+            MMOutputTransport(self.backend).release(ReleaseLeasePB(lease_id=["lease"]))
+
     def test_invalid_descriptor_releases_parsed_slots_and_raises(self):
         self.exporter.export_embedding.return_value = [
             _serialized_desc("parsed"),

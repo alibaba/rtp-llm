@@ -1295,6 +1295,18 @@ class MMCacheApiTest(unittest.TestCase):
             torch.equal(trans_tensor(response.multimodal_feature_hash), hashes)
         )
         self.assertFalse(response.HasField("multimodal_embedding"))
+        exporter.offer.assert_not_called()
+        context.invocation_metadata.return_value = [("x-rtp-rdma-claim", "1")]
+        exporter.offer.return_value = True
+        offered = server.RemoteMultimodalEmbedding(
+            MultimodalInputsPB(support_rdma=True), context
+        )
+        self.assertTrue(offered.rdma_claim_required)
+        exporter.offer.assert_called_once_with(["handle"])
+        result.feature_hashes = [torch.tensor([1], dtype=torch.int32)]
+        server.RemoteMultimodalEmbedding(MultimodalInputsPB(support_rdma=True), context)
+        exporter.release.assert_called_once_with(["handle"])
+        context.abort.assert_called_once()
 
 
 if __name__ == "__main__":
