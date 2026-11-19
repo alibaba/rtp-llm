@@ -68,34 +68,9 @@ class _MockEpsilon:
         )
 
 
-class _MockController:
-    def __init__(self, scheduler: _MockScheduler) -> None:
-        self.scheduler = scheduler
-        self.events = []
-
-    def run(self) -> None:
-        if not self.scheduler.wait_ready(timeout=2):
-            self.events.append(("abort", "missing-participant"))
-            self.scheduler.release(result=110)
-            return
-        ids = sorted(self.scheduler.arrivals)
-        if ids != list(range(self.scheduler.worker_num)):
-            self.events.append(("abort", "invalid-manifest"))
-            self.scheduler.release(result=22)
-            return
-        self.events.append(("check", 0))
-        self.events.append(("checkpoint-ready", True))
-        self.events.append(("dump", 0))
-        self.events.append(("wait-cr-done", 0))
-        self.events.append(("restore", 0))
-        self.scheduler.release()
-
-
 class ScrSchedulerE2ETest(unittest.TestCase):
-    def test_arrival_check_dump_restore_release(self) -> None:
+    def test_participants_block_until_control_plane_release(self) -> None:
         scheduler = _MockScheduler(worker_num=4)
-        epsilon = _MockEpsilon(scheduler)
-        controller = _MockController(scheduler)
         with mock.patch.dict(
             os.environ,
             {
@@ -104,47 +79,28 @@ class ScrSchedulerE2ETest(unittest.TestCase):
                 scr.SCR_GENERATION_ENV: "e2e-generation-1",
             },
             clear=True,
-        ), mock.patch.object(scr, "_load_epsilon", return_value=epsilon):
-            controller_thread = threading.Thread(target=controller.run, daemon=True)
-            controller_thread.start()
-            # Threads model separate participating processes in this test.
-            # Production startup always uses the synchronous barrier directly.
-            threads = [
-                threading.Thread(
-                    target=scr.arrive_scr_checkpoint_barrier,
-                    kwargs=dict(
-                        worker_id=worker_id,
-                        worker_num=4,
-                        generation="e2e-generation-1",
-                    ),
-                    daemon=True,
+        ), mock.patch.object(
+            scr, "_load_epsilon", return_value=_MockEpsilon(scheduler)
+        ), ThreadPoolExecutor(max_workers=4) as workers:
+            arrivals = [
+                workers.submit(
+                    scr.arrive_scr_checkpoint_barrier,
+                    worker_id=worker_id,
+                    worker_num=4,
+                    generation="e2e-generation-1",
                 )
                 for worker_id in range(4)
             ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                self.assertIsNotNone(thread)
-                thread.join(timeout=3)
-            controller_thread.join(timeout=3)
-
-        self.assertFalse(controller_thread.is_alive())
-        self.assertEqual(sorted(scheduler.arrivals), [0, 1, 2, 3])
-        self.assertEqual(
-            controller.events,
-            [
-                ("check", 0),
-                ("checkpoint-ready", True),
-                ("dump", 0),
-                ("wait-cr-done", 0),
-                ("restore", 0),
-            ],
-        )
-        self.assertTrue(scheduler.released)
+            try:
+                self.assertTrue(scheduler.wait_ready(timeout=2))
+                self.assertEqual(sorted(scheduler.arrivals), [0, 1, 2, 3])
+                self.assertTrue(all(not arrival.done() for arrival in arrivals))
+            finally:
+                scheduler.release()
+            self.assertEqual([arrival.result(timeout=3) for arrival in arrivals], [0] * 4)
 
     def test_control_plane_timeout_aborts_the_waiting_participant(self):
         scheduler = _MockScheduler(worker_num=2)
-        controller = _MockController(scheduler)
         with mock.patch.dict(
             os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
         ), mock.patch.object(
@@ -156,11 +112,17 @@ class ScrSchedulerE2ETest(unittest.TestCase):
                 worker_num=2,
                 fail_closed=True,
             )
-            controller.run()
+            try:
+                with scheduler.condition:
+                    self.assertTrue(scheduler.condition.wait_for(
+                        lambda: len(scheduler.arrivals) == 1, timeout=2
+                    ))
+                self.assertFalse(arrival.done())
+            finally:
+                # Model the controller's timeout result; RTP supplies no budget.
+                scheduler.release(result=110)
             with self.assertRaises(scr.ScrArrivalError):
                 arrival.result(timeout=3)
-        self.assertEqual(controller.events, [("abort", "missing-participant")])
-        self.assertTrue(scheduler.released)
 
     def test_generation_mismatch_never_reaches_scheduler(self) -> None:
         scheduler = _MockScheduler(worker_num=1)

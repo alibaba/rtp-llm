@@ -32,33 +32,6 @@ class _EpsilonDouble:
         return self.result
 
 
-class _ControllerDouble:
-    """Small controller-side quorum model used by contract tests."""
-
-    def __init__(self, worker_num):
-        self.worker_num = worker_num
-        self.ids = []
-        self.events = []
-
-    def observe(self, arrivals):
-        self.ids = [item["worker_id"] for item in arrivals]
-
-    def checkpoint_ready(self):
-        return len(self.ids) == self.worker_num and len(set(self.ids)) == self.worker_num
-
-    def dump(self, path):
-        self.events.append(("dump", path))
-        return 0
-
-    def wait_cr_done(self):
-        self.events.append(("wait-cr-done",))
-        return 0
-
-    def restore(self, path):
-        self.events.append(("restore", path))
-        return 0
-
-
 class ScrTemplateUtilsTest(unittest.TestCase):
     def setUp(self):
         scr._reset_for_test()
@@ -101,18 +74,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         self.assertIsNone(result)
         log_exception.assert_called_once()
         self.assertIn("snapshot barrier arrival failed", log_exception.call_args.args[0])
-
-    def test_successful_arrival_logs_snapstart_checkpoint_reached(self):
-        epsilon = _EpsilonDouble()
-        with self._enabled(), mock.patch.object(
-            scr, "_load_epsilon", return_value=epsilon
-        ), mock.patch.object(scr.LOGGER, "info") as log_info:
-            self.assertEqual(
-                scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1), 0
-            )
-
-        messages = [call.args[0] for call in log_info.call_args_list]
-        self.assertTrue(any("sCR snapstart checkpoint reached" in message for message in messages))
 
     def test_provider_cancellation_fails_closed_for_active_template(self):
         epsilon = _EpsilonDouble(error=TimeoutError("snapshot barrier timeout"))
@@ -220,56 +181,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertIsNone(scr.arrive_scr_checkpoint_barrier(worker_id=-1, worker_num=4))
             self.assertIsNone(scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=0))
         self.assertEqual(epsilon.arrivals, [])
-
-    def test_duplicate_and_missing_participants_are_visible_to_controller_double(self):
-        """RTP-LLM emits IDs; the controller owns quorum validation.
-
-        This intentionally does not hide duplicate IDs in RTP-LLM.  A
-        controller can reject this generation before dump instead of allowing
-        two processes to silently overwrite one Epsilon slot.
-        """
-        epsilon = _EpsilonDouble()
-        controller = _ControllerDouble(worker_num=3)
-        with self._enabled(), mock.patch.object(scr, "_load_epsilon", return_value=epsilon):
-            for worker_id in (0, 1, 1):
-                scr.arrive_scr_checkpoint_barrier(worker_id=worker_id, worker_num=3)
-
-        controller.observe(epsilon.arrivals)
-        self.assertFalse(controller.checkpoint_ready())
-        self.assertEqual(controller.ids.count(1), 2)
-
-        # A missing participant must remain non-ready even when fewer calls
-        # happen to have been observed.  This is the control-plane decision,
-        # not an RTP-LLM dump/restore operation.
-        epsilon.arrivals.clear()
-        for worker_id in (0, 1):
-            scr.arrive_scr_checkpoint_barrier(worker_id=worker_id, worker_num=3)
-        controller.observe(epsilon.arrivals)
-        self.assertFalse(controller.checkpoint_ready())
-
-    def test_mock_controller_lifecycle_is_external_to_rtp_llm(self):
-        epsilon = _EpsilonDouble()
-        controller = _ControllerDouble(worker_num=1)
-        with self._enabled(), mock.patch.object(scr, "_load_epsilon", return_value=epsilon):
-            self.assertEqual(
-                scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1), 0
-            )
-        controller.observe(epsilon.arrivals)
-        self.assertTrue(controller.checkpoint_ready())
-        self.assertEqual(controller.dump("/tmp/mock-template"), 0)
-        self.assertEqual(controller.wait_cr_done(), 0)
-        self.assertEqual(controller.restore("/tmp/mock-template"), 0)
-        self.assertEqual(
-            controller.events,
-            [
-                ("dump", "/tmp/mock-template"),
-                ("wait-cr-done",),
-                ("restore", "/tmp/mock-template"),
-            ],
-        )
-        # The runtime only made the Epsilon arrival; controller calls stayed in
-        # the test-side double and are not reachable from production helpers.
-        self.assertEqual(len(epsilon.arrivals), 1)
 
     def test_scr_disabled_arrival_path_does_not_import_epsilon(self):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(

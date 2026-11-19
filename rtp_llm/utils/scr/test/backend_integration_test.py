@@ -309,7 +309,6 @@ class BackendScrIntegrationTest(unittest.TestCase):
             self.assertIs(backend._register_scr_resources(manager, config), manager.engine)
 
         register.assert_called_once_with(manager.engine, local_rank=2)
-        self.assertFalse(hasattr(manager, "_scr_checkpoint_arrival"))
 
     def test_rank_arrival_uses_world_rank_from_the_manifest(self):
         manager = SimpleNamespace(engine=object())

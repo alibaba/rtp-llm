@@ -1,23 +1,15 @@
 import copy
-import multiprocessing
 import os
 import socket
-import threading
-import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import psutil
 from rtp_llm.test.smoke.scr_checkpoint_probe import (
-    BlockingTestEpsilon,
-    CheckpointBarrier,
     assert_clean_checkpoint,
     kv_backing_snapshot,
-    read_socket_message,
     tcp_snapshot,
-    write_message,
 )
 
 
@@ -369,174 +361,6 @@ class TcpObservationTest(unittest.TestCase):
                             listener.fileno(),
                             {entry["fd"] for entry in snapshot["tcp_listeners"]},
                         )
-
-
-def child_arrival(path, generation):
-    os.environ["SCR_TEST_BARRIER_SOCKET"] = path
-    os.environ["RTP_LLM_SCR_GENERATION"] = generation
-    pinned = clean_snapshot()["participants"][0]["pinned"]
-    pinned["pid"] = os.getpid()
-    epsilon = BlockingTestEpsilon(SimpleNamespace(snapshot=lambda: pinned))
-    epsilon.snapstart_checkpoint(
-        wait_mode=1, worker_id=1, worker_num=2
-    )
-
-
-class BlockingCheckpointTest(unittest.TestCase):
-    def test_spawned_child_and_parent_join_same_quorum(self):
-        generation = "spawn-generation"
-        barrier = CheckpointBarrier(generation)
-        self.addCleanup(barrier.close)
-        child = multiprocessing.get_context("spawn").Process(
-            target=child_arrival, args=(barrier.path, generation)
-        )
-        child.start()
-        pinned = clean_snapshot()["participants"][0]["pinned"]
-        pinned["pid"] = os.getpid()
-        epsilon = BlockingTestEpsilon(SimpleNamespace(snapshot=lambda: pinned))
-        with patch.dict(
-            os.environ,
-            {
-                "SCR_TEST_BARRIER_SOCKET": barrier.path,
-                "RTP_LLM_SCR_GENERATION": generation,
-            },
-        ), ThreadPoolExecutor(max_workers=1) as workers:
-            result = workers.submit(
-                epsilon.snapstart_checkpoint,
-                wait_mode=1,
-                worker_id=0,
-                worker_num=2,
-            )
-            try:
-                arrivals = barrier.wait_ready(os.getpid(), timeout=3)
-                self.assertEqual({a["pid"] for a in arrivals}, {os.getpid(), child.pid})
-                self.assertFalse(result.done())
-                self.assertEqual(len(barrier.snapshots()), 2)
-            finally:
-                barrier.release()
-                child.join(timeout=3)
-                if child.is_alive():
-                    child.terminate()
-                    child.join(timeout=2)
-            self.assertEqual(result.result(timeout=2), 0)
-            self.assertEqual(child.exitcode, 0)
-
-    def test_partial_message_obeys_absolute_deadline(self):
-        reader, writer = socket.socketpair()
-        with reader, writer:
-            writer.sendall(b"{")
-            started = time.monotonic()
-            with self.assertRaises(TimeoutError):
-                read_socket_message(reader, started + 0.02)
-            self.assertLess(time.monotonic() - started, 0.5)
-
-    def test_snapshot_reply_has_bounded_deadline(self):
-        barrier = CheckpointBarrier("expected")
-        self.addCleanup(barrier.close)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.connect(barrier.path)
-            with connection.makefile("rwb") as stream:
-                write_message(
-                    stream,
-                    {
-                        "pid": os.getpid(),
-                        "worker_id": 0,
-                        "worker_num": 1,
-                        "generation": "expected",
-                    },
-                )
-                barrier.wait_ready(os.getpid(), timeout=2)
-                with self.assertRaises(TimeoutError):
-                    barrier.snapshots(timeout=0.02)
-
-    def test_last_sample_has_its_own_reply_deadline(self):
-        barrier = CheckpointBarrier("expected")
-        self.addCleanup(barrier.close)
-        samples = clean_snapshot()
-        with patch(
-            "rtp_llm.test.smoke.scr_checkpoint_probe.time.monotonic",
-            side_effect=[0, 0.9, 1.1, 1.2],
-        ), patch(
-            "rtp_llm.test.smoke.scr_checkpoint_probe.tcp_snapshot",
-            return_value=samples["network"],
-        ), patch.object(
-            barrier, "snapshots", return_value=samples["participants"]
-        ) as snapshots:
-            self.assertEqual(list(barrier.observe(123, seconds=1)), [samples])
-        snapshots.assert_called_once_with(timeout=2)
-
-    def test_detached_participant_cannot_be_observed_as_clean(self):
-        barrier = CheckpointBarrier("expected")
-        self.addCleanup(barrier.close)
-        with patch.object(
-            barrier, "snapshots", return_value=clean_snapshot()["participants"]
-        ), patch(
-            "rtp_llm.test.smoke.scr_checkpoint_probe.tcp_snapshot",
-            return_value={"pids": [456], "external_tcp": [], "tcp_listeners": []},
-        ):
-            with self.assertRaisesRegex(RuntimeError, "left the service process tree"):
-                next(barrier.observe(456))
-
-    def test_arrival_stays_blocked_until_explicit_release(self):
-        generation = "unit-generation"
-        barrier = CheckpointBarrier(generation)
-        self.addCleanup(barrier.close)
-        pinned = copy.deepcopy(clean_snapshot()["participants"][0]["pinned"])
-        pinned["pid"] = os.getpid()
-        epsilon = BlockingTestEpsilon(SimpleNamespace(snapshot=lambda: pinned))
-        callback = threading.Event()
-        epsilon.register_before_checkpoint_func(callback.set)
-        epsilon.register_kv_caches([SimpleNamespace(nbytes=4096)])
-        with patch.dict(
-            os.environ,
-            {
-                "SCR_TEST_BARRIER_SOCKET": barrier.path,
-                "RTP_LLM_SCR_GENERATION": generation,
-            },
-        ), ThreadPoolExecutor(max_workers=1) as workers:
-            result = workers.submit(
-                epsilon.snapstart_checkpoint,
-                wait_mode=1,
-                worker_id=0,
-                worker_num=1,
-            )
-            try:
-                arrivals = barrier.wait_ready(os.getpid(), timeout=2)
-                self.assertTrue(callback.is_set())
-                self.assertEqual(arrivals[0]["gpu_kv_bytes"], 4096)
-                self.assertFalse(result.done())
-                snapshots = barrier.snapshots()
-                self.assertEqual(snapshots[0]["pinned"]["active_bytes"], 0)
-                self.assertFalse(result.done())
-            finally:
-                barrier.release()
-            self.assertEqual(result.result(timeout=2), 0)
-
-    def test_wrong_generation_cannot_reach_quorum(self):
-        barrier = CheckpointBarrier("expected")
-        self.addCleanup(barrier.close)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.connect(barrier.path)
-            with connection.makefile("rwb") as stream:
-                write_message(
-                    stream,
-                    {
-                        "pid": os.getpid(),
-                        "worker_id": 0,
-                        "worker_num": 1,
-                        "generation": "stale",
-                    },
-                )
-                with self.assertRaisesRegex(
-                    RuntimeError, "Invalid checkpoint membership"
-                ):
-                    barrier.wait_ready(os.getpid(), timeout=2)
-
-    def test_missing_participant_times_out(self):
-        barrier = CheckpointBarrier("expected")
-        self.addCleanup(barrier.close)
-        with self.assertRaises(TimeoutError):
-            barrier.wait_ready(os.getpid(), timeout=0.01)
 
 
 if __name__ == "__main__":

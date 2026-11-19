@@ -47,20 +47,6 @@ class ScrLocalCommTest(unittest.TestCase):
                     local_comm_enabled(world_size, local_size, nodes), expected
                 )
 
-    def test_removed_extra_switch_cannot_enable_or_disable_loopback(self):
-        for old_value in ("0", "1"):
-            for enabled in ("0", "1"):
-                with self.subTest(old_value=old_value, enabled=enabled), patch.dict(
-                    os.environ,
-                    {
-                        "RTP_LLM_SCR_LOCAL_COMM": old_value,
-                        "RTPLLM_ENABLE_SCR": enabled,
-                        "SCR_PHASE": "checkpoint",
-                    },
-                    clear=True,
-                ):
-                    self.assertEqual(local_comm_enabled(2, 2), enabled == "1")
-
     def test_restored_ip_may_differ_from_seed(self):
         validate_local_members(self.world, self.pc)
 

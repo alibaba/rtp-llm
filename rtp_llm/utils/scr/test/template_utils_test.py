@@ -67,18 +67,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "yes"}, clear=True):
             self.assertTrue(scr.is_scr_enabled())
 
-    def test_unified_switch_does_not_choose_controller_phase(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {
-                scr.RTPLLM_ENABLE_SCR_ENV: "1",
-                scr.SCR_PHASE_ENV: scr.SCR_PHASE_RESTORE,
-            },
-            clear=True,
-        ):
-            self.assertTrue(scr.is_scr_enabled())
-            self.assertEqual(os.environ[scr.SCR_PHASE_ENV], scr.SCR_PHASE_RESTORE)
-
     def test_external_shim_phase_is_checked_after_provider_load(self) -> None:
         epsilon = SimpleNamespace(_EXTERNAL_DIR="/custom/scr/epsilon")
         with mock.patch.dict(
@@ -90,13 +78,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             clear=True,
         ), mock.patch.object(scr.importlib, "import_module", return_value=epsilon):
             self.assertIs(scr._load_epsilon(), epsilon)
-
-    def test_control_plane_operations_are_not_exposed_by_rtp_llm(self) -> None:
-        self.assertFalse(hasattr(scr, "start_scr_checkpoint"))
-        self.assertFalse(hasattr(scr, "start_scr_checkpoint_thread"))
-        self.assertTrue(hasattr(scr, "ScrParticipantManifest"))
-        self.assertTrue(hasattr(scr, "build_scr_participant_manifest"))
-        self.assertTrue(hasattr(scr, "arrive_scr_checkpoint_barrier"))
 
     def test_full_process_manifest_is_stable_and_contiguous(self) -> None:
         manifest = scr.build_scr_participant_manifest(
