@@ -49,6 +49,10 @@ public final class PrefillChunkCapacity {
         remainingRequests = next.requestCapacity();
     }
 
+    public void freeze() {
+        definition = null;
+    }
+
     public long stepTokenBudget() {
         return stepTokenBudget;
     }

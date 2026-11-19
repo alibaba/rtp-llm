@@ -51,14 +51,14 @@ class GrpcWorkerStatusRunnerTest {
                 registry, role, status.getLogicalIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(invalidRole
                         ? CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
-                                 .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
-                                 .setRole("DECODE")
-                                 .setStatusVersion(1L).setAlive(true)
-                                 .build())
+                                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                                .setRole("DECODE")
+                                .setStatusVersion(1L)
+                                .setAlive(true)
+                                .build())
                         : CompletableFuture.failedFuture(io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
         for (int failure = 1; failure <= 3; failure++) {
@@ -92,7 +92,7 @@ class GrpcWorkerStatusRunnerTest {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         io.grpc.Status failure = "DEADLINE_EXCEEDED".equals(grpcCode)
                 ? io.grpc.Status.DEADLINE_EXCEEDED : io.grpc.Status.UNAVAILABLE;
-        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(CompletableFuture.failedFuture(failure.asRuntimeException()));
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
 
@@ -139,7 +139,7 @@ class GrpcWorkerStatusRunnerTest {
                         .setStepId(steps[i]).setTotalScheduledTokens(64).setTokenBudget(32000)
                         .setBudgetFillRatio(0.002));
             }
-            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any()))
                     .thenReturn(CompletableFuture.completedFuture(response.build()));
             new GrpcWorkerStatusRunner(ipPort, "test-site", RoleType.DECODE, null, status, status.tryBeginStatusPoll(),
                     directory, reporter, grpc, 5000L, mock(CacheAwareService.class), Runnable::run).run();
@@ -188,8 +188,7 @@ class GrpcWorkerStatusRunnerTest {
                         .setAlive(true)
                         .build();
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
         new GrpcWorkerStatusRunner(ipPort, "test-site", RoleType.DECODE, null, status, pollLease, directory,
@@ -235,8 +234,7 @@ class GrpcWorkerStatusRunnerTest {
                         .addRunningTaskInfo(task)
                         .build();
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(
-                anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response));
         new GrpcWorkerStatusRunner(ipPort, "test-site", RoleType.DECODE, null, status, pollLease, directory,
                 mock(EngineHealthReporter.class), grpc, 5_000L, mock(CacheAwareService.class), Runnable::run).run();

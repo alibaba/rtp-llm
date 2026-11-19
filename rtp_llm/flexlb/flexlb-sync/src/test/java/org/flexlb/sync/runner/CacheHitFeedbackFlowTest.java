@@ -408,7 +408,7 @@ class CacheHitFeedbackFlowTest {
 
     private void poll(WorkerStatus status, EngineRpcService.TaskInfoPB task, boolean finished, long version) {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(CompletableFuture.completedFuture(response(task, finished, version)));
         var lease = status.tryBeginStatusPoll();
         assertNotNull(lease);

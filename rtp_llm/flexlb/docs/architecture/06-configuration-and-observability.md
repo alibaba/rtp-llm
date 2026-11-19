@@ -730,3 +730,47 @@ Master 身份由公共监控标签区分：
 `requestLifecycle.request.statusUpdateTimeoutMs` 为发布调度结果后等待引擎确认的毫秒数，默认 1000，必须大于零，与状态轮询周期独立。V2 从发布或最近一次匹配的请求状态更新开始计时，使用当前配置检查静默时长；旧调度器在请求注册时保存该值作为首次确认时限。
 
 Prefill 的 waiting/running 快照和 finished 通知都能确认请求。活跃及 finished 上报在状态提交后经 EndpointEventHandler 交付节点对应的 V2 队列，finished 释放本地占用。Prefill、Decode 分别等待各自 WorkerStatus，独立回收并计数；超时指标携带 role、endpoint 标签，两端回收分别记录 requestId、role、endpoint、publishedAgeMs 和 timeoutMs 日志。V2 的该超时指标同时包含首次上报超时和已上报后持续缺失的清理次数。
+
+### Prefill chunk lease（测试控制）
+
+`router.roles.prefill.chunkLease` 默认关闭。开启后仅管理 `groups` 中的 PREFILL worker；
+不改变健康、服务发现、实例数、SDK fallback 或普通请求路径。适用于 chunk 请求的低负载实验，
+不提供切主状态恢复；Master 重启前应停止实验并排空，再重新建立接流集合。
+
+- `enabled`：开启显式 lease；要求 `chunkBatchingEnabled=true` 和非 BATCH dispatch。
+- `automatic`：默认 false。false 时通过手动接口控制；true 时按现有监控 TTFT **请求加权平均值**控制。
+- `groups`：显式受控 group 列表。首次接入时所有节点先获得 lease，确认后才能分配 chunk。
+  关闭功能或移除受控 group 时，状态同步会恢复这些节点的接流权限。
+- `minServingWorkers` / `maxServingWorkers`：自动模式接流下限与新增 lease 的上限，最少为 1；手动模式允许全部摘流。
+  切回自动模式时低于下限会逐个恢复；首次接入保留全体接流，不因 max 设置较小而强制摘流，
+  后续依 TTFT 逐个收敛。max 是自动新增的上限，不覆盖手动操作。
+- `ttftLowerMs` / `ttftUpperMs`：有限正上下界（默认 100 / 200），须先按实验工况标定。
+- `windowSeconds`（60）、`evaluationIntervalMs`（10000）、`minSamples`（100）、
+  `consecutiveViolations`（3）：测量窗口、决策周期、最少请求数、连续越界次数。
+- `settleSeconds`（30）和 `maxMetricAgeSeconds`（30）：切换完成后先等待稳定，再等待整个统计窗口
+  与采集延迟经过；不使用混有上一接流集合工况的窗口连续调节。
+- `metricStoreUrl`、`metricToken`、`metricTenant`：KMon/PromQL 查询地址及认证，地址不含 `/api/v1/query`。
+- `ttftMetric` 默认 `vllm.time_to_first_token_seconds`，查询其 `_sum` 和 `_count`；
+  TTFT 起点沿用该指标生产端定义，不宣称与 WorkerStatus 时间戳完全相同。
+- `metricNodeLabel` 默认 `host.name`；`workerMetricNodes` 必须显式将 Master 的逻辑地址
+  （含引擎索引，例如 `10.0.0.1:8001@0`）映射到该标签的实际值，不从 ready 或 IP 猜测。
+- `metricLabels` 是必填且非空的精确匹配标签，应按实际后端标签限定集群、部署、P role、模型及引擎，避免同主机其他服务混入。
+  一个 metric node 必须唯一对应一个受控 worker；共享 host 的多个引擎应选用实际存在的唯一指标标签，
+  本控制器不会将主机总指标错误拆分到多个 worker。标识缺失或重复时暂停自动决策。
+- `queryTimeoutMs`（3000）：每次指标查询超时。查询失败、缺节点、无样本、非有限值或旧数据时保持 lease。
+
+自动控制只读取当前已确认接流 worker 的指标：先对各序列累计 sum/count 求窗口增量，
+再以总耗时除以总请求数。空闲节点不会作为一个零 TTFT 样本参与；不平均节点均值或 P95。
+第一版不使用尚未验证可查询的 KMon histogram buckets，不提供 P95 控制。
+状态查询中的 `measurement` 为最近一次成功读取的数据，`result` 说明本次是否可用于决策。
+
+手动接口（沿用现有内部控制端点的访问范围）：
+
+```text
+GET /flexlb/prefill_lease/status?group=GROUP
+POST /flexlb/prefill_lease/change
+{"group":"GROUP","address":"10.0.0.1:8001@0","enabled":false}
+```
+
+自动模式每次最多增减一个节点。摘流选择在途数较少的节点；遇到正在排空、未确认或不健康节点先保持。
+手动变更可覆盖当前自动决策，但自动模式会在新的稳定窗口后再次按 TTFT 调节；纯手动实验应关闭 automatic。

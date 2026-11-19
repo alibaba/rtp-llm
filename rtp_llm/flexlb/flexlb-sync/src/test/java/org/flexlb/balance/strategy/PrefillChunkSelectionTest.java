@@ -148,6 +148,53 @@ class PrefillChunkSelectionTest {
         assertEquals(8600, fallback.failure().getCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void revokedLeaseStopsNewReservationsAndOldReportsCannotReopenCapacity(boolean prepared) {
+        PrefillEndpoint endpoint = publish("10.0.0.1", 500L, 3, dispatchDeadline);
+        WorkerStatus worker = endpoint.getStatus();
+        long leaseVersion = changeLease(worker, true);
+        report(endpoint, 500L, 3, dispatchDeadline, 3L, 2L, leaseVersion, true, leaseVersion);
+        try (SelectedRole alreadyReserved = select(prepared).value()) {
+            assertNotNull(alreadyReserved);
+            changeLease(worker, false);
+            assertEquals(PlacementResult.Status.REJECTED, select(prepared).status());
+            report(endpoint, 500L, 3, dispatchDeadline, 4L, 3L, leaseVersion, true, leaseVersion);
+            assertEquals(PlacementResult.Status.REJECTED, select(prepared).status());
+            assertNotNull(alreadyReserved.serverStatus().getPrefillChunk());
+        }
+        assertEquals(Long.MAX_VALUE, remaining(endpoint), "closing a previous reservation must not unfreeze capacity");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void newLeaseRequiresNewMatchingChunkEvenAfterAcknowledgement(boolean prepared) {
+        PrefillEndpoint endpoint = publish("10.0.0.1", 500L, 3, dispatchDeadline);
+        WorkerStatus worker = endpoint.getStatus();
+        long first = changeLease(worker, true);
+        report(endpoint, 500L, 3, dispatchDeadline, 3L, 2L, first, true, first);
+        changeLease(worker, false);
+        long next = changeLease(worker, true);
+        report(endpoint, 500L, 3, dispatchDeadline, 4L, 2L, next, true, first);
+        assertEquals(PlacementResult.Status.REJECTED, select(prepared).status());
+        report(endpoint, 500L, 3, dispatchDeadline, 5L, 3L, next, true, next);
+        try (SelectedRole selected = select(prepared).value()) {
+            assertNotNull(selected);
+            assertEquals(next, selected.serverStatus().getPrefillChunk().leaseVersion());
+        }
+    }
+
+    private long changeLease(WorkerStatus worker, boolean enabled) {
+        worker.lock.lock();
+        try {
+            worker.prefillChunkLease().change(enabled);
+            worker.prefillChunkCapacity().freeze();
+            return worker.prefillChunkLease().command().version();
+        } finally {
+            worker.lock.unlock();
+        }
+    }
+
     private PlacementResult<SelectedRole, RoleType> select(boolean prepared) {
         return prepared
                 ? strategy.selectPrepared(context, RoleType.PREFILL, null,
@@ -165,6 +212,18 @@ class PrefillChunkSelectionTest {
     }
 
     private void report(PrefillEndpoint endpoint, long tokens, int slots, long deadline, long version) {
+        report(endpoint, tokens, slots, deadline, version, 1L, 0L, false, 0L);
+    }
+
+    private void report(PrefillEndpoint endpoint,
+                        long tokens,
+                        int slots,
+                        long deadline,
+                        long version,
+                        long chunkId,
+                        long leaseVersion,
+                        boolean enabled,
+                        long chunkLeaseVersion) {
         WorkerStatus worker = endpoint.getStatus();
         var status = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole("PREFILL")
@@ -172,10 +231,13 @@ class PrefillChunkSelectionTest {
                 .setStatusVersion(version)
                 .setAvailableKvCache(1_000_000L)
                 .setTotalKvCache(1_000_000L)
+                .setPrefillChunkLease(
+                        EngineRpcService.PrefillChunkLeasePB.newBuilder().setVersion(leaseVersion).setEnabled(enabled))
                 .setPrefillStepTokenBudget(1_000L)
                 .setPrefillChunk(EngineRpcService.PrefillChunkPB.newBuilder()
                         .setEngineEpoch("epoch-1")
-                        .setChunkId(1L)
+                        .setChunkId(chunkId)
+                        .setLeaseVersion(chunkLeaseVersion)
                         .setInputTokenCapacity(tokens)
                         .setRequestCapacity(slots)
                         .setDispatchDeadlineMs(deadline))

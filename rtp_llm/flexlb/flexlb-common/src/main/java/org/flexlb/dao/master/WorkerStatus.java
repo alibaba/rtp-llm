@@ -39,6 +39,7 @@ public class WorkerStatus {
     private static final AtomicLong NEXT_GENERATION_ID = new AtomicLong();
 
     private final PrefillChunkCapacity prefillChunkCapacity = new PrefillChunkCapacity();
+    private final PrefillChunkLease prefillChunkLease = new PrefillChunkLease();
 
     /** Serializes lifecycle transitions for this generation. */
     public final transient ReentrantLock lock = new ReentrantLock();
@@ -303,6 +304,8 @@ public class WorkerStatus {
         private final Map<String, TaskObservation> finishedTasks;
         private final PrefillChunk prefillChunk;
         private final long prefillStepTokenBudget;
+        private final long chunkLeaseVersion;
+        private final boolean chunkLeaseEnabled;
 
         private StatusObservation(WorkerStatus owner,
                                   EngineObservation engine,
@@ -310,7 +313,8 @@ public class WorkerStatus {
                                   Long statusVersion,
                                   Long latestFinishedVersion,
                                   Map<String, TaskObservation> finishedTasks) {
-            this(owner, engine, reportedAlive, statusVersion, latestFinishedVersion, finishedTasks, null, 0L);
+            this(owner, engine, reportedAlive, statusVersion, latestFinishedVersion, finishedTasks, null, 0L, 0L,
+                    false);
         }
 
         private StatusObservation(WorkerStatus owner,
@@ -320,7 +324,9 @@ public class WorkerStatus {
                                   Long latestFinishedVersion,
                                   Map<String, TaskObservation> finishedTasks,
                                   PrefillChunk prefillChunk,
-                                  long prefillStepTokenBudget) {
+                                  long prefillStepTokenBudget,
+                                  long chunkLeaseVersion,
+                                  boolean chunkLeaseEnabled) {
             this.owner = owner;
             this.engine = engine;
             this.reportedAlive = reportedAlive;
@@ -329,11 +335,18 @@ public class WorkerStatus {
             this.finishedTasks = finishedTasks;
             this.prefillChunk = prefillChunk;
             this.prefillStepTokenBudget = prefillStepTokenBudget;
+            this.chunkLeaseVersion = chunkLeaseVersion;
+            this.chunkLeaseEnabled = chunkLeaseEnabled;
         }
 
         public StatusObservation withPrefillChunk(PrefillChunk chunk, long stepTokenBudget) {
             return new StatusObservation(owner, engine, reportedAlive, statusVersion, latestFinishedVersion,
-                    finishedTasks, chunk, stepTokenBudget);
+                    finishedTasks, chunk, stepTokenBudget, chunkLeaseVersion, chunkLeaseEnabled);
+        }
+
+        public StatusObservation withPrefillChunkLease(long version, boolean enabled) {
+            return new StatusObservation(owner, engine, reportedAlive, statusVersion, latestFinishedVersion,
+                    finishedTasks, prefillChunk, prefillStepTokenBudget, version, enabled);
         }
 
         /** Exact service-discovery generation which issued this observation. */
@@ -659,7 +672,15 @@ public class WorkerStatus {
             throw new IllegalStateException(
                     "prepared status is stale or has already been published");
         }
-        prefillChunkCapacity.update(prepared.observation.prefillChunk, prepared.observation.prefillStepTokenBudget);
+        prefillChunkLease.confirm(prepared.observation.chunkLeaseVersion, prepared.observation.chunkLeaseEnabled);
+        PrefillChunk chunk = prepared.observation.prefillChunk;
+        prefillChunkCapacity.update(prefillChunkLease.allows(chunk) ? chunk : null,
+                prepared.observation.prefillStepTokenBudget);
+    }
+
+    public PrefillChunkLease prefillChunkLease() {
+        requireGenerationLock();
+        return prefillChunkLease;
     }
 
     public PrefillChunkCapacity prefillChunkCapacity() {

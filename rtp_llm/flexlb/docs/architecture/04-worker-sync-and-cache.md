@@ -282,3 +282,16 @@ hash 不同）和 `querySucceeded`。空匹配是成功结果，查询失败的�
   算法代码保留，包括所需的 `TokenIds`、vLLM CBOR 计算工具和测试；调度链路没有调用这些策略。
 - LOCAL_SYNC、Local Standby 与 KVCM 复用同一组客户端 keys 和块大小，按请求顺序连续匹配，
   在首个 miss 停止。Local Standby 索引在路由成功后异步写入这些 keys。
+
+### Prefill chunk lease 同步
+
+WorkerStatus 请求可携带 `prefill_chunk_lease(version, enabled)`，响应携带 P 已应用的同名确认，
+每个 chunk 另带 `lease_version`。不带控制字段的普通状态查询不修改引擎接流状态。
+确认之后普通轮询不再附带控制命令，避免每次状态读取都调用 EngineCore utility；
+后续状态丢失确认（例如引擎重启）时，暂停容量并重新下发当前版本。
+Master 在 worker generation 锁内修改 lease 并立即清除未分配 chunk；该锁同时保护最终 chunk reserve。
+状态确认和 chunk 版本都匹配才发布容量，迟到的旧状态不能恢复撤销后的 chunk。
+
+P 撤销时冻结当前 chunk，停止发布新容量，但继续处理已预留/在途/接收的请求。
+`DRAINING` 结束需要 P 的 active tasks 与 Master 已提交请求数均归零，不能只看 chunk pending。
+lease 为单 Master 测试进程中的显式版本控制，不使用 TTL，也不扩展到 SDK fallback。

@@ -145,6 +145,7 @@ public final class FlexlbConfigValidator {
         validateRouting(config.getRouter());
         require(!config.getRouter().getRoles().getPrefill().isChunkBatchingEnabled() || !config.isBatchDispatch(),
                 "router.roles.prefill.chunkBatchingEnabled", "requires NON_BATCH or NON_BATCH_V2 dispatch");
+        validatePrefillLease(config.getRouter().getRoles().getPrefill());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
         validateServiceDiscovery(config.getServiceDiscovery());
@@ -160,6 +161,52 @@ public final class FlexlbConfigValidator {
         nonNegative(grpc.getPermitKeepAliveTimeMs(), "grpcServer.permitKeepAliveTimeMs");
         require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
                 "grpcServer.executorMaxSize", "must be at least executorCoreSize");
+    }
+
+    private static void validatePrefillLease(PrefillConfig prefill) {
+        PrefillLeaseConfig lease = prefill.getChunkLease();
+        require(lease != null, "router.roles.prefill.chunkLease", "is required");
+        if (!lease.isEnabled()) {
+            return;
+        }
+        String path = "router.roles.prefill.chunkLease";
+        require(prefill.isChunkBatchingEnabled(), path, "requires chunkBatchingEnabled");
+        require(lease.getGroups() != null && !lease.getGroups().isEmpty()
+                && lease.getGroups().stream().allMatch(group -> group != null && !group.isBlank()), path + ".groups",
+                "must name the controlled groups");
+        positive(lease.getMinServingWorkers(), path + ".minServingWorkers");
+        require(lease.getMaxServingWorkers() >= lease.getMinServingWorkers(), path + ".maxServingWorkers",
+                "must be at least minServingWorkers");
+        positive(lease.getEvaluationIntervalMs(), path + ".evaluationIntervalMs");
+        positive(lease.getWindowSeconds(), path + ".windowSeconds");
+        nonNegative(lease.getSettleSeconds(), path + ".settleSeconds");
+        positive(lease.getMaxMetricAgeSeconds(), path + ".maxMetricAgeSeconds");
+        positive(lease.getMinSamples(), path + ".minSamples");
+        positive(lease.getConsecutiveViolations(), path + ".consecutiveViolations");
+        positive(lease.getQueryTimeoutMs(), path + ".queryTimeoutMs");
+        require(Double.isFinite(lease.getTtftLowerMs()) && lease.getTtftLowerMs() > 0
+                && Double.isFinite(lease.getTtftUpperMs()) && lease.getTtftUpperMs() > lease.getTtftLowerMs(), path,
+                "requires finite 0 < ttftLowerMs < ttftUpperMs");
+        if (lease.isAutomatic()) {
+            require(lease.getMetricStoreUrl() != null && lease.getMetricStoreUrl().matches("https?://[^\\s]+"),
+                    path + ".metricStoreUrl", "requires an HTTP(S) metric store URL");
+            require(lease.getTtftMetric() != null && lease.getTtftMetric().matches("[a-zA-Z_:][a-zA-Z0-9_:.]*"),
+                    path + ".ttftMetric", "must be a metric name");
+            require(lease.getMetricNodeLabel() != null && lease.getMetricNodeLabel().matches("[a-zA-Z_][a-zA-Z0-9_.]*"),
+                    path + ".metricNodeLabel", "must be a metric label");
+            require(lease.getMetricLabels() != null && !lease.getMetricLabels().isEmpty()
+                    && lease.getWorkerMetricNodes() != null, path,
+                    "metric scope labels and worker identity map are required");
+            require(!lease.getWorkerMetricNodes().isEmpty(), path + ".workerMetricNodes", "must map worker addresses");
+            lease.getMetricLabels()
+                    .forEach((key, value) -> require(
+                            key != null && key.matches("[a-zA-Z_][a-zA-Z0-9_.]*") && value != null
+                                    && !key.equals(lease.getMetricNodeLabel()),
+                            path + ".metricLabels", "invalid or duplicate node label"));
+            lease.getWorkerMetricNodes()
+                    .forEach((key, value) -> require(key != null && !key.isBlank() && value != null && !value.isBlank(),
+                            path + ".workerMetricNodes", "requires nonempty addresses and metric identities"));
+        }
     }
 
     private static void validateQueue(SchedulerConfig queue) {

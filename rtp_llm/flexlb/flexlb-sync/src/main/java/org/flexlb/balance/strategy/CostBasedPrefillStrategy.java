@@ -801,6 +801,15 @@ public class CostBasedPrefillStrategy {
                 roleType, candidateMaxHitTokens);
     }
 
+    private boolean chunkLeaseAllows(BalanceContext context, WorkerStatus worker) {
+        var config = context.getConfig().getRouter().getRoles().getPrefill().getChunkLease();
+        if (config.isEnabled() && config.getGroups().contains(worker.getGroup())
+                && worker.prefillChunkLease().command() == null) {
+            return false;
+        }
+        return worker.prefillChunkLease().allows(worker.prefillChunkCapacity().definition());
+    }
+
     private PlacementResult<SelectedRole, RoleType> selectChunk(BalanceContext context, String group) {
         long inputTokens = context.getRequest().getSeqLen();
         Request request = context.getRequest();
@@ -819,7 +828,7 @@ public class CostBasedPrefillStrategy {
             try {
                 if (inputTokens > 0 && inputTokens < worker.prefillChunkCapacity().stepTokenBudget()) {
                     chunkSizedRequest = true;
-                    if (worker.isActiveGeneration() && endpoint
+                    if (worker.isActiveGeneration() && chunkLeaseAllows(context, worker) && endpoint
                             .canAcceptRequest(context.getConfig().getDispatcher().getMaxInflightPerPrefillWorker())) {
                         candidates.add(endpoint);
                     }
@@ -841,7 +850,9 @@ public class CostBasedPrefillStrategy {
                 worker.lock.lock();
                 try {
                     var capacity = worker.prefillChunkCapacity();
-                    long remaining = capacity.remainingTokens(inputTokens, System.currentTimeMillis(), deadline);
+                    long remaining = chunkLeaseAllows(context, worker)
+                            ? capacity.remainingTokens(inputTokens, System.currentTimeMillis(), deadline)
+                            : Long.MAX_VALUE;
                     boolean immediate = remaining != Long.MAX_VALUE && capacity.definition().dispatchImmediate();
                     long chunkDeadline =
                             remaining != Long.MAX_VALUE ? capacity.definition().dispatchDeadlineMs() : Long.MAX_VALUE;
@@ -873,7 +884,7 @@ public class CostBasedPrefillStrategy {
             PrefillChunk grant;
             worker.lock.lock();
             try {
-                grant = worker.isActiveGeneration()
+                grant = worker.isActiveGeneration() && chunkLeaseAllows(context, worker)
                         ? worker.prefillChunkCapacity().reserve(inputTokens, System.currentTimeMillis(), deadline)
                         : null;
             } finally {

@@ -505,9 +505,16 @@ message RemoteStoreResponsePB {
     int64 done_time_us = 2;
 }
 
+// Explicit chunk publication permission; absent preserves legacy behavior.
+message PrefillChunkLeasePB {
+    uint64 version = 1;
+    bool enabled = 2;
+}
+
 message StatusVersionPB {
     int64 latest_cache_version = 1;
     int64 latest_finished_version = 2;
+    PrefillChunkLeasePB prefill_chunk_lease = 3;
 }
 
 message CacheVersionPB {
@@ -687,6 +694,7 @@ message PrefillChunkPB {
     int64 dispatch_deadline_ms = 5;
     // Idle grant: deadline is validity only, not an expected wait.
     bool dispatch_immediate = 6;
+    uint64 lease_version = 7;
 }
 
 message WorkerStatusPB {
@@ -727,6 +735,7 @@ message WorkerStatusPB {
     string dp_master_address = 28;
     PrefillChunkPB prefill_chunk = 29;
     uint64 prefill_step_token_budget = 30;
+    PrefillChunkLeasePB prefill_chunk_lease = 31;
 }
 
 message EmbeddingInputPB {

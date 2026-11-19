@@ -9,7 +9,16 @@ public record PrefillChunk(String engineEpoch,
                            long inputTokenCapacity,
                            int requestCapacity,
                            long dispatchDeadlineMs,
-                           boolean dispatchImmediate) {
+                           boolean dispatchImmediate,
+                           long leaseVersion) {
+    public PrefillChunk(String engineEpoch,
+                        long chunkId,
+                        long inputTokenCapacity,
+                        int requestCapacity,
+                        long dispatchDeadlineMs,
+                        boolean dispatchImmediate) {
+        this(engineEpoch, chunkId, inputTokenCapacity, requestCapacity, dispatchDeadlineMs, dispatchImmediate, 0L);
+    }
     public PrefillChunk(String engineEpoch,
                         long chunkId,
                         long inputTokenCapacity,

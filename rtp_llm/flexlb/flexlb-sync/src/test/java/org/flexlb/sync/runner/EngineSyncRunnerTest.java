@@ -40,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.anyLong;
@@ -470,7 +471,7 @@ class EngineSyncRunnerTest {
         WorkerHost host = new WorkerHost("127.0.0.1", 8080, 8081, 8085,
                 18081, "", "", "");
         when(workerAddressService.getEngineWorkerList(RoleType.PREFILL)).thenReturn(List.of(host));
-        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(new java.util.concurrent.CompletableFuture<>());
         EngineSyncRunner runner = new EngineSyncRunner(workerDirectory, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL, cacheAwareService, cacheIntervalService,
@@ -481,8 +482,8 @@ class EngineSyncRunnerTest {
         ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
         verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
         submittedTasks.getAllValues().get(0).run();
-        verify(engineGrpcService).getWorkerStatusAsync(
-                "127.0.0.1", 18081, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
+        verify(engineGrpcService).getWorkerStatusAsync(eq("127.0.0.1"), eq(18081), eq(-1L), eq(syncRequestTimeoutMs),
+                eq(RoleType.PREFILL), any());
         assertEquals(8081, workerDirectory.statusSnapshot(RoleType.PREFILL)
                 .get("127.0.0.1:8080@0").getGrpcPort());
     }
@@ -491,7 +492,7 @@ class EngineSyncRunnerTest {
     void singleEngineWorkerWithoutStatusPortUsesGrpcPortForStatusRunner() {
         WorkerHost host = new WorkerHost("127.0.0.1", 8080);
         when(workerAddressService.getEngineWorkerList(RoleType.PREFILL)).thenReturn(List.of(host));
-        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(new java.util.concurrent.CompletableFuture<>());
 
         engineSyncRunner.run();
@@ -499,8 +500,8 @@ class EngineSyncRunnerTest {
         ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
         verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
         submittedTasks.getAllValues().get(0).run();
-        verify(engineGrpcService).getWorkerStatusAsync(
-                "127.0.0.1", 8081, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
+        verify(engineGrpcService).getWorkerStatusAsync(eq("127.0.0.1"), eq(8081), eq(-1L), eq(syncRequestTimeoutMs),
+                eq(RoleType.PREFILL), any());
         WorkerStatus status = workerDirectory.statusSnapshot(RoleType.PREFILL)
                 .get("127.0.0.1:8080@0");
         assertNotNull(status);
@@ -513,7 +514,7 @@ class EngineSyncRunnerTest {
         WorkerHost host = new WorkerHost("127.0.0.1", 8080, 8081, 8085,
                 18082, "", "", "", 1, 2);
         when(workerAddressService.getEngineWorkerList(RoleType.PREFILL)).thenReturn(List.of(host));
-        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any(), any()))
                 .thenReturn(new java.util.concurrent.CompletableFuture<>());
 
         engineSyncRunner.run();
@@ -526,8 +527,8 @@ class EngineSyncRunnerTest {
         ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
         verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
         submittedTasks.getAllValues().get(0).run();
-        verify(engineGrpcService).getWorkerStatusAsync(
-                "127.0.0.1", 18082, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
+        verify(engineGrpcService).getWorkerStatusAsync(eq("127.0.0.1"), eq(18082), eq(-1L), eq(syncRequestTimeoutMs),
+                eq(RoleType.PREFILL), any());
     }
 
     @Test

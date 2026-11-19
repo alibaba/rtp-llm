@@ -124,7 +124,7 @@ class DpGroupHealthTest {
                       WorkerStatus status,
                       CompletableFuture<EngineRpcService.WorkerStatusPB> response) {
         EngineGrpcService grpc = mock(EngineGrpcService.class);
-        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any())).thenReturn(response);
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any(), any())).thenReturn(response);
         new GrpcWorkerStatusRunner(status.getLogicalIpPort(), "test", status.getRole(), "default", status,
                 status.tryBeginStatusPoll(), directory, mock(EngineHealthReporter.class), grpc, 5000L,
                 mock(CacheAwareService.class), Runnable::run).run();

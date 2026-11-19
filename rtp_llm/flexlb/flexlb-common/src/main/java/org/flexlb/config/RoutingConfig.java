@@ -27,6 +27,7 @@ public final class RoutingConfig {
     @Setter
     public static final class PrefillConfig {
         private boolean chunkBatchingEnabled;
+        private PrefillLeaseConfig chunkLease = new PrefillLeaseConfig();
         private ExecutionTimeEstimatorConfig executionTimeEstimator =
                 new ExecutionTimeEstimatorConfig();
         private CacheAffinityConfig cacheAffinity;

@@ -65,8 +65,11 @@ public class EngineStatusConverter {
                                 workerStatusPB.getPrefillChunk().getInputTokenCapacity(),
                                 workerStatusPB.getPrefillChunk().getRequestCapacity(),
                                 workerStatusPB.getPrefillChunk().getDispatchDeadlineMs(),
-                                workerStatusPB.getPrefillChunk().getDispatchImmediate())
-                        : null, workerStatusPB.getPrefillStepTokenBudget());
+                                workerStatusPB.getPrefillChunk().getDispatchImmediate(),
+                                workerStatusPB.getPrefillChunk().getLeaseVersion())
+                        : null, workerStatusPB.getPrefillStepTokenBudget())
+                .withPrefillChunkLease(workerStatusPB.getPrefillChunkLease().getVersion(),
+                        workerStatusPB.getPrefillChunkLease().getEnabled());
     }
 
     private static WorkerStatus.StepMetrics convertStepMetrics(EngineRpcService.WorkerStatusPB status) {
