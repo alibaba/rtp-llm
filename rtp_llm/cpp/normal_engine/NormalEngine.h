@@ -20,6 +20,8 @@
 
 namespace rtp_llm {
 
+struct AccuracyScenario;
+
 class NormalEngine: public EngineBase {
 public:
     NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
@@ -50,6 +52,13 @@ public:
 
 private:
     static int calculateReserveStep(const EngineInitParams& params);
+#if USING_CUDA
+    static std::vector<AccuracyScenario> accuracyScenariosForStartup(const ModelConfig& model_config,
+                                                                    const RuntimeConfig& runtime_config,
+                                                                    const KVCacheConfig& cache_config,
+                                                                    size_t block_size,
+                                                                    size_t temporary_block_num);
+#endif
 
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
@@ -58,6 +67,8 @@ private:
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
+    // False means the configuration uses static decode; errors remain fatal.
+    absl::StatusOr<bool>              runAttentionAccuracyCheck(const EngineInitParams& params);
     absl::StatusOr<GenerateStreamPtr> runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
                                                             const ResourceContext& resource_context,
                                                             int                    reuse_length,
@@ -91,6 +102,7 @@ private:
 private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
+    bool                                          dynamic_decode_gate_enabled_ = false;
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;

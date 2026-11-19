@@ -45,7 +45,8 @@ std::string PrefillCPConfig::to_string() const {
             oss << "UNKNOWN";
             break;
     }
-    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n"
+    oss << "\n all_gather_impl: " << (all_gather_impl == CPAllGatherImpl::FUSED ? "FUSED" : "LEGACY") << "\n"
+        << " comm_buffer_size: " << comm_buffer_size << "\n"
         << " kv_cache_sharded: " << kv_cache_sharded << "\n"
         << " prefill_cp_size: " << prefill_cp_size << "\n";
     return oss.str();
@@ -217,6 +218,8 @@ std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
+        << "enable_dynamic_decode_backend: " << enable_dynamic_decode_backend << "\n"
+        << "dyn_decode_gate_thresholds: " << dyn_decode_gate_thresholds.value_or("") << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
         << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"
         << "generation_prefill_capture_token_buckets size: " << generation_prefill_capture_token_buckets.size() << "\n"
