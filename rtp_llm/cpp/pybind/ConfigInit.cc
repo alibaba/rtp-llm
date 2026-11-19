@@ -187,6 +187,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("UNKNOWN", CPRotateMethod::UNKNOWN)
         .export_values();
 
+    py::enum_<CPAllGatherImpl>(m, "CPAllGatherImpl")
+        .value("LEGACY", CPAllGatherImpl::LEGACY)
+        .value("FUSED", CPAllGatherImpl::FUSED)
+        .export_values();
+
     py::enum_<FMHAType>(m, "FMHAType")
         .value("FLASH_INFER", FMHAType::FLASH_INFER)
         .value("NONE", FMHAType::NONE)
@@ -880,6 +885,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       [](py::object) { return HWKernelConfig::kGenerationPrefillCudaGraphMaxRequests; })
         .def_readwrite("use_swizzleA", &HWKernelConfig::use_swizzleA)
         .def_readwrite("enable_cuda_graph", &HWKernelConfig::enable_cuda_graph)
+        .def_readwrite("enable_dynamic_decode_backend", &HWKernelConfig::enable_dynamic_decode_backend)
+        .def_readwrite("dyn_decode_gate_thresholds", &HWKernelConfig::dyn_decode_gate_thresholds)
         .def_readwrite("enable_cuda_graph_debug_mode", &HWKernelConfig::enable_cuda_graph_debug_mode)
         .def_readwrite("generation_prefill_cuda_graph_max_requests",
                        &HWKernelConfig::generation_prefill_cuda_graph_max_requests)
@@ -900,10 +907,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.decode_capture_batch_sizes,
                                       self.generation_prefill_cuda_graph_max_requests,
                                       self.generation_prefill_capture_token_buckets,
-                                      self.enable_decode_cascade_attention);
+                                      self.enable_decode_cascade_attention,
+                                      0,  // Reserved retired decode-capacity slot.
+                                      self.enable_decode_cascade_attention,
+                                      self.enable_dynamic_decode_backend,
+                                      self.dyn_decode_gate_thresholds);
             },
             [](py::tuple t) {
-                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10)
+                if (t.size() != 5 && t.size() != 7 && t.size() != 8 && t.size() != 9 && t.size() != 10 && t.size() != 11
+                    && t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -924,6 +936,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     // 10-tuple additionally re-states the cascade flag at t[9].
                     if (t.size() >= 10) {
                         c.enable_decode_cascade_attention = t[9].cast<bool>();
+                    }
+                    if (t.size() >= 11) {
+                        c.enable_dynamic_decode_backend = t[10].cast<bool>();
+                    }
+                    if (t.size() >= 12) {
+                        c.dyn_decode_gate_thresholds = t[11].cast<std::optional<std::string>>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
@@ -2264,6 +2282,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<PrefillCPConfig>(m, "PrefillCPConfig")
         .def(py::init<>())
         .def_readwrite("method", &PrefillCPConfig::method)
+        .def_readwrite("all_gather_impl", &PrefillCPConfig::all_gather_impl)
         .def_readwrite("comm_buffer_size", &PrefillCPConfig::comm_buffer_size)
         .def_readwrite("kv_cache_sharded", &PrefillCPConfig::kv_cache_sharded)
         .def_readwrite("prefill_cp_size", &PrefillCPConfig::prefill_cp_size)
@@ -2272,10 +2291,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def("is_prefill_enabled", &PrefillCPConfig::is_prefill_enabled)
         .def(py::pickle(
             [](const PrefillCPConfig& self) {
-                return py::make_tuple(self.method, self.comm_buffer_size, self.kv_cache_sharded, self.prefill_cp_size);
+                return py::make_tuple(self.method,
+                                      self.comm_buffer_size,
+                                      self.kv_cache_sharded,
+                                      self.prefill_cp_size,
+                                      self.all_gather_impl);
             },
             [](py::tuple t) {
-                if (t.size() != 2 && t.size() != 4)
+                if (t.size() != 2 && t.size() != 4 && t.size() != 5)
                     throw std::runtime_error("Invalid state!");
                 PrefillCPConfig c;
                 try {
@@ -2284,6 +2307,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     if (t.size() >= 4) {
                         c.kv_cache_sharded = t[2].cast<bool>();
                         c.prefill_cp_size  = t[3].cast<int64_t>();
+                    }
+                    if (t.size() >= 5) {
+                        c.all_gather_impl = t[4].cast<CPAllGatherImpl>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("PrefillCPConfig unpickle error: ") + e.what());

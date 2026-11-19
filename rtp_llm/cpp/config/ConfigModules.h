@@ -35,7 +35,12 @@ enum class CPRotateMethod {
     PREFILL_CP              = 4,
     UNKNOWN                 = 5,
 };
+enum class CPAllGatherImpl {
+    LEGACY = 0,
+    FUSED  = 1,
+};
 struct PrefillCPConfig {
+    CPAllGatherImpl all_gather_impl  = CPAllGatherImpl::LEGACY;
     CPRotateMethod method           = CPRotateMethod::DISABLED;
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
     // When true + tp_size > 1, KV cache uses page-level round-robin sharding
@@ -296,6 +301,8 @@ struct HWKernelConfig {
 
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
+    bool        enable_dynamic_decode_backend = false;
+    std::optional<std::string> dyn_decode_gate_thresholds;
     bool        enable_cuda_graph_debug_mode = false;
     // Generation-prefill graph is enabled only when the CUDA graph master
     // switch is on and this capture bucket list is explicitly configured.
