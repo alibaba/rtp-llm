@@ -317,7 +317,8 @@ def select_decode_tokens(
     if position_state is not None:
         rope_cos, rope_sin = position_state.rope(rope_config, group=True)
         position_state.stage()
-    fused_writer = True
+    batch_invariant = getattr(indexer, "batch_invariant", False)
+    fused_writer = not batch_invariant
     if fused_writer:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
             is_supported,
@@ -376,13 +377,15 @@ def select_decode_tokens(
             state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
             norm_eps=float(indexer.norm_eps),
             rope_is_token_aligned=True,
+            batch_invariant=batch_invariant,
         )
 
     rotated_q = apply_partial_rope(
         q, current_cos.unsqueeze(1), current_sin.unsqueeze(1)
     )
     if (
-        not self.is_mtp_draft
+        not batch_invariant
+        and not self.is_mtp_draft
         and ratio == 4
         and token_budget == 2048
         and use_flashinfer_indexer()
@@ -428,4 +431,5 @@ def select_decode_tokens(
         # a synchronization to every decode step.
         validate_lengths=False,
         scores_are_masked=True,
+        batch_invariant=batch_invariant,
     )

@@ -276,8 +276,8 @@ def validate_qsa_before_side_write(
             token_count=int(hidden_states.shape[0]),
             device=hidden_states.device,
         )
-    is_incremental_prefill = self._is_prefix_reuse_prefill()
-    if self.is_prefill and not self.is_target_verify and not is_incremental_prefill:
+    is_paged_prefill = self._uses_paged_prefill()
+    if self.is_prefill and not self.is_target_verify and not is_paged_prefill:
         if combined:
             qsa_runtime.validate_before_projection(
                 indexer=indexer,
@@ -296,7 +296,7 @@ def validate_qsa_before_side_write(
     if not hidden_states.is_cuda:
         raise RuntimeError("qwen4_exp QSA paged attention requires CUDA tensors")
 
-    if self.is_target_verify or is_incremental_prefill:
+    if self.is_target_verify or is_paged_prefill:
         sequence_bases = self.attn_inputs.prefix_lengths
         query_lengths = self.attn_inputs.input_lengths
     else:
@@ -337,7 +337,7 @@ def validate_qsa_before_side_write(
         if qtoken is None
         else 128
     )
-    if not graph_capture and not is_incremental_prefill:
+    if not graph_capture and not is_paged_prefill:
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
             MainGeometryReceipt,
         )

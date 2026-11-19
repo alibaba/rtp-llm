@@ -84,7 +84,8 @@ class MainQkCacheFixture:
             _selected_indices=None,
             _paged_kv_scale_args=Mock(return_value={}),
             _is_draft_graph=lambda: False,
-            _is_prefix_reuse_prefill=lambda: False,
+            _uses_paged_prefill=lambda: False,
+            batch_invariant=False,
             is_target_verify=True,
             is_prefill=True,
             _prepare_paged_inputs=Mock(

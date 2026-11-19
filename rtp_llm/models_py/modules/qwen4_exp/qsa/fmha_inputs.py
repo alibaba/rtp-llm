@@ -221,7 +221,7 @@ def _prepare_incremental_prefill_inputs(
     if (
         not self.is_prefill
         or self.is_target_verify
-        or (prefixes.device.type == "cpu" and not self._is_prefix_reuse_prefill())
+        or (prefixes.device.type == "cpu" and not self._uses_paged_prefill())
     ):
         raise RuntimeError("qwen4_exp incremental prefill requires an explicit prefix")
     if qkv.dim() != 2:
@@ -269,10 +269,11 @@ def _prepare_incremental_prefill_inputs(
     )
     prefixes_wide = prefixes.to(device=qkv.device, dtype=torch.int64, non_blocking=True)
     checks = DeviceChecks()
-    checks.add(
-        ~(prefixes_wide != 0).any(),
-        "qwen4_exp incremental prefill requires an explicit prefix",
-    )
+    if not self.batch_invariant:
+        checks.add(
+            ~(prefixes_wide != 0).any(),
+            "qwen4_exp incremental prefill requires an explicit prefix",
+        )
     checks.add(
         (lengths_device <= 0).any(),
         "qwen4_exp incremental prefill input lengths must be positive",

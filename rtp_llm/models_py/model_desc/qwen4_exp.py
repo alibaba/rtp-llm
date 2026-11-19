@@ -159,6 +159,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 W.qwen4_indexer_qk_proj_w + FP8_STORAGE_SCALE_SUFFIX
             ),
             rope_config=self.qsa_rope_config,
+            batch_invariant=getattr(hw_kernel_config, "batch_invariant", False),
         )
 
         mark_projection_for_restart(
@@ -203,8 +204,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             use_fused_indexer_prep,
         )
 
+        batch_invariant = getattr(self.qsa_indexer, "batch_invariant", False)
         fused_query = (
-            use_fused_indexer_prep()
+            not batch_invariant
+            and use_fused_indexer_prep()
             and type(qsa_runtime) is Qwen4ExpQSARuntimeContext
             and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
             and not qsa_runtime.main_inputs.is_target_verify
@@ -283,6 +286,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 return selected
             q = exact_head_rms_norm(
                 q, self.qsa_indexer.q_norm_gamma, self.qsa_indexer.norm_eps
+            )
+        if batch_invariant:
+            return qsa_runtime.select_prefix_reuse_prefill_tokens(
+                q, raw_keys, indexer=self.qsa_indexer, rope_config=self.qsa_rope_config
             )
         prefixes = qsa_runtime.main_inputs.prefix_lengths
         prefix_values = qsa_runtime.host_values(prefixes)
@@ -448,8 +455,10 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     use_fused_indexer_prep,
                 )
 
+                batch_invariant = getattr(self.qsa_indexer, "batch_invariant", False)
                 if (
-                    type(qsa_runtime) is Qwen4ExpQSARuntimeContext
+                    not batch_invariant
+                    and type(qsa_runtime) is Qwen4ExpQSARuntimeContext
                     and attention_inputs.is_prefill
                     and not attention_inputs.is_target_verify
                     and not self.is_mtp_draft
@@ -461,7 +470,8 @@ class Qwen4ExpAttention(Qwen3NextAttention):
 
                 prepared = None
                 if (
-                    type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+                    not batch_invariant
+                    and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
                     and hidden_states.ndim == 2
                     and (
                         1 <= hidden_states.shape[0] <= 32
@@ -593,6 +603,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             getattr(config, "online_mxfp8", False)
         )
         self._execution_role = getattr(parallelism_config, "role_type", "PDFUSION")
+        self.batch_invariant = getattr(hw_kernel_config, "batch_invariant", False)
         super().__init__(
             config,
             parallelism_config,
@@ -621,7 +632,9 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         if hasattr(self.mlp, "select_topk"):
             from rtp_llm.models_py.modules.qwen4_exp.moe.topk import Qwen4ExpMoeTopk
 
-            self.mlp.select_topk = Qwen4ExpMoeTopk(self.mlp.select_topk)
+            self.mlp.select_topk = Qwen4ExpMoeTopk(
+                self.mlp.select_topk, batch_invariant=self.batch_invariant
+            )
             self.mlp.prepare_shared_expert_overlap()
         from rtp_llm.models_py.modules.qwen4_exp.tp_reduce import (
             install_target_graph_all_reduce,
@@ -633,7 +646,9 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         # version would silently drop upstream's +1 -- see norm.py.
         fused = getattr(self.self_attn, "qk_fuse_norm", None)
         if fused is not None:
-            self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(fused)
+            self.self_attn.qk_fuse_norm = ZeroCenteredFusedQKRMSNorm.replacing(
+                fused, batch_invariant=self.batch_invariant
+            )
 
     def _attention_quant_config(self, config, weights):
         if getattr(config, "_qwen4_nvfp4_source", False):
@@ -682,6 +697,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
+            batch_invariant=self.batch_invariant,
             weight_scales=tuple(
                 weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
@@ -699,6 +715,7 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
             role=getattr(self, "_execution_role", "PDFUSION"),
+            batch_invariant=self.batch_invariant,
             weight_scales=tuple(
                 weights.get(name + FP8_STORAGE_SCALE_SUFFIX)
                 for name in (
@@ -1167,6 +1184,9 @@ class Qwen4ExpModel(Qwen35Model):
                     for name in (W.qwen4_ple_key_proj_w, W.qwen4_ple_value_proj_w)
                 ),
                 norm_eps=self.config.layernorm_eps,
+                batch_invariant=getattr(
+                    self.py_hw_kernel_config, "batch_invariant", False
+                ),
             )
 
             unit = self.ple_layers[str(layer_idx)]
@@ -1380,6 +1400,7 @@ class Qwen4ExpModel(Qwen35Model):
             hc_mult=model_config.hc_mult,
             norm_eps=model_config.layernorm_eps,
             role=getattr(self.parallelism_config, "role_type", "PDFUSION"),
+            batch_invariant=getattr(self.py_hw_kernel_config, "batch_invariant", False),
             weight_scales=(
                 weights.global_weights.get(
                     W.qwen4_hc_mixer_mix_down + FP8_STORAGE_SCALE_SUFFIX

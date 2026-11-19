@@ -6,13 +6,23 @@ import triton.language as tl
 
 
 @triton.jit
-def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr):
+def _moe_topk(
+    logits,
+    ids,
+    weights,
+    STRIDE: tl.constexpr,
+    EXPERTS: tl.constexpr = 512,
+    BLOCK: tl.constexpr = 512,
+):
     row = tl.program_id(0)
-    experts = tl.arange(0, 512)
-    values = tl.load(logits + row * STRIDE + experts).to(tl.float32)
+    experts = tl.arange(0, BLOCK)
+    values = tl.load(
+        logits + row * STRIDE + experts, experts < EXPERTS, other=float("-inf")
+    ).to(tl.float32)
     probabilities = tl.exp(values - tl.max(values, 0))
     probabilities = probabilities / tl.sum(probabilities, 0)
     invalid = tl.sum((probabilities != probabilities).to(tl.int32), 0) > 0
+    probabilities = tl.where(experts < EXPERTS, probabilities, -1.0)
     slots = tl.arange(0, 16)
     chosen = tl.full((16,), 0, tl.float32)
     norm = tl.full((), 0, tl.float32)
@@ -36,19 +46,20 @@ def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr):
     tl.store(weights + row * 10 + slots, chosen * (1.0 / norm), slots < 10)
 
 
-def is_supported(logits, ids, weights):
+def is_supported(logits, ids, weights, *, batch_invariant=False):
     return (
         isinstance(logits, torch.Tensor)
         and logits.is_cuda
         and torch.version.hip is None
         and logits.ndim == 2
-        and logits.shape[1] == 512
+        and logits.shape[1] in ((512, 768) if batch_invariant else (512,))
         and 0 < logits.shape[0] <= 16384
         and logits.dtype in (torch.bfloat16, torch.float32)
         and logits.stride(-1) == 1
         and logits.stride(0) > 0
         and ids.shape == weights.shape == (logits.shape[0], 10)
-        and ids.dtype == torch.int32
+        and ids.dtype
+        in ((torch.int32, torch.int64) if batch_invariant else (torch.int32,))
         and weights.dtype == torch.float32
         and ids.device == weights.device == logits.device
         and ids.is_contiguous()

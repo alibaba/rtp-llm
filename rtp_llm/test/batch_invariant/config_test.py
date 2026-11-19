@@ -8,7 +8,7 @@ from unittest.mock import patch
 from rtp_llm.config.engine_config import EngineConfig, configure_batch_invariant_model
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
-from rtp_llm.ops import CPRotateMethod, DataType, TaskType
+from rtp_llm.ops import CPRotateMethod, DataType, TaskType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -44,6 +44,63 @@ class BatchInvariantConfigTest(unittest.TestCase):
                 ValueError, "RTP_BATCH_INVARIANT must be 0 or 1"
             ):
                 setup_args([])
+
+    def test_m11_keeps_sparse_attention_and_native_mega_moe(self):
+        engine = make_engine()
+        engine.kv_cache_config.reuse_cache = False
+        parallel = engine.parallelism_config
+        parallel.world_size = parallel.local_world_size = parallel.dp_size = (
+            parallel.ep_size
+        ) = 8
+        engine.moe_config.moe_strategy = "mega_moe"
+        engine.moe_config.use_deepep_moe = False
+        model = ModelConfig()
+        model.model_type = "qwen4_exp"
+        model.task_type = TaskType.LANGUAGE_MODEL
+        model.data_type = "bf16"
+        model.num_layers = 60
+        model.hidden_size = 8192
+        model.expert_num = 768
+        model.moe_k = 10
+        model.moe_inter_size = 2048
+        model._qwen4_mxfp4_source = True
+        model.vit_separation = VitSeparation.VIT_SEPARATION_REMOTE
+        model.linear_attention_config.ssm_state_dtype = DataType.TYPE_FP32
+        attn = model.attn_config
+        attn.head_num, attn.kv_head_num, attn.size_per_head = 64, 4, 256
+        attn.is_sparse = attn.use_sparse_gqa_fmha = True
+        attn.tokens_per_block = attn.kernel_tokens_per_block = 128
+        checkpoint = {
+            "architectures": ["Qwen4ExpForConditionalGeneration"],
+            "text_config": {
+                "model_type": "qwen4_exp_text",
+                "dtype": "bfloat16",
+                "layer_types": (["linear_attention"] * 3 + ["full_attention"]) * 15,
+                "hc_count": 4,
+                "ple_layer_ids": [2],
+                "indexer_budget": 2048,
+                "indexer_compress_ratio": 4,
+            },
+        }
+        with (
+            patch("rtp_llm.config.engine_config.is_cuda", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(10, 3)),
+            patch(
+                "rtp_llm.config.engine_config.get_config_from_path",
+                return_value=checkpoint,
+            ),
+        ):
+            configure_batch_invariant_model(engine, model)
+            self.assertEqual(engine.moe_config.moe_strategy, "mega_moe")
+            self.assertTrue(attn.use_sparse_gqa_fmha)
+            self.assertEqual(attn.kernel_tokens_per_block, 128)
+            attn.kernel_tokens_per_block = 64
+            with self.assertRaisesRegex(ValueError, "requires 128-token"):
+                configure_batch_invariant_model(engine, model)
+            attn.kernel_tokens_per_block = 128
+            model._qwen4_mxfp4_source = False
+            with self.assertRaisesRegex(ValueError, "native Qwen4-Max M11"):
+                configure_batch_invariant_model(engine, model)
 
     def test_model_conflicts(self):
         engine = make_engine()

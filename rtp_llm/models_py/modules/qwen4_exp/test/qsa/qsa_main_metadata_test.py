@@ -39,7 +39,7 @@ class QsaMainMetadataTest(unittest.TestCase):
             attn_configs=SimpleNamespace(kernel_tokens_per_block=128),
             _selected_indices=None,
             _is_draft_graph=lambda: False,
-            _is_prefix_reuse_prefill=lambda: False,
+            _uses_paged_prefill=lambda: False,
             _paged_kv_scale_args=Mock(),
             _validate_main_paged_geometry=Mock(return_value=128),
         )

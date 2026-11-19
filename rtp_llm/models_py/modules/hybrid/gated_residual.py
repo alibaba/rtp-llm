@@ -11,7 +11,12 @@ from rtp_llm.models_py.modules.base.common.fp8_linear import (
 
 
 def grouped_rms_norm(
-    x: torch.Tensor, gamma: torch.Tensor, group_size: int, eps: float
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    group_size: int,
+    eps: float,
+    *,
+    batch_invariant: bool = False,
 ) -> torch.Tensor:
     """RMS taken independently per ``group_size``-wide group, one shared gamma.
 
@@ -27,7 +32,9 @@ def grouped_rms_norm(
             try_grouped_rms_norm,
         )
 
-        result = try_grouped_rms_norm(x, gamma, group_size, eps)
+        result = try_grouped_rms_norm(
+            x, gamma, group_size, eps, batch_invariant=batch_invariant
+        )
         if result is not None:
             return result
     out = x.float().unflatten(-1, (x.shape[-1] // group_size, group_size))
@@ -84,6 +91,7 @@ class GatedResidual(nn.Module):
         norm_eps: float,
         weight_scales=None,
         role="PDFUSION",
+        batch_invariant: bool = False,
     ):
         super().__init__()
         hc_hidden = norm_gamma.shape[-1]
@@ -110,6 +118,7 @@ class GatedResidual(nn.Module):
         self.hc_hidden_size = hc_hidden
         self.hidden_size = hc_hidden // hc_mult
         self.norm_eps = norm_eps
+        self.batch_invariant = batch_invariant
         self.norm_gamma = norm_gamma
         self.mix_down = mix_down
         self.mix_up = mix_up
@@ -140,8 +149,21 @@ class GatedResidual(nn.Module):
 
     def _norm(self, hyper_input: torch.Tensor) -> torch.Tensor:
         return grouped_rms_norm(
-            hyper_input, self.norm_gamma, self.hidden_size, self.norm_eps
+            hyper_input,
+            self.norm_gamma,
+            self.hidden_size,
+            self.norm_eps,
+            batch_invariant=self.batch_invariant,
         )
+
+    def _project(self, input, weight, projection):
+        if self.batch_invariant:
+            from rtp_llm.models_py.triton_kernels.common.batch_invariant_linear import (
+                batch_invariant_linear,
+            )
+
+            return batch_invariant_linear(input, weight)
+        return dense_projection(input, weight, projection)
 
     def forward(
         self, hyper_input: torch.Tensor
@@ -221,24 +243,29 @@ class GatedResidual(nn.Module):
             and normed.is_contiguous()
             and normed.dtype == merged.dtype
             and normed.device == merged.device
-            and 1 <= normed.numel() // self.hc_hidden_size <= 32
+            and (
+                self.batch_invariant or 1 <= normed.numel() // self.hc_hidden_size <= 32
+            )
         ):
             from rtp_llm.models_py.triton_kernels.gated_residual.down import (
                 down_inject_epilogue,
             )
 
             mix, inject_weights = down_inject_epilogue(
-                F.linear(normed, merged), self.mix_down.shape[0], self.hc_mult
+                self._project(normed, merged, None),
+                self.mix_down.shape[0],
+                self.hc_mult,
             )
         else:
             down = (
-                dense_projection(normed, self.mix_down, self.down_projection)
+                self._project(normed, self.mix_down, self.down_projection)
                 if down_input_scale is None
                 else self.down_projection(normed, input_scale=down_input_scale)
             )
             fused = None
             if (
-                self.inject_projection is not None
+                not self.batch_invariant
+                and self.inject_projection is not None
                 and self.inject_projection.compute_weight is not None
             ):
                 from rtp_llm.models_py.triton_kernels.gated_residual.splitk_inject import (
@@ -259,11 +286,22 @@ class GatedResidual(nn.Module):
                 )
 
                 injection = (
-                    dense_projection(normed, self.inject, self.inject_projection)
+                    self._project(normed, self.inject, self.inject_projection)
                     if self.inject is not None
                     else None
                 )
-                fused = separate_down_inject_epilogue(down, injection)
+                if self.batch_invariant and injection is not None:
+                    from rtp_llm.models_py.triton_kernels.gated_residual.down import (
+                        down_inject_epilogue,
+                    )
+
+                    fused = down_inject_epilogue(
+                        torch.cat((down, injection), dim=-1),
+                        self.mix_down.shape[0],
+                        self.hc_mult,
+                    )
+                else:
+                    fused = separate_down_inject_epilogue(down, injection)
             if fused is None:
                 mix = F.silu(down / self.hc_mult)
             else:
@@ -290,7 +328,7 @@ class GatedResidual(nn.Module):
                 mix, up.weight, up.scale, normed, self.hc_mult
             )
         if mixed is None:
-            mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
+            mix_logits = self._project(mix, self.mix_up, self.up_projection)
             if normed.is_cuda and torch.version.hip is None:
                 from rtp_llm.models_py.triton_kernels.gated_residual.mix import (
                     try_fused_mix_reduce,
@@ -308,7 +346,7 @@ class GatedResidual(nn.Module):
             return mixed, hyper_input, None
         if inject_weights is None:
             inject_weights = 2 * torch.sigmoid(
-                dense_projection(normed, self.inject, self.inject_projection)
+                self._project(normed, self.inject, self.inject_projection)
                 / self.hc_mult
             )
         return mixed, hyper_input, inject_weights

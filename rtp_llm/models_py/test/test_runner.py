@@ -19,6 +19,7 @@ def main():
         capabilities = {
             "L20_CU13": {(8, 6), (8, 9)},
             "H20_CU13": {(9, 0)},
+            "SM103_CU13": {(10, 3)},
             "RTX_5000_PRO_CU13": {(12, 0)},
         }[os.environ["MODELS_PY_TEST_GPU_TYPE"]]
         for device in range(gpu_count):

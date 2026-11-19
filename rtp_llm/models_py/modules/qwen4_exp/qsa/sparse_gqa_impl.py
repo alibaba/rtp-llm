@@ -58,10 +58,13 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         attn_configs: AttentionConfigs,
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
+        *,
+        batch_invariant: bool = False,
     ) -> None:
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
         self.parallelism_config = parallelism_config
+        self.batch_invariant = batch_invariant
         self.head_num = attn_configs.head_num
         self.kv_head_num = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
@@ -177,6 +180,11 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         prefixes = self.attn_inputs.prefix_lengths
         return bool(prefixes.numel()) and bool(torch.any(prefixes != 0).item())
 
+    def _uses_paged_prefill(self) -> bool:
+        if self.batch_invariant:
+            return self.is_prefill and not self.is_target_verify
+        return self._is_prefix_reuse_prefill()
+
     def _validate_main_paged_geometry(
         self,
         cache: torch.Tensor,
@@ -210,6 +218,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         )
 
     def _prepare_flashinfer_qtoken(self, runtime, hidden_states):
+        if self.batch_invariant:
+            return
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
             Qwen4ExpQSARuntimeContext,
         )
@@ -468,6 +478,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
     def forward_with_qk_norm_and_output_gate(
         self, qkv, kv_cache, layer_idx, gate, norm
     ):
+        if self.batch_invariant:
+            return self.forward_with_output_gate(
+                norm(qkv) if norm is not None else qkv, kv_cache, layer_idx, gate
+            )
         if (
             self._use_qtoken_selection()
             and gate.dtype == torch.bfloat16
@@ -506,7 +520,8 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
     def forward_with_output_gate(self, qkv, kv_cache, layer_idx, gate):
         if (
-            (
+            not self.batch_invariant
+            and (
                 self.is_target_verify
                 or not self.is_prefill
                 or self._use_qtoken_selection()
@@ -647,10 +662,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 self._selected_indices = None
                 self._trusted_prefill_cu_seqlens = None
             return output
-        is_incremental_prefill = self._is_prefix_reuse_prefill()
+        is_paged_prefill = self._uses_paged_prefill()
 
         paged_plan = None
-        if is_incremental_prefill:
+        if is_paged_prefill:
             paged_plan = self._prepare_incremental_prefill_inputs(
                 qkv, kv_cache, selected_indices
             )
@@ -751,7 +766,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 self._selected_indices = None
                 self._trusted_prefill_cu_seqlens = None
             return output
-        if is_incremental_prefill:
+        if is_paged_prefill:
             if int(qkv.shape[1]) < self.q_width:
                 raise RuntimeError(
                     "qwen4_exp incremental-prefill RoPE writer returned an "
@@ -828,7 +843,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 f"{tuple(selected_indices.shape)} for total_tokens={tokens}"
             )
 
-        if use_flashinfer_qsa():
+        if not self.batch_invariant and use_flashinfer_qsa():
             from .flashinfer_prefill import try_flashinfer_cold_prefill
 
             output = try_flashinfer_cold_prefill(
@@ -941,6 +956,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 else {}
             ),
             **self._paged_kv_scale_args(kv_cache),
+            **({"batch_invariant": True} if self.batch_invariant else {}),
             **({"graph_capture": True} if self.attn_inputs.is_cuda_graph else {}),
             **(
                 {"_validated_plan": plan}
@@ -975,6 +991,33 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         page_size = int(plan.page_size)
         requests = plan.requests
         lengths = plan.lengths_host
+        if self.batch_invariant:
+            # The grouped kernel writes eight FP32 partials per query/head.
+            # Limit temporary storage independently of scheduler grant size.
+            outputs = []
+            for index, request in enumerate(requests):
+                start, end = int(request.start), int(request.end)
+                for row in range(start, end, 128):
+                    stop = min(row + 128, end)
+                    query = q[row:stop].view(
+                        1, stop - row, self.head_num, self.head_dim
+                    )
+                    columns = slice(row - start, stop - start)
+                    output = sparse_paged_gqa_attn(
+                        query.transpose(1, 2).contiguous(),
+                        kv_cache.kv_cache_base,
+                        block_table[index : index + 1].contiguous(),
+                        request.kv_lens[:, columns],
+                        request.selected_indices[:, columns],
+                        page_size=page_size,
+                        kv_head_num=self.kv_head_num,
+                        validate_selected=not trusted_selected,
+                        batch_invariant=True,
+                    )
+                    outputs.append(
+                        output.transpose(1, 2).reshape(stop - row, self.q_width)
+                    )
+            return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
         max_rows = max(lengths)
         batch_rows = self._is_mtp_draft and len(requests) > 1 and max_rows <= 4
         if batch_rows:
@@ -1102,6 +1145,8 @@ def create_sparse_gqa_impl(
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
     cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
+    *,
+    batch_invariant: bool = False,
 ) -> AttentionImpl:
     """Factory entry for the sparse GQA family (qwen4 prefill and decode).
 
@@ -1127,7 +1172,9 @@ def create_sparse_gqa_impl(
             f"target_verify={attn_inputs.is_target_verify})"
         )
     attn_inputs.is_cuda_graph = is_cuda_graph
-    return SparseGqaFmhaImpl(attn_configs, attn_inputs, parallelism_config)
+    return SparseGqaFmhaImpl(
+        attn_configs, attn_inputs, parallelism_config, batch_invariant=batch_invariant
+    )
 
 
 AttnImplFactory.register_fmha_impl("sparse_gqa", create_sparse_gqa_impl)

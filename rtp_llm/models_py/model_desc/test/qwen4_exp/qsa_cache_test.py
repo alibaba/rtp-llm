@@ -69,7 +69,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
                     is_target_verify=False,
                     _selected_indices=None,
                     _is_draft_graph=lambda: False,
-                    _is_prefix_reuse_prefill=lambda: False,
+                    _uses_paged_prefill=lambda: False,
                     _paged_kv_scale_args=lambda cache: None,
                 )
                 owner._validate_main_paged_geometry = lambda *args, **kwargs: fmha_validation._validate_main_paged_geometry(

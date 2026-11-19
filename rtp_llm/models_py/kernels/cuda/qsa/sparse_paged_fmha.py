@@ -291,6 +291,7 @@ def sparse_paged_gqa_attn(
     selected_has_count: bool = False,
     fp16_pv: bool = False,
     validate_selected: bool = True,
+    batch_invariant: bool = False,
     _validated_plan=None,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
@@ -457,6 +458,24 @@ def sparse_paged_gqa_attn(
     if batch == 0 or query_len == 0:
         return output
 
+    if batch_invariant:
+        if (
+            (q_heads, kv_heads, head_dim, page_size, block_k) != (64, 4, 256, 128, 64)
+            or kv_cache.dtype != torch.bfloat16
+            or selected.shape[-1] != 2051
+            or selected_has_count
+            or graph_capture
+            or output_gate is not None
+            or fp16_pv
+        ):
+            raise ValueError("M11 batch-invariant QSA requires eager BF16 paged GQA")
+        from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
+            compact_qsa_selection,
+        )
+
+        selected = compact_qsa_selection(selected)
+        selected_has_count = True
+
     selected_width = int(selected.shape[2]) - int(selected_has_count)
     if selected_width == 0:
         output.zero_()
@@ -511,7 +530,7 @@ def sparse_paged_gqa_attn(
         is_supported,
     )
 
-    grouped = is_supported(
+    grouped = batch_invariant or is_supported(
         q,
         kv_cache,
         block_table,

@@ -43,11 +43,22 @@ def read_vocab_size(checkpoint):
     return vocab_size
 
 
-def make_prompt(tokenizer, length, lead):
-    instruction = tokenizer.encode(
-        "\nContinue with the text: red blue green yellow\n", add_special_tokens=False
-    ).ids
-    text = tokenizer.encode(lead * (length + 1), add_special_tokens=False).ids
+def load_encoder(checkpoint, *, m11=False):
+    if m11:
+        from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
+            TokenizerFactory,
+        )
+
+        path = str(checkpoint)
+        tokenizer = TokenizerFactory.create(path, path, "qwen4_exp")
+        return lambda text: tokenizer.encode(text, add_special_tokens=False)
+    tokenizer = Tokenizer.from_file(str(checkpoint / "tokenizer.json"))
+    return lambda text: tokenizer.encode(text, add_special_tokens=False).ids
+
+
+def make_prompt(encode, length, lead):
+    instruction = encode("\nContinue with the text: red blue green yellow\n")
+    text = encode(lead * (length + 1))
     prompt = text[: length - len(instruction)] + instruction
     assert len(prompt) == length
     return prompt
@@ -206,6 +217,9 @@ def evidence(
     target_rank=0,
     target_rpc_id=None,
     peer_rpc_ids=(),
+    target_length=TARGET_LENGTH,
+    expected_grants=None,
+    idle_peers=False,
 ):
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -213,13 +227,13 @@ def evidence(
         forwards = {}
         for batch in read_records(log_dir, offsets):
             dp_rank = batch["dp_rank"] if require_dp_rank else 0
-            if peer_rpc_ids and "forward_step" in batch:
+            if (peer_rpc_ids or idle_peers) and "forward_step" in batch:
                 key = (dp_rank, batch["forward_step"])
                 assert key not in forwards, (key, batch)
                 forwards[key] = batch
             rows = real_rows(batch)
             for i, row in enumerate(rows):
-                if row["input_len"] == TARGET_LENGTH and (
+                if row["input_len"] == target_length and (
                     target_rpc_id is None or row.get("rpc_request_id") == target_rpc_id
                 ):
                     targets[(dp_rank, row["request_id"])].append((batch, i, rows))
@@ -246,11 +260,23 @@ def evidence(
             candidates[(dp_rank, request_id)] = (target_prefill, mixed, list(aligned))
             alone = all(len(rows) == 1 for _, _, rows in records)
             saw_cut = any(prefix > 0 for prefix, _ in target_prefill)
+            peer_steps = {batch.get("forward_step") for batch, _, _ in records}
+            peers_were_idle = not idle_peers or (
+                None not in peer_steps
+                and all(
+                    rank == dp_rank or step not in peer_steps or not real_rows(batch)
+                    for (rank, step), batch in forwards.items()
+                )
+            )
             if (
-                sum(n for _, n in target_prefill) == TARGET_LENGTH
+                sum(n for _, n in target_prefill) == target_length
                 and saw_cut == chunked
+                and (
+                    expected_grants is None or sorted(target_prefill) == expected_grants
+                )
                 and (all(mixed.values()) if neighbors else alone)
                 and (not peer_rpc_ids or aligned.keys() == mixed.keys())
+                and peers_were_idle
             ):
                 matches.append((dp_rank, request_id, target_prefill, mixed, aligned))
         # The logger can append a previous request's last decode after the
@@ -259,7 +285,9 @@ def evidence(
             ((dp_rank, request_id, target_prefill, mixed, aligned),) = matches
             assert dp_rank == target_rank, (dp_rank, target_rank, request_id)
             print(
-                f"target DP rank {dp_rank}, recorded request {request_id}", flush=True
+                f"target DP rank {dp_rank}, recorded request {request_id}, "
+                f"RPC request {target_rpc_id}",
+                flush=True,
             )
             print(
                 f"target prefill (prefix, grant) {sorted(target_prefill)}", flush=True
@@ -270,6 +298,10 @@ def evidence(
                         f"mixed {name} (exec id, target row, prompt lengths) {records}",
                         flush=True,
                     )
+            if idle_peers:
+                print(
+                    "No peer rank recorded real requests in these forwards", flush=True
+                )
             for phase, (batch, peer) in aligned.items():
                 print(
                     json.dumps(
@@ -303,10 +335,11 @@ def mixed_request(
     *,
     target_request=None,
     peer_batch=None,
+    blocker_steps=BLOCKER_STEPS,
 ):
     # Queue a rank-1 batch with a longer decode lifetime than the local blocker.
     # The recorder checks that the side load actually survives target admission.
-    hold = start_request(stub, blocker, BLOCKER_STEPS)
+    hold = start_request(stub, blocker, blocker_steps)
     next(hold)
     if peer_batch is not None:
         peer_stub, peer_inputs = peer_batch
@@ -338,7 +371,7 @@ def mixed_request(
     return result
 
 
-def main():
+def main(argv=None, *, encode=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--address", default="127.0.0.1:19481")
@@ -346,6 +379,10 @@ def main():
     parser.add_argument("--save", type=Path)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--chunked", action="store_true")
+    parser.add_argument("--target-length", type=int, default=TARGET_LENGTH)
+    parser.add_argument(
+        "--m11", action="store_true", help="Verify the M11 DP8 contract"
+    )
     parser.add_argument(
         "--cross-dp-only",
         action="store_true",
@@ -360,18 +397,21 @@ def main():
     smoke = parser.add_mutually_exclusive_group()
     smoke.add_argument("--greedy-smoke", "--off-smoke", action="store_true")
     smoke.add_argument("--greedy-logits", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.cross_dp_only and (not args.dp_addresses or args.chunked or args.reference):
         parser.error(
             "--cross-dp-only requires a DP address list and a fresh budget-0 solo reference"
         )
-    tokenizer = Tokenizer.from_file(str(args.checkpoint / "tokenizer.json"))
+    if args.m11 and len(args.dp_addresses or []) != 8:
+        parser.error("--m11 requires eight ordered DP RPC addresses")
+    if encode is None:
+        encode = load_encoder(args.checkpoint, m11=args.m11)
     vocab_size = read_vocab_size(args.checkpoint)
-    fixed = tokenizer.encode(CONTINUATION, add_special_tokens=False).ids
-    target = make_prompt(tokenizer, TARGET_LENGTH, " The ocean is calm.")
-    short = make_prompt(tokenizer, SHORT_LENGTH, " Good.")
-    long = make_prompt(tokenizer, LONG_LENGTH, " An oak grew near the hill.")
-    blocker = make_prompt(tokenizer, 37, " Write a long story.")
+    fixed = encode(CONTINUATION)
+    target = make_prompt(encode, args.target_length, " The ocean is calm.")
+    short = make_prompt(encode, SHORT_LENGTH, " Good.")
+    long = make_prompt(encode, LONG_LENGTH, " An oak grew near the hill.")
+    blocker = make_prompt(encode, 37, " Write a long story.")
     args.log_dir = args.log_dir.resolve()
     with ExitStack() as channels:
         addresses = args.dp_addresses or [args.address]
@@ -423,15 +463,36 @@ def main():
                 )
             compare(reference, actual, name)
 
-        offsets = record_offsets(args.log_dir)
-        solo = collect(
-            start_request(stub, target, len(fixed), measure=True),
-            len(fixed),
-            vocab_size,
-        )
-        evidence(
-            args.log_dir, offsets, chunked=args.chunked, require_dp_rank=require_dp_rank
-        )
+        evidence_options = {
+            "chunked": args.chunked,
+            "require_dp_rank": require_dp_rank,
+            "target_length": args.target_length,
+        }
+
+        def solo_request(owner):
+            offsets = record_offsets(args.log_dir)
+            request = make_request(target, len(fixed), measure=True)
+            output = collect(
+                stubs[owner].GenerateStreamCall(request, timeout=180),
+                len(fixed),
+                vocab_size,
+            )
+            evidence(
+                args.log_dir,
+                offsets,
+                target_rank=owner,
+                target_rpc_id=str(request.request_id),
+                idle_peers=args.m11,
+                expected_grants=(
+                    [(0, 256), (256, 1)]
+                    if args.m11 and args.chunked and args.target_length == 257
+                    else None
+                ),
+                **evidence_options,
+            )
+            return output
+
+        solo = solo_request(0)
         baseline = solo
         if args.reference:
             with np.load(args.reference) as reference:
@@ -443,9 +504,12 @@ def main():
         print(f"fixed continuation tokens: {solo.tokens.tolist()}", flush=True)
         if args.save:
             np.savez(args.save, **vars(solo))
+        if args.m11 and not args.chunked:
+            compare_case(baseline, solo_request(7), "target DP rank 7 idle peers")
 
-        # With a 192-token budget the target's first grant fills the batch.
-        # The remaining target token can share a round with the short request.
+        # With a prompt one token over budget, the remaining target token can
+        # share a round with the short request. If the short request goes first,
+        # the target's first grant can shrink to make room for it.
         cases = (
             (
                 ((target, short), True, (SHORT_LENGTH,)),
@@ -459,14 +523,24 @@ def main():
         )
         for order, target_first, neighbors in () if args.cross_dp_only else cases:
             offsets = record_offsets(args.log_dir)
-            actual = mixed_request(stub, blocker, order, target, len(fixed), vocab_size)
+            target_request = make_request(target, len(fixed), measure=True)
+            actual = mixed_request(
+                stub,
+                blocker,
+                order,
+                target,
+                len(fixed),
+                vocab_size,
+                target_request=target_request,
+                blocker_steps=2 if args.m11 else BLOCKER_STEPS,
+            )
             evidence(
                 args.log_dir,
                 offsets,
                 neighbors=neighbors,
                 target_first=target_first,
-                chunked=args.chunked,
-                require_dp_rank=require_dp_rank,
+                target_rpc_id=str(target_request.request_id),
+                **evidence_options,
             )
             compare_case(
                 baseline, actual, f"target {'first' if target_first else 'last'}"
@@ -476,7 +550,8 @@ def main():
             assert (
                 len(stubs) >= 3
             ), "DP rank comparison needs two target ranks and a peer"
-            for owner, peer_prompts in ((0, (short,)), (2, (long, short, short))):
+            peer_cases = ((0, (short,)), (7 if args.m11 else 2, (long, short, short)))
+            for owner, peer_prompts in peer_cases:
                 offsets = record_offsets(args.log_dir)
                 target_request = make_request(target, len(fixed), measure=True)
                 peer_inputs = [
@@ -492,17 +567,22 @@ def main():
                     vocab_size,
                     target_request=target_request,
                     peer_batch=(stubs[1], peer_inputs),
+                    blocker_steps=2 if args.m11 else BLOCKER_STEPS,
                 )
                 evidence(
                     args.log_dir,
                     offsets,
                     neighbors=(SHORT_LENGTH, LONG_LENGTH),
-                    require_dp_rank=require_dp_rank,
                     target_rank=owner,
                     target_rpc_id=str(target_request.request_id),
                     peer_rpc_ids={str(request.request_id) for request in peer_inputs},
+                    **evidence_options,
                 )
-                compare_case(baseline, actual, f"target DP rank {owner}")
+                compare_case(
+                    baseline,
+                    actual,
+                    f"target DP rank {owner}" + (" busy peers" if args.m11 else ""),
+                )
 
 
 if __name__ == "__main__":

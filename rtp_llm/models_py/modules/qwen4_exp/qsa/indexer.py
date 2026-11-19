@@ -437,6 +437,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
         norm_eps: float,
         projection_scale=None,
         rope_config=None,
+        batch_invariant: bool = False,
     ):
         super().__init__()
         expected = (n_heads + kv_heads) * head_dim
@@ -452,6 +453,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 f"compress_ratio {compress_ratio}"
             )
         self.qk_proj = qk_proj
+        self.batch_invariant = batch_invariant
         from rtp_llm.models_py.modules.base.common.fp8_linear import make_projection
 
         self.qk_projection = make_projection(qk_proj, projection_scale)
@@ -524,11 +526,21 @@ class Qwen4ExpQSAIndexer(nn.Module):
     def project(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """``hidden -> (q [B,S,H,D], raw_keys [B,S,D])``, q normed but unrotated."""
         q, token_k = self.project_raw(hidden_states)
-        q = exact_head_rms_norm(q, self.q_norm_gamma, self.norm_eps)
+        q = exact_head_rms_norm(
+            q, self.q_norm_gamma, self.norm_eps, batch_invariant=self.batch_invariant
+        )
         return q, token_k
 
     def project_raw(self, hidden_states: torch.Tensor):
         """Keep Q raw for a runtime consumer that explicitly fuses its norm."""
+        if self.batch_invariant:
+            from rtp_llm.models_py.triton_kernels.common.batch_invariant_linear import (
+                batch_invariant_linear,
+            )
+
+            return self.split_projected(
+                batch_invariant_linear(hidden_states, self.qk_proj)
+            )
         qk = (
             self.qk_projection(hidden_states)
             if self.qk_projection is not None
@@ -642,7 +654,8 @@ class Qwen4ExpQSAIndexer(nn.Module):
             )
 
         if (
-            past_len == 0
+            not self.batch_invariant
+            and past_len == 0
             and ratio == 4
             and self.block_topk == 512
             and use_flashinfer_indexer()

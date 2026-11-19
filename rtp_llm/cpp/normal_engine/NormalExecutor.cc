@@ -73,7 +73,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
-    use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
+    record_aligned_moe_forwards_(
+        (params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency)
+        || (params.hw_kernel_config.batch_invariant && params.moe_config.moe_strategy == "mega_moe")),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
@@ -391,16 +393,17 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         // These eager DP/EP ranks enter the same sequence of MoE collectives.
         // Count every forward, including fake-only and unsampled batches, so
         // the recorder's per-rank filtering cannot shift the ordinal.
-        const bool align_dp_forward = execution_recorder.enabled() && !is_propose_ && use_all_gather_
+        const bool align_dp_forward = execution_recorder.enabled() && !is_propose_ && record_aligned_moe_forwards_
                                       && parallelism_config_.tp_size == 1 && parallelism_config_.pp_size == 1
                                       && parallelism_config_.dp_size > 1
                                       && parallelism_config_.dp_size == parallelism_config_.ep_size
                                       && parallelism_config_.local_world_size == parallelism_config_.world_size;
         const int64_t forward_step     = align_dp_forward ? ++dp_forward_step_ : 0;
         const int64_t forward_start_us = recorded_batch && forward_step ? monotonicTimeUs() : 0;
-        model_output                        = std::move(model_->forward(model_input));
+        model_output                   = std::move(model_->forward(model_input));
         if (forward_start_us) {
-            recorded_batch->setDpForward(parallelism_config_.dp_rank, forward_step, forward_start_us, monotonicTimeUs());
+            recorded_batch->setDpForward(
+                parallelism_config_.dp_rank, forward_step, forward_start_us, monotonicTimeUs());
         }
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }

@@ -33,7 +33,8 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
         host_lengths = attn_inputs.input_lengths
         host_prefixes = attn_inputs.prefix_lengths
         supported = (
-            mixed_qkv.is_cuda
+            not self.batch_invariant
+            and mixed_qkv.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(mixed_qkv.device) == (12, 0)
             and mixed_qkv.dtype == torch.bfloat16
@@ -370,14 +371,17 @@ def install_qwen4_gdn_backends(attention):
     backend = os.environ.get("QWEN4_GDN_BACKEND", "native")
     if backend not in ("native", "flashinfer"):
         raise ValueError("QWEN4_GDN_BACKEND must be native or flashinfer")
+    prefill = attention.prefill_gdn
     prefill_cls = Qwen4Sm120GdnPrefill
-    if backend == "flashinfer":
+    if backend == "flashinfer" and not prefill.batch_invariant:
         prefill_cls = Qwen4FlashInferGdnPrefill
         decode = attention.decode_gdn
         attention.decode_gdn = Qwen4FlashInferGdnDecode(
             decode.linear_attn_config, decode.parallelism_config, decode.weights
         )
-    prefill = attention.prefill_gdn
     attention.prefill_gdn = prefill_cls(
-        prefill.linear_attn_config, prefill.parallelism_config, prefill.weights
+        prefill.linear_attn_config,
+        prefill.parallelism_config,
+        prefill.weights,
+        batch_invariant=prefill.batch_invariant,
     )

@@ -30,14 +30,21 @@ class GdnFixture:
     block = 64
     dim = 128
 
-    def __init__(self, key_heads, value_heads, *, batch_invariant):
+    def __init__(
+        self, key_heads, value_heads, *, batch_invariant, page_size=64, max_input=193
+    ):
+        self.block = page_size
         self.value_heads = value_heads
-        self.widths = (key_heads * self.dim, key_heads * self.dim, value_heads * self.dim)
+        self.widths = (
+            key_heads * self.dim,
+            key_heads * self.dim,
+            value_heads * self.dim,
+        )
         self.channels = sum(self.widths)
         self.batch_invariant = batch_invariant
         torch.manual_seed(813)
         base = {"device": "cuda", "dtype": torch.bfloat16}
-        self.raw = [torch.randn(n + 3, self.channels, **base) for n in (193, 149)]
+        self.raw = [torch.randn(n + 3, self.channels, **base) for n in (max_input, 149)]
         self.g = [
             -torch.rand(x.size(0), self.value_heads, device="cuda") * 0.06
             for x in self.raw
@@ -166,7 +173,9 @@ class GdnFixture:
 
 def check_qk_norm(batch_invariant):
     generator = torch.Generator(device="cuda").manual_seed(45)
-    qk = torch.randn((193, 128), device="cuda", dtype=torch.bfloat16, generator=generator)
+    qk = torch.randn(
+        (193, 128), device="cuda", dtype=torch.bfloat16, generator=generator
+    )
     small = l2norm_fwd(qk[:128], batch_invariant=batch_invariant)
     mixed = l2norm_fwd(qk, batch_invariant=batch_invariant)[:128]
     different = bit_mismatches(small, mixed)
@@ -179,24 +188,34 @@ def check_qk_norm(batch_invariant):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-only", action="store_true")
-    parser.add_argument("--tp4-397b", action="store_true")
+    model = parser.add_mutually_exclusive_group()
+    model.add_argument("--tp4-397b", action="store_true")
+    model.add_argument("--m11", action="store_true")
     args = parser.parse_args()
-    heads = (4, 16) if args.tp4_397b else (16, 32)
-    fixture = GdnFixture(*heads, batch_invariant=not args.report_only)
+    heads = (16, 128) if args.m11 else (4, 16) if args.tp4_397b else (16, 32)
+    fixture = GdnFixture(
+        *heads,
+        batch_invariant=not args.report_only,
+        page_size=128 if args.m11 else 64,
+        max_input=257 if args.m11 else 193,
+    )
     check_qk_norm(fixture.batch_invariant)
     failures = 0
-    for length in (7, 17, 33, 63, 64, 65, 129, 193):
+    lengths = (127, 128, 129, 257) if args.m11 else (7, 17, 33, 63, 64, 65, 129, 193)
+    for length in lengths:
         expected = fixture.run([[(0, length)]])
         cases = {
             "first": [[(0, length), (1, 149)]],
             "last": [[(1, 149), (0, length)]],
         }
-        if length > 64:
-            cases["restored_at_64"] = [[(0, 64)], [(1, 149), (0, length - 64)]]
-        if length > 128:
-            cases["restored_at_128"] = [[(0, 128), (1, 149)], [(0, length - 128)]]
-        if length > 192:
-            cases["restored_at_192"] = [[(0, 192)], [(1, 149), (0, length - 192)]]
+        for page in range(fixture.block, length, fixture.block):
+            first = [(0, page)]
+            rest = [(0, length - page)]
+            if page == 128:
+                first.append((1, 149))
+            else:
+                rest.insert(0, (1, 149))
+            cases[f"restored_at_{page}"] = [first, rest]
         for case, batches in cases.items():
             decode_rows = (0, 1) if case == "first" else (1, 0)
             actual = fixture.run(batches, decode_rows=decode_rows)
@@ -212,10 +231,13 @@ def main():
     # A decode checkpoint, even on an exact page boundary, cannot substitute
     # for the corresponding prefill checkpoint. The serving mode rejects
     # cross-request prefix reuse until it can track the checkpoint's source.
-    prefill_checkpoint = fixture.run([[(0, 64)]])["ssm"][-1]
-    decode_checkpoint = fixture.run([[(0, 61)]])["decode_ssm"]
+    prefill_checkpoint = fixture.run([[(0, fixture.block)]])["ssm"][-1]
+    decode_checkpoint = fixture.run([[(0, fixture.block - 3)]])["decode_ssm"]
     differences = bit_mismatches(prefill_checkpoint, decode_checkpoint)
-    print("prefill vs decode checkpoint at token 64:", differences, flush=True)
+    print(
+        f"prefill vs decode checkpoint at token {fixture.block}: {differences}",
+        flush=True,
+    )
     assert differences > 0
 
 

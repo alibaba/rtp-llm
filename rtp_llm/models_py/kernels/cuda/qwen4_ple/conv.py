@@ -263,6 +263,7 @@ def try_ple_conv(
     cache_commit=None,
     history=None,
     page_size=128,
+    batch_invariant=False,
 ):
     """Apply PLE convolution with optional state and destination.
 
@@ -319,7 +320,11 @@ def try_ple_conv(
     batch, length, width = gated.shape
     capability = torch.cuda.get_device_capability(gated.device)
     warps = 4
-    if capability == (12, 0) and width == 10240 and not return_state:
+    if batch_invariant:
+        if capability != (10, 3) or width != 32768 or return_state:
+            return None
+        block = 1024
+    elif capability == (12, 0) and width == 10240 and not return_state:
         block = 1024
     elif capability in ((10, 0), (10, 3)) and width == 32768:
         if return_state and length != 1:
@@ -333,7 +338,8 @@ def try_ple_conv(
     if cache_commit is not None:
         state_pool, ctx_pool, state_blocks, ctx_blocks = cache_commit
         if not (
-            width == 32768
+            not batch_invariant
+            and width == 32768
             and length >= 192
             and batch == 1
             and not return_state
@@ -368,7 +374,7 @@ def try_ple_conv(
     output = torch.empty_like(gated) if out is None else out
     initial_batch_stride = initial.stride(0) if initial is not None else 0
     initial_row_stride = initial.stride(1) if initial is not None else 0
-    if width == 32768 and length >= 192:
+    if not batch_invariant and width == 32768 and length >= 192:
         block, time = 128, 8
         groups = triton.cdiv(length, 3 * time) * 3
         tiles = groups * (width // block)

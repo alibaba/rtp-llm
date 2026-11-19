@@ -271,6 +271,7 @@ _BATCH_INVARIANT_QWEN_MODELS = {
     ("qwen_3_moe", 48, 2048, 32, 4, 128, (128, 8, 768)): ("Qwen3-30B-A3B", 1),
     ("qwen35_moe", 40, 2048, 16, 2, 256, (256, 8, 512)): ("Qwen3.6-35B-A3B", 1),
     ("qwen35_moe", 60, 4096, 32, 2, 256, (512, 10, 1024)): ("Qwen3.5-397B-A17B", 4),
+    ("qwen4_exp", 60, 8192, 64, 4, 256, (768, 10, 2048)): ("Qwen4-Max M11", 1),
 }
 
 
@@ -287,16 +288,27 @@ def configure_batch_invariant_model(
     moe = engine_config.moe_config
     attn = model_config.attn_config
     model_type = model_config.model_type
-    hybrid = model_type == "qwen35_moe"
+    qwen4 = model_type == "qwen4_exp"
+    hybrid = qwen4 or model_type == "qwen35_moe"
     uses_moe = hybrid or model_type == "qwen_3_moe"
     dp_ep = parallel.tp_size == 1 and parallel.dp_size == parallel.ep_size > 1
     conflicts = []
     if not is_cuda() or torch.cuda.get_device_capability() != (10, 3):
         conflicts.append("requires an SM103 CUDA GPU")
-    if parallel.role_type != RoleType.PDFUSION or (
-        model_config.vit_separation != VitSeparation.VIT_SEPARATION_LOCAL
+    vit_separation = (
+        VitSeparation.VIT_SEPARATION_REMOTE
+        if qwen4
+        else VitSeparation.VIT_SEPARATION_LOCAL
+    )
+    if (
+        parallel.role_type != RoleType.PDFUSION
+        or model_config.vit_separation != vit_separation
     ):
-        conflicts.append("requires a colocated PDFUSION worker with no separate ViT")
+        conflicts.append(
+            "M11 requires a text PDFUSION worker with vit_separation=2"
+            if qwen4
+            else "requires a colocated PDFUSION worker with no separate ViT"
+        )
     ffn_shape = (
         (model_config.expert_num, model_config.moe_k, model_config.moe_inter_size)
         if uses_moe
@@ -318,8 +330,8 @@ def configure_batch_invariant_model(
     else:
         name, tp = model
         topology = (parallel.world_size, parallel.dp_size, parallel.ep_size)
-        supported_topologies = [(tp, 1, 1)]
-        if uses_moe:
+        supported_topologies = [(8, 8, 8)] if qwen4 else [(tp, 1, 1)]
+        if uses_moe and not qwen4:
             supported_topologies.append((4, 4 // tp, 4))
         if (
             topology not in supported_topologies
@@ -328,11 +340,17 @@ def configure_batch_invariant_model(
             or parallel.prefill_cp_config.is_enabled()
             or parallel.prefill_cp_config.is_prefill_enabled()
         ):
-            ep4 = f" or DP_SIZE={4 // tp}/EP_SIZE=4 on one node" if uses_moe else ""
-            conflicts.append(
-                f"{name} requires TP_SIZE={tp}, PP_SIZE=1, CP disabled and "
-                f"DP_SIZE=EP_SIZE=1{ep4}"
-            )
+            if qwen4:
+                conflicts.append(
+                    "M11 requires TP_SIZE=1, DP_SIZE=EP_SIZE=WORLD_SIZE=8 "
+                    "on one node, PP_SIZE=1 and CP disabled"
+                )
+            else:
+                ep4 = f" or DP_SIZE={4 // tp}/EP_SIZE=4 on one node" if uses_moe else ""
+                conflicts.append(
+                    f"{name} requires TP_SIZE={tp}, PP_SIZE=1, CP disabled and "
+                    f"DP_SIZE=EP_SIZE=1{ep4}"
+                )
     quant = model_config.quant_config
     quant_method = quant.get_method() if quant is not None else None
     fp8_block = (
@@ -342,7 +360,11 @@ def configure_batch_invariant_model(
     )
     if model_config.data_type != DataType.TYPE_BF16:
         conflicts.append("requires BF16 activations (ACT_TYPE=bf16)")
-    if quant is not None and (not fp8_block or not hybrid or model is None):
+    if qwen4 and (quant is not None or model_config.quantization):
+        conflicts.append(
+            "M11 requires the native MXFP4 checkpoint with --quantization omitted"
+        )
+    elif quant is not None and (not fp8_block or not hybrid or model is None):
         conflicts.append(
             f"unsupported quantization {quant_method}: FP8_PER_BLOCK with 128x128 "
             "weight blocks requires Qwen3.6-35B-A3B TP1 or Qwen3.5-397B-A17B TP4"
@@ -360,6 +382,21 @@ def configure_batch_invariant_model(
             conflicts.append(
                 f"requires a BF16 checkpoint ({config_name} has dtype {checkpoint_dtype!r})"
             )
+        if qwen4 and (
+            not getattr(model_config, "_qwen4_mxfp4_source", False)
+            or not attn.is_sparse
+            or not attn.use_sparse_gqa_fmha
+            or "Qwen4ExpForConditionalGeneration"
+            not in (checkpoint_config.get("architectures") or ())
+            or text_config.get("model_type") != "qwen4_exp_text"
+            or text_config.get("layer_types")
+            != (["linear_attention"] * 3 + ["full_attention"]) * 15
+            or text_config.get("hc_count") != 4
+            or text_config.get("ple_layer_ids") != [2]
+            or text_config.get("indexer_budget") != 2048
+            or text_config.get("indexer_compress_ratio") != 4
+        ):
+            conflicts.append("requires the native Qwen4-Max M11 GDN/QSA/PLE checkpoint")
     if model_config.task_type != TaskType.LANGUAGE_MODEL:
         conflicts.append("requires a text generation task")
     if model_config.lora_infos:
@@ -372,7 +409,9 @@ def configure_batch_invariant_model(
         conflicts.append("speculative decoding and MTP must be disabled")
     if engine_config.runtime_config.use_batch_decode_scheduler:
         conflicts.append("USE_BATCH_DECODE_SCHEDULER must be disabled")
-    if dp_ep:
+    if qwen4:
+        moe_strategies = ("mega_moe",)
+    elif dp_ep:
         moe_strategies = (
             ("auto", "fp8_per_block_pure_dp", "fp8_per_block_ep_normal")
             if fp8_block
@@ -383,8 +422,11 @@ def configure_batch_invariant_model(
             ("auto", "fp8_per_block_no_dp") if fp8_block else ("auto", "no_quant_cpp")
         )
     needs_all_gather = fp8_block or parallel.ep_size > 1
-    uses_unstable_router = not dp_ep and (
-        moe.use_deepep_moe or (needs_all_gather and not moe.use_all_gather)
+    uses_unstable_router = (
+        moe.use_deepep_moe
+        if qwen4
+        else not dp_ep
+        and (moe.use_deepep_moe or (needs_all_gather and not moe.use_all_gather))
     )
     if uses_moe and (
         moe.moe_strategy not in moe_strategies
@@ -394,7 +436,9 @@ def configure_batch_invariant_model(
         or model_config.eplb_config.phy_exp_num(model_config.expert_num)
         != model_config.expert_num
     ):
-        if dp_ep:
+        if qwen4:
+            conflicts.append("M11 requires native mega_moe without expert remapping")
+        elif dp_ep:
             conflicts.append(
                 "requires the eager all-gather MoE path for DP/EP without expert remapping"
             )
@@ -415,9 +459,10 @@ def configure_batch_invariant_model(
         and model_config.linear_attention_config.ssm_state_dtype != DataType.TYPE_FP32
     ):
         conflicts.append("requires FP32 SSM state (SSM_STATE_DTYPE=auto or fp32)")
-    if attn.tokens_per_block != 64 or attn.kernel_tokens_per_block != 64:
+    page_size = 128 if qwen4 else 64
+    if attn.tokens_per_block != page_size or attn.kernel_tokens_per_block != page_size:
         pages = "KV and SSM" if hybrid else "KV"
-        conflicts.append(f"requires 64-token {pages} pages")
+        conflicts.append(f"requires {page_size}-token {pages} pages")
     if (
         cache.reuse_cache
         or cache.enable_remote_cache
@@ -433,7 +478,7 @@ def configure_batch_invariant_model(
     if conflicts:
         raise ValueError("RTP_BATCH_INVARIANT=1:\n" + "\n".join(conflicts))
 
-    if dp_ep:
+    if dp_ep and not qwen4:
         # Ordinary DP/EP auto-selection uses DeepEP. Move the same shards over
         # the stage group in BI, where the combine order is fixed.
         moe.moe_strategy = "fp8_per_block_pure_dp" if fp8_block else "no_quant_pure_dp"
@@ -446,6 +491,12 @@ def configure_batch_invariant_model(
         model_config.mm_model_config.is_multimodal = False
     # Keep the checkpoint's BF16 LM head and accumulate its products in FP32.
     model_config.enable_fp32_lm_head = False
+    if qwen4:
+        logging.info(
+            "M11 batch invariant: 45 GDN / 15 sparse QSA layers, "
+            "TP1/DP8/EP8, BF16 dense and KV, FP32 SSM and logits, "
+            "128-token pages, FP8_FP4 MegaMoE, FP8 PLE"
+        )
 
 
 # ============================================================================

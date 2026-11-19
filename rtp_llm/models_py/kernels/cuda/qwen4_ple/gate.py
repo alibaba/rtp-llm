@@ -91,6 +91,7 @@ def try_ple_gate(
     projection_scales=None,
     *,
     reuse_key=False,
+    batch_invariant=False,
 ):
     if not (hidden.is_cuda and torch.version.hip is None and hidden.ndim == 3):
         return None
@@ -101,6 +102,8 @@ def try_ple_gate(
         (capability == (12, 0) and width == 10240)
         or (capability in ((10, 0), (10, 3)) and width == 32768 and not projected)
     ):
+        return None
+    if batch_invariant and (capability != (10, 3) or width != 32768):
         return None
     group_size = width // 4
     if projected and not (
@@ -143,14 +146,18 @@ def try_ple_gate(
     # only the key elements for its own row and branch.
     gated = (
         key
-        if reuse_key and group_size == 8192 and key.is_contiguous()
+        if reuse_key
+        and not batch_invariant
+        and group_size == 8192
+        and key.is_contiguous()
         else torch.empty(hidden.shape, device=hidden.device, dtype=hidden.dtype)
     )
     normed = torch.empty_like(gated)
     batch, length, _ = hidden.shape
     rows = batch * length
     if (
-        capability == (10, 3)
+        not batch_invariant
+        and capability == (10, 3)
         and group_size == 8192
         and (rows >= 4 or (length == 1 and batch > 0))
         and all(x.is_contiguous() for x in (key, value, hidden))
@@ -199,7 +206,7 @@ def try_ple_gate(
             num_warps=4,
             PROJECTED_FP32=projected,
         )
-        if group_size == 8192:
+        if group_size == 8192 and not batch_invariant:
             # The BF16 agreement can cross a rounding midpoint if Triton
             # sums the products in a different order than the original op.
             products = gated.view(batch, length, 4, group_size)

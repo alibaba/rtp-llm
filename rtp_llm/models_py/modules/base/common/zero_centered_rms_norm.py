@@ -3,7 +3,7 @@ from torch import nn
 
 
 def exact_head_rms_norm(
-    x: torch.Tensor, gamma: torch.Tensor, eps: float
+    x: torch.Tensor, gamma: torch.Tensor, eps: float, *, batch_invariant=False
 ) -> torch.Tensor:
     """RMSNorm over the last dim, matching upstream bit-for-bit.
 
@@ -11,6 +11,14 @@ def exact_head_rms_norm(
     the ``+1`` happens in fp32, after the cast. ``gamma`` is therefore the raw
     checkpoint tensor and is broadcast across heads.
     """
+    if batch_invariant:
+        from rtp_llm.models_py.triton_kernels.gated_residual.norm import (
+            grouped_rms_norm_triton,
+        )
+
+        return grouped_rms_norm_triton(
+            x.contiguous(), gamma, x.shape[-1], eps, batch_invariant=True
+        )
     if x.is_cuda and torch.version.hip is None:
         from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
             try_indexer_rmsnorm,
@@ -46,11 +54,13 @@ class ZeroCenteredFusedQKRMSNorm(nn.Module):
         kv_head_num: int,
         size_per_head: int = 128,
         eps: float = 1e-6,
+        batch_invariant: bool = False,
     ):
         super().__init__()
         self.q_weight = q_weight
         self.k_weight = k_weight
         self.eps = eps
+        self.batch_invariant = batch_invariant
         self.head_num = head_num
         self.kv_head_num = kv_head_num
         self.size_per_head = size_per_head
@@ -58,7 +68,9 @@ class ZeroCenteredFusedQKRMSNorm(nn.Module):
         self.kv_size = kv_head_num * size_per_head
 
     @classmethod
-    def replacing(cls, fused: nn.Module) -> "ZeroCenteredFusedQKRMSNorm":
+    def replacing(
+        cls, fused: nn.Module, *, batch_invariant=False
+    ) -> "ZeroCenteredFusedQKRMSNorm":
         """Build from an already-constructed ``FusedQKRMSNorm``.
 
         Both the CUDA and ROCm variants expose the same fields, so this stays
@@ -71,12 +83,17 @@ class ZeroCenteredFusedQKRMSNorm(nn.Module):
             kv_head_num=fused.kv_head_num,
             size_per_head=fused.size_per_head,
             eps=fused.eps,
+            batch_invariant=batch_invariant,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert hidden_states.dim() == 2
         rows, width = hidden_states.shape
-        if hidden_states.is_cuda and torch.version.hip is None:
+        if (
+            not self.batch_invariant
+            and hidden_states.is_cuda
+            and torch.version.hip is None
+        ):
             from rtp_llm.models_py.triton_kernels.common.zero_centered_rms_norm import (
                 is_small_qk_supported,
                 small_qk_rmsnorm_,
@@ -120,6 +137,14 @@ class ZeroCenteredFusedQKRMSNorm(nn.Module):
         q = qkv[:, : self.head_num, :]
         k = qkv[:, self.head_num : self.head_num + self.kv_head_num, :]
         # Materialized before copy_, so reading q/k while writing them is safe.
-        q.copy_(exact_head_rms_norm(q, self.q_weight, self.eps))
-        k.copy_(exact_head_rms_norm(k, self.k_weight, self.eps))
+        q.copy_(
+            exact_head_rms_norm(
+                q, self.q_weight, self.eps, batch_invariant=self.batch_invariant
+            )
+        )
+        k.copy_(
+            exact_head_rms_norm(
+                k, self.k_weight, self.eps, batch_invariant=self.batch_invariant
+            )
+        )
         return qkv.reshape(rows, width)

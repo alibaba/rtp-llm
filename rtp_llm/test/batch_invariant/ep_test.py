@@ -4,7 +4,6 @@ import argparse
 import os
 
 import torch
-import torch.distributed as dist
 
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.config.model_config import ModelConfig

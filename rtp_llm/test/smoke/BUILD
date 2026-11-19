@@ -192,6 +192,12 @@ test_suite(
     ]
 ]
 
+py_library(
+    name = "qwen4_m11_smoke",
+    srcs = ["qwen4_m11_smoke_test.py"],
+    deps = SMOKE_FRAMEWORK_DEPS,
+)
+
 # Frontend, a real FlexLB master, separate prefill/decode, and two ViT workers.
 # Five real requests with the same image check that FlexLB keeps sending
 # image computation to the ViT that already owns the cached embeddings.
