@@ -522,6 +522,11 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     # Internal backends must register parser and factory hooks before the
     # corresponding public argument groups and factories are initialized.
     ensure_backend_entrypoint_loaded()
+    from rtp_llm.utils.fastsafetensors_config import (
+        clear_injected_fastsafetensors_default,
+    )
+
+    clear_injected_fastsafetensors_default()
     parser = EnvArgumentParser(description="RTP LLM")
 
     # 先创建配置对象
@@ -550,6 +555,13 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     configure_loader_page_cache(
         py_env_configs.load_config.loader_drop_page_cache,
         py_env_configs.load_config.loader_drop_page_cache_threshold_mb,
+    )
+
+    from rtp_llm.utils.fastsafetensors_config import configure_fastsafetensors
+
+    configure_fastsafetensors(
+        py_env_configs.load_config.fastsafetensors_config_json,
+        py_env_configs.load_config.fastsafetensors_config,
     )
 
     return py_env_configs

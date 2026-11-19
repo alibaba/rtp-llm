@@ -354,3 +354,36 @@ models_py_test(
         "//rtp_llm/models_py/triton_kernels/moe/test:small_moe_test_support",
     ],
 )
+
+py_test(
+    name = "mega_moe_backend_lifecycle_test",
+    srcs = ["mega_moe_backend_lifecycle_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mega_moe_common_execution_test",
+    srcs = ["mega_moe_common_execution_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+cuda13_sm100_py_test(
+    name = "mega_moe_input_pack_policy_test",
+    srcs = ["mega_moe_input_pack_policy_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+)
+
+# Constructor synchronization is a CPU-only contract; exercise it in normal UT.
+py_test(
+    name = "trtllm_fp4_initialization_test",
+    srcs = ["trtllm_fp4_initialization_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

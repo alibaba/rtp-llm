@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import socket
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -9,6 +12,68 @@ import torch
 
 from rtp_llm.config.collective_config import CollectiveConfig
 from rtp_llm.models_py.distributed import collective_torch as collective
+
+
+class CpuTpBroadcasterPathTest(unittest.TestCase):
+    def test_long_tmpdir_produces_bindable_isolated_paths(self):
+        with (
+            tempfile.TemporaryDirectory(dir="/tmp") as root,
+            patch.dict(
+                os.environ,
+                {
+                    "TMPDIR": os.path.join(root, "worker-" + "x" * 180),
+                    "RTP_LLM_CPU_TP_BROADCASTER_DIR": "",
+                    "RTP_LLM_CPU_TP_BROADCASTER_ID": "path-test",
+                },
+            ),
+        ):
+            config = SimpleNamespace(dp_rank=0, pp_rank=0)
+            make_path = collective._make_cpu_tp_broadcaster_base_path
+            path = make_path(config, 12345)
+            self.assertEqual(path, make_path(config, 12345))
+            self.assertNotEqual(
+                path, make_path(SimpleNamespace(dp_rank=0, pp_rank=1), 12345)
+            )
+            self.assertNotEqual(
+                path, make_path(SimpleNamespace(dp_rank=1, pp_rank=0), 12345)
+            )
+            with patch.dict(os.environ, {"TMPDIR": os.environ["TMPDIR"] + "-other"}):
+                self.assertNotEqual(path, make_path(config, 12345))
+            socket_path = path + "_0.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+                listener.bind(socket_path)
+                self.addCleanup(os.unlink, socket_path)
+
+    def test_explicit_directory_is_preserved(self):
+        with (
+            tempfile.TemporaryDirectory(dir="/tmp") as root,
+            patch.dict(
+                os.environ,
+                {
+                    "TMPDIR": "/unused/" + "x" * 180,
+                    "RTP_LLM_CPU_TP_BROADCASTER_DIR": root,
+                    "RTP_LLM_CPU_TP_BROADCASTER_ID": "path-test",
+                },
+            ),
+        ):
+            path = collective._make_cpu_tp_broadcaster_base_path(
+                SimpleNamespace(dp_rank=0, pp_rank=0), 12345
+            )
+            self.assertEqual(os.path.dirname(path), root)
+
+    def test_explicit_overlong_directory_still_raises(self):
+        with (
+            patch.dict(
+                os.environ,
+                {"RTP_LLM_CPU_TP_BROADCASTER_DIR": "/tmp/" + "x" * 180},
+            ),
+            patch.object(collective.os, "makedirs") as makedirs,
+        ):
+            with self.assertRaisesRegex(ValueError, "UDS path too long"):
+                collective._make_cpu_tp_broadcaster_base_path(
+                    SimpleNamespace(dp_rank=0, pp_rank=0), 12345
+                )
+            makedirs.assert_not_called()
 
 
 class CollectiveTorchCommOpsUnitTest(unittest.TestCase):

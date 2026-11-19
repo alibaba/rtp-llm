@@ -692,4 +692,27 @@ TEST(DecodeRpcServerTest, EarlyCancelWithPrefillAddressUsesControlCapacity) {
     EXPECT_EQ(response.status(), CANCEL_STATUS_ACCEPTED);
 }
 
+TEST(BatchStreamOutputCollectorTest, MetricOnlyMarkersDoNotReplaceTokensOrLoseSpeculativeSamples) {
+    BatchStreamOutputCollector collector;
+    GenerateOutputs            metric;
+    metric.frontend_metric_only = true;
+    metric.frontend_sp_tpot_samples.emplace_back(1, 2.0);
+    ASSERT_TRUE(collector.add(std::move(metric)).ok());
+    EXPECT_TRUE(collector.empty());
+    GenerateOutputs terminal;
+    terminal.request_id = 7;
+    terminal.generate_outputs.emplace_back();
+    terminal.generate_outputs.back().finished   = true;
+    terminal.generate_outputs.back().output_ids = torch::tensor({{3}}, torch::kInt32);
+    terminal.frontend_sp_tpot_samples.emplace_back(2, 4.0);
+    ASSERT_TRUE(collector.add(std::move(terminal)).ok());
+    auto output = collector.finish();
+    ASSERT_EQ(output.generate_outputs.size(), 1u);
+    EXPECT_TRUE(output.generate_outputs.front().finished);
+    EXPECT_EQ(output.generate_outputs.front().output_ids.item<int32_t>(), 3);
+    ASSERT_EQ(output.frontend_sp_tpot_samples.size(), 2u);
+    EXPECT_EQ(output.frontend_sp_tpot_samples.front().first, 1);
+    EXPECT_EQ(output.frontend_sp_tpot_samples.back().first, 2);
+}
+
 }  // namespace rtp_llm

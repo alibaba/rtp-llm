@@ -46,6 +46,7 @@ class ServerConfig:
     """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
+        self.frontend_metrics_enable = False
         self.frontend_server_count = 4
         self.vit_server_count = 1
         self.start_port = DEFAULT_START_PORT
@@ -207,6 +208,8 @@ class LoraConfig:
 
 class LoadConfig:
     def __init__(self):
+        self.fastsafetensors_config_json: Optional[str] = None
+        self.fastsafetensors_config: Optional[str] = None
         self.load_method: str = "auto"
         self.force_cpu_load_weights: bool = False
         self.loader_recycle_handles: bool = True
@@ -796,9 +799,12 @@ class PyEnvConfigs:
             "[concurrency_config]\n" + self.concurrency_config.to_string() + "\n\n"
             "[moe_config]\n" + self.moe_config.to_string() + "\n\n"
             "[master_config]\n" + self.master_config.to_string() + "\n\n"
-            "[jit_config]\n" + self.jit_config.to_string() + "\n\n"
+            "[jit_config]\n"
+            + self.jit_config.to_string()
+            + "\n\n"
             + "[hot_hook_config]\n"
-            + self.hot_hook_config.to_string() + "\n\n"
+            + self.hot_hook_config.to_string()
+            + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
             "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
             "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"

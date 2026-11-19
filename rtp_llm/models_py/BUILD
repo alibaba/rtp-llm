@@ -1,6 +1,11 @@
 load("@arch_config//:arch_select.bzl", "requirement", "triton_deps")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 
+exports_files(
+    ["modules/factory/linear/fixed_m_linear.py"],
+    visibility = ["//rtp_llm/models_py/modules/factory/linear/test:__pkg__"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
@@ -425,4 +430,9 @@ filegroup(
         "kernels/ppu/**/*.py",
     ], exclude = ["**/test/**", "**/tests/**"]) + [":ppu_jit_sources", "//rtp_llm:models/deepseek_v4.py"],
     visibility = ["//visibility:public"],
+)
+
+exports_files(
+    ["model_desc/cp_mtp_hidden_handoff.py"],
+    visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
 )

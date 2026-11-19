@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -269,10 +270,10 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
-    auto                           tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
-    auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                          && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                                    && tp_rank_ == 0 && !warm_up_ && !streams.empty());
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -488,6 +489,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     if (recorded_batch) {
         recorded_batch->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us);
     }
+    FrontendMetricsStep<GenerateStreamPtr> frontend_step(stream_groups.allStreams(),
+                                                         isKmonMetricReportingEnabled() && tp_rank_ == 0 && !warm_up_);
     if (useStreamAsync() && is_decode_only && single_sequence_streams && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -504,6 +507,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
+        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                               tps_execute_time_us,
+                               std::nullopt});
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         return dispatchOutputAsync(stream_groups,
@@ -534,6 +542,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
+        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                               tps_execute_time_us,
+                               std::nullopt});
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         if (profile_step_finish_) {
@@ -548,7 +561,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
                                    RtpLLMTokenPSMetricsCollector&             tps_collector,
                                    int64_t                                    tps_execute_time_us,
                                    const StreamGroups::TokenCountsByPriority& token_counts_by_priority) {
-    if (tp_rank_ > 0) {
+    if (tp_rank_ > 0 || warm_up_ || !isKmonMetricReportingEnabled()) {
         return;
     }
     if (metrics_reporter_) {

@@ -57,7 +57,7 @@ class FakeSelectTopk(nn.Module):
 
 
 class FakeSharedExpert(nn.Module):
-    def forward(self, hidden_states, skip_allreduce=False):
+    def forward(self, hidden_states, x_fp8=None, x_scale=None, skip_allreduce=False):
         return hidden_states * 2
 
 

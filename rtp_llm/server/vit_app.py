@@ -307,9 +307,11 @@ class VitEndpointServer:
 
         self.rpc_server.add_insecure_port(f"0.0.0.0:{grpc_port}")
         self.rpc_server.start()
+        kmonitor.start_serving_when_ready()
         logging.info(f"Vit Server started on grpc port {grpc_port} (bind=0.0.0.0)")
 
     def stop(self):
+        kmonitor.set_serving(False)
         if self.rpc_server is not None:
             self.rpc_server.stop(grace=None)
         if self.mm_rpc_server is not None:

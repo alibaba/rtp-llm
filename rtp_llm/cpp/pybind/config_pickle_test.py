@@ -24,7 +24,14 @@ class DecodeGraphConfigPickleTest(unittest.TestCase):
 
     def test_previous_layouts_keep_defaults(self):
         state = HWKernelConfig().__getstate__()
-        for legacy in (state[:5], state[:7]):
+        for legacy in (
+            state[:5],
+            state[:7],
+            state[:8],
+            state[:9],
+            state[:10],
+            state[:11],
+        ):
             result = HWKernelConfig.__new__(HWKernelConfig)
             result.__setstate__(legacy)
             self.assertFalse(result.enable_decode_cascade_attention)
@@ -242,6 +249,9 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         config.decode_capture_batch_sizes = [2, 7]
         config.enable_dynamic_decode_backend = True
         config.dyn_decode_gate_thresholds = '{"calibration_id":"round-trip"}'
+        config.enable_fuse_kernels = False
+        config.glm5_cp_opt = False
+        config.enable_glm5_cmp = True
 
         restored = pickle.loads(pickle.dumps(config))
 
@@ -254,6 +264,9 @@ class HWKernelConfigPickleTest(unittest.TestCase):
         )
         self.assertEqual(restored.prefill_capture_seq_lens, [17, 23])
         self.assertEqual(restored.decode_capture_batch_sizes, [2, 7])
+        self.assertFalse(restored.enable_fuse_kernels)
+        self.assertFalse(restored.glm5_cp_opt)
+        self.assertTrue(restored.enable_glm5_cmp)
         self.assertTrue(restored.enable_dynamic_decode_backend)
         self.assertEqual(
             restored.dyn_decode_gate_thresholds, config.dyn_decode_gate_thresholds
@@ -271,6 +284,26 @@ class HWKernelConfigPickleTest(unittest.TestCase):
             restored = _new_hw_kernel_config()
             restored.__setstate__(state[:size])
             self.assertIsNone(restored.dyn_decode_gate_thresholds)
+
+    def test_pre_rebase_glm5_fields_do_not_enable_dynamic_decode(self):
+        base = HWKernelConfig().__getstate__()[:10]
+        for fields in ((False,), (True,), (False, False, True)):
+            with self.subTest(fields=fields):
+                restored = _new_hw_kernel_config()
+                restored.__setstate__(base + fields)
+                self.assertFalse(restored.enable_dynamic_decode_backend)
+                self.assertIsNone(restored.dyn_decode_gate_thresholds)
+                self.assertEqual(restored.enable_fuse_kernels, fields[0])
+                self.assertFalse(restored.glm5_cp_opt)
+                self.assertEqual(restored.enable_glm5_cmp, len(fields) == 3)
+
+    def test_main_dynamic_decode_fields_do_not_disable_fusion(self):
+        base = HWKernelConfig().__getstate__()[:10]
+        restored = _new_hw_kernel_config()
+        restored.__setstate__(base + (True, ""))
+        self.assertTrue(restored.enable_dynamic_decode_backend)
+        self.assertEqual(restored.dyn_decode_gate_thresholds, "")
+        self.assertTrue(restored.enable_fuse_kernels)
 
     def test_core_only_tuple_uses_generation_prefill_cuda_graph_defaults(self):
         restored = pickle.loads(pickle.dumps(_LegacyHWKernelConfig()))
@@ -306,7 +339,7 @@ class HWKernelConfigPickleTest(unittest.TestCase):
                 self.assertFalse(restored.enable_dynamic_decode_backend)
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 13, 15, 19, 20):
+        for size in (6, 14, 16, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):

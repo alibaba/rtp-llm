@@ -38,6 +38,32 @@ class StartServerFailureTest(unittest.TestCase):
         exit_parent.assert_called_once_with(1)
         self.assertEqual(exit_context.exception.code, 1)
 
+    def test_warmup_failure_drains_all_children_without_opening_gate(self):
+        configs = PyEnvConfigs()
+        configs.role_config.role_type = RoleType.FRONTEND
+        with (
+            patch(
+                "rtp_llm.start_server.start_frontend_server_impl", return_value=[]
+            ) as frontend,
+            patch("rtp_llm.start_server.start_dash_sc_server_impl", return_value=[]),
+            patch(
+                "rtp_llm.start_server._setup_startup_warmup_health_gate",
+                return_value="/test/gate",
+            ),
+            patch(
+                "rtp_llm.start_server._maybe_run_startup_real_warmup",
+                side_effect=RuntimeError("warmup failed"),
+            ),
+            patch(
+                "rtp_llm.start_server._mark_startup_warmup_health_gate_ready"
+            ) as mark_ready,
+            patch.object(ProcessManager, "run_health_checks", return_value=True),
+            patch.object(ProcessManager, "monitor_and_release_processes"),
+        ):
+            start_server(configs)
+        mark_ready.assert_not_called()
+        self.assertTrue(frontend.call_args.args[-1].is_set())
+
     def test_health_check_failure_after_shutdown_preserves_graceful_exit(self):
         py_env_configs = PyEnvConfigs()
         py_env_configs.role_config.role_type = RoleType.VIT

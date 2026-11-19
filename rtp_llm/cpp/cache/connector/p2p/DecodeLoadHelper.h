@@ -40,6 +40,10 @@ struct P2PSideChannelPayload {
     std::vector<int32_t> position_ids;
     std::map<std::string, TensorPB> first_token_tensors;
     std::optional<PromptLogitsOutputPB> prompt_logits;
+    int64_t                             frontend_context_token_num                  = 0;
+    int64_t                             frontend_context_token_num_with_cache       = 0;
+    int64_t                             frontend_context_execute_time_us            = 0;
+    int64_t                             frontend_context_execute_time_with_cache_us = 0;
     bool                 has_data = false;
 };
 

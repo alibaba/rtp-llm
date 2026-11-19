@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import requests
 
@@ -22,9 +22,7 @@ def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
     return min(decode_test_length, profile_steps) if is_decode else 1
 
 
-def _wait_for_trace_flush(
-    log_path: str, offset: int, budget_s: int
-) -> int:
+def _wait_for_trace_flush(log_path: str, offset: int, budget_s: int) -> int:
     """Wait for the engine's async trace save to complete.
 
     The save worker exports each profiled window on a background thread
@@ -55,9 +53,7 @@ def _wait_for_trace_flush(
         except OSError:
             pass
         time.sleep(0.25)
-    logging.warning(
-        "[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s
-    )
+    logging.warning("[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s)
     return offset
 
 
@@ -149,6 +145,10 @@ def _curl_server_batch_worker(
 
 
 class BatchPerfImpl(object):
+    # Optional process-local validation policy, installed by a specialized entry.
+    # The default leaves existing perf behavior unchanged.
+    response_validator: Optional[Callable[[List[ResponseInfo], int], None]] = None
+
     def __init__(
         self,
         base_port: int,
@@ -166,8 +166,10 @@ class BatchPerfImpl(object):
         profile_runs: Optional[int] = None,
         log_path: str = "",
         log_flush_offset: int = 0,
+        validate_responses: bool = True,
     ):
         self.base_port = base_port
+        self.validate_responses = validate_responses
         self.log_path = log_path
         self.dp_size = dp_size
         self.batch_size = batch_size
@@ -278,6 +280,15 @@ class BatchPerfImpl(object):
             # Too few runs to trim: pool every response of every run instead.
             results = analyze_results(all_measure_responses)
 
+        if not self.validate_responses:
+            # TPS probes must retain failures from every measurement, including
+            # rounds discarded from the latency average and missing responses.
+            results.success_requests = sum(r.success for r in all_measure_responses)
+            results.total_requests = max(
+                self.batch_size * measure_runs, len(all_measure_responses)
+            )
+            results.fail_requests = results.total_requests - results.success_requests
+
         if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that
             # all TP/DP ranks profile the upcoming request.  Requires the
@@ -387,6 +398,10 @@ class BatchPerfImpl(object):
         all_responses: List[ResponseInfo] = []
         for future in futures:
             all_responses.extend(future.result())
+
+        validator = type(self).response_validator
+        if self.validate_responses and validator is not None:
+            validator(all_responses, self.batch_size)
 
         return all_responses
 
