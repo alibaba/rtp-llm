@@ -154,7 +154,6 @@ def _draft_incremental_prefill_geometry(
     geometry = cached_prefill_geometry(self, lengths, host_prefixes, ratio, device)
     prefixes = geometry.prefixes
     expected_cu = geometry.cu_seqlens
-    expected_cu_kv = geometry.cu_kv_seqlens
     check_prefill_metadata_once(
         self,
         checks,
@@ -167,7 +166,7 @@ def _draft_incremental_prefill_geometry(
     )
     if draft_prefix_reuse:
         checks.add(
-            (cu_kv_seqlens != expected_cu_kv).any()
+            (cu_kv_seqlens != geometry.cu_kv_seqlens).any()
             & (cu_kv_seqlens[1:] < cu_kv_seqlens[:-1]).any(),
             "qwen4_exp QSA MTP draft prefix-reuse has invalid local cu_kv_seqlens metadata",
         )
@@ -178,7 +177,7 @@ def _draft_incremental_prefill_geometry(
             ("visible_cu", tuple(host_visible_ends)),
             (cu_kv_seqlens,),
             lambda: checks.add(
-                (cu_kv_seqlens != expected_cu_kv).any(),
+                (cu_kv_seqlens != geometry.cu_kv_seqlens).any(),
                 "qwen4_exp QSA draft incremental prefill cu_kv_seqlens do not match prefix+input lengths",
             ),
         )
@@ -271,10 +270,19 @@ def _draft_incremental_prefill_geometry(
 
     visible_lengths = geometry.visible_lengths
     compressed_lengths = geometry.compressed_lengths
-    final_compressed_lengths = geometry.final_compressed_lengths
-    required_kv_columns = (
-        final_compressed_lengths + kv_entries_per_block - 1
-    ) // kv_entries_per_block
+
+    def add_kv_page_checks() -> None:
+        required_kv_columns = (
+            geometry.final_compressed_lengths + kv_entries_per_block - 1
+        ) // kv_entries_per_block
+        _validate_required_blocks(
+            kv_table,
+            required_kv_columns,
+            pool_blocks=int(kv_pool.shape[0]),
+            tag=INDEXER_KV_TAG,
+            checks=checks,
+        )
+
     check_prefill_metadata_once(
         self,
         checks,
@@ -286,13 +294,7 @@ def _draft_incremental_prefill_geometry(
             int(kv_pool.shape[0]),
         ),
         (kv_table,),
-        lambda: _validate_required_blocks(
-            kv_table,
-            required_kv_columns,
-            pool_blocks=int(kv_pool.shape[0]),
-            tag=INDEXER_KV_TAG,
-            checks=checks,
-        ),
+        add_kv_page_checks,
     )
 
     # A completed group may read committed raw keys preceding the new rows.
