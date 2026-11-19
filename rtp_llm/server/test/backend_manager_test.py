@@ -215,7 +215,6 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                 manager = BackendManager.__new__(BackendManager)
                 manager.py_env_configs = Mock()
                 manager._distributed_server = Mock()
-                manager._mark_serving_when_ready = Mock()
                 config = Mock()
                 config.parallelism_config.world_size = 4
                 config.moe_config.use_all_gather = False
@@ -234,6 +233,7 @@ class BackendManagerDeepEPTest(unittest.TestCase):
                         get_world_info=Mock(),
                         update_worker_addrs=Mock(),
                         validate_hw_kernel_group_args=Mock(),
+                        get_template_lifecycle=Mock(),
                     ),
                     patch.dict(
                         "sys.modules",
@@ -319,6 +319,8 @@ class BackendManagerServiceStartTest(unittest.TestCase):
         with patch(
             "rtp_llm.server.backend_manager.EngineConfig.create",
             return_value=engine_config,
+        ), patch(
+            "rtp_llm.server.backend_manager.get_template_lifecycle"
         ), patch(
             "rtp_llm.server.backend_manager.get_world_info", return_value=None
         ), patch(
