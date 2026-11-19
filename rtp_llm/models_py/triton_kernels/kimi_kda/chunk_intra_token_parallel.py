@@ -52,24 +52,24 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_tg, i_hg = tl.program_id(0), tl.program_id(1)
+    i_tg = tl.program_id(0).to(tl.int64)
+    i_hg = tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
-        i_n = 0
         left, right = 0, N
 
         for _ in range(20):
             if left < right:
                 mid = (left + right) // 2
-                if i_tg < tl.load(cu_seqlens + mid + 1).to(tl.int32):
+                if i_tg < tl.load(cu_seqlens + mid + 1).to(tl.int64):
                     right = mid
                 else:
                     left = mid + 1
         i_n = left
 
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        ).to(tl.int64)
         T = eos - bos
         i_t = i_tg - bos
     else:
@@ -92,8 +92,8 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     beta += bos * H
 
     BK: tl.constexpr = triton.next_power_of_2(K)
-    o_h = tl.arange(0, BH)
-    o_k = tl.arange(0, BK)
+    o_h = tl.arange(0, BH).to(tl.int64)
+    o_k = tl.arange(0, BK).to(tl.int64)
     m_h = (i_hg * BH + o_h) < H
     m_k = o_k < K
 
@@ -126,12 +126,20 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         p_kj_m0 = (p_kj_i0 >= 0) & (p_kj_i0 < (H))
         p_kj_i1 = tl.arange(0, BK).to(tl.int64) + (0)
         p_kj_m1 = (p_kj_i1 >= 0) & (p_kj_i1 < (K))
-        p_kj = (k + j * H * K) + p_kj_i0[:, None] * (K) + p_kj_i1[None, :] * (1)
+        p_kj = (
+            (k + tl.cast(j, tl.int64) * H * K)
+            + p_kj_i0[:, None] * (K)
+            + p_kj_i1[None, :] * (1)
+        )
         p_gj_i0 = tl.arange(0, BH).to(tl.int64) + (i_hg * BH)
         p_gj_m0 = (p_gj_i0 >= 0) & (p_gj_i0 < (H))
         p_gj_i1 = tl.arange(0, BK).to(tl.int64) + (0)
         p_gj_m1 = (p_gj_i1 >= 0) & (p_gj_i1 < (K))
-        p_gj = (g + j * H * K) + p_gj_i0[:, None] * (K) + p_gj_i1[None, :] * (1)
+        p_gj = (
+            (g + tl.cast(j, tl.int64) * H * K)
+            + p_gj_i0[:, None] * (K)
+            + p_gj_i1[None, :] * (1)
+        )
         # [BH, BK]
         b_kj = tl.load(p_kj, mask=p_kj_m0[:, None] & p_kj_m1[None, :], other=0).to(
             tl.float32

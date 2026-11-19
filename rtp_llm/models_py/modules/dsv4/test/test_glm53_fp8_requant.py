@@ -406,7 +406,6 @@ class TestGlm53Fp8Requant(unittest.TestCase):
 
     def test_real_descriptor_postprocess_routing(self):
         from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
-        from rtp_llm.models_py.kernels.cuda import fp8_kernel as exported_fp8
 
         weight, scale = _fixture((128, 512))
         # Each arm traverses the real composite + atomic postprocess consumers.
@@ -441,7 +440,7 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                 with patch.object(
                     deepgemm_wrapper, "is_deep_gemm_e8m0_used", return_value=hardware
                 ), patch.object(
-                    exported_fp8,
+                    fp8_kernel,
                     "requant_weight_ue8m0",
                     wraps=fp8_kernel.requant_weight_ue8m0,
                 ) as requant:

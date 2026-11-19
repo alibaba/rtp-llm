@@ -33,7 +33,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/server:server",
     ],
-    tags = ["manual"],
+    tags = ["glm53_contract", "manual"],
 )
 
 py_test(

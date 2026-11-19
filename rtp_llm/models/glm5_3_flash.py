@@ -40,7 +40,9 @@ from rtp_llm.ops import (
     HybridAttentionType,
     KVCacheSpecDesc,
     KVCacheSpecType,
+    MoeConfig,
     OpaqueBlockEntryCountMode,
+    ParallelismConfig,
 )
 from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import (
@@ -184,6 +186,16 @@ class Glm53FlashModelConfig(ModelConfig):
         "kda_gate_lower_bound",
         "mtp_layer_offset",
     }
+
+    def prepare_moe_backend(
+        self, parallelism_config: ParallelismConfig, moe_config: MoeConfig
+    ) -> None:
+        # A None fallback is also a completed rank agreement. The direct loader
+        # and the service's earlier transport initialization share that decision.
+        if "mega_moe_policy" not in vars(self):
+            self.mega_moe_policy = resolve_moe_policy(
+                self, parallelism_config, moe_config
+            )
 
 
 def parse_glm53_flash_config(
@@ -614,7 +626,6 @@ class Glm53Flash(BaseModel):
             self.parallelism_config.role_type,
             self.max_generate_batch_size,
             self.model_config.gen_num_per_cycle,
-            enabled=os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1",
         )
         if blocks is not None:
             logging.info("GLM53 Decode request-state pool: %d physical blocks", blocks)
@@ -622,9 +633,7 @@ class Glm53Flash(BaseModel):
     def create_model_loader(self) -> ModelLoader:
         from rtp_llm.config.mega_moe import FP8_MEGA_MOE_STRATEGIES
 
-        self.model_config.mega_moe_policy = resolve_moe_policy(
-            self.model_config, self.parallelism_config, self.moe_config
-        )
+        self.model_config.prepare_moe_backend(self.parallelism_config, self.moe_config)
         self.model_config.prefill_mla_cp = use_dedicated_mla_cp(
             self.model_config, self.parallelism_config
         )

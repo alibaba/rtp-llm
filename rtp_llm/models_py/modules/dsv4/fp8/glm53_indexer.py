@@ -17,7 +17,6 @@ What this class does NOT do — by design:
 
 from __future__ import annotations
 
-import os
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
@@ -25,7 +24,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_INDEXER,
     CPContext,
@@ -42,61 +40,34 @@ from rtp_llm.models_py.modules.dsv4.forward_metadata import (
 from rtp_llm.models_py.modules.dsv4.fp8._glm53_indexer_q_quant_triton import (
     indexer_q_fp8_quant_fold,
 )
-from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
-    INDEXER_ENTRY_BYTES,
-    INDEXER_HEAD_DIM,
-)
-from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
-from rtp_llm.models_py.modules.dsv4.fp8.glm53_compressor import (
-    CompressorFP8,
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import INDEXER_HEAD_DIM
+from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     CompressorMeta,
     _CompressorPending,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.glm53_compressor import CompressorFP8
 from rtp_llm.models_py.modules.dsv4.fp8.glm53_indexer_score import (
     fp8_mqa_indexer_score,
     fp8_paged_indexer_score,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.indexer import (
+    FP8IndexerBase,
+    _as_bf16_contig,
+    _flat_1d,
+    _fp8_prefill_score_chunk_rows,
+)
 from rtp_llm.models_py.modules.dsv4.glm53_prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.indexer_topk import select_stable_window_topk
-from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.indexer_grouping import completed_group_lengths_i32
-
-
-def _use_varlen_prefill() -> bool:
-    return os.environ.get("DSV4_VARLEN_PREFILL", "1") != "0"
-
-
-from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
+from rtp_llm.ops import RoleType
 from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-
-def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
-    if t.dtype != torch.bfloat16:
-        t = t.to(torch.bfloat16)
-    if not t.is_contiguous():
-        t = t.contiguous()
-    return t
-
-
-def _flat_1d(t: torch.Tensor) -> torch.Tensor:
-    return t.reshape(-1).contiguous()
-
-
-def _topk_canonicalize_enabled() -> bool:
-    return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
 
 
 def canonicalize_topk_output(out: torch.Tensor) -> None:
     """Sort valid token indices in-place while preserving ``-1`` padding."""
-    if not _topk_canonicalize_enabled():
-        return
     if (
-        metadata_cache() is None
+        out.is_cuda
+        and metadata_cache() is None
         and out.dtype == torch.int32
         and out.ndim == 2
         and (
@@ -125,25 +96,12 @@ def canonicalize_topk_output(out: torch.Tensor) -> None:
     )
 
 
-def _select_topk(logits, starts, ends, out):
+def _select_topk(logits, starts, ends, out, *, canonicalize=False):
     select_stable_window_topk(
         logits, starts, ends, out, getattr(rtp_llm_ops, "topk_v3_tie_break", None)
     )
-    canonicalize_topk_output(out)
-
-
-def _fp8_prefill_score_chunk_rows() -> int:
-    """Rows per non-paged FP8 prefill score chunk.
-
-    ``fp8_mqa_indexer_score`` returns dense ``[M, T]`` logits. Long-context
-    CP prefill can have hundreds of thousands of local query rows and K rows,
-    so the one-shot output is not viable. Keep the default aligned with the
-    other DSV4 chunk knobs; lower it with the env var on tighter HBM budgets.
-    """
-    return dsv4_chunk_tokens_from_env(
-        "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS",
-        min_value=0,
-    )
+    if canonicalize:
+        canonicalize_topk_output(out)
 
 
 class _IndexerFP8PrefillMeta(NamedTuple):
@@ -219,7 +177,7 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     max_request_keys: Optional[int] = None
 
 
-class IndexerFP8(PoolBackedModule):
+class IndexerFP8(FP8IndexerBase):
     """FP8 lightning indexer. DeepGEMM-only score; nested
     ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
 
@@ -243,6 +201,7 @@ class IndexerFP8(PoolBackedModule):
         compressor_pre_norm_weight: Optional[torch.Tensor] = None,
         compressor_pre_norm_bias: Optional[torch.Tensor] = None,
         rotate_q: bool = False,
+        role_type: Optional[RoleType] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
@@ -268,13 +227,7 @@ class IndexerFP8(PoolBackedModule):
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
         self.rotate_q = bool(rotate_q)
-        self._glm_weights_chunk_rows = (
-            int(os.environ.get("GLM53_INDEXER_WEIGHTS_CHUNK_ROWS", "0"))
-            if compressor_kpool_mode
-            else 0
-        )
-        if self._glm_weights_chunk_rows < 0:
-            raise ValueError("GLM53_INDEXER_WEIGHTS_CHUNK_ROWS must be nonnegative")
+        self.role_type = role_type
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
 
@@ -339,13 +292,6 @@ class IndexerFP8(PoolBackedModule):
     def _compute_weights(self, x: torch.Tensor) -> torch.Tensor:
         """Project per-head gates in the checkpoint weight's native dtype."""
         weight = self.weights_proj
-        rows = getattr(self, "_glm_weights_chunk_rows", 0)
-        if rows and weight.dtype == torch.float32:
-            flat = x.reshape(-1, x.shape[-1])
-            projected = fixed_m_linear(
-                lambda chunk: F.linear(chunk.to(weight.dtype), weight), flat, rows
-            )
-            return projected.view(*x.shape[:-1], weight.shape[0])
         return F.linear(x if x.dtype == weight.dtype else x.to(weight.dtype), weight)
 
     def _fuse_glm_q_quant(self) -> bool:
@@ -422,6 +368,7 @@ class IndexerFP8(PoolBackedModule):
                         starts[begin:end],
                         ends[begin:end],
                         out[begin:end],
+                        canonicalize=self.role_type == RoleType.PREFILL,
                     )
                 del logits
             return out
@@ -458,53 +405,14 @@ class IndexerFP8(PoolBackedModule):
                         starts[begin:end],
                         ends[begin:end],
                         out[begin:end],
+                        canonicalize=self.role_type == RoleType.PREFILL,
                     )
                 del logits
         return out
 
     # --------------------------------------------------------------
-    # Pool propagation to nested compressor
+    # Gather paged indexer keys for prefill
     # --------------------------------------------------------------
-    def _propagate_pool_to_nested(self) -> None:
-        self.compressor.set_pool_context(
-            self._kv_pool_view,
-            self._kv_block_table,
-            self._kv_eb,
-            self._state_pool_3d,
-            self._state_block_table,
-            self._state_eb,
-            state_tokens_per_block=self._state_tokens_per_block,
-            kv_tokens_per_block=self._kv_tokens_per_block,
-            kv_owner_tokens_per_block=self._kv_owner_tokens_per_block,
-        )
-
-    def _clear_nested_pool(self) -> None:
-        compressor = getattr(self, "compressor", None)
-        if compressor is not None:
-            compressor.clear_pool_context()
-
-    def clear_pool_context(self) -> None:
-        super().clear_pool_context()
-        self._clear_nested_pool()
-
-    def set_cp_ctx(self, cp_ctx: Optional[CPContext]) -> None:
-        """Bind the per-forward CPContext (Phase F / Phase-2).
-
-        Phase-2 lifts the prior B==1 restriction: ``prepare`` already
-        consumes ``cp_ctx.input_lengths_global`` as a per-request array
-        (computing ``T_per_req`` elementwise), so multi-request CP just
-        works at this layer. The nested compressor's CP context is
-        bound by ``V4Transformer._propagate_cp_ctx`` separately (it walks
-        ``indexer.compressor`` directly) so we don't need to forward
-        here. Accepting ``None`` with cp_size <= 1 is the no-op.
-        """
-        if cp_ctx is not None and cp_ctx.cp_size > 1:
-            assert (
-                cp_ctx.input_lengths_global is not None
-                and cp_ctx.input_lengths_global.numel() >= 1
-            ), "IndexerFP8 CP requires cp_ctx.input_lengths_global"
-        self._cp_ctx = cp_ctx
-
     def _gather_prefill_k_cache(
         self,
         attention_inputs: _IndexerFP8PrefillMeta,
@@ -593,45 +501,8 @@ class IndexerFP8(PoolBackedModule):
         batched_rope: bool = False,
         apply_rope: bool = True,
     ) -> torch.Tensor:
-        """qr → wq_b → unflatten → RoPE → q.
-
-        Output layout mirrors qr's leading dims:
-          * qr ``[B, S, q_lora]``  → q ``[B, S, H, D]``  (legacy 3D)
-          * qr ``[T_total, q_lora]`` → q ``[T_total, H, D]`` (Phase-3a flat)
-
-        FP8 decode/indexer runs on CUDA. RoPE is always applied through the
-        shared Triton kernel, which supports both ``[B, S, H, D]`` and flat
-        ``[T, H, D]`` decode shapes.
-        """
-        # Framework FP8 linear (CudaFp8DeepGEMMLinear) requires 2D input;
-        # flatten leading dims and restore.
-        with record_function_range("dsv4.fp8.indexer.compute_q.wq_b"):
-            if qr.dim() > 2:
-                shape = qr.shape
-                q = self.wq_b(qr.reshape(-1, shape[-1])).view(
-                    *shape[:-1], self.n_heads * self.head_dim
-                )
-            else:
-                q = self.wq_b(qr)
-            q = q.unflatten(-1, (self.n_heads, self.head_dim))
-        if not apply_rope:
-            if self.rotate_q and not self._fuse_glm_q_quant():
-                from rtp_llm.models_py.modules.base.cuda.indexer_op import (
-                    _rotate_activation,
-                )
-
-                q = _rotate_activation(q)
-            return q
-        with record_function_range("dsv4.fp8.indexer.compute_q.rope"):
-            rope_view = q[..., -self.rope_head_dim :]
-            if not rope_view.is_cuda:
-                raise RuntimeError("IndexerFP8._compute_indexer_q expects CUDA tensors")
-            from rtp_llm.models_py.modules.dsv4._rope_only_triton import (
-                rope_only_inplace,
-            )
-
-            rope_only_inplace(rope_view, freqs_cis)
-        if self.rotate_q:
+        q = super()._compute_indexer_q(qr, freqs_cis, batched_rope, apply_rope)
+        if self.rotate_q and (apply_rope or not self._fuse_glm_q_quant()):
             from rtp_llm.models_py.modules.base.cuda.indexer_op import (
                 _rotate_activation,
             )
@@ -703,7 +574,6 @@ class IndexerFP8(PoolBackedModule):
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             fuse_gate_quant = (
                 self._fuse_glm_q_quant()
-                and not self._glm_weights_chunk_rows
                 and x.is_contiguous()
                 and x.dtype == torch.bfloat16
                 and self.head_dim == 128
@@ -1279,50 +1149,6 @@ class IndexerFP8(PoolBackedModule):
     #
     # Non-overlap callers must keep using :meth:`forward` unchanged.
     # --------------------------------------------------------------
-    def start_prefill_nested_compressor(
-        self,
-        x: torch.Tensor,
-        sp_int: int,
-        *,
-        meta: Optional[CompressorMeta],
-        cp_gather_stream: Optional[Any] = None,
-        profile_label: Optional[str] = None,
-        # REQUIRED, never Optional — see :meth:`forward`. Do NOT make Optional.
-        workspace: "PrefillWorkspace",
-    ) -> Optional[_CompressorPending]:
-        """Begin the nested compressor's CP all-gather without waiting.
-
-        Mirrors the first half of :meth:`forward` up to the synchronous
-        compressor call: warmup gate (returns ``None`` when no pool is
-        bound), ``freqs_cis`` propagation, and pool propagation to the
-        nested compressor. The fused KV/gate projection + NCCL gather
-        are then enqueued on the caller's ``cp_gather_stream`` via
-        :meth:`CompressorFP8.start_prefill`.
-
-        ``None`` return means warmup — callers must either fall back to
-        :meth:`forward` (which also returns the empty-topk shape) or
-        pass ``None`` straight to :meth:`forward_with_pending_nested`
-        (which detects warmup via the same pool check and returns the
-        empty-topk shape, after a no-op ``finish_prefill(None)``).
-        """
-        if (
-            self._kv_block_table is None
-            or self._kv_pool_view is None
-            or self._kv_eb <= 0
-        ):
-            return None
-        if not self.compressor.kpool_mode and self.compressor.freqs_cis is None:
-            self.compressor.freqs_cis = self.freqs_cis
-        self._propagate_pool_to_nested()
-        kwargs = {
-            "meta": meta,
-            "cp_gather_stream": cp_gather_stream,
-            "workspace": workspace,
-        }
-        if profile_label is not None:
-            kwargs["profile_label"] = profile_label
-        return self.compressor.start_prefill(x, sp_int, **kwargs)
-
     def forward_with_pending_nested(
         self,
         x: torch.Tensor,

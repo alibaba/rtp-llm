@@ -1,6 +1,5 @@
 """Pinned upstream sources for the isolated Blackwell extension ABIs."""
 
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("@rtp_blackwell_config//:pins.bzl", "DEEP_GEMM_WHEEL", "MHC_SOURCE")
 
@@ -76,16 +75,36 @@ _wheel_lock = repository_rule(
     attrs = {"url": attr.string(mandatory = True), "sha256": attr.string(mandatory = True)},
 )
 
+def _deep_gemm_wheel_sources_impl(ctx):
+    # The published wheel includes the original csrc and JIT headers.
+    ctx.download_and_extract(ctx.attr.url, output = "wheel", sha256 = ctx.attr.sha256, type = "zip")
+    dist_info = [p for p in ctx.path("wheel").readdir() if p.basename.endswith(".dist-info")]
+    if len(dist_info) != 1:
+        fail("Expected one DeepGEMM wheel metadata directory, found {}".format(dist_info))
+    ctx.symlink("wheel/deep_gemm/csrc", "csrc")
+    ctx.symlink("wheel/deep_gemm", "deep_gemm")
+    ctx.symlink(dist_info[0].get_child("LICENSE"), "LICENSE")
+    ctx.file("BUILD.bazel", ctx.attr.build_file_content)
+
+_deep_gemm_wheel_sources = repository_rule(
+    implementation = _deep_gemm_wheel_sources_impl,
+    attrs = {
+        "url": attr.string(mandatory = True),
+        "sha256": attr.string(mandatory = True),
+        "build_file_content": attr.string(mandatory = True),
+    },
+)
+
 def blackwell_repositories():
     _wheel_lock(name = "rtp_blackwell_wheel_lock", url = DEEP_GEMM_WHEEL.url, sha256 = DEEP_GEMM_WHEEL.sha256)
     for name, source in BLACKWELL_SOURCES.items():
         repository_name = "rtp_blackwell_" + name
         build_file = _BUILD.format(srcs = repr(source.srcs))
-        if hasattr(source, "git_remote"):
-            new_git_repository(
+        if hasattr(source, "wheel_url"):
+            _deep_gemm_wheel_sources(
                 name = repository_name,
-                remote = source.git_remote,
-                commit = source.commit,
+                url = source.wheel_url,
+                sha256 = source.sha256,
                 build_file_content = build_file,
             )
             continue

@@ -1,4 +1,3 @@
-import os
 from types import SimpleNamespace
 from typing import Any, Dict, Optional, Tuple
 
@@ -13,6 +12,7 @@ from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     tensor_key,
 )
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.hybrid.indexer import _is_decode_phase
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     fp8_pool_view,
     fp32_state_pool_view,
@@ -138,9 +138,9 @@ class Indexer(nn.Module):
         # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
         # out of the forward path so it's free at decode (no env / config
         # lookup per token).
+        enable_fusion = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_logits_head_gate = (
-            fuse_kernels_enabled(hw_kernel_config)
-            and fused_logits_head_gate is not None
+            enable_fusion and fused_logits_head_gate is not None
         )
 
         self.index_n_heads = attn_config.indexer_head_num
@@ -218,6 +218,7 @@ class Indexer(nn.Module):
                 compressor_pre_norm_weight=weights[W.mla_indexer_k_norm_w],
                 compressor_pre_norm_bias=weights[W.mla_indexer_k_norm_b],
                 rotate_q=True,
+                role_type=getattr(parallelism_config, "role_type", None),
             )
             return
 
@@ -259,6 +260,16 @@ class Indexer(nn.Module):
         ):
             self.weights_proj.weight = self.weights_proj.weight.contiguous()
         self.cos_sin_cache = global_weights[W.rope_cos_sin_cache]
+        # The fused RoPE kernels require equal rotary/non-rotary halves and
+        # power-of-two heads, matching the common Indexer geometry contract.
+        fuse_rope_quant = (
+            enable_fusion
+            and self.index_head_dim == 128
+            and self.rope_head_dim == 64
+            and self.index_n_heads > 0
+            and self.index_n_heads & (self.index_n_heads - 1) == 0
+            and self.cos_sin_cache.shape[-1] == self.rope_head_dim
+        )
 
         self.indexer_op = IndexerOp(
             index_n_heads=self.index_n_heads,
@@ -270,6 +281,7 @@ class Indexer(nn.Module):
             block_size=self.block_size,
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
+            enable_fuse_kernels=fuse_rope_quant,
         )
 
     def _bind_compressed_pools(
@@ -334,18 +346,12 @@ class Indexer(nn.Module):
         kv_block_table, kv_eb = self._bind_compressed_pools(
             global_kv_cache, group_inputs
         )
-        is_multi_token_decode = bool(
-            getattr(attention_inputs, "is_target_verify", False)
-        ) or bool(getattr(attention_inputs, "is_draft_extend", False))
-        is_regular_prefill = bool(attention_inputs.is_prefill) and not (
-            is_multi_token_decode
-        )
         cp_ctx = None
         workspace = None
         sequence_cp = self._prefill_cp_enabled()
         cache_sharded = self._prefill_cache_sharded()
         try:
-            if is_regular_prefill:
+            if not _is_decode_phase(attention_inputs):
                 position_ids = fmha_params.positions_d
                 req_id_per_token = fmha_params.batch_indice_d
                 input_lengths = attention_inputs.input_lengths
@@ -568,16 +574,8 @@ class Indexer(nn.Module):
             and int(getattr(parallelism_config, "tp_size", 1)) > 1
         )
 
-    def _prefill_cp_fused_quant_enabled(self) -> bool:
-        return os.environ.get(
-            "DSV4_CP_PREFILL_INDEXER_FUSED_QUANT", "1"
-        ).strip().lower() in ("1", "true", "yes", "on")
-
-    def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
-        return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
-
     def _is_sparse_prefill_sharded(self, attention_inputs: Any) -> bool:
-        return bool(attention_inputs.is_prefill) and (
+        return not _is_decode_phase(attention_inputs) and (
             self._prefill_cp_enabled() or self._prefill_cache_sharded()
         )
 
@@ -683,8 +681,7 @@ class Indexer(nn.Module):
         k = _project_with_optional_fp8(self.wk, x, x_fp8, x_scale)
         k = self.k_norm(k)
 
-        if self._prefill_cp_enabled() or self._prefill_cache_sharded():
-            assert cp_params is not None
+        if cp_params is not None:
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
                 q,
                 k,
@@ -739,10 +736,7 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> torch.Tensor:
-        is_multi_token_decode = bool(
-            getattr(attention_inputs, "is_target_verify", False)
-        ) or bool(getattr(attention_inputs, "is_draft_extend", False))
-        if not attention_inputs.is_prefill or is_multi_token_decode:
+        if _is_decode_phase(attention_inputs):
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
             )
@@ -815,7 +809,8 @@ class Indexer(nn.Module):
             self.indexer_op.quant_k_only(key, kv_cache, fmha_params.slot_mapping)
             return None
 
-        if self._is_sparse_prefill_sharded(attention_inputs):
+        sharded_prefill = self._is_sparse_prefill_sharded(attention_inputs)
+        if sharded_prefill:
             assert (
                 cp_params is not None
             ), "cp_params is required for sharded sparse prefill"
@@ -823,8 +818,8 @@ class Indexer(nn.Module):
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
         if (
-            self._is_sparse_prefill_sharded(attention_inputs)
-            and self._prefill_cp_fused_quant_enabled()
+            sharded_prefill
+            and self.indexer_op.enable_fuse_kernels
             and cp_params.full_rope_pos_ids is not None
         ):
             q_fp8, q_scale = self._fused_forward_prefill_cp(
@@ -839,7 +834,7 @@ class Indexer(nn.Module):
                 q_c_scale,
             )
         elif (
-            self._fuse_logits_head_gate
+            self.indexer_op.enable_fuse_kernels
             and not attention_inputs.is_prefill
             and cp_params is None
         ):
@@ -858,7 +853,7 @@ class Indexer(nn.Module):
                 q_lora,
                 hidden_states,
                 fmha_params,
-                cp_params,
+                cp_params if sharded_prefill else None,
                 x_fp8,
                 x_scale,
                 q_c_fp8,

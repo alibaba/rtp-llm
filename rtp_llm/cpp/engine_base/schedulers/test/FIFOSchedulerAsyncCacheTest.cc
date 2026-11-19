@@ -69,14 +69,16 @@ protected:
         DeviceTestBase::TearDown();
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler(size_t   max_generate_batch_size     = 100,
-                                                   size_t   max_inited_kv_cache_streams = 0,
-                                                   bool     async_cache_prepare         = false,
-                                                   RoleType role                        = RoleType::PDFUSION,
-                                                   int64_t  chunk_size                  = 0,
-                                                   int64_t  tp_rank                     = 0) {
+    std::shared_ptr<FIFOScheduler> createScheduler(size_t      max_generate_batch_size     = 100,
+                                                   size_t      max_inited_kv_cache_streams = 0,
+                                                   bool        async_cache_prepare         = false,
+                                                   RoleType    role                        = RoleType::PDFUSION,
+                                                   int64_t     chunk_size                  = 0,
+                                                   int64_t     tp_rank                     = 0,
+                                                   std::string model_type                  = "") {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
+        model_config.model_type  = model_type;
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                           = max_generate_batch_size;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size       = 8192;
@@ -417,6 +419,15 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundWorkerPreparesWithoutScheduler
     EXPECT_EQ(initial_malloc_calls_, 1);
     EXPECT_TRUE(scheduler->stop().ok());
     EXPECT_FALSE(scheduler->cache_prepare_thread_.joinable());
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testGlmPrefillPreparesCacheWithoutAnOverride) {
+    auto prefill = createScheduler(1, 0, false, RoleType::PREFILL, 0, 0, "glm5_3_flash");
+    EXPECT_TRUE(prefill->async_cache_prepare_enabled_);
+    EXPECT_FALSE(createScheduler(1, 0, false, RoleType::DECODE, 0, 0, "glm5_3_flash")->async_cache_prepare_enabled_);
+    EXPECT_FALSE(createScheduler(1, 0, false, RoleType::PREFILL, 128, 0, "glm5_3_flash")->async_cache_prepare_enabled_);
+    EXPECT_FALSE(createScheduler(1, 0, false, RoleType::PREFILL, 0, 1, "glm5_3_flash")->async_cache_prepare_enabled_);
+    EXPECT_FALSE(createScheduler(1, 0, false, RoleType::PREFILL)->async_cache_prepare_enabled_);
 }
 
 TEST_F(FIFOSchedulerAsyncCacheTest, testBackgroundPolicyKeepsDecodeOtherRanksAndChunkPath) {

@@ -16,15 +16,6 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         help="（设备参数）为设备参数设置的最大 context batch size，影响默认调度器的凑批决策。",
     )
     fifo_scheduler_group.add_argument(
-        "--async_cache_prepare",
-        env_name="RTP_LLM_ASYNC_PREPARE_CACHE",
-        bind_to=[(fifo_scheduler_config, "async_cache_prepare")],
-        type=str2bool,
-        default=False,
-        help="在 FIFO 后台线程准备初次 KV 分配与缓存加载，保留调度器准入；"
-        "仅非 DECODE 角色的 TP rank 0 生效，chunked prefill 保留原事务路径。",
-    )
-    fifo_scheduler_group.add_argument(
         "--max_batch_tokens_size",
         env_name="MAX_BATCH_TOKENS_SIZE",
         bind_to=[(fifo_scheduler_config, "max_batch_tokens_size")],

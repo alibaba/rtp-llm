@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -523,8 +522,7 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Fixed before CUDA graph capture; graph clones retain the same policy.
         self._drain_pinned_mla_before_moe = (
-            os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
-            and layer_idx in config.moe_layer_index
+            layer_idx in config.moe_layer_index
             and moe_config.moe_strategy in MEGA_MOE_STRATEGIES
         )
 

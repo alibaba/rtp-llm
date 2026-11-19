@@ -14,7 +14,14 @@ from typing import Iterable, Sequence
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
+
+
+def zigzag_local_rows(query_rows: int, world_size: int) -> int:
+    """Padded query rows owned by one rank for a single zigzag request."""
+    alignment = 2 * world_size
+    return 2 * ((query_rows + alignment - 1) // alignment)
 
 
 @dataclass(frozen=True)
@@ -136,8 +143,7 @@ class ZigzagTokenLayout:
             )
 
         self.chunk_lens = tuple(
-            2 * ((q_len + 2 * self.world_size - 1) // (2 * self.world_size))
-            for q_len in self.q_lens
+            zigzag_local_rows(q_len, self.world_size) for q_len in self.q_lens
         )
         self.local_cp_tokens = sum(self.chunk_lens)
         self.fragments = self._build_fragments()

@@ -1,11 +1,10 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.distributed import collective_torch
+from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.modules.glm53_mtp_indexer import (
     Glm53MtpIndexerSeeds,
     mtp_indexer_share_active,
@@ -16,21 +15,19 @@ class GlmMtpIndexerShareTest(unittest.TestCase):
     def test_activation_requires_checkpoint_opt_in_and_supported_geometry(self):
         config = SimpleNamespace(index_share_for_mtp_iteration=True)
         parallelism = SimpleNamespace(
-            prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+            pp_size=1, prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
         )
-        for value in ("0", "true", "1"):
-            with patch.dict(os.environ, {"RTP_LLM_ENABLE_MTP_INDEXER_SHARE": value}):
-                self.assertEqual(
-                    mtp_indexer_share_active(config, parallelism, 1, 2), value == "1"
-                )
-                self.assertFalse(mtp_indexer_share_active(config, parallelism, 2, 2))
-                self.assertFalse(mtp_indexer_share_active(config, parallelism, 1, 0))
-        with patch.dict(os.environ, {"RTP_LLM_ENABLE_MTP_INDEXER_SHARE": "1"}):
-            config.index_share_for_mtp_iteration = False
-            self.assertFalse(mtp_indexer_share_active(config, parallelism, 1, 2))
-            config.index_share_for_mtp_iteration = True
-            parallelism.prefill_cp_config.is_enabled = lambda: True
-            self.assertFalse(mtp_indexer_share_active(config, parallelism, 1, 2))
+        self.assertTrue(mtp_indexer_share_active(config, parallelism, 1, 2))
+        self.assertFalse(mtp_indexer_share_active(config, parallelism, 2, 2))
+        self.assertFalse(mtp_indexer_share_active(config, parallelism, 1, 0))
+        config.index_share_for_mtp_iteration = False
+        self.assertFalse(mtp_indexer_share_active(config, parallelism, 1, 2))
+        config.index_share_for_mtp_iteration = True
+        parallelism.pp_size = 2
+        self.assertFalse(mtp_indexer_share_active(config, parallelism, 1, 2))
+        parallelism.pp_size = 1
+        parallelism.prefill_cp_config.is_enabled = lambda: True
+        self.assertFalse(mtp_indexer_share_active(config, parallelism, 1, 2))
 
     def test_accepted_rows_expand_in_request_order_with_frozen_raw_tail(self):
         seeds = Glm53MtpIndexerSeeds(4, 2, 4, "cpu")
@@ -120,7 +117,7 @@ class GlmMtpIndexerShareTest(unittest.TestCase):
                             )
 
                     def reduce(tensor, group):
-                        self.assertEqual(group, collective_torch.Group.TP)
+                        self.assertEqual(group, Group.TP)
                         self.assertEqual(tuple(tensor.shape), (len(q_lens), 2))
                         contributions.append(tensor.clone())
                         return expected_pooled
@@ -178,36 +175,6 @@ class GlmMtpIndexerShareTest(unittest.TestCase):
                 torch.tensor([0], dtype=torch.int32),
                 torch.tensor([0, 1], dtype=torch.int32),
             )
-
-    def test_cpu_graph_choice_group_is_lazy_reused_and_topology_checked(self):
-        old_config = collective_torch._parallelism_config
-        old_group = collective_torch._mtp_indexer_cpu_world_group
-        try:
-            collective_torch._parallelism_config = SimpleNamespace(
-                world_size=2, ep_size=2, pp_size=1
-            )
-            collective_torch._mtp_indexer_cpu_world_group = None
-            with (
-                patch.dict(os.environ, {"RTP_LLM_ENABLE_MTP_INDEXER_SHARE": "1"}),
-                patch.object(torch.distributed, "is_gloo_available", return_value=True),
-                patch.object(
-                    torch.distributed, "new_group", return_value=object()
-                ) as create,
-            ):
-                first = collective_torch._get_or_create_mtp_indexer_cpu_world_group()
-                self.assertIs(
-                    first, collective_torch._get_or_create_mtp_indexer_cpu_world_group()
-                )
-                create.assert_called_once()
-                self.assertEqual(create.call_args.kwargs["ranks"], [0, 1])
-                self.assertEqual(create.call_args.kwargs["backend"], "gloo")
-                collective_torch._mtp_indexer_cpu_world_group = None
-                collective_torch._parallelism_config.ep_size = 1
-                with self.assertRaisesRegex(RuntimeError, "EP == WORLD"):
-                    collective_torch._get_or_create_mtp_indexer_cpu_world_group()
-        finally:
-            collective_torch._parallelism_config = old_config
-            collective_torch._mtp_indexer_cpu_world_group = old_group
 
 
 if __name__ == "__main__":

@@ -11,14 +11,12 @@ import torch
 
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.utils import RCP_LN2
+from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_o import chunk_gla_fwd_o_gk
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h_cublas,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk_intra import (
     chunk_kda_fwd_intra,
-)
-from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk_o import (
-    chunk_gla_fwd_o_gk,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.gate import (
     kda_gate_chunk_cumsum,

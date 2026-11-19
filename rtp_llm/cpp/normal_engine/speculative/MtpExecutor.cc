@@ -590,15 +590,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
-    const auto& draft_config = propose_params->getEngineInitParams().model_config_;
-    const bool  glm53_draft  = params.model_config_.model_type == "glm5_3_flash" && !is_dspark_;
-    const bool  indexer_opt_in =
-        glm53_draft && readEnvFlag("RTP_LLM_ENABLE_MTP_INDEXER_SHARE", "mtp-indexer-share", "requested");
-    const bool python_share_capable = pythonDraftSupportsMtpIndexerShare(params.py_sp_model);
-    const bool draft_cp_enabled =
+    const auto& draft_config         = propose_params->getEngineInitParams().model_config_;
+    const bool  glm53_draft          = params.model_config_.model_type == "glm5_3_flash" && !is_dspark_;
+    const bool  python_share_capable = pythonDraftSupportsMtpIndexerShare(params.py_sp_model);
+    const bool  draft_cp_enabled =
         params.parallelism_config.prefill_cp_config.is_enabled()
         || propose_params->getEngineInitParams().parallelism_config.prefill_cp_config.is_enabled();
-    mtp_indexer_prefill_seed_enabled_ = indexer_opt_in && python_share_capable
+    mtp_indexer_prefill_seed_enabled_ = glm53_draft && python_share_capable
                                         && draft_config.index_share_for_mtp_iteration && draft_config.num_layers == 1
                                         && draft_config.attn_config.indexer_topk > 0 && !draft_cp_enabled
                                         && params.parallelism_config.pp_size == 1;
@@ -620,12 +618,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         };
         uses_ep_collectives = requires_ep_sync(params.py_model) || requires_ep_sync(params.py_sp_model);
     }
-    mtp_indexer_graph_choice_world_sync_ =
-        uses_ep_collectives && params.parallelism_config.ep_size > 1 && params.parallelism_config.world_size > 1;
-    if (mtp_indexer_graph_choice_world_sync_) {
-        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.ep_size == params.parallelism_config.world_size,
-                                "GLM53 MegaMoE MTP indexer sharing requires EP == WORLD");
+    if (uses_ep_collectives && params.parallelism_config.ep_size != params.parallelism_config.world_size) {
+        // Graph clones have independent symmetric buffers. A partial expert group
+        // cannot coordinate the seed/reuse choice on the world communicator.
+        mtp_indexer_share_enabled_ = false;
     }
+    mtp_indexer_graph_choice_world_sync_ =
+        mtp_indexer_share_enabled_ && uses_ep_collectives && params.parallelism_config.world_size > 1;
     if (glm53_draft) {
         RTP_LLM_LOG_INFO("[MTP indexer share] enabled=%d prefill_seed=%d checkpoint_capability=%d "
                          "python_capability=%d context_parallel=%d world_choice=%d",
@@ -902,14 +901,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                        /*enable_cache_store=*/true,
                                        mtp_indexer_share_enabled_ ? MtpIndexerRole::REUSE : MtpIndexerRole::NORMAL));
             }
-            const bool force_glm53_draft_graph =
-                glm53_draft && readEnvFlag("RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH", "mtp-draft-graph", "force");
-            const bool disable_glm53_draft_graph =
-                glm53_draft && readEnvFlag("DISABLE_SP_PREFILL_CUDA_GRAPH", "mtp-draft-graph", "disabled");
-            const bool capture_draft_prefill = enable_cuda_graph
-                                               && (!glm53_draft
-                                                   || (!draft_cp_enabled && !disable_glm53_draft_graph
-                                                       && (force_glm53_draft_graph || mtp_indexer_share_enabled_)));
+            const bool capture_draft_prefill =
+                enable_cuda_graph
+                && (!glm53_draft
+                    || (!draft_cp_enabled && (role_type_ == RoleType::DECODE || mtp_indexer_share_enabled_)));
             RTP_LLM_CHECK_WITH_INFO(!mtp_indexer_share_enabled_ || capture_draft_prefill,
                                     "MTP indexer sharing requires the draft-extend CUDA graph");
             if (capture_draft_prefill || is_dspark_) {
@@ -3229,7 +3224,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         if (mtp_indexer_graph_choice_world_sync_ || parallelism_config_.tp_size > 1) {
             auto seed_flag = torch::tensor({isTpRank0() && !all_seeded ? 1 : 0}, torch::kInt32);
             if (mtp_indexer_graph_choice_world_sync_) {
-                seed_flag = execAllReduce({seed_flag, ReduceOp::Sum, ParallelMode::WORLD, torch::Tensor()}).buffer;
+                seed_flag = execAllReduce({seed_flag, ReduceOp::Sum, ParallelMode::WORLD_CPU, torch::Tensor()}).buffer;
             } else {
                 execBroadcastCpu({{seed_flag}, 0});
             }

@@ -36,7 +36,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     kv_cache_group = parser.add_argument_group("KVCache")
     kv_cache_group.add_argument(
         "--shared_hybrid_cache",
-        env_name="RTP_LLM_SHARED_HYBRID_CACHE",
+        cli_only=True,
         bind_to=(kv_cache_config, "shared_hybrid_cache"),
         type=int,
         choices=[-1, 0, 1],

@@ -2,8 +2,7 @@
 
 """Model-local GLM53 mHC post/pre composition.
 
-The model's existing DSV4_MHC_FUSED_POST_PRE gate chooses this helper at its two
-non-Mega seams. This module adds no environment switch or generic HC dispatch.
+Decode and target verification use this helper between consecutive HC layers.
 Eligible inference uses the source fixed-FP32 projection and owns all outputs.
 Unsupported source shapes keep main's post+pre semantics, including its possible
 in-place residual alias; do not infer owned fallback outputs from this helper.

@@ -28,41 +28,20 @@ can be unit-tested independently.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather
-from rtp_llm.models_py.modules.dsv4.cp import (
-    CPContext,
-    build_kv_allgather_restore_indices,
-    cp_actual_owned_kv_lens,
-    cp_padded_local_kv_lens,
-)
+from rtp_llm.models_py.modules.dsv4.cp import CPContext
 from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
-
-
-@dataclass
-class IndexerCPChunkPlan:
-    """Per-chunk metadata so indexer.py only computes restore once per chunk."""
-
-    cp_ctx: CPContext
-    # Per-request KV length (in indexer-pool entries) for the chunk's req slice.
-    per_req_total_kv_lens: torch.Tensor  # [b_chunk] int64
-    # Per-rank padded local lengths (== n_virtual_blocks * block_size).
-    per_req_local_kv_lens: torch.Tensor  # [b_chunk] int64
-    # Per-rank actual owned lengths for the current cp_rank. The last owned
-    # block may be partial; callers must not read past this from the pool.
-    per_req_actual_local_kv_lens: torch.Tensor  # [b_chunk] int64
-    total_local_T: int
-    total_actual_local_T: int
-    # restore_indices into [cp_size * total_local_T] gathered rows.
-    restore_indices: torch.Tensor  # [chunk_T] int64
-    block_size: int
-    owner_block_size: int
-    actual_local_cu: Optional[torch.Tensor] = None
+from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_cp_assembler as shared
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_cp_assembler import (
+    IndexerCPChunkPlan,
+    build_local_cu_kv_seqlens,
+    copy_actual_indexer_k_to_padded,
+)
 
 
 def build_indexer_cp_chunk_plan(
@@ -93,41 +72,12 @@ def build_indexer_cp_chunk_plan(
     )
     if cache is not None and cache_key in cache:
         return cache[cache_key]
-    per_req = per_req_total_kv_lens.to(device=device, dtype=torch.int64).contiguous()
-    local_lens = cp_padded_local_kv_lens(per_req, cp_ctx.cp_size, owner_bs).contiguous()
-    actual_lens = cp_actual_owned_kv_lens(
-        per_req, cp_ctx.cp_size, owner_bs, cp_ctx.cp_rank
-    ).contiguous()
-    total_local = int(local_lens.sum().item())
-    total_actual = int(actual_lens.sum().item())
-    restore = build_kv_allgather_restore_indices(
-        per_req, cp_ctx.cp_size, owner_bs, device
-    )
-    plan = IndexerCPChunkPlan(
-        cp_ctx=cp_ctx,
-        per_req_total_kv_lens=per_req,
-        per_req_local_kv_lens=local_lens,
-        per_req_actual_local_kv_lens=actual_lens,
-        total_local_T=total_local,
-        total_actual_local_T=total_actual,
-        restore_indices=restore,
-        block_size=block_size,
-        owner_block_size=owner_bs,
+    plan = shared.build_indexer_cp_chunk_plan(
+        cp_ctx, per_req_total_kv_lens, block_size, device, owner_block_size
     )
     if cache is not None:
         cache[cache_key] = plan
     return plan
-
-
-def build_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
-    """Per-rank cu_kv_seqlens (int32) over padded local lengths."""
-    cu = torch.zeros(
-        plan.per_req_local_kv_lens.numel() + 1,
-        dtype=torch.int32,
-        device=plan.per_req_local_kv_lens.device,
-    )
-    cu[1:] = torch.cumsum(plan.per_req_local_kv_lens, dim=0).to(torch.int32)
-    return cu
 
 
 def build_actual_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
@@ -136,86 +86,9 @@ def build_actual_local_cu_kv_seqlens(plan: IndexerCPChunkPlan) -> torch.Tensor:
     This is the length vector that should drive the paged-pool read kernel.
     The padded cu vector is only for NCCL shape/restore layout.
     """
-    if getattr(plan, "actual_local_cu", None) is not None:
-        return plan.actual_local_cu
-    cu = torch.zeros(
-        plan.per_req_actual_local_kv_lens.numel() + 1,
-        dtype=torch.int32,
-        device=plan.per_req_actual_local_kv_lens.device,
-    )
-    cu[1:] = torch.cumsum(plan.per_req_actual_local_kv_lens, dim=0).to(torch.int32)
-    plan.actual_local_cu = cu
-    return cu
-
-
-def copy_actual_indexer_k_to_padded(
-    *,
-    plan: IndexerCPChunkPlan,
-    actual_k_quant: torch.Tensor,
-    actual_k_scale: torch.Tensor,
-    padded_k_quant: torch.Tensor,
-    padded_k_scale: torch.Tensor,
-) -> None:
-    """Scatter compact actual rows into the padded per-rank local layout.
-
-    ``cp_gather_indexer_k_quant_cache`` can only express one compact
-    ``cu_seq_lens`` layout. For CP-sharded storage we must pass actual owned
-    lengths to avoid reading partial-block garbage, but the downstream
-    all_gather restore expects each request to start at the padded local base.
-    This helper inserts the per-request gaps and leaves those tails zero.
-    """
-    if actual_k_quant.shape[0] != plan.total_actual_local_T:
-        raise ValueError(
-            f"actual_k_quant rows {actual_k_quant.shape[0]} != "
-            f"total_actual_local_T {plan.total_actual_local_T}"
-        )
-    if actual_k_scale.shape[0] != plan.total_actual_local_T:
-        raise ValueError(
-            f"actual_k_scale rows {actual_k_scale.shape[0]} != "
-            f"total_actual_local_T {plan.total_actual_local_T}"
-        )
-    if padded_k_quant.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"padded_k_quant rows {padded_k_quant.shape[0]} != "
-            f"total_local_T {plan.total_local_T}"
-        )
-    if padded_k_scale.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"padded_k_scale rows {padded_k_scale.shape[0]} != "
-            f"total_local_T {plan.total_local_T}"
-        )
-    total_actual = plan.total_actual_local_T
-    if total_actual == 0:
-        return
-
-    device = padded_k_quant.device
-    if int(plan.per_req_actual_local_kv_lens.numel()) == 1:
-        padded_k_quant[:total_actual].copy_(actual_k_quant)
-        padded_k_scale[:total_actual].copy_(actual_k_scale)
-        return
-
-    actual_lens = plan.per_req_actual_local_kv_lens.to(device=device, dtype=torch.int64)
-    padded_lens = plan.per_req_local_kv_lens.to(device=device, dtype=torch.int64)
-    B = int(actual_lens.shape[0])
-    req_ids = torch.repeat_interleave(
-        torch.arange(B, device=device, dtype=torch.int64),
-        actual_lens,
-        output_size=total_actual,
-    )
-
-    actual_cu = torch.zeros(B, dtype=torch.int64, device=device)
-    padded_cu = torch.zeros(B, dtype=torch.int64, device=device)
-    if B > 1:
-        actual_cu[1:] = torch.cumsum(actual_lens[:-1], dim=0)
-        padded_cu[1:] = torch.cumsum(padded_lens[:-1], dim=0)
-    in_req_pos = torch.arange(
-        total_actual, device=device, dtype=torch.int64
-    ) - actual_cu.index_select(0, req_ids)
-    dst_idx = padded_cu.index_select(0, req_ids) + in_req_pos
-    padded_k_quant.view(torch.uint8).index_copy_(
-        0, dst_idx, actual_k_quant.view(torch.uint8)
-    )
-    padded_k_scale.index_copy_(0, dst_idx, actual_k_scale)
+    if getattr(plan, "actual_local_cu", None) is None:
+        plan.actual_local_cu = shared.build_actual_local_cu_kv_seqlens(plan)
+    return plan.actual_local_cu
 
 
 def assemble_indexer_k(
@@ -232,35 +105,16 @@ def assemble_indexer_k(
     with the rank-local ``cu_kv_seqlens`` (from ``build_local_cu_kv_seqlens``)
     and block_table to fill ``local_k_quant`` / ``local_k_scale`` first.
     """
-    if local_k_quant.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"local_k_quant rows {local_k_quant.shape[0]} != total_local_T "
-            f"{plan.total_local_T}"
-        )
-    if local_k_scale.shape[0] != plan.total_local_T:
-        raise ValueError(
-            f"local_k_scale rows {local_k_scale.shape[0]} != total_local_T "
-            f"{plan.total_local_T}"
-        )
-    chunk_T = int(plan.restore_indices.numel())
-    if out_k_quant.shape[0] != chunk_T or out_k_scale.shape[0] != chunk_T:
-        raise ValueError(
-            f"out shapes [{out_k_quant.shape[0]}, {out_k_scale.shape[0]}] != "
-            f"chunk_T {chunk_T}"
-        )
+    chunk_T = shared._validate_assemble_args(
+        plan=plan,
+        local_k_quant=local_k_quant,
+        local_k_scale=local_k_scale,
+        out_k_quant=out_k_quant,
+        out_k_scale=out_k_scale,
+    )
     if chunk_T == 0:
         return
-    # Use raw rank-major all_gather (NOT cp_all_gather_full_async, which
-    # asserts T_local == cp_ctx.chunk_length — that's the prefill-token
-    # space; here local_k_* lives in KV-pool-entry space sized by
-    # plan.total_local_T = sum_b n_virtual_blocks * block_size). The
-    # restore_indices are built against this rank-major layout.
-    # INVARIANT: the nested compressor writer lands its indexer-pool writes
-    # on the current stream (cp_wait_gather_full + writer _launch), so NCCL
-    # stream-ordering alone suffices for visibility. No CPU-blocking sync —
-    # at chunk granularity this would serialize the pipeline. See
-    # _pool_reader.fill for the same pattern.
+    # Use the GLM prefill TP group for the two rank-major KV shards.
     gathered_q = all_gather(local_k_quant, group=Group.TP)
     gathered_s = all_gather(local_k_scale, group=Group.TP)
-    out_k_quant.copy_(gathered_q[plan.restore_indices])
-    out_k_scale.copy_(gathered_s[plan.restore_indices])
+    shared.restore_indexer_k(plan, gathered_q, gathered_s, out_k_quant, out_k_scale)

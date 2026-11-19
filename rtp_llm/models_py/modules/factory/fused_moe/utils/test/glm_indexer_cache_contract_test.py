@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -137,6 +138,222 @@ class GlmIndexerCacheContractTest(unittest.TestCase):
 
 
 class GlmIndexerCacheGpuTest(unittest.TestCase):
+    def test_prefill_roles_order_the_same_selected_window(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import glm53_indexer as indexer
+        from rtp_llm.ops import RoleType
+
+        scores = torch.tensor([[99, 3, 3, 3, 8, 2], [9, 5, 1, 1, 9, 9]]).float()
+        starts = torch.tensor([1, 1], dtype=torch.int32)
+        ends = torch.tensor([6, 3], dtype=torch.int32)
+        meta = SimpleNamespace(M=2, T=6, ks=starts, ke=ends)
+        keys = torch.zeros(6)
+        for role in (
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+            RoleType.VIT,
+        ):
+            op = SimpleNamespace(
+                role_type=role,
+                index_topk=3,
+                compressor=SimpleNamespace(kpool_mode=False),
+            )
+            with (
+                self.subTest(role=role),
+                mock.patch.object(
+                    indexer, "fp8_mqa_indexer_score", return_value=scores
+                ),
+            ):
+                out = indexer.IndexerFP8._prefill_score_topk(
+                    op, scores, scores, keys, keys, meta
+                )
+                first = [0, 1, 3] if role == RoleType.PREFILL else [3, 0, 1]
+                self.assertEqual(out.tolist(), [first, [0, 1, -1]])
+
+    def test_decode_target_verify_keeps_selected_order(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import glm53_indexer as indexer
+        from rtp_llm.ops import RoleType
+
+        x = torch.ones(1, 3, 1)
+        positions = torch.tensor([12, 13, 14])
+        lengths = torch.tensor([5, 2, 0], dtype=torch.int32)
+        meta = SimpleNamespace(positions=positions, compressed_lens_per_token=lengths)
+        scores = torch.zeros(3, 32)
+        scores[:, :5] = torch.tensor([2, 5, 5, 5, 9])
+        op = SimpleNamespace(
+            role_type=RoleType.PREFILL,
+            index_topk=3,
+            compress_ratio=4,
+            n_heads=1,
+            freqs_cis=None,
+            _kv_block_table=torch.zeros(1, 1),
+            _kv_eb=32,
+            _kv_pool_view=None,
+            compressor=mock.Mock(kpool_mode=True),
+            _propagate_pool_to_nested=mock.Mock(),
+            _clear_nested_pool=mock.Mock(),
+            _fuse_glm_q_quant=lambda: False,
+            _compute_indexer_q=lambda *a, **kw: x,
+            _compute_weights=lambda x: x,
+            _quantize_q=lambda q, w: (q, w),
+        )
+        with mock.patch.object(indexer, "fp8_paged_indexer_score", return_value=scores):
+            actual = indexer.IndexerFP8.forward_decode_vectorized(
+                op,
+                x,
+                x,
+                positions[:1],
+                torch.empty(1, 3, 3, dtype=torch.int32),
+                position_ids=positions,
+                compressor_meta=meta,
+            )
+        self.assertEqual(actual.tolist(), [[[4, 1, 2], [0, 1, -1], [-1, -1, -1]]])
+
+    def test_mla_gather_uses_role_and_query_phase(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.glm53_sparse_mla import (
+            SparseMlaFp8Op,
+        )
+        from rtp_llm.models_py.modules.hybrid.glm53_indexer import Indexer
+        from rtp_llm.ops import RoleType
+
+        phases = (
+            (True, False, False),
+            (False, False, False),
+            (True, True, False),
+            (True, False, True),
+        )
+        for role in (
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+            RoleType.VIT,
+        ):
+            for graph in (False, True):
+                op = SparseMlaFp8Op(
+                    64,
+                    512,
+                    0,
+                    512,
+                    128,
+                    1.0,
+                    2051,
+                    parallelism_config=SimpleNamespace(role_type=role),
+                    indexer_top_k=512,
+                    indexer_group_size=4,
+                    use_cuda_graph=graph,
+                )
+                indexer = SimpleNamespace(_prefill_cp_enabled=lambda: True)
+                params = SimpleNamespace(
+                    batch_indice_h=torch.empty(6),
+                    prefill_ragged_kv_len_indptr_d=torch.tensor([0, 10, 20]),
+                )
+                for prefill, verify, extend in phases:
+                    inputs = SimpleNamespace(
+                        is_prefill=prefill,
+                        is_target_verify=verify,
+                        is_draft_extend=extend,
+                    )
+                    regular_prefill = prefill and not verify and not extend
+                    with (
+                        self.subTest(role=role, graph=graph, phase=inputs),
+                        mock.patch.object(op, "_reset_sched_meta"),
+                    ):
+                        op.plan(params, torch.zeros(2, 1), inputs)
+                        self.assertEqual(
+                            op._gather is not None,
+                            regular_prefill and role == RoleType.PREFILL and not graph,
+                        )
+                        self.assertEqual(
+                            op._native_tokens_per_request, 3 if verify else 1
+                        )
+                        self.assertEqual(
+                            Indexer._is_sparse_prefill_sharded(indexer, inputs),
+                            regular_prefill,
+                        )
+                        op._plan_prefill_gather(inputs, kv_cache_sharded=True)
+                        self.assertEqual(op._gather is not None, regular_prefill)
+                op._plan_prefill_gather(None, kv_cache_sharded=True)
+                self.assertIsNone(op._gather)
+
+    def test_sparse_query_chunk_limits_follow_cp_geometry(self):
+        from rtp_llm.models_py.distributed.zigzag_token_layout import zigzag_local_rows
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            glm53_sparse_mla as sparse,
+        )
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            glm53_sparse_mla_cp as sparse_cp,
+        )
+        from rtp_llm.ops import RoleType
+
+        for rows, expected in (
+            (0, 0),
+            (7, 2),
+            (8, 2),
+            (9, 2),
+            (15, 2),
+            (16, 2),
+            (17, 4),
+            (299999, 37500),
+            (300000, 37500),
+            (300001, 37502),
+            (1048576, 131072),
+        ):
+            self.assertEqual(zigzag_local_rows(rows, 8), expected)
+
+        # Tiny head/output widths keep numerical tensors small; FlashMLA is replaced
+        # by a shape recorder so the real dispatch can exercise long launches on CPU.
+        for role, cp, heads, limit, expected_chunks in (
+            (RoleType.PREFILL, True, 64, 1048576, [4097]),
+            (RoleType.PREFILL, True, 128, 1048576, [4097]),
+            (RoleType.PREFILL, True, 8, 1048576, [4096, 1]),
+            (RoleType.PREFILL, False, 64, 1048576, [4096, 1]),
+            (RoleType.DECODE, True, 64, 1048576, [4096, 1]),
+            (RoleType.PDFUSION, True, 64, 1048576, [4096, 1]),
+            (RoleType.PREFILL, True, 64, 0, [4096, 1]),
+            (RoleType.PREFILL, True, 64, -1, [4096, 1]),
+            (RoleType.PREFILL, True, 64, None, [4096, 1]),
+        ):
+            op = sparse.SparseMlaOp(
+                heads,
+                1,
+                0,
+                1,
+                128,
+                1.0,
+                1,
+                parallelism_config=SimpleNamespace(role_type=role),
+            )
+            op.sequence_parallel, op.prefill_cp_size = cp, 8
+            sparse_cp.SparseMlaFp8CPOp.configure_native_query_chunk(op, limit)
+            if (
+                role == RoleType.PREFILL
+                and cp
+                and limit == 1048576
+                and heads in (64, 128)
+            ):
+                self.assertEqual(op.native_q_chunk_rows, 131072)
+            else:
+                self.assertEqual(op.native_q_chunk_rows, 4096)
+            q = torch.ones(4097, heads, 1)
+            kv = torch.ones(1, 1, 1)
+            indices = torch.zeros(4097, 1, 128, dtype=torch.int32)
+            with (
+                self.subTest(role=role, cp=cp, heads=heads, limit=limit),
+                mock.patch.object(
+                    sparse,
+                    "flash_mla_sparse_fwd",
+                    side_effect=lambda rows, *a, **kw: (rows, None, None),
+                    create=True,
+                ) as kernel,
+            ):
+                self.assertTrue(torch.equal(op._forward_sparse(q, kv, indices), q))
+                self.assertEqual(
+                    [call.args[0].shape[0] for call in kernel.call_args_list],
+                    expected_chunks,
+                )
+        # Every row materializes 2176 selected BF16 keys of 512 channels.
+        self.assertEqual(sparse._SELECTED_KV_CHUNK_ROWS * 2176 * 512 * 2, 544 * 1024**2)
+
     def test_native_window_topk_matches_stable_fallback_membership(self):
         from rtp_llm.models_py.modules.dsv4.indexer_topk import (
             select_stable_window_topk,

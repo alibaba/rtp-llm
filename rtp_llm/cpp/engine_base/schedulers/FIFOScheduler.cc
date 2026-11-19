@@ -40,8 +40,10 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      max_inited_kv_cache_streams_);
     // Chunked prefill binds allocation to each scheduler-granted chunk. Keep
     // that main-native path intact rather than preallocating the whole prompt.
-    if (runtime_config.fifo_scheduler_config.async_cache_prepare && pd_sep_config_.role_type != RoleType::DECODE
-        && parallelism_config.tp_rank == 0 && prefill_chunk_size_ <= 0) {
+    const bool glm_prefill = model_config.model_type == "glm5_3_flash" && pd_sep_config_.role_type == RoleType::PREFILL;
+    if ((glm_prefill || runtime_config.fifo_scheduler_config.async_cache_prepare)
+        && pd_sep_config_.role_type != RoleType::DECODE && parallelism_config.tp_rank == 0
+        && prefill_chunk_size_ <= 0) {
         try {
             async_cache_prepare_enabled_ = true;
             cache_prepare_thread_ =

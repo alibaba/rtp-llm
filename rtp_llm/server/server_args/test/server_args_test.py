@@ -221,14 +221,33 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class VitFrameBudgetArgumentsTest(TestCase):
+    def test_vit_frame_budget_uses_the_service_default_or_an_explicit_cli_value(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"MM_VIDEO_MAX_FRAMES": "128"}, clear=True):
+            self.assertEqual(
+                server_args.setup_args([]).vit_config.mm_video_max_frames,
+                VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES,
+            )
+            self.assertEqual(
+                server_args.setup_args(
+                    ["--mm_video_max_frames", "32"]
+                ).vit_config.mm_video_max_frames,
+                32,
+            )
+
+
 class SharedHybridCacheArgumentsTest(TestCase):
-    def test_policy_environment_cli_and_transport(self):
+    def test_policy_cli_and_transport(self):
         from rtp_llm.server.server_args import server_args
 
         for env, args, expected in (
             ({}, [], -1),
-            ({"RTP_LLM_SHARED_HYBRID_CACHE": "0"}, [], 0),
-            ({"RTP_LLM_SHARED_HYBRID_CACHE": "1"}, [], 1),
+            ({"RTP_LLM_SHARED_HYBRID_CACHE": "0"}, [], -1),
+            ({"SHARED_HYBRID_CACHE": "1"}, [], -1),
+            ({}, ["--shared_hybrid_cache", "1"], 1),
             ({"RTP_LLM_SHARED_HYBRID_CACHE": "1"}, ["--shared_hybrid_cache", "0"], 0),
         ):
             with (
@@ -273,29 +292,12 @@ class SharedHybridCacheArgumentsTest(TestCase):
 
 
 class AsyncCachePrepareArgumentsTest(TestCase):
-    def test_environment_cli_and_transport(self):
+    def test_removed_override_leaves_the_native_role_policy_in_control(self):
         from rtp_llm.server.server_args import server_args
 
-        for env, args, expected in (
-            ({}, [], False),
-            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "1"}, [], True),
-            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "0"}, [], False),
-            (
-                {"RTP_LLM_ASYNC_PREPARE_CACHE": "1"},
-                ["--async_cache_prepare", "0"],
-                False,
-            ),
-        ):
-            with (
-                self.subTest(env=env, args=args),
-                patch.dict(os.environ, env, clear=True),
-            ):
-                config = server_args.setup_args(
-                    args
-                ).runtime_config.fifo_scheduler_config
-                self.assertEqual(config.async_cache_prepare, expected)
-                restored = pickle.loads(pickle.dumps(config))
-                self.assertEqual(restored.async_cache_prepare, expected)
+        with patch.dict(os.environ, {"RTP_LLM_ASYNC_PREPARE_CACHE": "1"}, clear=True):
+            config = server_args.setup_args([]).runtime_config.fifo_scheduler_config
+            self.assertFalse(config.async_cache_prepare)
 
     def test_legacy_pickles_keep_preparation_disabled(self):
         from rtp_llm.ops import FIFOSchedulerConfig
@@ -357,6 +359,8 @@ class CPRotateMethodArgumentsTest(TestCase):
                     self.assertRaises(SystemExit),
                 ):
                     server_args.setup_args(args)
+
+
 class DynamicDecodeArgumentsTest(TestCase):
     def test_dynamic_decode_backend_parser_and_default(self):
         from rtp_llm.server.server_args import server_args

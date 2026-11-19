@@ -31,6 +31,8 @@ enum class ParallelMode {
     STAGE = 6,
     /** Spans PP stages with the same DP/TP coordinates. */
     PP = 7,
+    /** CPU control collective across all ranks. */
+    WORLD_CPU = 8,
 };
 
 // A batch includes two parts: context batch and decoder batch.
@@ -112,13 +114,13 @@ struct GptModelInputs {
     bool need_all_hidden_states = false;
     bool skip_lm_head           = false;
     // PP batch contains only middle chunks; all TP ranks follow the same sampling/draft path.
-    bool is_middle_chunk_only = false;
-    bool capture_hidden_states  = false;
-    bool need_moe_gating        = false;
-    bool warmup                 = false;
-    bool skip_run               = false;
-    bool shutdown               = false;
-    bool is_fake_stream         = false;
+    bool is_middle_chunk_only  = false;
+    bool capture_hidden_states = false;
+    bool need_moe_gating       = false;
+    bool warmup                = false;
+    bool skip_run              = false;
+    bool shutdown              = false;
+    bool is_fake_stream        = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.

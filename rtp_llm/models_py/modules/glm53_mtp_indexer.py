@@ -1,7 +1,5 @@
 """Request-scoped GLM53 MTP indexer seeds, in expanded raw-token coordinates."""
 
-import os
-
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -20,8 +18,8 @@ MTP_INDEXER_REUSE = 2
 def mtp_indexer_share_active(config, parallelism, layer_count, topk):
     cp = getattr(parallelism, "prefill_cp_config", None)
     return (
-        os.environ.get("RTP_LLM_ENABLE_MTP_INDEXER_SHARE") == "1"
-        and bool(config.index_share_for_mtp_iteration)
+        bool(config.index_share_for_mtp_iteration)
+        and parallelism.pp_size == 1
         and not (cp is not None and cp.is_enabled())
         and layer_count == 1
         and topk > 0
