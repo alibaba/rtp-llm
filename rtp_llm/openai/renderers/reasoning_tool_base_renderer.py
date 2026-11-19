@@ -5,7 +5,7 @@ import os
 from abc import ABC
 from typing import List, Optional, Tuple
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader, Environment, Template
 from typing_extensions import override
 
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -84,6 +84,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         )
         self._setup_stop_words()
         self._setup_chat_template()
+        self._prompt_template_cache: Optional[Tuple[str, Template]] = None
 
     def _setup_stop_words(self):
         """设置额外的停止词，子类可以重写"""
@@ -162,24 +163,28 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         ):
             context.update(request.extra_configs.chat_template_kwargs)
 
-        # 创建Jinja2环境
+        try:
+            return self._get_prompt_template(self.chat_template).render(**context)
+        except Exception as e:
+            logging.error(f"构建提示文本失败: {str(e)}")
+            raise ValueError(f"Error rendering prompt template: {str(e)}") from e
+
+    def _get_prompt_template(self, source: str) -> Template:
+        # Cache the program, never the prompt or request context. Keep filters
+        # local to this renderer and recompile if its template is replaced.
+        cached = self._prompt_template_cache
+        if cached is not None and cached[0] == source:
+            return cached[1]
         env = Environment(
             loader=BaseLoader(),
             trim_blocks=True,
             lstrip_blocks=True,
             extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"],
         )
-
-        # 允许子类自定义环境
         self._customize_jinja_env(env)
-
-        try:
-            template = env.from_string(self.chat_template)
-            rendered_prompt = template.render(**context)
-            return rendered_prompt
-        except Exception as e:
-            logging.error(f"构建提示文本失败: {str(e)}")
-            raise ValueError(f"Error rendering prompt template: {str(e)}")
+        template = env.from_string(source)
+        self._prompt_template_cache = (source, template)
+        return template
 
     def _preprocess_messages(self, messages: List[dict]) -> List[dict]:
         """

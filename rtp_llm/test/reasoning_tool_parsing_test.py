@@ -1,5 +1,5 @@
 from typing import Optional
-from unittest import IsolatedAsyncioTestCase, main
+from unittest import IsolatedAsyncioTestCase, TestCase, main
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import torch
@@ -25,6 +25,34 @@ from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
     ReasoningParser,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+
+
+class PromptTemplateReuseTest(TestCase):
+    def test_reuse_is_per_renderer_and_never_reuses_request_content(self):
+        class Renderer(ReasoningToolBaseRenderer):
+            def __init__(self, prefix):
+                self.prefix = prefix
+                self.chat_template = "{{ messages[0].content | tag }}"
+                self._prompt_template_cache = None
+                self.compilations = 0
+
+            def _customize_jinja_env(self, env):
+                self.compilations += 1
+                env.filters["tag"] = lambda text: self.prefix + text
+
+        def request(text):
+            return ChatCompletionRequest(
+                messages=[ChatMessage(role=RoleEnum.user, content=text)]
+            )
+
+        left, right = Renderer("L:"), Renderer("R:")
+        self.assertEqual(left._build_prompt(request("one")), "L:one")
+        self.assertEqual(right._build_prompt(request("one")), "R:one")
+        self.assertEqual(left._build_prompt(request("two")), "L:two")
+        self.assertEqual((left.compilations, right.compilations), (1, 1))
+        left.chat_template = "{{ messages[0].content | upper }}"
+        self.assertEqual(left._build_prompt(request("three")), "THREE")
+        self.assertEqual(left.compilations, 2)
 
 
 class ProcessReasoningAndToolCallsTest(IsolatedAsyncioTestCase):
