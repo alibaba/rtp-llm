@@ -2105,6 +2105,21 @@ class MMProcessEngineGreenNetTest(TestCase):
                 greennet_hook.get_greennet_provider()
             self.assertIsNone(greennet_hook._PROVIDER)
 
+    def test_internal_provider_missing_dependency_propagates(self):
+        from rtp_llm.multimodal import greennet_hook
+
+        provider = types.ModuleType("internal_source.rtp_llm.multimodal.greennet.provider")
+        missing = "internal_source.rtp_llm.multimodal.greennet.inspector"
+        provider.__getattr__ = MagicMock(side_effect=ModuleNotFoundError(name=missing))
+        with (
+            patch.object(greennet_hook, "_PROVIDER", None),
+            patch("rtp_llm.utils.import_util.has_internal_source", return_value=True),
+            patch.dict(sys.modules, {provider.__name__: provider}),
+            self.assertRaises(ModuleNotFoundError) as error,
+        ):
+            greennet_hook.get_greennet_provider()
+        self.assertEqual(error.exception.name, missing)
+
     def test_partial_internal_namespace_uses_noop_provider(self):
         from rtp_llm.multimodal import greennet_hook
 
