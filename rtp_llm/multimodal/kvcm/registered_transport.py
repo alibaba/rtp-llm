@@ -336,13 +336,18 @@ class RegisteredObjectTransport:
                 raise
 
     def load_one(self, key, buffer, **kwargs):
+        return self._load(self._client.load_one, key, buffer, key=key, **kwargs)
+
+    def load_from_meta(self, meta, buffer, **kwargs):
+        return self._load(self._client.load_from_meta, meta, buffer, **kwargs)
+
+    def _load(self, load, value, buffer, *, key=None, **kwargs):
         with self._serialized("read"):
             transfer = self._view(buffer)
             failure_stage = "sdk_transfer"
             try:
-                # Includes native metadata lookup; PACE's own RT is separate.
                 with self._stage("read", "native_load"):
-                    self._client.load_one(key, transfer, **kwargs)
+                    load(value, transfer, **kwargs)
                 failure_stage = "gpu_ready_wait"
                 stream = self._stream
                 with self._stage("read", "gpu_ready_wait"):
@@ -507,6 +512,12 @@ class RegisteredTransportPool:
             if not slot.quarantined:
                 return slot.object_size(key, **kwargs)
         return None
+
+    def get_object_meta(self, key, **kwargs):
+        client = self._client
+        if client is None:
+            return None
+        return client.get_object_meta(key, **kwargs)
 
     def acquire(self, *, for_write=False):
         """Reads try once. Background writers wait for a lease."""

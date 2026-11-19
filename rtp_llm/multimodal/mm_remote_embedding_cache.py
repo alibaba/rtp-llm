@@ -20,7 +20,10 @@ import torch
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
-from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+from rtp_llm.multimodal.kvcm.lookup import (
+    KvMetaLookupError,
+    KvMetaLookupTimeout,
+)
 from rtp_llm.multimodal.kvcm.registered_transport import _safe_error_context
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
@@ -73,7 +76,10 @@ class MMRemoteEmbeddingCache:
         *,
         max_object_bytes,
         max_inflight_bytes,
-        max_pending=8,
+        max_pending=128,
+        metadata_workers=32,
+        read_transfer_workers=2,
+        write_transfer_workers=2,
         read_timeout_ms=200,
         cuda_device=None,
         client_factory=None,
@@ -84,7 +90,15 @@ class MMRemoteEmbeddingCache:
         audit_enabled=None,
         request_scoped_inspection=False,
     ):
-        if min(max_object_bytes, max_inflight_bytes, max_pending, read_timeout_ms) <= 0:
+        if min(
+            max_object_bytes,
+            max_inflight_bytes,
+            max_pending,
+            read_timeout_ms,
+            metadata_workers,
+            read_transfer_workers,
+            write_transfer_workers,
+        ) <= 0:
             raise ValueError("remote embedding cache limits must be positive")
         if client_factory is not None and (
             not isinstance(namespace, str) or not namespace.strip()
@@ -113,20 +127,17 @@ class MMRemoteEmbeddingCache:
         if gdr_enabled is None:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
         self._transport_mode = "gdr" if gdr_enabled else "staging"
-        metadata_workers = 8
-        self._executor = concurrent.futures.ThreadPoolExecutor(
+        self._metadata_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=metadata_workers, thread_name_prefix="mm-remote-metadata"
         )
-        self._metadata_slots = threading.BoundedSemaphore(metadata_workers)
-        transfer_workers = 2
         self._transfer_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=transfer_workers, thread_name_prefix="mm-remote-cache"
+            max_workers=read_transfer_workers, thread_name_prefix="mm-remote-cache"
         )
         # Admit only as many payloads as can run. A stalled transfer must not
         # leave subsequent hits waiting out their deadline in the executor.
-        self._transfer_slots = threading.BoundedSemaphore(transfer_workers)
+        self._transfer_slots = threading.BoundedSemaphore(read_transfer_workers)
         self._write_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="mm-remote-write"
+            max_workers=write_transfer_workers, thread_name_prefix="mm-remote-write"
         )
         self._lock = threading.Lock()
         self._stats_lock = threading.Lock()
@@ -224,7 +235,7 @@ class MMRemoteEmbeddingCache:
                     registered_factory,
                     max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
                     device=device,
-                    slots=getattr(vit_config, "mm_remote_cache_gdr_num", 1),
+                    slots=gdr_slots,
                     observe_stage=cls._observe_stage,
                     quarantine_ttl_seconds=getattr(
                         vit_config, "mm_remote_cache_quarantine_ttl_seconds", 300
@@ -240,6 +251,14 @@ class MMRemoteEmbeddingCache:
         gdr_enabled = vit_config.mm_remote_cache_gdr_enable
         if gdr_enabled is None:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
+        gdr_slots = getattr(vit_config, "mm_remote_cache_gdr_num", 1)
+        default_transfer_workers = gdr_slots if gdr_enabled else 2
+        read_transfer_workers = getattr(
+            vit_config, "mm_remote_cache_read_transfer_workers", None
+        )
+        write_transfer_workers = getattr(
+            vit_config, "mm_remote_cache_write_transfer_workers", None
+        )
         client = cls._create_client(factory, "gdr") if gdr_enabled else None
         return cls(
             client,
@@ -249,6 +268,17 @@ class MMRemoteEmbeddingCache:
             max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
             max_inflight_bytes=vit_config.mm_remote_cache_max_inflight_bytes,
             max_pending=vit_config.mm_remote_cache_max_pending,
+            metadata_workers=getattr(vit_config, "mm_remote_cache_metadata_workers", 32),
+            read_transfer_workers=(
+                default_transfer_workers
+                if read_transfer_workers is None
+                else read_transfer_workers
+            ),
+            write_transfer_workers=(
+                default_transfer_workers
+                if write_transfer_workers is None
+                else write_transfer_workers
+            ),
             read_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
             cuda_device=device,
             gdr_enabled=gdr_enabled,
@@ -325,10 +355,7 @@ class MMRemoteEmbeddingCache:
 
     @staticmethod
     def _error_context(error):
-        fields = _safe_error_context(error)
-        if isinstance(error, KvMetaLookupError):
-            fields.update(error.rpc_timing)
-        return fields
+        return _safe_error_context(error)
 
     def record(self, event, *, key=None, trace_id=None, **fields):
         with self._stats_lock:
@@ -467,28 +494,34 @@ class MMRemoteEmbeddingCache:
         )
         return elapsed_ms
 
-    def _lookup_object_size(self, client, key, trace_id, timeout_ms):
+    def _lookup_object_meta(self, client, key, trace_id, timeout_ms):
         outcome = "error"
         try:
             with self._observe_stage("read", "metadata"):
                 try:
-                    size = client.object_size(
+                    meta = client.get_object_meta(
                         key, trace_id=trace_id, timeout_ms=timeout_ms
                     )
                 except Exception as error:
                     # The typed lookup error is metadata-only; discovery can
                     # recover on the existing client without GPU registration.
-                    if not isinstance(error, KvMetaLookupError):
+                    native_lookup_failure = (
+                        getattr(error, "operation", None) == "get_object_meta"
+                        and getattr(error, "data_transfer_may_be_inflight", True) is False
+                    )
+                    if not native_lookup_failure and not isinstance(
+                        error, (KvMetaLookupError, KvMetaLookupTimeout)
+                    ):
                         self._retire_client(client, error)
                     raise
-                if size is None:
+                if meta is None:
                     outcome = "miss"
-                elif not 0 < size <= self.max_object_bytes:
+                elif not 0 < meta.size_bytes <= self.max_object_bytes:
                     outcome = "invalid"
                     raise ValueError("remote embedding object exceeds byte limit")
                 else:
                     outcome = "hit"
-                return size
+                return meta
         except _TIMEOUT_ERRORS:
             outcome = "timeout"
             raise
@@ -1070,7 +1103,6 @@ class MMRemoteEmbeddingCache:
             return {
                 key: timing[key]
                 for key in (
-                    "metadata_admission_wait_ms",
                     "queue_ms",
                     "lookup_budget_ms",
                     "metadata_ms",
@@ -1099,17 +1131,18 @@ class MMRemoteEmbeddingCache:
                 timing["lookup_budget_ms"] = remaining_ms
                 api_started = time.perf_counter()
                 try:
-                    size = self._lookup_object_size(client, key, trace_id, remaining_ms)
+                    meta = self._lookup_object_meta(client, key, trace_id, remaining_ms)
                 finally:
                     timing["metadata_ms"] = (time.perf_counter() - api_started) * 1000
                     timing["sdk_api_ms"] = timing["metadata_ms"]
-                if size is None:
+                if meta is None:
                     timing["outcome"] = "miss"
-                return size
+                return meta
             finally:
                 self._release_client(client)
 
-        def read(size):
+        def read(meta):
+            size = meta.size_bytes
             timing["transfer_queue_ms"] = self._report_queue_wait(
                 "read_transfer", transfer_queued_at
             )
@@ -1155,7 +1188,7 @@ class MMRemoteEmbeddingCache:
                 api_started = time.perf_counter()
                 try:
                     with self._observe_stage("read", "transfer", size):
-                        source.load_one(key, buffer, trace_id=trace_id)
+                        source.load_from_meta(meta, buffer, trace_id=trace_id)
                 except Exception as error:
                     if _is_read_miss(error):
                         timing["outcome"] = "miss"
@@ -1177,45 +1210,20 @@ class MMRemoteEmbeddingCache:
                     self._release_client(client)
 
         try:
-            admitted = self._metadata_slots.acquire(blocking=False)
-            if not admitted:
-                admission_started = time.perf_counter()
-                # Give short bursts time to drain while keeping executor queues
-                # independent of the caller's full deadline.
-                admitted = self._metadata_slots.acquire(
-                    timeout=min(0.05, max(0.0, deadline - time.monotonic()))
-                )
-                timing["metadata_admission_wait_ms"] = self._report_queue_wait(
-                    "read_metadata_admission", admission_started
-                )
-            if not admitted:
-                self._count("admission_skip")
-                outcome = "admission_skip"
-                self._report_skip("read", "metadata_admission")
-                return None
-            try:
-                queued_at = time.perf_counter()
-                future = self._executor.submit(lookup)
-            except BaseException:
-                self._metadata_slots.release()
-                raise
-            # Keep the slot until lookup completes, even when its caller times out.
-            future.add_done_callback(lambda _: self._metadata_slots.release())
-            size = future.result(timeout=max(0, deadline - time.monotonic()))
+            # _reserve() bounds running and queued work together. A timed-out
+            # caller leaves its reservation with the future until it exits.
+            queued_at = time.perf_counter()
+            future = self._metadata_executor.submit(lookup)
+            meta = future.result(timeout=max(0, deadline - time.monotonic()))
             future = None
-            if size is None:
+            if meta is None:
                 outcome = "miss"
                 self._count("miss")
                 self.record("load_miss", key=key, trace_id=trace_id)
                 return None
 
+            size = meta.size_bytes
             timing["nbytes"] = size
-            if not self._transfer_slots.acquire(blocking=False):
-                self._count("admission_skip")
-                outcome = "admission_skip"
-                self._report_skip("read", "transfer_admission")
-                return None
-            transfer_admitted = True
             with self._lock:
                 budget_exceeded = self._bytes + 3 * size > self.max_inflight_bytes
                 if not budget_exceeded:
@@ -1227,9 +1235,15 @@ class MMRemoteEmbeddingCache:
                 self._report_skip("read", "payload_budget")
                 return None
 
+            if not self._transfer_slots.acquire(blocking=False):
+                self._count("admission_skip")
+                outcome = "admission_skip"
+                self._report_skip("read", "transfer_admission")
+                return None
+            transfer_admitted = True
             timing["stage"] = "transfer_queue"
             transfer_queued_at = time.perf_counter()
-            future = self._transfer_executor.submit(read, size)
+            future = self._transfer_executor.submit(read, meta)
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
                 outcome = timing["outcome"]
@@ -1377,7 +1391,7 @@ class MMRemoteEmbeddingCache:
         if self._gdr_pool is not None:
             self._gdr_pool.stop_acquiring()
         self._write_executor.shutdown(wait=True, cancel_futures=True)
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        self._metadata_executor.shutdown(wait=True, cancel_futures=True)
         self._transfer_executor.shutdown(wait=True, cancel_futures=True)
         with self._client_lock:
             client, self._client = self._client, None

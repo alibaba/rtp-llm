@@ -1,4 +1,3 @@
-import concurrent.futures
 import gc
 import json
 import struct
@@ -8,10 +7,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import grpc
 import torch
-from rtp_llm.multimodal.kvcm import lookup_pb2
-from rtp_llm.multimodal.kvcm.lookup import KvMetaLookup, KvMetaLookupError
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
@@ -179,123 +175,6 @@ class TensorObjectTest(unittest.TestCase):
         self.assertTrue(torch.equal(restored[0], value[0]))
 
 
-class LookupTest(unittest.TestCase):
-    def setUp(self):
-        self.requests = []
-        self.response = lookup_pb2.GetResponse()
-        self.response.header.status.code = 1
-        self.response.hit_mask.values.append(True)
-        self.response.locations.add(value_size=123)
-        self.server = grpc.server(concurrent.futures.ThreadPoolExecutor(max_workers=1))
-
-        def get(request, context):
-            self.requests.append(request)
-            if getattr(self, "abort_code", None) is not None:
-                context.abort(self.abort_code, "bounded test overload")
-            return self.response
-
-        self.server.add_generic_rpc_handlers(
-            (
-                grpc.method_handlers_generic_handler(
-                    "kv_cache_manager.proto.kv_meta.MetaService",
-                    {
-                        "Get": grpc.unary_unary_rpc_method_handler(
-                            get,
-                            request_deserializer=lookup_pb2.GetRequest.FromString,
-                            response_serializer=lookup_pb2.GetResponse.SerializeToString,
-                        ),
-                    },
-                ),
-            )
-        )
-        port = self.server.add_insecure_port("127.0.0.1:0")
-        self.server.start()
-        self.addCleanup(lambda: self.server.stop(0).wait())
-        self.client = KvMetaLookup(
-            SimpleNamespace(
-                addresses=[f"127.0.0.1:{port}"],
-                instance_id="kve_model_v1",
-                call_timeout_ms=500,
-                max_object_bytes=1024,
-            )
-        )
-        self.addCleanup(self.client.close)
-
-    def test_wire_contract_matches_kvmeta_field_numbers(self):
-        request = lookup_pb2.GetRequest(instance_id="i", query_type=1, keys=["k"])
-        self.assertEqual(request.SerializeToString(), bytes.fromhex("120169180122016b"))
-        response = lookup_pb2.GetResponse.FromString(
-            bytes.fromhex("0a040a0208011202207b1a030a0101")
-        )
-        self.assertEqual(response.header.status.code, 1)
-        self.assertEqual(response.locations[0].value_size, 123)
-        self.assertEqual(list(response.hit_mask.values), [True])
-
-    def test_actual_grpc_get_hit_miss_and_request_identity(self):
-        self.assertEqual(
-            self.client.size("existing_url_config_key", trace_id="trace"), 123
-        )
-        request = self.requests[-1]
-        self.assertEqual(list(request.keys), ["existing_url_config_key"])
-        self.assertEqual(request.instance_id, "kve_model_v1")
-        self.assertEqual(request.query_type, 1)
-        self.assertEqual(request.trace_id, "trace")
-        self.response.hit_mask.values[0] = False
-        self.assertIsNone(self.client.size("missing"))
-
-    def test_vipserver_refresh_replaces_stale_channels_and_recovers_after_empty_list(
-        self,
-    ):
-        address = self.client._addresses[0]
-        ip, port = address.rsplit(":", 1)
-        host = SimpleNamespace(ip=ip, port=int(port))
-        self.client._config.vipserver_domain = "kvcm.test"
-        self.client._set_endpoints(("127.0.0.1:1",))
-        old_channel = self.client._channels[0]
-        resolver = "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver"
-        with patch(resolver, return_value=[host]), patch.object(
-            old_channel, "close"
-        ) as close:
-            self.assertEqual(self.client.size("key"), 123)
-            close.assert_called_once()
-        old_channel.close()
-        channels = list(self.client._channels)
-        with patch(resolver, return_value=[host]):
-            self.assertEqual(self.client.size("key"), 123)
-        self.assertEqual(self.client._channels, channels)
-        count = len(self.requests)
-        with patch(resolver, return_value=[]):
-            with self.assertRaises(KvMetaLookupError) as caught:
-                self.client.size("key")
-        self.assertEqual(caught.exception.reason, "discovery")
-        self.assertEqual(len(self.requests), count)
-        with patch(resolver, return_value=[host]):
-            self.assertEqual(self.client.size("key"), 123)
-
-    def test_transport_error_preserves_grpc_code_and_recovers(self):
-        self.abort_code = grpc.StatusCode.RESOURCE_EXHAUSTED
-        with self.assertRaises(KvMetaLookupError) as caught:
-            self.client.size("key")
-        self.assertEqual(caught.exception.code, grpc.StatusCode.RESOURCE_EXHAUSTED)
-        self.assertEqual(caught.exception.reason, "grpc")
-        self.abort_code = None
-        self.assertEqual(self.client.size("key"), 123)
-
-    def test_rejects_wrong_size_count_status_and_closed(self):
-        self.response.locations[0].value_size = 10000
-        with self.assertRaises(KvMetaLookupError):
-            self.client.size("key")
-        self.response.ClearField("locations")
-        with self.assertRaises(KvMetaLookupError):
-            self.client.size("key")
-        self.response.header.status.code = 8
-        with self.assertRaises(KvMetaLookupError):
-            self.client.size("key")
-        self.client.close()
-        with self.assertRaises(RuntimeError):
-            self.client.size("key")
-
-
 class ObjectFacadeTest(unittest.TestCase):
     def test_public_save_load_object_uses_one_key_and_preserves_full_result(self):
         from unittest.mock import MagicMock, patch
@@ -311,11 +190,15 @@ class ObjectFacadeTest(unittest.TestCase):
             self.assertEqual(len(tensors), 1)
             stored[keys[0]] = tensors[0].clone()
 
-        def load(keys, tensors, **kwargs):
-            tensors[0].copy_(stored[keys[0]])
+        def get_meta(key, timeout_ms, **kwargs):
+            return SimpleNamespace(key=key, size_bytes=stored[key].numel())
+
+        def load(meta, buffer, **kwargs):
+            buffer.copy_(stored[meta.key])
 
         backend.save.side_effect = save
-        backend.load.side_effect = load
+        backend.get_object_meta.side_effect = get_meta
+        backend.load_from_meta.side_effect = load
         config = RtpKvMetaObjectClientConfig(
             addresses=("127.0.0.1:19001",),
             instance_id="kve_test",
@@ -344,10 +227,12 @@ class ObjectFacadeTest(unittest.TestCase):
             [torch.tensor([3.5]), torch.tensor([2], dtype=torch.int32)],
         )
         client.save_object("existing_multimodal_key", result)
-        with patch.object(
-            client, "object_size", side_effect=lambda key, **kw: stored[key].numel()
-        ):
-            actual = client.load_object("existing_multimodal_key")
+        actual = client.load_object("existing_multimodal_key", trace_id="read")
+        self.assertEqual(backend.get_object_meta.call_count, 1)
+        self.assertEqual(backend.load_from_meta.call_count, 1)
+        self.assertEqual(backend.get_object_meta.call_args.kwargs["trace_id"], "read")
+        self.assertEqual(backend.load_from_meta.call_args.kwargs["trace_id"], "read")
+        backend.load.assert_not_called()
         self.assertTrue(torch.equal(actual[0], result[0]))
         self.assertTrue(torch.equal(actual[1], result[1]))
         self.assertTrue(torch.equal(actual[2][0], result[2][0]))
