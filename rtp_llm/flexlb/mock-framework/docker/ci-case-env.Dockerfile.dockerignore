@@ -1,0 +1,11 @@
+**
+!rtp_llm/
+!rtp_llm/flexlb/
+!rtp_llm/flexlb/**
+!rtp_llm/cpp/
+!rtp_llm/cpp/model_rpc/
+!rtp_llm/cpp/model_rpc/proto/
+!rtp_llm/cpp/model_rpc/proto/**
+**/target
+**/.venv
+**/__pycache__

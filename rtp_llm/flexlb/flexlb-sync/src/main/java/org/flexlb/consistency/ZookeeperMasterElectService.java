@@ -24,7 +24,9 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
+import org.springframework.lang.Nullable;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
@@ -77,12 +79,29 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
 
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
 
+    @Autowired
     public ZookeeperMasterElectService(
             GeneralHttpNettyService generalHttpNettyService,
             EngineHealthReporter engineHealthReporter,
             Environment environment,
             ConfigService configService,
             DeploymentIdentity deploymentIdentity) {
+        this(
+                generalHttpNettyService,
+                engineHealthReporter,
+                environment,
+                configService,
+                deploymentIdentity,
+                null);
+    }
+
+    protected ZookeeperMasterElectService(
+            GeneralHttpNettyService generalHttpNettyService,
+            EngineHealthReporter engineHealthReporter,
+            Environment environment,
+            ConfigService configService,
+            DeploymentIdentity deploymentIdentity,
+            @Nullable String configuredIp) {
 
         Logger.warn("Initializing ZookeeperMasterElectService...");
 
@@ -96,16 +115,12 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
                         ? zookeeper
                         : null;
 
-        init();
-    }
-
-    public void init() {
         if (consistencyConfig == null) {
             LOGGER.warn("ZooKeeper consistency is disabled.");
             return;
         }
         initializeRoleId();
-        initializeIpAndPort();
+        initializeIpAndPort(configuredIp);
         initializeZookeeperClient();
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_INIT);
     }
@@ -281,9 +296,12 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         roleId = deploymentIdentity.getDeploymentId();
     }
 
-    private void initializeIpAndPort() {
+    private void initializeIpAndPort(@Nullable String configuredIp) {
         try {
-            localIp = InetAddress.getLocalHost().getHostAddress();
+            localIp =
+                    configuredIp == null
+                            ? InetAddress.getLocalHost().getHostAddress()
+                            : configuredIp;
         } catch (UnknownHostException e) {
             throw new RuntimeException("Failed to retrieve local host address", e);
         }
