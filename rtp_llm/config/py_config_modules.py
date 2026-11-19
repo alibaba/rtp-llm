@@ -323,6 +323,7 @@ class MMControlConfig:
 class MMTransportConfig:
     def __init__(self):
         self.mode: str = MM_TRANSPORT_MODE_GRPC
+        self.allow_inline_clients: bool = False
         self.control = MMControlConfig()
         self.rdma = MMRdmaConfig()
 

@@ -422,6 +422,14 @@ def init_vit_group_args(parser, vit_config):
         help="多模态输出传输模式：grpc 使用内联传输，rdma 强制使用 RDMA 且失败时直接报错",
     )
     vit_group.add_argument(
+        "--mm_rdma_allow_inline_clients",
+        env_name="MM_RDMA_ALLOW_INLINE_CLIENTS",
+        bind_to=(transport_config, "allow_inline_clients"),
+        type=str2bool,
+        default=False,
+        help="ViT RDMA 模式下，对未声明 RDMA 能力的调用方使用 gRPC 内联输出",
+    )
+    vit_group.add_argument(
         "--mm_rdma_bind_ip",
         env_name="MM_RDMA_BIND_IP",
         bind_to=(rdma_config, "bind_ip"),

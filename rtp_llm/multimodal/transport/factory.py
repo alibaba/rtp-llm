@@ -5,8 +5,26 @@ from rtp_llm.config.py_config_modules import (
     MM_TRANSPORT_MODE_RDMA,
     MM_TRANSPORT_MODES,
 )
-from rtp_llm.multimodal.transport.base import MMOutputTransport
+from rtp_llm.multimodal.transport.base import MMOutputTransport, MMTransportBackend
 from rtp_llm.multimodal.transport.grpc.backend import GrpcInlineOutputBackend
+
+
+class NegotiatedOutputBackend(MMTransportBackend):
+    name = "negotiated"
+
+    def __init__(self, rdma_backend: MMTransportBackend):
+        self._rdma = rdma_backend
+        self._grpc = GrpcInlineOutputBackend()
+
+    def transfer(self, request, res):
+        backend = self._rdma if request.support_rdma else self._grpc
+        return backend.transfer(request, res)
+
+    def release(self, handles):
+        self._rdma.release(handles)
+
+    def close(self):
+        self._rdma.close()
 
 
 def create_mm_output_transport(
@@ -19,7 +37,9 @@ def create_mm_output_transport(
         from rtp_llm.multimodal.transport.rdma.backend import RdmaOutputBackend
 
         backend = RdmaOutputBackend.create(transport_config.rdma, local_device_id)
-        logging.info("[VIT] mm transport mode rdma: output backend enabled")
+        if transport_config.allow_inline_clients:
+            backend = NegotiatedOutputBackend(backend)
+        logging.info("[VIT] mm output backend: %s", backend.name)
     else:
         raise ValueError(
             f"invalid mm_transport_mode: {transport_config.mode!r}; "

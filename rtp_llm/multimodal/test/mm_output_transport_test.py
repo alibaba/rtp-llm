@@ -15,6 +15,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    ReleaseLeasePB,
 )
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
@@ -103,6 +104,34 @@ class MMOutputTransportFactoryTest(TestCase):
             create_mm_output_transport(config)
 
         create.assert_called_once_with(config.rdma, 0)
+
+    @patch("rtp_llm.multimodal.transport.rdma.backend.RdmaOutputBackend.create")
+    def test_allow_inline_clients_preserves_rdma_transfer_and_leases(self, create):
+        config = MMTransportConfig()
+        config.mode = MM_TRANSPORT_MODE_RDMA
+        config.allow_inline_clients = True
+        exporter = MagicMock()
+        exporter.export_embedding.return_value = [_serialized_desc("one")]
+        create.return_value = RdmaOutputBackend(exporter)
+        transport = create_mm_output_transport(config)
+        result = MMEmbeddingRes([_rows(1)])
+
+        inline = transport.transfer(MultimodalInputsPB(), result)
+        self.assertTrue(inline.HasField("multimodal_embedding"))
+        exporter.export_embedding.assert_not_called()
+
+        with _tensors_look_cuda():
+            receipt = transport.transfer(_rdma_request(), result)
+            self.assertEqual(receipt.output_rdma_slots[0].rdma_descriptor.lease_id, "one")
+            exporter.export_embedding.side_effect = RuntimeError("export failed")
+            with self.assertRaisesRegex(RuntimeError, "export failed"):
+                transport.transfer(_rdma_request(), result)
+
+        transport.release(ReleaseLeasePB(lease_id=["one"]))
+        exporter.release.assert_called_once_with(["one"])
+        with patch.object(create.return_value, "close") as close:
+            transport.close()
+        close.assert_called_once_with()
 
 
 class RdmaOutputBackendTest(TestCase):
