@@ -35,10 +35,6 @@ namespace {
 
 int64_t getStartupTimeoutMs(int64_t health_check_timeout_s) {
     constexpr int64_t kDefaultStartupTimeoutMs = 3600 * 1000;
-    const auto        explicit_timeout_ms      = autil::EnvUtil::getEnv("RTP_LLM_STARTUP_TIMEOUT_MS", int64_t(0));
-    if (explicit_timeout_ms > 0) {
-        return explicit_timeout_ms;
-    }
     if (health_check_timeout_s == -1) {
         return -1;
     }
@@ -231,35 +227,33 @@ void RtpLLMOp::init(py::object model,
     // here, then start the network listeners from startRPCServer().  Normal
     // startup calls it immediately; the SCR template path calls it after the
     // control-plane barrier releases.  One ordering, one set of failure paths.
-    deferred_init_params_ = std::make_unique<EngineInitParams>(std::move(params));
-    trace_config_         = std::move(telemetry_config);
-    prepareRPCService(*deferred_init_params_,
+    init_params_ = std::make_unique<EngineInitParams>(std::move(params));
+    trace_config_ = std::move(telemetry_config);
+    prepareRPCService(*init_params_,
                       std::move(mm_process_engine),
                       std::move(propose_params),
                       std::move(token_processor));
-    rpc_server_deferred_ = true;
     RTP_LLM_LOG_INFO("engine state prepared; RPC/HTTP listeners start from startRPCServer()");
 }
 
 void RtpLLMOp::startRPCServer() {
-    if (!rpc_server_deferred_) {
+    RTP_LLM_CHECK_WITH_INFO(!stop_requested_, "RPC server stopped during startup");
+    if (grpc_server_thread_.joinable()) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(deferred_init_params_ != nullptr, "deferred RPC init params are missing");
-    const auto& server_config = deferred_init_params_->server_config;
+    RTP_LLM_CHECK_WITH_INFO(init_params_ != nullptr, "RPC init params are missing");
+    const auto& server_config = init_params_->server_config;
     // The launcher supplies the total startup budget. Direct native callers
     // may omit ServerConfig's health-check timeout and use the RPC default.
     const auto health_timeout_s = py::hasattr(server_config, "startup_health_check_timeout") ?
                                       server_config.attr("startup_health_check_timeout").cast<int64_t>() :
                                       600;
     const int64_t startup_timeout_ms = getStartupTimeoutMs(health_timeout_s);
-    rpc_server_deferred_ = false;
 
     // Publish the thread before releasing the GIL so Python stop() can join it.
-    server_start_failed_ = false;
-    grpc_server_thread_  = std::thread([this]() {
+    grpc_server_thread_ = std::thread([this]() {
         try {
-            startRPCServerInternal(*deferred_init_params_);
+            startRPCServerInternal(*init_params_);
         } catch (const std::exception& e) {
             setServerStartError(e.what());
         } catch (...) {
@@ -270,13 +264,15 @@ void RtpLLMOp::startRPCServer() {
         pybind11::gil_scoped_release release;
         const auto    begin_wait_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         while (!is_server_ready_ && !stop_requested_) {
-            if (server_start_failed_) {
+            {
                 std::lock_guard<std::mutex> lock(server_state_mutex_);
-                RTP_LLM_FAIL("deferred RPC server start failed: %s", server_start_error_.c_str());
+                if (!server_start_error_.empty()) {
+                    RTP_LLM_FAIL("%s", server_start_error_.c_str());
+                }
             }
             if (startup_timeout_ms >= 0
                 && (autil::TimeUtility::currentTimeInMicroSeconds() - begin_wait_us) / 1000 > startup_timeout_ms) {
-                RTP_LLM_FAIL("deferred RPC server start timed out after %ld ms", startup_timeout_ms);
+                RTP_LLM_FAIL("RPC server start timed out after %ld ms", startup_timeout_ms);
             }
             sleep(1);
         }
@@ -285,11 +281,11 @@ void RtpLLMOp::startRPCServer() {
 }
 
 void RtpLLMOp::updateRuntimeEndpoints(py::object runtime_config) {
-    RTP_LLM_CHECK_WITH_INFO(rpc_server_deferred_ && deferred_init_params_ != nullptr,
-                            "runtime endpoints can only be updated before deferred RPC start");
+    RTP_LLM_CHECK_WITH_INFO(!stop_requested_ && !grpc_server_thread_.joinable() && init_params_ != nullptr,
+                            "runtime endpoints can only be updated before RPC start");
     auto config = runtime_config.cast<RuntimeConfig>();
-    deferred_init_params_->runtime_config.worker_addrs = config.worker_addrs;
-    deferred_init_params_->runtime_config.worker_grpc_addrs = config.worker_grpc_addrs;
+    init_params_->runtime_config.worker_addrs = config.worker_addrs;
+    init_params_->runtime_config.worker_grpc_addrs = config.worker_grpc_addrs;
     if (model_rpc_service_) {
         model_rpc_service_->updateRuntimeEndpoints(config);
     }
@@ -440,14 +436,10 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
                                  py::object                                    mm_process_engine,
                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                  py::object                                    token_processor) {
-    std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
         int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
         auto    role_type                      = maga_init_params.pd_sep_config.role_type;
-        // NOTE: ip/ip段可自定义为所需范围。
-        server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
@@ -467,17 +459,16 @@ void RtpLLMOp::prepareRPCService(const EngineInitParams&                       m
                                              http_server_address,
                                              maga_init_params,
                                              token_processor));
-        deferred_server_address_ = server_address;
     }
 }
 
 void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) {
 #if USING_CUDA || USING_ROCM
-    // Deferred startup runs on a new thread; bind its device before cache initialization.
+    // Startup runs on a new thread; bind its device before cache initialization.
     // Use the PyTorch device registry so ROCm can use its CUDA-compatible device type.
     const int device_id = static_cast<int>(getDeviceId());
     const c10::DeviceGuard device_guard(c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(device_id)));
-    RTP_LLM_LOG_INFO("deferred RPC startup bound to device_id=%d", device_id);
+    RTP_LLM_LOG_INFO("RPC startup bound to device_id=%d", device_id);
 #endif
     int64_t model_rpc_port = -1;
     {
@@ -500,6 +491,7 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
         is_server_ready_ = true;
         return;
     }
+    const std::string server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
     grpc::ServerBuilder builder;
     // Set large message limits as C++-level defaults (overridable via server_config from grpc_group_args.py)
     builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
@@ -514,21 +506,18 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
         builder.SetSyncServerOption(grpc::ServerBuilder::MAX_POLLERS, grpc_config.max_server_pollers);
         RTP_LLM_LOG_INFO("grpc sync server MAX_POLLERS: %d", grpc_config.max_server_pollers);
     }
-    builder.AddListeningPort(deferred_server_address_, grpc::InsecureServerCredentials());
+    builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 
+    auto server = builder.BuildAndStart();
+    grpc::Server* grpc_server = server.get();
     {
         std::lock_guard<std::mutex> lock(server_state_mutex_);
-        grpc_server_ = builder.BuildAndStart();
-    }
-    grpc::Server* grpc_server = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(server_state_mutex_);
-        grpc_server = grpc_server_.get();
+        grpc_server_ = std::move(server);
     }
     RTP_LLM_CHECK_WITH_INFO(grpc_server != nullptr,
-                            "grpc server start failed at address " + deferred_server_address_);
-    RTP_LLM_LOG_INFO("Server listening on %s", deferred_server_address_.c_str());
+                            "grpc server start failed at address " + server_address);
+    RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
     // stop() may race with BuildAndStart.  Check the shutdown intent after
     // publishing the server pointer so the joining thread cannot wait forever
@@ -537,15 +526,14 @@ void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) 
         grpc_server->Shutdown();
     }
     grpc_server->Wait();
-    RTP_LLM_LOG_INFO("Server exit on %s", deferred_server_address_.c_str());
+    RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
 }
 
 void RtpLLMOp::setServerStartError(const std::string& error) {
     {
         std::lock_guard<std::mutex> lock(server_state_mutex_);
-        server_start_error_ = error;
+        server_start_error_ = "RPC server start failed: " + error;
     }
-    server_start_failed_ = true;
 }
 
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,
@@ -572,7 +560,6 @@ void RtpLLMOp::stop() {
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
         stop_requested_             = true;
-        rpc_server_deferred_        = false;
         if (model_rpc_service_) {
             model_rpc_service_->beginShutdown();
         }
@@ -602,9 +589,8 @@ void RtpLLMOp::stop() {
         // this avoids the detached-thread lifetime race during CRIU restore
         // and shutdown.
         if (grpc_server_thread_.joinable()) {
-            // The normal-start listener thread reacquires the GIL to release
-            // its Python captures before exiting.  Joining with the GIL held
-            // deadlocks even when SCR is disabled.
+            // Startup reads Python configuration under the GIL. Joining with
+            // the GIL held can deadlock even during ordinary startup.
             pybind11::gil_scoped_release release;
             grpc_server_thread_.join();
         }
@@ -622,7 +608,7 @@ void RtpLLMOp::stop() {
             http_server_->stop();
             http_server_.reset();
         }
-        deferred_init_params_.reset();
+        init_params_.reset();
         is_server_shutdown_ = true;
         // bounded flush of remaining spans; never blocks process exit
         {

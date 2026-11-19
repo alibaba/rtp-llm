@@ -54,11 +54,8 @@ private:
     std::thread                     grpc_server_thread_;
     std::atomic<bool>               is_server_ready_{false};
     std::atomic<bool>               is_server_shutdown_{false};
-    std::atomic<bool>               rpc_server_deferred_{false};
-    std::unique_ptr<EngineInitParams> deferred_init_params_;
-    std::string                     deferred_server_address_;
+    std::unique_ptr<EngineInitParams> init_params_;
     telemetry::TelemetryConfig       trace_config_;
-    std::atomic<bool>               server_start_failed_{false};
     std::atomic<bool>               stop_requested_{false};
     std::mutex                      server_state_mutex_;
     std::string                     server_start_error_;

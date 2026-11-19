@@ -38,17 +38,6 @@ from rtp_llm.utils.gang_info import get_gang_member
 from rtp_llm.utils.scr.network import cache_store_advertise_ip
 
 
-def resolve_pd_role_type(py_env_configs) -> RoleType:
-    """Return the engine PD role for this process.
-
-    ``VIT_SEPARATION=ROLE`` only says that VIT runs as its own role somewhere in
-    the deployment.  A prefill or decode container must keep its own role, or
-    the engine would take VIT-only code paths (and skip the PD role setup) while
-    the launcher still treats it as a prefill/decode worker.
-    """
-    # The launcher applies the legacy PDFUSION-to-VIT default before spawning.
-    return py_env_configs.role_config.role_type
-
 
 @dataclass
 class EngineConfig:
@@ -212,7 +201,7 @@ class EngineConfig:
         # deployment, not this process: only the container that actually runs
         # the VIT role reports RoleType.VIT.  A prefill/decode container keeps
         # its own role even when the flag is set for the whole deployment.
-        pd_sep_config.role_type = resolve_pd_role_type(py_env_configs)
+        pd_sep_config.role_type = py_env_configs.role_config.role_type
 
         # Mirror role into parallelism_config so model construction can read it
         # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].

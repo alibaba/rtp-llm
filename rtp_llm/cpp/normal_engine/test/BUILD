@@ -189,3 +189,16 @@ cc_test(
     exec_properties = {"gpu": "H20_CU13"},
     tags = ["H20_CU13"],
 )
+
+cc_test(
+    name = "rpc_startup_test",
+    srcs = ["RpcStartupTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":mock_engine",
+        "//rtp_llm/cpp/pybind:th_transformer_lib",
+    ] + cuda13_torch_link_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+)
