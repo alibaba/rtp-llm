@@ -198,6 +198,7 @@ class BindBarrierTest(TestCase):
                     dash_sc_grpc_server_port=26818,
                     rank_id=0,
                     frontend_server_id=0,
+                    monitor_interval=1,
                 )
                 app.py_env_configs.server_config = app.server_config
                 app._grpc_server = Mock()

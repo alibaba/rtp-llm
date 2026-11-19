@@ -134,6 +134,7 @@ py_test(
         "//rtp_llm:config_ops",
         "//rtp_llm:utils",
         "//rtp_llm/distribute:distribute",
+        "//rtp_llm/metrics:metrics",
         "//rtp_llm/models_py/distributed:collective_torch",
     ],
 )
