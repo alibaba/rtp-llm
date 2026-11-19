@@ -695,7 +695,7 @@ class InspectionPipelineTest(TestCase):
                 request, inputs, [media.url.encode() for media in inputs]
             )
 
-        provider.preprocess_and_submit = reinspect
+        provider.reinspect_cached = reinspect
         media = self._make_input("fake://unchecked")
         tickets = engine._inspection.tickets
         ticket = tickets.open([{"key": media.cache_key()}])

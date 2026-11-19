@@ -552,6 +552,7 @@ class MMProcessEngine:
             service_name=service_name,
             external_request_id=external_request_id,
             deadline=deadline,
+            cached_embedding=True,
         )
         try:
             while future is not None:

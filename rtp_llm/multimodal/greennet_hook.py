@@ -67,6 +67,13 @@ class GreenNetHandle:
 
 
 class GreenNetProvider:
+    def share_verdict_cache(self) -> Optional[str]:
+        """Return a cache handle for ViT child processes when supported."""
+        return None
+
+    def attach_verdict_cache(self, handle: str) -> None:
+        """Use the parent ViT service's verdict cache when supported."""
+
     def worker_factory(self):
         """Optional picklable CPU-only factory; never pass a live HTTP client.
 
@@ -85,6 +92,10 @@ class GreenNetProvider:
         self, request: Any, mm_inputs: List[Any]
     ) -> GreenNetHandle:
         raise NotImplementedError
+
+    async def reinspect_cached(self, request, mm_inputs) -> GreenNetHandle:
+        """Only the verdict is consumed; providers may reuse a cached decision."""
+        return await self.preprocess_and_submit(request, mm_inputs)
 
     async def submit_sources(self, request, mm_inputs, sources: List[bytes]):
         """Inspect encoded bytes returned by CPU preprocessing, without URLs.

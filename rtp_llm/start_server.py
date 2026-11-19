@@ -340,6 +340,7 @@ def start_vit_server_impl(
         py_env_configs: 配置对象
         process_manager: 进程管理器
     """
+    from rtp_llm.multimodal.greennet_hook import get_greennet_provider
     from rtp_llm.multimodal.multimodal_util import url_data_cache_
     from rtp_llm.multimodal.vit_proxy_start_server import vit_proxy_start_server
     from rtp_llm.multimodal.vit_start_server import vit_start_server
@@ -388,6 +389,7 @@ def start_vit_server_impl(
         url_cache_handle = url_data_cache_.share(
             py_env_configs.vit_config.url_cache_item_num
         )
+        verdict_cache_handle = get_greennet_provider().share_verdict_cache()
         for i in range(vit_server_count):
             internal_grpc_port = base_grpc_port + i * 2 + 1
             internal_http_port = base_grpc_port + i * 2 + 2
@@ -410,6 +412,7 @@ def start_vit_server_impl(
                     True,  # is_proxy_mode (proxy 模式下的 worker 进程)
                     worker_rdma_port,
                     url_cache_handle,
+                    verdict_cache_handle,
                 ),
                 name=f"vit_worker_{i}",
             )

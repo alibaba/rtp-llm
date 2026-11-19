@@ -42,7 +42,8 @@ def _read(stream, size, sock, deadline):
 
 
 class _ByteStore:
-    def __init__(self, capacity):
+    def __init__(self, capacity, *, replace_existing=False):
+        self.replace_existing = replace_existing
         self.items = OrderedDict()
         self.lock = threading.Lock()
         self.resize(capacity)
@@ -68,8 +69,9 @@ class _ByteStore:
         if not self.lock.acquire(blocking=False):
             return
         try:
-            if self.capacity and key not in self.items:
+            if self.capacity and (self.replace_existing or key not in self.items):
                 self.items[key] = data
+                self.items.move_to_end(key)
                 if len(self.items) > self.capacity:
                     # Drop the last reference after releasing the index lock.
                     _ = self.items.popitem(last=False)
@@ -117,8 +119,8 @@ def _stop_server(server, directory):
 
 
 class URLDataCache:
-    def __init__(self, cache_size):
-        self._store = _ByteStore(cache_size)
+    def __init__(self, cache_size, *, replace_existing=False):
+        self._store = _ByteStore(cache_size, replace_existing=replace_existing)
         self._capacity = cache_size
         self._address = None
         self._owner_pid = None

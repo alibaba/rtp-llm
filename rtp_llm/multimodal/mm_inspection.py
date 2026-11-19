@@ -230,6 +230,7 @@ class MMInspectionCoordinator:
         deadline: Optional[float] = None,
         worker_sources: bool = False,
         external_request_id: str = "",
+        cached_embedding: bool = False,
     ) -> Tuple[
         List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
     ]:
@@ -281,6 +282,12 @@ class MMInspectionCoordinator:
         abandoned = threading.Event()
         unclaimed = {}
 
+        reuse_cached = (
+            cached_embedding
+            and self.mm_part.supports_inspection_sources
+            and not self._request_scoped_inspection()
+        )
+
         async def prepare():
             source_inputs = None
             prepare_sources = getattr(self.mm_part, "prepare_inspection_inputs", None)
@@ -299,9 +306,14 @@ class MMInspectionCoordinator:
             if abandoned.is_set():
                 raise asyncio.CancelledError()
             with vit_media.stage("greennet.prepare"):
-                handle = await self._greennet_provider.preprocess_and_submit(
-                    req, source_inputs if source_inputs is not None else mm_inputs
-                )
+                if reuse_cached and source_inputs is None:
+                    handle = await self._greennet_provider.reinspect_cached(
+                        req, mm_inputs
+                    )
+                else:
+                    handle = await self._greennet_provider.preprocess_and_submit(
+                        req, source_inputs if source_inputs is not None else mm_inputs
+                    )
             # A provider may finish concurrently with timeout, or even suppress
             # cancellation. Keep ownership until the waiting thread takes it.
             with ownership_lock:
@@ -413,10 +425,8 @@ class MMInspectionCoordinator:
                             request_attrs = vars(request_for_cache).copy()
                             request_attrs["greennet_passed"] = False
                             request_for_cache = SimpleNamespace(**request_attrs)
-                        cached_handle = (
-                            await self._greennet_provider.preprocess_and_submit(
-                                request_for_cache, cached_inputs
-                            )
+                        cached_handle = await self._greennet_provider.reinspect_cached(
+                            request_for_cache, cached_inputs
                         )
                         try:
                             with vit_media.stage("greennet"):
