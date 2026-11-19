@@ -366,18 +366,26 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertIsNone(remote.load("invalid", entry=fresh))
                 self.assertFalse(fresh.greennet_passed)
 
-    def test_quarantined_gdr_skips_reads_and_write_snapshots(self):
+    def test_quarantined_gdr_still_queries_metadata_but_skips_payload_io(self):
         store = Store()
         store.quarantined = True
         remote = self.remote(store, gdr_enabled=True)
         with patch.object(remote._write_executor, "submit") as submit, patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.plan_object"
-        ) as plan:
+        ) as plan, patch.object(
+            store, "object_size", return_value=32
+        ) as metadata, patch.object(
+            remote._transfer_executor, "submit"
+        ) as transfer:
             self.assertIsNone(remote.load("key"))
             remote.submit_result("key", (torch.ones(1), None))
+            metadata.assert_called_once()
+            transfer.assert_not_called()
             plan.assert_not_called()
             submit.assert_not_called()
-        self.assertEqual(remote.stats()["miss"], 1)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertFalse(remote.stats().get("read_error"))
+
 
     def test_quarantine_during_producer_wait_releases_write_admission(self):
         store = Store()

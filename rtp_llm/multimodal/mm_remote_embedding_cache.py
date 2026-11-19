@@ -1092,12 +1092,6 @@ class MMRemoteEmbeddingCache:
         if self._closed:
             self._report_skip("read", "executor_closed")
             return None
-        if self._skip_quarantined("read"):
-            self._count("miss")
-            self.record(
-                "load_miss", key=key, trace_id=trace_id, reason="gdr_quarantined"
-            )
-            return None
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
         started = time.perf_counter()
@@ -1227,6 +1221,11 @@ class MMRemoteEmbeddingCache:
                 outcome = "miss"
                 self._count("miss")
                 self.record("load_miss", key=key, trace_id=trace_id)
+                return None
+
+            if self._gdr_pool_quarantined():
+                outcome = "skipped"
+                self._report_skip("read", "gdr_quarantined", report_outcome=False)
                 return None
 
             size = meta.size_bytes
