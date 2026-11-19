@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import threading
-import time
+import weakref
 from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Any, TypeVar
@@ -21,6 +22,7 @@ _MISSING_WHEEL_MESSAGE = (
 )
 _INCOMPATIBLE_WHEEL_MESSAGE = "KVCM EMB storage requires KVMeta object API version 2"
 _REQUIRED_KVCM_OBJECT_API_VERSION = 2
+_ENDPOINT_REFRESH_SECONDS = 1.0
 _TensorT = TypeVar("_TensorT")
 
 
@@ -151,6 +153,15 @@ class RtpKvMetaObjectClient:
         self._metadata_lock = threading.Lock()
         self._metadata_addresses = frozenset(config.addresses)
         self._closed = False
+        self._metadata_stop = threading.Event()
+        if config.vipserver_domain:
+            # Keep the SDK's last usable endpoints available during discovery.
+            threading.Thread(
+                target=self._watch_metadata_addresses,
+                args=(weakref.ref(self), self._metadata_stop, _ENDPOINT_REFRESH_SECONDS),
+                name="emb-metadata-address-refresh",
+                daemon=True,
+            ).start()
 
     @classmethod
     def from_env(
@@ -222,38 +233,39 @@ class RtpKvMetaObjectClient:
         except Exception:
             raise KvMetaLookupError("KVMeta service discovery unavailable") from None
 
-    def _refresh_metadata_addresses(self, deadline=None):
+    @staticmethod
+    def _watch_metadata_addresses(client_ref, stop, interval):
+        last_error = None
+        while not stop.wait(interval):
+            client = client_ref()
+            if client is None:
+                return
+            try:
+                client._refresh_metadata_addresses()
+                last_error = None
+            except KvMetaLookupError as error:
+                if str(error) != last_error:
+                    last_error = str(error)
+                    logging.error("EMB KVCM endpoint refresh failed: %s", error)
+            finally:
+                # Do not hold the client alive while the thread is sleeping.
+                del client
+
+    def _refresh_metadata_addresses(self):
+        addresses = self._discover_addresses()
+        snapshot = frozenset(addresses)
+        with self._metadata_lock:
+            if self._closed or snapshot == self._metadata_addresses:
+                return
+            try:
+                self._client.update_addresses(addresses)
+            except Exception:
+                raise KvMetaLookupError("KVMeta endpoint update failed") from None
+            self._metadata_addresses = snapshot
+
+    def _ensure_open(self):
         if self._closed:
             raise RuntimeError("KVCM client is closed")
-        if not self._config.vipserver_domain:
-            return
-        # Stable endpoint reads don't take the address-update lock. The SDK
-        # keeps an immutable endpoint snapshot for each admitted RPC.
-        if frozenset(self._discover_addresses()) == self._metadata_addresses:
-            return
-        if deadline is None:
-            self._metadata_lock.acquire()
-        elif not self._metadata_lock.acquire(
-            timeout=max(0, deadline - time.monotonic())
-        ):
-            raise KvMetaLookupTimeout("KVMeta endpoint update lock deadline exceeded")
-        try:
-            if self._closed:
-                raise RuntimeError("KVCM client is closed")
-            if deadline is not None and time.monotonic() >= deadline:
-                raise KvMetaLookupTimeout("KVMeta endpoint update deadline exceeded")
-            # Re-read while holding the lock so an older snapshot can't
-            # overwrite a refresh published by another worker.
-            addresses = self._discover_addresses()
-            snapshot = frozenset(addresses)
-            if snapshot != self._metadata_addresses:
-                try:
-                    self._client.update_addresses(addresses)
-                except Exception:
-                    raise KvMetaLookupError("KVMeta endpoint update failed") from None
-                self._metadata_addresses = snapshot
-        finally:
-            self._metadata_lock.release()
 
     def save(
         self,
@@ -264,7 +276,7 @@ class RtpKvMetaObjectClient:
     ) -> None:
         """Save contiguous CPU/CUDA tensors under exact object keys."""
 
-        self._refresh_metadata_addresses()
+        self._ensure_open()
         self._client.save(keys, tensors, trace_id=trace_id)
 
     def save_one(self, key: str, tensor: Any, *, trace_id: str | None = None) -> None:
@@ -287,7 +299,7 @@ class RtpKvMetaObjectClient:
         be discarded rather than consumed by inference.
         """
 
-        self._refresh_metadata_addresses()
+        self._ensure_open()
         self._client.load(keys, tensors, trace_id=trace_id)
 
     def load_one(
@@ -325,19 +337,13 @@ class RtpKvMetaObjectClient:
 
     def get_object_meta(self, key: str, *, trace_id=None, timeout_ms=None):
         """Return native object metadata, or None for a cache miss."""
+        self._ensure_open()
         if timeout_ms is None:
             timeout_ms = self._config.call_timeout_ms
-        deadline = time.monotonic() + timeout_ms / 1000
         if timeout_ms <= 0:
             raise KvMetaLookupTimeout("KVMeta lookup deadline exceeded")
-        self._refresh_metadata_addresses(deadline)
-        remaining_ms = int((deadline - time.monotonic()) * 1000)
-        if remaining_ms <= 0:
-            raise KvMetaLookupTimeout(
-                "KVMeta lookup deadline exceeded during client setup"
-            )
         try:
-            return self._client.get_object_meta(key, remaining_ms, trace_id=trace_id)
+            return self._client.get_object_meta(key, timeout_ms, trace_id=trace_id)
         except self._client_error_type as error:
             if getattr(error.code, "name", None) == "ER_SDK_TIMEOUT":
                 raise KvMetaLookupTimeout("KVMeta Get returned ER_SDK_TIMEOUT") from error
@@ -421,7 +427,7 @@ class RtpKvMetaObjectClient:
     def remove(self, keys: Sequence[str], *, trace_id: str | None = None) -> None:
         """Remove exact object keys."""
 
-        self._refresh_metadata_addresses()
+        self._ensure_open()
         self._client.remove(keys, trace_id=trace_id)
 
     def remove_one(self, key: str, *, trace_id: str | None = None) -> None:
@@ -432,6 +438,7 @@ class RtpKvMetaObjectClient:
     def close(self) -> None:
         """Release local KVCM resources; safe to call more than once."""
 
+        self._metadata_stop.set()
         with self._metadata_lock:
             self._closed = True
             self._client.close()
@@ -448,6 +455,7 @@ class RtpKvMetaObjectClient:
     ) -> None:
         # Cleanup must never turn a body failure into apparent success, even if
         # a future optional client accidentally returns a truthy value here.
+        self._metadata_stop.set()
         with self._metadata_lock:
             self._closed = True
             self._client.__exit__(exc_type, exc_value, traceback)

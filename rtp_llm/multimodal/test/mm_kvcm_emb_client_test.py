@@ -78,34 +78,52 @@ def _kv_cache_config(**overrides):
 
 
 class RtpKvMetaObjectClientTest(unittest.TestCase):
-    def test_endpoint_update_wait_is_bounded_without_sending_query(self):
-        client, native, *_ = self._create(
-            _client_config(vipserver_domain="emb.vipserver")
-        )
-        self.addCleanup(client.close)
-        with client._metadata_lock, patch(
-            "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
-            return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+    def test_background_address_refresh_does_not_block_native_lookup(self):
+        entered, release = threading.Event(), threading.Event()
+        with (
+            patch.object(kvcm_client, "_ENDPOINT_REFRESH_SECONDS", 0.01),
+            patch(
+                "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
+                return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+            ),
         ):
-            with self.assertRaisesRegex(TimeoutError, "endpoint update lock"):
-                client.object_size("key", timeout_ms=10)
-        native.get_object_meta.assert_not_called()
+            native = MagicMock()
+            native.get_object_meta.return_value = SimpleNamespace(size_bytes=12)
 
-    def test_native_lookup_uses_remaining_budget_and_reuses_client(self):
+            def updating(addresses):
+                entered.set()
+                self.assertTrue(release.wait(2))
+
+            native.update_addresses.side_effect = updating
+            client, _, _, factory = self._create(
+                _client_config(vipserver_domain="emb.vipserver"), generic_client=native
+            )
+            try:
+                self.assertTrue(entered.wait(2))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                    reads = [
+                        executor.submit(client.object_size, key, timeout_ms=10)
+                        for key in ("one", "two")
+                    ]
+                    self.assertEqual([read.result(timeout=1) for read in reads], [12, 12])
+                self.assertEqual(native.get_object_meta.call_count, 2)
+                native.update_addresses.assert_called_once_with(("10.0.0.9:19001",))
+                factory.assert_called_once()
+            finally:
+                release.set()
+                client.close()
+            self.assertEqual(client._metadata_addresses, {"10.0.0.9:19001"})
+
+    def test_native_lookup_forwards_budget_and_reuses_client(self):
         client, native, *_ = self._create()
         self.addCleanup(client.close)
         native.get_object_meta.return_value = SimpleNamespace(size_bytes=12)
-        with patch.object(kvcm_client.time, "monotonic", side_effect=[1, 1.025]):
-            self.assertEqual(client.object_size("key", trace_id="trace", timeout_ms=50), 12)
-        self.assertEqual(native.get_object_meta.call_args.args[0], "key")
-        self.assertGreater(native.get_object_meta.call_args.args[1], 0)
-        self.assertLessEqual(native.get_object_meta.call_args.args[1], 25)
-        self.assertEqual(native.get_object_meta.call_args.kwargs["trace_id"], "trace")
+        self.assertEqual(client.object_size("key", trace_id="trace", timeout_ms=50), 12)
+        native.get_object_meta.assert_called_once_with("key", 50, trace_id="trace")
 
         native.get_object_meta.reset_mock()
-        with patch.object(kvcm_client.time, "monotonic", side_effect=[1, 1.060]):
-            with self.assertRaisesRegex(TimeoutError, "client setup"):
-                client.object_size("expired", timeout_ms=50)
+        with self.assertRaisesRegex(TimeoutError, "lookup deadline exceeded"):
+            client.object_size("expired", timeout_ms=0)
         native.get_object_meta.assert_not_called()
 
         native.get_object_meta.side_effect = _ClientError(_ClientCode.ER_SDK_TIMEOUT)
@@ -210,6 +228,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
             return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
         ):
+            client._refresh_metadata_addresses()
             client.save_one("key", object())
             client.load_one("key", object())
             client.remove_one("key")
@@ -233,43 +252,28 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         native.update_addresses.assert_not_called()
         client.close()
 
-    def test_discovery_or_publication_failure_keeps_old_client_and_submits_nothing(
-        self,
-    ):
+    def test_failed_address_refresh_keeps_previous_snapshot(self):
         from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
 
-        for method in ("save", "load", "remove"):
-            for publish_failure in (False, True):
-                with self.subTest(method=method, publish_failure=publish_failure):
-                    client, native, *_ = self._create(
-                        _client_config(vipserver_domain="emb.vipserver")
-                    )
-                    before = client._metadata_addresses
-                    if publish_failure:
-                        native.update_addresses.side_effect = RuntimeError(
-                            "private publication detail"
-                        )
-                    with patch(
-                        "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
-                        return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
-                        side_effect=(
-                            None
-                            if publish_failure
-                            else RuntimeError("private discovery detail")
-                        ),
-                    ):
-                        args = (
-                            (["key"],) if method == "remove" else (["key"], [object()])
-                        )
-                        with self.assertRaises(KvMetaLookupError) as caught:
-                            getattr(client, method)(*args)
-                    self.assertEqual(caught.exception.reason, "discovery")
-                    self.assertTrue(client.is_transfer_quiescent(caught.exception))
-                    self.assertNotIn("private", str(caught.exception))
-                    self.assertEqual(client._metadata_addresses, before)
-                    getattr(native, method).assert_not_called()
-                    native.close.assert_not_called()
-                    client.close()
+        client, native, *_ = self._create(
+            _client_config(vipserver_domain="emb.vipserver")
+        )
+        self.addCleanup(client.close)
+        before = client._metadata_addresses
+        native.get_object_meta.return_value = SimpleNamespace(size_bytes=12)
+        for publish_failure in (False, True):
+            with self.subTest(publish_failure=publish_failure), patch(
+                "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
+                return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
+                side_effect=(None if publish_failure else RuntimeError("private detail")),
+            ):
+                native.update_addresses.side_effect = RuntimeError("private detail")
+                with self.assertRaises(KvMetaLookupError) as caught:
+                    client._refresh_metadata_addresses()
+                self.assertNotIn("private", str(caught.exception))
+                self.assertEqual(client._metadata_addresses, before)
+                self.assertEqual(client.object_size("key"), 12)
+        native.close.assert_not_called()
 
     def test_mutation_failure_is_not_replayed_after_refresh(self):
         client, native, *_ = self._create(
@@ -280,6 +284,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             "rtp_llm.multimodal.kvcm.lookup._cached_vipserver_resolver",
             return_value=[SimpleNamespace(ip="10.0.0.9", port=19001)],
         ):
+            client._refresh_metadata_addresses()
             with self.assertRaisesRegex(RuntimeError, "outcome unknown"):
                 client.save_one("key", object())
         native.save.assert_called_once()
@@ -316,7 +321,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
                 self.assertTrue(closed.is_set())
             with self.assertRaisesRegex(RuntimeError, "closed"):
                 client.save_one("key", object())
-            self.assertEqual(resolver.call_count, 2)
+            resolver.assert_called_once()
         native.close.assert_called_once()
         native.save.assert_not_called()
 
