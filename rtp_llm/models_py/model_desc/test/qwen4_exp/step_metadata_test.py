@@ -9,7 +9,9 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.step_metadata import (
     cached_prefill_geometry,
     cached_query_geometry,
     cached_step_value,
+    check_prefill_metadata_once,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 
 
 class StepMetadataTest(unittest.TestCase):
@@ -81,6 +83,48 @@ class StepMetadataTest(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_prefill_request_geometry_cuda(self):
         self.check_prefill("cuda")
+
+    def test_prefill_receipts_require_success_and_refresh_mutated_metadata(self):
+        context = SimpleNamespace(
+            metadata_cache={},
+            is_mtp_draft=False,
+            main_inputs=SimpleNamespace(
+                is_prefill=True, is_target_verify=False, is_cuda_graph=False
+            ),
+        )
+        table = torch.tensor([1], dtype=torch.int32)
+        calls = []
+
+        def validate(*, scoped=True):
+            checks = DeviceChecks()
+            checks.prefill_metadata_readonly = scoped
+
+            def add():
+                calls.append(1)
+                checks.add((table <= 0).any(), "unallocated", ValueError)
+
+            check_prefill_metadata_once(context, checks, ("pages", 2), (table,), add)
+            return checks
+
+        first, pending = validate(), validate()
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(pending.verified)
+        first.verify()
+        pending.verify()
+        for _ in range(11):
+            validate().verify()
+        self.assertEqual(len(calls), 2)
+        validate(scoped=False).verify()
+        self.assertEqual(len(calls), 3)
+        table.zero_()
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, "unallocated"):
+                validate().verify()
+        self.assertEqual(len(calls), 5)
+        table.fill_(1)
+        context.metadata_cache = {}
+        validate().verify()
+        self.assertEqual(len(calls), 6)
 
     def assert_geometry(self, actual, prefix, query, ratio):
         visible = prefix[:, None] + torch.arange(1, query + 1, device=prefix.device)
