@@ -21,6 +21,10 @@ import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HIT_TOKENS
 import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_MAPPING_COUNT;
@@ -33,6 +37,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -60,6 +66,28 @@ class CacheMetricsReporterTest {
         } catch (Exception e) {
             fail("Failed to inject monitor: " + e.getMessage());
         }
+    }
+
+    @Test
+    void reportsKvcmGlobalCountersAndOnlyComparesAvailablePredictions() {
+        reporter.init();
+        verify(monitor).register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
+        verify(monitor).register(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        String address = "127.0.0.1:8080";
+        FlexMetricTags selected = FlexMetricTags.of("role", "PREFILL", "engineIp", address);
+        reporter.reportKvcmSelectedMatch(RoleType.PREFILL, address, 16L, 48L, 64L);
+        verify(monitor).report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, selected, 16L);
+        verify(monitor).report(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, selected, 48L);
+        verify(monitor).report(CACHE_KVCM_SELECTED_INPUT_TOKENS, selected, 64L);
+
+        FlexMetricTags comparison = FlexMetricTags.of("role", "PREFILL", "engineIp", address,
+                "group", "group", "taskState", "FINISHED", "cacheMatchSource", "KVCM");
+        reporter.reportCacheHitComparison(RoleType.PREFILL, address, "group", "FINISHED", 64L, 32L, 16L, -1L, null);
+        verify(monitor, never()).report(eq(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS),
+                eq(comparison), anyDouble());
+        reporter.reportCacheHitComparison(RoleType.PREFILL, address, "group", "FINISHED", 64L, 32L, 16L, 48L, null);
+        verify(monitor).report(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS, comparison, -16L);
     }
 
     @Test

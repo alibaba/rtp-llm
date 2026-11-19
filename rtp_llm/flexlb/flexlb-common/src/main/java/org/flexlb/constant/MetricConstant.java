@@ -266,6 +266,11 @@ public class MetricConstant {
     public static final String CACHE_HIT_COMPARISON_INPUT_TOKENS = "app.cache.hit.comparison.input.tokens";
     public static final String CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS = "app.cache.hit.comparison.kvcm.predicted.tokens";
     public static final String CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS = "app.cache.hit.comparison.kvcm.local.delta.tokens";
+    public static final String CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS =
+            "app.cache.hit.comparison.kvcm.global.match.delta.tokens";
+    public static final String CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS = "app.cache.kvcm.selected.local.match.tokens";
+    public static final String CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS = "app.cache.kvcm.selected.global.match.tokens";
+    public static final String CACHE_KVCM_SELECTED_INPUT_TOKENS = "app.cache.kvcm.selected.input.tokens";
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS = "app.cache.hit.comparison.local.standby.delta.tokens";
 
     /**

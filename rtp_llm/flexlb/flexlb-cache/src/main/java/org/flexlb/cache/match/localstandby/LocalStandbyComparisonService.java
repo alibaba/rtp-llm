@@ -37,7 +37,8 @@ final class LocalStandbyComparisonService {
             } else {
                 metrics.reportCacheHitComparison(comparison.role(), comparison.worker(), comparison.group(),
                         comparison.state(), comparison.inputTokens(), comparison.actualHitTokens(),
-                        comparison.kvcmPrediction().localPredictionTokens(), standbyTokens);
+                        comparison.kvcmPrediction().localPredictionTokens(),
+                        comparison.kvcmPrediction().globalPredictionTokens(), standbyTokens);
             }
         });
     }
@@ -46,8 +47,10 @@ final class LocalStandbyComparisonService {
         this.reporter = reporter;
     }
 
-    Prediction register(Dispatch dispatch, String group, long inputTokens, long blockSize, int kvcmBlocks) {
-        Prediction prediction = new Prediction(group, inputTokens, blockSize, tokens(inputTokens, blockSize, kvcmBlocks));
+    Prediction register(Dispatch dispatch, String group, long inputTokens, long blockSize, int kvcmBlocks,
+                        Long kvcmGlobalTokens) {
+        Prediction prediction = new Prediction(group, inputTokens, blockSize, tokens(inputTokens, blockSize, kvcmBlocks),
+                kvcmGlobalTokens == null ? -1 : kvcmGlobalTokens);
         return pending.asMap().putIfAbsent(dispatch, prediction) == null ? prediction : null;
     }
 
@@ -94,7 +97,7 @@ final class LocalStandbyComparisonService {
         reporter.accept(new Comparison(event, Long.toString(dispatch.requestId()), "KVCM", dispatch.role(),
                 prediction.group(), dispatch.workerAddress(), dispatch.workerGeneration(), dispatch.batchId(),
                 state, prediction.inputTokens(), prediction.blockSize(), actualTokens,
-                new CachePrediction(prediction.kvcmLocalTokens(), prediction.kvcmLocalTokens(), -1),
+                new CachePrediction(prediction.kvcmLocalTokens(), prediction.kvcmLocalTokens(), prediction.kvcmGlobalTokens()),
                 standbyTokens == null ? null : new CachePrediction(standbyTokens, -1, -1)));
     }
 
@@ -108,12 +111,13 @@ final class LocalStandbyComparisonService {
     record Dispatch(long requestId, RoleType role, String workerAddress, long workerGeneration, long batchId) {}
 
     /**
-     * Holds the routing prediction while the shadow query and first valid status race.
+     * Holds the routing and global predictions while the shadow query and first valid status race.
      */
-    record Prediction(String group, long inputTokens, long blockSize, long kvcmLocalTokens,
+    record Prediction(String group, long inputTokens, long blockSize, long kvcmLocalTokens, long kvcmGlobalTokens,
                       CompletableFuture<Long> standbyTokens, AtomicBoolean observed) {
-        Prediction(String group, long inputTokens, long blockSize, long kvcmLocalTokens) {
-            this(group, inputTokens, blockSize, kvcmLocalTokens, new CompletableFuture<>(), new AtomicBoolean());
+        Prediction(String group, long inputTokens, long blockSize, long kvcmLocalTokens, long kvcmGlobalTokens) {
+            this(group, inputTokens, blockSize, kvcmLocalTokens, kvcmGlobalTokens,
+                    new CompletableFuture<>(), new AtomicBoolean());
         }
     }
 

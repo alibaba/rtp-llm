@@ -27,11 +27,15 @@ import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_GLOBAL_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_INPUT_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_MAPPING_COUNT;
@@ -91,6 +95,11 @@ public class CacheMetricsReporter {
      * Register all cache-related monitoring metrics
      */
     private void registerCacheMetrics() {
+        monitor.register(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_KVCM_SELECTED_INPUT_TOKENS, FlexMetricType.COUNTER);
+        monitor.register(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS,
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
         monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
@@ -159,14 +168,27 @@ public class CacheMetricsReporter {
         monitor.report(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, tags, hitTokens / (double) inputTokens);
     }
 
+    public void reportKvcmSelectedMatch(RoleType role, String address, long local, long global, long inputTokens) {
+        if (role == null || inputTokens <= 0) {
+            return;
+        }
+        FlexMetricTags tags = FlexMetricTags.of("role", role.name(), "engineIp", address);
+        monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, local);
+        monitor.report(CACHE_KVCM_SELECTED_GLOBAL_MATCH_TOKENS, tags, global);
+        monitor.report(CACHE_KVCM_SELECTED_INPUT_TOKENS, tags, inputTokens);
+    }
+
     public void reportCacheHitComparison(RoleType role, String address, String group, String state,
-                                         long inputTokens, long actual, long kvcmLocal, Long standby) {
+                                         long inputTokens, long actual, long kvcmLocal, long kvcmGlobal, Long standby) {
         FlexMetricTags tags = FlexMetricTags.of("role", role.name(), "engineIp", address,
                 "group", group == null ? "" : group, "taskState", state, "cacheMatchSource", "KVCM");
         monitor.report(CACHE_HIT_COMPARISON_INPUT_TOKENS, tags, inputTokens);
         monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, tags, actual);
         monitor.report(CACHE_HIT_COMPARISON_KVCM_PREDICTED_TOKENS, tags, kvcmLocal);
         monitor.report(CACHE_HIT_COMPARISON_KVCM_LOCAL_DELTA_TOKENS, tags, actual - kvcmLocal);
+        if (kvcmGlobal >= 0) {
+            monitor.report(CACHE_HIT_COMPARISON_KVCM_GLOBAL_MATCH_DELTA_TOKENS, tags, actual - kvcmGlobal);
+        }
         if (standby != null) {
             monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, tags, actual - standby);
         }

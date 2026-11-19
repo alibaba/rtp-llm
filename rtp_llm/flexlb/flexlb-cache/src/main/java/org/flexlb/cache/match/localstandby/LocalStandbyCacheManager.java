@@ -90,7 +90,8 @@ public class LocalStandbyCacheManager {
                     worker.getIpPort(), worker.getGenerationId(), batchId);
             Integer kvcmBlocks = route.getKvcmMatchedBlocks();
             var prediction = kvcmBlocks == null || blockSize <= 0 || request.getSeqLen() <= 0 ? null
-                    : comparison.register(dispatch, route.getGroup(), request.getSeqLen(), blockSize, kvcmBlocks);
+                    : comparison.register(dispatch, route.getGroup(), request.getSeqLen(), blockSize, kvcmBlocks,
+                            route.getKvcmGlobalMatchTokens());
             try {
                 updates.execute(() -> {
                     try {

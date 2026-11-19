@@ -140,8 +140,18 @@ public class CostBasedPrefillStrategy {
                 selectedPin);
         try {
             if (cacheMatch != null && cacheMatch.kvcm()) {
-                selectedRole.serverStatus().setKvcmMatchedBlocks(
-                        cacheMatch.matches().getOrDefault(survivors.endpointAddress(selectedIndex), 0));
+                String selectedAddress = survivors.endpointAddress(selectedIndex);
+                selectedRole.serverStatus().setKvcmMatchedBlocks(cacheMatch.matches().getOrDefault(selectedAddress, 0));
+                Long globalBlocks = cacheMatch.globalMatches().get(selectedAddress);
+                long blockSize = balanceContext.getRequest().getCacheKeyBlockSize();
+                if (blockSize > 0 && seqLen > 0) {
+                    if (globalBlocks != null) {
+                        selectedRole.serverStatus().setKvcmGlobalMatchTokens(
+                                globalBlocks > seqLen / blockSize ? seqLen : globalBlocks * blockSize);
+                    } else if (!cacheMatch.matches().containsKey(selectedAddress)) {
+                        selectedRole.serverStatus().setKvcmGlobalMatchTokens(0L);
+                    }
+                }
             }
             reportSelectedEstimates(
                     roleType,

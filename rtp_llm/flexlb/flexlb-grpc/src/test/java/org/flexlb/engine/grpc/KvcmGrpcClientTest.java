@@ -50,6 +50,7 @@ class KvcmGrpcClientTest {
         var failuresRemaining = new AtomicInteger();
         var omitResponse = new AtomicBoolean();
         var emptyMatch = new AtomicBoolean();
+        var globalBlocks = new AtomicInteger(100);
         var attempts = new AtomicInteger();
         var reporter = mock(KvcmMetricsReporter.class);
         Server server = ServerBuilder.forPort(0).addService(new MetaServiceGrpc.MetaServiceImplBase() {
@@ -74,7 +75,8 @@ class KvcmGrpcClientTest {
                     return;
                 }
                 out.onNext(GetHostCacheStateResponse.newBuilder().setHeader(OK)
-                        .addHosts(HostCacheMatch.newBuilder().setHostIpPort("127.0.0.1:18080@0").setLocal(2).setGlobal(100))
+                        .addHosts(HostCacheMatch.newBuilder().setHostIpPort("127.0.0.1:18080@0")
+                                .setLocal(2).setGlobal(globalBlocks.get()))
                         .addHosts(HostCacheMatch.newBuilder().setHostIpPort("old:18080").setLocal(3)).build()); out.onCompleted();
             }
         }).build().start();
@@ -89,7 +91,9 @@ class KvcmGrpcClientTest {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
             while (true) {
                 try {
-                    assertEquals(Map.of(candidates.getFirst(), 2), client.findMatchingEngines(keys, 16, candidates));
+                    var lookup = client.lookup(keys, 16, candidates);
+                    assertEquals(Map.of(candidates.getFirst(), 2), lookup.localMatches());
+                    assertEquals(Map.of(candidates.getFirst(), 100L), lookup.globalMatches());
                     break;
                 } catch (IllegalStateException unavailable) {
                     if (System.nanoTime() >= deadline) throw unavailable;
@@ -101,6 +105,11 @@ class KvcmGrpcClientTest {
             assertEquals(QueryType.QT_PREFIX_MATCH, observed.get().getQueryType());
             assertEquals(List.of("hbm"), observed.get().getMediumList());
             assertEquals(0, observed.get().getGlobalKvsHostCount()); assertFalse(observed.get().getEnableP2P());
+            globalBlocks.set(-1);
+            var lookup = client.lookup(keys, 16, candidates);
+            assertEquals(Map.of(candidates.getFirst(), 2), lookup.localMatches());
+            assertTrue(lookup.globalMatches().isEmpty());
+            globalBlocks.set(100);
             clearInvocations(reporter);
             attempts.set(0);
             failuresRemaining.set(1);

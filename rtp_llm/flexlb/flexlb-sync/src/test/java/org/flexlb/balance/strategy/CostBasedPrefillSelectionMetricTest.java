@@ -1,12 +1,11 @@
 package org.flexlb.balance.strategy;
 
-import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.CacheAwareService.CacheMatch;
 import org.flexlb.config.ConfigService;
@@ -21,12 +20,13 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.testfixture.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.testfixture.TaskInfo;
+import org.flexlb.testfixture.WorkerStatusTestFixtures;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -51,6 +51,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies Prefill selection and the metrics emitted for the chosen worker.
+ */
 class CostBasedPrefillSelectionMetricTest {
     private static final int FULL_FLEET_SIZE = 750;
 
@@ -262,6 +265,22 @@ class CostBasedPrefillSelectionMetricTest {
                 .lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong());
         try (SelectedRole selected = select()) {
             assertEquals(replace ? "10.0.0.2" : "10.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
+    void kvcmGlobalIsCarriedForTelemetryButCannotChangeTheLocalWinner() {
+        publish("10.0.0.2", 8080);
+        context.getRequest().setCacheKeyBlockSize(100L);
+        context.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L, 4L, 5L));
+        when(cache.lookup(any(), any(), any(), org.mockito.ArgumentMatchers.anyLong())).thenReturn(
+                new CacheMatch(Map.of("10.0.0.1:8080", 2, "10.0.0.2:8080", 1), true,
+                        Map.of("10.0.0.1:8080", 3L, "10.0.0.2:8080", 5L)));
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            var copy = ServerStatus.copyOf(selected.serverStatus());
+            assertEquals(2, copy.getKvcmMatchedBlocks());
+            assertEquals(300L, copy.getKvcmGlobalMatchTokens());
         }
     }
 

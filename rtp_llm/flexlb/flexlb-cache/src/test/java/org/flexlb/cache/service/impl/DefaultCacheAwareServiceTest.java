@@ -2,12 +2,16 @@ package org.flexlb.cache.service.impl;
 
 import org.flexlb.cache.core.KvCacheManager;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.KvcmGrpcClient.MatchObservation;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -99,14 +103,38 @@ class DefaultCacheAwareServiceTest {
         var service = new DefaultCacheAwareService(cache, mock(CacheMetricsReporter.class), kvcm, standby);
         var keys = List.of(11L, 22L); var candidates = List.of("127.0.0.1:18080");
         when(kvcm.enabled()).thenReturn(true);
-        when(kvcm.findMatchingEngines(keys, 16, candidates)).thenReturn(java.util.Map.of(candidates.getFirst(), 2));
-        org.junit.jupiter.api.Assertions.assertEquals(java.util.Map.of(candidates.getFirst(), 2),
+        when(kvcm.lookup(keys, 16, candidates)).thenReturn(
+                new MatchObservation(Map.of(candidates.getFirst(), 1), Map.of(candidates.getFirst(), 2L)));
+        org.junit.jupiter.api.Assertions.assertEquals(Map.of(candidates.getFirst(), 1),
                 service.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16));
+        org.junit.jupiter.api.Assertions.assertEquals(Map.of(candidates.getFirst(), 2L),
+                service.lookup(keys, RoleType.PREFILL, candidates, 16).globalMatches());
         org.mockito.Mockito.verifyNoInteractions(cache);
-        when(kvcm.findMatchingEngines(keys, 16, candidates)).thenThrow(new IllegalStateException("unavailable"));
+        when(kvcm.lookup(keys, 16, candidates)).thenThrow(new IllegalStateException("unavailable"));
         when(standby.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16)).thenReturn(java.util.Map.of(candidates.getFirst(), 1));
         org.junit.jupiter.api.Assertions.assertEquals(java.util.Map.of(candidates.getFirst(), 1),
                 service.findMatchingEngines(keys, RoleType.PREFILL, candidates, 16));
+    }
+
+    @Test
+    void reportsPairedCountersOnlyForSuccessfulRoutesWithGlobalEvidence() {
+        var metrics = mock(CacheMetricsReporter.class);
+        var service = new DefaultCacheAwareService(mock(KvCacheManager.class), metrics);
+        Request request = new Request();
+        request.setSeqLen(64);
+        request.setCacheKeyBlockSize(16);
+        ServerStatus selected = new ServerStatus();
+        selected.setRole(RoleType.PREFILL);
+        selected.setServerIp("127.0.0.1");
+        selected.setHttpPort(8080);
+        selected.setSuccess(true);
+        selected.setKvcmMatchedBlocks(1);
+        service.recordRoutedRequest(request, List.of(selected));
+        org.mockito.Mockito.verifyNoInteractions(metrics);
+
+        selected.setKvcmGlobalMatchTokens(48L);
+        service.recordRoutedRequest(request, List.of(selected));
+        verify(metrics).reportKvcmSelectedMatch(RoleType.PREFILL, "127.0.0.1:8080", 16L, 48L, 64L);
     }
 
     @Test void disabledBypassesKvcmEvenWithConfiguredTopology() {

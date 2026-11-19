@@ -5,8 +5,12 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import org.flexlb.dao.route.RoleType;
 
+/**
+ * Describes a selected worker and carries internal routing observations.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
@@ -16,6 +20,9 @@ public class ServerStatus {
     private long workerGeneration;
     @JsonIgnore
     private Integer kvcmMatchedBlocks;
+    @JsonIgnore
+    @EqualsAndHashCode.Exclude
+    private Long kvcmGlobalMatchTokens;
     @JsonProperty("role")
     private RoleType role;
 
@@ -52,7 +59,6 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
-
     /**
      * Returns an independent copy, or null when the source is null.
      * The ViT generation remains part of the copied selection identity.
@@ -71,6 +77,7 @@ public class ServerStatus {
         copy.group = source.group;
         copy.workerGeneration = source.workerGeneration;
         copy.kvcmMatchedBlocks = source.kvcmMatchedBlocks;
+        copy.kvcmGlobalMatchTokens = source.kvcmGlobalMatchTokens;
         copy.debugInfo = DebugInfo.copyOf(source.debugInfo);
         copy.requestId = source.requestId;
         copy.success = source.success;

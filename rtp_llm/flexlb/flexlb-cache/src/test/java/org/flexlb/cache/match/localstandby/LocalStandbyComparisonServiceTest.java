@@ -26,8 +26,8 @@ class LocalStandbyComparisonServiceTest {
     void onlyOneValidObservationForTheExactDispatchIsReported() {
         var events = new ArrayList<LocalStandbyComparisonService.Comparison>();
         var comparison = new LocalStandbyComparisonService(events::add);
-        var prediction = comparison.register(DISPATCH, "group", 48, 16, 2);
-        assertNull(comparison.register(DISPATCH, "group", 48, 16, 3));
+        var prediction = comparison.register(DISPATCH, "group", 48, 16, 2, 48L);
+        assertNull(comparison.register(DISPATCH, "group", 48, 16, 3, 48L));
         WorkerStatus worker = worker(7);
         comparison.observe(worker, observation(worker, 11, false));
         comparison.observe(worker, observation(worker, 12, true));
@@ -46,6 +46,7 @@ class LocalStandbyComparisonServiceTest {
         assertEquals("cache_hit_comparison", feedback.event());
         assertEquals(0L, feedback.actualHitTokens());
         assertEquals(32L, feedback.kvcmPrediction().localPredictionTokens());
+        assertEquals(48L, feedback.kvcmPrediction().globalPredictionTokens());
         assertEquals(16L, feedback.localStandbyPrediction().predictedHitTokens());
     }
 
@@ -53,7 +54,7 @@ class LocalStandbyComparisonServiceTest {
     void anEarlyActualSampleCanCompleteWithoutAShadowPrediction() {
         var events = new ArrayList<LocalStandbyComparisonService.Comparison>();
         var comparison = new LocalStandbyComparisonService(events::add);
-        var prediction = comparison.register(DISPATCH, null, 48, 16, 0);
+        var prediction = comparison.register(DISPATCH, null, 48, 16, 0, null);
         WorkerStatus worker = worker(7);
         comparison.observe(worker, observation(worker, 11, true));
         assertTrue(events.isEmpty());
@@ -61,6 +62,7 @@ class LocalStandbyComparisonServiceTest {
         assertEquals(List.of("cache_hit_comparison"), events.stream()
                 .map(LocalStandbyComparisonService.Comparison::event).toList());
         assertNull(events.getFirst().localStandbyPrediction());
+        assertEquals(-1L, events.getFirst().kvcmPrediction().globalPredictionTokens());
     }
 
     private static WorkerStatus worker(long generation) {

@@ -97,6 +97,10 @@ public final class KvcmGrpcClient implements AutoCloseable {
     }
 
     public Map<String, Integer> findMatchingEngines(List<Long> keys, long blockSize, List<String> candidates) {
+        return lookup(keys, blockSize, candidates).localMatches();
+    }
+
+    public MatchObservation lookup(List<Long> keys, long blockSize, List<String> candidates) {
         if (!enabled()) {
             throw new IllegalStateException("KVCM is disabled");
         }
@@ -124,7 +128,7 @@ public final class KvcmGrpcClient implements AutoCloseable {
                 metricsReporter.reportQueryRetry(attempt);
             }
             try {
-                Map<String, Integer> matches = query(target, request, deadline, candidates);
+                MatchObservation matches = query(target, request, deadline, candidates);
                 recordQuery(true);
                 return matches;
             } catch (RuntimeException failure) {
@@ -163,12 +167,13 @@ public final class KvcmGrpcClient implements AutoCloseable {
         }
     }
 
-    private Map<String, Integer> query(ManagedChannel target, GetHostCacheStateRequest request,
+    private MatchObservation query(ManagedChannel target, GetHostCacheStateRequest request,
                                        Deadline deadline, List<String> candidates) {
         var response = MetaServiceGrpc.newBlockingStub(target).withDeadline(deadline).getHostCacheState(request);
         requireOk(response.getHeader());
         Set<String> live = new HashSet<>(candidates);
         Map<String, Integer> matches = new HashMap<>();
+        Map<String, Long> globalMatches = new HashMap<>();
         for (var host : response.getHostsList()) {
             String address = host.getHostIpPort();
             if (!live.contains(address) && address.endsWith("@0")) {
@@ -180,9 +185,13 @@ public final class KvcmGrpcClient implements AutoCloseable {
                     throw new IllegalStateException("Invalid KVCM local match count");
                 }
                 matches.merge(address, Math.toIntExact(count), Math::max);
+                if (host.getGlobal() >= count) {
+                    globalMatches.merge(address, host.getGlobal(), Math::max);
+                }
             }
         }
-        return Map.copyOf(matches);
+        globalMatches.entrySet().removeIf(entry -> entry.getValue() < matches.get(entry.getKey()));
+        return new MatchObservation(Map.copyOf(matches), Map.copyOf(globalMatches));
     }
 
     private static void requireOk(CommonResponseHeader header) {
@@ -301,4 +310,9 @@ public final class KvcmGrpcClient implements AutoCloseable {
             recoverySuccesses = 0;
         }
     }
+
+    /**
+     * Local matches drive routing; global matches are collected only for telemetry.
+     */
+    public record MatchObservation(Map<String, Integer> localMatches, Map<String, Long> globalMatches) {}
 }

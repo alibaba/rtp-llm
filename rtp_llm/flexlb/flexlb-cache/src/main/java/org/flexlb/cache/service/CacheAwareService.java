@@ -68,5 +68,9 @@ public interface CacheAwareService {
     /**
      * Routing matches and whether they came from a successful KVCM query.
      */
-    record CacheMatch(Map<String, Integer> matches, boolean kvcm) {}
+    record CacheMatch(Map<String, Integer> matches, boolean kvcm, Map<String, Long> globalMatches) {
+        public CacheMatch(Map<String, Integer> matches, boolean kvcm) {
+            this(matches, kvcm, Map.of());
+        }
+    }
 }

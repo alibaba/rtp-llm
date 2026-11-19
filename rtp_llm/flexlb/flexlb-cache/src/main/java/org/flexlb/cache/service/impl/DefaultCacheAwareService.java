@@ -66,9 +66,9 @@ public class DefaultCacheAwareService implements CacheAwareService {
                 return new CacheMatch(standby.findMatchingEngines(keys, role, candidates, blockSize), false);
             }
             try {
-                var result = kvcm.findMatchingEngines(keys, blockSize, candidates);
+                var result = kvcm.lookup(keys, blockSize, candidates);
                 reportFindLatency(role, started, FIND_METRIC_SUCCESS);
-                return new CacheMatch(result, true);
+                return new CacheMatch(result.localMatches(), true, result.globalMatches());
             } catch (RuntimeException failure) {
                 reportFindLatency(role, started, FIND_METRIC_FAILURE);
                 long now = System.nanoTime(), next = nextKvcmWarning.get();
@@ -96,6 +96,25 @@ public class DefaultCacheAwareService implements CacheAwareService {
     public void recordRoutedRequest(Request request, List<ServerStatus> selected, long batchId) {
         if (standby != null) {
             standby.recordRoutedRequest(request, selected, batchId);
+        }
+        if (selected != null && request.getSeqLen() > 0 && request.getCacheKeyBlockSize() > 0) {
+            for (ServerStatus route : selected) {
+                if (route == null || !route.isSuccess() || route.getKvcmGlobalMatchTokens() == null
+                        || route.getKvcmMatchedBlocks() == null) {
+                    continue;
+                }
+                long input = request.getSeqLen();
+                long blockSize = request.getCacheKeyBlockSize();
+                int localBlocks = route.getKvcmMatchedBlocks();
+                long localTokens = localBlocks > input / blockSize ? input : localBlocks * blockSize;
+                try {
+                    cacheMetricsReporter.reportKvcmSelectedMatch(route.getRole(),
+                            route.getServerIp() + ":" + route.getHttpPort(), localTokens,
+                            route.getKvcmGlobalMatchTokens(), input);
+                } catch (RuntimeException failure) {
+                    log.debug("Failed to report selected KVCM matches for request {}", request.getRequestId(), failure);
+                }
+            }
         }
     }
 
