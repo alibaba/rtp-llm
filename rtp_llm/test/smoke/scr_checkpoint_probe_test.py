@@ -378,7 +378,7 @@ def child_arrival(path, generation):
     pinned["pid"] = os.getpid()
     epsilon = BlockingTestEpsilon(SimpleNamespace(snapshot=lambda: pinned))
     epsilon.snapstart_checkpoint(
-        wait_mode=1, worker_id=1, worker_num=2, timeout=5, inactivity_timeout=1
+        wait_mode=1, worker_id=1, worker_num=2
     )
 
 
@@ -406,8 +406,6 @@ class BlockingCheckpointTest(unittest.TestCase):
                 wait_mode=1,
                 worker_id=0,
                 worker_num=2,
-                timeout=5,
-                inactivity_timeout=1,
             )
             try:
                 arrivals = barrier.wait_ready(os.getpid(), timeout=3)
@@ -501,8 +499,6 @@ class BlockingCheckpointTest(unittest.TestCase):
                 wait_mode=1,
                 worker_id=0,
                 worker_num=1,
-                timeout=5,
-                inactivity_timeout=1,
             )
             try:
                 arrivals = barrier.wait_ready(os.getpid(), timeout=2)

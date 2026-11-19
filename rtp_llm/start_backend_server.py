@@ -34,8 +34,6 @@ from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.scr.template_utils import (
     SCR_GENERATION_ENV,
-    SCR_INACTIVITY_TIMEOUT_ENV,
-    SCR_TIMEOUT_ENV,
     ScrParticipantManifest,
 )
 from rtp_llm.utils.scr.template_utils import (
@@ -134,14 +132,12 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None):
         worker_num = scr_manifest.worker_num
         logging.info(
             "sCR rank arrival mapping resolved: local_rank=%s worker_id=%s "
-            "worker_num=%s phase=%s generation=%s timeout=%s inactivity_timeout=%s",
+            "worker_num=%s phase=%s generation=%s",
             getattr(pc, "local_rank", 0),
             worker_id,
             worker_num,
             os.environ.get("SCR_PHASE", ""),
             os.environ.get(SCR_GENERATION_ENV, "<unset>"),
-            os.environ.get(SCR_TIMEOUT_ENV, "<default>"),
-            os.environ.get(SCR_INACTIVITY_TIMEOUT_ENV, "<default>"),
         )
         result = arrive_scr_checkpoint_barrier(
             worker_id=worker_id,

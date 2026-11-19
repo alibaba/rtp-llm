@@ -36,7 +36,6 @@ class ScrCheckpointSteadyStateTest(unittest.TestCase):
                 "HIPPO_ROLE_SHORT_NAME": "scr_kmonitor_negative",
                 "HIPPO_SLAVE_IP": "203.0.113.1",  # Reserved example IP, not a real Flume endpoint.
                 "RTP_LLM_SCR_GENERATION": generation,
-                "RTP_LLM_SCR_TIMEOUT": "900",
                 "SCR_TEST_BARRIER_SOCKET": barrier.path,
             },
             role_name="scr_checkpoint",

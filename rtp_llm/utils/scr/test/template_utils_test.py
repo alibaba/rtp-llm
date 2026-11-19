@@ -167,8 +167,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                         "wait_mode": 1,
                         "worker_id": 1,
                         "worker_num": 2,
-                        "timeout": 900,
-                        "inactivity_timeout": 10,
                     },
                 )
             ],
@@ -186,7 +184,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             )
         self.assertEqual(epsilon.calls, [])
 
-    def test_rank_barrier_legacy_epsilon_is_called_once_without_probe_retry(self) -> None:
+    def test_rank_barrier_uses_the_minimal_blocking_abi_once(self) -> None:
         epsilon = _FakeEpsilon()
         calls = []
 

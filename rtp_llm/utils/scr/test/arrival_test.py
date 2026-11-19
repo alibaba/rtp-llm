@@ -91,7 +91,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         )
         self.assertTrue(all(item["worker_num"] == 4 for item in epsilon.arrivals))
 
-    def test_timeout_is_fail_open_and_is_logged(self):
+    def test_provider_error_is_logged_for_optional_arrival(self):
         epsilon = _EpsilonDouble(error=TimeoutError("snapshot barrier timeout"))
         with self._enabled(), mock.patch.object(
             scr, "_load_epsilon", return_value=epsilon
@@ -114,7 +114,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         messages = [call.args[0] for call in log_info.call_args_list]
         self.assertTrue(any("sCR snapstart checkpoint reached" in message for message in messages))
 
-    def test_fail_closed_timeout_raises_for_active_template_path(self):
+    def test_provider_cancellation_fails_closed_for_active_template(self):
         epsilon = _EpsilonDouble(error=TimeoutError("snapshot barrier timeout"))
         with self._enabled(), mock.patch.object(
             scr, "_load_epsilon", return_value=epsilon
@@ -134,10 +134,9 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                     worker_id=0, worker_num=1, fail_closed=True
                 )
 
-    def test_late_success_is_not_treated_as_a_local_timeout(self):
-        # A resumed process keeps its own monotonic origin, which is unrelated
-        # to the checkpoint host's, so a local elapsed time cannot gate the
-        # arrival. Epsilon owns the timeout budget.
+    def test_success_records_a_fresh_barrier_return_time(self):
+        # Startup timing begins when the provider releases the restored process;
+        # RTP never uses this clock to decide whether the barrier timed out.
         epsilon = _EpsilonDouble(result=0)
         with self._enabled(), mock.patch.object(
             scr, "_load_epsilon", return_value=epsilon
@@ -146,7 +145,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                 scr.arrive_scr_checkpoint_barrier(
                     worker_id=0,
                     worker_num=1,
-                    timeout=1,
                     fail_closed=True,
                 ),
                 0,
@@ -168,47 +166,14 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                 )
         self.assertIsNone(scr.get_scr_barrier_return_time())
 
-    def test_timeout_budget_accepts_controller_values_and_rejects_invalid_values(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTPLLM_ENABLE_SCR": "1",
-                "RTP_LLM_SCR_TIMEOUT": "37",
-                "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "5",
-            },
-            clear=True,
-        ):
-            self.assertEqual(scr._scr_timeouts(), (37, 5))
 
-        with mock.patch.dict(
-            os.environ,
-            {
-                "RTP_LLM_SCR_TIMEOUT": "not-a-number",
-                "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "0",
-            },
-            clear=True,
-        ), mock.patch.object(scr.LOGGER, "error") as log_error:
-            self.assertEqual(scr._scr_timeouts(), (scr.DEFAULT_TIMEOUT_SECONDS, scr.DEFAULT_INACTIVITY_TIMEOUT_SECONDS))
-        self.assertEqual(log_error.call_count, 2)
-
-    def test_timeout_aliases_cannot_override_the_controller_budget(self):
-        for conflicting_value in ("38", "invalid"):
-            with self.subTest(value=conflicting_value), mock.patch.dict(
-                os.environ,
-                {"RTP_LLM_SCR_TIMEOUT": "37", "SCR_TIMEOUT": conflicting_value},
-                clear=True,
-            ), self.assertRaisesRegex(scr.EpsilonProtocolError, "conflicting"):
-                scr._scr_timeouts()
-
-    def test_arrival_passes_timeout_budget(self):
+    def test_arrival_supplies_only_blocking_mode_and_participant_identity(self):
         epsilon = _EpsilonDouble()
         generation = None
         with mock.patch.dict(
             os.environ,
             {
                 "RTPLLM_ENABLE_SCR": "1",
-                "RTP_LLM_SCR_TIMEOUT": "37",
-                "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "5",
                 scr.SCR_GENERATION_ENV: "generation-7",
                 scr.SCR_PHASE_ENV: scr.SCR_PHASE_RESTORE,
             },
@@ -226,8 +191,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                     "wait_mode": 1,
                     "worker_id": 0,
                     "worker_num": 1,
-                    "timeout": 37,
-                    "inactivity_timeout": 5,
                 }
             ],
         )

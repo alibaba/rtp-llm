@@ -462,8 +462,6 @@ class BackendScrIntegrationTest(unittest.TestCase):
             "SCR_PHASE": "checkpoint",
             "SCR_GENERATION": "3",
             "RTP_LLM_SCR_GENERATION": "3",
-            "RTP_LLM_SCR_TIMEOUT": "900",
-            "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "10",
             "UNRELATED": "keep",
         }
         seen = {}

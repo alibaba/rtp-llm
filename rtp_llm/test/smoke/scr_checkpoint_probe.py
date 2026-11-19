@@ -50,7 +50,6 @@ def read_message(stream):
 
 
 class BlockingTestEpsilon:
-    API_VERSION = "smoke-test-barrier-not-native-scr"
     __file__ = __file__
 
     def __init__(self, probe):
@@ -76,15 +75,12 @@ class BlockingTestEpsilon:
             "gpu_kv_bytes": sum(int(tensor.nbytes) for tensor in self.tensors),
         }
 
-    def snapstart_checkpoint(
-        self, *, wait_mode, worker_id, worker_num, timeout, inactivity_timeout
-    ):
+    def snapstart_checkpoint(self, *, wait_mode, worker_id, worker_num):
         if wait_mode != 1:
             raise RuntimeError("Smoke requires a blocking checkpoint arrival")
         for callback in self.callbacks:
             callback()
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(timeout)
             connection.connect(os.environ["SCR_TEST_BARRIER_SOCKET"])
             with connection.makefile("rwb") as stream:
                 write_message(

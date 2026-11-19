@@ -627,7 +627,6 @@ def get_master(
         nodes = network.topology(
             parallelism_config,
             GangInfoReader.from_config(distribute_config),
-            wait=True,
         )
         address, port = get_master_from_c2(distribute_config)
         if address != nodes[0]:

@@ -64,8 +64,6 @@ class ScrVipTest(unittest.TestCase):
             self._write_rows(self.rows)
 
         with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
-            network.time, "monotonic", side_effect=[0, 1]
-        ), patch.object(
             network.time, "sleep", side_effect=publish_map
         ) as sleep, patch.object(
             network, "validate_device"
@@ -82,25 +80,6 @@ class ScrVipTest(unittest.TestCase):
             restored.self.cache_store_listen_port, world.self.cache_store_listen_port
         )
 
-    def test_restore_rejects_persistently_unmerged_gang_info(self):
-        from rtp_llm.utils.scr.restore_context import RestoreContext
-
-        world = self._world()
-        self._write_rows(
-            {key: {"ip": value["real_ip"]} for key, value in self.rows.items()}
-        )
-        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
-            network.time, "monotonic", side_effect=[0, 1, 121]
-        ), patch.object(network.time, "sleep") as sleep, patch.object(
-            network, "validate_device"
-        ) as device:
-            with self.assertRaisesRegex(KeyError, "real_ip"):
-                RestoreContext("seed", "10.0.0.3").resolve_world_info(
-                    world, self.pc, self.reader
-                )
-        sleep.assert_called_once_with(0.5)
-        device.assert_not_called()
-        self.assertEqual(world.self.ip, "22.0.1.3")
 
     def test_restore_rejects_changed_vip_after_map_becomes_ready(self):
         from rtp_llm.utils.scr.restore_context import RestoreContext
@@ -117,34 +96,19 @@ class ScrVipTest(unittest.TestCase):
                 )
         self.assertEqual(world.members[0].ip, "22.0.1.2")
 
-    def test_restore_waits_for_network_and_fails_when_it_stays_unready(self):
+    def test_restore_waits_for_network_readiness(self):
         from rtp_llm.utils.scr.restore_context import RestoreContext
 
-        for readiness in (
-            [RuntimeError("network not ready"), None],
-            [RuntimeError("network not ready")] * 2,
+        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
+            network.time, "sleep"
+        ) as sleep, patch.object(
+            network, "validate_device", side_effect=[RuntimeError("not ready"), None]
         ):
-            with self.subTest(recovers=readiness[-1] is None), patch.dict(
-                os.environ, {"SCR_PHASE": "restore"}
-            ), patch.object(
-                network.time, "monotonic", side_effect=[0, 1, 121]
-            ), patch.object(
-                network.time, "sleep"
-            ) as sleep, patch.object(
-                network, "validate_device", side_effect=readiness
-            ):
-                context = RestoreContext("seed", "10.0.0.3")
-                if readiness[-1] is None:
-                    self.assertEqual(
-                        context.resolve_world_info(
-                            self._world(), self.pc, self.reader
-                        ).self.ip,
-                        "22.0.1.3",
-                    )
-                else:
-                    with self.assertRaisesRegex(RuntimeError, "network not ready"):
-                        context.resolve_world_info(self._world(), self.pc, self.reader)
-                sleep.assert_called_once_with(0.5)
+            world = RestoreContext("seed", "10.0.0.3").resolve_world_info(
+                self._world(), self.pc, self.reader
+            )
+        self.assertEqual(world.self.ip, "22.0.1.3")
+        sleep.assert_called_once_with(0.5)
 
     def test_control_plane_addresses_and_new_underlay(self):
         self.assertEqual(
@@ -160,24 +124,14 @@ class ScrVipTest(unittest.TestCase):
         self._write_rows(
             {key: {"ip": row["real_ip"]} for key, row in self.rows.items()}
         )
-        with patch.object(network.time, "monotonic", side_effect=[0, 1]), patch.object(
+        with patch.object(
             network.time, "sleep", side_effect=lambda _: self._write_rows(self.rows)
         ), patch.object(network, "validate_device"):
             self.assertEqual(
-                network.topology(self.pc, self.reader, wait=True),
+                network.topology(self.pc, self.reader),
                 {0: "22.0.1.2", 1: "22.0.1.3"},
             )
 
-    def test_unmerged_annotation_times_out_without_using_pod_ip(self):
-        self._write_rows(
-            {key: {"ip": row["real_ip"]} for key, row in self.rows.items()}
-        )
-        with patch.object(
-            network.time, "monotonic", side_effect=[0, 121]
-        ), patch.object(network, "validate_device") as device:
-            with self.assertRaisesRegex(KeyError, "real_ip"):
-                network.internal_ip(self.pc, "10.0.0.3", self.reader)
-            device.assert_not_called()
 
     def test_local_vip_uses_rtp_node_rank_without_rank_id_env(self):
         self.pc.world_size = 8
@@ -213,7 +167,7 @@ class ScrVipTest(unittest.TestCase):
                 os.environ, {"RANK_SIZE": wrong}
             ), patch.object(network, "validate_device") as device:
                 with self.assertRaisesRegex(ValueError, "RANK_SIZE"):
-                    network.topology(self.pc, self.reader, wait=True)
+                    network.topology(self.pc, self.reader)
                 device.assert_not_called()
 
     def test_c2_part_names_resolve_vip_and_underlay(self):
@@ -316,35 +270,37 @@ class ScrVipTest(unittest.TestCase):
                             )
                             if expected:
                                 topology.assert_called_once_with(
-                                    self.pc, self.reader, wait=True
+                                    self.pc, self.reader
                                 )
                             else:
                                 topology.assert_not_called()
 
-    def test_missing_or_invalid_platform_map_never_falls_back(self):
-        for content, error in ((None, FileNotFoundError), ("{}", ValueError)):
-            with self.subTest(content=content):
-                if content is None:
+    def test_control_plane_can_cancel_platform_readiness_wait(self):
+        for state in ("missing-projection", "unmerged-projection", "unready-device"):
+            with self.subTest(state=state):
+                self._write_rows(self.rows)
+                if state == "missing-projection":
                     self.path.unlink()
-                else:
-                    self.path.write_text(
-                        "app.c2.io/biz-detail-ganginfo=" + json.dumps(content) + "\n"
+                elif state == "unmerged-projection":
+                    self._write_rows(
+                        {key: {"ip": row["real_ip"]} for key, row in self.rows.items()}
                     )
                 with patch.object(
-                    network.time, "monotonic", side_effect=[0, 121]
-                ), patch.object(network, "validate_device") as device:
-                    with self.assertRaises(error):
+                    network.time, "sleep", side_effect=SystemExit("control plane cancelled")
+                ) as sleep, patch.object(
+                    network, "validate_device", side_effect=RuntimeError("network not ready")
+                ):
+                    with self.assertRaisesRegex(SystemExit, "control plane cancelled"):
                         network.internal_ip(self.pc, "10.0.0.3", self.reader)
-                    device.assert_not_called()
+                sleep.assert_called_once_with(0.5)
 
-    def test_unready_network_never_falls_back(self):
-        with patch.object(
-            network.time, "monotonic", side_effect=[0, 121]
-        ), patch.object(
-            network, "validate_device", side_effect=RuntimeError("network not ready")
-        ):
-            with self.assertRaisesRegex(RuntimeError, "network not ready"):
+    def test_invalid_platform_topology_fails_before_waiting(self):
+        self._write_rows({})
+        with patch.object(network.time, "sleep") as sleep:
+            with self.assertRaises(ValueError):
                 network.internal_ip(self.pc, "10.0.0.3", self.reader)
+        sleep.assert_not_called()
+
 
     def test_platform_network_contract(self):
         addresses = json.dumps([{"addr_info": [{"local": "22.0.1.3"}]}])

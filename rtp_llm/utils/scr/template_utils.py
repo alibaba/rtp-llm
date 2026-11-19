@@ -17,7 +17,6 @@ controller/platform through ``SCR_PHASE``; this module never chooses it.
 from __future__ import annotations
 
 import importlib
-import inspect
 import logging
 import os
 import sys
@@ -97,23 +96,10 @@ SCR_PHASE_CHECKPOINT = "checkpoint"
 SCR_PHASE_RESTORE = "restore"
 SCR_PHASE_NORMAL = "normal"
 
-# These values are control-plane inputs only. RTP-LLM never invokes a
-# controller or performs dump/restore; it passes the timeout budget to
-# Epsilon and includes the controller generation in diagnostics. A finite
-# default prevents a missing sidecar/quorum from blocking forever.
-SCR_TIMEOUT_ENV = "RTP_LLM_SCR_TIMEOUT"
-SCR_INACTIVITY_TIMEOUT_ENV = "RTP_LLM_SCR_INACTIVITY_TIMEOUT"
+# Snapshot waiting, timeout and cancellation belong to the control plane/Epsilon.
+# RTP supplies participation and blocking semantics, never a timeout budget.
 SCR_GENERATION_ENV = "RTP_LLM_SCR_GENERATION"
 SCR_GENERATION_ALIAS_ENV = "SCR_GENERATION"
-SCR_TIMEOUT_ALIASES = (
-    "SCR_TIMEOUT",
-    "EPSILON_CR_TIMEOUT",
-)
-SCR_INACTIVITY_TIMEOUT_ALIASES = (
-    "SCR_INACTIVITY_TIMEOUT",
-)
-DEFAULT_TIMEOUT_SECONDS = 900
-DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 10
 
 
 def _scr_generation() -> str:
@@ -264,125 +250,6 @@ class EpsilonProtocolError(RuntimeError):
 
 class ScrArrivalError(RuntimeError):
     """Raised when an active template participant cannot reach its barrier."""
-
-
-@dataclass(frozen=True)
-class EpsilonCapabilities:
-    """Capabilities discovered from one loaded Epsilon implementation."""
-
-    api_version: str
-    supports_timeout: bool
-    supports_inactivity_timeout: bool
-    supports_kv_registration: bool
-    signature_source: str
-
-
-def _callable_accepts(function: Any, parameter: str) -> bool | None:
-    """Inspect a Python/pybind callable without invoking it.
-
-    ``None`` means that the implementation does not expose an inspectable
-    signature.  In that case callers must use explicit capability metadata or
-    choose the conservative legacy path; they must not probe by making a
-    second barrier call after a TypeError.
-    """
-
-    try:
-        signature = inspect.signature(function)
-    except (TypeError, ValueError):
-        return None
-    parameters = signature.parameters.values()
-    if any(item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters):
-        return True
-    return parameter in signature.parameters
-
-
-def _epsilon_capabilities(epsilon: Any) -> EpsilonCapabilities:
-    """Discover Epsilon capabilities without side effects or trial calls."""
-
-    explicit: Mapping[str, Any] = {}
-    raw_capabilities = getattr(epsilon, "capabilities", None)
-    try:
-        if callable(raw_capabilities):
-            raw_capabilities = raw_capabilities()
-        if isinstance(raw_capabilities, Mapping):
-            explicit = raw_capabilities
-    except Exception as exc:
-        LOGGER.warning("sCR Epsilon capability query failed: %s", exc)
-
-    version = str(
-        explicit.get("api_version")
-        or getattr(epsilon, "API_VERSION", None)
-        or getattr(epsilon, "__version__", None)
-        or "unknown"
-    )
-    checkpoint = getattr(epsilon, "snapstart_checkpoint", None)
-    timeout = _callable_accepts(checkpoint, "timeout")
-    inactivity_timeout = _callable_accepts(checkpoint, "inactivity_timeout")
-    if timeout is None:
-        timeout = bool(
-            explicit.get(
-                "supports_timeout", getattr(epsilon, "SUPPORTS_TIMEOUT", False)
-            )
-        )
-    if inactivity_timeout is None:
-        inactivity_timeout = bool(
-            explicit.get(
-                "supports_inactivity_timeout",
-                getattr(epsilon, "SUPPORTS_INACTIVITY_TIMEOUT", False),
-            )
-        )
-
-    register_kv = getattr(epsilon, "register_kv_caches", None)
-    return EpsilonCapabilities(
-        api_version=version,
-        supports_timeout=bool(timeout),
-        supports_inactivity_timeout=bool(inactivity_timeout),
-        supports_kv_registration=callable(register_kv),
-        signature_source="inspect" if checkpoint is not None else "missing",
-    )
-
-
-class EpsilonAdapter:
-    """Version-tolerant, one-call adapter for the Epsilon Python boundary."""
-
-    def __init__(self, epsilon: Any):
-        self.epsilon = epsilon
-        self.capabilities = _epsilon_capabilities(epsilon)
-
-    def snapshot_arrival(
-        self,
-        *,
-        worker_id: int,
-        worker_num: int,
-        timeout: int,
-        inactivity_timeout: int,
-    ) -> int | None:
-        checkpoint = getattr(self.epsilon, "snapstart_checkpoint", None)
-        if not callable(checkpoint):
-            raise EpsilonProtocolError("Epsilon snapstart_checkpoint is unavailable")
-        if _callable_accepts(checkpoint, "wait_mode") is False:
-            raise EpsilonProtocolError(
-                "SCR requires Epsilon snapstart_checkpoint(wait_mode=1)"
-            )
-
-        # The blocking ABI is mandatory: restoring listeners before the
-        # controller releases the checkpoint quorum breaks the template.
-        kwargs: dict[str, Any] = {
-            "wait_mode": 1,
-            "worker_id": worker_id,
-            "worker_num": worker_num,
-        }
-        if self.capabilities.supports_timeout:
-            kwargs["timeout"] = timeout
-        else:
-            LOGGER.warning(
-                "sCR Epsilon API %s has no native timeout capability; "
-                "external watchdog is required",
-                self.capabilities.api_version,
-            )
-        if self.capabilities.supports_inactivity_timeout:
-            kwargs["inactivity_timeout"] = inactivity_timeout
-        return _call_result(checkpoint, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -577,49 +444,6 @@ def _make_cuda_synchronize(device: Any | None) -> Callable[[], None]:
     return _supplementary_callback
 
 
-def _scr_timeouts() -> tuple[int, int]:
-    """Resolve one explicit timeout budget for every Epsilon implementation."""
-
-    def _resolve(canonical: str, aliases: tuple[str, ...], default: int) -> int:
-        # The external shim may override the Python argument with SCR_TIMEOUT.
-        # Therefore all supplied timeout aliases must agree; otherwise the
-        # caller cannot know which budget the provider will actually use.
-        # The controller must publish one budget consistently across aliases.
-        names = (canonical,) + aliases
-        supplied = [(name, os.environ[name]) for name in names if name in os.environ]
-        if not supplied:
-            return default
-        values: list[int] = []
-        invalid = False
-        for name, raw in supplied:
-            try:
-                value = int(raw)
-                if value < 1:
-                    raise ValueError
-            except (TypeError, ValueError):
-                LOGGER.error("invalid %s=%r; using default=%s", name, raw, default)
-                invalid = True
-                continue
-            values.append(value)
-        if invalid and values:
-            raise EpsilonProtocolError(
-                f"conflicting {canonical} timeout configuration: malformed alias"
-            )
-        if values and any(value != values[0] for value in values[1:]):
-            raise EpsilonProtocolError(
-                f"conflicting {canonical} timeout configuration: {supplied!r}"
-            )
-        return values[0] if values else default
-
-    timeout = _resolve(SCR_TIMEOUT_ENV, SCR_TIMEOUT_ALIASES, DEFAULT_TIMEOUT_SECONDS)
-    inactivity_timeout = _resolve(
-        SCR_INACTIVITY_TIMEOUT_ENV,
-        SCR_INACTIVITY_TIMEOUT_ALIASES,
-        DEFAULT_INACTIVITY_TIMEOUT_SECONDS,
-    )
-    return timeout, inactivity_timeout
-
-
 def register_for_scr(
     engine: Any,
     *,
@@ -661,11 +485,6 @@ def _register_for_scr_once(
     epsilon = _load_epsilon()
     if epsilon is None or not _epsilon_is_active(epsilon):
         return False
-    try:
-        adapter = EpsilonAdapter(epsilon)
-    except Exception:
-        LOGGER.exception("sCR Epsilon capability discovery failed")
-        return False
 
     # Registration may be retried when the cache is initialized lazily. Avoid
     # registering the Epsilon callback twice for the same engine object.
@@ -685,7 +504,7 @@ def _register_for_scr_once(
     try:
         tensors = _engine_kv_cache_tensors(engine)
         kv_bytes = sum(int(tensor.nbytes) for tensor in tensors)
-        if tensors and adapter.capabilities.supports_kv_registration:
+        if tensors and callable(getattr(epsilon, "register_kv_caches", None)):
             cache_result = _call_result(epsilon.register_kv_caches, list(tensors))
             ok = ok and cache_result in (None, 0)
         elif not tensors:
@@ -741,14 +560,13 @@ def _register_for_scr_once(
         _registrations[engine_key] = registration
     LOGGER.info(
         "sCR registration completed generation=%s phase=%s tensors=%d cache_result=%s "
-        "hook_result=%s ok=%s api_version=%s elapsed_ms=%.3f kv_bytes=%d",
+        "hook_result=%s ok=%s elapsed_ms=%.3f kv_bytes=%d",
         _scr_generation(),
         os.environ.get(SCR_PHASE_ENV, "<unset>"),
         len(tensors),
         cache_result,
         hook_result,
         ok,
-        adapter.capabilities.api_version,
         registration.registration_duration_ms,
         kv_bytes,
     )
@@ -772,8 +590,6 @@ def arrive_scr_checkpoint_barrier(
     *,
     worker_id: int,
     worker_num: int,
-    timeout: int | None = None,
-    inactivity_timeout: int | None = None,
     generation: str | None = None,
     fail_closed: bool = False,
 ) -> int | None:
@@ -824,79 +640,6 @@ def arrive_scr_checkpoint_barrier(
             f"sCR generation mismatch expected={generation} actual={actual_generation}"
         )
     try:
-        default_timeout, default_inactivity = _scr_timeouts()
-    except EpsilonProtocolError as exc:
-        LOGGER.error(
-            "sCR timeout configuration conflict generation=%s: %s",
-            _scr_generation(),
-            exc,
-        )
-        return _raise_if_strict(f"sCR timeout configuration conflict: {exc}", exc)
-    try:
-        resolved_timeout = int(timeout) if timeout is not None else default_timeout
-        resolved_inactivity = (
-            int(inactivity_timeout)
-            if inactivity_timeout is not None
-            else default_inactivity
-        )
-        # The external shim gives SCR_TIMEOUT precedence over the function
-        # argument. Refuse an explicit disagreement rather than logging one
-        # value while the provider waits with another.
-        timeout_names = (SCR_TIMEOUT_ENV,) + SCR_TIMEOUT_ALIASES
-        if (
-            timeout is not None
-            and any(name in os.environ for name in timeout_names)
-            and resolved_timeout != default_timeout
-        ):
-            raise EpsilonProtocolError(
-                "explicit timeout disagrees with configured SCR timeout"
-            )
-        inactivity_names = (
-            SCR_INACTIVITY_TIMEOUT_ENV,
-        ) + SCR_INACTIVITY_TIMEOUT_ALIASES
-        if (
-            inactivity_timeout is not None
-            and any(name in os.environ for name in inactivity_names)
-            and resolved_inactivity != default_inactivity
-        ):
-            raise EpsilonProtocolError(
-                "explicit inactivity timeout disagrees with configured SCR timeout"
-            )
-    except EpsilonProtocolError as exc:
-        LOGGER.error(
-            "invalid explicit sCR timeout configuration timeout=%r "
-            "inactivity_timeout=%r generation=%s: %s; skipping arrival",
-            timeout,
-            inactivity_timeout,
-            _scr_generation(),
-            exc,
-        )
-        return _raise_if_strict(
-            f"invalid explicit sCR timeout configuration: {exc}", exc
-        )
-    except (TypeError, ValueError):
-        LOGGER.error(
-            "invalid explicit sCR timeout configuration timeout=%r "
-            "inactivity_timeout=%r generation=%s; skipping arrival",
-            timeout,
-            inactivity_timeout,
-            _scr_generation(),
-        )
-        return _raise_if_strict("invalid explicit sCR timeout configuration")
-    if resolved_timeout <= 0 or resolved_inactivity <= 0:
-        LOGGER.error(
-            "invalid sCR timeout configuration timeout=%s inactivity_timeout=%s "
-            "generation=%s; skipping arrival",
-            resolved_timeout,
-            resolved_inactivity,
-            _scr_generation(),
-        )
-        return _raise_if_strict(
-            f"invalid sCR timeout configuration timeout={resolved_timeout} "
-            f"inactivity_timeout={resolved_inactivity}"
-        )
-
-    try:
         worker_id = int(worker_id)
         worker_num = int(worker_num)
     except (TypeError, ValueError):
@@ -921,25 +664,19 @@ def arrive_scr_checkpoint_barrier(
     epsilon = _load_epsilon()
     if epsilon is None or not _epsilon_is_active(epsilon):
         return _raise_if_strict("sCR Epsilon provider is unavailable or inactive")
-    try:
-        adapter = EpsilonAdapter(epsilon)
-    except Exception as exc:
-        LOGGER.exception("sCR Epsilon capability discovery failed")
-        return _raise_if_strict("sCR Epsilon capability discovery failed", exc)
-    if not callable(getattr(epsilon, "snapstart_checkpoint", None)):
+    checkpoint = getattr(epsilon, "snapstart_checkpoint", None)
+    if not callable(checkpoint):
         LOGGER.warning("sCR active but Epsilon snapshot barrier is unavailable")
         return _raise_if_strict("sCR snapshot barrier API is unavailable")
 
     try:
         LOGGER.info(
             "sCR snapshot arrival started generation=%s phase=%s worker_id=%d "
-            "worker_num=%d timeout_s=%d inactivity_timeout_s=%d",
+            "worker_num=%d",
             _scr_generation(),
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
             worker_id,
             worker_num,
-            resolved_timeout,
-            resolved_inactivity,
         )
         prepare_device = _capture_cuda_device()
         try:
@@ -960,11 +697,10 @@ def arrive_scr_checkpoint_barrier(
         try:
             # Provider discovery above may load native modules that set signals.
             ignore_sigpipe("before Epsilon snapshot arrival")
-            result = adapter.snapshot_arrival(
-                worker_id=worker_id,
-                worker_num=worker_num,
-                timeout=resolved_timeout,
-                inactivity_timeout=resolved_inactivity,
+            # One blocking call. The provider/control plane owns its deadline
+            # and cancellation policy; do not negotiate or override them here.
+            result = _call_result(
+                checkpoint, wait_mode=1, worker_id=worker_id, worker_num=worker_num
             )
         finally:
             # Do not let an exception or a provider that invokes the callback
@@ -987,10 +723,9 @@ def arrive_scr_checkpoint_barrier(
                     f"sCR snapshot arrival returned status {result!r}"
                 )
         else:
-            # The saved clock origin belongs to the checkpoint process/host, so
-            # a local elapsed time cannot gate a resumed success: Epsilon owns
-            # the passed timeout budget. Preserve its status/exception instead
-            # of rejecting an arrival that already succeeded.
+            # Use a fresh clock origin for post-restore startup metrics.
+            # Waiting belongs to the controller/provider; elapsed time is
+            # diagnostic only.
             _scr_barrier_return_time = time.monotonic()
             LOGGER.info(
                 "sCR snapstart checkpoint reached pid=%d generation=%s phase=%s "
@@ -1005,17 +740,16 @@ def arrive_scr_checkpoint_barrier(
             )
         return result
     except Exception as exc:
-        # The barrier is optional. A timeout or an unavailable sidecar must
-        # not take down a serving rank; the control plane can use a fallback.
+        # Preserve provider failures. Active template participants fail closed
+        # instead of releasing listeners after a failed checkpoint arrival.
         LOGGER.exception(
             "sCR snapshot barrier arrival failed generation=%s phase=%s "
-            "worker_id=%d worker_num=%d elapsed_ms=%.3f timeout_s=%d",
+            "worker_id=%d worker_num=%d elapsed_ms=%.3f",
             _scr_generation(),
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
             worker_id,
             worker_num,
             (time.monotonic() - started) * 1000.0,
-            resolved_timeout,
         )
         if fail_closed:
             raise ScrArrivalError(
@@ -1029,8 +763,6 @@ def arrive_scr_template_barrier(
     *,
     worker_id: int,
     worker_num: int,
-    timeout: int | None = None,
-    inactivity_timeout: int | None = None,
     generation: str | None = None,
     fail_closed: bool = False,
 ) -> int | None:
@@ -1045,8 +777,6 @@ def arrive_scr_template_barrier(
         return arrive_scr_checkpoint_barrier(
             worker_id=worker_id,
             worker_num=worker_num,
-            timeout=timeout,
-            inactivity_timeout=inactivity_timeout,
             generation=generation,
             fail_closed=fail_closed,
         )
@@ -1061,8 +791,6 @@ def arrive_scr_template_barrier(
         result = arrive_scr_checkpoint_barrier(
             worker_id=worker_id,
             worker_num=worker_num,
-            timeout=timeout,
-            inactivity_timeout=inactivity_timeout,
             generation=generation,
             # A prepared template must never release after a failed arrival.
             # Legacy Epsilon APIs return None on success, so enforce errors at

@@ -7,7 +7,7 @@ announces a passive arrival at the barrier.
 Import from this package instead of the individual modules; the file layout
 is an implementation detail.
 
-    template_utils   gate, manifest, Epsilon adapter, registration, arrival
+    template_utils   gate, manifest, Epsilon integration, registration, arrival
     lifecycle        template lifecycle callbacks
     restore_context  the restored-Pod identity carried across CRIU
     runtime_fixup    re-derive runtime state after a restore
@@ -39,7 +39,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    # Metrics can import the lifecycle without loading the Epsilon adapter
+    # Metrics can import the lifecycle without loading the Epsilon integration
     # and its distributed/torch dependencies.
     if name not in __all__:
         raise AttributeError(name)

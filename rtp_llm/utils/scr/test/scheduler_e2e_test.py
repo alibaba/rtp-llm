@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 import unittest
 from unittest import mock
+from concurrent.futures import ThreadPoolExecutor
 
 from rtp_llm.utils.scr import template_utils as scr
 
@@ -16,6 +16,7 @@ class _MockScheduler:
         self.worker_num = worker_num
         self.arrivals = {}
         self.released = False
+        self.result = 0
         self.condition = threading.Condition()
 
     def arrive(self, kwargs):
@@ -27,13 +28,8 @@ class _MockScheduler:
                 raise RuntimeError("worker_num mismatch")
             self.arrivals[worker_id] = dict(kwargs)
             self.condition.notify_all()
-            deadline = time.monotonic() + kwargs["timeout"]
-            while not self.released:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return 110
-                self.condition.wait(timeout=remaining)
-            return 0
+            self.condition.wait_for(lambda: self.released)
+            return self.result
 
     def wait_ready(self, timeout: float) -> bool:
         with self.condition:
@@ -42,8 +38,9 @@ class _MockScheduler:
                 timeout=timeout,
             )
 
-    def release(self) -> None:
+    def release(self, result=0) -> None:
         with self.condition:
+            self.result = result
             self.released = True
             self.condition.notify_all()
 
@@ -51,7 +48,6 @@ class _MockScheduler:
 class _MockEpsilon:
     def __init__(self, scheduler: _MockScheduler) -> None:
         self.scheduler = scheduler
-        self.API_VERSION = "mock-v2"
 
     def is_snapstart_enable(self):
         return True
@@ -62,16 +58,12 @@ class _MockEpsilon:
         wait_mode,
         worker_id,
         worker_num,
-        timeout,
-        inactivity_timeout,
     ):
         return self.scheduler.arrive(
             {
                 "wait_mode": wait_mode,
                 "worker_id": worker_id,
                 "worker_num": worker_num,
-                "timeout": timeout,
-                "inactivity_timeout": inactivity_timeout,
             }
         )
 
@@ -84,12 +76,12 @@ class _MockController:
     def run(self) -> None:
         if not self.scheduler.wait_ready(timeout=2):
             self.events.append(("abort", "missing-participant"))
-            self.scheduler.release()
+            self.scheduler.release(result=110)
             return
         ids = sorted(self.scheduler.arrivals)
         if ids != list(range(self.scheduler.worker_num)):
             self.events.append(("abort", "invalid-manifest"))
-            self.scheduler.release()
+            self.scheduler.release(result=22)
             return
         self.events.append(("check", 0))
         self.events.append(("checkpoint-ready", True))
@@ -124,8 +116,6 @@ class ScrSchedulerE2ETest(unittest.TestCase):
                         worker_id=worker_id,
                         worker_num=4,
                         generation="e2e-generation-1",
-                        timeout=2,
-                        inactivity_timeout=1,
                     ),
                     daemon=True,
                 )
@@ -150,6 +140,26 @@ class ScrSchedulerE2ETest(unittest.TestCase):
                 ("restore", 0),
             ],
         )
+        self.assertTrue(scheduler.released)
+
+    def test_control_plane_timeout_aborts_the_waiting_participant(self):
+        scheduler = _MockScheduler(worker_num=2)
+        controller = _MockController(scheduler)
+        with mock.patch.dict(
+            os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "1"}, clear=True
+        ), mock.patch.object(
+            scr, "_load_epsilon", return_value=_MockEpsilon(scheduler)
+        ), ThreadPoolExecutor(max_workers=1) as workers:
+            arrival = workers.submit(
+                scr.arrive_scr_checkpoint_barrier,
+                worker_id=0,
+                worker_num=2,
+                fail_closed=True,
+            )
+            controller.run()
+            with self.assertRaises(scr.ScrArrivalError):
+                arrival.result(timeout=3)
+        self.assertEqual(controller.events, [("abort", "missing-participant")])
         self.assertTrue(scheduler.released)
 
     def test_generation_mismatch_never_reaches_scheduler(self) -> None:

@@ -5,8 +5,8 @@ does it reach its peers?
 
 * multi-node: the platform provides ``scr_vxlan0`` and a network-manager
   readiness socket; gang membership comes from the existing Pod annotation
-  projection.  Missing or invalid platform state fails startup instead of
-  falling back to Pod IPs.
+  projection. Wait for platform readiness; invalid topology fails startup
+  instead of falling back to Pod IPs.
 * single-Pod: every rank shares one network namespace, so control addresses
   stay on loopback while external advertisements keep the Pod IP.
 
@@ -88,7 +88,7 @@ def validate_device(address: str) -> None:
         probe.bind((address, 0))
 
 
-def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, str]:
+def topology(pc, gang_info: GangInfoReader) -> dict[int, str]:
     if not 0 <= pc.world_rank < pc.world_size:
         raise ValueError("SCR world rank is outside the topology")
     if pc.local_world_size <= 0 or pc.world_size % pc.local_world_size:
@@ -100,7 +100,6 @@ def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, 
         raise ValueError(
             f"SCR VIP requires RANK_SIZE={node_count} in the worker environment"
         )
-    deadline = time.monotonic() + (120 if wait else 0)
     while True:
         try:
             nodes = read_topology(pc.world_size, pc.local_world_size, gang_info)
@@ -115,15 +114,15 @@ def topology(pc, gang_info: GangInfoReader, *, wait: bool = False) -> dict[int, 
         ):
             # ValueError means the gang annotation itself is malformed; retrying
             # cannot fix it, so surface it immediately.
-            if time.monotonic() >= deadline:
-                raise
+            # Readiness waiting shares the control plane's startup lifetime;
+            # do not impose a second deadline inside the restored process.
             time.sleep(0.5)
 
 
 def internal_ip(pc, fallback: str, gang_info: GangInfoReader) -> str:
     if not enabled(pc):
         return fallback
-    return topology(pc, gang_info, wait=True)[pc.world_rank // pc.local_world_size]
+    return topology(pc, gang_info)[pc.world_rank // pc.local_world_size]
 
 
 def configure_network(pc) -> None:
@@ -147,7 +146,7 @@ def validate_world_info(current, pc, gang_info: GangInfoReader):
     The network manager owns underlay and transport recovery. RTP verifies its
     existing VIP topology after the restore barrier, including frontend subsets.
     """
-    nodes = topology(pc, gang_info, wait=True)
+    nodes = topology(pc, gang_info)
     if current.self is None:
         raise ValueError("SCR VIP world requires a local worker")
     if current.self.world_rank != pc.world_rank:
