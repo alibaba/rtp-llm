@@ -1363,8 +1363,7 @@ class ResponseFormatProjectionTest(TestCase):
                     self.assertIsNone(cfg.structural_tag)
                     self.assertIsNone(cfg.json_schema)
 
-                    plan.apply_to_config(cfg)
-                    final = plan.final_constraint
+                    final = cfg.finalize_response_format(plan=plan)
                     self.assertEqual(validate.call_count, 1)
                     self.assertEqual(final, plan.final_constraint)
                     self.assertIsNone(cfg.response_format)

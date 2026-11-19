@@ -23,7 +23,7 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
-from rtp_llm.config.response_format_compiler import ReasoningFormat, ResponseFormatPlan
+from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
@@ -410,10 +410,10 @@ class OpenaiEndpoint(object):
                 self.generate_env_config,
                 self._reasoning_format_for_prompt(config, renderer, input_ids),
             )
-            plan = ResponseFormatPlan.compile(config, reasoning_format=reasoning_format)
+            config.finalize_response_format(reasoning_format=reasoning_format)
         else:
             plan = build_plan(request, config, input_ids=input_ids)
-        plan.apply_to_config(config)
+            config.finalize_response_format(plan=plan)
         if request.debug_info:
             config.return_output_ids = True
         return config

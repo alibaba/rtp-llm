@@ -37,7 +37,10 @@ from rtp_llm.utils.util import check_with_info
 
 if TYPE_CHECKING:
     from rtp_llm.config.grammar_constraint import GrammarConstraint
-    from rtp_llm.config.response_format_compiler import ReasoningFormat
+    from rtp_llm.config.response_format_compiler import (
+        ReasoningFormat,
+        ResponseFormatPlan,
+    )
 
 
 class RequestFormat:
@@ -711,16 +714,29 @@ class GenerateConfig(BaseModel):
     def finalize_response_format(
         self,
         reasoning_format: Optional["ReasoningFormat"] = None,
+        *,
+        plan: Optional["ResponseFormatPlan"] = None,
     ) -> Optional["GrammarConstraint"]:
         """Validate and install the one grammar constraint used by the engine.
 
-        Repeated finalization reuses an installed reasoning envelope. RPC
-        serialization only verifies the result without mutating the config.
+        A model may supply its own plan. Repeated finalization without a plan
+        reuses an installed reasoning envelope.
         """
 
         from rtp_llm.config.response_format_compiler import prepare_response_format
 
-        return prepare_response_format(self, reasoning_format=reasoning_format)
+        self.validate()
+        if plan is None:
+            return prepare_response_format(self, reasoning_format=reasoning_format)
+
+        plan.apply_to_config(self)
+        self._reasoning_envelope_applied = (
+            self.in_think_mode or self.thinking_mode == ThinkingMode.ADAPTIVE
+        )
+        self._reasoning_final_constraint = (
+            plan.final_constraint if self._reasoning_envelope_applied else None
+        )
+        return plan.final_constraint
 
     def add_thinking_params(
         self,

@@ -180,7 +180,6 @@ class KimiK3Grammar:
         )
         _apply_thinking_constraints(tag["format"], budget)
         grammar = GrammarConstraint("structural_tag", tag).normalized()
-        config.validate()
         return ResponseFormatPlan(constraint, grammar)
 
     def _build_format(

@@ -804,7 +804,7 @@ class KimiK3GrammarTest(unittest.TestCase):
         self.assertEqual(config.response_format.type, "json_object")
         self.assertIsNone(config.structural_tag)
         self.assertFalse(config._reasoning_envelope_applied)
-        plan.apply_to_config(config)
+        config.finalize_response_format(plan=plan)
         self.assertIsNone(config.response_format)
         self.assertEqual(config.structural_tag, plan.engine_constraint.value)
         config.finalize_response_format()
