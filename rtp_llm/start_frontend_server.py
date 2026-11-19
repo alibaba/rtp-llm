@@ -46,7 +46,11 @@ def start_frontend_server(
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    service_draining=None,
 ):
+    from rtp_llm.metrics import kmonitor
+
+    kmonitor.bind_service_draining(service_draining)
     pc = py_env_configs.parallelism_config
     # Topology uses the global rank; listening ports use the derived local rank.
     set_parallelism_config(

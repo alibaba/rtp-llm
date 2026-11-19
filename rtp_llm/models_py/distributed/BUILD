@@ -11,6 +11,7 @@ py_library(
         "collective_torch.py",
         "collective_utils.py",
         "canonical_p2p.py",
+        "pynccl_cp.py",
         "flashinfer_all_reduce.py",
         "flashinfer_ipc_all_reduce.py",
         "all_reduce.py",

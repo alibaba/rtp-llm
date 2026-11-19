@@ -286,6 +286,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
                          model_config_.max_seq_len,
                          int(runtime_config.warm_up_with_loss));
+        ScopedKmonMetricsSuppression suppress_warmup_metrics;
         warm_up_result = warmUp(params);
         RTP_LLM_LOG_INFO(
             "warm up done, max runtime used memory: %ld bytes (%ld MiB), device reserved memory: %ld bytes (%ld MiB)",
@@ -1111,7 +1112,7 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    running_                    = false;
     const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.
@@ -1317,6 +1318,7 @@ absl::Status NormalEngine::step() try {
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
+    const bool   report_metrics     = isKmonMetricReportingEnabled();
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
@@ -1344,7 +1346,7 @@ absl::Status NormalEngine::step() try {
     // loop() is a no-sleep tight loop and with TP>1 every iteration enters
     // process() to drive the collective tpSync even with empty streams —
     // without this gate the gauge gets diluted to ~0 by idle iterations.
-    if (parallelism_config.tp_rank == 0 && !streams.empty()) {
+    if (parallelism_config.tp_rank == 0 && !streams.empty() && report_metrics) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;
         reportMetrics({step_latency});

@@ -2,13 +2,14 @@
 
 MegaMoE consumes a symmetric-memory dispatch buffer.  The original path builds
 temporary FP8 activation and UE8M0 scale tensors, then copies four tensors into
-that buffer.  This module centralizes the implementation choice so Triton/CUDA
-packer below is the reference oracle for tests; the runtime always uses the fused packer.
+that buffer.  The runtime uses the fused packer; the Torch implementation provides
+a reference for tests.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from functools import partial
 
 import torch
 
@@ -66,6 +67,10 @@ class TorchMegaMoEInputPacker(MegaMoEInputPacker):
 class FusedMegaMoEInputPacker(MegaMoEInputPacker):
     name = "fused"
 
+    def __init__(self, *, pack_inputs=None):
+        # Recipes share validation and slicing while selecting the kernel policy.
+        self.pack_inputs = pack_inputs
+
     def pack(
         self,
         x: torch.Tensor,
@@ -89,7 +94,8 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
             fused_pack_mega_moe_inputs,
         )
 
-        fused_pack_mega_moe_inputs(
+        pack_inputs = self.pack_inputs or fused_pack_mega_moe_inputs
+        pack_inputs(
             x,
             weights,
             indices,
@@ -100,5 +106,18 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
         )
 
 
-def get_mega_moe_input_packer() -> MegaMoEInputPacker:
+def get_mega_moe_input_packer(*, prepared: bool = False) -> MegaMoEInputPacker:
+    if prepared:
+        from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (
+            fused_pack_mega_moe_inputs_optimized,
+        )
+
+        # GLM checkpoints allow int32 routing IDs and skip input sanitization.
+        return FusedMegaMoEInputPacker(
+            pack_inputs=partial(
+                fused_pack_mega_moe_inputs_optimized,
+                sanitize_non_finite=False,
+                allow_int32_indices=True,
+            )
+        )
     return FusedMegaMoEInputPacker()

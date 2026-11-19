@@ -51,6 +51,12 @@ struct GptModelDescription {
     MoeConfig moe_runtime_config;
 };
 
+enum class MtpIndexerRole : int32_t {
+    NORMAL = 0,
+    SEED   = 1,
+    REUSE  = 2,
+};
+
 struct GptModelInitParams {
     const rtp_llm::Weights                       weights;
     const GptModelDescription                    description;
@@ -62,8 +68,8 @@ struct GptModelInitParams {
     RuntimeConfig                                runtime_config;
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
-    int64_t                                      max_seq_len  = 0;
-    int64_t                                      hidden_size  = 0;
+    int64_t                                      max_seq_len = 0;
+    int64_t                                      hidden_size = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -185,6 +191,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlOpaqueKvCacheStore  = 1u << 9,
     kControlShutdown            = 1u << 10,
     kControlMiddleChunkOnly     = 1u << 11,
+    kControlDraftExtend         = 1u << 12,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -274,6 +281,10 @@ public:
     // Prefill CP cannot recover the full target hidden sequence from its
     // last-hidden output, so initialization must know whether this rank-local
     // hand-off exists before admitting CPRR execution.
+    virtual void          loadMtpIndexerTopk(const torch::Tensor&) {}
+    virtual torch::Tensor snapshotMtpIndexerTopk(int64_t) {
+        return {};
+    }
     virtual bool hasMtpTargetHiddenBuffer() const {
         return false;
     }

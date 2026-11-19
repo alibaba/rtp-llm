@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include <ATen/core/Dict.h>
 #include <ATen/core/jit_type.h>
@@ -504,8 +505,7 @@ void ModelInputsLogger::log(const GptModelInputs& inputs, ModelInputsModelRole r
     worker_->enqueue(inputs, role, model_id);
     if (metrics_reporter_) {
         const auto elapsed_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_us;
-        metrics_reporter_->report(
-            elapsed_us, "rtp_llm_model_inputs_log_us", kmonitor::MetricType::GAUGE, nullptr, true);
+        reportKmonMetric(metrics_reporter_, elapsed_us, "rtp_llm_model_inputs_log_us", kmonitor::MetricType::GAUGE);
     }
 }
 }  // namespace rtp_llm

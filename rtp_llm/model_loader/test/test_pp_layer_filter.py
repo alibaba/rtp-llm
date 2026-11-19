@@ -1,7 +1,7 @@
 import unittest
 from functools import partial
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import torch
 
@@ -232,9 +232,7 @@ class PPEplbLoadingTest(unittest.TestCase):
                 cfg.ep_size = 1
                 cfg.num_nodes = 2
                 if should_reject:
-                    with self.assertRaisesRegex(
-                        ValueError, "ep_size 1.*num_nodes 2"
-                    ):
+                    with self.assertRaisesRegex(ValueError, "ep_size 1.*num_nodes 2"):
                         make_eplb_loader(
                             cfg,
                             [1, 3, 5, 7],
@@ -343,8 +341,25 @@ class PPStackedMoeLoadingTest(unittest.TestCase):
                         result = loader._load_from_fastsafetensor("cpu")
 
                     iterator.assert_called_once_with(
-                        "cpu", True, stacked_key_config=expected_rules
+                        "cpu",
+                        True,
+                        stacked_key_config=expected_rules,
+                        local_copyout_filter=ANY,
                     )
+                    copyout_filter = iterator.call_args.kwargs["local_copyout_filter"]
+                    for layer_id in range(cfg.num_layers):
+                        if layer_id in cfg.moe_layer_index:
+                            keys = [
+                                expected_rules[
+                                    f"model.layers.{layer_id}.moe.w1"
+                                ].format(expert_id=i)
+                                for i in range(2)
+                            ]
+                        else:
+                            keys = [f"model.layers.{layer_id}.dense"]
+                        for key in keys:
+                            self.assertEqual(copyout_filter(key), layer_id in scope)
+                    self.assertFalse(copyout_filter("unknown.weight"))
                     self.assertEqual(
                         [i for i, layer in enumerate(result.weights) if layer],
                         list(scope),

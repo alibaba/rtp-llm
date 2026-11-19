@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -34,6 +35,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #endif
 #include "autil/TimeUtility.h"
+#include "autil/EnvUtil.h"
 #include <cmath>
 #include <limits>
 #include <cstdlib>
@@ -44,7 +46,24 @@
 
 namespace rtp_llm {
 
-bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
+bool pythonDraftSupportsMtpIndexerShare(const py::object& py_model) {
+    if (py_model.is_none()) {
+        return false;
+    }
+    py::gil_scoped_acquire gil;
+    try {
+        const auto has_callable = [&py_model](const char* name) {
+            return py::hasattr(py_model, name) && PyCallable_Check(py_model.attr(name).ptr()) != 0;
+        };
+        return has_callable("clone_for_cuda_graph") && has_callable("set_mtp_indexer_role")
+               && has_callable("load_mtp_indexer_topk") && has_callable("snapshot_mtp_indexer_topk");
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_WARNING("failed to inspect Python draft MTP indexer sharing APIs: %s", e.what());
+        return false;
+    }
+}
+
+bool MtpExecutor::speculativePrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
     return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
 }
 
@@ -566,9 +585,20 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     propose_step_          = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
-    vocab_size_                 = params.model_config_.vocab_size;
-    draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
-    is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    vocab_size_                = params.model_config_.vocab_size;
+    draft_vocab_size_          = propose_params->getEngineInitParams().model_config_.vocab_size;
+    is_dspark_                 = propose_params->sp_type == SP_TYPE_DSPARK;
+    const auto& draft_config   = propose_params->getEngineInitParams().model_config_;
+    const auto& draft_parallel = propose_params->getEngineInitParams().parallelism_config;
+    mtp_indexer_share_enabled_ =
+        !is_dspark_ && !params.py_sp_model.is_none() && pythonDraftSupportsMtpIndexerShare(params.py_sp_model)
+        && params.hw_kernel_config.enable_cuda_graph && !params.parallelism_config.prefill_cp_config.is_enabled()
+        && !draft_parallel.prefill_cp_config.is_enabled() && draft_config.model_type == "glm_5_mtp"
+        && draft_config.attn_config.is_sparse && draft_config.num_layers == 1
+        && draft_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
+    mtp_indexer_topk_ = draft_config.attn_config.indexer_topk;
+    RTP_LLM_LOG_INFO("MTP index sharing enabled=%d topk=%ld", mtp_indexer_share_enabled_, mtp_indexer_topk_);
+
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -583,16 +613,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
                                 "dspark requires sp_dspark_mask_token_id, got %ld",
                                 params.sp_config.sp_dspark_mask_token_id);
-        // The draft rides the standard prefill-CP split for its commit calls.
-        // Its fixed-width decode-phase blocks (propose, tail commit) must stay
-        // unsplit, so an enabled split is only legal on a pure prefill role:
-        // colocated engines would CP-split the decode-phase blocks (and a
-        // sharded-CP ring would flip geometry between commit and propose),
-        // and a decode role with an enabled split method is a misconfiguration
-        // (decode roles describe imported CP layout via PREFILL_CP, which is
-        // not an enabled split).
-        RTP_LLM_CHECK_WITH_INFO(dsparkPrefillCPRoleIsValid(params.parallelism_config.prefill_cp_config, role_type_),
-                                "dspark with an enabled prefill-CP split requires the PREFILL role");
+    }
+
+    if (is_dspark_ || params.model_config_.model_type == "glm_5") {
+        // Decode/verify blocks are not CP prefill inputs. Reject a split-enabled
+        // colocated role before constructing graphs or accepting requests.
+        RTP_LLM_CHECK_WITH_INFO(
+            speculativePrefillCPRoleIsValid(params.parallelism_config.prefill_cp_config, role_type_),
+            "GLM5 MTP/DSpARK with an enabled prefill-CP split requires the PREFILL role; "
+            "decode workers must use the PREFILL_CP layout-only method");
     }
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
@@ -821,27 +850,58 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // PREFILL descriptors omit every proposal-only tensor, so do not
             // instantiate a PROPOSE wrapper for that graph.
             if (!dspark_prefill_commit_only_) {
-                draft_model_.reset(new PyWrappedModel(model_params,
-                                                      params.py_sp_model,
-                                                      false,
-                                                      false,
-                                                      is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
-                                                      draft_graph_allowed));
+                draft_model_.reset(
+                    new PyWrappedModel(model_params,
+                                       params.py_sp_model,
+                                       false,
+                                       false,
+                                       is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
+                                       draft_graph_allowed,
+                                       false,
+                                       /*enable_cache_store=*/true,
+                                       mtp_indexer_share_enabled_ ? MtpIndexerRole::REUSE : MtpIndexerRole::NORMAL));
             }
             /** MTP separates prefill/decode graph shapes; DSpARK separates fixed PROPOSE/COMMIT entry points. */
             if (enable_cuda_graph || is_dspark_) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
+                py::object prefill_py_model = params.py_sp_model;
+                {
+                    py::gil_scoped_acquire gil;
+                    if (py::hasattr(prefill_py_model, "clone_for_cuda_graph")) {
+                        prefill_py_model = prefill_py_model.attr("clone_for_cuda_graph")();
+                    }
+                }
                 sp_prefill_draft_model_.reset(
                     new PyWrappedModel(model_params,
-                                       params.py_sp_model,
+                                       prefill_py_model,
                                        !is_dspark_,
                                        false,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
                                        draft_graph_allowed,
-                                       dspark_prefill_commit_only_));
+                                       dspark_prefill_commit_only_,
+                                       /*enable_cache_store=*/true,
+                                       mtp_indexer_share_enabled_ ? MtpIndexerRole::SEED : MtpIndexerRole::NORMAL));
             }
+        }
+        if (mtp_indexer_share_enabled_) {
+            py::gil_scoped_acquire gil;
+            const bool             share_mega = params.moe_config.moe_strategy.rfind("mega_moe", 0) == 0
+                                    && params.parallelism_config.ep_size > 1
+                                    && params.parallelism_config.world_size > 1;
+            py::object seed_py_model =
+                share_mega ? params.py_sp_model.attr("clone_for_cuda_graph")(py::arg("share_mega_buf") = true) :
+                             params.py_sp_model.attr("clone_for_cuda_graph")();
+            seed_decode_draft_model_.reset(new PyWrappedModel(model_params,
+                                                              seed_py_model,
+                                                              false,
+                                                              false,
+                                                              DSparkModelRole::NONE,
+                                                              true,
+                                                              false,
+                                                              true,
+                                                              MtpIndexerRole::SEED));
         }
         break;  // NOTE: only support one mtp model now
     }
@@ -910,6 +970,14 @@ void MtpExecutor::collectPrefillMetrics(const StreamGroups&  stream_groups,
         tps_execute_time_us = model_forward_us;
     }
 
+    if (metrics_collector.frontend_prefill_step) {
+        metrics_collector.frontend_prefill_step->publish(
+            {static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+             static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+             0,
+             tps_execute_time_us,
+             std::nullopt});
+    }
     tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
                                stream_groups.contextExecuteTokenSizeWithCache(),
                                0,
@@ -1043,6 +1111,23 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     beginProfiledWork();
     metrics_collector.not_skip = true;
 
+    // Every successful prefill exit, including target-only requests, must
+    // reserve its final frame before publishing the completed engine sample.
+    auto collect_prefill_metrics = [&] {
+        metrics_collector.frontend_prefill_step = std::make_unique<FrontendMetricsStep<GenerateStreamPtr>>(
+            stream_groups.allStreams(),
+            isKmonMetricReportingEnabled() && isTpRank0() && !warm_up_ && !model_input.is_fake_stream);
+        if (isKmonMetricReportingEnabled()
+            && (metrics_reporter_ || !metrics_collector.frontend_prefill_step->empty())) {
+            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
+        }
+    };
+    auto dispatch_prefill_only = [&] {
+        auto result = isTpRank0() ? batch_stream_processor_->dispatchPrefillOnly(stream_groups) : absl::OkStatus();
+        metrics_collector.frontend_prefill_step.reset();
+        return result;
+    };
+
     mtp::DSparkCacheStoreDrainGuard cache_store_drain_guard{
         is_dspark_ && !model_input.warmup && model_input.pd_separation, model_.get(), sp_prefill_draft_model_.get()};
 
@@ -1080,9 +1165,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (target_only && !is_dspark_ && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size)) {
-        if (metrics_reporter_) {
-            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-        }
+        collect_prefill_metrics();
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
@@ -1094,13 +1177,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             }
             return absl::OkStatus();
         }
-        if (isTpRank0()) {
-            if (batch_record) {
-                batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
-            }
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+        if (isTpRank0() && batch_record) {
+            batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
         }
-        return absl::OkStatus();
+        return dispatch_prefill_only();
     }
 
     // Prepare the draft prefill input on each TP root. Target-only MTP uses a
@@ -1217,18 +1297,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (target_only) {
-        if (metrics_reporter_) {
-            collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-        }
+        collect_prefill_metrics();
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        if (isTpRank0()) {
-            if (batch_record) {
-                batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
-            }
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+        if (isTpRank0() && batch_record) {
+            batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
         }
-        return absl::OkStatus();
+        return dispatch_prefill_only();
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -1258,10 +1333,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
     }
 
-    // collect metrics
-    if (metrics_reporter_) {
-        collectPrefillMetrics(stream_groups, metrics_collector, schedule_time_us, model_forward_us);
-    }
+    // Use the exact timing sample recorded by the engine TPS collector.
+    collect_prefill_metrics();
 
     // dispatch
     {
@@ -1275,6 +1348,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             {std::move(draft_model_output), std::move(draft_sampler_output)},
             draft_last_hidden_states);
         RTP_LLM_LOG_DEBUG("dispatch done");
+        metrics_collector.frontend_prefill_step.reset();
 
         releaseAllModelBuffers();
 
@@ -1440,8 +1514,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return target_execution_status;
     }
 
-    mtp::DSparkRoundState                     dspark_round_state;
-    size_t                                    batch_size = 0;
+    mtp::DSparkRoundState dspark_round_state;
+    size_t                batch_size = 0;
 
     if (is_dspark_) {
         // Proposal and target verification are two model phases with different
@@ -1879,9 +1953,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         draft_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    if (metrics_reporter_) {
+    metrics_collector.frontend_decode_step = std::make_unique<FrontendMetricsStep<GenerateStreamPtr>>(
+        stream_groups.allStreams(), isKmonMetricReportingEnabled() && isTpRank0() && !warm_up_);
+    if (isKmonMetricReportingEnabled() && (metrics_reporter_ || !metrics_collector.frontend_decode_step->empty())) {
         collectDecodeMetrics(
             stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, model_forward_us);
+    } else {
+        // Discard a delayed previous-batch numerator when collection is disabled.
+        // A later request must not inherit a non-adjacent speculative sample.
+        consumePendingAcceptLenMetrics();
     }
 
     if (batch_record) {
@@ -2072,6 +2152,9 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 }
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input, bool post_rejection) {
+    if (mtp_indexer_share_enabled_) {
+        return;
+    }
     if (post_rejection) {
         // The pre-rejection fork (non-hooks mode) already prepared this step;
         // AsyncRunner is single-slot, so a second launch would serialize on it.
@@ -2092,8 +2175,10 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
-    auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
-    auto  model_input_copy    = model_input;
+    auto* draft_prefill_model         = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+    auto  model_input_copy            = model_input;
+    model_input_copy.is_target_verify = is_dspark_;
+    model_input_copy.is_draft_extend  = !is_dspark_;
     mtp::applyCacheStrideToModelInput(model_input_copy, mtp_cache_cfg);
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -2158,7 +2243,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     model_input.is_target_verify = false;
     return model_output;
 }
-
 
 bool MtpExecutor::asyncPrepareAllowed(bool requested, bool target_commit_hooks) {
     return requested && !target_commit_hooks;
@@ -2581,6 +2665,9 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
     maybePrintModelInput(model_input, "decode post draft model");
     model_input.is_target_verify = is_dspark_;
+    // Tensor-only post-rejection broadcasts do not carry control flags. Set
+    // the phase on every TP rank, matching asynchronous preparation above.
+    model_input.is_draft_extend = !is_dspark_;
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
@@ -2602,6 +2689,10 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     // Ordinary MTP chains this output into the next autoregressive draft step.
     if (!is_dspark_) {
         mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
+    }
+    if (mtp_indexer_share_enabled_) {
+        draft_prefill_model_output.mtp_indexer_topk =
+            draft_prefill_model->snapshotMtpIndexerTopk(model_input.input_lengths.size(0)).clone();
     }
     return draft_prefill_model_output;
 }
@@ -2680,6 +2771,16 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
         if (result.ok() && useAsyncDeviceState()) {
             publishSyncMtpDeviceState(
                 stream_groups, speculative_sampler_output, verify_position_ids, draft_prefill_output);
+        } else if (result.ok() && mtp_indexer_share_enabled_) {
+            // Indexer reuse is independent of asynchronous device bookkeeping.
+            const auto& topk = draft_prefill_output.model_output.mtp_indexer_topk;
+            int64_t     row  = 0;
+            for (const auto& stream : stream_groups.allStreams()) {
+                auto state                 = stream->getMtpAsyncDeviceState();
+                state.mtp_indexer_topk_gpu = topk.defined() ? topk.narrow(0, row, 1) : torch::Tensor();
+                stream->setMtpAsyncDeviceState(std::move(state));
+                ++row;
+            }
         }
     }
     return result;
@@ -2696,6 +2797,8 @@ void MtpExecutor::releaseAllModelBuffers() {
     if (draft_model_) {
         draft_model_->releaseBuffers();
     }
+    if (seed_decode_draft_model_)
+        seed_decode_draft_model_->releaseBuffers();
     if (sp_prefill_draft_model_) {
         sp_prefill_draft_model_->releaseBuffers();
     }
@@ -2820,10 +2923,10 @@ absl::Status MtpExecutor::process(const ScheduleOutput& schedule_output, int64_t
         schedule_time_us = process_start_time_us;
     }
     MtpMetricsCollector metrics_collector;
-    auto                tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
-    auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                          && isTpRank0() && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                                    && isTpRank0() && !warm_up_ && !streams.empty());
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
@@ -2848,11 +2951,22 @@ absl::Status MtpExecutor::process(const ScheduleOutput& schedule_output, int64_t
         autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
     // report metrics
-    if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
+    if (isKmonMetricReportingEnabled() && isTpRank0() && !warm_up_ && metrics_collector.not_skip
+        && (metrics_reporter_ || metrics_collector.frontend_decode_step)) {
         // decode metrics
         auto& tps_collector       = metrics_collector.tps_collector;
         auto& sp_engine_collector = metrics_collector.sp_engine_collector;
         auto  decode_time         = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (metrics_collector.frontend_decode_step) {
+            FrontendMetricUpdate update;
+            update.generate_tokens = sp_engine_collector.total_accepted_token_num;
+            update.execute_time_us = decode_time;
+            if (sp_engine_collector.total_propose_token_num > 0 && sp_engine_collector.total_stream_num > 0
+                && sp_engine_collector.total_accepted_token_num > 0) {
+                update.sp_tpot_us = sp_engine_collector.estimateTpotUs();
+            }
+            metrics_collector.frontend_decode_step->publish(update);
+        }
         if (sp_engine_collector.total_accepted_token_num) {
             tps_collector.addTokenSize(0,
                                        0,
@@ -2873,15 +2987,18 @@ absl::Status MtpExecutor::process(const ScheduleOutput& schedule_output, int64_t
             tps_collector.addTokenSizeByPriority(accepted_counts_by_priority, decode_time);
         }
 
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
-        metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
-            nullptr, &metrics_collector.executor_collector);
-        tps_reporter_.report(&metrics_collector.tps_collector);
-        wall_tps_reporter_.report(&metrics_collector.tps_collector);
-        metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
-            nullptr, &metrics_collector.sp_engine_collector);
+        if (metrics_reporter_) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
+            metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
+                nullptr, &metrics_collector.executor_collector);
+            tps_reporter_.report(&metrics_collector.tps_collector);
+            wall_tps_reporter_.report(&metrics_collector.tps_collector);
+            metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
+                nullptr, &metrics_collector.sp_engine_collector);
+        }
     }
 
+    metrics_collector.frontend_decode_step.reset();
     return absl::OkStatus();
 }
 
@@ -2993,6 +3110,49 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // model_input.combo_tokens assignments do not mutate this storage.
         pre_propose_token_t_raw = to_cuda_i32_flat(model_input.combo_tokens);
     }
+    const auto all_streams = stream_groups.allStreams();
+
+    // Seeds remain request-scoped and TP-local. Seed/reuse decode models share
+    // MegaMoE communication buffers, so DP peers can independently choose their
+    // indexer path while entering the same EP collective. TP peers still agree.
+    bool use_seed_graph = false;
+    if (mtp_indexer_share_enabled_) {
+        std::vector<torch::Tensor> seed_rows;
+        bool                       all_seeded = isTpRank0() && all_streams.size() == batch_size;
+        if (all_seeded) {
+            seed_rows.reserve(batch_size);
+            for (const auto& stream : all_streams) {
+                const auto& seed = stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
+                if (!seed.defined() || !seed.is_cuda() || seed.numel() != mtp_indexer_topk_) {
+                    all_seeded = false;
+                    break;
+                }
+                seed_rows.push_back(seed.reshape({1, mtp_indexer_topk_}));
+            }
+        }
+        // Keep graph selection on the host; TP=1 needs no tensor or collective.
+        use_seed_graph = !all_seeded;
+        if (parallelism_config_.tp_size > 1) {
+            auto seed_flag = torch::tensor({isTpRank0() && !all_seeded ? 1 : 0}, torch::kInt32);
+            execBroadcastCpu({{seed_flag}, 0});
+            use_seed_graph = seed_flag.item<int32_t>() != 0;
+        }
+
+        if (!use_seed_graph) {
+            torch::Tensor ordered_seed;
+            if (isTpRank0()) {
+                ordered_seed = torch::cat(seed_rows, 0).contiguous();
+            } else {
+                ordered_seed = torch::empty({static_cast<int64_t>(batch_size), mtp_indexer_topk_},
+                                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            }
+            if (parallelism_config_.tp_size > 1) {
+                execBroadcast({{ordered_seed}, 0});
+            }
+            draft_model_->loadMtpIndexerTopk(ordered_seed);
+        }
+    }
+
     bool pre_target_from_device_state = false;
     auto pre_target_token_t           = gatherPreviousTargetTokens(
         stream_groups, batch_size, useStreamAsync() || useAsyncDeviceState(), pre_target_from_device_state);
@@ -3005,10 +3165,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%zu)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu/%zu start, batch_size %zu", i, decode_steps, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
-        int64_t start_time_us             = autil::TimeUtility::currentTimeInMicroSeconds();
-        auto    draft_decode_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
+        int64_t    start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        ModelBase* active_draft  = i == 0 && use_seed_graph ? seed_decode_draft_model_.get() : draft_model_.get();
+        RTP_LLM_CHECK(active_draft != nullptr);
+        auto draft_decode_model_output = forwardModel(active_draft, model_input, ModelInputsModelRole::DRAFT);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
+        mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *active_draft);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
 
         // sample
@@ -3258,6 +3420,8 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         state.next_position_ids_gpu =
             next_position_ids_all.defined() ? next_position_ids_all.narrow(0, idx, 1) : torch::Tensor();
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        const auto& topk             = draft_prefill_output.model_output.mtp_indexer_topk;
+        state.mtp_indexer_topk_gpu   = topk.defined() ? topk.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {
@@ -3406,6 +3570,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.next_kv_cache_kernel_block_id_gpu =
             next_kv_cache_kernel_block_id.defined() ? next_kv_cache_kernel_block_id.narrow(1, idx, 1) : torch::Tensor();
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        const auto& topk             = draft_prefill_output.model_output.mtp_indexer_topk;
+        state.mtp_indexer_topk_gpu   = topk.defined() ? topk.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {

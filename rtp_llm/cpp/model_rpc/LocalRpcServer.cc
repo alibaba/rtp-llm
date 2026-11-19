@@ -392,7 +392,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
                                      && std::all_of(output.generate_outputs.begin(),
                                                     output.generate_outputs.end(),
                                                     [](const auto& item) { return item.finished; });
-        if (collect_pd_output) {
+        if (collect_pd_output && !output.frontend_metric_only) {
             const auto status = complete_output.add(std::move(output));
             if (!status.ok()) {
                 stream->reportError(status.code(), status.ToString());
@@ -424,7 +424,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             // WriterInterface uses false to signal that its downstream consumer has closed or cancelled.
             return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
         }
-        if (stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
+        if (!output.frontend_metric_only && stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
             if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
                 while (!isCancelled(context) && stream->getStatus() != StreamState::FINISHED) {
                     if (stream->checkTimeoutAndHasError()) {
@@ -446,7 +446,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             }
             break;
         }
-        if (collect_pd_output || (check_remote && terminal_output)) {
+        if ((collect_pd_output && !output.frontend_metric_only) || (check_remote && terminal_output)) {
             // StartLoad already delivered the handoff. The companion Prefill
             // RPC may still be draining its own output and cleanup.
             break;
@@ -510,7 +510,8 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(
                     progress = true;
                 }
             }
-            if (terminal_output || (stream->isFinished() && !stream->hasOutput())) {
+            if (terminal_output
+                || (stream->isFinished() && !stream->hasOutput() && !stream->hasPendingFrontendMetrics())) {
                 if (!terminal_output) {
                     fail({ErrorCode::EXECUTION_EXCEPTION, "batch item completed without terminal output"});
                     continue;
@@ -571,6 +572,7 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               std::shared_ptr<GenerateStream>&      stream,
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
+    std::vector<std::pair<uint64_t, double>> frontend_sp_tpot_samples;
     while (true) {
         const auto output_result = stream->nextOutputForRpc(kRpcOutputWaitTimeoutMs);
         if (isCancelled(context)) {
@@ -587,8 +589,15 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
             }
             break;
         }
-        last_outputs = output_result.value();
+        const auto& output = output_result.value();
+        frontend_sp_tpot_samples.insert(frontend_sp_tpot_samples.end(),
+                                        output.frontend_sp_tpot_samples.begin(),
+                                        output.frontend_sp_tpot_samples.end());
+        if (!output.frontend_metric_only) {
+            last_outputs = output;
+        }
     }
+    last_outputs.frontend_sp_tpot_samples = std::move(frontend_sp_tpot_samples);
     return ErrorInfo::OkStatus();
 }
 

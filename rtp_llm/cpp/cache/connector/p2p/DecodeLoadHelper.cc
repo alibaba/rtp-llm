@@ -322,6 +322,11 @@ void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& si
         side_channel_payload.has_first_token =
             payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
         side_channel_payload.first_token_id   = payload.first_generate_token_id();
+        side_channel_payload.frontend_context_token_num            = payload.frontend_context_token_num();
+        side_channel_payload.frontend_context_token_num_with_cache = payload.frontend_context_token_num_with_cache();
+        side_channel_payload.frontend_context_execute_time_us      = payload.frontend_context_execute_time_us();
+        side_channel_payload.frontend_context_execute_time_with_cache_us =
+            payload.frontend_context_execute_time_with_cache_us();
         side_channel_payload.generation_prefill_cuda_graph_status = payload.generation_prefill_cuda_graph_status();
         side_channel_payload.prefill_use_independent_block_pools  = payload.prefill_use_independent_block_pools();
         side_channel_payload.total_reuse_len  = payload.total_reuse_len();

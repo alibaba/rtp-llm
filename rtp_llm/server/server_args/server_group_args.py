@@ -7,6 +7,14 @@ def init_server_group_args(parser, server_config, distribute_config):
     ##############################################################################################################
     server_group = parser.add_argument_group("Server Configuration")
     server_group.add_argument(
+        "--frontend_metrics_enable",
+        env_name="RTP_LLM_FRONTEND_METRICS_ENABLE",
+        bind_to=(server_config, "frontend_metrics_enable"),
+        type=str2bool,
+        default=False,
+        help="Enable per-request frontend latency and token metrics.",
+    )
+    server_group.add_argument(
         "--frontend_server_count",
         env_name="FRONTEND_SERVER_COUNT",
         bind_to=(server_config, "frontend_server_count"),
