@@ -281,6 +281,7 @@ class RegisteredObjectTransport:
         with ExitStack() as stack:
             with self._stage(operation, "transport_lock_wait"):
                 stack.enter_context(self._lock)
+            self._check_available()
             with self._stage(operation, "cuda_gate_wait"):
                 stack.enter_context(cuda_graph_gate.operation())
             stack.enter_context(torch.cuda.device(self._device))
@@ -311,7 +312,12 @@ class RegisteredObjectTransport:
                 host = self._host_staging[: buffer.numel()]
                 with self._stage("write", "host_copy"):
                     if host.data_ptr() != buffer.data_ptr():
-                        host.copy_(buffer)
+                        # These are contiguous CPU byte buffers. Use a single
+                        # native copy so parallel slots do not each fan out to
+                        # the PyTorch CPU intra-op workers.
+                        ctypes.memmove(
+                            host.data_ptr(), buffer.data_ptr(), buffer.numel()
+                        )
                 failure_stage = "gpu_copy"
                 stream = self._stream
                 with self._stage("write", "h2d_staging"):
@@ -336,18 +342,18 @@ class RegisteredObjectTransport:
                 raise
 
     def load_one(self, key, buffer, **kwargs):
-        return self._load(self._client.load_one, key, buffer, key=key, **kwargs)
+        return self._load("load_one", key, buffer, key=key, **kwargs)
 
     def load_from_meta(self, meta, buffer, **kwargs):
-        return self._load(self._client.load_from_meta, meta, buffer, **kwargs)
+        return self._load("load_from_meta", meta, buffer, **kwargs)
 
-    def _load(self, load, value, buffer, *, key=None, **kwargs):
+    def _load(self, method, value, buffer, *, key=None, **kwargs):
         with self._serialized("read"):
             transfer = self._view(buffer)
             failure_stage = "sdk_transfer"
             try:
                 with self._stage("read", "native_load"):
-                    load(value, transfer, **kwargs)
+                    getattr(self._client, method)(value, transfer, **kwargs)
                 failure_stage = "gpu_ready_wait"
                 stream = self._stream
                 with self._stage("read", "gpu_ready_wait"):
@@ -359,7 +365,7 @@ class RegisteredObjectTransport:
                     stream.synchronize()
                 failure_stage = "host_copy"
                 with self._stage("read", "host_copy"):
-                    buffer.copy_(host)
+                    ctypes.memmove(buffer.data_ptr(), host.data_ptr(), buffer.numel())
                 return buffer
             except Exception as error:
                 self._handle_failure(

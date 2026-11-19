@@ -160,6 +160,8 @@ class RegisteredObjectTransportTest(unittest.TestCase):
         self.assertIsNone(transport._host_staging)
         with self.assertRaises(RuntimeError):
             transport.load_one("x", target)
+        with self.assertRaises(RuntimeError):
+            transport.load_from_meta(object(), target)
 
 
 class RegisteredTransportFailureTest(unittest.TestCase):
