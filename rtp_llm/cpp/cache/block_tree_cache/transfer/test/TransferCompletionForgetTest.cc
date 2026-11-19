@@ -112,11 +112,11 @@ TEST(TransferCompletionForgetTest, LocalBatchPreservesNamespacesAndRetriesRunnin
     ASSERT_TRUE(kvcm.begin("71"));
     ASSERT_TRUE(kvcm.finish("71", true));
     size_t                   calls = 0;
-    TransferCompletionForget forget(nullptr, [&](const Trace& trace) {
+    TransferCompletionForget forget(nullptr, [&](const Trace& trace, bool force) {
         ++calls;
         if (const auto* numeric = std::get_if<uint64_t>(&trace))
-            return ordinary.forget(*numeric);
-        return kvcm.forget(std::get<std::string>(trace));
+            return ordinary.forget(*numeric, force);
+        return kvcm.forget(std::get<std::string>(trace), force);
     });
     const std::vector<Trace> traces{uint64_t{71}, std::string("71"), uint64_t{72}, uint64_t{0}, std::string{}};
     const auto               first = forget.forget(target({"local"}, false), traces, 1000);
@@ -133,8 +133,9 @@ TEST(TransferCompletionForgetTest, LocalBatchPreservesNamespacesAndRetriesRunnin
     EXPECT_EQ(calls, 3u);  // Invalid keys never reach the registry callback.
     EXPECT_EQ(ordinary.size(), 1u);
     EXPECT_EQ(kvcm.size(), 0u);
-    ASSERT_TRUE(ordinary.finish(uint64_t{71}, true));
-    const auto retried = forget.forget(target({"local"}, false), {uint64_t{71}, std::string("71"), uint64_t{72}}, 1000);
+    auto forced = target({"local"}, false);
+    forced.transfer_released = true;
+    const auto retried = forget.forget(forced, {uint64_t{71}}, 1000);
     EXPECT_TRUE(retried.error.empty());
     for (const auto& entry : retried.entries)
         EXPECT_TRUE(entry.all_done);
@@ -144,7 +145,7 @@ TEST(TransferCompletionForgetTest, LocalBatchPreservesNamespacesAndRetriesRunnin
 
 TEST(TransferCompletionForgetTest, LocalFailuresDoNotPreventLaterKeysFromCompleting) {
     size_t                   calls = 0;
-    TransferCompletionForget forget(nullptr, [&](const Trace& trace) -> Outcome {
+    TransferCompletionForget forget(nullptr, [&](const Trace& trace, bool) -> Outcome {
         ++calls;
         switch (std::get<uint64_t>(trace)) {
             case 1:
@@ -173,10 +174,7 @@ TEST(TransferCompletionForgetTest, LocalFailuresDoNotPreventLaterKeysFromComplet
 
 TEST(TransferCompletionForgetTest, BatchLimitTimeoutAndLocalTargetValidationPrecedeDeletion) {
     size_t                   calls = 0;
-    TransferCompletionForget forget(nullptr, [&](const Trace&) {
-        ++calls;
-        return Outcome::DONE;
-    });
+    TransferCompletionForget forget(nullptr, [&](const Trace&, bool) { ++calls; return Outcome::DONE; });
     const auto               local = target({"local"}, false);
     for (const int timeout : {0, -1}) {
         const auto result = forget.forget(local, {uint64_t{1}}, timeout);
@@ -211,10 +209,12 @@ TEST(TransferCompletionForgetTest, RemoteBatchRequiresAllOriginalRanksButRunning
     ASSERT_TRUE((*workers)[0].kvcm.finish("71", true));
     auto handler = [workers](size_t rank, const auto& request, auto& response) {
         EXPECT_EQ(request.completion_forget().keys_size(), 2);
+        EXPECT_FALSE(request.completion_forget().kvcm_read_released());
         answer(rank, request, response, [&](const TransferCompletionKeyPB& key) {
-            return key.trace_case() == TransferCompletionKeyPB::kTransferTraceId ?
-                       (*workers)[rank].ordinary.forget(key.transfer_trace_id()) :
-                       (*workers)[rank].kvcm.forget(key.kvcm_trace_id());
+            auto& worker = (*workers)[rank];
+            if (key.trace_case() == TransferCompletionKeyPB::kTransferTraceId)
+                return worker.ordinary.forget(key.transfer_trace_id(), request.completion_forget().transfer_released());
+            return worker.kvcm.forget(key.kvcm_trace_id());
         });
         return grpc::Status::OK;
     };
@@ -242,14 +242,23 @@ TEST(TransferCompletionForgetTest, RemoteBatchRequiresAllOriginalRanksButRunning
         EXPECT_TRUE(row.cq_ok);
         EXPECT_EQ(row.grpc_code, std::optional<int>{grpc::StatusCode::OK});
         EXPECT_EQ((*workers)[rank].ordinary.size(), 0u);
+        ASSERT_TRUE((*workers)[rank].ordinary.begin(uint64_t{72}));
     }
+    auto forced = routing;
+    forced.transfer_released = true;
+    const auto released = forget.forget(forced, {uint64_t{72}, std::string("71")}, 2000);
+    ASSERT_EQ(released.entries.size(), 2u);
+    EXPECT_TRUE(released.entries[0].all_done);
+    EXPECT_FALSE(released.entries[1].all_done);
     ASSERT_TRUE((*workers)[1].kvcm.finish("71", true));
     const auto retried = forget.forget(routing, {uint64_t{71}, std::string("71")}, 2000);
     EXPECT_TRUE(retried.error.empty());
     EXPECT_TRUE(retried.entries[0].all_done);
     EXPECT_TRUE(retried.entries[1].all_done);
-    EXPECT_EQ(first.calls(), 2u);
-    EXPECT_EQ(second.calls(), 2u);
+    EXPECT_EQ(first.calls(), 3u);
+    EXPECT_EQ(second.calls(), 3u);
+    EXPECT_FALSE((*workers)[1].kvcm.finish("71", true));
+    EXPECT_EQ((*workers)[1].kvcm.size(), 0u);
 }
 
 TEST(TransferCompletionForgetTest, LostAcknowledgmentRetriesTheAlreadyDeletedKeySuccessfully) {
@@ -276,7 +285,7 @@ TEST(TransferCompletionForgetTest, LostAcknowledgmentRetriesTheAlreadyDeletedKey
     EXPECT_EQ(registry->size(), 0u);
     const auto second = forget.forget(routing, {uint64_t{81}}, 2000);
     EXPECT_TRUE(second.entries[0].all_done);
-    EXPECT_EQ(registry->size(), 0u);
+    EXPECT_EQ(registry->queryLocal(std::vector<uint64_t>{81}).front(), TransferTaskRegistry::State::REJECTED);
     EXPECT_EQ(calls->load(), 2u);
 }
 
@@ -289,10 +298,7 @@ TEST(TransferCompletionForgetTest, InvalidParticipantSetsRejectBeforeRpcOrLocalF
     auto manager = std::make_shared<BroadcastManager>(std::vector<std::string>{server.address()});
     ASSERT_TRUE(manager->init());
     size_t                                local_calls = 0;
-    TransferCompletionForget              forget(manager, [&](const Trace&) {
-        ++local_calls;
-        return Outcome::DONE;
-    });
+    TransferCompletionForget forget(manager, [&](const Trace&, bool) { ++local_calls; return Outcome::DONE; });
     std::vector<TransferCompletionTarget> invalid{
         target({}), target({server.address(), server.address()}), target({""}), target({server.address() + "-other"})};
     invalid.push_back(target({server.address()}));

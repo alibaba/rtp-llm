@@ -143,6 +143,20 @@ TEST(TransferCompletionCleanupTest, BatchesByOriginalRoutingAndNeverExceedsProto
     EXPECT_EQ(queue->size(), 0u);
 }
 
+TEST(TransferCompletionCleanupTest, ForcedAndNormalEntriesUseSeparateBatches) {
+    auto queue = std::make_shared<Cleanup>();
+    queue->prepare(localTarget(), uint64_t{1}).submit(true);
+    queue->prepare(localTarget(), uint64_t{2}).submit();
+    size_t calls = 0;
+    queue->drain([&](const auto& target, const auto& traces, int) {
+        ++calls;
+        EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{uint64_t{target.transfer_released ? 1u : 2u}}));
+        return doneResult(traces);
+    }, 1000);
+    EXPECT_EQ(calls, 2u);
+    EXPECT_EQ(queue->size(), 0u);
+}
+
 TEST(TransferCompletionCleanupTest, PartialSuccessRemovesOnlyConfirmedEntriesAndRetriesNextDrain) {
     auto                                      queue = std::make_shared<Cleanup>();
     const std::vector<TransferExecutionTrace> traces{uint64_t{1}, std::string("1"), uint64_t{2}};

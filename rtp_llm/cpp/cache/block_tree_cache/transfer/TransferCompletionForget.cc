@@ -181,7 +181,9 @@ TransferCompletionForgetResult TransferCompletionForget::forget(const TransferCo
                 continue;
             }
             try {
-                setOutcome(row, local_forget_(traces[index]));
+                const bool released = std::holds_alternative<uint64_t>(traces[index]) ?
+                                          target.transfer_released : target.kvcm_read_released;
+                setOutcome(row, local_forget_(traces[index], released));
             } catch (const std::exception& error) {
                 row.error = error.what();
             } catch (...) {
@@ -201,8 +203,11 @@ TransferCompletionForgetResult TransferCompletionForget::forget(const TransferCo
     try {
         std::vector<FunctionRequestPB> requests(target.peers.size());
         for (auto& request : requests) {
+            auto* forget = request.mutable_completion_forget();
+            forget->set_kvcm_read_released(target.kvcm_read_released);
+            forget->set_transfer_released(target.transfer_released);
             for (const auto index : valid_indices)
-                encodeKey(traces[index], *request.mutable_completion_forget()->add_keys());
+                encodeKey(traces[index], *forget->add_keys());
         }
         const int submit_timeout = remainingTimeout(deadline);
         if (submit_timeout == 0) {

@@ -150,8 +150,8 @@ std::vector<std::shared_ptr<FrozenTask>> BlockTreeCache::frozenTasks() const {
     return transfer_dispatcher_ ? transfer_dispatcher_->frozenTasks() : std::vector<std::shared_ptr<FrozenTask>>{};
 }
 
-TransferTaskRegistry::ForgetResult BlockTreeCache::forgetLocalTransferCompletion(uint64_t trace_id) const {
-    return transfer_dispatcher_ ? transfer_dispatcher_->forgetLocalCompletion(trace_id) :
+TransferTaskRegistry::ForgetResult BlockTreeCache::forgetLocalTransferCompletion(uint64_t trace_id, bool force) const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->forgetLocalCompletion(trace_id, force) :
                                   TransferTaskRegistry::ForgetResult::FAILED;
 }
 

@@ -69,8 +69,8 @@ public:
         return task_registry_->queryAndBlockMissing(std::vector<uint64_t>{trace_id}).front();
     }
 
-    TransferTaskRegistry::ForgetResult forgetLocalCompletion(uint64_t trace_id) const {
-        return task_registry_->forget(trace_id);
+    TransferTaskRegistry::ForgetResult forgetLocalCompletion(uint64_t trace_id, bool force = false) const {
+        return task_registry_->forget(trace_id, force);
     }
 
     // Initialization only, before any coordinator execution can be submitted.
@@ -88,19 +88,19 @@ private:
                                                            const char*  completion_operation = nullptr) const;
     void submitCoordinated(TransferTask task, TransferDoneCallback done, const char* completion_operation) const;
     FrozenTask::ExecutionInfo buildExecutionInfo(const TransferTask& task, const char* completion_operation) const;
-    void                      retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) const noexcept;
+    void retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) const noexcept;
 
-    std::shared_ptr<PerRankBlockTransferEngine>    per_rank_engine_;
-    std::shared_ptr<MultiRankBlockTransferEngine>  multi_rank_engine_;
-    mutable std::mutex                             inflight_mutex_;
-    mutable std::condition_variable                inflight_cv_;
-    mutable size_t                                 inflight_count_{0};
-    std::function<void()>                          drain_observer_for_test_;
-    mutable std::mutex                             frozen_mutex_;
+    std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
+    std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
+    mutable std::mutex                            inflight_mutex_;
+    mutable std::condition_variable               inflight_cv_;
+    mutable size_t                                inflight_count_{0};
+    std::function<void()>                         drain_observer_for_test_;
+    mutable std::mutex                            frozen_mutex_;
     mutable std::list<std::shared_ptr<FrozenTask>> frozen_tasks_;
     std::shared_ptr<TransferTaskRegistry>          task_registry_{std::make_shared<TransferTaskRegistry>()};
     std::shared_ptr<TransferCompletionCleanup>     completion_cleanup_;
-    mutable std::atomic<size_t>                    next_registry_warning_{4096};
+    mutable std::atomic<size_t>                   next_registry_warning_{4096};
 };
 
 using BlockTransferDispatcherPtr = std::shared_ptr<BlockTransferDispatcher>;

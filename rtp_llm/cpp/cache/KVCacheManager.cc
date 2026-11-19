@@ -1312,7 +1312,7 @@ TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const Transf
 }
 
 TransferTaskRegistry::ForgetResult
-KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const {
+KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trace_id, bool force) const {
     using Result = TransferTaskRegistry::ForgetResult;
     if (!validTransferExecutionTrace(trace_id)) {
         RTP_LLM_LOG_WARNING("completion forget requires a nonempty execution trace");
@@ -1321,21 +1321,22 @@ KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trac
     if (!block_tree_cache_)
         return Result::FAILED;
     if (const auto* trace = std::get_if<uint64_t>(&trace_id))
-        return block_tree_cache_->forgetLocalTransferCompletion(*trace);
+        return block_tree_cache_->forgetLocalTransferCompletion(*trace, force);
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
     auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
     if (backend)
-        return backend->forgetReadCompletion(std::get<std::string>(trace_id));
+        return backend->forgetReadCompletion(std::get<std::string>(trace_id), force);
 #endif
     return Result::FAILED;
 }
 
-TransferCompletionForgetResult KVCacheManager::forgetTransferCompletion(
-    const TransferCompletionTarget& target, const std::vector<TransferExecutionTrace>& traces, int timeout_ms) const {
-    return TransferCompletionForget(
-               transfer_broadcast_manager_,
-               [this](const TransferExecutionTrace& trace) { return localForgetTransferCompletion(trace); })
-        .forget(target, traces, timeout_ms);
+TransferCompletionForgetResult
+KVCacheManager::forgetTransferCompletion(const TransferCompletionTarget& target,
+                                        const std::vector<TransferExecutionTrace>& traces, int timeout_ms) const {
+    return TransferCompletionForget(transfer_broadcast_manager_,
+                                    [this](const TransferExecutionTrace& trace, bool force) {
+                                        return localForgetTransferCompletion(trace, force);
+                                    }).forget(target, traces, timeout_ms);
 }
 
 TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
@@ -1352,7 +1353,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         forget_response->Clear();
         forget_response->set_rank(static_cast<uint32_t>(parallelism_config_.pp_rank * parallelism_config_.tp_size
                                                         + parallelism_config_.tp_rank));
-        const auto& keys = request.completion_forget().keys();
+        const auto& forget = request.completion_forget();
+        const auto& keys = forget.keys();
         if (static_cast<size_t>(keys.size()) > kTransferCompletionForgetBatchSize) {
             RTP_LLM_LOG_WARNING("completion forget batch exceeds limit: %d", keys.size());
             return false;
@@ -1363,10 +1365,10 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
             auto result = TransferTaskRegistry::ForgetResult::INVALID;
             switch (key.trace_case()) {
                 case TransferCompletionKeyPB::kTransferTraceId:
-                    result = localForgetTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
+                    result = localForgetTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()}, forget.transfer_released());
                     break;
                 case TransferCompletionKeyPB::kKvcmTraceId:
-                    result = localForgetTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
+                    result = localForgetTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()}, forget.kvcm_read_released());
                     break;
                 default:
                     RTP_LLM_LOG_WARNING("completion forget key has no trace namespace");

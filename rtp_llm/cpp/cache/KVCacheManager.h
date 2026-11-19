@@ -245,8 +245,9 @@ private:
     void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     bool                              initP2PConnector();
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
-    TransferTaskRegistry::State       localTransferCompletion(const TransferExecutionTrace& trace_id) const;
-    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    TransferTaskRegistry::State localTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(
+        const TransferExecutionTrace& trace_id, bool force = false) const;
     bool                               startFrozenTaskRecovery();
     void                               stopFrozenTaskRecovery() noexcept;
 

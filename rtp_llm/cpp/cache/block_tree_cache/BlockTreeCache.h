@@ -169,7 +169,7 @@ public:
 
     TransferResult                     executeTransfer(TransferTask task);
     TransferTaskRegistry::State        localTransferCompletion(uint64_t trace_id) const;
-    TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id) const;
+    TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id, bool force = false) const;
     void cleanupExpiredMissing() const;
     // Configure before accepting coordinator work.
     void                                     setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);

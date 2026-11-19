@@ -641,10 +641,9 @@ TEST(BlockTransferDispatcherTest, OverlappingTasksKeepIndependentResults) {
 
 TransferCompletionCleanup::Forget localCleanupForget(const BlockTransferDispatcher& dispatcher) {
     return [&dispatcher](const TransferCompletionTarget&            target,
-                         const std::vector<TransferExecutionTrace>& traces,
-                         int                                        timeout_ms) {
-        TransferCompletionForget forget(nullptr, [&dispatcher](const TransferExecutionTrace& trace) {
-            return dispatcher.forgetLocalCompletion(std::get<uint64_t>(trace));
+                         const std::vector<TransferExecutionTrace>& traces, int timeout_ms) {
+        TransferCompletionForget forget(nullptr, [&dispatcher](const TransferExecutionTrace& trace, bool force) {
+            return dispatcher.forgetLocalCompletion(std::get<uint64_t>(trace), force);
         });
         return forget.forget(target, traces, timeout_ms);
     };

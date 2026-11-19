@@ -116,8 +116,7 @@ TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadl
     EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
     EXPECT_EQ(dispatcher.taskRegistry().size(), 0u);
     EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
-    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
-    // A subsequent recovery query starts a new retention fence.
+    EXPECT_EQ(state(dispatcher, trace), State::REJECTED);
     EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
 }
 

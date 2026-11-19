@@ -26,7 +26,10 @@
 
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
+#include <unordered_set>
+
 #include "kvcm_client/HostCacheStateCompat.h"
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
@@ -1181,11 +1184,19 @@ public:
     struct ReadExecution {
         std::string                           trace_id;
         std::shared_ptr<TransferBufferSafety> proof;
+        std::shared_ptr<std::atomic<bool>> recovery_cancelled;
     };
     using ReadExecutionPtr = std::shared_ptr<ReadExecution>;
 
     void cleanupExpiredMissing() {
         read_registry_->cleanupExpiredMissing();
+        std::unordered_set<std::string> retries;
+        {
+            std::lock_guard<std::mutex> lock(recovery_discard_mutex_);
+            retries.swap(pending_recovery_discards_);
+        }
+        for (const auto& trace_id : retries)
+            discardReadRecovery(trace_id);
     }
 
     const TransferTaskRegistry& taskRegistry() const {
@@ -1200,12 +1211,24 @@ public:
         completion_cleanup_ = std::move(cleanup);
     }
 
-    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id) {
-        const auto result = read_registry_->forget(trace_id);
+    void discardReadRecovery(const std::string& trace_id) {
+        try {
+            if (client_wrapper_)
+                client_wrapper_->discardReadRecovery(trace_id);
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(recovery_discard_mutex_);
+            pending_recovery_discards_.insert(trace_id);
+            RTP_LLM_LOG_WARNING("KVCM READ recovery discard failed trace=%s", trace_id.c_str());
+        }
+    }
+
+    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id, bool released) {
+        const auto result = read_registry_->forget(trace_id, released);
         if (result == TransferTaskRegistry::ForgetResult::INVALID) {
             RTP_LLM_LOG_WARNING("KVCM READ completion forget rejected rank=%ld trace=%s reason=empty_trace",
-                                static_cast<long>(parallelism_config_.world_rank),
-                                trace_id.c_str());
+                                static_cast<long>(parallelism_config_.world_rank), trace_id.c_str());
+        } else if (released) {
+            discardReadRecovery(trace_id);
         }
         return result;
     }
@@ -1234,7 +1257,13 @@ public:
         execution->trace_id = request.trace_id();
         execution->proof    = std::make_shared<TransferBufferSafety>(
             [registry = read_registry_, trace_id = execution->trace_id] { registry->finish(trace_id, true); });
-        if (!read_registry_->begin(execution->trace_id)) {
+        if (kvcm::kSupportsReadRecoveryDiscard &&
+            parallelism_config_.role_type != RoleType::DECODE &&
+            std::all_of(request.uris().begin(), request.uris().end(),
+                        [](const auto& uri) { return uri.compare(0, 7, "pace://") == 0; })) {
+            execution->recovery_cancelled = std::make_shared<std::atomic<bool>>(false);
+        }
+        if (!read_registry_->begin(execution->trace_id, execution->recovery_cancelled)) {
             reject("duplicate_trace");
             return nullptr;
         }
@@ -1345,8 +1374,15 @@ public:
         // Declared before the existing payload reconciliation scopes: their
         // final explicit proof must be published first, including while unwinding.
         block_tree_cache_detail::ScopeRollback publish_completion([&] {
-            if (execution)
-                execution->proof->report(response.payload_buffer_safe());
+            if (!execution)
+                return;
+            if (response.payload_buffer_safe()) {
+                execution->proof->report(true);
+            }
+            if constexpr (!kvcm::kSupportsReadRecoveryCancellation) {
+                if (execution->recovery_cancelled && execution->recovery_cancelled->load())
+                    discardReadRecovery(execution->trace_id);
+            }
         });
         response.set_sdk_failed(false);
         response.set_payload_buffer_safe(true);
@@ -1378,7 +1414,7 @@ public:
             if (source_may_be_touched)
                 *source_may_be_touched = unknown;
         });
-        const auto result = executeTagTransfers(request.op(), tags, uris, buffers, response, unknown, nullptr, task);
+        const auto result = executeTagTransfers(request.op(), tags, uris, buffers, response, unknown, nullptr, task, execution.get());
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
@@ -1765,7 +1801,8 @@ private:
                                          RemoteOperationResponsePB&         response,
                                          bool&                              source_may_be_touched,
                                          bool*                              transfer_attempted,
-                                         const TransferTask&                task) {
+                                         const TransferTask&                task,
+                                         const ReadExecution* execution = nullptr) {
         auto completion = kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED;
         RtpLLMRemoteCacheSDKMetricsCollector collector;
         collector.remote_sdk_block_num               = static_cast<int64_t>(uris.size());
@@ -1791,8 +1828,11 @@ private:
             return TransferResult::TIMEOUT;
         }
         if (operation == REMOTE_OPERATION_READ) {
+            std::shared_ptr<kv_cache_manager::TransferTraceInfo> trace;
+            if (execution && execution->recovery_cancelled)
+                kvcm::setSdkReadExecutionId(trace, execution->trace_id, execution->recovery_cancelled);
             const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(
-                client_tag, uris, buffers, nullptr, &completion, task.deadline());
+                client_tag, uris, buffers, trace, &completion, task.deadline());
             if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
                 return TransferResult::TIMEOUT;
             }
@@ -1824,7 +1864,8 @@ private:
                                        RemoteOperationResponsePB&         response,
                                        bool&                              source_may_be_touched,
                                        bool*                              transfer_attempted,
-                                       const TransferTask&                task) {
+                                       const TransferTask&                task,
+                                         const ReadExecution* execution = nullptr) {
         if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return TransferResult::FAILED;
@@ -1841,7 +1882,7 @@ private:
                                                       response,
                                                       source_may_be_touched,
                                                       transfer_attempted,
-                                                      task);
+                                                      task, execution);
             if (result != TransferResult::SUCCESS) {
                 return result;
             }
@@ -2207,6 +2248,8 @@ private:
     std::shared_ptr<BroadcastManager>              broadcast_manager_;
     std::atomic<bool>                              payload_stopped_{false};
     std::shared_ptr<TransferTaskRegistry>          read_registry_{std::make_shared<TransferTaskRegistry>()};
+    std::mutex                                           recovery_discard_mutex_;
+    std::unordered_set<std::string>                      pending_recovery_discards_;
     std::shared_ptr<TransferCompletionCleanup>     completion_cleanup_;
     mutable std::atomic<size_t>                    next_registry_warning_{4096};
     mutable std::mutex                             frozen_mutex_;
@@ -2386,8 +2429,8 @@ TransferTaskRegistry::State KVCMStorageBackend::queryReadCompletion(const std::s
     return impl_->queryReadCompletion(trace_id);
 }
 
-TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id) {
-    return impl_->forgetReadCompletion(trace_id);
+TransferTaskRegistry::ForgetResult KVCMStorageBackend::forgetReadCompletion(const std::string& trace_id, bool released) {
+    return impl_->forgetReadCompletion(trace_id, released);
 }
 
 void KVCMStorageBackend::setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {

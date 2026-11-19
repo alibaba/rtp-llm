@@ -423,12 +423,25 @@ TEST(KVCMCompletionQueryTest, RpcBatchForgetKeepsRunningReadsAndSeparatesTraceNa
     forget->add_keys();
     for (const bool completed : {false, true}) {
         if (completed) {
+            FunctionRequestPB release;
+            auto* released = release.mutable_completion_forget();
+            released->set_kvcm_read_released(true);
+            released->add_keys()->set_kvcm_trace_id("71");
+            FunctionResponsePB response;
+            ASSERT_TRUE(rpc(release, response).ok());
+            ASSERT_EQ(response.completion_forget().entries_size(), 1);
+            EXPECT_EQ(response.completion_forget().entries(0).status(), TRANSFER_FORGET_DONE);
+            EXPECT_EQ(running.waitFor(0ms), std::future_status::timeout);
+            EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"71"}).front(),
+                      RegistryState::UNKNOWN);
             gate->release();
             ASSERT_EQ(running.waitFor(5s), std::future_status::ready);
             const auto result = running.get();
             ASSERT_TRUE(result.first.ok());
             EXPECT_EQ(result.second.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_SUCCESS);
             EXPECT_TRUE(result.second.remote_response().payload_buffer_safe());
+            EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"71"}).front(),
+                      RegistryState::UNKNOWN);
         }
         FunctionResponsePB response;
         ASSERT_TRUE(rpc(request, response).ok());
@@ -458,8 +471,11 @@ TEST(KVCMCompletionQueryTest, RpcBatchForgetKeepsRunningReadsAndSeparatesTraceNa
         EXPECT_EQ(query_response.completion_query().entries(1).state(), TRANSFER_COMPLETION_UNKNOWN);
         EXPECT_EQ(query_response.completion_query().entries(0).admission_closed(), completed);
         EXPECT_TRUE(query_response.completion_query().entries(1).admission_closed());
-        EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
-        EXPECT_EQ(ordinary.size(), 1u);
+        EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"missing"}).front(),
+                  RegistryState::REJECTED);
+        EXPECT_EQ(ordinary.queryLocal(std::vector<uint64_t>{999}).front(), RegistryState::REJECTED);
+        EXPECT_EQ(worker->backend->taskRegistry().size(), 2u);
+        EXPECT_EQ(ordinary.size(), 2u);
         EXPECT_TRUE(worker->backend->frozenTasks().empty());
         EXPECT_FALSE(worker->environment->device_pool->isFrozen(worker->environment->block_id));
         EXPECT_EQ(worker->environment->device_pool->refCount(worker->environment->block_id), references);

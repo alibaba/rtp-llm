@@ -121,6 +121,7 @@ public:
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
                                  TransferCompletion*                                         completion,
                                  std::optional<std::chrono::steady_clock::time_point>        deadline);
+    virtual void discardReadRecovery(const std::string& trace_id);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,

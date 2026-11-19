@@ -65,7 +65,7 @@ TEST(TransferTaskRegistryTest, MissingEvidenceDoesNotCreateOrCompleteAnExecution
     EXPECT_TRUE(registry.begin("missing"));
 }
 
-TEST(TransferTaskRegistryTest, ForgetRemovesOnlySafeRecordsAndIsIdempotent) {
+TEST(TransferTaskRegistryTest, NormalForgetRemovesSafeRecordsAndFencesMissingTraces) {
     Registry   registry;
     const auto epoch = registry.epoch();
     ASSERT_TRUE(registry.begin("safe"));
@@ -73,16 +73,16 @@ TEST(TransferTaskRegistryTest, ForgetRemovesOnlySafeRecordsAndIsIdempotent) {
     ASSERT_TRUE(registry.begin("running"));
 
     EXPECT_EQ(registry.forget("missing"), ForgetResult::DONE);
+    EXPECT_EQ(registry.forget("safe"), ForgetResult::DONE);
     EXPECT_EQ(registry.size(), 2u);
-    EXPECT_EQ(registry.forget("safe"), ForgetResult::DONE);
-    EXPECT_EQ(registry.size(), 1u);
     EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"safe", "running", "missing"}),
-              (std::vector<State>{State::UNKNOWN, State::RUNNING, State::UNKNOWN}));
-    EXPECT_EQ(registry.forget("safe"), ForgetResult::DONE);
+              (std::vector<State>{State::UNKNOWN, State::RUNNING, State::REJECTED}));
     EXPECT_FALSE(registry.finish("safe", true));
-    EXPECT_FALSE(registry.finish("safe", false));
+    EXPECT_EQ(registry.forget("safe"), ForgetResult::DONE);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"safe"}).front(), State::REJECTED);
+    EXPECT_FALSE(registry.begin("safe"));
+    EXPECT_FALSE(registry.begin("missing"));
     EXPECT_EQ(registry.size(), 1u);
-    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"safe"}), (std::vector<State>{State::UNKNOWN}));
     EXPECT_EQ(registry.epoch(), epoch);
 }
 
@@ -101,6 +101,33 @@ TEST(TransferTaskRegistryTest, ForgetPreservesRunningExecutionUntilProofArrives)
     EXPECT_EQ(registry.size(), 0u);
 }
 
+TEST(TransferTaskRegistryTest, ForcedForgetRemovesRunningAndPreservesLateAdmissionFences) {
+    auto now = Registry::Clock::now();
+    Registry registry([&] { return now; });
+    ASSERT_TRUE(registry.begin(uint64_t{71}));
+    EXPECT_EQ(registry.forget(uint64_t{71}), ForgetResult::RUNNING);
+    EXPECT_EQ(registry.forget(uint64_t{71}, true), ForgetResult::DONE);
+    EXPECT_FALSE(registry.finish(uint64_t{71}, true));
+    EXPECT_EQ(registry.size(), 0u);
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
+    ASSERT_TRUE(registry.begin("read", cancelled));
+    EXPECT_EQ(registry.forget("read"), ForgetResult::RUNNING);
+    EXPECT_FALSE(cancelled->load());
+    EXPECT_EQ(registry.forget("read", true), ForgetResult::DONE);
+    EXPECT_TRUE(cancelled->load());
+    EXPECT_FALSE(registry.finish("read", true));
+    EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.forget("late", true), ForgetResult::DONE);
+    EXPECT_EQ(registry.forget("late", true), ForgetResult::DONE);
+    EXPECT_FALSE(registry.begin("late"));
+    EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.forget("absent", true), ForgetResult::DONE);
+    now += std::chrono::hours(1);
+    EXPECT_EQ(registry.forget("absent", true), ForgetResult::DONE);
+    EXPECT_EQ(registry.cleanupExpiredMissing(), 1u);
+    EXPECT_EQ(registry.size(), 0u);
+}
+
 TEST(TransferTaskRegistryTest, ForgetRejectsInvalidIdsWithoutTouchingStringZero) {
     Registry registry;
     ASSERT_TRUE(registry.begin("0"));
@@ -113,20 +140,21 @@ TEST(TransferTaskRegistryTest, ForgetRejectsInvalidIdsWithoutTouchingStringZero)
     EXPECT_EQ(registry.size(), 0u);
 }
 
-TEST(TransferTaskRegistryTest, NumericForgetUsesTheExistingIdentityWithoutRetainingTombstones) {
+TEST(TransferTaskRegistryTest, NumericForgetFencesMissingTracesAndRemovesCompletedTraces) {
     Registry       registry;
     const uint64_t trace_id = std::numeric_limits<uint64_t>::max();
     EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
+    EXPECT_FALSE(registry.begin(trace_id));
     ASSERT_TRUE(registry.begin(trace_id));
     EXPECT_EQ(registry.forget(trace_id), ForgetResult::RUNNING);
     ASSERT_TRUE(registry.finish(trace_id, true));
     EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
-    EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
     EXPECT_FALSE(registry.finish(trace_id, true));
-    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}), (std::vector<State>{State::UNKNOWN}));
     EXPECT_EQ(registry.size(), 0u);
-    ASSERT_TRUE(registry.begin(std::to_string(trace_id)));
-    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}), (std::vector<State>{State::RUNNING}));
+    EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}).front(), State::REJECTED);
+    EXPECT_FALSE(registry.begin(std::to_string(trace_id)));
+    EXPECT_EQ(registry.size(), 0u);
 }
 
 TEST(TransferTaskRegistryTest, ConcurrentFinishAndForgetPreserveTheSafetyBoundary) {
@@ -150,7 +178,9 @@ TEST(TransferTaskRegistryTest, ConcurrentFinishAndForgetPreserveTheSafetyBoundar
         ASSERT_TRUE(result == ForgetResult::RUNNING || result == ForgetResult::DONE);
         EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace_id}),
                   (std::vector<State>{result == ForgetResult::DONE ? State::UNKNOWN : State::BUFFER_SAFE}));
+        if (result == ForgetResult::RUNNING) {
         EXPECT_EQ(registry.forget(trace_id), ForgetResult::DONE);
+        }
         EXPECT_FALSE(registry.finish(trace_id, true));
         EXPECT_EQ(registry.size(), 0u);
     }
@@ -210,8 +240,9 @@ TEST(TransferTaskRegistryTest, LateExecutionConsumesMissingFenceWithoutAdmission
     EXPECT_FALSE(registry.finish("late", true));
     EXPECT_FALSE(registry.finish("late", false));
     EXPECT_EQ(registry.forget("late"), ForgetResult::DONE);
+    EXPECT_EQ(registry.queryLocal(ids).front(), State::REJECTED);
     now += std::chrono::hours(1);
-    EXPECT_EQ(registry.cleanupExpiredMissing(), 1u);
+    EXPECT_EQ(registry.cleanupExpiredMissing(), 2u);
     EXPECT_EQ(registry.size(), 0u);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
     EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"never-arrives"}).front(), State::UNKNOWN);

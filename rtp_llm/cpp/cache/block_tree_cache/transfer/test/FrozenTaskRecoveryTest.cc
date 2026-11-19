@@ -300,7 +300,7 @@ TEST(FrozenTaskRecoveryTest, ConfiguredTimeoutCanShortenExtendOrDisableForcedRel
     EXPECT_THROW((FrozenTaskRecovery({}, {}, {}, {}, -1)), std::invalid_argument);
 }
 
-TEST(FrozenTaskRecoveryTest, TimeoutPreservesOtherFrozenOwnersAndRetriesForgetUntilSafe) {
+TEST(FrozenTaskRecoveryTest, TimeoutPreservesOtherFrozenOwnersAndForcesForget) {
     auto       pool     = makePool();
     const auto block    = hold(pool);
     auto       other    = makeTask(uint64_t{84}, pool, block);
@@ -319,11 +319,11 @@ TEST(FrozenTaskRecoveryTest, TimeoutPreservesOtherFrozenOwnersAndRetriesForgetUn
     FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task, other}; },
                                 [&](const auto& execution, int) { return proof(execution, State::RUNNING); },
                                 [&](int timeout, const auto& stopped) {
-                                    return cleanup->drain(
-                                        [&](const auto&, const auto& traces, int) {
+            return cleanup->drain([&](const auto& target, const auto& traces, int) {
                                             ++forget_calls;
                                             EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{uint64_t{83}}));
-                                            const auto                          status = registry.forget(uint64_t{83});
+                EXPECT_TRUE(target.transfer_released);
+                const auto status = registry.forget(uint64_t{83}, target.transfer_released);
                                             TransferCompletionForgetResult      result;
                                             TransferCompletionForgetEntryResult entry;
                                             entry.trace_id = uint64_t{83};
@@ -344,11 +344,10 @@ TEST(FrozenTaskRecoveryTest, TimeoutPreservesOtherFrozenOwnersAndRetriesForgetUn
     EXPECT_EQ(pending.released, 0u);
     EXPECT_EQ(pending.pending, 1u);
     EXPECT_EQ(forget_calls, 1u);
-    EXPECT_EQ(cleanup->size(), 1u);
-    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{83}).front(), State::RUNNING);
-    ASSERT_TRUE(registry.finish(uint64_t{83}, true));
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_FALSE(registry.finish(uint64_t{83}, true));
     EXPECT_EQ(recovery.runOnce(1000).released, 0u);
-    EXPECT_EQ(forget_calls, 2u);
+    EXPECT_EQ(forget_calls, 1u);
     EXPECT_EQ(cleanup->size(), 0u);
     EXPECT_EQ(registry.size(), 0u);
     EXPECT_TRUE(pool->isFrozen(block));
