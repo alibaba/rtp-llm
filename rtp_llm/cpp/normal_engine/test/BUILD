@@ -197,6 +197,8 @@ cc_test(
     deps = [
         ":mock_engine",
         "//rtp_llm/cpp/pybind:th_transformer_lib",
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
     ] + cuda13_torch_link_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},
     exec_properties = {"gpu": "H20_CU13"},
