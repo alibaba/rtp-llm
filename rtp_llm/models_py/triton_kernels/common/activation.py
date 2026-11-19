@@ -1,4 +1,5 @@
 from enum import Enum
+from functools import lru_cache
 from typing import Tuple
 
 import torch
@@ -1308,6 +1309,105 @@ def _silu_mul_masked_fp8_post_quant_fwd(
             output_scale_offs + token_index * stride_output_scale_1,
             output_s,
         )
+
+
+if gluon is not None:
+
+    @gluon.jit(do_not_specialize=["X_EXPERT", "Y_EXPERT", "S_EXPERT", "S_GROUP"])
+    def _silu_mul_masked_fp8_subwarp(
+        X, Y, S, Counts,
+        X_EXPERT: gl.int64, X_ROW: gl.constexpr,
+        Y_EXPERT: gl.int64, Y_ROW: gl.constexpr,
+        S_EXPERT: gl.int64, S_ROW: gl.constexpr, S_GROUP: gl.int64,
+        GROUPS: gl.constexpr,
+        LANES: gl.constexpr = 8,
+        WARPS: gl.constexpr = 8,
+    ):
+        layout: gl.constexpr = gl.BlockedLayout(
+            [1, 128 // LANES], [32 // LANES, LANES], [WARPS, 1], [1, 0]
+        )
+        expert = gl.program_id(1)
+        count = gl.load(Counts + expert)
+        task = gl.arange(0, 32, layout=gl.SliceLayout(1, layout))
+        feature = gl.arange(0, 128, layout=gl.SliceLayout(0, layout))
+        expert = expert.to(gl.int64)
+        # The contiguous input and output have whole 128-feature groups.
+        # Preserve this alignment fact when their strides vary at runtime.
+        x = X + gl.multiple_of(expert * X_EXPERT, 16)
+        y = Y + gl.multiple_of(expert * Y_EXPERT, 16)
+        s = S + expert * S_EXPERT
+        for offset in range(gl.program_id(0) * 32, count * GROUPS, gl.num_programs(0) * 32):
+            work = offset + task
+            token, group = work // GROUPS, work % GROUPS
+            valid = token < count
+            row = token[:, None]
+            col = group[:, None] * 128 + feature[None, :]
+            # The loop only runs for nonempty experts. Reuse the last row for
+            # inactive lanes, and mask both stores so padding stays untouched.
+            input_row = gl.minimum(row, count - 1)
+            src = x + input_row * X_ROW + col
+            up = gl.load(src)
+            gate = gl.load(src + GROUPS * 128).to(gl.float32)
+            activated = up * (gate / (1 + gl.exp(-gate)))
+            scale = gl.maximum(gl.max(gl.abs(activated), 1), 1e-10) / 448.0
+            output = gl.minimum(gl.maximum(activated / scale[:, None], -448.0), 448.0)
+            gl.store(y + row * Y_ROW + col, output, valid[:, None])
+            gl.store(s + token * S_ROW + group * S_GROUP, scale, valid)
+
+
+@lru_cache(maxsize=128)
+def _compiled_masked_silu_launcher(device, experts, width, count_dtype, small_groups):
+    groups = width // 128
+    input_row_stride = 2 * width
+    # Only row and tile geometry is specialized. Expert and scale-group
+    # strides are passed at launch so a new token capacity does not recompile.
+    warmup_layout = (input_row_stride, input_row_stride, width, width, groups, 1, 16, groups)
+    lanes, warps, blocks = (4, 4, 12) if small_groups else (8, 8, 16)
+    grid = (blocks, experts, 1)
+    with torch.cuda.device(device):
+        kernel = _silu_mul_masked_fp8_subwarp.warmup(
+            torch.bfloat16, torch.float8_e4m3fn, torch.float32, count_dtype,
+            *warmup_layout, lanes, warps, grid=grid, num_warps=warps,
+        )
+        if kernel is None:
+            return None
+        if hasattr(kernel, "result"):
+            kernel = kernel.result()
+        launch = kernel[grid]
+        current_stream = triton.runtime.driver.active.get_current_stream
+
+    def run(input, output, scale, counts):
+        # The executor allocates all three buffers on this device. Preparation
+        # checks the counts tensor, so Triton can take the CUDA addresses.
+        capacity = input.size(1)
+        launch(
+            input.data_ptr(), output.data_ptr(), scale.data_ptr(), counts.data_ptr(),
+            capacity * input_row_stride, input_row_stride,
+            capacity * width, width, capacity * groups, 1, capacity, groups,
+            lanes, warps, stream=current_stream(device),
+        )
+
+    return run
+
+
+def prepare_masked_silu_fp8_launcher(device, experts, capacity, width, counts):
+    """Prepare the masked executor's native allocation layout for eager launch."""
+    if (
+        gluon is None
+        or _silu_mul_masked_fp8_subwarp.pre_run_hooks
+        or triton.knobs.runtime.debug
+        or triton.knobs.compilation.instrumentation_mode
+        or counts.device != device
+        or counts.dtype not in (torch.int32, torch.int64)
+        or not counts.is_contiguous()
+        or counts.data_ptr() % 16
+    ):
+        return None
+    # Four-lane groups better utilize the 384-wide case at larger capacities.
+    small_groups = width == 384 and capacity >= 5120
+    return _compiled_masked_silu_launcher(
+        device.index, experts, width, counts.dtype, small_groups
+    )
 
 
 def silu_mul_masked_fp8_post_quant_fwd(

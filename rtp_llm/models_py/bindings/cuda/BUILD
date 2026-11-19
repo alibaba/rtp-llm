@@ -178,6 +178,7 @@ cc_library(
         "//conditions:default": [
             "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3",
             "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_tie_break",
+            "//rtp_llm/models_py/bindings/cuda/kernels:contiguous_silu_fp8",
         ],
     }) + select({
         "@//:using_cuda12_9": [
