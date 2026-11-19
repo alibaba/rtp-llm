@@ -22,7 +22,11 @@ from rtp_llm.model_loader.per_block_fp8_quant_weight import (
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
-from rtp_llm.models.glm5_3_flash import Glm53Flash, Glm53FlashWeight
+from rtp_llm.models.glm5_3_flash import (
+    Glm53Flash,
+    Glm53FlashModelConfig,
+    Glm53FlashWeight,
+)
 from rtp_llm.models.glm5_3_flash_mtp import Glm53FlashMtp, Glm53FlashMtpWeight
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import fp8_kernel
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
@@ -230,7 +234,7 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                         loader = SimpleNamespace(get_load_config=lambda: config)
                         model = object.__new__(model_type)
                         model.moe_config = SimpleNamespace(moe_strategy=strategy)
-                        model.model_config = SimpleNamespace()
+                        model.model_config = Glm53FlashModelConfig()
                         model.parallelism_config = SimpleNamespace()
                         with patch(
                             "rtp_llm.models.glm5_3_flash.use_dedicated_mla_cp",
