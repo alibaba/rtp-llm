@@ -326,17 +326,15 @@ protected:
 
     std::shared_ptr<StreamReadStorageBackend>
     prepareStorageBackendResource(bool                      block_matches,
-                                  bool                      seed_host         = false,
-                                  RoleType                  role_type         = RoleType::PDFUSION,
-                                  bool                      seed_resident     = false,
-                                  std::chrono::milliseconds timeout           = std::chrono::seconds(10),
-                                  int                       min_replica_count = 0) {
+                                  bool                      seed_host     = false,
+                                  RoleType                  role_type     = RoleType::PDFUSION,
+                                  bool                      seed_resident = false,
+                                  std::chrono::milliseconds timeout       = std::chrono::seconds(10)) {
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_remote_cache    = true;
-        kv_cache_config.kvcm_min_replica_count = min_replica_count;
-        kv_cache_config.enable_memory_cache    = seed_host;
-        kv_cache_config.memory_cache_size_mb   = seed_host ? 1 : 0;
-        KVCacheConfig manager_kv_cache_config  = kv_cache_config;
+        kv_cache_config.enable_remote_cache   = true;
+        kv_cache_config.enable_memory_cache   = seed_host;
+        kv_cache_config.memory_cache_size_mb  = seed_host ? 1 : 0;
+        KVCacheConfig manager_kv_cache_config = kv_cache_config;
         // The manager must not construct a real KVCM client before this test
         // replaces its BlockTreeCache with the controllable fake backend.
         manager_kv_cache_config.enable_remote_cache = false;
@@ -1347,31 +1345,28 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
 }
 
-TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleReplicaPrefill) {
+TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForPrefill) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
         SCOPED_TRACE(role);
-        for (const int replicas : {0, 1, 2}) {
-            SCOPED_TRACE(replicas);
-            auto backend = prepareStorageBackendResource(false, false, role, false, std::chrono::seconds(10), replicas);
-            auto& resource = stream_->streamCacheResource();
-            ASSERT_TRUE(resource.initKVBlock().ok());
-            ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
-            auto& counts = resource.batch_kv_cache_resource_->cacheResource(0);
-            counts.setDeviceReuseBlockNum(1);
-            counts.setStorageBackendReuseBlockNum(1);
-            auto expected = counts.cacheKeys();
-            ASSERT_EQ(expected.size(), 3u);
-            if (role == RoleType::PREFILL && replicas <= 1) {
-                expected.erase(expected.begin() + 1);
-            }
-            stream_->generate_status_->status = StreamState::FINISHED;
-            stream_->fillSubGenerateStatus(StreamState::FINISHED);
-            stream_->releaseResource();
-            backend->shutdown();
-            EXPECT_EQ(backend->writtenKeyValues(), expected);
-            EXPECT_TRUE(resource.isResourceReleased());
+        auto  backend  = prepareStorageBackendResource(false, false, role);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+        auto& counts = resource.batch_kv_cache_resource_->cacheResource(0);
+        counts.setDeviceReuseBlockNum(1);
+        counts.setStorageBackendReuseBlockNum(1);
+        auto expected = counts.cacheKeys();
+        ASSERT_EQ(expected.size(), 3u);
+        if (role == RoleType::PREFILL) {
+            expected.erase(expected.begin() + 1);
         }
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->fillSubGenerateStatus(StreamState::FINISHED);
+        stream_->releaseResource();
+        backend->shutdown();
+        EXPECT_EQ(backend->writtenKeyValues(), expected);
+        EXPECT_TRUE(resource.isResourceReleased());
     }
 }
 

@@ -172,26 +172,16 @@ struct KVCacheConfig {
     std::string                             disk_cache_paths              = "";
     int64_t                                 disk_cache_size_mb            = 0;
     bool                                    disk_cache_buffered_io        = true;
-    int64_t                                 disk_cache_read_thread_count  = 16;
-    int64_t                                 disk_cache_write_thread_count = 16;
     int64_t                                 disk_cache_sync_timeout_ms    = 30000;
     // Evict/store override; -1 inherits the load timeout above.
     int64_t disk_cache_evict_timeout_ms                     = -1;
     int64_t disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
     int64_t disk_cache_staging_block_count                  = 128;
     int64_t memory_cache_max_descriptors_per_transfer_batch = 32;
-    // Prefer WorkLoop for supported final layouts; legal legacy layouts fall back at creation.
-    bool btc_transfer_engine_async = true;
-    // Slots per device in each WorkLoop's private async CRC service.
-    int64_t btc_crc_slot_count                 = 8;
     int     block_tree_task_pool_size          = 4;
     int64_t block_tree_transfer_worker_count   = 2;
     int64_t block_tree_business_queue_max_size = 10000;
     int64_t block_tree_transfer_queue_max_size = 10000;
-    // Coordinator recovery and completion cleanup; interval zero pauses both.
-    // Query/forget timeout is positive; both durations must fit int milliseconds.
-    int64_t block_tree_frozen_recovery_interval_ms       = 1000;
-    int64_t block_tree_frozen_recovery_query_timeout_ms  = 1000;
     int64_t block_tree_frozen_force_release_timeout_ms   = 60000;
     double  block_pool_frozen_abort_lower_ratio          = kDefaultBlockPoolFrozenAbortLowerRatio;
     double  block_pool_frozen_abort_upper_ratio          = kDefaultBlockPoolFrozenAbortUpperRatio;
@@ -201,13 +191,6 @@ struct KVCacheConfig {
     double  block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
     double  block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double  block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
-    // FULL-only per-tier overrides: -1/-1 inherits the shared watermarks.
-    double   block_tree_full_device_evict_low_watermark_ratio  = -1.0;
-    double   block_tree_full_device_evict_high_watermark_ratio = -1.0;
-    double   block_tree_full_memory_evict_low_watermark_ratio  = -1.0;
-    double   block_tree_full_memory_evict_high_watermark_ratio = -1.0;
-    double   block_tree_full_disk_evict_low_watermark_ratio    = -1.0;
-    double   block_tree_full_disk_evict_high_watermark_ratio   = -1.0;
     int      reuse_cache_tail_blocks                           = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                                = 0;
     uint32_t swa_pool_blocks                                   = 0;
@@ -268,8 +251,6 @@ struct KVCacheConfig {
     std::string kvcm_server_address                  = "";
     std::string kvcm_instance_group                  = "default";
     int         kvcm_task_timeout_ms                 = 20000;
-    int32_t     kvcm_read_backend_type               = 0;  // 0 uses MatchLocation
-    int32_t     kvcm_min_replica_count               = 0;  // server interprets 0 as 1
     uint32_t    kvcm_meta_channel_retry_time         = 3;
     uint32_t    kvcm_meta_channel_connection_timeout = 6000;
     uint32_t    kvcm_meta_channel_call_timeout       = 1500;

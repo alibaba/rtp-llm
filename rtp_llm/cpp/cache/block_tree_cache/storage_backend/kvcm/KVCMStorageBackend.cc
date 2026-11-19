@@ -497,13 +497,6 @@ public:
                                      config->vipserver_domain(),
                                      config->addresses(),
                                      merge_full_specs_};
-        if (kv_cache_config_.kvcm_min_replica_count < 0
-            || (kv_cache_config_.kvcm_read_backend_type != 0
-                && !isPayloadBackend(kv_cache_config_.kvcm_read_backend_type))) {
-            RTP_LLM_LOG_ERROR("invalid KVCM replica/backend config");
-            return false;
-        }
-
         const auto registrations = makePoolRegistrations(pool_resolver);
         if (registrations.empty()) {
             return false;
@@ -586,22 +579,8 @@ public:
         (void)remainingTimeout(request, "before match");
         bool                        success = false;
         kv_cache_manager::Locations locations;
-        bool                        positional = query_type == kv_cache_manager::QueryType::QT_BATCH_GET;
-        if (kv_cache_config_.kvcm_read_backend_type != 0) {
-            auto result = client_wrapper_->getCacheLocationsByBackend(
-                "",
-                trace_id,
-                keys,
-                {},
-                request.local_matched_blocks_num,
-                {},
-                static_cast<kv_cache_manager::StorageType>(kv_cache_config_.kvcm_read_backend_type));
-            success = result.first;
-            if (success) {
-                locations = selectBackendLocations(result.second);
-            }
-            positional = true;
-        } else if (positional && request.local_matched_blocks_num > 0) {
+        const bool                  positional = query_type == kv_cache_manager::QueryType::QT_BATCH_GET;
+        if (positional && request.local_matched_blocks_num > 0) {
             const CacheKeysType query_keys(keys.begin() + request.local_matched_blocks_num, keys.end());
             auto                result =
                 client_wrapper_->match("", trace_id, query_type, query_keys, kv_cache_manager::BlockMaskOffset{0}, {});
@@ -885,13 +864,14 @@ public:
             const auto                             stage_start = Clock::now();
             block_tree_cache_detail::ScopeRollback timer(
                 [&] { collector.remote_get_write_location_time_us = elapsedTimeUs(stage_start); });
+            // The server interprets 0 as one readable replica.
             return client_wrapper_->getWriteLocation("",
                                                      trace_id,
                                                      keys,
                                                      /*tokens=*/{},
                                                      location_spec_group_names,
                                                      /*write_timeout_seconds=*/40,
-                                                     kv_cache_config_.kvcm_min_replica_count);
+                                                     /*min_replica_count=*/0);
         }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
         auto& write_location = publication.location;
@@ -1481,17 +1461,6 @@ private:
         return type == 1 || type == 2 || type == 3 || type == 4 || type == 5;
     }
 
-    kv_cache_manager::Locations selectBackendLocations(const kv_cache_manager::BackendLocations& result) const {
-        kv_cache_manager::Locations locations;
-        locations.reserve(result.size());
-        for (const auto& key_locations : result) {
-            RTP_LLM_CHECK_WITH_INFO(key_locations.size() <= 1, "KVCM returned multiple locations for one backend");
-            locations.push_back(key_locations.empty() ? kv_cache_manager::Location{} :
-                                                        key_locations.front().location_specs);
-        }
-        return locations;
-    }
-
     kv_cache_manager::Locations reusableLocations(const StorageRequest&       request,
                                                   kv_cache_manager::Locations locations) const {
         const size_t local     = request.local_matched_blocks_num;
@@ -1583,8 +1552,7 @@ private:
                 if (query.query_type() != 0 && query.query_type() != 1) {
                     return false;
                 }
-                const int backend =
-                    query.backend_type() == 0 ? kv_cache_config_.kvcm_read_backend_type : query.backend_type();
+                const int backend = query.backend_type();
                 if (!isPayloadBackend(backend)) {
                     return false;
                 }

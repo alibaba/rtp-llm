@@ -1995,8 +1995,6 @@ TEST_F(BlockTreeCacheIntegrationTest, WorkLoopEvictLoadRetainsBusinessReferences
         auto group = block_transfer_engine_test::makeTestGroupSet(0, topology, {"group0"}, {device}, host, disk, true);
         BlockTreeCacheConfig config;
         config.enable_host_cache = config.enable_disk_cache = true;
-        config.btc_transfer_engine_async                    = true;
-        config.btc_crc_slot_count                           = 1;
         config.device_disk_staging_block_count              = 4;
         config.max_descriptors_per_transfer_batch           = 2;
         auto       cache                                    = makeBlockTreeCacheForTest({group}, config);

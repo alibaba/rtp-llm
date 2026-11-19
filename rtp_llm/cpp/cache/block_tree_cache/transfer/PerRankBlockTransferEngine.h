@@ -6,6 +6,7 @@
 #include <vector>
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostCopyOptions.h"
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
@@ -31,7 +32,7 @@ public:
                                         size_t                   transfer_queue_max_size                  = 10000,
                                         std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter   = nullptr,
                                         int64_t                                        world_rank         = 0,
-                                        size_t                                         btc_crc_slot_count = 8,
+                                        size_t btc_crc_slot_count = kDefaultCrcSlotsPerWorkLoop,
                                         bool                                           btc_transfer_engine_async = true,
                                         DiskIOExecutorConfig                           disk_io_config            = {});
     PerRankBlockTransferEngine() = delete;

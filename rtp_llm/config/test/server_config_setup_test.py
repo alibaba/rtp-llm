@@ -288,36 +288,12 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
         self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
 
-    def test_full_watermark_overrides_survive_worker_pickle(self):
-        import pickle
-
-        values = {
-            "block_tree_full_device_evict_low_watermark_ratio": 0.90,
-            "block_tree_full_device_evict_high_watermark_ratio": 0.95,
-            "block_tree_full_memory_evict_low_watermark_ratio": 0.94,
-            "block_tree_full_memory_evict_high_watermark_ratio": 0.97,
-            "block_tree_full_disk_evict_low_watermark_ratio": 0.96,
-            "block_tree_full_disk_evict_high_watermark_ratio": 0.98,
-        }
-        config = PyEnvConfigs().kv_cache_config
-        for name, value in values.items():
-            setattr(config, name, value)
-        # Spawned backend and rank workers must keep explicitly set overrides.
-        for _ in range(2):
-            config = pickle.loads(pickle.dumps(config))
-            for name, value in values.items():
-                self.assertEqual(getattr(config, name), value)
-
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config
 
         self.assertTrue(config.enable_crc)
-        self.assertTrue(config.btc_transfer_engine_async)
-        self.assertEqual(config.btc_crc_slot_count, 8)
         self.assertEqual(config.block_tree_task_pool_size, 4)
         self.assertEqual(config.block_tree_transfer_worker_count, 2)
-        self.assertEqual(config.disk_cache_read_thread_count, 16)
-        self.assertEqual(config.disk_cache_write_thread_count, 16)
         self.assertFalse(config.enable_memory_cache)
         self.assertEqual(config.disk_cache_staging_block_count, 128)
         self.assertEqual(config.device_eviction_policy, "lru")
@@ -326,8 +302,6 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.reserve_block_ratio, 5)
         self.assertEqual(config.block_pool_frozen_abort_lower_ratio, 0.3)
         self.assertEqual(config.block_pool_frozen_abort_upper_ratio, 0.4)
-        self.assertEqual(config.block_tree_frozen_recovery_interval_ms, 1000)
-        self.assertEqual(config.block_tree_frozen_recovery_query_timeout_ms, 1000)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
         self.assertFalse(hasattr(config, "write_cache_sync"))
 
@@ -351,11 +325,9 @@ class GenerateConfigTest(TestCase):
                 0,
             )
 
-    def test_async_transfer_defaults_and_worker_cli_overrides(self):
+    def test_transfer_pool_defaults_and_worker_cli_overrides(self):
         with patch.dict("os.environ", _jit_env(), clear=True):
             config = setup_args([]).kv_cache_config
-            self.assertTrue(config.btc_transfer_engine_async)
-            self.assertEqual(config.btc_crc_slot_count, 8)
             self.assertEqual(config.block_tree_task_pool_size, 4)
             self.assertEqual(config.block_tree_transfer_worker_count, 2)
             self.assertEqual(
@@ -375,12 +347,8 @@ class GenerateConfigTest(TestCase):
                     "--block_tree_transfer_worker_count=2",
                 ]
             ).kv_cache_config
-            self.assertTrue(config.btc_transfer_engine_async)
-            self.assertEqual(config.btc_crc_slot_count, 8)
             self.assertEqual(config.block_tree_task_pool_size, 8)
             self.assertEqual(config.block_tree_transfer_worker_count, 2)
-            self.assertEqual(config.disk_cache_read_thread_count, 16)
-            self.assertEqual(config.disk_cache_write_thread_count, 16)
 
     def test_disabled_crc_survives_worker_pickle_and_engine_config(self):
         import pickle
@@ -550,14 +518,10 @@ class GenerateConfigTest(TestCase):
         config.block_tree_full_prefix_scan_interval_ms = 5000
         config.block_tree_task_pool_size = 6
         config.block_tree_transfer_worker_count = 7
-        config.btc_crc_slot_count = 3
-        config.btc_transfer_engine_async = False
         config.block_tree_business_queue_max_size = 211
         config.block_tree_transfer_queue_max_size = 307
         config.block_pool_frozen_abort_lower_ratio = 0.45
         config.block_pool_frozen_abort_upper_ratio = 0.8
-        config.block_tree_frozen_recovery_interval_ms = 0
-        config.block_tree_frozen_recovery_query_timeout_ms = 750
         config.block_tree_device_evict_low_watermark_ratio = 0.71
         config.block_tree_device_evict_high_watermark_ratio = 0.81
         config.block_tree_memory_evict_low_watermark_ratio = 0.72
@@ -566,8 +530,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 96)
-        self.assertEqual(state[:2], ("KVCacheConfig", 20))
+        self.assertEqual(len(state), 82)
+        self.assertEqual(state[:2], ("KVCacheConfig", 21))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -583,14 +547,10 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(restored.block_tree_full_prefix_scan_interval_ms, 5000)
         self.assertEqual(restored.block_tree_task_pool_size, 6)
         self.assertEqual(restored.block_tree_transfer_worker_count, 7)
-        self.assertEqual(restored.btc_crc_slot_count, 3)
-        self.assertFalse(restored.btc_transfer_engine_async)
         self.assertEqual(restored.block_tree_business_queue_max_size, 211)
         self.assertEqual(restored.block_tree_transfer_queue_max_size, 307)
         self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, 0.45)
         self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, 0.8)
-        self.assertEqual(restored.block_tree_frozen_recovery_interval_ms, 0)
-        self.assertEqual(restored.block_tree_frozen_recovery_query_timeout_ms, 750)
         self.assertEqual(restored.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(restored.block_tree_device_evict_high_watermark_ratio, 0.81)
         self.assertEqual(restored.block_tree_memory_evict_low_watermark_ratio, 0.72)
@@ -661,10 +621,6 @@ class GenerateConfigTest(TestCase):
             restored_write_sync,
         ):
             self.assertTrue(legacy_config.enable_crc)
-            self.assertEqual(legacy_config.btc_crc_slot_count, 8)
-            self.assertTrue(legacy_config.btc_transfer_engine_async)
-            self.assertEqual(legacy_config.disk_cache_read_thread_count, 16)
-            self.assertEqual(legacy_config.disk_cache_write_thread_count, 16)
             self.assertEqual(
                 legacy_config.disk_cache_evict_max_pending_bytes,
                 default_config.disk_cache_evict_max_pending_bytes,
@@ -693,16 +649,10 @@ class GenerateConfigTest(TestCase):
 
         expected_fields = {
             "enable_crc": "bool",
-            "disk_cache_read_thread_count": "int",
-            "disk_cache_write_thread_count": "int",
             "block_tree_task_pool_size": "int",
             "block_tree_transfer_worker_count": "int",
-            "btc_crc_slot_count": "int",
-            "btc_transfer_engine_async": "bool",
             "block_tree_business_queue_max_size": "int",
             "block_tree_transfer_queue_max_size": "int",
-            "block_tree_frozen_recovery_interval_ms": "int",
-            "block_tree_frozen_recovery_query_timeout_ms": "int",
             "block_tree_frozen_force_release_timeout_ms": "int",
             "block_pool_frozen_abort_lower_ratio": "float",
             "block_pool_frozen_abort_upper_ratio": "float",
@@ -712,12 +662,6 @@ class GenerateConfigTest(TestCase):
             "block_tree_memory_evict_high_watermark_ratio": "float",
             "block_tree_disk_evict_low_watermark_ratio": "float",
             "block_tree_disk_evict_high_watermark_ratio": "float",
-            "block_tree_full_device_evict_low_watermark_ratio": "float",
-            "block_tree_full_device_evict_high_watermark_ratio": "float",
-            "block_tree_full_memory_evict_low_watermark_ratio": "float",
-            "block_tree_full_memory_evict_high_watermark_ratio": "float",
-            "block_tree_full_disk_evict_low_watermark_ratio": "float",
-            "block_tree_full_disk_evict_high_watermark_ratio": "float",
         }
         stub_path = (
             Path(__file__).resolve().parents[2] / "ops" / "libth_transformer_config.pyi"

@@ -792,8 +792,6 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
         auto backend     = std::shared_ptr<KVCMStorageBackend>(std::move(handle.backend));
         ASSERT_TRUE(initSingleRank(*backend, environment));
         KVCacheConfig recovery_config;
-        recovery_config.block_tree_frozen_recovery_interval_ms      = 20;
-        recovery_config.block_tree_frozen_recovery_query_timeout_ms = 1000;
         auto coordinator = makeQueryManager(environment, backend, parallel, broadcast, recovery_config);
         ASSERT_NE(coordinator, nullptr);
         coordinator->completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();

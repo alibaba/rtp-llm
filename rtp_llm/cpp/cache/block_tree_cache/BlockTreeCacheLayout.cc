@@ -99,7 +99,7 @@ size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheCon
         return 0;
     std::vector<std::vector<std::string>> members;
     RTP_LLM_CHECK_WITH_INFO(buildBlockTreeGroupMembers(config, members), "invalid BlockTree group aggregation");
-    bool   async       = options.btc_transfer_engine_async;
+    bool   async       = true;
     size_t max_payload = 0, max_tiles = 0;
     for (const auto& tags : members) {
         const auto layout = computeBlockTreeBackingLayout(config, tags, true, 16);
@@ -120,7 +120,7 @@ size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheCon
         return 0;
     const size_t batch = positive(options.memory_cache_max_descriptors_per_transfer_batch, "transfer batch size");
     const auto count = crcTransferWorkspaceCount(positive(options.block_tree_transfer_worker_count, "transfer workers"),
-                                                 async ? positive(options.btc_crc_slot_count, "CRC slots") : 1,
+                                                 kDefaultCrcSlotsPerWorkLoop,
                                                  async);
     const auto usage = CrcCopyWorkspace::memoryUsage(batch, max_payload, checkedProduct(batch, max_tiles));
     return checkedProduct(count, usage.device_bytes);

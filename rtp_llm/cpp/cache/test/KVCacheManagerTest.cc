@@ -2496,9 +2496,8 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
 TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCapacity) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig config;
-    config.enable_memory_cache                    = true;
-    config.memory_cache_size_mb                   = 1;
-    config.block_tree_frozen_recovery_interval_ms = 20;
+    config.enable_memory_cache  = true;
+    config.memory_cache_size_mb = 1;
     auto monitor = std::make_shared<kmonitor::KMonitor>("unfreeze_background_test");
     monitor->SetServiceName("");
     auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
@@ -2564,23 +2563,20 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
     EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{trace}).front(), TransferTaskRegistry::State::UNKNOWN);
 }
 
-TEST_F(KVCacheManagerTest, FrozenRecoveryStartsOnlyForEnabledAllocatorOwner) {
+TEST_F(KVCacheManagerTest, FrozenRecoveryStartsOnlyForAllocatorOwner) {
     const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     for (const int rank : {0, 1}) {
-        for (const int interval : {0, 1000}) {
-            ParallelismConfig parallel;
-            parallel.tp_rank = rank;
-            parallel.tp_size = rank == 0 ? 1 : 2;
-            KVCacheConfig config;
-            config.block_tree_frozen_recovery_interval_ms = interval;
-            auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config, parallel);
-            ASSERT_TRUE(manager->init());
-            EXPECT_EQ(manager->frozen_task_recovery_ != nullptr, rank == 0 && interval > 0);
-            EXPECT_EQ(manager->completion_cleanup_ != nullptr, rank == 0);
-            manager->stopFrozenTaskRecovery();
-            manager->stopFrozenTaskRecovery();
-            EXPECT_EQ(manager->frozen_task_recovery_, nullptr);
-        }
+        ParallelismConfig parallel;
+        parallel.tp_rank = rank;
+        parallel.tp_size = rank == 0 ? 1 : 2;
+        KVCacheConfig config;
+        auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config, parallel);
+        ASSERT_TRUE(manager->init());
+        EXPECT_EQ(manager->frozen_task_recovery_ != nullptr, rank == 0);
+        EXPECT_EQ(manager->completion_cleanup_ != nullptr, rank == 0);
+        manager->stopFrozenTaskRecovery();
+        manager->stopFrozenTaskRecovery();
+        EXPECT_EQ(manager->frozen_task_recovery_, nullptr);
     }
 }
 
@@ -2626,16 +2622,13 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
     }
 }
 
-TEST_F(KVCacheManagerTest, CompletionCleanupHandlesSuccessAndLateSafeFailureAndHonorsPausedPolling) {
-    for (const int mode : {0, 1, 2}) {
-        SCOPED_TRACE(mode);
-        const bool    failed       = mode == 1;
-        const bool    paused       = mode == 2;
+TEST_F(KVCacheManagerTest, CompletionCleanupHandlesSuccessAndLateSafeFailure) {
+    for (const bool failed : {false, true}) {
+        SCOPED_TRACE(failed);
         auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
         KVCacheConfig config;
-        config.enable_memory_cache                    = true;
-        config.memory_cache_size_mb                   = 1;
-        config.block_tree_frozen_recovery_interval_ms = paused ? 0 : 20;
+        config.enable_memory_cache  = true;
+        config.memory_cache_size_mb = 1;
         auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
         ASSERT_TRUE(manager->init());
         manager->stopFrozenTaskRecovery();
@@ -2680,40 +2673,22 @@ TEST_F(KVCacheManagerTest, CompletionCleanupHandlesSuccessAndLateSafeFailureAndH
             engine->last_proof->report(true);
         }
         ASSERT_TRUE(manager->startFrozenTaskRecovery());
-        if (paused) {
-            EXPECT_EQ(manager->frozen_task_recovery_, nullptr);
-            EXPECT_EQ(manager->completion_cleanup_->size(), 1u);
-            EXPECT_EQ(registry.size(), 1u);
-        } else {
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-            while (manager->completion_cleanup_->size() != 0 && std::chrono::steady_clock::now() < deadline)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            manager->stopFrozenTaskRecovery();
-            EXPECT_EQ(manager->completion_cleanup_->size(), 0u);
-            EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{engine->last_trace}).front(),
-                      TransferTaskRegistry::State::UNKNOWN);
-            EXPECT_EQ(registry.size(), 0u);
-        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (manager->completion_cleanup_->size() != 0 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        manager->stopFrozenTaskRecovery();
+        EXPECT_EQ(manager->completion_cleanup_->size(), 0u);
+        EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{engine->last_trace}).front(),
+                  TransferTaskRegistry::State::UNKNOWN);
+        EXPECT_EQ(registry.size(), 0u);
         EXPECT_EQ(settlements, 1u);
         EXPECT_EQ(engine->submitted_batch_count, 1u);
     }
 }
 
-TEST_F(KVCacheManagerTest, InvalidFrozenRecoveryConfigurationFailsBeforeAllocatingCache) {
+TEST_F(KVCacheManagerTest, InvalidFrozenForceReleaseTimeoutFailsBeforeAllocatingCache) {
     const auto    cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     const int64_t overflow     = static_cast<int64_t>(std::numeric_limits<int>::max()) + 1;
-    const std::vector<std::pair<int64_t, int64_t>> invalid{
-        {-1, 1000}, {overflow, 1000}, {1000, 0}, {1000, -1}, {1000, overflow}, {0, 0}};
-    for (const auto& values : invalid) {
-        KVCacheConfig config;
-        config.block_tree_frozen_recovery_interval_ms      = values.first;
-        config.block_tree_frozen_recovery_query_timeout_ms = values.second;
-        KVCacheManager manager(cache_config, false, nullptr, config);
-        EXPECT_FALSE(manager.init());
-        EXPECT_FALSE(manager.initialized());
-        EXPECT_EQ(manager.blockTreeCache(), nullptr);
-        EXPECT_EQ(manager.frozen_task_recovery_, nullptr);
-    }
     for (const int64_t timeout_ms : std::vector<int64_t>{-1, overflow}) {
         KVCacheConfig config;
         config.block_tree_frozen_force_release_timeout_ms = timeout_ms;

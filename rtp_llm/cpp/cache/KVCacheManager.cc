@@ -306,14 +306,9 @@ bool KVCacheManager::init() {
                           parallelism_config_.pp_size);
         return false;
     }
-    if (kv_cache_config_.block_tree_frozen_recovery_interval_ms < 0
-        || kv_cache_config_.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
-        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms <= 0
-        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()
-        || kv_cache_config_.block_tree_frozen_force_release_timeout_ms < 0
+    if (kv_cache_config_.block_tree_frozen_force_release_timeout_ms < 0
         || kv_cache_config_.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
-        RTP_LLM_LOG_ERROR("invalid frozen recovery interval/query timeout; interval must be in [0, INT_MAX] "
-                          "and query timeout in [1, INT_MAX], force release timeout in [0, INT_MAX]");
+        RTP_LLM_LOG_ERROR("frozen force release timeout must be in [0, INT_MAX]");
         return false;
     }
     if (kv_cache_config_.enable_remote_cache && kv_cache_config_.kvcm_asyncwrapper_thread_num == 0) {
@@ -333,8 +328,7 @@ bool KVCacheManager::init() {
     }
 
     coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
-    coordinator_manager_->setSkipRemoteReusedWrite(pd_sep_config_.role_type == RoleType::PREFILL
-                                                   && kv_cache_config_.kvcm_min_replica_count <= 1);
+    coordinator_manager_->setSkipRemoteReusedWrite(pd_sep_config_.role_type == RoleType::PREFILL);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
     // Observe real pool capacity, including asynchronous eviction and lease release.
     const auto capacity_changed = allocationChangeCallback();
@@ -414,7 +408,7 @@ bool KVCacheManager::init() {
 }
 
 bool KVCacheManager::startFrozenTaskRecovery() {
-    if (!isAllocatorOwner() || kv_cache_config_.block_tree_frozen_recovery_interval_ms == 0) {
+    if (!isAllocatorOwner()) {
         return true;
     }
     if (!block_tree_cache_) {
@@ -444,8 +438,9 @@ bool KVCacheManager::startFrozenTaskRecovery() {
                 block_tree_cache_->reportUnfreezeMetrics(execution, forced);
             },
             static_cast<int>(kv_cache_config_.block_tree_frozen_force_release_timeout_ms));
-        if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
-                             static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {
+        constexpr int kRecoveryIntervalMs = 1000;
+        constexpr int kQueryTimeoutMs      = 1000;
+        if (!recovery->start(kRecoveryIntervalMs, kQueryTimeoutMs)) {
             RTP_LLM_LOG_ERROR("failed to start frozen task recovery thread");
             return false;
         }

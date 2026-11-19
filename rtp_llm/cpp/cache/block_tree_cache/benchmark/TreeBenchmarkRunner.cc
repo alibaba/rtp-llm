@@ -664,7 +664,7 @@ bool TreeBenchmarkRunner::runOnlineBenchmark(const OnlineTreeWorkloadConfig& con
     const auto& engine = cache->transfer_dispatcher_->per_rank_engine_;
     RTP_LLM_CHECK(engine->asyncEnabled());
     writer_.addResolvedConfig("transfer_implementation", "workloop");
-    writer_.addResolvedConfigInt("btc_transfer_engine_async", cache->config().btc_transfer_engine_async);
+    writer_.addResolvedConfigInt("btc_transfer_engine_async", engine->asyncEnabled());
     writer_.addResolvedConfigInt("owners_per_direction", engine->transferWorkerCount());
     writer_.addResolvedConfigInt("transfer_worker_count_per_direction", engine->transferWorkerCount());
     writer_.addResolvedConfigInt("enable_disk_cache", cache->config().enable_disk_cache);

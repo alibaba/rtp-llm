@@ -394,7 +394,6 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.disk_cache_buffered_io         = true;
     config.disk_cache_sync_timeout_ms     = 5000;
     config.disk_cache_staging_block_count = 8;
-    config.btc_transfer_engine_async      = true;
     config.enable_crc                     = true;
     config.reuse_cache_tail_blocks        = std::numeric_limits<int>::max();
     if (config.enable_disk_cache) {

@@ -851,9 +851,7 @@ BlockTreeEvictor::watermarkLogicalBatchLimit(const GroupSet& group_set, Tier sou
     return std::min(count, max_descriptors_per_batch_);
 }
 
-void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                         tier,
-                                                        std::optional<TierWatermark> tier_watermark,
-                                                        std::optional<TierWatermark> full_watermark) {
+void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, std::optional<TierWatermark> tier_watermark) {
     const Tier   target_tier        = watermarkTargetTier(tier);
     const bool   direct_drop        = target_tier == Tier::NONE;
     const bool   is_host_disk       = tier == Tier::HOST && target_tier == Tier::DISK;
@@ -870,9 +868,7 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                    
         if (tier_watermark.has_value()
             && (!is_host_disk
                 || (!round.watermark.has_value() && round.required_count == 0 && round.pending_count == 0))) {
-            round.watermark = group_set->groupType() == CacheGroupType::FULL && full_watermark.has_value() ?
-                                  full_watermark :
-                                  tier_watermark;
+            round.watermark = tier_watermark;
         }
         if (!round.watermark.has_value()) {
             continue;

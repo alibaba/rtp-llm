@@ -246,7 +246,6 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     config.enable_host_cache                  = enable_host;
     config.enable_disk_cache                  = enable_disk;
     config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
-    config.btc_transfer_engine_async          = true;
     config.task_pool_size                     = static_cast<int>(task_pool_size);
     config.watermark_device                   = {1.0, 1.0};
     config.watermark_host                     = {1.0, 1.0};
@@ -268,10 +267,7 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
                                                                config.max_descriptors_per_transfer_batch,
                                                                config.transfer_worker_count,
                                                                config.transfer_queue_max_size,
-                                                               cache_metrics_reporter,
-                                                               0,
-                                                               config.btc_crc_slot_count,
-                                                               config.btc_transfer_engine_async);
+                                                               cache_metrics_reporter);
     RTP_LLM_CHECK(engine->asyncEnabled());
     auto dispatcher = std::make_unique<BlockTransferDispatcher>(engine, nullptr);
     auto task_pool =

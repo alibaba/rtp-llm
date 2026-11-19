@@ -475,8 +475,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                           std::shared_ptr<StorageBackend>            storage_backend,
                                                           std::shared_ptr<BroadcastManager>          broadcast_manager,
                                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
-    group_sets                       = workLoopTestGroups(std::move(group_sets));
-    config.btc_transfer_engine_async = true;
+    group_sets = workLoopTestGroups(std::move(group_sets));
     if (config.disk_cache_evict_max_pending_bytes == 0) {
         config.disk_cache_evict_max_pending_bytes = KVCacheConfig{}.disk_cache_evict_max_pending_bytes;
     }
@@ -510,10 +509,9 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
         };
     }
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
-    const bool async =
-        config.btc_transfer_engine_async && std::all_of(group_sets.begin(), group_sets.end(), [](const auto& group) {
-            return group->devicePools().empty() || (!group->hostPool() && !group->diskPool()) || group->crcEnabled();
-        });
+    const bool async = std::all_of(group_sets.begin(), group_sets.end(), [](const auto& group) {
+        return group->devicePools().empty() || (!group->hostPool() && !group->diskPool()) || group->crcEnabled();
+    });
     auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         config.enable_disk_cache,
                                                                         DeviceHostCopyOptions{},
@@ -523,7 +521,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
                                                                         config.transfer_queue_max_size,
                                                                         cache_metrics_reporter,
                                                                         0,
-                                                                        config.btc_crc_slot_count,
+                                                                        kDefaultCrcSlotsPerWorkLoop,
                                                                         async);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {

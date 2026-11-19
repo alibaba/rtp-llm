@@ -21,7 +21,6 @@ BackendHandle makeRegistryBackend(const BackendEnvironment&                 envi
     config.kvcm_server_address                 = "unused-test-address";
     config.kvcm_instance_id_salt               = "worker-registry";
     config.kvcm_model_sdk_config               = R"([{"type":"pace"}])";
-    config.kvcm_read_backend_type              = 0;
     config.kvcm_storage_thread_num             = 1;
     config.kvcm_asyncwrapper_thread_num        = 1;
     config.kvcm_asyncwrapper_queue_size        = 1;

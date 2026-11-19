@@ -469,33 +469,33 @@ class CacheConfigArgumentsTest(TestCase):
                 self.assertEqual(config.kvcm_get_timeout_ms, 12000)
                 self.assertEqual(config.kvcm_put_timeout_ms, 12000)
 
-    def test_retired_cache_options_use_defaults_at_startup_and_in_workers(self):
+    def test_retired_cache_options_are_absent_at_startup_and_in_workers(self):
         options = (
-            ("kvcm_read_backend_type", "3", 0),
-            ("kvcm_min_replica_count", "4", 0),
-            ("btc_transfer_engine_async", "false", True),
-            ("btc_crc_slot_count", "3", 8),
-            ("disk_cache_read_thread_count", "4", 16),
-            ("disk_cache_write_thread_count", "6", 16),
-            ("block_tree_frozen_recovery_interval_ms", "0", 1000),
-            ("block_tree_frozen_recovery_query_timeout_ms", "750", 1000),
-            ("block_tree_full_device_evict_low_watermark_ratio", "0.90", -1.0),
-            ("block_tree_full_device_evict_high_watermark_ratio", "0.95", -1.0),
-            ("block_tree_full_memory_evict_low_watermark_ratio", "0.94", -1.0),
-            ("block_tree_full_memory_evict_high_watermark_ratio", "0.97", -1.0),
-            ("block_tree_full_disk_evict_low_watermark_ratio", "0.96", -1.0),
-            ("block_tree_full_disk_evict_high_watermark_ratio", "0.98", -1.0),
+            ("kvcm_read_backend_type", "3"),
+            ("kvcm_min_replica_count", "4"),
+            ("btc_transfer_engine_async", "false"),
+            ("btc_crc_slot_count", "3"),
+            ("disk_cache_read_thread_count", "4"),
+            ("disk_cache_write_thread_count", "6"),
+            ("block_tree_frozen_recovery_interval_ms", "0"),
+            ("block_tree_frozen_recovery_query_timeout_ms", "750"),
+            ("block_tree_full_device_evict_low_watermark_ratio", "0.90"),
+            ("block_tree_full_device_evict_high_watermark_ratio", "0.95"),
+            ("block_tree_full_memory_evict_low_watermark_ratio", "0.94"),
+            ("block_tree_full_memory_evict_high_watermark_ratio", "0.97"),
+            ("block_tree_full_disk_evict_low_watermark_ratio", "0.96"),
+            ("block_tree_full_disk_evict_high_watermark_ratio", "0.98"),
         )
-        env = {name.upper(): value for name, value, _ in options}
+        env = {name.upper(): value for name, value in options}
         for args in (None, []):
             config = self.parse_cache_config(args, env)
             restored = pickle.loads(pickle.dumps(config))
-            for name, _, expected in options:
+            for name, _ in options:
                 with self.subTest(name=name, args=args):
-                    self.assertEqual(getattr(config, name), expected)
-                    self.assertEqual(getattr(restored, name), expected)
+                    self.assertFalse(hasattr(config, name))
+                    self.assertFalse(hasattr(restored, name))
 
-        for name, value, _ in options:
+        for name, value in options:
             with self.subTest(name=name), self.assertRaises(SystemExit):
                 self.parse_cache_config([f"--{name}={value}"], {})
 

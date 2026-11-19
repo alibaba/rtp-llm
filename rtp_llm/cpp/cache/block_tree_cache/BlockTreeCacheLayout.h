@@ -61,6 +61,9 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
                                             bool                            enable_crc,
                                             size_t                          alignment);
 
+// Shared by pre-allocation budgeting and WorkLoop construction.
+inline constexpr size_t kDefaultCrcSlotsPerWorkLoop = 8;
+
 // Shared by pre-allocation budgeting and the selected transfer implementation.
 size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop, bool async);
 // Explicit GPU allocations for this rank's CRC services. No pools or CUDA

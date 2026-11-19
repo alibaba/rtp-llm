@@ -81,9 +81,7 @@ public:
     // Force-drop a batch until this member pool reaches the requested free-block delta
     // or no candidate remains. Return the actual number of physically reclaimed blocks.
     size_t reclaimDeviceBlocksLocked(size_t group_set_id, size_t member_group_id, size_t num_blocks);
-    void   scheduleWatermarkEvictionsLocked(Tier                         tier,
-                                            std::optional<TierWatermark> watermark      = std::nullopt,
-                                            std::optional<TierWatermark> full_watermark = std::nullopt);
+    void   scheduleWatermarkEvictionsLocked(Tier tier, std::optional<TierWatermark> watermark = std::nullopt);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Release a detached operation's source CACHE reference after it settles, without publishing its target.
     void discardDetachedTransfer(DescriptorView transfer_descs);

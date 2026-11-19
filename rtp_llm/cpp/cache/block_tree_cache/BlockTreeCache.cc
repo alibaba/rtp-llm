@@ -328,7 +328,7 @@ void BlockTreeCache::checkWatermark() {
         if (!config_.isTierEnabled(tier)) {
             continue;
         }
-        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark, config_.fullWatermarkForTier(tier));
+        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark);
     }
 }
 

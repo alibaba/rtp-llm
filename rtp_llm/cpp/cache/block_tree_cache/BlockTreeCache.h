@@ -49,10 +49,6 @@ struct BlockTreeCacheConfig {
     TierWatermark watermark_device;
     TierWatermark watermark_host;
     TierWatermark watermark_disk;
-    // Unset overrides inherit the per-tier watermarks above.
-    std::optional<TierWatermark> full_watermark_device;
-    std::optional<TierWatermark> full_watermark_host;
-    std::optional<TierWatermark> full_watermark_disk;
 
     // ---- Per-tier eviction policy ----
     EvictionPolicy device_eviction_policy{EvictionPolicy::LRU};
@@ -65,8 +61,6 @@ struct BlockTreeCacheConfig {
 
     // ---- Per-rank WorkLoop owners or legacy workers per direction ----
     size_t transfer_worker_count{2};
-    size_t btc_crc_slot_count{8};
-    bool   btc_transfer_engine_async{true};
     size_t transfer_queue_max_size{10000};
 
     // ---- Transfer deadlines, including queue wait and cross-rank work ----
@@ -113,19 +107,6 @@ struct BlockTreeCacheConfig {
                 return watermark_disk;
             default:
                 return {};
-        }
-    }
-
-    std::optional<TierWatermark> fullWatermarkForTier(Tier tier) const {
-        switch (tier) {
-            case Tier::DEVICE:
-                return full_watermark_device;
-            case Tier::HOST:
-                return full_watermark_host;
-            case Tier::DISK:
-                return full_watermark_disk;
-            default:
-                return std::nullopt;
         }
     }
 };

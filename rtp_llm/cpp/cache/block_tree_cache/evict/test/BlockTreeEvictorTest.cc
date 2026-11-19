@@ -742,7 +742,7 @@ protected:
         env_.evictor_->settled_                            = [this, settled](bool check_watermark) {
             settled(check_watermark);
             if (check_watermark) {
-                env_.evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark_, full_watermark_);
+                env_.evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark_);
             }
         };
     }
@@ -784,7 +784,7 @@ protected:
     void schedule() {
         {
             std::lock_guard<std::mutex> lock(env_.cache_mutex_);
-            env_.evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark_, full_watermark_);
+            env_.evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark_);
         }
         env_.task_pool_->waitForIdle();
     }
@@ -816,7 +816,6 @@ protected:
 
     MultiGroupAsyncEvictionEnvironment env_;
     TierWatermark                      watermark_{0.25, 0.75};
-    std::optional<TierWatermark>       full_watermark_;
     int64_t                            next_key_{100};
 };
 
@@ -1293,19 +1292,6 @@ TEST_F(HostDiskWatermarkTest, AdmissionRejectionClearsPassAndReservations) {
         EXPECT_EQ(env_.evictor_->candidateCount(gid, Tier::HOST), 3u);
         expectEvictionQps(gid, 1, 1);
     }
-}
-
-TEST_F(HostDiskWatermarkTest, HigherFullWatermarkStillEvictsSwa) {
-    insertHostNodes(3);
-    full_watermark_ = TierWatermark{0.75, 1.0};
-    schedule();
-    expectBatch(0, 1);
-    complete(0);
-    expectBatch(1, 1);
-    complete(1);
-    EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 3u);
-    EXPECT_EQ(env_.host_pools_[1]->usedBlocksNum(), 1u);
-    EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
 }
 
 TEST_F(HostDiskWatermarkTest, DetachedCompletionStillAdvancesPass) {
@@ -2247,68 +2233,54 @@ TEST_F(BlockTreeEvictorTest, WatermarkRequiresHighAndRequestsDownToLowWithIntege
     device_pool_->decRef(*second);
 }
 
-TEST(FullWatermarkTest, OverridesLeaveSwaAndLinearOnSharedWatermarks) {
-    struct Scenario {
-        TierWatermark                shared;
-        std::optional<TierWatermark> full;
-        size_t                       full_used;
-        size_t                       other_used;
+TEST(BlockTreeWatermarkTest, DeviceWatermarkIsSharedAcrossGroupTypes) {
+    const std::vector<DeviceBlockPoolPtr> pools = {
+        makeTestDevicePool(10, "watermark_full"),
+        makeTestDevicePool(10, "watermark_swa"),
+        makeTestDevicePool(10, "watermark_linear"),
     };
-    const std::vector<Scenario> scenarios = {
-        {{0.5, 0.6}, TierWatermark{0.8, 1.0}, 9, 5},
-        {{0.9, 1.0}, TierWatermark{0.8, 0.9}, 8, 9},
-        {{0.5, 0.6}, std::nullopt, 5, 5},
-    };
-    for (size_t index = 0; index < scenarios.size(); ++index) {
-        SCOPED_TRACE(index);
-        const auto&                     scenario = scenarios[index];
-        std::vector<DeviceBlockPoolPtr> pools    = {makeTestDevicePool(10, "full_override_full"),
-                                                    makeTestDevicePool(10, "full_override_swa"),
-                                                    makeTestDevicePool(10, "full_override_linear")};
-        for (const auto& pool : pools) {
-            ASSERT_NE(pool, nullptr);
-        }
-        std::vector<GroupSetPtr> groups = {
-            std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pools[0]}, nullptr, nullptr),
-            std::make_shared<SWAGroupSet>(2, 1, std::vector<DeviceBlockPoolPtr>{pools[1]}, nullptr, nullptr),
-            std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pools[2]}, nullptr, nullptr)};
-        auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-        full_policy.enable_prefix_reuse   = true;
-        swa_policy.enable_prefix_reuse    = true;
-        linear_policy.enable_prefix_reuse = true;
-        initializeGroups(groups,
-                         pools,
-                         {block_transfer_engine_test::makeTestGroupBase(full_policy, {0}, 16),
-                          block_transfer_engine_test::makeTestGroupBase(swa_policy, {0}, 16),
-                          block_transfer_engine_test::makeTestGroupBase(linear_policy, {0}, 16)});
-        BlockTreeCacheConfig config;
-        config.watermark_device      = scenario.shared;
-        config.full_watermark_device = scenario.full;
-        auto cache                   = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    for (const auto& pool : pools) {
+        ASSERT_NE(pool, nullptr);
+    }
+    std::vector<GroupSetPtr> groups = {
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pools[0]}, nullptr, nullptr),
+        std::make_shared<SWAGroupSet>(2, 1, std::vector<DeviceBlockPoolPtr>{pools[1]}, nullptr, nullptr),
+        std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pools[2]}, nullptr, nullptr)};
+    auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    full_policy.enable_prefix_reuse   = true;
+    swa_policy.enable_prefix_reuse    = true;
+    linear_policy.enable_prefix_reuse = true;
+    initializeGroups(groups,
+                     pools,
+                     {block_transfer_engine_test::makeTestGroupBase(full_policy, {0}, 16),
+                      block_transfer_engine_test::makeTestGroupBase(swa_policy, {0}, 16),
+                      block_transfer_engine_test::makeTestGroupBase(linear_policy, {0}, 16)});
+    BlockTreeCacheConfig config;
+    config.watermark_device = {0.5, 0.6};
+    auto cache              = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
 
-        std::vector<MultiNodeBlocks> request_blocks;
-        for (const auto& group : groups) {
-            request_blocks.push_back(allocateDeviceBlocksForTest(*group, 9));
-            ASSERT_EQ(request_blocks.back().size(), 9u);
+    std::vector<MultiNodeBlocks> request_blocks;
+    for (const auto& group : groups) {
+        request_blocks.push_back(allocateDeviceBlocksForTest(*group, 9));
+        ASSERT_EQ(request_blocks.back().size(), 9u);
+    }
+    // Independent keys isolate each group's watermark from Full's cross-group drop cascade.
+    for (size_t group = 0; group < groups.size(); ++group) {
+        for (size_t node = 0; node < 9; ++node) {
+            std::vector<GroupSetResource> resources(groups.size());
+            resources[group].device_blocks = request_blocks[group][node];
+            cache->insert({static_cast<CacheKeyType>(100 * (group + 1) + node)}, {resources}, Tier::DEVICE);
         }
-        // Independent keys isolate each group's watermark from Full's cross-group drop cascade.
-        for (size_t group = 0; group < groups.size(); ++group) {
-            for (size_t node = 0; node < 9; ++node) {
-                std::vector<GroupSetResource> resources(groups.size());
-                resources[group].device_blocks = request_blocks[group][node];
-                cache->insert({static_cast<CacheKeyType>(100 * (group + 1) + node)}, {resources}, Tier::DEVICE);
-            }
-        }
-        for (size_t group = 0; group < groups.size(); ++group) {
-            unreferenceDeviceBlocksForTest(*groups[group], request_blocks[group]);
-        }
-        block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
-        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
-        EXPECT_EQ(pools[0]->usedBlocksNum(), scenario.full_used);
-        EXPECT_EQ(pools[1]->usedBlocksNum(), scenario.other_used);
-        EXPECT_EQ(pools[2]->usedBlocksNum(), scenario.other_used);
+    }
+    for (size_t group = 0; group < groups.size(); ++group) {
+        unreferenceDeviceBlocksForTest(*groups[group], request_blocks[group]);
+    }
+    block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool->usedBlocksNum(), 5u);
     }
 }
 

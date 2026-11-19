@@ -490,23 +490,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_paths", &KVCacheConfig::disk_cache_paths)
         .def_readwrite("disk_cache_size_mb", &KVCacheConfig::disk_cache_size_mb)
         .def_readwrite("disk_cache_buffered_io", &KVCacheConfig::disk_cache_buffered_io)
-        .def_readwrite("disk_cache_read_thread_count", &KVCacheConfig::disk_cache_read_thread_count)
-        .def_readwrite("disk_cache_write_thread_count", &KVCacheConfig::disk_cache_write_thread_count)
         .def_readwrite("disk_cache_sync_timeout_ms", &KVCacheConfig::disk_cache_sync_timeout_ms)
         .def_readwrite("disk_cache_evict_timeout_ms", &KVCacheConfig::disk_cache_evict_timeout_ms)
         .def_readwrite("disk_cache_evict_max_pending_bytes", &KVCacheConfig::disk_cache_evict_max_pending_bytes)
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
-        .def_readwrite("btc_transfer_engine_async", &KVCacheConfig::btc_transfer_engine_async)
-        .def_readwrite("btc_crc_slot_count", &KVCacheConfig::btc_crc_slot_count)
         .def_readwrite("block_tree_task_pool_size", &KVCacheConfig::block_tree_task_pool_size)
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
-        .def_readwrite("block_tree_frozen_recovery_interval_ms", &KVCacheConfig::block_tree_frozen_recovery_interval_ms)
-        .def_readwrite("block_tree_frozen_recovery_query_timeout_ms",
-                       &KVCacheConfig::block_tree_frozen_recovery_query_timeout_ms)
         .def_readwrite("block_tree_frozen_force_release_timeout_ms",
                        &KVCacheConfig::block_tree_frozen_force_release_timeout_ms)
         .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
@@ -523,18 +516,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
         .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
-        .def_readwrite("block_tree_full_device_evict_low_watermark_ratio",
-                       &KVCacheConfig::block_tree_full_device_evict_low_watermark_ratio)
-        .def_readwrite("block_tree_full_device_evict_high_watermark_ratio",
-                       &KVCacheConfig::block_tree_full_device_evict_high_watermark_ratio)
-        .def_readwrite("block_tree_full_memory_evict_low_watermark_ratio",
-                       &KVCacheConfig::block_tree_full_memory_evict_low_watermark_ratio)
-        .def_readwrite("block_tree_full_memory_evict_high_watermark_ratio",
-                       &KVCacheConfig::block_tree_full_memory_evict_high_watermark_ratio)
-        .def_readwrite("block_tree_full_disk_evict_low_watermark_ratio",
-                       &KVCacheConfig::block_tree_full_disk_evict_low_watermark_ratio)
-        .def_readwrite("block_tree_full_disk_evict_high_watermark_ratio",
-                       &KVCacheConfig::block_tree_full_disk_evict_high_watermark_ratio)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
@@ -557,8 +538,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
         .def_readwrite("kvcm_instance_group", &KVCacheConfig::kvcm_instance_group)
         .def_readwrite("kvcm_task_timeout_ms", &KVCacheConfig::kvcm_task_timeout_ms)
-        .def_readwrite("kvcm_read_backend_type", &KVCacheConfig::kvcm_read_backend_type)
-        .def_readwrite("kvcm_min_replica_count", &KVCacheConfig::kvcm_min_replica_count)
         .def_readwrite("kvcm_meta_channel_retry_time", &KVCacheConfig::kvcm_meta_channel_retry_time)
         .def_readwrite("kvcm_meta_channel_connection_timeout", &KVCacheConfig::kvcm_meta_channel_connection_timeout)
         .def_readwrite("kvcm_meta_channel_call_timeout", &KVCacheConfig::kvcm_meta_channel_call_timeout)
@@ -609,7 +588,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      20,
+                                      21,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -680,131 +659,32 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_crc,
                                       self.linear_pool_blocks,
                                       self.swa_pool_blocks,
-                                      self.block_tree_full_device_evict_low_watermark_ratio,
-                                      self.block_tree_full_device_evict_high_watermark_ratio,
-                                      self.block_tree_full_memory_evict_low_watermark_ratio,
-                                      self.block_tree_full_memory_evict_high_watermark_ratio,
-                                      self.block_tree_full_disk_evict_low_watermark_ratio,
-                                      self.block_tree_full_disk_evict_high_watermark_ratio,
                                       self.memory_cache_swa_block_ratio,
                                       self.dsv41_decoder_swa_pool_blocks,
                                       self.kvcm_task_timeout_ms,
-                                      self.kvcm_read_backend_type,
-                                      self.kvcm_min_replica_count,
                                       self.kv_cache_event_snapshot_interval_ms,
-                                      self.btc_crc_slot_count,
-                                      self.btc_transfer_engine_async,
-                                      self.disk_cache_read_thread_count,
-                                      self.disk_cache_write_thread_count,
                                       self.disk_cache_evict_timeout_ms,
                                       self.block_pool_frozen_abort_lower_ratio,
                                       self.block_pool_frozen_abort_upper_ratio,
                                       self.disk_cache_evict_max_pending_bytes,
-                                      self.block_tree_frozen_recovery_interval_ms,
-                                      self.block_tree_frozen_recovery_query_timeout_ms,
                                       self.block_tree_task_pool_size,
                                       self.block_tree_frozen_force_release_timeout_ms);
             },
-            [](py::tuple t) {
-                const py::tuple force_release_state = t;
-                const bool      has_force_release =
-                    t.size() == 96 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 20;
-                if (has_force_release) {
-                    t    = t[py::slice(0, 95, 1)].cast<py::tuple>();
-                    t[1] = py::int_(19);
-                }
-                const py::tuple task_pool_state = t;
-                const bool has_task_pool = t.size() == 95 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 19;
-                if (has_task_pool) {
-                    t    = t[py::slice(0, 94, 1)].cast<py::tuple>();
-                    t[1] = py::int_(18);
-                }
-                const py::tuple recovery_timing_state = t;
-                const bool      has_recovery_timing =
-                    t.size() == 94 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 18;
-                if (has_recovery_timing) {
-                    t    = t[py::slice(0, 92, 1)].cast<py::tuple>();
-                    t[1] = py::int_(17);
-                }
-                const py::tuple pending_budget_state = t;
-                const bool      has_pending_budget =
-                    t.size() == 92 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 17;
-                if (has_pending_budget) {
-                    t    = t[py::slice(0, 91, 1)].cast<py::tuple>();
-                    t[1] = py::int_(16);
-                }
-                const py::tuple frozen_bounds_state = t;
-                const bool      has_frozen_bounds =
-                    t.size() == 91 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 16;
-                if (has_frozen_bounds) {
-                    t    = t[py::slice(0, 90, 1)].cast<py::tuple>();
-                    t[1] = py::int_(15);
-                }
-                const py::tuple frozen_ratio_state = t;
-                const bool      has_frozen_ratio =
-                    t.size() == 90 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 15;
-                if (has_frozen_ratio) {
-                    t    = t[py::slice(0, 89, 1)].cast<py::tuple>();
-                    t[1] = py::int_(14);
-                }
-                const py::tuple disk_timeout_state = t;
-                const bool      has_disk_timeout =
-                    t.size() == 89 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 14;
-                if (has_disk_timeout) {
-                    t    = t[py::slice(0, 88, 1)].cast<py::tuple>();
-                    t[1] = py::int_(13);
-                }
-                const py::tuple backend_state = t;
-                const bool      has_async_fields =
-                    t.size() == 88 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 13;
-                const bool has_backend_fields =
-                    has_async_fields || (t.size() == 84 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12);
-                if (has_backend_fields) {
-                    t    = t[py::slice(0, 80, 1)].cast<py::tuple>();
-                    t[1] = py::int_(11);
-                }
-                const py::tuple host_pool_state = t;
-                const bool      has_host_pool_fields =
-                    t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
-                if (has_host_pool_fields) {
-                    t    = t[py::slice(0, 78, 1)].cast<py::tuple>();
-                    t[1] = py::int_(10);
-                }
-                const py::tuple full_watermark_state = t;
-                const bool      has_full_watermarks =
-                    t.size() == 78 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
-                if (has_full_watermarks) {
-                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
-                    t[1] = py::int_(9);
-                }
-                const py::tuple tail_state = t;
-                const bool has_tail_fields = t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
-                if (has_tail_fields) {
-                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
-                    t[1] = py::int_(8);
-                }
-                const py::tuple crc_state = t;
-                const bool has_crc_field  = t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
-                if (has_crc_field) {
-                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
-                    t[1] = py::int_(7);
-                }
-                const py::tuple event_state = t;
-                const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
-                if (has_event_fields) {
-                    t    = t[py::slice(0, 64, 1)].cast<py::tuple>();
-                    t[1] = py::int_(6);
-                }
+            [](const py::tuple& t) {
                 constexpr size_t kLegacyFieldCount               = 55;
                 constexpr size_t kQueueConfigFieldCount          = 64;
                 constexpr size_t kWriteSyncFieldCount            = 56;
                 constexpr size_t kQueueConfigWriteSyncFieldCount = 65;
                 constexpr size_t kPinnedHostFieldCount           = 64;
                 constexpr size_t kReserveRemovedFieldCount       = 63;
-                constexpr size_t kCurrentFieldCount              = 62;
-                if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])) {
+                constexpr size_t kV6FieldCount                   = 62;
+                // Tuple sizes for versions 7 through 21, including the tag and version.
+                constexpr size_t kExtendedStateSizes[] = {69, 70, 72, 78, 80, 84, 88, 89, 90, 91, 92, 94, 95, 96, 82};
+                if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
+                    || t[0].cast<std::string>() != "KVCacheConfig") {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
+
                 const int  version = t[1].cast<int>();
                 const bool valid_legacy_state =
                     version == 1 && (t.size() == kLegacyFieldCount + 2 || t.size() == kQueueConfigFieldCount + 2);
@@ -813,42 +693,34 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     version == 3 && t.size() == kQueueConfigWriteSyncFieldCount + 2;
                 const bool valid_pinned_host_state     = version == 4 && t.size() == kPinnedHostFieldCount + 2;
                 const bool valid_reserve_removed_state = version == 5 && t.size() == kReserveRemovedFieldCount + 2;
-                const bool valid_current_state         = version == 6 && t.size() == kCurrentFieldCount + 2;
-                if (t[0].cast<std::string>() != "KVCacheConfig"
-                    || (!valid_legacy_state && !valid_write_sync_state && !valid_queue_write_sync_state
-                        && !valid_pinned_host_state && !valid_reserve_removed_state && !valid_current_state)) {
+                const bool valid_v6_state              = version == 6 && t.size() == kV6FieldCount + 2;
+                const bool valid_extended_state =
+                    version >= 7 && version <= 21 && t.size() == kExtendedStateSizes[version - 7];
+                if (!valid_legacy_state && !valid_write_sync_state && !valid_queue_write_sync_state
+                    && !valid_pinned_host_state && !valid_reserve_removed_state && !valid_v6_state
+                    && !valid_extended_state) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
                 KVCacheConfig c;
-                if (has_task_pool) {
-                    c.block_tree_task_pool_size = task_pool_state[94].cast<int>();
+                // Version 21 omits the retired options. Read only retained fields from older tuples.
+                const bool compact_state = version == 21;
+                if (version >= 11) {
+                    c.memory_cache_swa_block_ratio  = t[compact_state ? 72 : 78].cast<double>();
+                    c.dsv41_decoder_swa_pool_blocks = t[compact_state ? 73 : 79].cast<uint32_t>();
                 }
-                if (has_recovery_timing) {
-                    c.block_tree_frozen_recovery_interval_ms      = recovery_timing_state[92].cast<int64_t>();
-                    c.block_tree_frozen_recovery_query_timeout_ms = recovery_timing_state[93].cast<int64_t>();
+                if (version >= 12) {
+                    c.kvcm_task_timeout_ms                = t[compact_state ? 74 : 80].cast<int>();
+                    c.kv_cache_event_snapshot_interval_ms = t[compact_state ? 75 : 83].cast<int>();
                 }
-                if (has_force_release) {
-                    c.block_tree_frozen_force_release_timeout_ms = force_release_state[95].cast<int64_t>();
+                if (version >= 14) {
+                    c.disk_cache_evict_timeout_ms = t[compact_state ? 76 : 88].cast<int64_t>();
                 }
-                if (c.block_tree_frozen_recovery_interval_ms < 0
-                    || c.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
-                    || c.block_tree_frozen_recovery_query_timeout_ms <= 0
-                    || c.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()
-                    || c.block_tree_frozen_force_release_timeout_ms < 0
-                    || c.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
-                    throw std::runtime_error("invalid KVCacheConfig frozen recovery timing: expected interval in "
-                                             "[0, INT_MAX], query timeout in [1, INT_MAX] and force release timeout "
-                                             "in [0, INT_MAX]");
+                if (version >= 15) {
+                    c.block_pool_frozen_abort_lower_ratio = t[compact_state ? 77 : 89].cast<double>();
                 }
-                if (has_pending_budget) {
-                    c.disk_cache_evict_max_pending_bytes = pending_budget_state[91].cast<int64_t>();
-                }
-                if (has_frozen_bounds) {
-                    c.block_pool_frozen_abort_upper_ratio = frozen_bounds_state[90].cast<double>();
-                }
-                if (has_frozen_ratio) {
-                    c.block_pool_frozen_abort_lower_ratio = frozen_ratio_state[89].cast<double>();
+                if (version >= 16) {
+                    c.block_pool_frozen_abort_upper_ratio = t[compact_state ? 78 : 90].cast<double>();
                 }
                 if (!std::isfinite(c.block_pool_frozen_abort_lower_ratio)
                     || !std::isfinite(c.block_pool_frozen_abort_upper_ratio)
@@ -859,27 +731,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         "invalid KVCacheConfig block pool frozen abort ratio range: expected finite "
                         "0 <= lower <= upper <= 1");
                 }
-                if (has_disk_timeout) {
-                    c.disk_cache_evict_timeout_ms = disk_timeout_state[88].cast<int64_t>();
+                if (version >= 17) {
+                    c.disk_cache_evict_max_pending_bytes = t[compact_state ? 79 : 91].cast<int64_t>();
                 }
-                if (has_async_fields) {
-                    c.btc_crc_slot_count            = backend_state[84].cast<int64_t>();
-                    c.btc_transfer_engine_async     = backend_state[85].cast<bool>();
-                    c.disk_cache_read_thread_count  = backend_state[86].cast<int64_t>();
-                    c.disk_cache_write_thread_count = backend_state[87].cast<int64_t>();
+                if (version >= 19) {
+                    c.block_tree_task_pool_size = t[compact_state ? 80 : 94].cast<int>();
                 }
-                if (has_host_pool_fields) {
-                    c.memory_cache_swa_block_ratio  = host_pool_state[78].cast<double>();
-                    c.dsv41_decoder_swa_pool_blocks = host_pool_state[79].cast<uint32_t>();
+                if (version >= 20) {
+                    c.block_tree_frozen_force_release_timeout_ms = t[compact_state ? 81 : 95].cast<int64_t>();
+                    if (c.block_tree_frozen_force_release_timeout_ms < 0
+                        || c.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
+                        throw std::runtime_error(
+                            "invalid KVCacheConfig frozen recovery timing: expected force release timeout in [0, INT_MAX]");
+                    }
                 }
-                if (has_full_watermarks) {
-                    c.block_tree_full_device_evict_low_watermark_ratio  = full_watermark_state[72].cast<double>();
-                    c.block_tree_full_device_evict_high_watermark_ratio = full_watermark_state[73].cast<double>();
-                    c.block_tree_full_memory_evict_low_watermark_ratio  = full_watermark_state[74].cast<double>();
-                    c.block_tree_full_memory_evict_high_watermark_ratio = full_watermark_state[75].cast<double>();
-                    c.block_tree_full_disk_evict_low_watermark_ratio    = full_watermark_state[76].cast<double>();
-                    c.block_tree_full_disk_evict_high_watermark_ratio   = full_watermark_state[77].cast<double>();
-                }
+
                 // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
                 const auto value = [&](size_t index) {
                     return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
@@ -891,10 +757,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.reserve_block_ratio          = value(4).cast<int64_t>();
                 c.memory_cache_size_mb         = value(6).cast<int64_t>();
                 c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
-                if (has_tail_fields) {
-                    c.reuse_cache_tail_blocks = tail_state[10].cast<int>();
-                    c.linear_pool_blocks      = tail_state[70].cast<uint32_t>();
-                    c.swa_pool_blocks         = tail_state[71].cast<uint32_t>();
+                if (version >= 9) {
+                    c.reuse_cache_tail_blocks = t[10].cast<int>();
+                    c.linear_pool_blocks      = t[70].cast<uint32_t>();
+                    c.swa_pool_blocks         = t[71].cast<uint32_t>();
                     if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                         || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
                         || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
@@ -945,7 +811,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.dsv4_fixed_pool_use_memory                      = value(53).cast<bool>();
                 c.block_tree_full_prefix_scan_interval_ms         = value(54).cast<int64_t>();
                 if ((valid_legacy_state && t.size() == kQueueConfigFieldCount + 2) || valid_queue_write_sync_state
-                    || valid_pinned_host_state || valid_reserve_removed_state || valid_current_state) {
+                    || valid_pinned_host_state || valid_reserve_removed_state || valid_v6_state
+                    || valid_extended_state) {
                     c.block_tree_transfer_worker_count             = value(55).cast<int64_t>();
                     c.block_tree_business_queue_max_size           = value(56).cast<int64_t>();
                     c.block_tree_transfer_queue_max_size           = value(57).cast<int64_t>();
@@ -957,21 +824,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.block_tree_disk_evict_high_watermark_ratio   = value(63).cast<double>();
                 }
                 // Legacy write-sync fields are intentionally ignored.
-                if (has_event_fields) {
-                    c.kv_cache_event_publisher_type   = event_state[64].cast<std::string>();
-                    c.kv_cache_event_manager_endpoint = event_state[65].cast<std::string>();
-                    c.kv_cache_event_instance_group   = event_state[66].cast<std::string>();
-                    c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
-                    c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
+                if (version >= 7) {
+                    c.kv_cache_event_publisher_type   = t[64].cast<std::string>();
+                    c.kv_cache_event_manager_endpoint = t[65].cast<std::string>();
+                    c.kv_cache_event_instance_group   = t[66].cast<std::string>();
+                    c.kv_cache_event_instance_id      = t[67].cast<std::string>();
+                    c.kv_cache_event_host_ip_port     = t[68].cast<std::string>();
                 }
-                if (has_crc_field) {
-                    c.enable_crc = crc_state[69].cast<bool>();
-                }
-                if (has_backend_fields) {
-                    c.kvcm_task_timeout_ms                = backend_state[80].cast<int>();
-                    c.kvcm_read_backend_type              = backend_state[81].cast<int32_t>();
-                    c.kvcm_min_replica_count              = backend_state[82].cast<int32_t>();
-                    c.kv_cache_event_snapshot_interval_ms = backend_state[83].cast<int>();
+                if (version >= 8) {
+                    c.enable_crc = t[69].cast<bool>();
                 }
                 return c;
             }));

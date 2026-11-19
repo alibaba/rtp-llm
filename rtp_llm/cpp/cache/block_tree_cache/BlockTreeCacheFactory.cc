@@ -473,21 +473,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                           max_batch_descriptors);
         return nullptr;
     }
-    const size_t         max_blocks_per_batch = static_cast<size_t>(max_batch_descriptors);
-    DiskIOExecutorConfig disk_io_config;
-    if (disk_enabled) {
-        const auto valid_threads = [](int64_t count) {
-            return count > 0 && count <= std::numeric_limits<int32_t>::max();
-        };
-        if (!valid_threads(kv_cache_config.disk_cache_read_thread_count)
-            || !valid_threads(kv_cache_config.disk_cache_write_thread_count)) {
-            RTP_LLM_LOG_ERROR("disk cache read/write thread counts must be positive and fit in int32");
-            return nullptr;
-        }
-        disk_io_config.read_thread_count  = static_cast<size_t>(kv_cache_config.disk_cache_read_thread_count);
-        disk_io_config.write_thread_count = static_cast<size_t>(kv_cache_config.disk_cache_write_thread_count);
-    }
-
+    const size_t max_blocks_per_batch = static_cast<size_t>(max_batch_descriptors);
     if (layout == nullptr) {
         layout = planBlockTreeCacheLayout(cache_config, kv_cache_config);
     }
@@ -700,36 +686,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             return nullptr;
         }
     }
-    const auto set_full_watermark = [&](Tier tier, double low, double high, std::optional<TierWatermark>& override) {
-        if (!config.isTierEnabled(tier) || (low == -1.0 && high == -1.0)) {
-            return true;
-        }
-        const TierWatermark watermark{low, high};
-        if (!valid_watermark(watermark)) {
-            RTP_LLM_LOG_ERROR("invalid FULL cache watermark: tier=%s low_ratio=%f high_ratio=%f; "
-                              "set both to -1 to inherit, or 0 < low < high <= 1",
-                              tierName(tier),
-                              low,
-                              high);
-            return false;
-        }
-        override = watermark;
-        return true;
-    };
-    if (!set_full_watermark(Tier::DEVICE,
-                            kv_cache_config.block_tree_full_device_evict_low_watermark_ratio,
-                            kv_cache_config.block_tree_full_device_evict_high_watermark_ratio,
-                            config.full_watermark_device)
-        || !set_full_watermark(Tier::HOST,
-                               kv_cache_config.block_tree_full_memory_evict_low_watermark_ratio,
-                               kv_cache_config.block_tree_full_memory_evict_high_watermark_ratio,
-                               config.full_watermark_host)
-        || !set_full_watermark(Tier::DISK,
-                               kv_cache_config.block_tree_full_disk_evict_low_watermark_ratio,
-                               kv_cache_config.block_tree_full_disk_evict_high_watermark_ratio,
-                               config.full_watermark_disk)) {
-        return nullptr;
-    }
     config.host_cache_sync_timeout_ms =
         checkedTimeout(kv_cache_config.memory_cache_sync_timeout_ms, "memory_cache_sync_timeout_ms");
     config.disk_cache_sync_timeout_ms =
@@ -737,21 +693,14 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                        config.host_cache_sync_timeout_ms;
     config.disk_cache_evict_max_pending_bytes =
         checkedSize(kv_cache_config.disk_cache_evict_max_pending_bytes, "disk_cache_evict_max_pending_bytes");
-    config.btc_transfer_engine_async = kv_cache_config.btc_transfer_engine_async;
-    const auto fallback_reason       = workLoopCompatibility(group_sets, disk_enabled);
-    const bool uses_workloop         = config.btc_transfer_engine_async && fallback_reason.empty();
-    RTP_LLM_LOG_INFO("BlockTree transfer: requested_async=%d implementation=%s fallback_reason=%s",
-                     config.btc_transfer_engine_async,
+    const auto fallback_reason = workLoopCompatibility(group_sets, disk_enabled);
+    const bool uses_workloop   = fallback_reason.empty();
+    RTP_LLM_LOG_INFO("BlockTree transfer: implementation=%s fallback_reason=%s",
                      uses_workloop ? "workloop" : "legacy",
-                     config.btc_transfer_engine_async && !uses_workloop ? fallback_reason.c_str() : "none");
+                     uses_workloop ? "none" : fallback_reason.c_str());
     if (uses_workloop
         && (!transfer_queue_size || transfer_queue_size > std::numeric_limits<size_t>::max() / max_blocks_per_batch)) {
         RTP_LLM_LOG_ERROR("WorkLoop transfer requires positive, nonoverflowing Q*M");
-        return nullptr;
-    }
-    config.btc_crc_slot_count = checkedSize(kv_cache_config.btc_crc_slot_count, "btc_crc_slot_count");
-    if (config.btc_crc_slot_count > std::numeric_limits<size_t>::max() / 2) {
-        RTP_LLM_LOG_ERROR("btc_crc_slot_count overflows total CRC slot count");
         return nullptr;
     }
     config.disk_cache_evict_timeout_ms =
@@ -767,7 +716,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         return nullptr;
     }
     if (uses_workloop
-        && config.transfer_worker_count > std::numeric_limits<size_t>::max() / (2 * config.btc_crc_slot_count)) {
+        && config.transfer_worker_count > std::numeric_limits<size_t>::max() / (2 * kDefaultCrcSlotsPerWorkLoop)) {
         RTP_LLM_LOG_ERROR("transfer worker count overflows total CRC slot count");
         return nullptr;
     }
@@ -814,9 +763,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                                         config.transfer_queue_max_size,
                                                                         cache_metrics_reporter,
                                                                         parallelism_config.world_rank,
-                                                                        config.btc_crc_slot_count,
-                                                                        uses_workloop,
-                                                                        disk_io_config);
+                                                                        kDefaultCrcSlotsPerWorkLoop,
+                                                                        uses_workloop);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(
