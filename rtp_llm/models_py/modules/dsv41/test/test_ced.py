@@ -1983,7 +1983,13 @@ class CedRouterProjectionTest(_SingleThreadTest):
             for n in cls.body
             if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk"
         )
+        helper = next(
+            n
+            for n in ast.parse(path.read_text()).body
+            if isinstance(n, ast.FunctionDef) and n.name == "_should_chunk_moe"
+        )
         ns = dict(torch=torch)
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), ns)
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), ns)
         plan, _ = _plan(
             131072, 0, torch.arange(130944, 131072), candidate_publication=True
@@ -2092,6 +2098,17 @@ class CedRouterProjectionTest(_SingleThreadTest):
 
     def test_mega_and_mega_se_gate_pack_consume_gate_projection(self):
         root = Path(_CED.__file__).parents[2] / "factory/fused_moe/impl/cuda/executors"
+        base_path = root / "mega_moe.py"
+        base_cls = next(
+            n
+            for n in ast.parse(base_path.read_text()).body
+            if isinstance(n, ast.ClassDef) and n.name == "MegaMoeExecutor"
+        )
+        method = next(
+            n
+            for n in base_cls.body
+            if isinstance(n, ast.FunctionDef) and n.name == "forward_gate_pack"
+        )
         for filename, classname in (
             ("mega_moe.py", "MegaMoeExecutor"),
             ("mega_moe_se.py", "MegaMoeSEExecutor"),
@@ -2102,15 +2119,23 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 for n in ast.parse(path.read_text()).body
                 if isinstance(n, ast.ClassDef) and n.name == classname
             )
-            method = next(
+            stage_method = next(
                 n
                 for n in cls.body
-                if isinstance(n, ast.FunctionDef) and n.name == "forward_gate_pack"
+                if isinstance(n, ast.FunctionDef) and n.name == "_stage_kernel_inputs"
             )
             pack, stage = mock.Mock(), mock.Mock()
-            ns = dict(torch=torch, ExpertGatePayload=types.SimpleNamespace)
+            ns = dict(
+                torch=torch,
+                ExpertGatePayload=types.SimpleNamespace,
+                stage_shared_fp8_input_scales=stage,
+            )
             exec(
-                compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"),
+                compile(
+                    ast.Module(body=[method, stage_method], type_ignores=[]),
+                    str(path),
+                    "exec",
+                ),
                 ns,
             )
             packages = {}
@@ -2148,6 +2173,9 @@ class CedRouterProjectionTest(_SingleThreadTest):
                 _block_m=lambda *a: 128,
                 _launch=mock.Mock(),
             )
+            owner._stage_kernel_inputs = types.MethodType(
+                ns["_stage_kernel_inputs"], owner
+            )
             gate = self._gate(fused_gate=True)
             scores = torch.full((4, 3), 7, dtype=torch.bfloat16)
             gate._ced_row_projection = mock.Mock(return_value=scores)
@@ -2169,7 +2197,9 @@ class CedRouterProjectionTest(_SingleThreadTest):
                     pack.call_args.kwargs["input_ids"] is not None, hash_gate
                 )
                 if filename == "mega_moe_se.py":
-                    stage.assert_called_once()
+                    stage.assert_called_once_with(
+                        buf.x_sf, buf.shared_l1_acts_sf, 4, 128
+                    )
                 else:
                     stage.assert_not_called()
 

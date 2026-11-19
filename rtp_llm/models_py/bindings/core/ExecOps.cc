@@ -72,7 +72,8 @@ namespace {
 static std::atomic<bool> g_runtime_initialized{false};
 static std::once_flag    g_init_flag;
 
-static int64_t g_device_id = 0;
+static int64_t   g_device_id                       = 0;
+thread_local int g_cuda_graph_warmup_forward_depth = 0;
 }  // anonymous namespace
 
 // ============================================================
@@ -86,6 +87,22 @@ bool isRuntimeInitialized() {
 // ============================================================
 // Config accessors
 // ============================================================
+
+void pushCudaGraphWarmupForwardFlag() {
+    ++g_cuda_graph_warmup_forward_depth;
+}
+
+void popCudaGraphWarmupForwardFlag() {
+    if (g_cuda_graph_warmup_forward_depth > 0) {
+        --g_cuda_graph_warmup_forward_depth;
+    }
+}
+
+bool cudaGraphWarmupForwardEnabled() {
+    const char* value       = std::getenv("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD");
+    const bool  env_enabled = value && *value && std::string(value) != "0";
+    return env_enabled || g_cuda_graph_warmup_forward_depth > 0;
+}
 
 int64_t getDeviceId() {
     return g_device_id;
@@ -919,6 +936,7 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
+    m.def("cuda_graph_warmup_forward_enabled", &cudaGraphWarmupForwardEnabled);
     m.def("preprocess_weight_scale", &preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
     m.def("init_exec_ctx", [](size_t device_id) { initRuntime(device_id); }, py::arg("device_id"));

@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -63,16 +64,20 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                bool                                   is_propose,
                                int                                    propose_model_index,
                                std::function<void()>                  profile_step_start,
-                               std::function<void()>                  profile_step_finish):
+                               std::function<void()>                  profile_step_finish,
+                               bool                                   allow_cuda_graph,
+                               bool                                   accuracy_check_mode,
+                               bool                                   dynamic_decode_enabled):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
+    accuracy_check_mode_(accuracy_check_mode),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
-    metrics_reporter_(params.metrics_reporter),
+    metrics_reporter_(accuracy_check_mode ? nullptr : params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+        params.parallelism_config.tp_rank == 0 && !warm_up && !accuracy_check_mode ? metrics_reporter_ : nullptr)),
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+        params.parallelism_config.tp_rank == 0 && !warm_up && !accuracy_check_mode ? metrics_reporter_ : nullptr)),
     is_propose_(is_propose),
     propose_model_index_(propose_model_index),
     profile_step_start_(std::move(profile_step_start)),
@@ -89,7 +94,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     // First instance() call may carry the arg+env resolved engine config; a
     // null/disabled config leaves the recorder Disabled.
     auto& recorder = ExecutionRecorder::instance(&params.profiling_debug_logging_config);
-    if (!warm_up_ && !is_propose_ && recorder.needsConfiguration()) {
+    if (!warm_up_ && !is_propose_ && !accuracy_check_mode_ && recorder.needsConfiguration()) {
         ExecutionRecorder::Json metadata{{"tp_size", parallelism_config_.tp_size},
                                          {"dp_size", parallelism_config_.dp_size},
                                          {"world_size", parallelism_config_.world_size},
@@ -122,7 +127,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                 metrics_reporter_);
     }
 
-    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
+    if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0 && !accuracy_check_mode_) {
         // use first moe layer weight as moe weight type
         int         first_moe_layer = params.model_config_.moe_layer_index.front();
         const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
@@ -169,13 +174,16 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.owns_py_model                  = !warm_up_;
+    model_init_params.owns_py_model                  = !warm_up_ && !accuracy_check_mode_;
     model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
+    if (accuracy_check_mode) {
+        model_init_params.hidden_state_capture_layer_ids.clear();
+    }
     model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -211,7 +219,19 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        if (params.hw_kernel_config.enable_dynamic_decode_backend) {
+            py::gil_scoped_acquire gil;
+            params.py_model.attr("configure_dynamic_decode")(dynamic_decode_enabled && !warm_up && !accuracy_check_mode
+                                                             && allow_cuda_graph);
+        }
+        model_.reset(new PyWrappedModel(model_init_params,
+                                        params.py_model,
+                                        false,
+                                        false,
+                                        DSparkModelRole::NONE,
+                                        allow_cuda_graph,
+                                        false,
+                                        !accuracy_check_mode));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -225,18 +245,20 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    const int async_worker_count =
-        tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
+    const int async_worker_count = tp_rank_ > 0 || warm_up_ || is_propose_ || accuracy_check_mode ?
+                                       0 :
+                                       params.runtime_config.output_dispatcher_worker_count;
     batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
                                                                  params.pd_sep_config,
                                                                  params.profiling_debug_logging_config,
                                                                  cache_config,
                                                                  warm_up_,
                                                                  async_worker_count));
-    LogitsProcessorFactory::init(params.model_config_,
-                                 params.grammar_config,
-                                 params.sp_config.tree_decode_config,
-                                 params.parallelism_config.tp_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr);
+    LogitsProcessorFactory::init(
+        params.model_config_,
+        params.grammar_config,
+        params.sp_config.tree_decode_config,
+        params.parallelism_config.tp_rank == 0 && !warm_up_ && !accuracy_check_mode_ ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
 }
 
@@ -248,10 +270,10 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
-    auto                           tps_active_guard =
-        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
-    auto wall_tps_active_guard =
-        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto tps_active_guard      = tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                          && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(isKmonMetricReportingEnabled() && metrics_reporter_
+                                                                    && tp_rank_ == 0 && !warm_up_ && !streams.empty());
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     SamplerOutput   sampler_output;
@@ -280,7 +302,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     }
 
     auto&      execution_recorder = ExecutionRecorder::instance();
-    const bool record_owner       = execution_recorder.enabled() && !warm_up_ && !is_propose_ && tp_rank_ == 0;
+    const bool record_owner =
+        execution_recorder.enabled() && !warm_up_ && !is_propose_ && !accuracy_check_mode_ && tp_rank_ == 0;
     // dp>1 idle steps fill batches with fake streams (mayAddFakeStream); a
     // fake-only batch carries no request slots and would drain the recorder's
     // total-bytes budget with is_fake lines, exactly like an idle alignment
@@ -456,6 +479,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     if (recorded_batch) {
         recorded_batch->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us);
     }
+    FrontendMetricsStep<GenerateStreamPtr> frontend_step(stream_groups.allStreams(),
+                                                         isKmonMetricReportingEnabled() && tp_rank_ == 0 && !warm_up_);
     if (useStreamAsync() && is_decode_only && single_sequence_streams && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -472,6 +497,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
+        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                               tps_execute_time_us,
+                               std::nullopt});
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         return dispatchOutputAsync(stream_groups,
@@ -502,6 +532,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
+        frontend_step.publish({static_cast<int64_t>(stream_groups.contextExecuteTokenSize()),
+                               static_cast<int64_t>(stream_groups.contextExecuteTokenSizeWithCache()),
+                               static_cast<int64_t>(stream_groups.totalDecodeBatchSize()),
+                               tps_execute_time_us,
+                               std::nullopt});
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         if (profile_step_finish_) {
@@ -516,7 +551,7 @@ void NormalExecutor::reportMetrics(const StreamGroups&                        st
                                    RtpLLMTokenPSMetricsCollector&             tps_collector,
                                    int64_t                                    tps_execute_time_us,
                                    const StreamGroups::TokenCountsByPriority& token_counts_by_priority) {
-    if (tp_rank_ > 0) {
+    if (tp_rank_ > 0 || warm_up_ || !isKmonMetricReportingEnabled()) {
         return;
     }
     if (metrics_reporter_) {
@@ -551,6 +586,9 @@ bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
 }
 
 bool NormalExecutor::useStreamAsync() const {
+    if (accuracy_check_mode_) {
+        return false;
+    }
     static const bool enabled = []() {
         return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");
     }();

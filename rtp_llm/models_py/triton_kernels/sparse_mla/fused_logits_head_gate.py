@@ -12,7 +12,7 @@ with a single Triton kernel that:
   - reads ``w`` as fp32 (DSV3.2 ``weights_proj.weight`` is loaded as fp32 in
     ``models/deepseek_v2.py``); falls back to fp32 cast for bf16/fp16 weight too,
   - does ``out[t, n] = sum_k x[t, k] * w[n, k]`` in fp32 (TF32 tensor cores
-    on H20+), keeping the same precision as the original fp32 GEMM,
+    on H20+); the large-T path rounds inputs to TF32 precision,
   - multiplies by ``q_scale[t, n, 1]`` and a constant ``scale`` in epilogue.
 
 The fp32 path is required because DSV3.2 indexer logits feed into a top-k
@@ -223,6 +223,9 @@ def fused_logits_head_gate(
         raise ValueError(f"q_scale must be 2-D or 3-D, got {q_scale.shape}")
     assert qs_2d.shape == (T, N), f"q_scale shape {qs_2d.shape} != (T={T}, N={N})"
 
+    if T == 0:
+        return torch.empty((0, N, 1), dtype=torch.float32, device=x.device)
+
     # Fast-path constraints. Production decode runs under CUDA Graph (launch
     # overhead amortized by capture+replay), so the Triton kernel can win at
     # any T. Two kernel variants:
@@ -236,7 +239,8 @@ def fused_logits_head_gate(
     #    faster than the prior 3-pass tf32x3 (1024->44us, 8192->68us on B300).
     #    Handles both contiguous and transposed weight via W_IS_TRANSPOSED.
     use_fast_path = (
-        x.dtype in (torch.bfloat16, torch.float16)
+        T > 0
+        and x.dtype in (torch.bfloat16, torch.float16)
         and weight.dtype in (torch.bfloat16, torch.float16, torch.float32)
         and x.is_contiguous()
         and K <= MAX_K

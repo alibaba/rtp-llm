@@ -13,6 +13,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -34,9 +35,9 @@ TEST(StoreTaskRunnerTest, PrepareTaskCreatesHostTransferAndTemporaryHolds) {
     const std::shared_ptr<const CacheTopology> topology    = makeTestTopology({group});
     DeviceBlockPoolPtr                         device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner");
     std::shared_ptr<HostBlockPool>             host_pool   = block_transfer_engine_test::makeHostPool(16, 1);
-    GroupSetPtr group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
-    const std::vector<GroupSetPtr>             group_sets{group_set};
-    StoreTaskRunner                            runner(group_sets);
+    GroupSetPtr                    group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
+    const std::vector<GroupSetPtr> group_sets{group_set};
+    StoreTaskRunner                runner(group_sets);
 
     MultiNodeBlocks source_holder = allocateDeviceBlocksForTest(*group_set, 1);
     ASSERT_EQ(source_holder.size(), 1u);
@@ -75,7 +76,7 @@ TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 4, "store_task_runner_path_index");
     std::shared_ptr<HostBlockPool> host_pool   = block_transfer_engine_test::makeHostPool(16, 2);
-    GroupSetPtr                    group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
+    GroupSetPtr                    group_set   = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
 
@@ -195,6 +196,14 @@ TEST(StoreTaskRunnerTest, DiskFailureWaitsForEverySubmittedBatch) {
 }
 
 TEST(StoreTaskRunnerTest, SplitHostAndDiskBatchesReportOneCrcErrorAfterAllCompletions) {
+    startKmonServiceStatus(nullptr);
+    setKmonServiceServing(true);
+    struct StopTestMetrics {
+        ~StopTestMetrics() {
+            stopKmonServiceStatus();
+        }
+    } stop_test_metrics;
+
     for (const auto target : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(tierName(target));
         const std::vector<GroupSetPtr> groups;
@@ -233,6 +242,7 @@ TEST(StoreTaskRunnerTest, SplitHostAndDiskBatchesReportOneCrcErrorAfterAllComple
         EXPECT_EQ(metric->metric_data_->Size(), 1u);
         kmonitor::MetricsTags tags("copy_direction", "FROM_GPU");
         tags.AddTag("error_type", "CRC_COMPUTE_FAILED");
+        tags         = kmonTagsWithServiceStatus(&tags);
         auto* series = metric->DeclareMetric(&tags);
         ASSERT_NE(series, nullptr);
         kmonitor::MetricsRecord snapshot(nullptr, nullptr, 0);
@@ -250,7 +260,7 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_transfer");
     std::shared_ptr<HostBlockPool> host_pool   = block_transfer_engine_test::makeHostPool(16, 1);
-    GroupSetPtr                    group_set = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
+    GroupSetPtr                    group_set   = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
     const std::vector<GroupSetPtr> group_sets{group_set};
     StoreTaskRunner                runner(group_sets);
 

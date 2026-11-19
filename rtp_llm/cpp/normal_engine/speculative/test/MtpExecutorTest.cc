@@ -2,6 +2,7 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -55,21 +56,21 @@ void registerExecCtxOps(pybind11::module& m);
 using namespace std;
 namespace spec = speculative;
 
-TEST(MtpExecutorPolicyTest, DSparkPrefillCPRequiresPrefillRole) {
+TEST(MtpExecutorPolicyTest, SpeculativePrefillCPRequiresPrefillRole) {
     PrefillCPConfig prefill_cp_config;
     prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
-    EXPECT_TRUE(MtpExecutor::dsparkPrefillCPRoleIsValid(prefill_cp_config, RoleType::PREFILL));
+    EXPECT_TRUE(MtpExecutor::speculativePrefillCPRoleIsValid(prefill_cp_config, RoleType::PREFILL));
 
     PrefillCPConfig decode_cp_config;
     decode_cp_config.method = CPRotateMethod::PREFILL_CP;
     EXPECT_FALSE(decode_cp_config.is_enabled());
-    EXPECT_TRUE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
+    EXPECT_TRUE(MtpExecutor::speculativePrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
 
     // A split-enabled decode/colocated engine would conflate the two roles:
     // its proposal block would be fed through the prefill CP splitter.
     decode_cp_config.method = CPRotateMethod::ALL_GATHER;
-    EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
-    EXPECT_FALSE(MtpExecutor::dsparkPrefillCPRoleIsValid(decode_cp_config, RoleType::PDFUSION));
+    EXPECT_FALSE(MtpExecutor::speculativePrefillCPRoleIsValid(decode_cp_config, RoleType::DECODE));
+    EXPECT_FALSE(MtpExecutor::speculativePrefillCPRoleIsValid(decode_cp_config, RoleType::PDFUSION));
 }
 
 TEST(MtpExecutorPolicyTest, DSparkPrefillRoleDisablesDraftGraphCapture) {
@@ -300,6 +301,17 @@ public:
         }
         return output_holder.get();
     }
+
+    void loadMtpIndexerTopk(const torch::Tensor& topk) override {
+        loaded_indexer_seed_ = topk.clone();
+    }
+
+    torch::Tensor snapshotMtpIndexerTopk(int64_t batch_size) override {
+        return indexer_snapshot_.narrow(0, 0, batch_size);
+    }
+
+    torch::Tensor loaded_indexer_seed_;
+    torch::Tensor indexer_snapshot_;
 
     size_t forwardCount() const {
         return forward_count_;
@@ -844,6 +856,27 @@ struct MtpExecutorComponents {
     ResourceContext                         resource_context;
 };
 
+class ScopedMtpMetricsServing {
+public:
+    ScopedMtpMetricsServing() {
+        if (const char* gate = std::getenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE")) {
+            old_gate_ = gate;
+        }
+        ::unsetenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE");
+        startKmonServiceStatus(nullptr);
+        setKmonServiceServing(true);
+    }
+    ~ScopedMtpMetricsServing() {
+        stopKmonServiceStatus();
+        if (old_gate_) {
+            ::setenv("RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE", old_gate_->c_str(), 1);
+        }
+    }
+
+private:
+    std::optional<std::string> old_gate_;
+};
+
 class MtpExecutorTest: public DeviceTestBase {
 public:
     void runMultiBatchDecode(bool use_mtp_hidden_buffer);
@@ -1073,10 +1106,11 @@ public:
     void runTargetOnlyPrefillScenario(RoleType                   role_type,
                                       bool                       simulate_multi_dp,
                                       bool                       expect_draft_forward,
-                                      bool                       simulate_cp_mutation   = false,
-                                      std::optional<std::string> deferred_capture_error = std::nullopt,
-                                      SpeculativeType            sp_type                = SP_TYPE_MTP,
-                                      bool                       existing_stream_error  = false) {
+                                      bool                       simulate_cp_mutation    = false,
+                                      std::optional<std::string> deferred_capture_error  = std::nullopt,
+                                      SpeculativeType            sp_type                 = SP_TYPE_MTP,
+                                      bool                       existing_stream_error   = false,
+                                      bool                       enable_frontend_metrics = false) {
         MtpExecutorTestConfig test_config;
         test_config.role_type = role_type;
         test_config.sp_type   = sp_type;
@@ -1091,6 +1125,8 @@ public:
         }
         auto target_only_stream = createContextStream(
             components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3}, 0);
+        target_only_stream->generateConfig()->frontend_metric_streaming = enable_frontend_metrics;
+        const bool expect_frontend_samples = enable_frontend_metrics && isKmonMetricReportingEnabled();
         EXPECT_TRUE(target_only_stream->generateConfig()->isPrefillOnly());
         EXPECT_TRUE(target_only_stream->generateConfig()->reuse_cache);
         EXPECT_FALSE(target_only_stream->reuseCache());
@@ -1175,6 +1211,20 @@ public:
             ASSERT_EQ(output.value().generate_outputs.size(), 1);
             EXPECT_TRUE(output.value().generate_outputs[0].finished);
             EXPECT_EQ(output.value().generate_outputs[0].output_ids.sizes(), (torch::IntArrayRef{1, 0}));
+            if (expect_frontend_samples) {
+                EXPECT_EQ(output.value().frontend_context_token_num, 4);
+                EXPECT_EQ(output.value().frontend_context_token_num_with_cache, 4);
+                ASSERT_TRUE(output.value().frontend_context_execute_time_us.has_value());
+                EXPECT_GT(*output.value().frontend_context_execute_time_us, 0);
+                EXPECT_EQ(output.value().frontend_context_execute_time_with_cache_us,
+                          output.value().frontend_context_execute_time_us);
+                EXPECT_EQ(target_only_stream->frontendContextTokenNum(), 4);
+                EXPECT_EQ(target_only_stream->frontendContextExecuteTimeUs(),
+                          *output.value().frontend_context_execute_time_us);
+            } else {
+                EXPECT_FALSE(output.value().frontend_context_token_num.has_value());
+                EXPECT_FALSE(output.value().frontend_context_execute_time_us.has_value());
+            }
             EXPECT_FALSE(target_only_stream->hasOutput());
         }
 
@@ -1204,6 +1254,7 @@ public:
     void runSingleBatchDecodeScenario(bool                         with_prefill_only,
                                       const MtpExecutorTestConfig* config_override   = nullptr,
                                       int64_t*                     out_kv_len_before = nullptr);
+    void runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hidden_buffer = false);
 
     GptModelOutputs createRandomGptModelOutputs(size_t token_num, size_t vocab_size, size_t hidden_size) {
         auto output              = GptModelOutputs{};
@@ -1261,6 +1312,8 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     });
     components.fake_draft_prefill_model->setInputObserver([&](const GptModelInputs& inputs) {
         saw_draft_prepare = true;
+        EXPECT_TRUE(inputs.is_draft_extend);
+        EXPECT_FALSE(inputs.is_target_verify);
         EXPECT_EQ(inputs.kv_block_stride_bytes, draft_stride);
         EXPECT_EQ(inputs.kv_scale_stride_bytes, draft_scale);
     });
@@ -1859,6 +1912,23 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefillRestoresCpInputBeforeDraftShift) {
 
 TEST_F(MtpExecutorTest, testCpPrefillDoesNotFallBackWithoutHiddenBuffers) {
     runSingleBatchPrefillScenario(/*simulate_cp_mutation=*/true, /*with_cp_hidden_buffers=*/false);
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyFrontendMetricsReachTerminalBeforeEarlyReturn) {
+    ScopedMtpMetricsServing serving;
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false, std::nullopt, SP_TYPE_MTP, false, true);
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyFrontendMetricsReachTerminalAfterAlignment) {
+    ScopedMtpMetricsServing serving;
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, true, false, std::nullopt, SP_TYPE_MTP, false, true);
+}
+
+TEST_F(MtpExecutorTest, testTargetOnlyFrontendMetricsAreSuppressedDuringWarmup) {
+    ScopedMtpMetricsServing      serving;
+    ScopedKmonMetricsSuppression warmup;
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, false, false, false, std::nullopt, SP_TYPE_MTP, false, true);
+    runTargetOnlyPrefillScenario(RoleType::PREFILL, true, true, false, std::nullopt, SP_TYPE_MTP, false, true);
 }
 
 TEST_F(MtpExecutorTest, testTargetOnlyRunsTargetPrefillWithoutDraftOrSampling) {
@@ -3337,6 +3407,10 @@ TEST_F(MtpExecutorTest, testMultiBatchDecodeCompactsMtpHiddenBuffer) {
 }
 
 void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer) {
+    runMultiBatchDecodeScenario(-1, use_mtp_hidden_buffer);
+}
+
+void MtpExecutorTest::runMultiBatchDecodeScenario(int seed_mode, bool use_mtp_hidden_buffer) {
     // test multi batch decode not accept & accept all
     // input s1:[0, 1, 2, 3] + [2] s2:[3, 2, 1] + [3]
     // darft s1:[2]+[1,2,3] s2:[3]+[0,2,2]
@@ -3442,8 +3516,36 @@ void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer) {
     }
     next_draft_input.last_hidden_states = torch::cat({target_hidden.narrow(0, 0, 1), target_hidden.narrow(0, 5, 5)});
 
-    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
-    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    auto*      draft_model    = components.fake_draft_model.get();
+    FakeModel* seed_model     = nullptr;
+    auto       snapshot       = torch::tensor({{11, 12}, {21, 22}}, torch::kInt32).to(torch::kCUDA);
+    auto       previous_seeds = torch::tensor({{31, 32}, {41, 42}}, torch::kInt32).to(torch::kCUDA);
+    if (seed_mode >= 0) {
+        components.executor->mtp_indexer_share_enabled_ = true;
+        components.executor->mtp_indexer_topk_          = 2;
+        draft_model->indexer_snapshot_                  = snapshot;
+        // Request order differs from the previous batch's seed row order.
+        auto state1                 = stream1->getMtpAsyncDeviceState();
+        state1.mtp_indexer_topk_gpu = previous_seeds.narrow(0, 1, 1);
+        stream1->setMtpAsyncDeviceState(state1);
+        if (seed_mode == 1) {
+            auto state2                 = stream2->getMtpAsyncDeviceState();
+            state2.mtp_indexer_topk_gpu = previous_seeds.narrow(0, 0, 1);
+            stream2->setMtpAsyncDeviceState(state2);
+        }
+    }
+    if (seed_mode == 0) {
+        auto seed  = std::make_unique<FakeModel>();
+        seed_model = seed.get();
+        seed->setInputs({draft_input_1});
+        seed->setOutputs({draft_output_1});
+        components.executor->seed_decode_draft_model_ = std::move(seed);
+        draft_model->setInputs({draft_input_2, draft_input_3, next_draft_input});
+        draft_model->setOutputs({draft_output_2, draft_output_3, next_draft_output});
+    } else {
+        draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
+        draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    }
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -3521,11 +3623,32 @@ void MtpExecutorTest::runMultiBatchDecode(bool use_mtp_hidden_buffer) {
     // Verify executor was created successfully
     auto status = components.executor->process(ScheduleOutput{{stream1, stream2}});
     ASSERT_TRUE(status.ok());
+    if (seed_mode >= 0) {
+        if (seed_mode == 1) {
+            EXPECT_TRUE(torch::equal(draft_model->loaded_indexer_seed_, previous_seeds.flip({0})));
+            EXPECT_EQ(draft_model->forwardCount(), 4);
+        } else {
+            EXPECT_FALSE(draft_model->loaded_indexer_seed_.defined());
+            EXPECT_EQ(seed_model->forwardCount(), 1);
+            EXPECT_EQ(draft_model->forwardCount(), 3);
+        }
+        snapshot.zero_();
+        EXPECT_EQ(toVec<int>(stream1->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.cpu()), (vector<int>{11, 12}));
+        EXPECT_EQ(toVec<int>(stream2->getMtpAsyncDeviceState().mtp_indexer_topk_gpu.cpu()), (vector<int>{21, 22}));
+    }
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 3}, {3, 1}, {0, 1, 0, 0}, {0.1, 0.11});
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
     EXPECT_EQ(target_model->mtp_hidden_requests, (std::vector<int64_t>{10}));
+}
+
+TEST_F(MtpExecutorTest, testIndexerSeedsFollowRequestOrderAndSnapshotIsIsolated) {
+    runMultiBatchDecodeScenario(1);
+}
+
+TEST_F(MtpExecutorTest, testMissingIndexerSeedUsesSeedGraphOnlyForFirstProposal) {
+    runMultiBatchDecodeScenario(0);
 }
 
 TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {

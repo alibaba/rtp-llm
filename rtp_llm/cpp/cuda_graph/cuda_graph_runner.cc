@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
@@ -23,6 +24,15 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
+class ScopedCudaGraphWarmupForwardFlag {
+public:
+    ScopedCudaGraphWarmupForwardFlag() {
+        pushCudaGraphWarmupForwardFlag();
+    }
+    ~ScopedCudaGraphWarmupForwardFlag() {
+        popCudaGraphWarmupForwardFlag();
+    }
+};
 int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
     const size_t expansion =
         group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
@@ -551,6 +561,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                 "MTP seed rows must be CUDA int32 with one accepted row per request");
         // Request lanes fix graph capacity, while live input/position rows
         // remain packed. Accepted seed rows keep those packed coordinates.
+        if (has_padded_rows) {
+            dst.slice(0, state.current_batch_size, selected_graph_batch_size).zero_();
+        }
         tryAddD2DCopy(src, dst, src.numel() * sizeof(int32_t));
     }
 
@@ -2018,7 +2031,8 @@ void CudaGraphRunner::initCapture() {
             // Distributed model implementations may rendezvous during this
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
-            ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            ScopedEnvFlag                    cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            ScopedCudaGraphWarmupForwardFlag forward_phase;
             initial_outputs = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj).cast<PyModelOutputs>();
             if (!py_after_warmup_method_.is_none()) {
                 py_after_warmup_method_(capture_mem_hold_.py_model_inputs_);
@@ -2073,8 +2087,8 @@ void CudaGraphRunner::replayGraph(int key) {
                                     is_target_verify_,
                                     exception.what());
                 if (metrics_reporter_) {
-                    metrics_reporter_->report(
-                        1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS, nullptr, true);
+                    reportKmonMetric(
+                        metrics_reporter_, 1, "rtp_llm_cuda_graph_replay_oom_retry_qps", kmonitor::MetricType::QPS);
                 }
                 cuda_graph::graphEmptyCache();
             });
@@ -2106,7 +2120,8 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // Run the same backend that will be captured for this exact key.  In
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
-        ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        ScopedEnvFlag                    cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        ScopedCudaGraphWarmupForwardFlag forward_phase;
         py_forward_method_(inputs, attn_pyobj);
         if (!py_after_warmup_method_.is_none()) {
             py_after_warmup_method_(inputs);

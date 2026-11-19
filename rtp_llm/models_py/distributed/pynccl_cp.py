@@ -3,7 +3,7 @@
 The regular ``torch.distributed`` path creates a ProcessGroupNCCL ``Work``
 object and manages internal CUDA events for every collective. GLM5 prefill
 issues several small CP AllGathers per sparse-MLA layer, so that host-side
-control cost is measurable. ``GLM5_CP_OPT=1`` enables the complete optimization
+control cost is measurable. ``--glm5_cp_opt=true`` enables the complete optimization
 stack: direct ``ctypes`` submission of ``ncclAllGather``, registered symmetric
 output windows, and packed Indexer K gather. With the switch unset or set to
 zero, callers use the original torch/c10d and separate-gather paths.
@@ -11,7 +11,7 @@ zero, callers use the original torch/c10d and separate-gather paths.
 The direct path owns a second NCCL communicator containing exactly the ranks
 from the supplied torch process group.  Callers in the GLM5 hot path consume
 the result on the same stream, so CUDA stream ordering replaces the C10D Work
-object.  The feature is opt-in; with the flag unset the existing collective
+object.  The feature is opt-in; with the option disabled the existing collective
 wrapper is used unchanged.
 """
 
@@ -62,14 +62,13 @@ for _fp8_name in (
         _NCCL_DT[_fp8] = 1
 
 
-def _env_enabled(name: str) -> bool:
-    return os.environ.get(name, "0").strip().lower() in ("1", "true", "yes", "on")
+_OPT_ENABLED = False
 
 
-# Resolve once at import. Production sets the flag before the worker starts;
-# avoiding an os.environ lookup in every layer keeps the dispatcher negligible.
-_OPT_ENABLED = _env_enabled("GLM5_CP_OPT")
-_PYNCCL_VALIDATE = _env_enabled("GLM5_CP_PYNCCL_VALIDATE")
+def configure(enabled: bool) -> None:
+    """Publish the parsed model hardware configuration before collectives run."""
+    global _OPT_ENABLED
+    _OPT_ENABLED = bool(enabled)
 
 
 class _NCCLLib:
@@ -103,7 +102,7 @@ class _NCCLLib:
             _cudaStream_t,
         ]
         # Symmetric window registration was added in NCCL 2.27. Keep it
-        # optional so GLM5_CP_OPT can fall back to ordinary pynccl.
+        # optional so the optimized path can fall back to ordinary pynccl.
         self._has_symm = hasattr(self._lib, "ncclCommWindowRegister")
         if self._has_symm:
             self._lib.ncclCommWindowRegister.restype = _ncclResult_t
@@ -381,21 +380,18 @@ def _init_symm_windows(process_group, device: torch.device) -> None:
     if group_key in _SYMM_INIT_DONE:
         return
 
-    lib, comm = _require_comm(process_group, device)
-    if not lib._has_symm:
-        logging.warning(
-            "GLM5_CP_OPT requested, but NCCL lacks ncclCommWindowRegister; "
-            "falling back to ordinary pynccl"
-        )
-        _SYMM_INIT_DONE.add(group_key)
-        return
+    from rtp_llm.models_py.distributed.symm_mem import _agree_across_group
 
-    pool = _symm_pool(process_group, device, create=True)
+    lib, comm = _require_comm(process_group, device)
+    pool = _symm_pool(process_group, device, create=True) if lib._has_symm else None
     max_nbytes = _symm_max_nbytes(process_group, device)
-    if pool is None or max_nbytes is None:
+    # A local fallback must not leave peers entering collective registration.
+    # Use the rendezvous store so allocator/driver failures need no CUDA work.
+    if not _agree_across_group(
+        process_group, pool is not None and max_nbytes is not None, "cp_symm_capability"
+    ):
         logging.warning(
-            "GLM5_CP_OPT symmetric mode is unsupported for this GPU/world-size topology; "
-            "falling back to ordinary pynccl"
+            "GLM5 CP symmetric windows unavailable on a peer; using ordinary pynccl"
         )
         _SYMM_INIT_DONE.add(group_key)
         return
@@ -410,17 +406,20 @@ def _init_symm_windows(process_group, device: torch.device) -> None:
             base_key = (*group_key, role, dtype)
             if base_key in _SYMM_BASES:
                 continue
-            if used_nbytes + int(max_nbytes) > _SYMM_INIT_BUDGET_NBYTES:
-                logging.warning(
-                    "GLM5 CP symmetric registration reached the 1-GiB/rank budget"
-                )
+            base = None
+            if used_nbytes + int(max_nbytes) <= _SYMM_INIT_BUDGET_NBYTES:
+                try:
+                    element_size = torch.empty((), dtype=dtype).element_size()
+                    capacity_numel = int(max_nbytes) // int(element_size)
+                    with torch.cuda.use_mem_pool(pool):
+                        base = torch.empty(capacity_numel, dtype=dtype, device=device)
+                except Exception as error:
+                    logging.warning("GLM5 CP symmetric allocation failed: %s", error)
+            if not _agree_across_group(
+                process_group, base is not None, "cp_symm_alloc_" + role
+            ):
                 _SYMM_INIT_DONE.add(group_key)
                 return
-
-            element_size = torch.empty((), dtype=dtype).element_size()
-            capacity_numel = int(max_nbytes) // int(element_size)
-            with torch.cuda.use_mem_pool(pool):
-                base = torch.empty(capacity_numel, dtype=dtype, device=device)
 
             ptr_key = (*group_key, int(base.data_ptr()))
             # Window registration is collective and must remain in this
@@ -460,7 +459,8 @@ def _symm_output(
         numel *= int(dim)
     ptr_key = (*group_key, int(base.data_ptr()))
     capacity_nbytes = _SYMM_CAPACITY_NBYTES.get(ptr_key, 0)
-    if numel * base.element_size() > capacity_nbytes:
+    # Empty views have a null data_ptr even when their base is registered.
+    if numel == 0 or numel * base.element_size() > capacity_nbytes:
         return None
 
     view_key = (*group_key, role, dtype, shape)
@@ -541,42 +541,9 @@ def warmup(
         _init_symm_windows(process_group, resolved_device)
 
 
-def init_direct_all_gather(process_group, device: torch.device) -> None:
-    """Initialize transport only, without reserving CP symmetric windows."""
-    if device.type != "cuda" or str(dist.get_backend(process_group)).lower() != "nccl":
-        raise RuntimeError("direct AllGather requires a CUDA NCCL process group")
-    _get_comm(process_group, device)
-
-
 def init(process_group, device: Any) -> None:
     """Distributed-startup entry point for all optional GLM5 CP resources."""
     warmup(process_group, device)
-
-
-def _validate_all_gather(
-    output: torch.Tensor, input: torch.Tensor, process_group
-) -> None:
-    if not input.is_cuda or not output.is_cuda:
-        raise RuntimeError("GLM5 pynccl AllGather requires CUDA tensors")
-    if input.device != output.device:
-        raise ValueError(
-            f"AllGather input/output devices differ: {input.device} vs {output.device}"
-        )
-    if input.dtype != output.dtype:
-        raise ValueError(
-            f"AllGather input/output dtypes differ: {input.dtype} vs {output.dtype}"
-        )
-    if input.dtype not in _NCCL_DT:
-        raise TypeError(f"unsupported pynccl AllGather dtype: {input.dtype}")
-    if not input.is_contiguous() or not output.is_contiguous():
-        raise ValueError("GLM5 pynccl AllGather requires contiguous tensors")
-
-    world_size = _world_size(process_group)
-    expected = world_size * input.numel()
-    if output.numel() != expected:
-        raise ValueError(
-            f"AllGather output has {output.numel()} elements, expected {expected}"
-        )
 
 
 def all_gather_into_tensor(
@@ -585,7 +552,6 @@ def all_gather_into_tensor(
     *,
     group: Any = None,
     stream: torch.cuda.Stream | None = None,
-    direct: bool = False,
 ) -> None:
     """Gather into ``output`` using pynccl or the original C10D fallback.
 
@@ -593,16 +559,11 @@ def all_gather_into_tensor(
     ``output`` on the same stream, which supplies the required dependency.
     """
     process_group = _resolve_process_group(group)
-    if not enabled() and not direct:
+    if not enabled():
         dist.all_gather_into_tensor(output, input, group=process_group)
         return
 
-    # Full Python-side validation is useful while bringing up a new shape, but
-    # costs a meaningful fraction of an 11-us pynccl launch. Production relies
-    # on the fixed GLM5 call-site contracts; opt in when diagnosing a new path.
-    if _PYNCCL_VALIDATE:
-        _validate_all_gather(output, input, process_group)
-    gather_stream = stream or torch.cuda.current_stream(input.device.index)
+    gather_stream = stream or torch.cuda.current_stream(input.device)
     lib, comm = _require_comm(process_group, input.device)
     lib.all_gather(
         input.data_ptr(),
@@ -640,7 +601,7 @@ def all_gather(
     )
     gather_stream = None
     if output is not None:
-        gather_stream = torch.cuda.current_stream(input.device.index)
+        gather_stream = torch.cuda.current_stream(input.device)
         if not _symm_stream_allowed(role, gather_stream, process_group, input.device):
             # A separate stream could still be reading the persistent role
             # buffer. Use an ordinary output instead of adding hot-path events.
@@ -654,8 +615,6 @@ def all_gather(
         all_gather_into_tensor(output, input, group=process_group)
         return output
 
-    if _PYNCCL_VALIDATE:
-        _validate_all_gather(output, input, process_group)
     assert gather_stream is not None
     _pynccl_symm_all_gather(output, input, gather_stream, process_group)
     return output

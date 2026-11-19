@@ -74,6 +74,22 @@ FLASHINFER_TRTLLM_GEN_IMPLS = {
 }
 
 
+def get_all_supported_impls(
+    attn_configs, attn_inputs, fmha_config=None, parallelism_config=None
+) -> List[type[FMHAImplBase]]:
+    impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
+    return [
+        impl
+        for impl in dict.fromkeys(impls)
+        if _implementation_allows_cuda_graph_selection_mode(
+            impl, CudaGraphSelectionMode.EAGER
+        )
+        and not _is_fmha_impl_disabled(impl.__name__, fmha_config)
+        and impl.support(attn_configs, attn_inputs)
+        and impl.support_parallelism_config(parallelism_config)
+    ]
+
+
 def get_mla_impl(
     attn_configs: AttentionConfigs,
     weight: ModelWeights,
@@ -90,39 +106,81 @@ def get_mla_impl(
         is_cuda_graph, cuda_graph_selection_mode
     )
 
-    mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    # MTP target-verify arrives with is_prefill=True (sequence_lengths is empty in
+    # MtpBatchStreamProcessor::prepareOneStepSpecDecodeModelInput) but it is really
+    # multi-token decode with prefix in cache — sglang/vllm both classify it as
+    # decode. If we let it go through the prefill path the fast-path branch below
+    # skips SparseMlaImpl, so the main (DSA) model uses dense MLA during verify and
+    # baseline (DSA decode) uses sparse MLA — different attention algorithms over
+    # the same KV cache → divergent main-model predictions and wrong response.
+    is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+    is_draft_extend = bool(getattr(attn_inputs, "is_draft_extend", False))
+    # Only sparse/DSA target verify and draft extend use paged multi-token decode.
+    # Dense MLA keeps the prefill impl for these prefill-shaped inputs.
+    use_decode_mla = (is_target_verify or is_draft_extend) and attn_configs.is_sparse
+
+    mla_impls = (
+        PREFILL_MLA_IMPS
+        if (attn_inputs.is_prefill and not use_decode_mla)
+        else DECODE_MLA_IMPS
+    )
+    allow_cuda_graph_prefill_absorb = False
+    if is_cuda_graph and attn_inputs.is_prefill and not use_decode_mla:
+        try:
+            input_lengths = attn_inputs.input_lengths
+            prefix_lengths = attn_inputs.prefix_lengths
+            total_q = int(input_lengths.sum().item())
+            max_q_per_req = int(input_lengths.max().item())
+            has_reuse_cache = (
+                prefix_lengths is not None
+                and prefix_lengths.numel() > 0
+                and int(prefix_lengths.max().item()) > 0
+            )
+            allow_cuda_graph_prefill_absorb = (
+                has_reuse_cache
+                and total_q > 0
+                and max_q_per_req > 0
+                and total_q <= max_q_per_req
+            )
+        except Exception:
+            allow_cuda_graph_prefill_absorb = False
+    use_fast_path = None
+    cos_sin_cache = None
     for impl in mla_impls:
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
             continue
-        # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
-        # TODO: support fast path for cp prefill
-        use_fast_path = (
-            attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item()
-            <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
+        if use_fast_path is None:
+            # The layout and prefix lengths do not depend on the backend. In
+            # particular, do the device-to-host max() read only once.
+            cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
+            use_fast_path = bool(
+                attn_inputs.is_prefill
+                and not use_decode_mla
+                and not (
+                    parallelism_config
+                    and parallelism_config.prefill_cp_config.is_enabled()
+                )
+                and attn_inputs.cu_kv_seqlens_device.max().item()
+                <= attn_configs.indexer_topk
             )
-        )
 
         if not use_fast_path and not impl.support_parallelism_config(
             parallelism_config
         ):
             continue
 
-        # Skip sparse MLA if fast path is enabled
         if use_fast_path and impl.is_sparse():
-            logging.debug(
-                f"skip sparse mla impl [{impl}] because fast path: {use_fast_path}"
-            )
             continue
 
-        if attn_configs.is_sparse and not use_fast_path and not impl.is_sparse():
-            logging.debug(f"skip mla impl [{impl}] because sparse mla is not supported")
+        if (
+            attn_configs.is_sparse
+            and not use_fast_path
+            and not impl.is_sparse()
+            and not allow_cuda_graph_prefill_absorb
+        ):
             continue
 
         instance = impl(
@@ -258,8 +316,11 @@ def get_fmha_impl(
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        # Check if implementation supports parallelism config
-        if not impl.support_parallelism_config(parallelism_config):
+        # Prefill CP gathers the full KV cache before regular TP decode. Decode
+        # backends do not need to implement the prefill communication method.
+        if attn_inputs.is_prefill and not impl.support_parallelism_config(
+            parallelism_config
+        ):
             continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
         try:
@@ -350,6 +411,7 @@ class AttnImplFactory(object):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
         decode_cascade_max_requests: int = 0,
+        hw_kernel_config=None,
     ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
@@ -418,6 +480,16 @@ class AttnImplFactory(object):
             parallelism_config,
             cuda_graph_selection_mode,
         )
+        configure_fusion = getattr(instance, "configure_fusion", None)
+        if configure_fusion is not None:
+            configure_fusion(hw_kernel_config)
+        if not is_cuda_graph and str(getattr(model_config, "model_type", "")) in (
+            "glm_5",
+            "glm_5_mtp",
+        ):
+            enable_workspace = getattr(instance, "enable_glm53_prefill_workspace", None)
+            if enable_workspace is not None:
+                enable_workspace()
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance
 

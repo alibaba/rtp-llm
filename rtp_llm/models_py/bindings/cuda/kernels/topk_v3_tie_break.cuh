@@ -16,7 +16,7 @@ using base::TieValue;
 inline constexpr uint32_t kBlockSize = base::TopKConfig::kBlockSize;
 inline constexpr uint32_t kMaxNumTie = base::TopKConfig::kMaxNumTie;
 inline constexpr uint32_t kRadixSize = base::TopKConfig::kRadixSize;
-inline constexpr uint32_t kWarpSize = base::kWarpSize;
+inline constexpr uint32_t kWarpSize  = base::kWarpSize;
 
 // Keep the exact score ordering identical to
 // dsv4_top_k_per_row_prefill::make_deterministic_sort_key(). In particular,
@@ -27,14 +27,14 @@ SGL_DEVICE uint32_t stable_score_key(float value) {
     return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
 }
 
-template <typename Predicate, typename KeyFn>
-SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                       problem,
-                                         uint32_t                                 rank,
+template<typename Predicate, typename KeyFn>
+SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                        problem,
+                                         uint32_t                                  rank,
                                          typename base::TopKConfig::TieHandleSmem* smem,
-                                         Predicate                                predicate,
-                                         KeyFn                                    key_fn) {
-    const uint32_t tx = threadIdx.x;
-    uint32_t       prefix = 0;
+                                         Predicate                                 predicate,
+                                         KeyFn                                     key_fn) {
+    const uint32_t tx        = threadIdx.x;
+    uint32_t       prefix    = 0;
     uint32_t       remaining = rank;
 
 #pragma unroll
@@ -45,10 +45,10 @@ SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                     
         __syncthreads();
 
         const uint32_t shift = 24u - round * 8u;
-        const uint32_t mask = round == 0 ? 0u : (~0u << (32u - round * 8u));
+        const uint32_t mask  = round == 0 ? 0u : (~0u << (32u - round * 8u));
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
-            const float value = problem.in[idx];
-            const uint32_t key = key_fn(value, idx);
+            const float    value = problem.in[idx];
+            const uint32_t key   = key_fn(value, idx);
             if (predicate(value, idx) && (key & mask) == prefix) {
                 atomicAdd(&smem->histogram[0][(key >> shift) & 0xffu], 1u);
             }
@@ -59,9 +59,9 @@ SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                     
         for (uint32_t step = 0; step < 8; ++step) {
             if (tx < kRadixSize) {
                 const uint32_t distance = 1u << step;
-                const uint32_t src = step & 1u;
-                const uint32_t dst = src ^ 1u;
-                uint32_t value = smem->histogram[src][tx];
+                const uint32_t src      = step & 1u;
+                const uint32_t dst      = src ^ 1u;
+                uint32_t       value    = smem->histogram[src][tx];
                 if (tx + distance < kRadixSize) {
                     value += smem->histogram[src][tx + distance];
                 }
@@ -80,27 +80,26 @@ SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                     
         __syncthreads();
         if (tx == 0) {
             const uint32_t threshold = smem->match.bin;
-            const uint32_t count_gt =
-                threshold + 1u < kRadixSize ? smem->histogram[0][threshold + 1u] : 0u;
+            const uint32_t count_gt  = threshold + 1u < kRadixSize ? smem->histogram[0][threshold + 1u] : 0u;
             prefix |= threshold << shift;
             smem->match.above_count = prefix;
             smem->match.equal_count = remaining - count_gt;
         }
         __syncthreads();
-        prefix = smem->match.above_count;
+        prefix    = smem->match.above_count;
         remaining = smem->match.equal_count;
     }
     return prefix;
 }
 
-template <uint32_t kItems>
+template<uint32_t kItems>
 SGL_DEVICE void stable_handle_tie_impl(const TieValue*                           tie_buffer,
                                        const TopKProblem&                        problem,
                                        uint32_t                                  base_out,
                                        uint32_t                                  num_ties,
                                        uint32_t                                  remaining_topk,
                                        typename base::TopKConfig::TieHandleSmem* smem) {
-    const uint32_t tx = threadIdx.x;
+    const uint32_t tx      = threadIdx.x;
     const uint32_t lane_id = tx % kWarpSize;
     const uint32_t warp_id = tx / kWarpSize;
 
@@ -110,30 +109,30 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
     uint32_t write_pos[kItems];
 #pragma unroll
     for (uint32_t i = 0; i < kItems; ++i) {
-        const uint32_t t = tx + i * kBlockSize;
-        active[i] = t < num_ties;
+        const uint32_t t   = tx + i * kBlockSize;
+        active[i]          = t < num_ties;
         const TieValue tie = active[i] ? tie_buffer[t] : TieValue::invalid();
-        score_key[i] = stable_score_key(tie.value);
-        idx[i] = tie.idx;
-        write_pos[i] = remaining_topk;
+        score_key[i]       = stable_score_key(tie.value);
+        idx[i]             = tie.idx;
+        write_pos[i]       = remaining_topk;
     }
 
     if (tx < kRadixSize) {
         smem->histogram[0][tx] = 0;
     }
     if (tx == kRadixSize) {
-        smem->counter = 0;
+        smem->counter       = 0;
         smem->counter_final = 0;
     }
     __syncthreads();
 
-    uint32_t score_rank = remaining_topk;
+    uint32_t score_rank   = remaining_topk;
     uint32_t total_active = num_ties;
 #pragma unroll
     for (uint32_t round = 0; round < 4; ++round) {
-        const uint32_t shift = 24u - round * 8u;
-        const uint32_t hist_idx = round & 1u;
-        uint32_t* histogram = smem->histogram[hist_idx];
+        const uint32_t shift     = 24u - round * 8u;
+        const uint32_t hist_idx  = round & 1u;
+        uint32_t*      histogram = smem->histogram[hist_idx];
 #pragma unroll
         for (uint32_t i = 0; i < kItems; ++i) {
             if (active[i]) {
@@ -145,10 +144,10 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
         }
         __syncthreads();
 
-        uint32_t hist_value = 0;
+        uint32_t hist_value  = 0;
         uint32_t warp_prefix = 0;
         if (tx < kRadixSize) {
-            hist_value = histogram[tx];
+            hist_value  = histogram[tx];
             warp_prefix = base::warp_inclusive_sum(lane_id, hist_value);
             if (lane_id == kWarpSize - 1u) {
                 smem->warp_sum[warp_id] = warp_prefix;
@@ -156,10 +155,9 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
         }
         __syncthreads();
         if (tx < kRadixSize) {
-            const uint32_t inter_warp =
-                warp::reduce_sum(lane_id < warp_id ? smem->warp_sum[lane_id] : 0u);
-            const uint32_t prefix = inter_warp + warp_prefix;
-            const uint32_t above = total_active - prefix;
+            const uint32_t inter_warp = warp::reduce_sum(lane_id < warp_id ? smem->warp_sum[lane_id] : 0u);
+            const uint32_t prefix     = inter_warp + warp_prefix;
+            const uint32_t above      = total_active - prefix;
             if (above < score_rank && above + hist_value >= score_rank) {
                 smem->match = {tx, above, hist_value};
             }
@@ -167,8 +165,8 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
         __syncthreads();
 
         const uint32_t threshold_bin = smem->match.bin;
-        const uint32_t above_count = smem->match.above_count;
-        const uint32_t equal_count = smem->match.equal_count;
+        const uint32_t above_count   = smem->match.above_count;
+        const uint32_t equal_count   = smem->match.equal_count;
         score_rank -= above_count;
         if (round < 3) {
             total_active = equal_count;
@@ -181,7 +179,7 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
             const uint32_t bin = (score_key[i] >> shift) & 0xffu;
             if (bin > threshold_bin) {
                 write_pos[i] = atomicAdd(&smem->counter, 1u);
-                active[i] = false;
+                active[i]    = false;
             } else if (bin < threshold_bin) {
                 active[i] = false;
             }
@@ -194,7 +192,7 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
 
     const uint32_t exact_above = smem->counter;
     const uint32_t exact_equal = smem->match.equal_count;
-    const uint32_t need_equal = remaining_topk - exact_above;
+    const uint32_t need_equal  = remaining_topk - exact_above;
     if (need_equal > 0 && exact_equal <= need_equal) {
 #pragma unroll
         for (uint32_t i = 0; i < kItems; ++i) {
@@ -212,12 +210,12 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
         __syncthreads();
 
         uint32_t index_rank = need_equal;
-        total_active = exact_equal;
+        total_active        = exact_equal;
 #pragma unroll
         for (uint32_t round = 0; round < 4; ++round) {
-            const uint32_t shift = 24u - round * 8u;
-            const uint32_t hist_idx = round & 1u;
-            uint32_t* histogram = smem->histogram[hist_idx];
+            const uint32_t shift     = 24u - round * 8u;
+            const uint32_t hist_idx  = round & 1u;
+            uint32_t*      histogram = smem->histogram[hist_idx];
 #pragma unroll
             for (uint32_t i = 0; i < kItems; ++i) {
                 if (active[i]) {
@@ -230,10 +228,10 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
             }
             __syncthreads();
 
-            uint32_t hist_value = 0;
+            uint32_t hist_value  = 0;
             uint32_t warp_prefix = 0;
             if (tx < kRadixSize) {
-                hist_value = histogram[tx];
+                hist_value  = histogram[tx];
                 warp_prefix = base::warp_inclusive_sum(lane_id, hist_value);
                 if (lane_id == kWarpSize - 1u) {
                     smem->warp_sum[warp_id] = warp_prefix;
@@ -241,10 +239,9 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
             }
             __syncthreads();
             if (tx < kRadixSize) {
-                const uint32_t inter_warp =
-                    warp::reduce_sum(lane_id < warp_id ? smem->warp_sum[lane_id] : 0u);
-                const uint32_t prefix = inter_warp + warp_prefix;
-                const uint32_t above = total_active - prefix;
+                const uint32_t inter_warp = warp::reduce_sum(lane_id < warp_id ? smem->warp_sum[lane_id] : 0u);
+                const uint32_t prefix     = inter_warp + warp_prefix;
+                const uint32_t above      = total_active - prefix;
                 if (above < index_rank && above + hist_value >= index_rank) {
                     smem->match = {tx, above, hist_value};
                 }
@@ -252,8 +249,8 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
             __syncthreads();
 
             const uint32_t threshold_bin = smem->match.bin;
-            const uint32_t above_count = smem->match.above_count;
-            const uint32_t equal_count = smem->match.equal_count;
+            const uint32_t above_count   = smem->match.above_count;
+            const uint32_t equal_count   = smem->match.equal_count;
             index_rank -= above_count;
             if (round < 3) {
                 total_active = equal_count;
@@ -264,15 +261,15 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
                     continue;
                 }
                 const uint32_t index_key = 0xffffffffu - idx[i];
-                const uint32_t bin = (index_key >> shift) & 0xffu;
+                const uint32_t bin       = (index_key >> shift) & 0xffu;
                 if (bin > threshold_bin) {
                     write_pos[i] = exact_above + atomicAdd(&smem->counter_final, 1u);
-                    active[i] = false;
+                    active[i]    = false;
                 } else if (bin < threshold_bin) {
                     active[i] = false;
                 } else if (round == 3) {
                     write_pos[i] = exact_above + atomicAdd(&smem->counter_final, 1u);
-                    active[i] = false;
+                    active[i]    = false;
                 }
             }
             if (index_rank == 0) {
@@ -327,7 +324,7 @@ SGL_DEVICE void stable_handle_tie(const TieValue*                           tie_
     }
 }
 
-template <uint32_t kHistBits>
+template<uint32_t kHistBits>
 SGL_DEVICE bool in_threshold_bin(float value, uint32_t threshold_bin) {
     // The first pass builds the histogram with extract_coarse_bin(). Reuse the
     // exact same classification here instead of reconstructing it with FP32
@@ -337,63 +334,56 @@ SGL_DEVICE bool in_threshold_bin(float value, uint32_t threshold_bin) {
     return base::extract_coarse_bin<kHistBits>(value) == threshold_bin;
 }
 
-template <uint32_t kHistBits>
+template<uint32_t kHistBits>
 SGL_DEVICE bool is_signed_zero_threshold_bin(uint32_t threshold_bin) {
-    constexpr uint32_t kShift = 16u - kHistBits;
+    constexpr uint32_t kShift           = 16u - kHistBits;
     constexpr uint32_t kNegativeZeroBin = 0x7fffu >> kShift;
     constexpr uint32_t kPositiveZeroBin = 0x8000u >> kShift;
     return threshold_bin - kNegativeZeroBin <= kPositiveZeroBin - kNegativeZeroBin;
 }
 
-template <uint32_t kHistBits>
+template<uint32_t kHistBits>
 SGL_DEVICE bool needs_exact_coarse_classification(uint32_t threshold_bin) {
     constexpr uint32_t kShift = 16u - kHistBits;
     // The edge bins touch +/-inf or the canonical NaN bin. Numeric comparisons
     // cannot reproduce their coarse-key classification.
-    constexpr uint32_t kNegativeInfBin = 0x03ffu >> kShift;
-    constexpr uint32_t kPositiveInfBin = 0xfc00u >> kShift;
+    constexpr uint32_t kNegativeInfBin      = 0x03ffu >> kShift;
+    constexpr uint32_t kPositiveInfBin      = 0xfc00u >> kShift;
     constexpr uint32_t kFiniteInteriorBegin = kNegativeInfBin + 1u;
-    constexpr uint32_t kFiniteInteriorSize = kPositiveInfBin - kFiniteInteriorBegin;
+    constexpr uint32_t kFiniteInteriorSize  = kPositiveInfBin - kFiniteInteriorBegin;
     // Unsigned wrap makes bins <= kNegativeInfBin land above the interior
     // size, combining the two edge comparisons into one.
-    return is_signed_zero_threshold_bin<kHistBits>(threshold_bin) ||
-           threshold_bin - kFiniteInteriorBegin >= kFiniteInteriorSize;
+    return is_signed_zero_threshold_bin<kHistBits>(threshold_bin)
+           || threshold_bin - kFiniteInteriorBegin >= kFiniteInteriorSize;
 }
 
-// Candidate-buffer overflow fallback. It performs the same stable score then
-// index radix selection while rescanning the coarse threshold interval, or the
-// whole row for the non-monotonic canonical NaN bin.
-template <uint32_t kHistBits>
-SGL_DEVICE void stable_exact_boundary_scan_topk(
-    const TopKProblem&                        problem,
-    typename base::TopKConfig::TieHandleSmem* smem,
-    uint32_t                                  threshold_bin,
-    uint32_t                                  output_base) {
+// Exact fallback for candidate-buffer overflow or canonical NaN bins. Select
+// by score then index while rescanning the threshold interval, or the whole row
+// when FP16 NaN canonicalization loses the ordering of the exact score keys.
+template<uint32_t kHistBits>
+SGL_DEVICE void stable_exact_boundary_scan_topk(const TopKProblem&                        problem,
+                                                typename base::TopKConfig::TieHandleSmem* smem,
+                                                uint32_t                                  threshold_bin,
+                                                uint32_t                                  output_base) {
     const uint32_t tx = threadIdx.x;
     if (output_base >= problem.topk) {
         return;
     }
     const uint32_t remaining_topk = problem.topk - output_base;
-    const auto in_interval = [threshold_bin](float value, uint32_t) {
-        // Match per-row radix: FP32->FP16 canonicalizes every NaN sign/payload
-        // into the highest coarse bin. If that bin exceeds its 2048-candidate
-        // buffer, per-row restarts radix selection from all row inputs so
-        // finite values can outrank negative NaNs by their exact score key.
-        // Restricting the rescan to the non-monotonic NaN bin would lose them.
+    const auto     in_interval    = [threshold_bin](float value, uint32_t) {
+        // FP32->FP16 canonicalizes every NaN sign/payload into the highest
+        // coarse bin. Rescan the whole row so finite values can outrank
+        // negative NaNs according to their exact score key.
         if (threshold_bin == (1u << kHistBits) - 1u) {
             return true;
         }
         return in_threshold_bin<kHistBits>(value, threshold_bin);
     };
     const uint32_t threshold_score_key = radix_select_problem(
-        problem,
-        remaining_topk,
-        smem,
-        in_interval,
-        [](float value, uint32_t) { return stable_score_key(value); });
+        problem, remaining_topk, smem, in_interval, [](float value, uint32_t) { return stable_score_key(value); });
 
     if (tx == 0) {
-        smem->counter = 0;
+        smem->counter       = 0;
         smem->counter_final = 0;
     }
     __syncthreads();
@@ -412,7 +402,7 @@ SGL_DEVICE void stable_exact_boundary_scan_topk(
     __syncthreads();
     const uint32_t exact_above = smem->counter;
     const uint32_t exact_equal = smem->counter_final;
-    const uint32_t need_equal = remaining_topk - exact_above;
+    const uint32_t need_equal  = remaining_topk - exact_above;
     // All warps must snapshot the count before thread 0 reuses it for
     // emission. Otherwise later warps can observe zero and overwrite the
     // strictly-greater outputs when they emit the threshold-score ties.
@@ -461,26 +451,26 @@ SGL_DEVICE void stable_exact_boundary_scan_topk(
     __syncthreads();
     for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
         const float value = problem.in[idx];
-        if (in_interval(value, idx) && stable_score_key(value) == threshold_score_key &&
-            0xffffffffu - idx >= threshold_index_key) {
+        if (in_interval(value, idx) && stable_score_key(value) == threshold_score_key
+            && 0xffffffffu - idx >= threshold_index_key) {
             const uint32_t pos = atomicAdd(&smem->counter_final, 1u);
             problem.emit(output_base + exact_above + pos, idx);
         }
     }
 }
 
-template <uint32_t kLocalVecs_>
-struct TopKRegister : base::TopKRadixBase<12> {
+template<uint32_t kLocalVecs_>
+struct TopKRegister: base::TopKRadixBase<12> {
     static constexpr uint32_t kLocalVecs = kLocalVecs_;
     static constexpr uint32_t kMaxSeqLen = kBlockSize * base::TopKRadixBase<12>::kVecSize * kLocalVecs;
-    using Base = base::TopKRadixBase<12>;
-    using Smem = Base::Smem;
-    using vec_t = typename Base::vec_t;
+    using Base                           = base::TopKRadixBase<12>;
+    using Smem                           = Base::Smem;
+    using vec_t                          = typename Base::vec_t;
 
-    template <bool kAlignedInput>
+    template<bool kAlignedInput>
     SGL_DEVICE static void forward(const TopKProblem problem, void* raw_smem) {
-        const uint32_t tx = threadIdx.x;
-        auto* smem = static_cast<Smem*>(raw_smem);
+        const uint32_t          tx   = threadIdx.x;
+        auto*                   smem = static_cast<Smem*>(raw_smem);
         typename Smem::kHistVec hist_vec;
         hist_vec.fill(0);
         smem->hist_vecs[tx] = hist_vec;
@@ -490,12 +480,12 @@ struct TopKRegister : base::TopKRadixBase<12> {
         }
         __syncthreads();
 
-        constexpr uint32_t kVecSize = Base::kVecSize;
-        const uint32_t num_full = problem.seq_len / kVecSize;
-        const uint32_t tail_start = num_full * kVecSize;
-        const uint32_t tail = problem.seq_len - tail_start;
-        const bool owns_tail = tx >= kBlockSize - tail;
-        float tail_value = 0.0f;
+        constexpr uint32_t kVecSize   = Base::kVecSize;
+        const uint32_t     num_full   = problem.seq_len / kVecSize;
+        const uint32_t     tail_start = num_full * kVecSize;
+        const uint32_t     tail       = problem.seq_len - tail_start;
+        const bool         owns_tail  = tx >= kBlockSize - tail;
+        float              tail_value = 0.0f;
 
         vec_t local_vecs[kLocalVecs];
 #pragma unroll
@@ -523,19 +513,26 @@ struct TopKRegister : base::TopKRadixBase<12> {
         }
         if (owns_tail) {
             const uint32_t idx = tail_start + tx - (kBlockSize - tail);
-            tail_value = problem.in[idx];
+            tail_value         = problem.in[idx];
             atomicAdd(&smem->histogram[base::extract_coarse_bin<Base::kHistBits>(tail_value)], 1u);
         }
         __syncthreads();
 
+        // Snapshot before find_threshold's barriers: tie scratch aliases the
+        // histogram, so every warp must read this before exact selection starts.
+        constexpr uint32_t kNaNBin  = (1u << Base::kHistBits) - 1u;
+        const bool         has_nans = smem->histogram[kNaNBin] != 0;
         Base::find_threshold(problem.topk, problem.seq_len, smem);
-        const uint32_t threshold_bin = smem->threshold_bin;
-        const float v_hi = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin + 1u);
-        const float v_lo = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin);
-        const bool exact_coarse_classification =
-            needs_exact_coarse_classification<Base::kHistBits>(threshold_bin);
-        const uint32_t topk = problem.topk;
-        const auto collect_above = [&](uint32_t idx) {
+        if (__builtin_expect(has_nans, false)) {
+            stable_exact_boundary_scan_topk<Base::kHistBits>(problem, &smem->tie.handle, kNaNBin, 0u);
+            return;
+        }
+        const uint32_t threshold_bin               = smem->threshold_bin;
+        const float    v_hi                        = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin + 1u);
+        const float    v_lo                        = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin);
+        const bool     exact_coarse_classification = needs_exact_coarse_classification<Base::kHistBits>(threshold_bin);
+        const uint32_t topk                        = problem.topk;
+        const auto     collect_above               = [&](uint32_t idx) {
             const uint32_t pos = atomicAdd(&smem->count_gt, 1u);
             if (pos < topk) {
                 problem.emit(pos, idx);
@@ -611,13 +608,13 @@ struct TopKRegister : base::TopKRadixBase<12> {
     }
 };
 
-struct TopKStreaming : TopKRegister<2> {
+struct TopKStreaming: TopKRegister<2> {
     static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
 
-    template <bool kAlignedInput>
+    template<bool kAlignedInput>
     SGL_DEVICE static void forward(const TopKProblem problem, void* raw_smem) {
-        const uint32_t tx = threadIdx.x;
-        auto* smem = static_cast<Smem*>(raw_smem);
+        const uint32_t          tx   = threadIdx.x;
+        auto*                   smem = static_cast<Smem*>(raw_smem);
         typename Smem::kHistVec hist_vec;
         hist_vec.fill(0);
         smem->hist_vecs[tx] = hist_vec;
@@ -631,15 +628,22 @@ struct TopKStreaming : TopKRegister<2> {
             atomicAdd(&smem->histogram[base::extract_coarse_bin<Base::kHistBits>(value)], 1u);
         });
         __syncthreads();
+        // Snapshot before find_threshold's barriers: tie scratch aliases the
+        // histogram, so every warp must read this before exact selection starts.
+        constexpr uint32_t kNaNBin  = (1u << Base::kHistBits) - 1u;
+        const bool         has_nans = smem->histogram[kNaNBin] != 0;
         Base::find_threshold(problem.topk, problem.seq_len, smem);
+        if (__builtin_expect(has_nans, false)) {
+            stable_exact_boundary_scan_topk<Base::kHistBits>(problem, &smem->tie.handle, kNaNBin, 0u);
+            return;
+        }
 
-        const uint32_t threshold_bin = smem->threshold_bin;
-        const float v_hi = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin + 1u);
-        const float v_lo = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin);
-        const bool exact_coarse_classification =
-            needs_exact_coarse_classification<Base::kHistBits>(threshold_bin);
-        const uint32_t topk = problem.topk;
-        const auto collect_above = [&](uint32_t idx) {
+        const uint32_t threshold_bin               = smem->threshold_bin;
+        const float    v_hi                        = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin + 1u);
+        const float    v_lo                        = base::coarse_bin_lower_bound<Base::kHistBits>(threshold_bin);
+        const bool     exact_coarse_classification = needs_exact_coarse_classification<Base::kHistBits>(threshold_bin);
+        const uint32_t topk                        = problem.topk;
+        const auto     collect_above               = [&](uint32_t idx) {
             const uint32_t pos = atomicAdd(&smem->count_gt, 1u);
             if (pos < topk) {
                 problem.emit(pos, idx);

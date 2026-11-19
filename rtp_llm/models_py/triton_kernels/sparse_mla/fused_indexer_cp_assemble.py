@@ -10,6 +10,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.pynccl_cp import all_gather
 from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
@@ -34,7 +35,7 @@ def _fused_zero_scatter_kernel(
     For each padded row: if src_for_padded[row] >= 0, copy from actual;
     otherwise write zeros.
     """
-    row_id = tl.program_id(0)
+    row_id = tl.program_id(0).to(tl.int64)
     if row_id >= n_padded_rows:
         return
     src_row = tl.load(src_for_padded_ptr + row_id)
@@ -74,7 +75,7 @@ def _gather_restore_fused_kernel(
     Grid: (n_rows,)
     Each program copies one row from ``[K bytes | scale bytes]`` to outputs.
     """
-    row_id = tl.program_id(0)
+    row_id = tl.program_id(0).to(tl.int64)
     if row_id >= n_rows:
         return
     src_row = tl.load(indices_ptr + row_id)
@@ -109,7 +110,7 @@ def _gather_restore_separate_kernel(
     BLOCK_S: tl.constexpr,
 ):
     """Restore K and scale from two separately gathered tensors."""
-    row_id = tl.program_id(0)
+    row_id = tl.program_id(0).to(tl.int64)
     if row_id >= n_rows:
         return
     src_row = tl.load(indices_ptr + row_id)

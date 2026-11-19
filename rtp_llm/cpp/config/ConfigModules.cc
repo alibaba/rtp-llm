@@ -45,7 +45,8 @@ std::string PrefillCPConfig::to_string() const {
             oss << "UNKNOWN";
             break;
     }
-    oss << "\n comm_buffer_size: " << comm_buffer_size << "\n"
+    oss << "\n all_gather_impl: " << (all_gather_impl == CPAllGatherImpl::FUSED ? "FUSED" : "LEGACY") << "\n"
+        << " comm_buffer_size: " << comm_buffer_size << "\n"
         << " kv_cache_sharded: " << kv_cache_sharded << "\n"
         << " prefill_cp_size: " << prefill_cp_size << "\n";
     return oss.str();
@@ -103,7 +104,8 @@ std::string FMHAConfig::to_string() const {
         << "use_aiter_pa: " << use_aiter_pa << "\n"
         << "use_asm_pa: " << use_asm_pa << "\n"
         << "use_triton_pa: " << use_triton_pa << "\n"
-        << "absorb_opt_len: " << absorb_opt_len << "\n";
+        << "absorb_opt_len: " << absorb_opt_len << "\n"
+        << "deterministic_gemm: " << deterministic_gemm << "\n";
     return oss.str();
 }
 
@@ -218,6 +220,8 @@ std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
+        << "enable_dynamic_decode_backend: " << enable_dynamic_decode_backend << "\n"
+        << "dyn_decode_gate_thresholds: " << dyn_decode_gate_thresholds.value_or("") << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
         << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"
         << "generation_prefill_capture_token_buckets size: " << generation_prefill_capture_token_buckets.size() << "\n"
@@ -225,7 +229,9 @@ std::string HWKernelConfig::to_string() const {
         << "decode_capture_batch_sizes size: " << decode_capture_batch_sizes.size() << "\n"
         << "enable_decode_cascade_attention: " << enable_decode_cascade_attention << "\n"
         << "disable_dpc_random: " << disable_dpc_random << "\n"
-        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag;
+        << "rocm_disable_custom_ag: " << rocm_disable_custom_ag << "\n"
+        << "enable_fuse_kernels: " << enable_fuse_kernels << ", glm5_cp_opt: " << glm5_cp_opt
+        << ", enable_glm5_cmp: " << enable_glm5_cmp;
     return oss.str();
 }
 

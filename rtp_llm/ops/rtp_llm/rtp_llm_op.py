@@ -50,5 +50,8 @@ class RtpLLMOp:
             trace_config,
         )
 
+    def set_serving(self, serving: bool) -> None:
+        self.ft_op.set_serving(serving)
+
     def stop(self):
         self.ft_op.stop()  # type: ignore

@@ -1,10 +1,11 @@
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import attn_factory
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 
 
 class _StubAttentionImpl:
@@ -55,6 +56,19 @@ class _GenerationOnlyAttentionImpl(_SafeAttentionImpl):
     cuda_graph_selection_modes = frozenset(
         {attn_factory.CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH}
     )
+
+
+class _NoPrefillCpAttentionImpl(_SafeAttentionImpl):
+    support_parallelism_config = classmethod(
+        FMHAImplBase.support_parallelism_config.__func__
+    )
+
+    @classmethod
+    def support_prefill_cp(cls):
+        return False
+
+    def __init__(self, _configs, _inputs, parallelism_config):
+        self.parallelism_config = parallelism_config
 
 
 class AttentionFactoryGenerationPrefillCudaGraphTest(unittest.TestCase):
@@ -201,6 +215,33 @@ class AttentionFactoryGenerationPrefillMlaCudaGraphTest(
         with self.assertRaises(ValueError):
             self._select([_SafeAttentionImpl], mode="invalid_graph_mode")
 
+    def test_prefill_checks_short_sequence_once_and_skips_the_check_under_cp(self):
+        class Sparse(_StubAttentionImpl):
+            @classmethod
+            def is_sparse(cls):
+                return True
+
+        self.attn_configs.indexer_topk = 4
+        self.attn_configs.is_sparse = True
+        for cp, expected in ((False, _SafeAttentionImpl), (True, Sparse)):
+            with self.subTest(cp=cp):
+                lengths = types.SimpleNamespace(max=Mock(return_value=torch.tensor(4)))
+                self.attn_inputs.cu_kv_seqlens_device = lengths
+                parallelism = types.SimpleNamespace(
+                    prefill_cp_config=types.SimpleNamespace(is_enabled=lambda: cp)
+                )
+                with patch.object(
+                    attn_factory, "PREFILL_MLA_IMPS", [Sparse, _SafeAttentionImpl]
+                ):
+                    selected = attn_factory.get_mla_impl(
+                        self.attn_configs,
+                        self.weight,
+                        self.attn_inputs,
+                        parallelism_config=parallelism,
+                    )
+                self.assertIsInstance(selected, expected)
+                self.assertEqual(lengths.max.call_count, 0 if cp else 1)
+
 
 class AttnFactoryRegistryDispatchTest(unittest.TestCase):
     """Every registry entry must accept the dispatcher's positional call.
@@ -241,6 +282,34 @@ class AttnFactoryRegistryDispatchTest(unittest.TestCase):
                     f"registry entry {name!r} ({fn.__name__}) cannot bind the "
                     f"dispatcher's 9 positional arguments: {error}"
                 )
+
+
+class AttentionFactoryPrefillCpDecodeTest(unittest.TestCase):
+    def _select(self, is_prefill):
+        config = types.SimpleNamespace(
+            prefill_cp_config=types.SimpleNamespace(is_enabled=lambda: True)
+        )
+        configs = types.SimpleNamespace(
+            rope_config=types.SimpleNamespace(style=None),
+            need_rope_kv_cache=False,
+        )
+        inputs = types.SimpleNamespace(is_prefill=is_prefill)
+        registry = "PREFILL_MHA_IMPS" if is_prefill else "DECODE_MHA_IMPS"
+        with patch.object(attn_factory, registry, [_NoPrefillCpAttentionImpl]):
+            selected = attn_factory.get_fmha_impl(
+                configs, None, inputs, parallelism_config=config
+            )
+        return selected, config
+
+    def test_decode_with_prefill_cp_keeps_regular_tp_backend(self):
+        selected, config = self._select(is_prefill=False)
+        self.assertIsInstance(selected, _NoPrefillCpAttentionImpl)
+        self.assertIs(selected.parallelism_config, config)
+        self.assertTrue(config.prefill_cp_config.is_enabled())
+
+    def test_prefill_cp_still_rejects_backend_without_cp_support(self):
+        with self.assertRaisesRegex(Exception, "can not find mha type"):
+            self._select(is_prefill=True)
 
 
 if __name__ == "__main__":

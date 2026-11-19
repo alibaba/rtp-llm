@@ -21,7 +21,7 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     resolve_moe_max_tokens_per_rank,
     synchronized_moe_chunk_plan,
-    synchronized_moe_chunk_tokens,
+    synchronize_moe_chunk_tokens,
 )
 
 from .mega_moe import GLM5MegaMoE
@@ -292,9 +292,7 @@ class MegaMoeWrapper(nn.Module):
                 )
             return forward_fn(hidden_states, topk_weights, topk_ids)
 
-        chunk_tokens = synchronized_moe_chunk_tokens(
-            tokens, hidden_states.device, group=self.mega_moe._mega_group
-        )
+        chunk_tokens = synchronize_moe_chunk_tokens(tokens, hidden_states.device)
         if chunk_tokens <= capacity:
             return forward_fn(hidden_states, topk_weights, topk_ids)
 

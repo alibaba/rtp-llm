@@ -112,10 +112,26 @@ def validate_hw_kernel_group_args(
 
 
 def init_hw_kernel_group_args(parser, hw_kernel_config):
+    hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
+    hw_kernel_group.add_argument(
+        "--enable_dynamic_decode_backend",
+        env_name="ENABLE_DYNAMIC_DECODE_BACKEND",
+        bind_to=(hw_kernel_config, "enable_dynamic_decode_backend"),
+        type=str2bool,
+        default=False,
+        help="Validate and benchmark decode attention backends before graph capture",
+    )
+    hw_kernel_group.add_argument(
+        "--dyn_decode_gate_thresholds",
+        env_name="DYN_DECODE_GATE_THRESHOLDS",
+        bind_to=(hw_kernel_config, "dyn_decode_gate_thresholds"),
+        type=str,
+        default=None,
+        help="Complete inline JSON thresholds, parsed only when the dynamic decode gate runs",
+    )
     ##############################################################################################################
     # 硬件/Kernel 特定优化
     ##############################################################################################################
-    hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
 
     hw_kernel_group.add_argument(
         "--enable_cuda_graph",
@@ -227,6 +243,35 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
             "Buckets must not exceed CONCURRENCY_LIMIT and do not resize decode capacity. "
             "If unset, buckets are generated up to CONCURRENCY_LIMIT."
         ),
+    )
+
+    hw_kernel_group.add_argument(
+        "--enable_fuse_kernels",
+        env_name="ENABLE_FUSE_KERNELS",
+        bind_to=(hw_kernel_config, "enable_fuse_kernels"),
+        type=str2bool,
+        default=True,
+        help=(
+            "Enable optional MLA, Indexer and MLP fusion kernels. "
+            "Required layout kernels (strided slice and output BMM) remain enabled."
+        ),
+    )
+
+    hw_kernel_group.add_argument(
+        "--glm5_cp_opt",
+        env_name="GLM5_CP_OPT",
+        bind_to=(hw_kernel_config, "glm5_cp_opt"),
+        type=str2bool,
+        default=False,
+        help="Enable direct NCCL and packed GLM5 prefill gathers.",
+    )
+    hw_kernel_group.add_argument(
+        "--enable_glm5_cmp",
+        env_name="RTP_LLM_GLM5_CMP",
+        bind_to=(hw_kernel_config, "enable_glm5_cmp"),
+        type=str2bool,
+        default=False,
+        help="Enable GLM5 CMP when model and hardware support it.",
     )
 
 

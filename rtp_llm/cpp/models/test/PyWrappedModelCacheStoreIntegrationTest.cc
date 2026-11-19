@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
@@ -99,7 +100,14 @@ std::optional<MetricSnapshot> readMetric(kmonitor::MutableMetric* mutable_metric
 
 class FakeMetricsReporter {
 public:
-    FakeMetricsReporter(): reporter_(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{})) {}
+    FakeMetricsReporter(): reporter_(std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{})) {
+        startKmonServiceStatus(nullptr);
+        setKmonServiceServing(true);
+    }
+
+    ~FakeMetricsReporter() {
+        stopKmonServiceStatus();
+    }
 
     const kmonitor::MetricsReporterPtr& reporter() const {
         return reporter_;
@@ -142,7 +150,8 @@ public:
 
 private:
     void addMetric(py::dict& values, py::dict& types, kmonitor::MutableMetric* metric) const {
-        if (auto snapshot = readMetric(metric, reporter_->getTags()); snapshot.has_value()) {
+        if (auto snapshot = readMetric(metric, kmonTagsWithServiceStatus(&reporter_->getTags()));
+            snapshot.has_value()) {
             const auto name        = py::str(snapshot->name);
             values[name]           = snapshot->value;
             types[std::move(name)] = static_cast<unsigned int>(snapshot->type);
@@ -408,10 +417,10 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.cache_store_publish_start_tokens =
         pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
-    inputs.kv_cache_block_id   = pinnedTensor(block_ids,
-                                            {static_cast<int64_t>(group_tags.size()),
-                                             static_cast<int64_t>(batch_size),
-                                             static_cast<int64_t>(block_table_width)});
+    inputs.kv_cache_block_id        = pinnedTensor(block_ids,
+                                                   {static_cast<int64_t>(group_tags.size()),
+                                                    static_cast<int64_t>(batch_size),
+                                                    static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -626,17 +635,17 @@ Scenario makeMtpScenario() {
 
 Scenario makeScenario(const std::string& name) {
     if (name == "cyclic_chunk_views") {
-        auto config      = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
-        auto groups      = config.topology().groups();
-        groups[0].policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        auto full_spec                      = groups[1].spec->clone();
+        auto config                          = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
+        auto groups                          = config.topology().groups();
+        groups[0].policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        auto full_spec                       = groups[1].spec->clone();
         full_spec->kernel_seq_size_per_block = 1;
-        groups[1].spec                      = std::move(full_spec);
+        groups[1].spec                       = std::move(full_spec);
         config.setTopology(std::move(groups), {LayerBase{kLayerId, {"swa", "full"}}});
         auto layout = makeLayout(config);
         // Both chunk rows use cyclic execution banks, but only the final
         // SWA row exposes its owned tail blocks to cache-store publication.
-        auto inputs = makeInputs(/*input_lengths=*/{4, 4},
+        auto inputs                             = makeInputs(/*input_lengths=*/{4, 4},
                                  /*request_ids=*/{301, 302},
                                  /*cache_keys=*/{3101, 3102, 3103, 3104, 3201, 3202, 0, 0},
                                  /*cache_keys_width=*/4,
@@ -647,9 +656,8 @@ Scenario makeScenario(const std::string& name) {
                                  /*global_stride_bytes=*/24);
         inputs.prefix_lengths                   = pinnedTensor({4, 0}, {2});
         inputs.cache_store_publish_start_tokens = pinnedTensor({4, 0}, {2});
-        inputs.kv_cache_kernel_block_id = pinnedTensor(
-            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0,
-             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
+        inputs.kv_cache_kernel_block_id         = pinnedTensor(
+            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
@@ -769,6 +777,11 @@ Scenario makeScenario(const std::string& name) {
             torch::arange(rows * 2, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true)).reshape({rows, 2});
         scenario.inputs.need_all_logits        = false;
         scenario.inputs.need_all_hidden_states = false;
+        return scenario;
+    }
+    if (name == "prefill_only_pd_cache_store_disabled") {
+        auto scenario                 = makeMultiTagScenario();
+        scenario.inputs.pd_separation = true;
         return scenario;
     }
     if (name == "capture_bf16") {
@@ -1114,7 +1127,16 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
     std::vector<std::string>   deferred_capture_errors;
     forward_hidden_states.reserve(forward_count);
     {
-        PyWrappedModel                model(params, std::move(py_model));
+        const bool enable_cache_store =
+            scenario_name != "prefill_only_pd_cache_store_disabled";
+        PyWrappedModel model(params,
+                             std::move(py_model),
+                             /*is_prefill_cuda_graph_mode=*/false,
+                             /*use_spec_decoding=*/false,
+                             DSparkModelRole::NONE,
+                             /*allow_cuda_graph=*/true,
+                             /*track_cache_store_completion=*/false,
+                             enable_cache_store);
         TestContextParallelProcessor* test_cp_processor = nullptr;
         if (scenario.replace_cp_processor) {
             auto processor = std::make_unique<TestContextParallelProcessor>(

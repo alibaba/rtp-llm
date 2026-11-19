@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import check_flexlb_java as checks
 
@@ -57,7 +58,14 @@ class DocumentationGateTest(unittest.TestCase):
         self.assertEqual([], checks.documentation_errors(b"class Existing {}", []))
 
     def test_staged_method_edit_requires_existing_class_summary(self):
-        with tempfile.TemporaryDirectory() as folder:
+        git_environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        }
+        with mock.patch.dict(
+            os.environ, git_environment, clear=True
+        ), tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             path = root / "rtp_llm/flexlb/Example.java"

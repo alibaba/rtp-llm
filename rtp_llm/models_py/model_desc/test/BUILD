@@ -3,6 +3,33 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "dynamic_decode_gate_test",
+    srcs = ["dynamic_decode_gate_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cu12_9_or_13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "dynamic_decode_scheduler_test",
+    srcs = ["dynamic_decode_scheduler_test.py"],
+    main = "dynamic_decode_scheduler_test.py",
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cu12_9_or_13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",
@@ -173,4 +200,27 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "cp_mtp_hidden_handoff_test",
+    srcs = ["cp_mtp_hidden_handoff_test.py"],
+    data = ["//rtp_llm/models_py:model_desc/cp_mtp_hidden_handoff.py"],
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "glm5_fmha_dispatch_test",
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["glm5_fmha_dispatch_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+)
+
+py_test(
+    name = "glm5_mtp_indexer_state_test",
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["glm5_mtp_indexer_state_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
 )

@@ -19,6 +19,7 @@ and transparent to callers.
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
@@ -34,11 +35,8 @@ def _ieee_rn_div_f32(x, y):
     IEEE-RNE). This helper forces ``div.rn.f32`` via inline asm for callers
     that need byte-exact alignment with ``sgl_per_token_group_quant_fp8``.
 
-    NOTE: not used by the kernels in this file anymore — they switched to
-    the default approx-div + reciprocal-multiply path after empirical
-    verification that the 1 ULP difference is absorbed by UE8M0 power-of-2
-    rounding and E4M3 3-mantissa quant (bit-identical fp8/bf16/scale outputs,
-    ~20% wall-time savings). Kept here because other kernels still import it.
+    FP32 scales require exact division at E4M3 rounding boundaries. The
+    UE8M0 branch uses reciprocal multiplication with power-of-two scales.
     """
     return tl.inline_asm_elementwise(
         "div.rn.f32 $0, $1, $2;",
@@ -164,12 +162,13 @@ def _fused_add_rmsnorm_fp8_quant_singlepass_kernel(
             mask=pack_mask,
         )
     else:
-        s = absmax / fp8_max
+        # FP32 scales are not powers of two: approximate division can move
+        # exact E4M3 midpoints across the rounding boundary.
+        s = _ieee_rn_div_f32(absmax, tl.full(absmax.shape, fp8_max, tl.float32))
         s_bcast = tl.reshape(s, (num_groups, 1))
         s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
-        inv_s = 1.0 / s_full
         fp8_2d = tl.clamp(
-            normed_2d * inv_s,
+            _ieee_rn_div_f32(normed_2d, s_full),
             fp8_min,
             fp8_max,
         ).to(fp8_out_ptr.dtype.element_ty)
@@ -295,12 +294,13 @@ def _fused_add_rmsnorm_fp8_quant_dual_output_singlepass_kernel(
             mask=pack_mask,
         )
     else:
-        s = absmax / fp8_max
+        # FP32 scales are not powers of two: approximate division can move
+        # exact E4M3 midpoints across the rounding boundary.
+        s = _ieee_rn_div_f32(absmax, tl.full(absmax.shape, fp8_max, tl.float32))
         s_bcast = tl.reshape(s, (num_groups, 1))
         s_full = tl.broadcast_to(s_bcast, (num_groups, GROUP_SIZE))
-        inv_s = 1.0 / s_full
         fp8_2d = tl.clamp(
-            normed_2d * inv_s,
+            _ieee_rn_div_f32(normed_2d, s_full),
             fp8_min,
             fp8_max,
         ).to(fp8_out_ptr.dtype.element_ty)
@@ -333,6 +333,7 @@ def _baseline_add_rmsnorm_fp8_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H."""
     import flashinfer.norm
+
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     residual.add_(hidden_states)
@@ -357,6 +358,7 @@ def _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fallback: baseline CUDA kernels for H > MAX_INREG_H (dual output)."""
     import flashinfer.norm
+
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     residual.add_(hidden_states)
@@ -390,7 +392,7 @@ def fused_add_rmsnorm_fp8_quant_with_bf16_output(
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
-    if block_n > MAX_INREG_H:
+    if T > 0 and block_n > MAX_INREG_H:
         return _baseline_add_rmsnorm_fp8_quant_with_bf16_output(
             hidden_states, residual, weight, eps, group_size, scale_ue8m0
         )
@@ -462,7 +464,7 @@ def fused_add_rmsnorm_fp8_quant(
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = triton.next_power_of_2(H)
-    if block_n > MAX_INREG_H:
+    if T > 0 and block_n > MAX_INREG_H:
         return _baseline_add_rmsnorm_fp8_quant(
             hidden_states, residual, weight, eps, group_size, scale_ue8m0
         )

@@ -64,7 +64,9 @@ public:
 
     // Fair, all-or-nothing allocation; existing async waiters are never bypassed.
     // Invokes callback outside mutex_. A null result means expiration, cancellation, or an invalid request.
-    void requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback);
+    // Returns a nonzero waiter ID only when the request is queued.
+    size_t requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback);
+    void cancelBatchWaiter(size_t waiter_id);
 
     // Shutdown boundary: every queued waiter is notified even if another
     // waiter's callback throws, and no exception escapes a caller's destructor.
@@ -74,6 +76,7 @@ private:
     friend class HostStagingBlockLease;
 
     struct BatchWaiter {
+        size_t             id;
         size_t             count{0};
         Clock::time_point  deadline;
         BatchReadyCallback callback;
@@ -97,6 +100,7 @@ private:
     AlignedHostMemory       backing_;
     std::vector<size_t>     free_id_list_;
     std::deque<BatchWaiter> batch_waiters_;
+    size_t                  next_waiter_id_{1};
     std::mutex              mutex_;
 };
 

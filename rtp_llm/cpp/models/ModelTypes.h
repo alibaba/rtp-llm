@@ -25,12 +25,6 @@ namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
 
-enum class MtpIndexerRole : int32_t {
-    NORMAL = 0,
-    SEED   = 1,
-    REUSE  = 2,
-};
-
 /** Model-level container for stage-boundary tensors, independent of PP transport. */
 struct PPIntermediateTensors {
     std::map<std::string, torch::Tensor> tensors;
@@ -55,6 +49,12 @@ struct GptModelDescription {
     // description produced by Executor::genModelDescription so every model
     // construction path receives the same fail-closed eligibility inputs.
     MoeConfig moe_runtime_config;
+};
+
+enum class MtpIndexerRole : int32_t {
+    NORMAL = 0,
+    SEED   = 1,
+    REUSE  = 2,
 };
 
 struct GptModelInitParams {
@@ -279,6 +279,10 @@ public:
     // Prefill CP cannot recover the full target hidden sequence from its
     // last-hidden output, so initialization must know whether this rank-local
     // hand-off exists before admitting CPRR execution.
+    virtual void          loadMtpIndexerTopk(const torch::Tensor&) {}
+    virtual torch::Tensor snapshotMtpIndexerTopk(int64_t) {
+        return {};
+    }
     virtual bool hasMtpTargetHiddenBuffer() const {
         return false;
     }
@@ -288,11 +292,6 @@ public:
     // hidden buffer. Passing num_tokens < 0 asks the producer for its last
     // written row count.
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
-        return torch::Tensor();
-    }
-
-    virtual void          loadMtpIndexerTopk(const torch::Tensor& /*topk*/) {}
-    virtual torch::Tensor snapshotMtpIndexerTopk(int64_t /*batch_size*/) {
         return torch::Tensor();
     }
 

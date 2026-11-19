@@ -236,6 +236,7 @@ class TraceTelemetryLifecycleTest(TestCase):
             dash_sc_grpc_server_port=18096,
             ip="127.0.0.1",
             frontend_server_id="42",
+            monitor_interval=1,
         )
         app.py_env_configs = MagicMock()
         app.py_env_configs.generate_env_config.think_terminate_token_id = -1
@@ -269,6 +270,10 @@ class TraceTelemetryLifecycleTest(TestCase):
         ), patch.object(
             bg_app.kmonitor, "init"
         ), patch.object(
+            bg_app.kmonitor, "start_serving_when_ready"
+        ) as ready_metric, patch.object(
+            bg_app.kmonitor, "set_serving"
+        ), patch.object(
             bg_app, "_init_trace_telemetry"
         ) as init_trace, patch.object(
             bg_app, "_shutdown_trace_telemetry"
@@ -278,6 +283,7 @@ class TraceTelemetryLifecycleTest(TestCase):
         init_trace.assert_called_once_with()
         shutdown_trace.assert_called_once_with()
         app.stop.assert_called_once_with()
+        ready_metric.assert_called_once_with()
 
     def test_init_failure_is_fail_open(self) -> None:
         with patch.object(

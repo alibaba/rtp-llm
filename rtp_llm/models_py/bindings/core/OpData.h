@@ -112,13 +112,13 @@ struct GptModelInputs {
     bool need_all_hidden_states = false;
     bool skip_lm_head           = false;
     // PP batch contains only middle chunks; all TP ranks follow the same sampling/draft path.
-    bool is_middle_chunk_only  = false;
-    bool capture_hidden_states = false;
-    bool need_moe_gating       = false;
-    bool warmup                = false;
-    bool skip_run              = false;
-    bool shutdown              = false;
-    bool is_fake_stream        = false;
+    bool is_middle_chunk_only = false;
+    bool capture_hidden_states  = false;
+    bool need_moe_gating        = false;
+    bool warmup                 = false;
+    bool skip_run               = false;
+    bool shutdown               = false;
+    bool is_fake_stream         = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
@@ -128,14 +128,16 @@ struct GptModelInputs {
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;
+    // MTP draft model state extension after target verification. The outer
+    // input remains prefill-shaped (input_lengths + prefix_lengths), while
+    // MLA/Indexer must execute as flattened multi-token paged decode.
+    bool is_draft_extend = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
     // Logging-only full prefill sequences, including cached prefixes; aligned with request_id.
     std::optional<std::vector<torch::Tensor>> all_input_token_ids;
     std::optional<std::vector<bool>>          request_is_multimodal;
-    // Incremental draft commit uses decode-shaped sparse-indexer metadata.
-    bool is_draft_extend = false;
 
 public:
     std::string debugString(bool force = false) const;
@@ -148,6 +150,9 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Request-ordered GLM-5.2 MTP indexer seed. It stays on the draft
+    // device and is carried by GenerateStream between decode cycles.
+    torch::Tensor mtp_indexer_topk;
 
     std::vector<torch::Tensor> moe_gating;
 
@@ -168,8 +173,6 @@ struct GptModelOutputs {
 
     /** Downstream activations from a non-last target stage. */
     std::map<std::string, torch::Tensor> pp_intermediates;
-    // Request-ordered, expanded raw-token indexer seed for the next MTP round.
-    torch::Tensor mtp_indexer_topk;
 };
 
 struct CopyParams {

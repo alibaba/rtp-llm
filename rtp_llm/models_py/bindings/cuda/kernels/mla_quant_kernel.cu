@@ -156,8 +156,10 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
     const int     token_idx = blockIdx.x * blockDim.y + threadIdx.y;
     const int     head_idx  = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
 
-    // Find batch index within a block
+    // CUDA graph replay may reuse a graph captured with a larger dst_k capacity
+    // than the current cu_seq_lens. Leave unmatched capacity rows idle.
     __shared__ int batch_idx[BLOCK_Y_SIZE];
+    batch_idx[threadIdx.y] = -1;
     for (int iter = 0; iter < (batch_size + blockDim.x - 1) / blockDim.x; iter++) {
         int tid = iter * blockDim.x + threadIdx.x;
         if (tid < batch_size) {
@@ -172,7 +174,8 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
     __syncwarp();
 
     // CUDA Graph outputs can have spare capacity beyond the live batch lengths.
-    if (head_idx >= head_dim || token_idx >= num_tokens || token_idx >= cu_seq_lens[batch_size]) {
+    if (head_idx >= head_dim || token_idx >= num_tokens || token_idx >= cu_seq_lens[batch_size]
+        || batch_idx[threadIdx.y] < 0) {
         return;
     }
     const int     inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx[threadIdx.y]];
@@ -211,6 +214,20 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
                                int64_t            quant_block_size,  // quantization block size
                                const std::string& scale_fmt) {
 
+    TORCH_CHECK(k.dim() == 2, "indexer_k_quant_and_cache: k must be 2-D [num_tokens, head_dim], got dim ", k.dim());
+    TORCH_CHECK(k.is_contiguous(), "indexer_k_quant_and_cache: k must be contiguous");
+    TORCH_CHECK(kv_cache.dim() == 3,
+                "indexer_k_quant_and_cache: kv_cache must be 3-D [num_blocks, block_size, cache_stride], got dim ",
+                kv_cache.dim());
+    TORCH_CHECK(kv_cache.is_contiguous(), "indexer_k_quant_and_cache: kv_cache must be contiguous");
+    TORCH_CHECK(slot_mapping.defined(), "indexer_k_quant_and_cache: slot_mapping is undefined");
+    TORCH_CHECK(slot_mapping.dim() == 1,
+                "indexer_k_quant_and_cache: slot_mapping must be 1-D [num_tokens], got dim ",
+                slot_mapping.dim());
+    TORCH_CHECK(slot_mapping.scalar_type() == torch::kInt64, "indexer_k_quant_and_cache: slot_mapping must be int64");
+    TORCH_CHECK(slot_mapping.is_contiguous(), "indexer_k_quant_and_cache: slot_mapping must be contiguous");
+    TORCH_CHECK(quant_block_size > 0, "indexer_k_quant_and_cache: quant_block_size must be positive");
+
     int  num_tokens       = k.size(0);
     int  head_dim         = k.size(1);
     int  cache_block_size = kv_cache.size(1);
@@ -220,7 +237,27 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
     // Validation checks
     TORCH_CHECK(k.device() == kv_cache.device(), "k and kv_cache must be on the same device");
     TORCH_CHECK(k.device() == slot_mapping.device(), "k and slot_mapping must be on the same device");
+    TORCH_CHECK(k.scalar_type() == torch::kBFloat16, "indexer_k_quant_and_cache: k must be bfloat16");
+    TORCH_CHECK(kv_cache.scalar_type() == torch::kUInt8, "indexer_k_quant_and_cache: kv_cache must be uint8");
+    TORCH_CHECK(kv_cache.size(0) > 0, "indexer_k_quant_and_cache: kv_cache must have at least one block");
+    TORCH_CHECK(cache_block_size > 0, "indexer_k_quant_and_cache: cache block size must be positive");
+    TORCH_CHECK(cache_stride > 0, "indexer_k_quant_and_cache: cache stride must be positive");
+    TORCH_CHECK(slot_mapping.size(0) >= num_tokens,
+                "indexer_k_quant_and_cache: slot_mapping size ",
+                slot_mapping.size(0),
+                " is smaller than k num_tokens ",
+                num_tokens);
     TORCH_CHECK(head_dim % quant_block_size == 0, "head_dim must be divisible by quant_block_size");
+    TORCH_CHECK(cache_stride >= head_dim + head_dim / quant_block_size * 4,
+                "indexer_k_quant_and_cache: cache_stride ",
+                cache_stride,
+                " is too small for head_dim ",
+                head_dim,
+                " and quant_block_size ",
+                quant_block_size);
+    if (num_tokens == 0) {
+        return;
+    }
 
     constexpr int vec_size = 4;
     dim3          grid(num_tokens, (head_dim + quant_block_size * vec_size - 1) / (quant_block_size * vec_size));

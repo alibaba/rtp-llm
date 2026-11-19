@@ -27,7 +27,6 @@ private:
     torch::Tensor topk_indices_offset_d_;
     torch::Tensor ks_d_;
     torch::Tensor ke_d_;
-    int           multi_token_decode_total_tokens_ = 0;
 
     void ensureTensorSize(int batch_size, int token_num, bool forbid_realloc = false);
     void fillParamsInternal(bool                 is_prefill,
@@ -65,28 +64,44 @@ private:
     void refreshCpBuffer(int kv_restore_count, int total_ids_count, int batch_size);
 
 public:
+    int  multi_token_decode_total_tokens_ = 0;
+    int  prefill_tokens_per_batch_        = 0;
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
     void fillMultiTokenDecodeParams(torch::Tensor input_lengths,
                                     torch::Tensor prefix_lengths,
                                     torch::Tensor block_table,
                                     int           seq_size_per_block,
                                     int           total_tokens);
-    void fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths,
-                                             torch::Tensor prefix_lengths,
-                                             torch::Tensor block_table,
+    void fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
+                                             torch::Tensor prefix_lengths_d,
+                                             torch::Tensor kv_cache_block_id_device,
                                              int           seq_size_per_block);
-    int  multiTokenDecodeTotalTokens() const {
-        return multi_token_decode_total_tokens_;
+    // Compatibility alias for existing target-verify callers/tests.
+    void fillTargetVerifyCudaGraphParams(torch::Tensor input_lengths_d,
+                                         torch::Tensor prefix_lengths_d,
+                                         torch::Tensor kv_cache_block_id_device,
+                                         int           seq_size_per_block) {
+        fillMultiTokenDecodeCudaGraphParams(
+            input_lengths_d, prefix_lengths_d, kv_cache_block_id_device, seq_size_per_block);
     }
+    // Decode CUDA graph fast path for SparseMla (draft model). Delegates the
+    // base-class metadata to fillDecodeCudaGraphParams and matches the decode
+    // branch of fillParams (empty ks/ke/topk_indices_offset; expanded_seq_lens
+    // reuses kvlen_d). Avoids the 3 toHostContiguousI32 D2H syncs in fillParams.
     void fillSparseMlaDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                             torch::Tensor kv_cache_block_id_device,
                                             int           seq_size_per_block);
 
-    // SparseMlaParams-specific outputs (5 parameters)
+    // SparseMlaParams-specific ragged indexer metadata.
     torch::Tensor expanded_seq_lens;
     torch::Tensor topk_indices_offset;
     torch::Tensor ks;
     torch::Tensor ke;
+
+    // Maximum request-local KV length. This is prepared from the existing CPU
+    // length metadata and lets ragged kernels choose Register vs Streaming
+    // without a device-to-host reduction.
+    int64_t prefill_max_kv_len = 0;
 
     // schedule_metadata for deep_gemm
     torch::Tensor schedule_metadata;

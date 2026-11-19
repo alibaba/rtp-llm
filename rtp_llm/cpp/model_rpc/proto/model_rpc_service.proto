@@ -167,6 +167,7 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    bool frontend_metric_streaming = 77;
 }
 
 message MMPreprocessConfigPB {
@@ -387,6 +388,24 @@ message GenerateOutputsPB {
     RpcErrorPB error_info = 9;
     // Advertised only by the Decode ALLOCATE response.
     bool supports_prefill_completion = 10;
+    bool frontend_metric_only = 11;
+    google.protobuf.Int64Value frontend_generate_token_num = 12;
+    google.protobuf.Int64Value frontend_context_token_num = 13;
+    google.protobuf.Int64Value frontend_context_token_num_with_cache = 14;
+    google.protobuf.Int64Value frontend_context_execute_time_us = 15;
+    google.protobuf.Int64Value frontend_context_execute_time_with_cache_us = 16;
+    google.protobuf.Int64Value frontend_generate_execute_time_us = 17;
+    google.protobuf.Int64Value frontend_input_len = 18;
+    google.protobuf.Int64Value frontend_output_len = 19;
+    google.protobuf.Int64Value frontend_speculative_verify_rounds = 20;
+    google.protobuf.Int64Value frontend_speculative_accepted_token_num = 21;
+    google.protobuf.Int64Value frontend_speculative_proposed_draft_tokens = 22;
+    repeated FrontendSpTpotSamplePB frontend_sp_tpot_samples = 23;
+}
+
+message FrontendSpTpotSamplePB {
+    uint64 sequence_id = 1;
+    double tpot_us = 2;
 }
 
 // return to python client
@@ -426,6 +445,16 @@ enum ErrorCodePB {
     EXECUTION_EXCEPTION = 27;
     // Added on main after the feature branch froze its wire enum at 26.
     LOAD_KV_CACHE_FAILED = 28;
+    GENERATE_TIMEOUT = 603;
+    GET_CONNECTION_FAILED = 8201;
+    RPC_FINISH_FAILED = 8210;
+    P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED = 8326;
+    P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED = 8327;
+    P2P_CONNECTOR_TRANSFER_RPC_FAILED = 8328;
+    P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED = 8329;
+    P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED = 8330;
+    P2P_CONNECTOR_TRANSFER_COPY_FAILED = 8331;
+    P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED = 8332;
 }
 
 // transfer between prefill and decode
@@ -893,10 +922,9 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
-    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill).
-    int32 remote_tp_size = 8;
-    reserved 10;
-    reserved "allow_empty_projection";
+    // The transfer plan supplies explicit routes. Empty routes mean no work.
+    reserved 8, 10;
+    reserved "remote_tp_size", "allow_empty_projection";
     // Original user-request deadline. deadline_ms remains the physical
     // transfer deadline used by this broadcast and its worker operation.
     int64 request_deadline_ms = 9;
@@ -916,6 +944,8 @@ message P2PConnectorBroadcastTpRequestPB {
     // CANCEL_READ only: remaining request lifetime for an early-cancel fence.
     // This is a retention budget, never evidence that a physical read has stopped.
     int64 cancel_retention_ms = 14;
+    // Per-send transport budget. Zero uses the legacy worker deadline.
+    int64 communication_timeout_ms = 15;
 }
 
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
@@ -950,7 +980,9 @@ message LeaseStatusResponsePB {
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
-    int64 deadline_ms = 3;
+    // Per-send communication budget when handoff_timeout_ms is present.
+    // Legacy peers interpret this as the entire StartLoad budget.
+    int64 timeout_ms = 3;
     // Decode already has all matched KV blocks locally. Prefill should still
     // complete the StartLoad lifecycle and return side-channel data, but must
     // not dispatch a data transfer.
@@ -965,6 +997,10 @@ message P2PConnectorStartLoadRequestPB {
     // this request's concrete key range. Prefill uses the same ids to avoid
     // dispatching routes whose key set is empty for short/windowed requests.
     repeated int32 active_route_ids = 7;
+    // Remaining Decode request lifetime at submission, relative to the receiver clock.
+    int64 handoff_timeout_ms = 8;
+    // Decode TP width. The worker list can also include other pipeline stages.
+    int32 decode_tp_size = 9;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode

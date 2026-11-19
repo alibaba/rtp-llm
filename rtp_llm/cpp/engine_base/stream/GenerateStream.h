@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/engine_base/stream/FrontendMetricsStep.h"
 
 #include "absl/status/statusor.h"
 #include "autil/TimeUtility.h"
@@ -168,6 +169,13 @@ public:
     // A positive wait_timeout_ms bounds only the consumer condition-variable
     // wait. Zero waits without a caller interval; a request deadline, when
     // configured, remains authoritative.
+    virtual bool beginFrontendMetricsStep() {
+        return false;
+    }
+    virtual void endFrontendMetricsStep() {}
+    virtual bool publishFrontendMetrics(const FrontendMetricUpdate&) {
+        return false;
+    }
     virtual ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) = 0;
     // RPC consumers can serialize a compact terminal result without materializing
     // per-beam tensors. Other stream implementations retain their existing path.
@@ -326,8 +334,16 @@ public:
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
-    void step();
-    void spStep();
+    void    step();
+    void    spStep();
+    void    addFrontendContextExecuteMetrics(int64_t execute_time_us,
+                                             int64_t context_token_num,
+                                             int64_t context_token_num_with_cache);
+    void    addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num);
+    int64_t frontendContextTokenNum() const;
+    int64_t frontendContextTokenNumWithCache() const;
+    int64_t frontendContextExecuteTimeUs() const;
+    int64_t frontendContextExecuteTimeWithCacheUs() const;
 
     // Raw multimodal accessors — return the full per-image vectors/tensor unfiltered.
     // Stream is a pure data holder; NormalModelInputGatherer omits fully reused images
@@ -688,6 +704,7 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
+        torch::Tensor mtp_indexer_topk_gpu;
         // Upper bound for the sequence length represented by the previous
         // round. It equals host seqLength when no worker is pending; otherwise
         // it chains from the prior published bound so multiple overlapped
@@ -699,8 +716,7 @@ public:
         // monotonically while workers overlap and resets to exact host state
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
-        int           next_seq_len_upper_bound = -1;
-        torch::Tensor mtp_indexer_topk_gpu;
+        int next_seq_len_upper_bound = -1;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -935,8 +951,11 @@ protected:
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
     void                     updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices);
     std::optional<ErrorInfo> validateLogitsProcessorState();
+    void                     markSubGenerateFinished(size_t batch_id);
     void                     fillSubGenerateStatus(StreamState state);
     void                     resizeSubGenerateStatus(size_t new_size);
+
+    int64_t subGenerateOutputLength(size_t batch_id) const;
 
     void reportStreamMetrics();
     void reportMetricOnce();
@@ -947,6 +966,15 @@ protected:
     std::shared_ptr<GenerateStateMachine> generate_status_;
     std::atomic<size_t>                   pp_inflight_{0};
     std::vector<StreamState>              sub_generate_status_;
+    std::vector<int64_t>                  sub_generate_output_lengths_;
+    int64_t                               frontend_context_token_num_                  = 0;
+    int64_t                               frontend_context_token_num_with_cache_       = 0;
+    int64_t                               frontend_context_execute_time_us_            = 0;
+    int64_t                               frontend_context_execute_time_with_cache_us_ = 0;
+    int64_t                               frontend_generate_token_num_                 = 0;
+    int64_t                               frontend_generate_execute_time_us_           = 0;
+    size_t                                last_frontend_metric_output_pos_             = 0;
+    int64_t                               speculative_proposed_draft_tokens_           = 0;
     int                                   max_seq_len_;
     int64_t                               vocab_size_;
     size_t                                output_vocab_size_;

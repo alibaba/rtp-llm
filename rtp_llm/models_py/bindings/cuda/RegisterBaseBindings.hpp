@@ -254,13 +254,14 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("max_seq_len"));
     rtp_ops_m.def("topk_v3_tie_break",
                   &topk_v3_tie_break,
-                  "GLM-5.3 stable ragged radix-select TopK",
+                  "GLM5 prefill stable ragged radix-select TopK",
                   py::arg("scores"),
                   py::arg("row_starts"),
                   py::arg("row_ends"),
                   py::arg("output"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+
 #endif  // !USE_PPU
 
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).

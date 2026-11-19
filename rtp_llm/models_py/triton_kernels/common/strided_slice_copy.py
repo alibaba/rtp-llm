@@ -79,7 +79,8 @@ def strided_slice_copy_(
         - both src and dst must be 3-D bf16/fp16/fp32
         - src last dim must be contiguous (stride[-1] == 1) — middle dim can be strided
         - dst last dim must be contiguous (stride[-1] == 1)
-        - both must satisfy ``stride(0) == H * stride(1)`` (flat-row trick)
+        - the Triton path requires ``stride(0) == H * stride(1)``; other
+          row layouts use PyTorch copy
 
     NOTE: src does NOT need to be ``.contiguous()`` — the kernel reads via
     ``stride(1)``. This is the whole point: callers like
@@ -100,13 +101,9 @@ def strided_slice_copy_(
     # The flattening (t, h) -> i = t*H + h must respect each tensor's strides.
     # For a tensor with stride(0) == H * stride(1), the flat-row index walks
     # via stride(1) for both h++ within a token AND t++ at h=0 boundary.
-    assert src.stride(0) == H * src.stride(1), (
-        f"src must have stride(0) == H * stride(1) (got {src.stride()}), "
-        "i.e. T axis contiguous in per-head blocks"
-    )
-    assert dst.stride(0) == H * dst.stride(
-        1
-    ), f"dst must have stride(0) == H * stride(1) (got {dst.stride()})"
+    if src.stride(0) != H * src.stride(1) or dst.stride(0) != H * dst.stride(1):
+        dst[:, :, dst_col_offset : dst_col_offset + R].copy_(src)
+        return
 
     # In CUDA Graph mode (the production decode path), Triton wins for all T:
     # bench shows 1.06x-3.83x across T=1..2048. In pure eager mode (no graph)

@@ -2,22 +2,18 @@
 
 Targets the DeepSeek-V3.2 MLA path where ``torch.split(fused_qkv, ...)``
 produces strided (non-contiguous) views that today need an extra
-``.contiguous()`` copy before RMSNorm. Three flavors are exposed:
+``.contiguous()`` copy before RMSNorm. Two flavors are exposed:
 
   - ``fused_strided_rmsnorm``                : bf16 normed output
                                                (replaces F2 = compressed_kv path
                                                and F1a = q-path when q_b_proj/wq_b
                                                are bf16).
-  - ``fused_strided_rmsnorm_per_token_fp8_quant`` : fp8 + scale only
-                                               (F1b single-output: when both
-                                               q_b_proj and wq_b are fp8 and
-                                               share scale_ue8m0).
   - ``fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output``: bf16 + fp8 + scale
                                                (F1b dual-output: when one
                                                consumer wants bf16 (e.g. RoPE)
                                                and the other wants fp8).
 
-All three accept a strided 2-D input (``stride_x_t = x.stride(0)``) so the
+Both accept a strided 2-D input (``stride_x_t = x.stride(0)``) so the
 caller can pass a slice from ``torch.split`` directly without forcing
 ``.contiguous()``.
 
@@ -40,9 +36,11 @@ contention noise, not a real loss zone.
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
+
 from rtp_llm.models_py.triton_kernels.common.host_math import next_power_of_2
 
 MAX_INREG_H = 8192
@@ -236,6 +234,7 @@ def _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
     scale_ue8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import flashinfer.norm
+
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     bf16_out = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
@@ -260,7 +259,7 @@ def fused_strided_rmsnorm(
     weight: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """RMSNorm over a (possibly strided) 2-D input. Returns bf16 normed output.
+    """RMSNorm over a (possibly strided) 2-D input, preserving its dtype.
 
     Args:
         x:      [T, H] strided OK. ``x.stride(0)`` is read inside the kernel.
@@ -269,22 +268,23 @@ def fused_strided_rmsnorm(
         eps:    RMSNorm epsilon.
 
     Returns:
-        bf16 normed output, contiguous shape ``[T, H]``.
+        Normed output with input dtype, contiguous shape ``[T, H]``.
 
     Falls back to ``.contiguous() + flashinfer.norm.rmsnorm`` for ``H > 8192``
-    or when ``x.stride(-1) != 1``.
+    or when ``x.stride(-1) != 1`` or the input is not bf16.
     """
     assert x.dim() == 2
     assert weight.dim() == 1 and weight.shape[0] == x.shape[1]
     T, H = x.shape
 
+    if T == 0:
+        return torch.empty((T, H), dtype=x.dtype, device=x.device)
+
     block_n = next_power_of_2(H)
-    if block_n > MAX_INREG_H or x.stride(-1) != 1:
+    if x.dtype != torch.bfloat16 or block_n > MAX_INREG_H or x.stride(-1) != 1:
         return _baseline_strided_rmsnorm(x, weight, eps)
 
     bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)
-    if T == 0:
-        return bf16_out
 
     finfo = torch.finfo(torch.float8_e4m3fn)
     fp8_max = finfo.max
@@ -408,7 +408,7 @@ def fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
         assert (H // group_size) % 4 == 0, "UE8M0 requires num_groups divisible by 4"
 
     block_n = next_power_of_2(H)
-    if block_n > MAX_INREG_H or x.stride(-1) != 1:
+    if T > 0 and (block_n > MAX_INREG_H or x.stride(-1) != 1):
         return _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
             x, weight, eps, group_size, scale_ue8m0
         )

@@ -1,10 +1,11 @@
+import inspect
 import json
 import logging
 import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple, Union
 
 import torch
 from tqdm.auto import tqdm
@@ -15,10 +16,8 @@ from rtp_llm.utils.ckpt_file_info import CkptFileInfo, CkptMetaCache, FinetuneTy
 
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks|layer)\.(\d+)\.")
 
-# Parsed model.safetensors.index.json cache: every CkptDatabase construction
-# reads the index up to three times (load_hf_meta / _parse_weight_style /
-# _parse_ft_weight_params); with target + eplb + draft databases on the same
-# checkpoint directory that is up to a dozen cold reads per model load.
+# Share the parsed model.safetensors.index.json across target, EPLB and
+# draft databases that use the same checkpoint directory.
 _INDEX_CACHE = CkptMetaCache()
 
 _HF_INDEX_NAME = "model.safetensors.index.json"
@@ -89,6 +88,7 @@ class CkptDatabase(BaseDatabase):
         ptuning_path: Optional[str] = None,
         recycle_handles: bool = False,
     ) -> None:
+        self.path: Optional[str] = path
 
         if path is None:
             return
@@ -105,26 +105,37 @@ class CkptDatabase(BaseDatabase):
         if os.path.isfile(path):
             raise Exception(f"CkptDatabase needs directory contains checkpoint files")
 
-        self.load_hf_meta(path)
+        hf_index = self.load_hf_meta(path)
         self._recycle_handles = self._recycle_handles and self.is_safetensor
 
         self.load_ptuning_meta(ptuning_path)
 
-        self._is_ft_style: bool = self._parse_weight_style(path)
+        self._is_ft_style: bool = False
+        self._ft_weight_params = None
+        if path and hf_index is not None:
+            logging.info(
+                "read weight style from: %s", os.path.join(path, _HF_INDEX_NAME)
+            )
+            self._is_ft_style = hf_index.get("is_ft_style_weight", False)
+            if self._is_ft_style:
+                self._ft_weight_params = hf_index.get("__env__params__")
+        del hf_index
 
-        self._ft_weight_params = (
-            self._parse_ft_weight_params(path) if self._is_ft_style else None
-        )
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(
+                "CkptDatabase all tensor names = %s",
+                self.get_pretrain_tensor_names(),
+            )
 
         for ckpt_file in self.pretrain_file_list:
-            for tname in ckpt_file.metadata.keys():
+            for tname in ckpt_file.get_tensor_names():
                 self._tensor_index[tname] = ckpt_file
                 if self._recycle_handles and (match := _LAYER_RE.search(tname)):
                     self._file_max_layer[ckpt_file] = max(
                         self._file_max_layer.get(ckpt_file, -1), int(match.group(1))
                     )
         for ckpt_file in self.finetune_file_list:
-            for tname in ckpt_file.metadata.keys():
+            for tname in ckpt_file.get_tensor_names():
                 self._tensor_index[tname] = ckpt_file
 
         # Lazy formatting: the previous f-string built the full tensor-name
@@ -210,19 +221,28 @@ class CkptDatabase(BaseDatabase):
             return
 
         self.pretrain_file_list = filtered_file_list
+        # Keep _tensor_index complete. pretrain_file_list limits the shards fed
+        # to the bulk AutoLoader, while late-bound/misc weights may still use
+        # load_tensor() as a targeted fallback from a filtered-out shard.
         logging.info(
             f"filter_by_tensor_name_regexes: {original_count} -> {len(self.pretrain_file_list)} files"
         )
 
-    def load_hf_meta(self, path: str):
+    def load_hf_meta(self, path: str) -> Optional[Dict[str, Any]]:
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
-        meta_json = _read_hf_index(path)
-        if meta_json is not None:
-            files = set(meta_json["weight_map"].values())
-            for f in files:
-                ckpt = CkptFileInfo(file_name=os.path.join(path, f))
+        hf_index = _read_hf_index(path)
+        if hf_index is not None:
+            weight_map = hf_index["weight_map"]
+            shard_to_tensor_names: Dict[str, List[str]] = {}
+            for tensor_name, shard_name in weight_map.items():
+                shard_to_tensor_names.setdefault(shard_name, []).append(tensor_name)
+            for shard_name, tensor_names in shard_to_tensor_names.items():
+                ckpt = CkptFileInfo(
+                    file_name=os.path.join(path, shard_name),
+                    tensor_names=tensor_names,
+                )
                 self.pretrain_file_list.append(ckpt)
-            return
+            return hf_index
 
         # standard HF
         patterns = ["*.safetensors", "*.bin", "*.pth", "*.pt"]
@@ -241,6 +261,7 @@ class CkptDatabase(BaseDatabase):
                         ckpt = CkptFileInfo(file_name=str(f))
                         self.pretrain_file_list.append(ckpt)
                 break
+        return None
 
     def load_ptuning_meta(self, ptuning_path: Optional[str]):
         if ptuning_path is None or not os.path.exists(ptuning_path):
@@ -294,7 +315,10 @@ class CkptDatabase(BaseDatabase):
         return name in self._tensor_index
 
     def get_tensor_type(self, name: str) -> torch.dtype:
-        return self.pretrain_file_list[0].get_tensor_type(name)
+        ckpt_file = self._tensor_index.get(name)
+        if ckpt_file is None:
+            raise KeyError(f"Tensor '{name}' not found in checkpoint")
+        return ckpt_file.get_tensor_type(name)
 
     def get_tensor_order(self, name: str) -> List[int]:
         orders = []
@@ -340,17 +364,14 @@ class CkptDatabase(BaseDatabase):
                         res[k].append(v)
         return res
 
-    def fastsafetensors_weights_iterator(
+    def _legacy_fastsafetensors_weights_iterator(
         self,
         device: str,
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
-
-        from rtp_llm.model_loader.per_expert_parallel_loader import (
-            PerExpertParallelLoader,
-        )
+        from fastsafetensors.parallel_loader import PipelineParallel
 
         def iterator(device: str, use_tqdm_on_load: bool):
             if torch.distributed.is_initialized():
@@ -380,16 +401,134 @@ class CkptDatabase(BaseDatabase):
                 use_shm=not use_nogds,
                 nogds=use_nogds,
             )
-            if stacked_key_config:
+            native_split = (
+                "split_large_tensors_before_broadcast"
+                in inspect.signature(PipelineParallel.__init__).parameters
+            )
+            if stacked_key_config and native_split:
+                # New wheels own ordered batches and expert broadcasts. Do not
+                # override their consumer with the legacy queue implementation.
+                loader = ParallelLoader(
+                    split_large_tensors_before_broadcast=stacked_key_config,
+                    **loader_kwargs,
+                )
+            elif stacked_key_config:
+                from rtp_llm.model_loader.per_expert_parallel_loader import (
+                    PerExpertParallelLoader,
+                )
+
                 loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
             else:
                 loader = ParallelLoader(**loader_kwargs)
             try:
                 yield from loader.iterate_weights()
             finally:
-                loader.loader.close()
+                if native_split:
+                    loader.close()
+                else:
+                    loader.loader.close()
 
         return iterator(device, use_tqdm_on_load)
+
+    def _fastsafetensors_read_filter(self, local_filter, stacked_key_config, pg):
+        if local_filter is None:
+            return None
+        names = sorted(
+            {
+                name
+                for shard in self.pretrain_file_list
+                for name in shard.get_tensor_names()
+            }
+        )
+        # Stacked checkpoint keys expand into per-expert names only after the
+        # read. Keep their source tensors when a requested weight uses them.
+        stacked_keys = stacked_key_config or {}
+        needed = [name in stacked_keys or local_filter(name) for name in names]
+        if names and torch.distributed.is_initialized():
+            # Read/broadcast plans must agree even when EP ranks need disjoint
+            # experts. Rank-local filtering alone happens after GPU staging and
+            # can OOM while loading a tiny draft from otherwise large shards.
+            mask_device = (
+                torch.device("cuda", torch.cuda.current_device())
+                if torch.distributed.get_backend(pg) == "nccl"
+                else torch.device("cpu")
+            )
+            mask = torch.tensor(needed, dtype=torch.uint8, device=mask_device)
+            torch.distributed.all_reduce(
+                mask, op=torch.distributed.ReduceOp.MAX, group=pg
+            )
+            needed = mask.tolist()
+        shared_names = {name for name, keep in zip(names, needed) if keep}
+        return shared_names.__contains__
+
+    def fastsafetensors_weights_iterator(
+        self,
+        device: str,
+        use_tqdm_on_load: bool,
+        stacked_key_config: Optional[Dict[str, str]] = None,
+        local_copyout_filter: Optional[Callable[[str], bool]] = None,
+    ):
+        if os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1":
+            return self._legacy_fastsafetensors_weights_iterator(
+                device, use_tqdm_on_load, stacked_key_config
+            )
+        try:
+            from fastsafetensors import AutoLoader, SingleGroup
+        except ImportError:
+            # Older platform wheels keep ParallelLoader's ABI. The consumer
+            # still fans out each tensor to every registered weight collector.
+            return self._legacy_fastsafetensors_weights_iterator(
+                device, use_tqdm_on_load, stacked_key_config
+            )
+
+        # Progress and buffering are configured by the pinned wrapper.
+        del use_tqdm_on_load
+
+        def iterator(device: str):
+            if torch.distributed.is_initialized():
+                pg = torch.distributed.group.WORLD
+            else:
+                pg = SingleGroup()
+
+            hf_weights_files = sorted(
+                [file.file_name for file in self.pretrain_file_list]
+            )
+            if device == "cuda":
+                device = f"cuda:{pg.rank()}"
+                logging.debug(f"origin device is cuda, set to {device}")
+
+            # Keep staging allocations bounded, including direct database users.
+            from rtp_llm.utils.fastsafetensors_config import (
+                ensure_fastsafetensors_configured,
+            )
+
+            ensure_fastsafetensors_configured()
+
+            loader = AutoLoader(
+                pg,
+                hf_weights_files,
+                device=device,
+                tensor_filter=self._fastsafetensors_read_filter(
+                    local_copyout_filter, stacked_key_config, pg
+                ),
+                local_copyout_filter=local_copyout_filter,
+                stacked_moe_tensors=stacked_key_config,
+            )
+            try:
+                yield from loader.iterate_weights()
+            except BaseException:
+                try:
+                    loader.close()
+                except BaseException:
+                    logging.warning(
+                        "FastSafeTensors close failed while preserving active error",
+                        exc_info=True,
+                    )
+                raise
+            else:
+                loader.close()
+
+        return iterator(device)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
         return self.lora_ckpt.get_lora_tensor_names(config_name)
@@ -416,16 +555,3 @@ class CkptDatabase(BaseDatabase):
 
     def dump_lora_info(self) -> None:
         self.lora_ckpt.dump_lora_info()
-
-    def _parse_weight_style(self, ckpt_path: str):
-        meta_json = _read_hf_index(ckpt_path) if ckpt_path else None
-        if meta_json is not None:
-            logging.info(f"read weight style from: {os.path.join(ckpt_path, _HF_INDEX_NAME)}")
-            return meta_json.get("is_ft_style_weight", False)
-        return False
-
-    def _parse_ft_weight_params(self, ckpt_path: str):
-        meta_json = _read_hf_index(ckpt_path)
-        if meta_json is None:
-            return None
-        return meta_json.get("__env__params__", None)

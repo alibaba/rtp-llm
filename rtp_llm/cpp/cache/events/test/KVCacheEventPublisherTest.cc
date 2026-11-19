@@ -374,6 +374,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
     EXPECT_EQ("/api/registerInstance", requests.front().route);
     EXPECT_NE(std::string::npos, requests.front().body.find("rtp_llm_hbm_64"));
     EXPECT_NE(std::string::npos, requests.front().body.find("location_spec_groups"));
+    EXPECT_NE(std::string::npos, requests.front().body.find("\"disable_write_session\":true"));
     EXPECT_EQ(1, countOccurrences(requests.front().body, "\"dtype\""));
 
     bool   saw_node_register = false;
@@ -426,6 +427,15 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromRegistrationFailure) {
     ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", kAsyncTestTimeout));
     EXPECT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
     publisher.stop();
+
+    size_t register_count = 0;
+    for (const RecordingReporter::Request& request : reporter->requests()) {
+        if (request.route == "/api/registerInstance") {
+            ++register_count;
+            EXPECT_NE(std::string::npos, request.body.find("\"disable_write_session\":true"));
+        }
+    }
+    EXPECT_GE(register_count, 2);
 }
 
 TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromSnapshotProviderFailure) {

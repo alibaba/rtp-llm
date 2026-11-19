@@ -262,6 +262,20 @@ TEST_F(ModelDataTest, testShapeHintsCarryTpControlPlaneAndCacheGeometry) {
     EXPECT_TRUE(has(GptModelInputControlFlag::kControlMiddleChunkOnly));
 }
 
+TEST_F(ModelDataTest, testDraftExtendAndMiddleChunkFlagsAreIndependent) {
+    for (const bool draft_extend : {false, true}) {
+        for (const bool middle_chunk : {false, true}) {
+            GptModelInputs inputs;
+            inputs.is_draft_extend      = draft_extend;
+            inputs.is_middle_chunk_only = middle_chunk;
+            const auto hints            = getModelInputShapeHints(inputs);
+            const auto flags            = static_cast<uint32_t>(hints[GptModelInputIndex::modelControlFlags]);
+            EXPECT_EQ((flags & GptModelInputControlFlag::kControlDraftExtend) != 0, draft_extend);
+            EXPECT_EQ((flags & GptModelInputControlFlag::kControlMiddleChunkOnly) != 0, middle_chunk);
+        }
+    }
+}
+
 namespace {
 
 void expectIntTensor(const torch::Tensor& actual, const torch::Tensor& expected) {

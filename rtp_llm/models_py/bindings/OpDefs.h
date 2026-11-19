@@ -305,9 +305,11 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    bool          is_draft_extend{false};
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
+    torch::Tensor mtp_indexer_seed_rows;
     // Group-local kernel-granularity block IDs for attention compute.
     // Shape: [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id;
@@ -366,9 +368,7 @@ struct PyAttentionInputs {
     std::optional<PyContextParallelParams> context_parallel_info;
 
     // Headwise attention config (Python dict or None).
-    py::object    headwise_config{py::none()};
-    bool          is_draft_extend{false};
-    torch::Tensor mtp_indexer_seed_rows;
+    py::object headwise_config{py::none()};
 };
 
 struct BertEmbeddingInputs {

@@ -84,16 +84,19 @@ public:
                    bool                      use_spec_decoding            = false,
                    DSparkModelRole           dspark_model_role            = DSparkModelRole::NONE,
                    bool                      allow_cuda_graph             = true,
-                   bool                      track_cache_store_completion = false);
+                   bool                      track_cache_store_completion = false,
+                   bool                      enable_cache_store           = true,
+                   MtpIndexerRole            mtp_indexer_role             = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
-    GptModelOutputs            forward(const GptModelInputs& inputs) override;
-    PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
-    void                       releaseBuffers() override;
+    GptModelOutputs       forward(const GptModelInputs& inputs) override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    void                  releaseBuffers() override;
+    py::object&           getPyModel() {
+        return py_model_;
+    }
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
-    void                       loadMtpIndexerTopk(const torch::Tensor& topk) override;
-    torch::Tensor              snapshotMtpIndexerTopk(int64_t batch_size) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
@@ -106,6 +109,8 @@ public:
     std::string                finishSpeculativeTargetCommit(bool commit) override;
     std::string                finalizeSpeculativeTargetCommit() override;
     std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
+    void                       loadMtpIndexerTopk(const torch::Tensor& topk) override;
+    torch::Tensor              snapshotMtpIndexerTopk(int64_t batch_size) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -157,6 +162,9 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
+    const bool                                      enable_prefill_cp_;
+    const MtpIndexerRole                            mtp_indexer_role_;
+    const bool                                      fixed_graph_indexer_;
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
     const bool                                      owns_py_model_;
@@ -166,6 +174,8 @@ private:
     const GptModelDescription                       description_;
     std::optional<rtp_llm::GroupedCacheLayerLayout> kv_cache_layer_layout_;
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
+    torch::Tensor                                   cp_mtp_last_hidden_states_;
+    bool                                            has_py_mtp_last_hidden_getter_ = false;
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
     TensorHolder                                    buffer_holder_;
@@ -181,13 +191,15 @@ private:
     bool                             enable_cuda_graph_{false};
     bool                             synchronize_cuda_graph_choice_{false};
     bool                             is_prefill_cuda_graph_mode_{false};
-    MtpIndexerRole                   mtp_indexer_role_{MtpIndexerRole::NORMAL};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_init_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
+    bool supports_micro_batch_{false};
+    bool synchronize_moe_forward_{false};
+    bool moe_forward_allows_graph_{true};
     bool check_nan_{false};
 
     std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
@@ -217,7 +229,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
                                       bool                      allow_cuda_graph,
-                                      bool                      track_cache_store_completion):
+                                      bool                      track_cache_store_completion,
+                                      bool                      enable_cache_store,
+                                      MtpIndexerRole            mtp_indexer_role):
     device_props_(buildExecProperties(params.parallelism_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -226,6 +240,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // non-causal propose block never reaches a CP-enabled model: proposals
     // run only on decode roles, where prefill CP is off (colocated CP is
     // rejected at executor construction).
+    enable_prefill_cp_(device_props_.enable_prefill_cp),
+    mtp_indexer_role_(mtp_indexer_role != MtpIndexerRole::NORMAL ? mtp_indexer_role : params.mtp_indexer_role),
+    fixed_graph_indexer_(params.mtp_indexer_role != MtpIndexerRole::NORMAL),
     dspark_model_role_(dspark_model_role),
     track_cache_store_completion_(track_cache_store_completion),
     owns_py_model_(params.owns_py_model),
@@ -241,7 +258,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                params.sp_config.type)),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
-    mtp_indexer_role_(params.mtp_indexer_role),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
                                                    GenerationPrefillCudaGraphStatus::NOT_REQUESTED),
@@ -403,6 +419,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "speculative target transactions require a CPU TP status reducer");
     }
 
+    supports_micro_batch_ = py::hasattr(py_model_, "forward_micro_batch");
+    synchronize_moe_forward_ =
+        params.sp_config.type == SP_TYPE_NONE && params.parallelism_config.role_type == RoleType::PDFUSION
+        && params.parallelism_config.dp_size > 1 && py::hasattr(py_model_, "prepare_moe_forward");
+    if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
+        RTP_LLM_CHECK_WITH_INFO((fixed_graph_indexer_ || enable_cuda_graph_) && dspark_model_role_ == DSparkModelRole::NONE,
+                                "MTP index sharing requires a fixed ordinary CUDA graph wrapper");
+        RTP_LLM_CHECK(py::hasattr(py_model_, "set_mtp_indexer_role"));
+        py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
+    }
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -427,11 +453,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (owns_generation_prefill_cuda_graph_) {
             generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
         }
-    }
-    if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
-        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "set_mtp_indexer_role"),
-                                "MTP indexer role requires the model sharing API");
-        py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
     }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
@@ -463,7 +484,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
         graph_params.model_data_type        = dtype;
         graph_params.max_context_batch_size = params.concurrency_config.concurrency_limit;
-        if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
+        if (fixed_graph_indexer_) {
             graph_params.max_context_batch_size =
                 std::min<int64_t>(graph_params.max_context_batch_size, params.runtime_config.max_generate_batch_size);
         }
@@ -551,6 +572,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
             syncCudaGraphCaptureRanks(params.parallelism_config, "after_initialize_before_initCapture");
+            if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
+                py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
+            }
             graph_runner_.reset(CudaGraphRunner::initializeCapture(std::move(graph_runner)));
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
@@ -671,15 +695,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
-    cache_store_async_writer_ =
-        std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
-                                                cache_manager_,
-                                                model_id_,
-                                                params.mtp_cache_config_index);
+    if (enable_cache_store) {
+        cache_store_async_writer_ =
+            std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
+                                                    cache_manager_,
+                                                    model_id_,
+                                                    params.mtp_cache_config_index);
+    }
 
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();
     }
+
+    has_py_mtp_last_hidden_getter_ = py::hasattr(py_model_, "get_mtp_last_hidden_states");
 
     // Speculative prefill CP needs every target rank to retain the complete
     // rank-local hidden sequence for the following draft prefill. The normal
@@ -687,6 +715,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // configuration while initializing the target model if that hand-off is
     // unavailable.
     if (device_props_.enable_prefill_cp && use_spec_decoding_ && !hasMtpTargetHiddenBuffer()) {
+        RTP_LLM_LOG_ERROR("speculative prefill CP target is missing rank-local MTP hidden handoff");
         throw std::runtime_error(
             "speculative prefill CP requires the target model to provide a rank-local MTP hidden buffer");
     }
