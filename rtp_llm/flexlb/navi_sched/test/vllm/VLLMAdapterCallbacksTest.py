@@ -68,6 +68,78 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             reg.install(plugins)
 
+    def test_legacy_registry_delegates_factories_and_repeated_install(self):
+        reg = module("review_legacy_registry", ADAPTER / "VLLMPluginRegistry.py")
+        factories, metrics = {}, []
+
+        def registration(name):
+            def register(factory):
+                if name in factories and factories[name] is not factory:
+                    raise RuntimeError("another factory owns this hook")
+                factories[name] = factory
+            return register
+
+        names = ("engine_observer", "engine_transport", "worker_observer",
+                 "renderer_transport", "frontend_request_interceptor",
+                 "frontend_app_configurator")
+        plugins = types.SimpleNamespace(**{
+            "register_" + name + ("_factory" if name in names[:4] else ""): registration(name)
+            for name in names
+        })
+        plugins.register_scheduler_iteration_metrics = lambda: metrics.append(True)
+        reg.install(plugins)
+        reg.install(plugins)
+        original = object()
+        self.assertIsNone(factories["engine_observer"](1, 2, 3))
+        self.assertIs(original, factories["engine_transport"](1, original))
+        self.assertIs(original, factories["worker_observer"](1, original))
+        observed, wrapped = object(), object()
+        reg.register_engine_observer_factory(lambda *args: observed)
+        reg.register_engine_transport_factory(lambda *args: wrapped)
+        worker = lambda *args: wrapped
+        reg.register_worker_observer_factory(worker)
+        self.assertIs(observed, factories["engine_observer"](1, 2, 3))
+        self.assertIs(wrapped, factories["engine_transport"](1, original))
+        self.assertIs(wrapped, factories["worker_observer"](1, original))
+        with self.assertRaises(RuntimeError):
+            reg.register_worker_observer_factory(lambda *args: original)
+        reg.register_scheduler_iteration_metrics()
+        self.assertEqual([True], metrics)
+        calls = []
+        reg.register_frontend_request_interceptor(lambda a, b: calls.append((a, b)) or True)
+        self.assertTrue(factories["frontend_request_interceptor"](1, original))
+        self.assertEqual([(1, original)], calls)
+
+    def test_legacy_registry_preserves_native_errors_and_rejects_missing_hooks(self):
+        reg = module("review_legacy_registry_errors", ADAPTER / "VLLMPluginRegistry.py")
+        calls = []
+        with self.assertRaisesRegex(RuntimeError, "neither"):
+            reg.install(types.SimpleNamespace(register_engine_observer_factory=calls.append))
+        self.assertEqual([], calls)
+        failure = ValueError("native registration conflict")
+
+        def reject(factory):
+            raise failure
+
+        with self.assertRaises(ValueError) as raised:
+            reg.install(types.SimpleNamespace(register_engine_observer_factory=reject,
+                                             register_engine_transport_factory=calls.append))
+        self.assertIs(failure, raised.exception)
+        self.assertEqual([], calls)
+
+    def test_modern_adapter_registry_does_not_use_legacy_factories(self):
+        reg = module("review_modern_registry", ADAPTER / "VLLMPluginRegistry.py")
+        registered = []
+
+        def legacy(*args):
+            self.fail("modern registry must not register legacy callbacks")
+
+        reg.install(types.SimpleNamespace(get_engine_adapter=lambda: None,
+                    register_engine_adapter=registered.append,
+                    register_engine_observer_factory=legacy,
+                    register_engine_transport_factory=legacy))
+        self.assertEqual([reg], registered)
+
     def test_sample_result_identity_and_original_exception(self):
 
         class Observer(core_callbacks.VLLMCoreCallbacks):
@@ -272,6 +344,7 @@ class AdditionalBoundaryTests(unittest.TestCase):
             for modname, fn in [
                 ("VLLMDeferredRenderer", "create_deferred_renderer"),
                 ("VLLMEngineObserver", "create_vllm_engine_observer"),
+                ("VLLMWorkerObserver", "create_vllm_worker_observer"),
                 ("VLLMEngineTransport", "create_vllm_engine_transport"),
                 ("VLLMNativePreparation", "configure_native_preparation"),
             ]:
@@ -303,6 +376,7 @@ class AdditionalBoundaryTests(unittest.TestCase):
                 )
                 entry.register_enabled_vllm_plugin()
                 self.assertIs(state["provider"], reg)
+                self.assertIs(reg.create_worker_observer(None, None), expected)
                 self.assertIsInstance(
                     reg.create_worker_diagnostics(types.SimpleNamespace(rank=0)),
                     worker_callbacks.VLLMWorkerDiagnostics,

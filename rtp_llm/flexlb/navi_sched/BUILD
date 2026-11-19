@@ -1827,7 +1827,7 @@ cc_test(
 py_test(
     name = "navi_sched_vllm_adapter_callbacks_test",
     srcs = ["test/vllm/VLLMAdapterCallbacksTest.py"],
-    data = glob(["adapters/vllm/*.py"]),
+    data = glob(["adapters/vllm/*.py"]) + ["test/vllm/VLLMLoggingTest.py"],
     main = "test/vllm/VLLMAdapterCallbacksTest.py",
     python_version = "PY3",
 )

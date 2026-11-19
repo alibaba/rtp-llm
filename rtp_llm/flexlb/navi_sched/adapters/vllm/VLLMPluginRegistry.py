@@ -7,6 +7,8 @@ _renderer_transport_factory: Callable[[Any], Any] | None = None
 _frontend_request_interceptor: Callable[[Any, Any], bool] | None = None
 _frontend_app_configurator: Callable[[Any], None] | None = None
 _scheduler_iteration_metrics_enabled = False
+_worker_observer_factory: Callable[[Any, Any], Any] | None = None
+_legacy_metrics_registrar = None
 
 
 def register_engine_observer_factory(factory: Callable[[Any, Any, int], Any]) -> None:
@@ -28,6 +30,19 @@ def create_engine_observer(
         kv_cache_config,
         max_concurrent_batches,
     )
+
+
+def register_worker_observer_factory(factory: Callable[[Any, Any], Any]) -> None:
+    global _worker_observer_factory
+    if _worker_observer_factory is not None and _worker_observer_factory is not factory:
+        raise RuntimeError("a worker observer factory is already registered")
+    _worker_observer_factory = factory
+
+
+def create_worker_observer(vllm_config: Any, worker: Any) -> Any:
+    if _worker_observer_factory is None:
+        return worker
+    return _worker_observer_factory(vllm_config, worker)
 
 
 def register_engine_transport_factory(factory: Callable[[Any, Any], Any]) -> None:
@@ -98,6 +113,8 @@ def configure_frontend_app(app: Any) -> None:
 def register_scheduler_iteration_metrics() -> None:
     global _scheduler_iteration_metrics_enabled
     _scheduler_iteration_metrics_enabled = True
+    if _legacy_metrics_registrar is not None:
+        _legacy_metrics_registrar()
 
 
 def scheduler_iteration_metrics_enabled() -> bool:
@@ -107,11 +124,36 @@ def scheduler_iteration_metrics_enabled() -> bool:
 def install(plugins):
     import sys
 
+    global _legacy_metrics_registrar
     adapter = sys.modules[__name__]
-    existing = plugins.get_engine_adapter()
-    if existing is not None and existing is not adapter:
-        raise RuntimeError("an engine adapter is already registered")
-    plugins.register_engine_adapter(adapter)
+    get_adapter = getattr(plugins, "get_engine_adapter", None)
+    register_adapter = getattr(plugins, "register_engine_adapter", None)
+    if callable(get_adapter) and callable(register_adapter):
+        existing = get_adapter()
+        if existing is not None and existing is not adapter:
+            raise RuntimeError("an engine adapter is already registered")
+        register_adapter(adapter)
+        _legacy_metrics_registrar = None
+        return
+
+    # Older vLLM delegates through factory hooks. Keep callback ownership here.
+    required = ("register_engine_observer_factory", "register_engine_transport_factory")
+    if any(not callable(getattr(plugins, name, None)) for name in required):
+        raise RuntimeError("vLLM exposes neither an engine adapter nor legacy factory hooks")
+    factories = (
+        ("register_engine_observer_factory", create_engine_observer),
+        ("register_engine_transport_factory", create_engine_transport),
+        ("register_worker_observer_factory", create_worker_observer),
+        ("register_renderer_transport_factory", create_renderer_transport),
+        ("register_frontend_request_interceptor", is_frontend_request_intercepted),
+        ("register_frontend_app_configurator", configure_frontend_app),
+    )
+    for name, factory in factories:
+        register = getattr(plugins, name, None)
+        if callable(register):
+            register(factory)
+    metrics = getattr(plugins, "register_scheduler_iteration_metrics", None)
+    _legacy_metrics_registrar = metrics if callable(metrics) else None
 
 
 def raise_if_error(finish_reason, request_id, stop_reason, logger):
