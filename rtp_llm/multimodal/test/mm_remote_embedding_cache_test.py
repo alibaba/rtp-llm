@@ -418,6 +418,43 @@ class RemoteCacheTest(unittest.TestCase):
             slots,
         )
 
+    def test_registered_metadata_does_not_take_client_replacement_lock(self):
+        remote, (slot,) = self.slot_cache(1)
+        with concurrent.futures.ThreadPoolExecutor(4) as callers:
+            with remote._client_lock:
+                reads = [callers.submit(remote.load, str(i)) for i in range(4)]
+                for read in reads:
+                    self.assertIsNone(read.result(timeout=2))
+        self.assertEqual(remote.stats()["miss"], 4)
+        self.assertFalse(remote._client_users)
+        remote.close()
+        self.assertTrue(slot.closed)
+
+    def test_completed_write_releases_registered_slot_before_diagnostics(self):
+        remote, (slot,) = self.slot_cache(1)
+        reported = threading.Event()
+        resume = threading.Event()
+        original = remote.record
+        value = torch.arange(8)
+
+        def record(event, **kwargs):
+            if event == "store_success":
+                reported.set()
+                self.assertTrue(resume.wait(3))
+            return original(event, **kwargs)
+
+        with patch.object(remote, "record", side_effect=record):
+            remote.submit_result("written", (value, None))
+            try:
+                self.assertTrue(reported.wait(2))
+                self.assertFalse(remote._gdr_pool._in_use)
+                torch.testing.assert_close(remote.load("written")[0], value)
+            finally:
+                resume.set()
+            remote._write_executor.shutdown(wait=True)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
     def test_two_slow_writes_preserve_distinct_results_without_blocking_callers(self):
         remote, slots = self.slot_cache(3)
         results = [(torch.arange(8) + i, None) for i in range(2)]
