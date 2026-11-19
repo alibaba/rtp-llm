@@ -125,6 +125,109 @@ def cached_query_geometry(context, prefixes, query_len, ratio):
     )
 
 
+def rope_config_signature(config):
+    # The prefill builders derive their inverse frequencies from base and dim.
+    style = config.style
+    return (type(style), str(style)) + tuple(
+        getattr(config, name, None)
+        for name in (
+            "base",
+            "dim",
+            "scale",
+            "index_factor",
+            "indexer_is_neox_style",
+            "mrope_interleaved",
+            "mrope_dim1",
+            "mrope_dim2",
+            "mrope_dim3",
+        )
+    )
+
+
+def prefill_current_rope(
+    context,
+    positions,
+    config,
+    *,
+    token_count,
+    dtype,
+    device,
+    logical_positions,
+    checks,
+    share,
+):
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import build_qsa_rope
+
+    def build(position_checks):
+        return build_qsa_rope(
+            positions,
+            config,
+            token_count=token_count,
+            dtype=dtype,
+            device=device,
+            logical_positions=logical_positions,
+            checks=position_checks,
+        )
+
+    if not share:
+        return build(checks)
+
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+
+    def materialize():
+        position_checks = DeviceChecks()
+        return positions, build(position_checks), position_checks
+
+    _, rope, position_checks = cached_step_value(
+        context,
+        (
+            "prefill_current_rope",
+            tensor_signature(positions),
+            None if torch.is_inference(positions) else positions._version,
+            None if logical_positions is None else tensor_signature(logical_positions),
+            rope_config_signature(config),
+            token_count,
+            dtype,
+            device,
+        ),
+        materialize,
+    )
+    # Include the position flags in every layer's pre-write verification.
+    checks.extend(position_checks)
+    return rope
+
+
+def prefill_group_rope(
+    context, logical_positions, config, *, ratio, token_count, dtype, device, share
+):
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+        build_qsa_rope_from_logical_positions,
+    )
+
+    def materialize():
+        starts = logical_positions - logical_positions.remainder(ratio)
+        return build_qsa_rope_from_logical_positions(
+            starts, config, token_count=token_count, dtype=dtype, device=device
+        )
+
+    if not share:
+        return materialize()
+
+    return cached_step_value(
+        context,
+        (
+            "prefill_group_rope",
+            tensor_signature(logical_positions),
+            ratio,
+            rope_config_signature(config),
+            token_count,
+            dtype,
+            device,
+        ),
+        materialize,
+    )
+
+
 def cached_text_rope(
     context, positions, rope_config, indexer, *, token_count, dtype, device
 ):
@@ -147,26 +250,12 @@ def cached_text_rope(
                 frequency.device,
                 tuple(frequency.shape),
             )
-    settings = (str(rope_config.style),) + tuple(
-        getattr(rope_config, name, None)
-        for name in (
-            "base",
-            "dim",
-            "scale",
-            "index_factor",
-            "indexer_is_neox_style",
-            "mrope_interleaved",
-            "mrope_dim1",
-            "mrope_dim2",
-            "mrope_dim3",
-        )
-    )
     return cached_step_value(
         context,
         (
             "text_rope",
             tensor_signature(positions),
-            settings,
+            rope_config_signature(rope_config),
             frequency_key,
             token_count,
             dtype,
