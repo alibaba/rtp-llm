@@ -105,10 +105,9 @@ public:
 private:
     // Rejections are remembered for one eviction pass under the cache mutex.
     struct EvictionBatchContext {
-        std::unordered_set<TreeNode*>       rejected_candidates;
-        std::unordered_map<TreeNode*, bool> endpoint_matchable;
-        // On-demand reclamation must find its scope on the selected heap.
-        bool expect_rejected_prefix{false};
+        std::unordered_set<TreeNode*>                    rejected_candidates;
+        std::unordered_map<TreeNode*, bool>              endpoint_matchable;
+        std::optional<EvictionHeap::RejectedPrefixScope> rejected_prefix;
     };
 
     struct PreparedVictims {
@@ -169,7 +168,8 @@ private:
                     Tier                  source_tier,
                     bool                  notify_settled,
                     EvictionVictimTrigger trigger                = EvictionVictimTrigger::FORCE_DROP,
-                    EvictionBatchContext* eviction_batch_context = nullptr);
+                    EvictionBatchContext* eviction_batch_context = nullptr,
+                    bool                  may_drop_again         = true);
     // Builds the drop closure without reserving or detaching its resources.
     EvictionDropTask planDropTask(TransferDescriptor                         eviction_desc,
                                   std::vector<std::pair<TreeNode*, size_t>>& detached_resources,

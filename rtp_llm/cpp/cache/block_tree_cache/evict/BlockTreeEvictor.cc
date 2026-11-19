@@ -235,20 +235,15 @@ size_t BlockTreeEvictor::reclaimDeviceBlocksLocked(size_t group_set_id, size_t m
     size_t                reclaimed    = 0;
     bool                  triggered    = false;
     EvictionBatchContext  context;
-    context.expect_rejected_prefix = true;
-    {
-        // Each primary drop can prune nodes or promote a parent. The scope
-        // holds only a proved rejected boundary, never an iterator across drops.
-        EvictionHeap::RejectedPrefixScope prefix(*heapFor(group_set_id, Tier::DEVICE), context.rejected_candidates);
-        while (reclaimed < num_blocks) {
-            if (!dropLocked(group_set_id, Tier::DEVICE, /*notify_settled=*/true, EvictionVictimTrigger::FORCE_DROP, &context)) {
-                break;
-            }
-            triggered                 = true;
-            const size_t current_free = device_pool->freeBlocksNum();
-            reclaimed                 = current_free > initial_free ? current_free - initial_free : 0;
+    while (reclaimed < num_blocks) {
+        if (!dropLocked(group_set_id, Tier::DEVICE, /*notify_settled=*/true, EvictionVictimTrigger::FORCE_DROP, &context)) {
+            break;
         }
+        triggered                 = true;
+        const size_t current_free = device_pool->freeBlocksNum();
+        reclaimed                 = current_free > initial_free ? current_free - initial_free : 0;
     }
+    context.rejected_prefix.reset();
     if (triggered) {
         metrics_reporter_->reportEvictionTriggered(Tier::DEVICE, group_set->groupType(), true);
     }
@@ -333,10 +328,20 @@ bool BlockTreeEvictor::dropLocked(size_t                group_set_id,
                                   Tier                  source_tier,
                                   bool                  notify_settled,
                                   EvictionVictimTrigger trigger,
-                                  EvictionBatchContext* eviction_batch_context) {
+                                  EvictionBatchContext* eviction_batch_context,
+                                  bool                  may_drop_again) {
     auto eviction_desc = chooseDropVictim(group_set_id, source_tier, eviction_batch_context, trigger);
     if (!eviction_desc.has_value()) {
         return false;
+    }
+    if (may_drop_again && eviction_batch_context != nullptr && !eviction_batch_context->rejected_prefix.has_value()
+        && !eviction_batch_context->rejected_candidates.empty()) {
+        // Install the copied boundary while the heap still matches the
+        // completed scan. This drop can already promote or prune candidates.
+        heapFor(group_set_id, source_tier)
+            ->rememberRejectedPrefixBefore(eviction_desc->node,
+                                           eviction_batch_context->rejected_candidates,
+                                           eviction_batch_context->rejected_prefix);
     }
     runDropTask(std::move(*eviction_desc),
                 notify_settled,
@@ -366,21 +371,19 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
     size_t remaining_count = max_victim_count;
     // Discard batch-local proofs and rejection data before settlement.
     {
-        EvictionBatchContext                             context;
-        std::optional<EvictionHeap::RejectedPrefixScope> prefix;
+        EvictionBatchContext context;
         while (remaining_count > 0) {
-            // Start from the current heap after the preceding drop has settled.
-            // The scope will prove the prefix during the next selection.
-            if (!prefix && !context.rejected_candidates.empty()) {
-                prefix.emplace(*heapFor(group_set_id, source_tier), context.rejected_candidates);
-                context.expect_rejected_prefix = true;
-            }
             std::vector<size_t> used_before;
             used_before.reserve(source_pools.size());
             for (IBlockPool* pool : source_pools) {
                 used_before.push_back(pool->usedBlocksNum());
             }
-            if (!dropLocked(group_set_id, source_tier, false, EvictionVictimTrigger::WATERMARK, &context)) {
+            if (!dropLocked(group_set_id,
+                            source_tier,
+                            /*notify_settled=*/false,
+                            EvictionVictimTrigger::WATERMARK,
+                            &context,
+                            /*may_drop_again=*/remaining_count > 1)) {
                 break;
             }
             processed                  = true;
@@ -856,7 +859,7 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseDropVictim(size_t     
         return true;
     };
     auto* prefix = heap->rejectedPrefixFor(eviction_batch_context->rejected_candidates,
-                                           eviction_batch_context->expect_rejected_prefix);
+                                          eviction_batch_context->rejected_prefix.has_value());
     std::optional<EvictionEntry> entry;
     while (true) {
         entry = prefix != nullptr ? prefix->best(can_evict) : heap->best(can_evict);
