@@ -89,10 +89,15 @@ public:
                    MtpIndexerRole            mtp_indexer_role             = MtpIndexerRole::NORMAL);
     ~PyWrappedModel();
 
-    GptModelOutputs       forward(const GptModelInputs& inputs) override;
-    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
-    void                  releaseBuffers() override;
-    py::object&           getPyModel() {
+    // The embedding executor verifies the model and handler agree on pooled rows.
+    void usePooledEmbeddingForward() {
+        py_forward_method_ = py_model_.attr("forward_pooled_embedding");
+    }
+
+    GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    void                       releaseBuffers() override;
+    py::object&                getPyModel() {
         return py_model_;
     }
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
@@ -119,12 +124,12 @@ private:
 
 private:
     // Helper functions to reduce code duplication
-    torch_ext::PyAttentionInputs  buildPyAttentionInputs(const GptModelInputs& inputs);
-    torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
-    torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
-    torch_ext::BertEmbeddingInputs
-                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
-                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
+    torch_ext::PyAttentionInputs    buildPyAttentionInputs(const GptModelInputs& inputs);
+    torch_ext::PyEmbeddingInputs    buildPyEmbeddingInputs(const GptModelInputs& inputs);
+    torch_ext::PyMultimodalInputs   buildPyMultimodalInputs(const GptModelInputs& inputs);
+    torch_ext::BertEmbeddingInputs  buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                             const torch::Tensor&  prepared_position_ids,
+                                                             const torch::Tensor&  prepared_type_ids);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -183,6 +188,8 @@ private:
     std::unique_ptr<GraphBase> generation_prefill_graph_runner_;
     py::object                 py_model_;
     py::object                 py_forward_method_;
+    bool                       prepare_attention_in_forward_ = false;
+    bool                       use_host_multimodal_locs_     = false;
     py::object                 held_attn_pyobj_;
     // Per-wrapper ownership, not the process-wide configuration request. Only
     // the normal main-generation wrapper can own this secondary runner.
@@ -439,6 +446,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                  dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
                                                                                   "forward";
     py_forward_method_         = py_model_.attr(forward_method);
+    prepare_attention_in_forward_ =
+        py::getattr(py_model_, "prepare_attention_in_forward", py::bool_(false)).cast<bool>();
+    use_host_multimodal_locs_ = py::getattr(py_model_, "use_host_multimodal_locs", py::bool_(false)).cast<bool>();
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.

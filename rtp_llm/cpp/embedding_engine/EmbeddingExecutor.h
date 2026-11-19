@@ -37,12 +37,20 @@ class EmbeddingExecutor {
 public:
     explicit EmbeddingExecutor(const EngineInitParams& params, py::object handler);
 
-    absl::Status process(const std::list<EmbeddingStreamPtr>& streams);
+    absl::Status process(const std::list<EmbeddingStreamPtr>& streams, bool overlap = false);
+    bool         canOverlapTensorOutput() const {
+        return device_output_handler_;
+    }
+    void drainTensorOutput();
 
 private:
     std::unique_ptr<ModelBase>   model_;
     py::object                   handler_;
     HandlerArgs::Flag            handler_args_;
+    bool                         pooled_output_         = false;
+    bool                         device_output_handler_ = false;
+    std::shared_ptr<c10::Event>  previous_result_;
+    std::shared_ptr<c10::Event>  oldest_result_;
     py::handle                   torch_type_;
     bool                         requires_host_input_metadata_ = false;
     torch::Tensor                max_position_ids_tensor_;
@@ -56,12 +64,16 @@ private:
     std::unique_ptr<GptModelOutputs> copyResultToCPU(th::Tensor gpu_outputs) const;
     absl::Status                     updateStreams(py::object                           post_process_output,
                                                    const std::list<EmbeddingStreamPtr>& streams,
-                                                   int                                  total_batch_size) const;
-    absl::Status
-    sliceTensor(py::object gpu_outputs, const std::list<EmbeddingStreamPtr>& streams, int total_batch_size) const;
+                                                   int                                  total_batch_size,
+                                                   bool                                 overlap);
+    absl::Status                     sliceTensor(py::object                           gpu_outputs,
+                                                 const std::list<EmbeddingStreamPtr>& streams,
+                                                 int                                  total_batch_size,
+                                                 bool                                 overlap = false);
     absl::Status
     slicePyList(py::object gpu_outputs, const std::list<EmbeddingStreamPtr>& streams, int total_batch_size) const;
-    absl::StatusOr<py::object> postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs);
+    absl::StatusOr<py::object>
+         postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs, bool overlap);
     void calcTokenNum(const std::list<EmbeddingStreamPtr>& streams, int64_t& token_num, int64_t& batch_size) const;
     void init_position_ids(int max_seq_len);
     void reportMetrics(size_t context_batch_size, size_t combo_token_num, size_t max_seq_len) const;

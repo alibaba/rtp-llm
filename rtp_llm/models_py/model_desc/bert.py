@@ -70,17 +70,23 @@ class BertDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         quantized_hidden_states: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         quantize_output: bool = False,
+        output_rows: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
         empty_bias = torch.empty(
             0, device=hidden_states.device, dtype=hidden_states.dtype
         )
 
-        residual = hidden_states
+        residual = (
+            hidden_states
+            if output_rows is None
+            else hidden_states.index_select(0, output_rows)
+        )
         hidden_states, attention_bias = self.self_attn.forward_without_output_bias(
             hidden_states=hidden_states,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
             quantized_hidden_states=quantized_hidden_states,
+            **({"output_rows": output_rows} if output_rows is not None else {}),
         )
         attention_bias_tensor = (
             attention_bias.to(hidden_states.dtype)
@@ -177,7 +183,10 @@ class BertModel(GptModelBase):
         )
 
     def forward(
-        self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: FMHAImplBase = None,
+        output_rows: Optional[torch.Tensor] = None,
     ) -> PyModelOutputs:
         input_ids: torch.Tensor = inputs.input_ids
         bert_embedding_inputs = inputs.bert_embedding_inputs
@@ -229,18 +238,33 @@ class BertModel(GptModelBase):
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        return PyModelOutputs(self.forward_encoder(hidden_states, fmha_impl))
+        if output_rows is None:
+            return PyModelOutputs(self.forward_encoder(hidden_states, fmha_impl))
+        return PyModelOutputs(
+            self.forward_encoder(hidden_states, fmha_impl, output_rows)
+        )
 
     def forward_encoder(
-        self, hidden_states: torch.Tensor, fmha_impl: FMHAImplBase
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        output_rows: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.layer_num == 0 and output_rows is not None:
+            return hidden_states.index_select(0, output_rows)
         quantized_hidden_states = None
-        for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+        for i in range(self.layer_num):
+            decoder_layer = self.layers[i]
             next_layer_uses_quantized_input = (
                 i + 1 < self.layer_num
                 and self.layers[
                     i + 1
                 ].self_attn.qkv_proj.supports_prequantized_activation
+            )
+            row_args = (
+                {"output_rows": output_rows}
+                if output_rows is not None and i + 1 == self.layer_num
+                else {}
             )
             hidden_states, quantized_hidden_states = decoder_layer(
                 hidden_states,
@@ -248,5 +272,6 @@ class BertModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 quantized_hidden_states=quantized_hidden_states,
                 quantize_output=next_layer_uses_quantized_input,
+                **row_args,
             )
         return hidden_states

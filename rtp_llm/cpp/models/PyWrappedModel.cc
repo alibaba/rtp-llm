@@ -639,7 +639,8 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
 
 // Helper function to build BertEmbeddingInputs from GptModelInputs
 torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const GptModelInputs& inputs,
-                                                                        const torch::Tensor&  prepared_position_ids) {
+                                                                        const torch::Tensor&  prepared_position_ids,
+                                                                        const torch::Tensor&  prepared_type_ids) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildBertEmbeddingInputs");
     torch_ext::BertEmbeddingInputs bert_embedding_inputs;
 
@@ -655,7 +656,7 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 
     // Convert combo_tokens_type_ids from Buffer to torch::Tensor
     if (inputs.combo_tokens_type_ids.defined()) {
-        bert_embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
+        bert_embedding_inputs.combo_tokens_type_ids = prepared_type_ids;
     }
 
     // Get position_encoding from model weights (no clone needed for weights)
@@ -780,10 +781,10 @@ std::string PyWrappedModel::waitCacheStorePublication() {
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
     torch_ext::PyEmbeddingInputs embedding_inputs;
     if (inputs.combo_tokens_type_ids.defined()) {
-        embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.cuda();
+        embedding_inputs.combo_tokens_type_ids = inputs.combo_tokens_type_ids.to(torch::kCUDA, /*non_blocking=*/true);
     }
     if (inputs.text_tokens_mask.defined()) {
-        embedding_inputs.text_tokens_mask = inputs.text_tokens_mask.cuda();
+        embedding_inputs.text_tokens_mask = inputs.text_tokens_mask.to(torch::kCUDA, /*non_blocking=*/true);
     }
     return embedding_inputs;
 }
@@ -805,7 +806,8 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
         multimodal_input.mm_extra_input = mm_extra_input;
     }
     if (inputs.mm_features_locs.defined()) {
-        multimodal_input.mm_features_locs = inputs.mm_features_locs.cuda();
+        multimodal_input.mm_features_locs =
+            use_host_multimodal_locs_ ? inputs.mm_features_locs : inputs.mm_features_locs.cuda();
     }
     if (inputs.mm_features_spans.defined()) {
         buffer_holder_.hold_host(inputs.mm_features_spans);
@@ -989,9 +991,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             }
         }
 
-        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs, combo_position_ids);
+        auto embedding_inputs  = buildPyEmbeddingInputs(inputs);
+        auto multimodal_inputs = buildPyMultimodalInputs(inputs);
+        auto bert_embedding_inputs =
+            buildBertEmbeddingInputs(inputs, combo_position_ids, embedding_inputs.combo_tokens_type_ids);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
@@ -1076,7 +1079,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            // Eager encoders can enqueue their embedding work before planning attention on the host.
+            held_attn_pyobj_ = prepare_attention_in_forward_ ?
+                                   py::none() :
+                                   py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
