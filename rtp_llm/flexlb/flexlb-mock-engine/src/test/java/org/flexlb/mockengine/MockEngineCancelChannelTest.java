@@ -282,7 +282,7 @@ class MockEngineCancelChannelTest {
     }
 
     @Test
-    void decodeTargetFailsWithoutScanningOrCancellingPrefill() throws Exception {
+    void invalidPrefillRouteFailsWithoutScanningOrCancellingPrefill() throws Exception {
         startCluster(model("500"), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
@@ -294,14 +294,11 @@ class MockEngineCancelChannelTest {
                         slot(0, inputWithDecode("31", 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
-        CancelAck outcome =
-                channel.cancel(target(decodeServices.get(0).getGrpcPort()), "31", 2_000)
-                        .get(2, TimeUnit.SECONDS);
-
-        assertEquals(
-                CancelAck.FAILED,
-                outcome,
-                "Decode must model the real UNIMPLEMENTED Cancel contract");
+        assertThrows(
+                java.util.concurrent.ExecutionException.class,
+                () ->
+                        channel.cancel(target(decodeServices.get(0).getGrpcPort()), "31", 2_000)
+                                .get(2, TimeUnit.SECONDS));
         assertTrue(
                 prefill.getInflightCount() > 0,
                 "a wrong target must not cancel the request on another worker");
@@ -318,7 +315,9 @@ class MockEngineCancelChannelTest {
         assertTrue(channel.isSupported(endpoint(decodeServices.get(0).getGrpcPort())));
         assertFalse(channel.isSupported(endpoint(59999)));
 
-        CancelAck outcome = channel.cancel(target(59999), "1", 2_000).get(2, TimeUnit.SECONDS);
+        CancelAck outcome =
+                channel.cancel(new CancelTarget("127.0.0.1", 59999, "127.0.0.1:59998"), "1", 2_000)
+                        .get(2, TimeUnit.SECONDS);
         assertEquals(CancelAck.UNSUPPORTED, outcome);
     }
 
@@ -392,9 +391,10 @@ class MockEngineCancelChannelTest {
                             ExecutionException.class,
                             () -> future.get(2, TimeUnit.SECONDS),
                             "cancel_error must surface as a failed future");
-            assertTrue(
-                    failure.getCause() instanceof IllegalStateException,
-                    "the transport-layer failure surfaces as IllegalStateException");
+            assertEquals(
+                    io.grpc.Status.Code.INTERNAL,
+                    io.grpc.Status.fromThrowable(failure.getCause()).getCode(),
+                    "the transport-layer failure preserves the gRPC status");
             assertEquals(
                     1L,
                     cluster.stats().cancelCensusInjected.sum(),
@@ -484,8 +484,12 @@ class MockEngineCancelChannelTest {
 
     // ---- helpers ----
 
-    private static CancelTarget target(int grpcPort) {
-        return new CancelTarget("127.0.0.1", 1, "127.0.0.1:" + grpcPort);
+    private CancelTarget target(int grpcPort) {
+        int decodePort =
+                decodeServices == null || decodeServices.isEmpty()
+                        ? grpcPort
+                        : decodeServices.get(0).getGrpcPort();
+        return new CancelTarget("127.0.0.1", decodePort, "127.0.0.1:" + grpcPort);
     }
 
     private static DecodeEndpoint endpoint(int grpcPort) {

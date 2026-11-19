@@ -783,6 +783,19 @@ void KVCacheManager::publishPrefillPayload(const std::string&                   
     }
 }
 
+void KVCacheManager::failP2PPublication(int64_t            request_id,
+                                        const std::string& unique_key,
+                                        int64_t            deadline_ms,
+                                        const ErrorInfo&   error) {
+    if (!p2p_connector_) {
+        return;
+    }
+    p2p_connector_->rejectLayer(request_id, deadline_ms, 0, error);
+    if (auto store = p2p_connector_->streamStore()) {
+        store->markTerminal(unique_key, deadline_ms, P2PConnectorResourceStore::TerminalReason::FAILED);
+    }
+}
+
 void KVCacheManager::finishP2PPublication(const torch::Tensor& final_prefill,
                                           const torch::Tensor& pd_separation,
                                           const torch::Tensor& request_ids,

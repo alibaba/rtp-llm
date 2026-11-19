@@ -30,7 +30,12 @@ TEST(PrefillRpcServerTest, GetPeerInfoReturnsOnlySelectedPeerLayoutWithoutWorker
     pc.dp_size          = 3;
     pc.dp_rank          = 2;
     // No worker address list is needed to report the selected endpoint's layout.
-    for (auto method : {CPRotateMethod::DISABLED, CPRotateMethod::ALL_GATHER}) {
+    for (auto method : {CPRotateMethod::DISABLED,
+                        CPRotateMethod::UNKNOWN,
+                        CPRotateMethod::PREFILL_CP,
+                        CPRotateMethod::ALL_GATHER,
+                        CPRotateMethod::ALL_GATHER_WITH_OVERLAP,
+                        CPRotateMethod::ALLTOALL}) {
         pc.prefill_cp_config.method = method;
         for (bool sharded : {false, true}) {
             pc.prefill_cp_config.kv_cache_sharded = sharded;
@@ -39,7 +44,10 @@ TEST(PrefillRpcServerTest, GetPeerInfoReturnsOnlySelectedPeerLayoutWithoutWorker
             GetPeerInfoResponsePB response;
             ASSERT_TRUE(server.GetPeerInfo(&context, &request, &response).ok());
             EXPECT_EQ(response.tp_size(), 4);
-            EXPECT_EQ(response.cp_size(), method == CPRotateMethod::ALL_GATHER && sharded ? 4 : 1);
+            const bool physical_cp = method == CPRotateMethod::ALL_GATHER
+                                     || method == CPRotateMethod::ALL_GATHER_WITH_OVERLAP
+                                     || method == CPRotateMethod::ALLTOALL;
+            EXPECT_EQ(response.cp_size(), physical_cp && sharded ? 4 : 1);
         }
     }
 }

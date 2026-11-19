@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
 
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
@@ -1404,19 +1405,23 @@ TEST(PlannerGroupD, D4_MirrorConsistencyAcrossSides) {
     EXPECT_GT(checked, 0);
 }
 
-// 用例 D4b: 线上 factory 必须把角色相关的 CP method 规范化，不能照抄本端配置。
-// Prefill ALL_GATHER 的 attention cache 不按 TP 切 head，而 Decode PREFILL_CP 仍按 TP 切；
-// 两端仅知道对端 TP/CP 分片开关时，也必须独立推导出完全相同的 plan。
-TEST(PlannerGroupD, D4b_FactoryMirrorConsistencyForPrefillCpToDecodeTp) {
+// A non-sharded CP Prefill still has different attention head geometry from
+// ordinary TP. Decode must consume the advertised layout, not infer the CP
+// method from its own configuration or from cp_size == 1.
+TEST(PlannerGroupD, D4b_AdvertisedLayoutConsistencyForPrefillCpToDecodeTp) {
     auto prefill_self = mhaLayout(2, CPRotateMethod::ALL_GATHER, /*sharded=*/false);
     auto decode_self  = mhaLayout(2, CPRotateMethod::PREFILL_CP, /*sharded=*/false);
     prefill_self.pc.role_type = RoleType::PREFILL;
     decode_self.pc.role_type  = RoleType::DECODE;
 
-    const auto prefill_as_seen_by_decode =
-        ShardLayoutFactory::peerOf(decode_self, /*peer_tp_size=*/2, /*peer_kv_cache_sharded=*/false, RoleType::PREFILL);
-    const auto decode_as_seen_by_prefill =
-        ShardLayoutFactory::peerOf(prefill_self, /*peer_tp_size=*/2, /*peer_kv_cache_sharded=*/false, RoleType::DECODE);
+    P2PShardLayoutPB advertised_prefill;
+    encodeP2PShardLayout(prefill_self, &advertised_prefill);
+    ShardLayout prefill_as_seen_by_decode;
+    ASSERT_TRUE(decodeP2PShardLayout(advertised_prefill, RoleType::PREFILL, prefill_as_seen_by_decode));
+    P2PShardLayoutPB advertised_decode;
+    encodeP2PShardLayout(decode_self, &advertised_decode);
+    ShardLayout decode_as_seen_by_prefill;
+    ASSERT_TRUE(decodeP2PShardLayout(advertised_decode, RoleType::DECODE, decode_as_seen_by_prefill));
 
     EXPECT_EQ(prefill_as_seen_by_decode.pc.prefill_cp_config.method, CPRotateMethod::ALL_GATHER);
     EXPECT_EQ(decode_as_seen_by_prefill.pc.prefill_cp_config.method, CPRotateMethod::PREFILL_CP);

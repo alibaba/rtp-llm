@@ -73,7 +73,11 @@ PrefillServerCallerContext::~PrefillServerCallerContext() {
     } catch (...) {
         // Telemetry must not interrupt CQ cleanup.
     }
-    shutdownAndDrainCompletionQueue();
+    try {
+        shutdownAndDrainCompletionQueue();
+    } catch (...) {
+        // Destruction must not propagate completion-queue or telemetry failures.
+    }
 }
 
 void PrefillServerCallerContext::cancel() {

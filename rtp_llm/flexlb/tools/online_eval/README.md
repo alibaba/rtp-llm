@@ -404,10 +404,14 @@ The client is configured entirely through environment variables
 for that mapping (unpassed vars are blanked so no ambient environment leaks
 in).
 
-For master-enqueued batch requests (BATCH dispatcher), the client follows the
-frontend behavior: it calls `FetchResponse` on the selected prefill engine. For
-frontend-sent requests (NON_BATCH dispatcher), it calls `GenerateStreamCall`
-directly on the routed prefill engine.
+The Python functional harness (`EngineOps`) targets mock engines. Its BATCH
+response attachment uses `FetchResponse` on Prefill. For real RTP-LLM engines,
+`flexlb_load_client.py` defaults to protocol detection through GetPeerInfo:
+real engines use `GenerateStreamCall` on Decode (or PDFUSION) for both
+master-admitted and frontend-sent requests. `--engine-protocol rtp|mock`
+can select the protocol explicitly. Mock mode retains the Prefill/FetchResponse
+protocol for fault injection; probe failures keep the real-engine route.
+Priority Cancel enters Decode and forwards the explicit Prefill control address.
 
 The functional-test runner selects a scheduling profile
 (`--profile batch-window|single-nonbatch|single-batch|window-nonbatch`):

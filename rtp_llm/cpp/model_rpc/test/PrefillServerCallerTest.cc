@@ -211,6 +211,7 @@ public:
 
     grpc::Status
     GetPeerInfo(grpc::ServerContext*, const GetPeerInfoRequestPB*, GetPeerInfoResponsePB* response) override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(peer_info_delay_ms_.load()));
         std::lock_guard<std::mutex> lock(mutex_);
         ++peer_info_call_count_;
         if (peer_info_fail_) {
@@ -221,6 +222,10 @@ public:
         response->set_tp_size(info.tp_size);
         response->set_cp_size(info.cp_size);
         return grpc::Status::OK;
+    }
+
+    void setPeerInfoDelay(int delay_ms) {
+        peer_info_delay_ms_.store(delay_ms);
     }
 
     void setPeerInfoResponses(std::vector<PrefillPeerInfo> responses) {
@@ -269,6 +274,7 @@ private:
     GenerateInputPB         captured_request_;
     std::string             captured_traceparent_;
     int                     peer_info_call_count_{0};
+    std::atomic<int>                      peer_info_delay_ms_{0};
     bool                                  peer_info_fail_{false};
     std::vector<PrefillPeerInfo> peer_info_responses_;
 };
@@ -613,6 +619,25 @@ TEST_F(PrefillServerCallerTest, PeerInfoFailureDoesNotReusePreviousSuccessAndNex
     EXPECT_EQ(recovered.tp_size, 4);
     EXPECT_EQ(recovered.cp_size, 2);
     EXPECT_EQ(server.service()->peerInfoCallCount(), 3);
+}
+
+TEST_F(PrefillServerCallerTest, PeerInfoAllowsSlowProbeWithinRequestBudget) {
+    auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
+    service->setPeerInfoDelay(1100);
+    FakePrefillRpcServer server(std::move(service));
+    ASSERT_TRUE(server.start());
+    auto result = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 3000);
+    ASSERT_TRUE(result.ok()) << result.status().ToString();
+}
+
+TEST_F(PrefillServerCallerTest, PeerInfoTimeoutIsReroutableAndRespectsRequestBudget) {
+    auto service = std::make_unique<FakePrefillRpcService>(FakePrefillRpcService::Mode::kCaptureForwardedRequest);
+    service->setPeerInfoDelay(100);
+    FakePrefillRpcServer server(std::move(service));
+    ASSERT_TRUE(server.start());
+    auto result = caller_.getPrefillPeerInfo("127.0.0.1", server.port(), 10);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::CONNECT_TIMEOUT);
 }
 
 TEST_F(PrefillServerCallerTest, PeerInfoCarriesCpSizeIndependentlyFromTpSize) {

@@ -363,10 +363,17 @@ class QueuedBatchDeliveryTest {
 
     private ScheduledRequest item(long id) {
         var context = RequestLifecycleTestSupport.context(config, id);
+        context.getRequest().setMaxNewTokens(8);
+        context.getRequest().setNumBeams(1);
         context.setGenerateInputPb(
                 EngineRpcService.GenerateInputPB.newBuilder()
                         .setRequestId(id)
-                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder())
+                        .setGenerateConfig(
+                                EngineRpcService.GenerateConfigPB.newBuilder()
+                                        .setCanUsePdSeparation(true)
+                                        .setMaxNewTokens(8)
+                                        .setNumBeams(1)
+                                        .setNumReturnSequences(1))
                         .build()
                         .toByteString());
         var future = registry.register(context);

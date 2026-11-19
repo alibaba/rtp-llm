@@ -339,10 +339,13 @@ class PriorityPreemptionSmoke(FlexLBSmokeBase):
                 weak_snapshot, high_rid
             ), "high request reached an engine before typed CANCELED"
             weak_cancel = self._cancel_counts(weak_snapshot)
-            original_prefill_name = self._engine(weak_snapshot, prefill_target)["name"]
+            cancel_owner_names = {
+                self._engine(weak_snapshot, prefill_target)["name"],
+                self._engine(weak_snapshot, decode_target)["name"],
+            }
             for name, count in weak_cancel.items():
                 delta = count - baseline_cancel.get(name, 0)
-                expected = 1 if name == original_prefill_name else 0
+                expected = 1 if name in cancel_owner_names else 0
                 assert delta == expected, (
                     "Master Cancel routing mismatch: "
                     f"engine={name} delta={delta} expected={expected}"

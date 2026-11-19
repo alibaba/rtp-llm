@@ -44,6 +44,7 @@ public:
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                        releaseResource();
+    void                        failPrefillPublication(const ErrorInfo& error);
     bool                        asyncLoadCache();
     bool                        loadCacheDone();
 

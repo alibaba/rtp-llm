@@ -69,6 +69,19 @@ JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
 logger = logging.getLogger(__name__)
 
 
+def _grpc_status_details(metadata):
+    """Read structured error details from mapping and pair-iterable trailers."""
+    if metadata is None:
+        return None
+    getter = getattr(metadata, "get", None)
+    if callable(getter):
+        return getter("grpc-status-details-bin")
+    for key, value in metadata:
+        if key == "grpc-status-details-bin":
+            return value
+    return None
+
+
 def _selected_pd_separation(
     selected_role: Optional[RoleType],
     generate_config: GenerateConfig,
@@ -1476,14 +1489,11 @@ class ModelRpcClient(object):
         # request_desc reaches the client; keep backend addresses in the log-only argument.
         details = ErrorDetailsPB()
         try:
-            # aio.Metadata iterates (key, value) pairs, but dict(metadata)
-            # treats its keys() result as mapping keys and raises KeyError.
-            metadata = {key: value for key, value in (e.trailing_metadata() or ())}
-            encoded = metadata.get("grpc-status-details-bin")
+            encoded = _grpc_status_details(e.trailing_metadata())
             if encoded:
                 details.ParseFromString(encoded)
-        except (DecodeError, TypeError, ValueError):
-            # A malformed envelope must not hide the RPC failure itself.
+        except (DecodeError, TypeError, ValueError) as error:
+            logging.warning("Malformed gRPC error details: %s", error)
             details.Clear()
         if details.error_code:
             logging.error(
@@ -2099,10 +2109,10 @@ class ModelRpcClient(object):
             except grpc.RpcError as e:
                 error_details = ErrorDetailsPB()
                 try:
-                    metadata = {key: value for key, value in (e.trailing_metadata() or ())}
-                    encoded = metadata.get("grpc-status-details-bin")
+                    encoded = _grpc_status_details(e.trailing_metadata())
                     has_details = bool(encoded) and bool(error_details.ParseFromString(encoded))
-                except (DecodeError, TypeError, ValueError):
+                except (DecodeError, TypeError, ValueError) as error:
+                    logging.warning("Malformed greennet gRPC error details: %s", error)
                     has_details = False
                 if has_details:
                     logging.warning(

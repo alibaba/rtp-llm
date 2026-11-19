@@ -150,6 +150,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:rpc_completion_queue",
         "//rtp_llm/cpp/utils:time_util",
+        "@havenask//aios/autil:scope",
         "@havenask//aios/autil:thread",
         "@havenask//aios/autil:net",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:backend_factory",

@@ -72,7 +72,7 @@ class RequestSchedulerTest {
                 "prompt-logits",
                 "multimodal"
             })
-    void requestsThatCannotUseBatchAdmissionUseDirectRouteDelivery(String kind) {
+    void requestsThatCannotUseBatchAdmissionRetainQueueAdmission(String kind) {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
@@ -115,9 +115,10 @@ class RequestSchedulerTest {
                         new PlacementAvailability());
         try {
             assertSame(future, scheduler.submit(context));
-            verify(router).select(context);
-            verify(router, never()).select(any(), any());
-            assertEquals(0, scheduler.getQueuedRequestCount());
+            verify(router, never()).select(context);
+            assertTrue(BatchDeliveryStrategy.requiresClientRoute(context));
+            assertFalse(future.isDone());
+            assertEquals(1, scheduler.getQueuedRequestCount());
         } finally {
             scheduler.closePlacement();
         }

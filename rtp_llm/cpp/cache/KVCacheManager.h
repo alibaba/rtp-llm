@@ -165,6 +165,8 @@ public:
     void              publishPrefillPayload(const std::string&                           unique_key,
                                              int64_t                                      deadline_ms,
                                              PrefillResultStore::SideChannelData&& data);
+    void
+    failP2PPublication(int64_t request_id, const std::string& unique_key, int64_t deadline_ms, const ErrorInfo& error);
     void finishP2PPublication(const torch::Tensor& final_prefill,
                               const torch::Tensor& pd_separation,
                               const torch::Tensor& request_ids,

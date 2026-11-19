@@ -125,7 +125,8 @@ enum class Fault {
     CorruptByte,
     OmitLastLayer,
     DropBatchAck,
-    RejectSecondBatchItem
+    RejectSecondBatchItem,
+    MultiDpPrefill
 };
 
 enum class CancelStage : int32_t {
@@ -902,7 +903,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     ASSERT_LE(hello.request_timeout_ms, 600000);
     ASSERT_TRUE(hello.dtype == 0 || hello.dtype == 1);
     ASSERT_GE(hello.fault, 0);
-    ASSERT_LE(hello.fault, static_cast<int>(Fault::RejectSecondBatchItem));
+    ASSERT_LE(hello.fault, static_cast<int>(Fault::MultiDpPrefill));
     const auto transport = environment("P2P_SMOKE_TRANSPORT", "tcp");
     ASSERT_TRUE(transport == "tcp" || transport == "rdma");
     ASSERT_EQ(hello.rdma, transport == "rdma");
@@ -911,6 +912,8 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     ASSERT_TRUE(transport != "rdma" || host != "127.0.0.1");
     {
         PrefillRpcServer prefill;
+        if (hello.fault == static_cast<int>(Fault::MultiDpPrefill))
+            prefill.maga_init_params_.parallelism_config.dp_size = 2;
         prefill.meta_ = std::make_shared<RpcServerRuntimeMeta>();
         prefill.cancel_registry_ = std::make_unique<PDCancelRegistry>(prefill.meta_);
         PayloadEndpoint endpoint(prefill, &prefill, host);
@@ -1434,6 +1437,24 @@ INSTANTIATE_TEST_SUITE_P(Admission,
 
 TEST_F(P2PGenerateStreamSmokeTest, PromptScoringBatchFallsBackAndReturnsSingleTokenWithScores) {
     batchRoundTrips(true);
+}
+
+TEST_F(P2PGenerateStreamSmokeTest, MultiDpPrefillFallsBackWithoutFailingTheFrontendBatch) {
+    initialize(DataType::TYPE_FP16, Fault::MultiDpPrefill);
+    BatchGenerateInputPB batch;
+    batch.add_inputs()->CopyFrom(request(1791, 8));
+    batch.add_inputs()->CopyFrom(request(1792, 11));
+    auto stub = RpcService::NewStub(grpc::CreateChannel(decode_rpc_->address(), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
+    BatchGenerateOutputsPB response;
+    const auto             status = stub->BatchGenerateCall(&context, batch, &response);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    ASSERT_EQ(response.results_size(), 2);
+    for (const auto& result : response.results())
+        EXPECT_FALSE(result.has_error_info()) << result.error_info().error_message();
+    EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+    ASSERT_NO_FATAL_FAILURE(expectReleased());
 }
 
 TEST_F(P2PGenerateStreamSmokeTest, MultiDPBatchAttachesMasterAdmissionsWithoutEnqueueingAgain) {

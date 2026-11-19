@@ -492,10 +492,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                        request_id,
                                        event,
                                        deadline_ms)) {
-                RTP_LLM_LOG_WARNING("P2P layer publication failed, request_id=%ld layer_id=%d tag=%s",
-                                    request_id,
-                                    layer_kv.layer_id,
-                                    layer_kv.tag.c_str());
+                throw std::runtime_error("P2P layer publication failed, request_id=" + std::to_string(request_id)
+                                         + " layer_id=" + std::to_string(layer_kv.layer_id) + " tag=" + layer_kv.tag);
             }
         }
 

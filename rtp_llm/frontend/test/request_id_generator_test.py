@@ -196,6 +196,23 @@ class RequestIdGeneratorTest(TestCase):
         logging.info(f"  - Value fits in 64 bits: {request_id < 2**63}")
 
 
+class FrontendClockValidationTest(TestCase):
+    def test_invalid_startup_clock_is_rejected_before_serving(self):
+        from unittest.mock import patch
+        from rtp_llm.utils.concurrency_controller import ConcurrencyController
+        from rtp_llm.frontend.request_id_generator import (
+            EPOCH_2020_MS,
+            REQUEST_ID_TIMESTAMP_LIMIT_MS,
+        )
+
+        for now_ms in (EPOCH_2020_MS - 1, REQUEST_ID_TIMESTAMP_LIMIT_MS):
+            with self.subTest(now_ms=now_ms), patch(
+                "rtp_llm.utils.concurrency_controller.time.time_ns",
+                return_value=now_ms * 1_000_000,
+            ), self.assertRaisesRegex(RuntimeError, "synchronize the host clock"):
+                ConcurrencyController()
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,

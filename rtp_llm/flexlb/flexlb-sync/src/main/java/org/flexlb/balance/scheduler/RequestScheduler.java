@@ -1,20 +1,17 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.InvalidProtocolBufferException;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RequestPhase;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -187,8 +184,7 @@ public final class RequestScheduler {
             } else {
                 selectAndPublishEncoder(context);
             }
-        } else if (requestConfig.isDirect()
-                || requiresDirectRouteDelivery(context, requestConfig)) {
+        } else if (requestConfig.isDirect()) {
             submitDirect(context);
         } else {
             enqueueGenerationRequest(context, future);
@@ -258,37 +254,6 @@ public final class RequestScheduler {
                 requestRegistry.publishDecisionResponseAsync(
                         context.getRequestId(), context.getFuture(), failure, RequestPhase.ENCODER);
             }
-        }
-    }
-
-    private static boolean requiresDirectRouteDelivery(
-            BalanceContext context, FlexlbConfig config) {
-        if (config.getDispatcher().getType() != DispatcherConfig.Type.BATCH
-                || context.getGenerateInputPb() == null
-                || context.getGenerateInputPb().isEmpty()) {
-            return false;
-        }
-        // The client must send requests that EnqueueBatch cannot accept to
-        // the selected route. Batch delivery would attempt to admit them on Prefill.
-        var request = context.getRequest();
-        if (request.getMaxNewTokens() <= 1 || request.getNumBeams() > 1) {
-            return true;
-        }
-        try {
-            var input = EngineRpcService.GenerateInputPB.parseFrom(context.getGenerateInputPb());
-            var generation = input.getGenerateConfig();
-            return input.getMultimodalInputsCount() > 0
-                    || input.hasV41Inputs()
-                    || input.hasMultimodalTokenLayout()
-                    || !generation.getCanUsePdSeparation()
-                    || generation.getMaxNewTokens() <= 1
-                    || generation.getReturnPromptLogits()
-                    || generation.getNumBeams() > 1
-                    || generation.getVariableNumBeamsCount() > 0
-                    || generation.getNumReturnSequences() > 1;
-        } catch (InvalidProtocolBufferException ignored) {
-            // The batch dispatcher reports a malformed serialized request.
-            return false;
         }
     }
 

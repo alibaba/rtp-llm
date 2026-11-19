@@ -1121,12 +1121,24 @@ class MockRpcServicer:
         )
 
     async def Cancel(self, request, context):
+        if self.state.role == "decode":
+            import grpc
+
+            self.state._rpc_counts["cancel"] += 1
+            if not request.prefill_address:
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, "Cancel requires prefill_address"
+                )
+            channel = await self.state.cluster._get_grpc_channel(
+                request.prefill_address
+            )
+            stub = self.state.cluster.pb2_grpc.RpcServiceStub(channel)
+            return await stub.Cancel(request, timeout=context.time_remaining())
         if self.state.role != "prefill":
             import grpc
 
             await context.abort(
-                grpc.StatusCode.UNIMPLEMENTED,
-                "priority Cancel is owned by the original Prefill",
+                grpc.StatusCode.UNIMPLEMENTED, "Cancel requires Decode or Prefill"
             )
         found = await self.state.cancel(int(request.request_id))
         return self.pb2.CancelResponsePB(

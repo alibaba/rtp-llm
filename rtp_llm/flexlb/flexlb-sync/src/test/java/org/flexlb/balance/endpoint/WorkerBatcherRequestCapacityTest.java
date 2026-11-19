@@ -43,6 +43,65 @@ import static org.mockito.Mockito.verify;
  */
 class WorkerBatcherRequestCapacityTest {
     @ParameterizedTest
+    @CsvSource({"1,1", "8,2"})
+    void batchFallbackOwnsPublishedRouteUntilCancellation(int tokens, int beams) {
+        FlexlbConfig config = productionConfig();
+        try (Fixture fixture = fixture(config)) {
+            Request request = new Request();
+            request.setRequestId("fallback");
+            request.setSeqLen(10L);
+            request.setMaxNewTokens(tokens);
+            request.setNumBeams(beams);
+            BalanceContext context = new BalanceContext(config);
+            context.setRequest(request);
+            context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+            context.setGenerateInputPb(
+                    org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB.newBuilder()
+                            .setGenerateConfig(
+                                    org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB
+                                            .newBuilder()
+                                            .setCanUsePdSeparation(true)
+                                            .setMaxNewTokens(tokens)
+                                            .setNumBeams(beams))
+                            .build()
+                            .toByteString());
+            ScheduledRequest item =
+                    new ScheduledRequest(
+                            context,
+                            new CompletableFuture<Response>(),
+                            null,
+                            null,
+                            null,
+                            fixture.endpoint,
+                            null,
+                            null,
+                            System.currentTimeMillis());
+            assertTrue(item.requiresRouteReservation());
+            assertTrue(EndpointTestSupport.offer(fixture.endpoint, item));
+            org.junit.jupiter.api.Assertions.assertNotNull(
+                    org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                            item, "publishedRouteReservation"));
+            var strategy =
+                    new org.flexlb.balance.scheduler.BatchDeliveryStrategy(
+                            () -> {
+                                throw new AssertionError("fallback must not submit a batch");
+                            },
+                            () -> 99L,
+                            fixture.runtime.requests(),
+                            mock(org.flexlb.balance.delivery.DeliveryMetrics.class));
+            try (var transaction =
+                    strategy.prepare(
+                            List.of(item),
+                            new org.flexlb.balance.prediction.FormulaPredictor("10"),
+                            java.util.OptionalLong.empty())) {
+                assertEquals(List.of(item), transaction.items());
+            }
+            assertTrue(fixture.endpoint.removeQueued(item, "cancel fallback"));
+            assertEquals(0L, fixture.endpoint.observedRequestCount());
+        }
+    }
+
+    @ParameterizedTest
     @CsvSource({"false,90,false", "true,50,false", "true,0,false", "true,90,true"})
     void queuedPreemptionHonorsDisabledPolicyAndStrictlyHigherPriority(
             boolean enabled, int priority, boolean accepted) {
