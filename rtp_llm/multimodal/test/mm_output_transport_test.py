@@ -31,6 +31,7 @@ from rtp_llm.multimodal.transport.rdma.backend import (
     RdmaOutputBackend,
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.utils.grpc_util import trans_tensor
 
 
 def _serialized_desc(handle: str, nbytes: int = 16) -> bytes:
@@ -181,6 +182,32 @@ class GrpcInlineOutputBackendTest(TestCase):
         self.assertEqual(result.transport, TRANSPORT_BYTES)
         self.assertEqual(list(result.receipt.split_size), [2, 3])
         self.assertEqual(len(result.receipt.output_rdma_slots), 0)
+
+    def test_inline_metrics_and_wire_bytes_follow_concatenated_dtype(self):
+        bf16 = _rows(2).to(torch.bfloat16)
+        fp32 = _rows(3, offset=100.0)
+        position_ids = torch.arange(2, dtype=torch.int32)
+        extra = torch.ones(3, dtype=torch.float16)
+        result = GrpcInlineOutputBackend().transfer(
+            MultimodalInputsPB(),
+            MMEmbeddingRes(
+                [bf16, fp32],
+                position_ids=[position_ids],
+                extra_input=[extra, None],
+            ),
+        )
+
+        embedding = torch.cat([bf16, fp32])
+        self.assertEqual(result.payload_embedding_bytes, embedding.nbytes)
+        self.assertEqual(result.payload_pos_bytes, position_ids.nbytes)
+        self.assertEqual(result.payload_extra_bytes, extra.nbytes)
+        torch.testing.assert_close(trans_tensor(result.receipt.multimodal_embedding), embedding)
+        torch.testing.assert_close(trans_tensor(result.receipt.multimodal_pos_id), position_ids)
+        torch.testing.assert_close(
+            trans_tensor(result.receipt.multimodal_extra_input[0]), extra
+        )
+        self.assertEqual(result.receipt.multimodal_extra_input[1].ByteSize(), 0)
+
 
 class _FakeBackend(MMTransportBackend):
     name = "fake"

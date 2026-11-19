@@ -70,10 +70,11 @@ def trans_tensor(t: TensorPB):
     return torch.frombuffer(payload, dtype=dtype).reshape(shape)
 
 
-def trans_from_tensor(t: torch.Tensor):
+def trans_from_tensor(t: torch.Tensor, *, into: TensorPB | None = None):
+    """Encode a tensor, optionally into a fresh submessage of a larger response."""
+    res = TensorPB() if into is None else into
     if t is None:
-        return TensorPB()
-    res = TensorPB()
+        return res
     with cuda_graph_gate.operation():
         t = t.cpu()
     res.shape.extend(list(t.shape))
