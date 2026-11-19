@@ -274,6 +274,7 @@ def build_qwen4_quant_config(quantization, source_fp8):
                 requested, "decode_cutlass_profile_ids", None
             ),
             decode_shared_gemm_nk=getattr(requested, "decode_shared_gemm_nk", False),
+            decode_lsa_timeout_ms=getattr(requested, "decode_lsa_timeout_ms", 0),
             prefill_library=getattr(requested, "prefill_library", None),
             prefill_library_sha256=getattr(requested, "prefill_library_sha256", None),
             source_fp8_block_size=128,

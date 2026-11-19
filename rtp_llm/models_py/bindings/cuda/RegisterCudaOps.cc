@@ -48,6 +48,9 @@ void registerLsaBindings(py::module& ops) {
         checkLsa(qwen38_lsa_allocate(device, hidden, &handle));
         return reinterpret_cast<uintptr_t>(handle);
     });
+    m.def("set_timeout", [](uintptr_t handle, int timeout_ms) {
+        checkLsa(qwen38_lsa_set_timeout(reinterpret_cast<void*>(handle), timeout_ms));
+    });
     m.def("connect", [](uintptr_t handle, int rank, const py::bytes& value) {
         const std::string uid = value;
         if (uid.size() != static_cast<size_t>(qwen38_lsa_uid_size()))

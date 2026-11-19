@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -47,11 +47,67 @@ def make_layer():
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class SharedExpertOverlapTest(unittest.TestCase):
+    def test_output_allocation_failure_precedes_routed_collective_suppression(self):
+        layer = make_layer()
+        layer._forward_routed = Mock(
+            side_effect=AssertionError("routed branch must not start")
+        )
+        layer._reduce_shared_gate = SimpleNamespace(
+            supports=lambda value: True,
+            prepare_output=Mock(
+                side_effect=torch.OutOfMemoryError("injected output allocation failure")
+            ),
+        )
+        value = torch.empty(2, 2560, device="cuda", dtype=torch.bfloat16)
+        with self.assertRaises(torch.OutOfMemoryError):
+            layer(value)
+        layer._forward_routed.assert_not_called()
+
+    def test_fp8_overlap_qualification_keeps_cutlass_and_hybrid(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutlass_nvfp4_executor import (
+            CutlassNvfp4Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.nvfp4_hybrid_executor import (
+            Nvfp4HybridExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterNvfp4Cutlass,
+        )
+
+        for executor_type in (CutlassNvfp4Executor, Nvfp4HybridExecutor):
+            layer = make_layer()
+            layer._shared_stream = None
+            layer.parallelism_config = SimpleNamespace(
+                role_type="DECODE", tp_size=2, ep_size=2, dp_size=1
+            )
+            layer.config = SimpleNamespace(
+                _qwen4_full_fp8_nvfp4=True,
+                eplb_config=SimpleNamespace(enable_eplb=lambda: False),
+            )
+            layer.ffn_tp_size = 1
+            layer.fused_moe = FusedMoe.__new__(FusedMoe)
+            torch.nn.Module.__init__(layer.fused_moe)
+            layer.fused_moe.router = PureTpRouterNvfp4Cutlass.__new__(
+                PureTpRouterNvfp4Cutlass
+            )
+            layer.fused_moe.fused_experts = executor_type.__new__(executor_type)
+            layer.prepare_shared_expert_overlap()
+            self.assertIsNotNone(layer._shared_stream)
+            x = torch.randn(4, 2560, device="cuda", dtype=torch.bfloat16)
+            expected = layer.shared_expert(x, skip_allreduce=True)
+            gate = layer.shared_expert_gate(x)
+            routed = layer._forward_routed(x)
+            layer.sigmoid_gate_scale_add(gate, expected, routed)
+            self.assertTrue(torch.equal(layer(x), routed))
+
     def test_bf16_shared_gemm_layout_dispatch_and_source_ownership(self):
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
             CudaF16Linear,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import prepare_shared_gemm
+        from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import (
+            prepare_shared_gemm,
+        )
         from rtp_llm.utils.model_weight import W
 
         device = torch.device("cuda", torch.cuda.current_device())
@@ -64,7 +120,9 @@ class SharedExpertOverlapTest(unittest.TestCase):
         shared = SimpleNamespace(up_proj=original_up, down_proj=original_down)
         layer = SimpleNamespace(mlp=SimpleNamespace(shared_expert=shared))
         prepare_shared_gemm([layer], [source])
-        self.assertTrue(all(w._rtp_requires_restart_for_update for w in source.values()))
+        self.assertTrue(
+            all(w._rtp_requires_restart_for_update for w in source.values())
+        )
         for original, current, k, low, high in (
             (original_up, shared.up_proj, 2560, 1, 16),
             (original_down, shared.down_proj, 640, 2, 32),
