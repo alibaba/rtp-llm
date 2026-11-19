@@ -1,6 +1,8 @@
 """Touch hints must proceed independently of cache snapshot completion."""
 import ast
 from concurrent.futures import Future
+from functools import partial
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -16,7 +18,7 @@ def observer():
                for n in c.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert {n.name for n in methods} == names
     unit = ast.Module(body=[ast.ClassDef(name='Observer', bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[])
-    scope = dict(logger=Mock(), time=time, _CACHE_SNAPSHOT_INTERVAL_NS=100000000)
+    scope = dict(logger=Mock(), time=time, os=os, partial=partial, _CACHE_SNAPSHOT_INTERVAL_NS=100000000)
     exec(compile(ast.fix_missing_locations(unit), str(path), 'exec'), scope)
     value = scope['Observer']()
     value._forward_stop = threading.Event()
@@ -30,9 +32,29 @@ class TouchDrainTest(unittest.TestCase):
     def test_pending_snapshot_does_not_block_touch_submission_or_wait_for_result(self):
         value, log = observer()
         value._poll_v6d_cache_source()
-        value._v6d_scheduler.submit_local_cache_touches.assert_called_once_with((11,22,33))
+        call = value._v6d_scheduler.submit_local_cache_touches.call_args
+        self.assertEqual(((11,22,33),), call.args)
+        touch_id = call.kwargs["touch_id"]
+        self.assertTrue(touch_id.startswith(str(os.getpid()) + ":"))
+        self.assertIn("[navi-v6d-touch-submit]", log.info.call_args.args[0])
+        self.assertEqual(touch_id, log.info.call_args.args[1])
         self.assertFalse(value._v6d_snapshot_future.done())
         self.assertFalse(value._v6d_scheduler.submit_local_cache_touches.return_value.done())
+        log.exception.assert_not_called()
+
+    def test_completion_log_uses_same_id_and_counts_real_storage_results(self):
+        value, log = observer()
+        value._drain_v6d_cache_touches()
+        touch_id = value._v6d_scheduler.submit_local_cache_touches.call_args.kwargs["touch_id"]
+        value._v6d_scheduler.submit_local_cache_touches.return_value.set_result([
+            dict(requested=4, touched=3, missing=1, busy=0),
+            dict(requested=4, touched=2, missing=0, busy=2),
+            TimeoutError(),
+        ])
+        args = log.info.call_args.args
+        self.assertIn("[navi-v6d-touch-complete]", args[0])
+        self.assertEqual((touch_id, 3, 1, 8, 5, 1, 2), args[1:])
+        log.warning.assert_called_once()
         log.exception.assert_not_called()
 
     def test_submit_failure_does_not_escape_to_inference_loop(self):
