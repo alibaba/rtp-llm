@@ -135,7 +135,11 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         bind_to=(grammar_admission_config, "compiler_cache_bytes"),
         type=int,
         default=1024 * 1024 * 1024,
-        help="Byte cap on each admission xgrammar compiler cache; <=0 is unlimited.",
+        help=(
+            "Byte cap on each admission xgrammar compiler cache; <=0 is unlimited. "
+            "Sandbox workers compile without a cache, so this only bounds the parent "
+            "startup-check compiler and is kept for config compatibility."
+        ),
     )
     grammar_group.add_argument(
         "--grammar_admission_result_cache_max_entries",
@@ -146,8 +150,8 @@ def init_grammar_group_args(parser, grammar_config, grammar_admission_config):
         help="Maximum cached deterministic grammar validation results; 0 disables it.",
     )
 
-    # Deprecated DS_LLM_-prefixed env aliases for the six admission knobs above.
-    # Early DSv4 rollouts configured these names; the canonical envs now follow
+    # Deprecated DS_LLM_-prefixed env aliases for the admission knobs above that early
+    # DSv4 rollouts configured; the canonical envs now follow
     # the repo-wide convention (flag name upper-cased). default=None keeps an
     # unset alias from clobbering the canonical value, and an explicitly-passed
     # CLI canonical flag always beats a stale alias env

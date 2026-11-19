@@ -526,7 +526,12 @@ class CacheConfigArgumentsTest(TestCase):
                 (0, 1),
             ),
             (
-                [f"--{interval_name}", str(2**31 - 1), f"--{timeout_name}", str(2**31 - 1)],
+                [
+                    f"--{interval_name}",
+                    str(2**31 - 1),
+                    f"--{timeout_name}",
+                    str(2**31 - 1),
+                ],
                 {},
                 (2**31 - 1, 2**31 - 1),
             ),
@@ -579,9 +584,9 @@ class CacheConfigArgumentsTest(TestCase):
             ),
         ):
             for value in values:
-                with self.subTest(name=name, value=value, source="cli"), self.assertRaises(
-                    SystemExit
-                ):
+                with self.subTest(
+                    name=name, value=value, source="cli"
+                ), self.assertRaises(SystemExit):
                     self.parse_cache_config([f"--{name}", value], {})
                 for args in (None, []):
                     with self.subTest(
@@ -612,14 +617,10 @@ class CacheConfigArgumentsTest(TestCase):
             with self.subTest(args=args, env=env):
                 config = self.parse_cache_config(args, env)
                 self.assertEqual(config.block_pool_frozen_abort_lower_ratio, lower)
-                self.assertEqual(
-                    config.block_pool_frozen_abort_upper_ratio, upper
-                )
+                self.assertEqual(config.block_pool_frozen_abort_upper_ratio, upper)
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, lower)
-                self.assertEqual(
-                    restored.block_pool_frozen_abort_upper_ratio, upper
-                )
+                self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, upper)
 
     def test_block_pool_frozen_abort_bounds_reject_invalid_cli_and_environment(self):
         for name in (

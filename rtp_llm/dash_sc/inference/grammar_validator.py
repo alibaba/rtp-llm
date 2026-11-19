@@ -101,14 +101,36 @@ def _with_request_id(message: str) -> str:
     return f"{message}, request_id={request_id}" if request_id else message
 
 
+_NATIVE_ALLOCATION_FAILURE_MARKERS = (
+    "bad_alloc",
+    "out of memory",
+    "cannot allocate memory",
+    "memoryallocation",
+)
+
+
+def _is_native_allocation_failure(error: BaseException, message: str) -> bool:
+    """Return whether the trial compile failed because the worker ran out of memory.
+
+    tvm-ffi surfaces C++ ``std::bad_alloc`` as ``RuntimeError("std::bad_alloc")``, so a
+    resource failure is indistinguishable from a grammar rejection by type alone. The
+    text check is therefore load-bearing: reading exhaustion as a client error turns a
+    retryable 429 into a cached 400 and leaves the worker pinned at its address-space
+    cap, where every later compile of any grammar fails the same way.
+    """
+    if isinstance(error, MemoryError):
+        return True
+    lowered = message.lower()
+    return any(marker in lowered for marker in _NATIVE_ALLOCATION_FAILURE_MARKERS)
+
+
 def _compile_exception_reply(error: Exception) -> tuple[_WorkerStatus, bool, str]:
     """Classify exceptions from the request's trial compile, not worker startup or IPC."""
     message = (str(error) or type(error).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
-    if isinstance(error, MemoryError):
+    if _is_native_allocation_failure(error, message):
         return _WorkerStatus.OVERLOADED, True, message
     # xgrammar uses RuntimeError for validation failures and unsupported grammars.
-    # Treat all such compile errors as request rejections, regardless of their text.
-    # This policy includes native failures exposed as RuntimeError.
+    # Treat those compile errors as request rejections, regardless of their text.
     if isinstance(error, (RuntimeError, ValueError, TypeError)):
         return _WorkerStatus.INVALID, False, message
     return _WorkerStatus.UNAVAILABLE, True, message
@@ -174,9 +196,7 @@ def _read_worker_fault_trace(fault_file: BinaryIO | None) -> str:
     except (OSError, ValueError):
         return ""
     truncated = len(raw_trace) > _MAX_WORKER_FAULT_TRACE_BYTES
-    trace = raw_trace[:_MAX_WORKER_FAULT_TRACE_BYTES].decode(
-        "utf-8", errors="replace"
-    )
+    trace = raw_trace[:_MAX_WORKER_FAULT_TRACE_BYTES].decode("utf-8", errors="replace")
     trace = trace.strip()
     if truncated:
         trace += "\n[worker fatal traceback truncated]"
@@ -302,22 +322,20 @@ class GrammarValidator:
         grammar_config: GrammarConfig,
         admission_config: GrammarAdmissionConfig,
     ) -> None:
-        self._result_cache_max_entries = int(
-            admission_config.result_cache_max_entries
-        )
+        self._result_cache_max_entries = int(admission_config.result_cache_max_entries)
         if self._result_cache_max_entries < 0:
             raise ValueError(
                 "grammar admission result_cache_max_entries must be non-negative"
             )
         self._result_cache_lock = threading.Lock()
-        self._result_cache: OrderedDict[
-            tuple[str, str], _GrammarCheckResult
-        ] = OrderedDict()
+        self._result_cache: OrderedDict[tuple[str, str], _GrammarCheckResult] = (
+            OrderedDict()
+        )
         self._crash_circuit_lock = threading.Lock()
         self._crash_circuit: OrderedDict[tuple[str, str], float] = OrderedDict()
-        self._initialize_compiler(
-            tokenizer_info_json, grammar_config, admission_config
-        )
+        # The parent backend only proves that the tokenizer/xgrammar pair is usable;
+        # every trial compile happens in a worker, so the parent keeps no cache.
+        self._initialize_compiler(tokenizer_info_json, grammar_config, admission_config)
         self._worker_tokenizer_info_json = tokenizer_info_json
         self._worker_grammar_config = grammar_config
         self._worker_admission_config = admission_config
@@ -361,9 +379,7 @@ class GrammarValidator:
         # for the same key to execute more than once. Keep one in-flight Future per exact
         # grammar so duplicate requests share the leader's compile result.
         self._inflight_lock = threading.Lock()
-        self._inflight: dict[
-            tuple[str, str], Future[_GrammarCheckResult]
-        ] = {}
+        self._inflight: dict[tuple[str, str], Future[_GrammarCheckResult]] = {}
         self._live = 0
         self._spawning = 0
         self._coordinator_running = False
@@ -378,7 +394,7 @@ class GrammarValidator:
         self._ensure_pool()  # warm N workers in the background; never blocks init
 
         worker_limit_mb = max(0, self._worker_memory_limit_bytes // 1024 // 1024)
-        msg = f"GrammarValidator mode=sandbox compile_backend=on queue_timeout_s={self._queue_timeout_s:g} compile_timeout_s={self._compile_timeout_s:g} compiler_threads={self._compile_threads} compiler_cache_bytes={self._cache_limit_bytes} result_cache_max_entries={self._result_cache_max_entries} pool={self._pool_target} worker_memory_limit_mb={worker_limit_mb}"
+        msg = f"GrammarValidator mode=sandbox compile_backend=on queue_timeout_s={self._queue_timeout_s:g} compile_timeout_s={self._compile_timeout_s:g} compiler_threads={self._compile_threads} worker_compile_cache=off result_cache_max_entries={self._result_cache_max_entries} pool={self._pool_target} worker_memory_limit_mb={worker_limit_mb}"
         logger.debug(msg)
 
     # -- public entry points (shape checks first, then maybe compile) ------- #
@@ -528,9 +544,7 @@ class GrammarValidator:
             # no sort_keys: validate/cache the exact string xgrammar will compile.
             spec_str = spec if isinstance(spec, str) else json.dumps(spec)
         except Exception as e:
-            detail = (str(e) or type(e).__name__)[
-                :_MAX_COMPILE_ERROR_MESSAGE_LENGTH
-            ]
+            detail = (str(e) or type(e).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
             logger.warning(
                 _with_request_id(
                     f"GrammarValidator: cannot serialize grammar spec ({detail}); rejecting it"
@@ -554,9 +568,7 @@ class GrammarValidator:
             )
             raise
         except Exception as e:
-            detail = (str(e) or type(e).__name__)[
-                :_MAX_COMPILE_ERROR_MESSAGE_LENGTH
-            ]
+            detail = (str(e) or type(e).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
             logger.warning(
                 _with_request_id(
                     f"GrammarValidator: unexpected grammar check failure ({detail}); request may be retried"
@@ -613,9 +625,7 @@ class GrammarValidator:
                 if self._inflight.get(key) is future:
                     del self._inflight[key]
 
-    def _get_cached_result(
-        self, key: tuple[str, str]
-    ) -> _GrammarCheckResult | None:
+    def _get_cached_result(self, key: tuple[str, str]) -> _GrammarCheckResult | None:
         if self._result_cache_max_entries == 0:
             return None
         with self._result_cache_lock:
@@ -624,9 +634,7 @@ class GrammarValidator:
                 self._result_cache.move_to_end(key)
             return result
 
-    def _cache_result(
-        self, key: tuple[str, str], result: _GrammarCheckResult
-    ) -> None:
+    def _cache_result(self, key: tuple[str, str], result: _GrammarCheckResult) -> None:
         if self._result_cache_max_entries == 0:
             return
         with self._result_cache_lock:
@@ -793,7 +801,11 @@ class GrammarValidator:
                 # compile costs a few CPU-seconds, well inside the 30s
                 # admission deadline.
                 max_threads=1,
-                cache_enabled=True,
+                # The sandbox only needs a verdict, never the compiled grammar, and the
+                # parent already caches results. xgrammar's cache would instead grow this
+                # process's address space with every distinct grammar until it fills the
+                # RLIMIT_AS headroom, after which every compile fails with std::bad_alloc.
+                cache_enabled=False,
                 cache_limit_bytes=self._cache_limit_bytes,
             )
         except Exception as e:
@@ -1014,9 +1026,7 @@ class GrammarValidator:
                     break
                 self._retire(*worker)
 
-    def _retire(
-        self, proc: Any, conn: Any, fault_file: BinaryIO | None = None
-    ) -> None:
+    def _retire(self, proc: Any, conn: Any, fault_file: BinaryIO | None = None) -> None:
         """Kill a dead/bad worker and schedule a bounded-rate replacement."""
         if conn is not None:
             try:
@@ -1220,6 +1230,15 @@ class GrammarValidator:
                 status = _WorkerStatus.VALID
             except Exception as e:
                 status, exit_after_reply, compile_error = _compile_exception_reply(e)
+                if not exit_after_reply and self._sandbox_address_space_exhausted():
+                    # This worker is at its RLIMIT_AS cap: every later compile of any
+                    # grammar fails the same way, so retire it instead of returning a
+                    # verdict that would keep a spent worker in the pool.
+                    status = _WorkerStatus.OVERLOADED
+                    exit_after_reply = True
+                    compile_error = (
+                        f"{compile_error} (sandbox worker address space exhausted)"
+                    )
             try:
                 conn.send((status, exit_after_reply, compile_error))
             except (EOFError, OSError):
@@ -1234,6 +1253,24 @@ class GrammarValidator:
         """Return this process's current virtual address space (VmSize)."""
         with open("/proc/self/statm") as f:
             return int(f.read().split()[0]) * resource.getpagesize()
+
+    # A worker this close to its RLIMIT_AS cap cannot complete a meaningful compile,
+    # and stays unusable for every later grammar, so it must be replaced rather than
+    # kept in the pool.
+    _ADDRESS_SPACE_RETIRE_MARGIN_BYTES = 64 * 1024 * 1024
+
+    def _sandbox_address_space_exhausted(self) -> bool:
+        """Return whether this worker is close enough to its RLIMIT_AS cap to be spent."""
+        try:
+            soft, _ = resource.getrlimit(resource.RLIMIT_AS)
+            if soft == resource.RLIM_INFINITY:
+                return False
+            return (
+                self._current_vsz_bytes() + self._ADDRESS_SPACE_RETIRE_MARGIN_BYTES
+                >= soft
+            )
+        except Exception:
+            return False
 
     @staticmethod
     @functools.lru_cache(maxsize=1)
