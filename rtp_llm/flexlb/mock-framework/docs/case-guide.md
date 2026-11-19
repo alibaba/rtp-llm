@@ -26,7 +26,7 @@
 
 `environment` 按角色声明 `master`、`prefill`、`decode`、`vit`、`frontend`。P/D 必须写 `engine: rtp`。`deployment.replicas` 默认 1，表示独立 JVM 数。Frontend 的 `qps`、`total_concurrency` 是所有副本的合计，由 `frontend/start/playback` 的参数指定。本地启动器会拒绝当前无法落实的 `resources` 和 `heap` 限制。
 
-`config` 文件的内容就是角色配置 mapping。Master 的 `FLEXLB_CONFIG` 和 `MODEL_SERVICE_CONFIG` 使用原生 JSON 字符串。Mock 点分键由编译器展开。重复键、YAML merge 和点分路径冲突会报错。[组件参数](component-reference.md#engine-配置规则)
+`config` 文件的内容就是角色配置 mapping。Master 的 `FLEXLB_CONFIG` 和 `MODEL_SERVICE_CONFIG` 使用原生 JSON 字符串。Mock 点分键由编译器展开。重复键、YAML merge 和点分路径冲突会报错。[Mock 参数](configuration.md)
 
 ID 使用小写 `snake_case`，Case、Phase 和 Step 的 ID 在同一个 Case 中全局唯一。Case ID 与目录同名，Phase ID 描述阶段。Step ID 写成“动作 + 对象”，例如 `start_frontend`、`get_master_a`、`check_prefill_tps`、`check_frontend_success_rate_after_drain`。阈值放进 `expect`，场景意图放进 `describe`。改名时同步修改引用。
 
