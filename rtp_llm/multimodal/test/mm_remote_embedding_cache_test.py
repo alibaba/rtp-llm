@@ -585,6 +585,58 @@ class RemoteCacheTest(unittest.TestCase):
         finally:
             remote._gdr_pool.release(slot)
 
+    def test_read_can_lease_a_slot_released_during_short_wait(self):
+        remote, (slot,) = self.slot_cache(1)
+        value = torch.arange(8)
+        slot.objects["hit"] = pack_object(
+            plan_object(
+                {"cache_key": "hit", "version": 1, "result": (value, None), "greennet": None}
+            )
+        )
+        self.assertIs(remote._gdr_pool.acquire(), slot)
+        condition = remote._gdr_pool._condition
+
+        def release_slot(timeout=None):
+            remote._gdr_pool.release(slot)
+            return True
+
+        with patch.object(condition, "wait", side_effect=release_slot) as wait:
+            torch.testing.assert_close(remote.load("hit")[0], value)
+            wait.assert_called_once()
+            self.assertLessEqual(wait.call_args.args[0], 0.025)
+
+    def test_expired_background_write_never_packs_or_calls_the_sdk(self):
+        remote, (slot,) = self.slot_cache(1, write_transfer_workers=1, write_timeout_ms=1)
+        release = threading.Event()
+        remote._write_executor.submit(release.wait, 3)
+        try:
+            with patch.object(slot, "pack") as pack, patch.object(
+                remote, "_report_skip"
+            ) as skip:
+                remote.submit_result("old", (torch.arange(8), None))
+                time.sleep(0.02)
+                release.set()
+                remote._write_executor.submit(lambda: None).result(timeout=2)
+                skip.assert_called_once_with("write", "write_queue_expired")
+                pack.assert_not_called()
+                self.assertNotIn("old", slot.objects)
+        finally:
+            release.set()
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_write_backlog_leaves_room_for_metadata(self):
+        remote = self.remote(Store(), max_pending=4, write_transfer_workers=1)
+        release = threading.Event()
+        remote._write_executor.submit(release.wait, 3)
+        try:
+            for i in range(4):
+                remote.submit_result(str(i), (torch.arange(8), None))
+            self.assertEqual(remote.stats()["inflight_tasks"], 4)
+            self.assertIsNone(remote.load("missing"))
+            self.assertEqual(remote.stats()["miss"], 1)
+        finally:
+            release.set()
+
     def test_slow_restore_leaves_transfer_available_and_retains_payload_budget(self):
         value = torch.arange(8)
         store = Store({"hit": pack_object(plan_object((value, None)))})
@@ -743,7 +795,7 @@ class RemoteCacheTest(unittest.TestCase):
             recovered = remote._gdr_pool.acquire()
             self.assertIs(recovered, slot)
             remote._gdr_pool.release(recovered)
-            self.assertEqual(remote.stats()["inflight_tasks"], 1)
+            self.assertEqual(remote.stats()["inflight_tasks"], 0)
         finally:
             gate.set()
             for blocker in blockers:
@@ -785,7 +837,7 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
-    def test_running_metadata_retains_the_total_budget_after_caller_timeout(self):
+    def test_timed_out_metadata_retains_its_worker_until_it_exits(self):
         store = Store({})
         remote = self.remote(store, max_pending=2, metadata_workers=2)
         entered = threading.Semaphore(0)
@@ -806,17 +858,17 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertTrue(all(entered.acquire(timeout=1) for _ in reads))
                 for read in reads:
                     self.assertIsNone(read.result(timeout=1))
-                self.assertIsNone(remote.load("over-budget"))
+                self.assertIsNone(remote.load("workers-busy", timeout_ms=25))
                 self.assertEqual(lookup.call_count, 2)
-                self.assertEqual(remote.stats()["inflight_tasks"], 2)
-                skip.assert_called_once_with("read", "admission")
+                self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                skip.assert_not_called()
             finally:
                 release.set()
         remote.close()
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
-    def test_timed_out_queued_reads_keep_admission_until_consumed(self):
-        remote, (slot,) = self.slot_cache(1, max_pending=2)
+    def test_timed_out_queued_reads_cannot_fill_an_unbounded_queue(self):
+        remote, (slot,) = self.slot_cache(1, max_pending=1, metadata_workers=2)
         gate = threading.Event()
         blockers = [
             remote._metadata_executor.submit(gate.wait, 3)
@@ -830,7 +882,7 @@ class RemoteCacheTest(unittest.TestCase):
             ) as acquire:
                 for _ in range(2):
                     self.assertIsNone(remote.load("queued", timeout_ms=10))
-                self.assertEqual(remote.stats()["inflight_tasks"], 2)
+                self.assertEqual(remote.stats()["inflight_tasks"], 0)
                 self.assertIsNone(remote.load("not-admitted", timeout_ms=10))
                 self.assertEqual(submit.call_count, 2)
                 metadata.assert_not_called()
@@ -865,15 +917,15 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertEqual(remote.stats()["inflight_tasks"], 0)
                 self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
-    def test_task_admission_precedes_metadata_and_slot_acquisition(self):
+    def test_full_payload_admission_still_queries_metadata_without_leasing_a_slot(self):
         remote, (slot,) = self.slot_cache(1, max_pending=1)
         self.assertTrue(remote._reserve(0))
         try:
-            with patch.object(slot, "object_size") as metadata, patch.object(
+            with patch.object(slot, "object_size", return_value=32) as metadata, patch.object(
                 remote._gdr_pool, "acquire", wraps=remote._gdr_pool.acquire
             ) as acquire:
                 self.assertIsNone(remote.load("key"))
-                metadata.assert_not_called()
+                metadata.assert_called_once()
                 acquire.assert_not_called()
         finally:
             remote._release(0)
@@ -939,8 +991,8 @@ class RemoteCacheTest(unittest.TestCase):
         remote, (slot,) = self.slot_cache(1)
         original_acquire = remote._gdr_pool.acquire
 
-        def acquire():
-            leased = original_acquire()
+        def acquire(**kwargs):
+            leased = original_acquire(**kwargs)
             time.sleep(0.06)
             return leased
 
@@ -1249,9 +1301,7 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["hit"], 1)
 
     def test_executor_queue_delay_is_observable(self):
-        from concurrent.futures import ThreadPoolExecutor
-
-        remote = self.remote(Store())
+        remote = self.remote(Store(), metadata_workers=1)
         entered = [threading.Event() for _ in range(remote._metadata_executor._max_workers)]
         release = threading.Event()
 
@@ -1261,19 +1311,22 @@ class RemoteCacheTest(unittest.TestCase):
 
         blockers = [remote._metadata_executor.submit(block, i) for i in range(len(entered))]
         self.assertTrue(all(e.wait(2) for e in entered))
-        with patch(
+        submitted = threading.Event()
+        original_submit = remote._metadata_executor.submit
+
+        def submit(lookup):
+            task = original_submit(lookup)
+            submitted.set()
+            return task
+
+        with patch.object(remote._metadata_executor, "submit", side_effect=submit), patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
         ) as report:
-            with ThreadPoolExecutor(max_workers=1) as caller:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as caller:
                 pending = caller.submit(remote.load, "missing")
                 try:
-                    deadline = time.monotonic() + 2
-                    while (
-                        remote.stats()["inflight_tasks"] != 1
-                        and time.monotonic() < deadline
-                    ):
-                        time.sleep(0.001)
-                    self.assertEqual(remote.stats()["inflight_tasks"], 1)
+                    self.assertTrue(submitted.wait(1))
+                    self.assertEqual(remote.stats()["inflight_tasks"], 0)
                     time.sleep(0.03)
                 finally:
                     release.set()
@@ -1691,17 +1744,17 @@ class RemoteCacheTest(unittest.TestCase):
                 remote._release(0)
         self.assertEqual(
             self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC),
-            [(1, {"status": "admission_skip"})],
+            [(1, {"status": "admission_skip"})] * 2,
         )
         self.assertEqual(
             self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
-            [(0, {})],
+            [(0, {})] * 2,
         )
         self.assertEqual(
             self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC),
             [
                 (1, {"operation": "read", "reason": "payload_budget"}),
-                (1, {"operation": "read", "reason": "admission"}),
+                (1, {"operation": "read", "reason": "transfer_admission"}),
             ],
         )
 
@@ -2572,7 +2625,7 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
 
         self.cache._factory = lambda: SlowCleanup(self.storage)
         self.cache.read_timeout_ms = 20
-        self.cache.max_pending = 2
+        self.cache._metadata_workers = threading.BoundedSemaphore(2)
         try:
             started = time.monotonic()
             self.assertIsNone(self.cache.load("one"))
@@ -2580,9 +2633,9 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 0.5)
             self.assertEqual(len(retired), 2)
             self.assertFalse(any(client.closed for client in retired))
-            self.assertEqual(self.cache.stats()["inflight_tasks"], 2)
+            self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
             self.assertIsNone(self.cache.load("not-admitted"))
-            self.assertEqual(self.cache.stats()["admission_skip"], 1)
+            self.assertEqual(self.cache.stats().get("admission_skip", 0), 0)
             self.assertEqual(len(retired), 2)
         finally:
             release.set()
@@ -2607,7 +2660,7 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
             self.assertIsNone(self.cache.load("missing"))
             self.assertLess(time.monotonic() - before, 0.5)
             self.assertTrue(started.is_set())
-            self.assertEqual(self.cache.stats()["inflight_tasks"], 1)
+            self.assertEqual(self.cache.stats()["inflight_tasks"], 0)
         finally:
             release.set()
             self.cache.close()

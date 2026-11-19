@@ -520,7 +520,7 @@ class RegisteredTransportPool:
         return client.get_object_meta(key, **kwargs)
 
     def acquire(self, *, for_write=False, timeout=0):
-        """Reads try once. Background writers can wait up to timeout seconds."""
+        """Lease an available slot, optionally waiting up to timeout seconds."""
         deadline = time.monotonic() + timeout
         with self._condition:
             while self._accepting and not self.quarantined:
@@ -539,7 +539,7 @@ class RegisteredTransportPool:
                             self._in_use[slot] = for_write
                             return slot
                 remaining = deadline - time.monotonic()
-                if not for_write or remaining <= 0:
+                if remaining <= 0:
                     break
                 if not self._condition.wait(remaining):
                     break
