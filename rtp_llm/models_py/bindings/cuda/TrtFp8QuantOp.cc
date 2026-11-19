@@ -1,10 +1,15 @@
 #include "rtp_llm/models_py/bindings/cuda/TrtFp8QuantOp.h"
 #include "rtp_llm/models_py/bindings/common/Torch_ext.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
+#if defined(ENABLE_FP8) && !defined(USE_PPU)
+#include "rtp_llm/models_py/bindings/cuda/kernels/contiguous_silu_fp8.h"
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <climits>
 #include <cstdint>
+#include <optional>
 #include <iostream>
 #include <stdexcept>
 #include <c10/cuda/CUDAGuard.h>
@@ -59,6 +64,55 @@ std::pair<at::Tensor, at::Tensor> create_output_tensors(const at::Tensor& input,
 
     return {output_q, output_s};
 }
+
+#if defined(ENABLE_FP8) && !defined(USE_PPU)
+std::pair<at::Tensor, at::Tensor> sm90_contiguous_silu_fp8(const at::Tensor& input,
+                                                       const std::optional<at::Tensor>& expert_ids,
+                                                       const std::optional<at::Tensor>& expert_end,
+                                                       int64_t padding_begin,
+                                                       int64_t padding_end) {
+    validate_input_tensor(input);
+    const int64_t rows = input.size(0);
+    const int64_t width = input.size(1) / 2;
+    TORCH_CHECK(width > 0 && width % 128 == 0 && width * 2 == input.size(1) &&
+                    width < 65536 && rows * (width / 128) <= INT_MAX / 2,
+                "invalid SiLU-FP8 shape");
+    TORCH_CHECK(reinterpret_cast<uintptr_t>(input.const_data_ptr()) % 16 == 0,
+                "SiLU-FP8 input must be 16-byte aligned");
+    TORCH_CHECK(padding_begin >= 0 && padding_begin <= padding_end && padding_end <= rows,
+                "invalid SiLU-FP8 padding bounds");
+    TORCH_CHECK(expert_ids.has_value() == expert_end.has_value() &&
+                    (padding_begin == padding_end || expert_ids.has_value()),
+                "SiLU-FP8 padding requires both expert metadata tensors");
+    if (expert_ids) {
+        const auto valid_metadata = [&](const at::Tensor& t) {
+            return t.device() == input.device() && t.is_contiguous() && t.dim() == 1 &&
+                   t.scalar_type() == at::kInt;
+        };
+        TORCH_CHECK(valid_metadata(*expert_ids) && expert_ids->numel() == rows &&
+                        valid_metadata(*expert_end) && expert_end->numel() > 0,
+                    "invalid SiLU-FP8 expert metadata layout");
+    }
+
+    const c10::cuda::CUDAGuard guard(input.device());
+    const auto* properties = at::cuda::getDeviceProperties(input.get_device());
+    TORCH_CHECK(properties->major == 9 && properties->minor == 0,
+                "contiguous SiLU-FP8 requires SM90");
+    const int64_t scale_ld = (rows + 3) / 4 * 4;
+    auto output = at::empty({rows, width}, input.options().dtype(at::kFloat8_e4m3fn));
+    auto scales = at::empty_strided({rows, width / 128}, {1, scale_ld}, input.options().dtype(at::kFloat));
+    const auto status = rtp_llm::invokeContiguousSiluFp8(
+        input.const_data_ptr(),
+        expert_ids ? expert_ids->const_data_ptr<int32_t>() : nullptr,
+        expert_end ? expert_end->const_data_ptr<int32_t>() : nullptr,
+        reinterpret_cast<uint8_t*>(output.mutable_data_ptr()),
+        scales.mutable_data_ptr<float>(),
+        rows, width, scale_ld, c10::cuda::getCurrentCUDAStream(input.get_device()), padding_begin, padding_end);
+    TORCH_CHECK(status == cudaSuccess, "SiLU-FP8 launch failed: ", cudaGetErrorString(status));
+    return {output, scales};
+}
+#endif
+
 }  // namespace
 
 std::pair<at::Tensor, at::Tensor> trt_fp8_quantize_128(const at::Tensor& input, bool col_major_scale) {
@@ -162,6 +216,12 @@ void trt_fp8_quantize_128_inplace(const at::Tensor& input,
 #endif
 
 void registerTrtFp8QuantOp(py::module& m) {
+#if defined(ENABLE_FP8) && !defined(USE_PPU)
+    m.def("sm90_contiguous_silu_fp8",
+          &sm90_contiguous_silu_fp8,
+          py::arg("input"), py::arg("expert_ids"), py::arg("expert_end"),
+          py::arg("padding_begin"), py::arg("padding_end"));
+#endif
     m.def("trt_fp8_quantize_128",
           &trt_fp8_quantize_128,
           "Quantize BF16 weight matrix to FP8 format using 128-element block processing",

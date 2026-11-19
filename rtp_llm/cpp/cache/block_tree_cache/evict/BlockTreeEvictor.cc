@@ -222,8 +222,12 @@ std::vector<TreeNode*> BlockTreeEvictor::candidateNodes(size_t group_set_id, Tie
     return heap == nullptr ? std::vector<TreeNode*>{} : heap->nodes();
 }
 
-bool BlockTreeEvictor::dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled) {
-    std::optional<TransferDescriptor> eviction_desc = chooseVictim(group_set_id, source_tier, /*force_drop=*/true);
+bool BlockTreeEvictor::dropLocked(size_t                group_set_id,
+                                  Tier                  source_tier,
+                                  bool                  notify_settled,
+                                  std::optional<size_t> reclaim_device_member) {
+    std::optional<TransferDescriptor> eviction_desc =
+        chooseVictim(group_set_id, source_tier, /*force_drop=*/true, reclaim_device_member);
     if (!eviction_desc.has_value()) {
         return false;
     }
@@ -449,15 +453,24 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
     }
 }
 
-std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_set_id, Tier tier, bool force_drop) {
+std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t                group_set_id,
+                                                                 Tier                  tier,
+                                                                 bool                  force_drop,
+                                                                 std::optional<size_t> reclaim_device_member) {
     EvictionHeap* heap = heapFor(group_set_id, tier);
     if (heap == nullptr) {
         return std::nullopt;
     }
 
-    const auto can_evict = [this, group_set_id, tier, force_drop](TreeNode* node) {
-        if (force_drop || tier != Tier::DEVICE
-            || tree_->groupSets()[group_set_id]->groupType() != CacheGroupType::FULL) {
+    const auto& group = tree_->groupSets()[group_set_id];
+    const auto can_evict = [&](TreeNode* node) {
+        if (reclaim_device_member) {
+            const auto&  blocks = node->group_set_resources[group_set_id].device_blocks;
+            const size_t member = *reclaim_device_member;
+            return member < blocks.size() && !isNullBlockIdx(blocks[member])
+                   && group->devicePools()[member]->isCacheOnlyBlock(blocks[member]);
+        }
+        if (force_drop || tier != Tier::DEVICE || group->groupType() != CacheGroupType::FULL) {
             return true;
         }
         return std::none_of(node->children.begin(), node->children.end(), [group_set_id](const auto& child_entry) {
