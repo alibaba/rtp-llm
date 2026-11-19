@@ -59,25 +59,23 @@ std::optional<EvictionEntry>
 EvictionHeap::RejectedPrefixScope::best(const std::function<bool(TreeNode*)>& can_evict) {
     // EntryLess uses every copied key, including the live boundary's pointer
     // tie-breaker. Erasing that boundary invalidates it before node destruction.
-    auto candidate     = fence_.has_value() ? heap_.ordered_.upper_bound(*fence_) : heap_.ordered_.begin();
-    auto last_rejected = heap_.ordered_.end();
-    for (; candidate != heap_.ordered_.end(); ++candidate) {
-        const EvictionEntry& entry = *candidate;
-        if (can_evict(entry.node)) {
-            if (last_rejected != heap_.ordered_.end()) {
-                fence_ = *last_rejected;
-            }
-            return entry;
+    const auto start     = fence_.has_value() ? heap_.ordered_.upper_bound(*fence_) : heap_.ordered_.begin();
+    const auto end       = heap_.ordered_.end();
+    auto       candidate = start;
+    for (; candidate != end; ++candidate) {
+        if (can_evict(candidate->node)) {
+            break;
         }
-        // Trusted selection predicate: false confirms/inserts the identity in
-        // R. Reuse that proof without another hash lookup on every rejection.
-        last_rejected = candidate;
     }
-    if (last_rejected != heap_.ordered_.end()) {
-        fence_ = *last_rejected;
+    // The predicate records every rejection. The preceding entry is the
+    // last one rejected, including when the scan reached the end.
+    if (candidate != start) {
+        fence_ = *std::prev(candidate);
     }
-    // Both iterators die here, before any cascading drop can run.
-    return std::nullopt;
+    if (candidate == end) {
+        return std::nullopt;
+    }
+    return *candidate;
 }
 
 EvictionEntry EvictionHeap::makeEntry(TreeNode* node, const CandidateMeta& meta) const {
@@ -157,6 +155,20 @@ std::optional<EvictionEntry> EvictionHeap::best(const std::function<bool(TreeNod
         }
     }
     return std::nullopt;
+}
+
+void EvictionHeap::rememberRejectedPrefixBefore(TreeNode*                            victim,
+                                                const std::unordered_set<TreeNode*>& rejected,
+                                                std::optional<RejectedPrefixScope>&  scope) {
+    RTP_LLM_CHECK_WITH_INFO(!scope.has_value(), "rejected-prefix storage is already active");
+    const auto selected = index_.find(victim);
+    RTP_LLM_CHECK_WITH_INFO(selected != index_.end(), "rejected-prefix victim must be in the heap");
+    if (selected->second != ordered_.begin()) {
+        const auto& boundary = *std::prev(selected->second);
+        RTP_LLM_CHECK_WITH_INFO(rejected.count(boundary.node) != 0, "rejected-prefix boundary must be rejected");
+        scope.emplace(*this, rejected);
+        scope->fence_ = boundary;
+    }
 }
 
 EvictionHeap::RejectedPrefixScope*

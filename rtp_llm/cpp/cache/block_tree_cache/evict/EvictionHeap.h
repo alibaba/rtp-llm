@@ -75,6 +75,11 @@ public:
     void erase(TreeNode* node);
     // Read the best matching victim without changing heap membership.
     std::optional<EvictionEntry> best(const std::function<bool(TreeNode*)>& can_evict) const;
+    // The victim came from a scan from the heap head. All live predecessors
+    // were rejected by this batch, and no heap changes may intervene.
+    void rememberRejectedPrefixBefore(TreeNode*                            victim,
+                                      const std::unordered_set<TreeNode*>& rejected,
+                                      std::optional<RejectedPrefixScope>&  scope);
     // Match the batch by rejection set identity. Reject overlapping batches
     // and a prefix-enabled batch sent to a heap without its scope.
     RejectedPrefixScope* rejectedPrefixFor(const std::unordered_set<TreeNode*>& rejected,
