@@ -519,26 +519,30 @@ class RegisteredTransportPool:
             return None
         return client.get_object_meta(key, **kwargs)
 
-    def acquire(self, *, for_write=False):
-        """Reads try once. Background writers wait for a lease."""
+    def acquire(self, *, for_write=False, timeout=0):
+        """Reads try once. Background writers can wait up to timeout seconds."""
+        deadline = time.monotonic() + timeout
         with self._condition:
             while self._accepting and not self.quarantined:
                 healthy = [slot for slot in self._slots if not slot.quarantined]
                 # A multi-slot pool reserves one healthy slot for read leases.
+                writable = len(healthy)
                 if for_write and len(self._slots) > 1:
-                    active_writes = sum(
+                    if len(healthy) <= 1:
+                        return None
+                    writable -= 1 + sum(
                         self._in_use.get(slot, False) for slot in healthy
                     )
-                    if active_writes >= len(healthy) - 1:
-                        self._condition.wait()
-                        continue
-                for slot in healthy:
-                    if slot not in self._in_use:
-                        self._in_use[slot] = for_write
-                        return slot
-                if not for_write:
+                if writable > 0:
+                    for slot in healthy:
+                        if slot not in self._in_use:
+                            self._in_use[slot] = for_write
+                            return slot
+                remaining = deadline - time.monotonic()
+                if not for_write or remaining <= 0:
                     break
-                self._condition.wait()
+                if not self._condition.wait(remaining):
+                    break
         return None
 
     def stop_acquiring(self):
