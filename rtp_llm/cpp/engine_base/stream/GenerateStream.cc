@@ -149,7 +149,6 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              calculateLoss()                                 ? "calculate_loss" :
                              config.return_hidden_states                     ? "return_hidden_states" :
                              config.return_all_hidden_states                 ? "return_all_hidden_states" :
-                             getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
                              input->custom_output_token_position >= 0        ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
                              !model_config.attn_config.is_causal              ? "non_causal_attention" :
