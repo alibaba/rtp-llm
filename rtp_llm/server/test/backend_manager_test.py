@@ -255,12 +255,15 @@ class BackendManagerDeepEPTest(unittest.TestCase):
 
 
 class BackendManagerServiceStartTest(unittest.TestCase):
-    """The SCR gate must be an opt-in flag, not a new default startup path."""
+    """Preparation precedes listener startup and serving metrics activation."""
 
     def _manager_and_config(self):
         manager = BackendManager.__new__(BackendManager)
         manager._distributed_server = Mock()
         manager._distributed_server.get_nccl_comm_config.return_value = None
+        manager._shutdown_requested = threading.Event()
+        manager._service_draining = None
+        manager._metrics_state_lock = threading.RLock()
 
         profiling = SimpleNamespace(log_file_backup_count=1)
         py_config = SimpleNamespace(
@@ -276,6 +279,7 @@ class BackendManagerServiceStartTest(unittest.TestCase):
             render_config=object(),
             eplb_config=object(),
             vit_config=object(),
+            py_hw_kernel_config=SimpleNamespace(glm5_cp_opt=False),
         )
 
         engine_config = SimpleNamespace(
@@ -299,7 +303,9 @@ class BackendManagerServiceStartTest(unittest.TestCase):
             concurrency_config=SimpleNamespace(concurrency_limit=1),
         )
         model_config = SimpleNamespace(expert_num=0, task_type=TaskType.LANGUAGE_MODEL)
-        engine = SimpleNamespace(task_type=TaskType.LANGUAGE_MODEL)
+        engine = SimpleNamespace(
+            task_type=TaskType.LANGUAGE_MODEL, set_serving=Mock()
+        )
         return manager, py_config, engine_config, model_config, engine
 
     def test_start_prepares_then_start_service_binds_listeners(self):
@@ -307,7 +313,9 @@ class BackendManagerServiceStartTest(unittest.TestCase):
         manager, py_config, engine_config, model_config, engine = (
             self._manager_and_config()
         )
-        engine.start_service = Mock()
+        events = []
+        engine.start_service = Mock(side_effect=lambda: events.append("listeners"))
+        engine.set_serving.side_effect = lambda serving: events.append("serving")
         with patch(
             "rtp_llm.server.backend_manager.EngineConfig.create",
             return_value=engine_config,
@@ -328,6 +336,7 @@ class BackendManagerServiceStartTest(unittest.TestCase):
             manager.py_env_configs = py_config
             manager.start()
             engine.start_service.assert_not_called()
+            engine.set_serving.assert_not_called()
             manager.start_service()
             manager.start_service()
 
@@ -335,6 +344,15 @@ class BackendManagerServiceStartTest(unittest.TestCase):
         # BackendManager forwards every call; LanguageCppEngine owns the
         # idempotence guard.
         self.assertEqual(engine.start_service.call_count, 2)
+        self.assertEqual(events, ["listeners", "serving", "listeners", "serving"])
+
+    def test_failed_service_start_does_not_mark_serving(self):
+        manager, _, _, _, engine = self._manager_and_config()
+        manager.engine = engine
+        engine.start_service = Mock(side_effect=RuntimeError("listener failed"))
+        with self.assertRaisesRegex(RuntimeError, "listener failed"):
+            manager.start_service()
+        engine.set_serving.assert_not_called()
 
     def test_start_rejects_embedding_in_deferred_template_mode(self):
         manager, py_config, engine_config, model_config, engine = (

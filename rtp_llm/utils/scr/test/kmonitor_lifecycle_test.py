@@ -150,7 +150,7 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
                 self.assertEqual(worker.init_tags["custom_default"], "kept")
                 retained.report(2)
                 monitor.register_gauge_metric("fresh.metric").report(3)
-                events = worker.get_report_events()
+                events = worker.get_report_events({"service_status": "serving"})
                 self.assertEqual(len(events), 3)
                 for event in events:
                     message = event.body.decode()
@@ -162,6 +162,7 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
                         "hippo_group=restored_group",
                         "custom_default=kept",
                         "configured=kept",
+                        "service_status=serving",
                     ):
                         self.assertIn(tag, message)
                     self.assertNotIn("seed_", message)

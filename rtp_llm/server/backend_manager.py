@@ -221,7 +221,6 @@ class BackendManager(object):
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
         )
-        self._mark_serving_when_ready()
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
@@ -266,6 +265,7 @@ class BackendManager(object):
         start_service = getattr(self.engine, "start_service", None)
         if start_service is not None:
             start_service()
+        self._mark_serving_when_ready()
 
     def _watch_service_draining(self):
         # This only updates tags; the process manager retains responsibility for
