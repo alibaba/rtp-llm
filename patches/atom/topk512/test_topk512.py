@@ -3,7 +3,7 @@ import triton
 import aiter
 from atom.plugin.rtpllm.utils.topk512 import run
 torch.manual_seed(123)
-for m in [1, 2, 3, 4]:
+for m in [1, 2, 3, 4, 8, 64, 1024]:
     for shared in [0, 1]:
         g = torch.randn(m, 520, device='cuda', dtype=torch.bfloat16)[:, :512 + shared]
         w = torch.zeros(m, 12, device='cuda')
@@ -35,7 +35,7 @@ for m in [1, 2, 3, 4]:
         torch.cuda.current_stream().wait_stream(stream)
         with torch.cuda.graph(graph, stream=stream):
             cand()
-        for live in range(m + 1):
+        for live in (range(m + 1) if m <= 8 else [0, 1, m // 2, m - 1, m]):
             valid.fill_(live)
             g.normal_()
             graph.replay()
