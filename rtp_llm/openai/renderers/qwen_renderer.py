@@ -461,7 +461,7 @@ class QwenRenderer(CustomChatRenderer):
         )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
         if (len(status.total_output_string)) and (
-            "\uFFFD" == status.total_output_string[-1]
+            "\ufffd" == status.total_output_string[-1]
         ):
             return await self._create_empty_delta(output.aux_info)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
@@ -563,10 +563,13 @@ class QwenRenderer(CustomChatRenderer):
                     )
                 )
             else:
-                trunc_string = truncate_response_with_stop_words(
-                    status.total_output_string[status.responded_length :],
-                    stop_words_str,
-                    is_streaming,
+                pending_output = status.total_output_string[status.responded_length :]
+                trunc_string = (
+                    pending_output
+                    if status.fixed_output_token_budget
+                    else truncate_response_with_stop_words(
+                        pending_output, stop_words_str, is_streaming
+                    )
                 )
                 output_items.append(
                     OutputDelta(
@@ -617,7 +620,7 @@ class QwenRenderer(CustomChatRenderer):
         )
         status.total_output_string = self.tokenizer.decode(status.output_ids).strip()
         if (len(status.total_output_string)) and (
-            "\uFFFD" == status.total_output_string[-1]
+            "\ufffd" == status.total_output_string[-1]
         ):
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
             # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
