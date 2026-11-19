@@ -264,6 +264,12 @@ class MMWorkItem:
             # stream that owns the encoder output before that storage is reused.
             self._remote_producer_streams = _current_cuda_streams(result)
         if self.defer_cache_complete and not force:
+            if (
+                self.cache_entry is not None
+                and self.cache_entry.capture_compute_streams
+                and self.embedding_producer_streams is None
+            ):
+                self.embedding_producer_streams = _current_cuda_streams(result)
             return
         if (
             not self._cache_failed

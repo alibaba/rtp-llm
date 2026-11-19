@@ -627,11 +627,19 @@ class MasterClient:
         hash acquisition errors and timeouts still fail the request.
         """
         unique_keys = list(dict.fromkeys(keys))
+        probe = MultimodalHashRequestPB(keys=unique_keys)
         probe_timeout = DEFAULT_REQUEST_TIMEOUT_SEC
         if input is not None:
+            inspection_enabled = extract_input_inspection_enabled(input.headers)
+            probe.request_id = input.request_id
+            probe.timeout_ms = max(0, input.generate_config.timeout_ms or 0)
+            probe.defer_inspection = inspection_enabled is not False
+            if inspection_enabled is not None:
+                probe.input_inspection_enabled.value = inspection_enabled
             # The first hash probe carries only keys, even on a warm hit.
             check_download_urls(item.url for item in input.mm_inputs)
             input.greennet_verified_vit = None
+            input.deferred_inspection = None
             if deadline is None:
                 deadline = vit_hash_deadline(input)
             try:
@@ -657,7 +665,7 @@ class MasterClient:
         ):
             metadata = await self._get_vit_metadata(
                 address,
-                MultimodalHashRequestPB(keys=unique_keys),
+                probe,
                 probe_timeout,
                 headers=input.headers if input is not None else None,
                 fallback_on_unimplemented=input is not None,
@@ -684,7 +692,16 @@ class MasterClient:
                 "hash_hit", entries.get(key, {}).get("hit", False)
             )
         }
+        ticket = (metadata or {}).get("inspection_ticket") or ""
+        if ticket:
+            missing.update(
+                key
+                for key in unique_keys
+                if not entries.get(key, {}).get("greennet_passed")
+            )
         if not missing:
+            if ticket:
+                input.deferred_inspection = (address.ip, address.grpc_port, ticket)
             self._record_greennet_approval(input, address, unique_keys, entries)
             return metadata
 
@@ -699,7 +716,9 @@ class MasterClient:
                 "rtp_llm.vit.missing_key_count": len(missing),
             },
         ):
-            inputs = MultimodalInputsPB(request_id=input.request_id)
+            inputs = MultimodalInputsPB(
+                request_id=input.request_id, inspection_ticket=ticket
+            )
             region = input.headers.get("region")
             if region:
                 # Request-level: one value for every multimodal input submitted below.
@@ -750,6 +769,13 @@ class MasterClient:
             raise FtRuntimeException(
                 ExceptionType.ROUTE_ERROR, "ViT restarted during hash acquisition"
             )
+        if ticket:
+            if filled.get("inspection_ticket") != ticket:
+                raise FtRuntimeException(
+                    ExceptionType.MM_PROCESS_ERROR,
+                    "ViT inspection ticket changed during hash fill",
+                )
+            input.deferred_inspection = (address.ip, address.grpc_port, ticket)
         entries.update({e["key"]: e for e in filled.get("entries", [])})
         if any(
             not entries.get(key, {}).get(

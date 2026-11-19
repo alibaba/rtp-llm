@@ -17,6 +17,7 @@ _METHODS = {
     "GetMultimodalHashes": "get_multimodal_hashes",
     "AsyncSubmitEmbedding": "async_submit_embedding",
     "RemoteMultimodalEmbedding": "remote_multimodal_embedding",
+    "GetGreenNetVerdict": "get_greennet_verdict",
     "WaitGreenNetVerdict": "wait_greennet_verdict",
 }
 _SERVICE = "/MultimodalRpcService/"

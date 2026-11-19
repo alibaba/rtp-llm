@@ -859,6 +859,34 @@ class ModelRpcClientTest(TestCase):
         )
         self.assertIn("received 0 results for 2 requests", context.exception.message)
 
+    def test_batch_generate_waits_for_inspection_before_returning(self):
+        client = self._make_batch_client()
+        inp = self._make_generate_input(GenerateConfig(timeout_ms=5000))
+        inp.deferred_inspection = ("vit", 2, "ticket")
+        response = BatchGenerateOutputsPB()
+        response.results.add().final_output.flatten_output.finished.append(True)
+        stub = MagicMock()
+        stub.BatchGenerateCall = AsyncMock(return_value=response)
+
+        async def reject(request, wire, *, deadline):
+            stub.BatchGenerateCall.assert_awaited_once()
+            self.assertEqual(request.deferred_inspection, inp.deferred_inspection)
+            self.assertGreater(deadline, asyncio.get_running_loop().time())
+            raise FtRuntimeException(ExceptionType.UNSAFE_INPUT_CONTENT, "blocked")
+
+        with (
+            patch(
+                "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+                return_value=stub,
+            ),
+            patch.object(client, "_wait_greennet_verdict", side_effect=reject),
+        ):
+            with self.assertRaises(FtRuntimeException) as caught:
+                asyncio.run(client.batch_generate([inp]))
+        self.assertEqual(
+            caught.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+
     def test_batch_generate_is_atomic_when_one_item_fails(self):
         response = BatchGenerateOutputsPB()
         response.results.add().final_output.flatten_output.finished.append(True)
@@ -2947,6 +2975,63 @@ class ClientSpanSettlementTest(TestCase):
                 self.assertTrue(span.finished)
                 self.assertEqual(span.status, "ERROR")
                 self.assertEqual(span.end_count, 1)
+
+    def test_deferred_gate_holds_first_frame_and_cancels_on_rejection(self):
+        for fetch in (False, True):
+            for passed in (False, True):
+                with self.subTest(fetch=fetch, passed=passed):
+                    client = self._build_client(_FakeClientSpan(), total=2)
+                    inp = self._make_input()
+                    inp.enqueued_by_master = fetch
+                    inp.generate_config.role_addrs = [
+                        RoleAddr(
+                            role=RoleType.PREFILL,
+                            ip="127.0.0.1",
+                            grpc_port=1234,
+                            http_port=1,
+                        )
+                    ]
+                    inp.deferred_inspection = ("vit", 2, "ticket")
+                    pb = GenerateInputPB(request_id=inp.request_id)
+                    pb.multimodal_inputs.inspection_ticket = "ticket"
+                    pb.multimodal_inputs.multimodal_inputs.add(multimodal_url="img")
+
+                    async def run():
+                        gate_started, release = asyncio.Event(), asyncio.Event()
+
+                        async def gate(*args, **kwargs):
+                            self.assertIsNotNone(client._test_stub.iterator)
+                            gate_started.set()
+                            await release.wait()
+                            if not passed:
+                                raise FtRuntimeException(
+                                    ExceptionType.UNSAFE_INPUT_CONTENT, "blocked"
+                                )
+
+                        with (
+                            patch(
+                                "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+                                return_value=pb,
+                            ),
+                            patch.object(
+                                client, "_wait_greennet_verdict", side_effect=gate
+                            ) as wait,
+                        ):
+                            stream = client.enqueue(inp)
+                            first = asyncio.create_task(stream.__anext__())
+                            await asyncio.wait_for(gate_started.wait(), 2)
+                            self.assertFalse(first.done())
+                            release.set()
+                            if passed:
+                                self.assertTrue((await first).generate_outputs)
+                            else:
+                                with self.assertRaises(FtRuntimeException):
+                                    await first
+                                self.assertTrue(client._test_stub.iterator.cancelled)
+                            wait.assert_awaited_once()
+                            await stream.aclose()
+
+                    asyncio.run(run())
 
     def test_greennet_rpc_carries_only_parsed_region(self):
         greennet_hook = importlib.import_module("rtp_llm.multimodal.greennet_hook")

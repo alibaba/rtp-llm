@@ -8,6 +8,8 @@ import grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
+    EmptyPB,
+    GreenNetQueryPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
     StatusVersionPB,
@@ -26,6 +28,7 @@ class BlockingWorker(MultimodalRpcServiceServicer):
         self.entered = threading.Event()
         self.release = threading.Event()
         self.cache_entered = threading.Event()
+        self.inspection_entered = threading.Event()
         self.status_thread = None
         self.cache_thread = None
 
@@ -36,6 +39,14 @@ class BlockingWorker(MultimodalRpcServiceServicer):
                 grpc.StatusCode.DEADLINE_EXCEEDED, "test did not release work"
             )
         return MultimodalOutputPB()
+
+    def GetGreenNetVerdict(self, request, context):
+        self.inspection_entered.set()
+        if not self.release.wait(5):
+            context.abort(
+                grpc.StatusCode.DEADLINE_EXCEEDED, "test inspection timed out"
+            )
+        return EmptyPB()
 
     def GetWorkerStatus(self, request, context):
         self.status_thread = threading.current_thread().name
@@ -101,6 +112,16 @@ class VitRpcControlTest(unittest.TestCase):
         work.result(timeout=2)
         cache.result(timeout=2)
         self.assertTrue(self.worker.cache_thread.startswith("vit-rpc"))
+
+    def test_waiting_for_inspection_leaves_data_and_status_threads_available(self):
+        query = self.stub.GetGreenNetVerdict.future(GreenNetQueryPB(), timeout=5)
+        self.assertTrue(self.worker.inspection_entered.wait(2))
+        self.stub.GetCacheStatus(CacheVersionPB(), timeout=1)
+        self.assertTrue(self.worker.cache_thread.startswith("vit-rpc"))
+        self.assertTrue(self.stub.GetWorkerStatus(StatusVersionPB(), timeout=1).alive)
+        self.assertFalse(query.done())
+        self.worker.release.set()
+        query.result(timeout=2)
 
     def test_graceful_shutdown_drains_accepted_business_rpc(self):
         work = self.stub.RemoteMultimodalEmbedding.future(

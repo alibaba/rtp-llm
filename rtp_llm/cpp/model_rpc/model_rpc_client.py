@@ -745,6 +745,8 @@ def trans_multimodal_input(
 
     multimodal = input_pb.multimodal_inputs
     multimodal.request_id = input_pb.request_id
+    if input_py.deferred_inspection:
+        multimodal.inspection_ticket = input_py.deferred_inspection[2]
     multimodal.multimodal_inputs.extend(
         iter_multimodal_inputs(input_py, generate_config)
     )
@@ -1340,7 +1342,8 @@ class ModelRpcClient(object):
         last_output = None
 
         try:
-            if input_pb.multimodal_inputs.multimodal_inputs:
+            ticket = input_pb.multimodal_inputs.inspection_ticket
+            if input_pb.multimodal_inputs.multimodal_inputs and not ticket:
                 # GreenNet content-safety gate: block before prefill until the VIT
                 # encoder's inspection verdict lands. A violation raises
                 # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
@@ -1378,6 +1381,11 @@ class ModelRpcClient(object):
                 first_response = last_output is None
                 if first_response:
                     trace_event("rtp_llm.first_engine_response_received")
+                    if ticket:
+                        with internal_span("rtp_llm.frontend.wait_greennet_verdict"):
+                            await self._wait_greennet_verdict(
+                                input_py, input_pb, deadline=rpc_deadline
+                            )
                 output_py = trans_output(input_py, response, stream_state)
                 if first_response:
                     trace_event("rtp_llm.first_engine_response_decoded")
@@ -1405,6 +1413,11 @@ class ModelRpcClient(object):
                             _consume_settlement_task
                         )
                 yield output_py
+            if ticket and last_output is None:
+                raise FtRuntimeException(
+                    ExceptionType.MM_PROCESS_ERROR,
+                    "Engine closed before inspected output",
+                )
             stream_done = True
             _validate_prefill_only_completed(input_py, stream_state)
         except grpc.RpcError as e:
@@ -1580,7 +1593,9 @@ class ModelRpcClient(object):
             if effective_ms > 0:
                 config.timeout_ms = int(effective_ms)
                 effective_timeouts_ms.append(int(effective_ms))
-            batch_inputs.append(replace(inp, generate_config=config))
+            batch_input = replace(inp, generate_config=config)
+            batch_input.deferred_inspection = inp.deferred_inspection
+            batch_inputs.append(batch_input)
 
         # A mixed batch with no service fallback has no safe finite batch deadline:
         # the finite item must not terminate the unlimited item.
@@ -1612,6 +1627,7 @@ class ModelRpcClient(object):
                 if grpc_timeout_seconds is not None
                 else {}
             )
+            started = asyncio.get_running_loop().time()
             response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
 
             if len(response.results) != len(inputs):
@@ -1644,6 +1660,17 @@ class ModelRpcClient(object):
                 )
                 _validate_prefill_only_completed(batch_inputs[i], stream_state)
                 results.append(output)
+            for index, inp in enumerate(batch_inputs):
+                if inp.deferred_inspection:
+                    timeout_ms = inp.generate_config.timeout_ms
+                    deadline = (
+                        started + timeout_ms / 1000
+                        if timeout_ms and timeout_ms > 0
+                        else None
+                    )
+                    await self._wait_greennet_verdict(
+                        inp, batch_input_pb.inputs[index], deadline=deadline
+                    )
             return results
 
         except grpc.RpcError as e:
@@ -1655,7 +1682,7 @@ class ModelRpcClient(object):
             raise e
 
     async def _wait_greennet_verdict(
-        self, input_py: GenerateInput, input_pb: GenerateInputPB
+        self, input_py: GenerateInput, input_pb: GenerateInputPB, *, deadline=None
     ) -> None:
         """Block until the VIT encoder's greennet inspection verdict lands.
 
@@ -1674,15 +1701,21 @@ class ModelRpcClient(object):
         off), this returns immediately WITHOUT any RPC — so the disabled path is
         byte-identical to the pre-greennet behavior (no extra round-trip).
         """
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import GreenNetQueryPB
         from rtp_llm.multimodal.greennet_hook import greennet_enabled
 
-        if not greennet_enabled():
+        receipt = input_py.deferred_inspection
+        if not receipt and (
+            extract_input_inspection_enabled(input_py.headers) is False
+            or not greennet_enabled()
+        ):
             return
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role != RoleType.VIT:
                 continue
             if (
-                input_py.greennet_verified_vit is not None
+                not receipt
+                and input_py.greennet_verified_vit is not None
                 and input_py.greennet_verified_vit
                 == (
                     role_addr.ip,
@@ -1694,21 +1727,42 @@ class ModelRpcClient(object):
                 # approved hash). No separate ViT RPC is needed on this route.
                 continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
-            mm_inputs_pb = input_pb.multimodal_inputs
+            if receipt and receipt[:2] != (role_addr.ip, role_addr.grpc_port):
+                raise FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR, "ViT inspection worker changed"
+                )
+            mm_inputs_pb = (
+                GreenNetQueryPB(
+                    inspection_ticket=receipt[2], request_id=input_py.request_id
+                )
+                if receipt
+                else input_pb.multimodal_inputs
+            )
+            method = "GetGreenNetVerdict" if receipt else "WaitGreenNetVerdict"
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:
                 from rtp_llm.telemetry.vit_rpc import vit_client_span
 
                 with vit_client_span(
-                    "WaitGreenNetVerdict",
+                    method,
                     vit_addr,
                     mm_inputs_pb,
                     dashscope_greennet_metadata(input_py.headers),
                 ) as metadata:
-                    await stub.WaitGreenNetVerdict(
+                    timeout = VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0
+                    if deadline is not None:
+                        timeout = min(
+                            timeout, deadline - asyncio.get_running_loop().time()
+                        )
+                        if timeout <= 0:
+                            raise FtRuntimeException(
+                                ExceptionType.GENERATE_TIMEOUT,
+                                "Inspection deadline exceeded",
+                            )
+                    await getattr(stub, method)(
                         mm_inputs_pb,
-                        timeout=VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0,
+                        timeout=timeout,
                         metadata=metadata,
                     )
             except grpc.RpcError as e:
@@ -1729,6 +1783,11 @@ class ModelRpcClient(object):
                         ExceptionType(error_details.error_code),
                         error_details.error_message,
                     )
+                if receipt and e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise FtRuntimeException(
+                        ExceptionType.GENERATE_TIMEOUT,
+                        "ViT inspection deadline exceeded",
+                    ) from e
                 # No structured detail: greennet infra error (timeout / VIT down).
                 # Fail closed — never let an uninspected request through.
                 logging.error(
@@ -1739,7 +1798,11 @@ class ModelRpcClient(object):
                     ExceptionType.MM_PROCESS_ERROR,
                     f"greennet verdict unavailable: {e.code()}: {e.details()}",
                 )
-            break
+            return
+        if receipt:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR, "Missing ViT inspection worker"
+            )
 
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         """Compatibility alias for callers using the historical enqueue name."""

@@ -1,3 +1,4 @@
+import concurrent.futures
 import logging
 import threading
 import time
@@ -202,9 +203,14 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     external_request_id=extract_correlation_request_id(headers),
                     cancellation_event=cancellation,
                     binary_hashes=True,
+                    defer_inspection=request.defer_inspection,
+                    inspection_lifetime_ms=request.timeout_ms,
+                    inspection_request_id=request.request_id,
                     region=_multimodal_inputs_region(inputs),
                     input_inspection_enabled=(
-                        _multimodal_inputs_input_inspection_enabled(inputs)
+                        _multimodal_inputs_input_inspection_enabled(
+                            inputs if inputs is not None else request
+                        )
                     ),
                 )
             )
@@ -270,6 +276,38 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 grpc.StatusCode.INTERNAL,
                 f"[MM_PROCESS_ERROR] {type(error).__name__}: {error}",
             )
+
+    def GetGreenNetVerdict(self, request, context):
+        """Wait for work registered by hash routing and prefill on this worker."""
+        try:
+            timeout_ms = _rpc_timeout_ms(context, VitConfig.DEFAULT_MM_TIMEOUT_MS)
+            verdict = self.engine._inspection.tickets.wait(
+                request.inspection_ticket,
+                time.monotonic() + timeout_ms / 1000,
+                self._register_rpc_completion(context),
+                request_id=request.request_id,
+            )
+            if not verdict.passed:
+                raise FtRuntimeException(
+                    (
+                        ExceptionType.UNSAFE_INPUT_CONTENT
+                        if verdict.code == 2
+                        else ExceptionType.MM_PROCESS_ERROR
+                    ),
+                    verdict.message or "data inspection failed",
+                )
+        except Exception as error:
+            if not isinstance(error, FtRuntimeException):
+                if isinstance(error, concurrent.futures.CancelledError):
+                    code = ExceptionType.CANCELLED_ERROR
+                elif isinstance(error, (TimeoutError, concurrent.futures.TimeoutError)):
+                    code = ExceptionType.GENERATE_TIMEOUT
+                else:
+                    code = ExceptionType.MM_PROCESS_ERROR
+                error = FtRuntimeException(code, str(error))
+            self.engine.report_vit_error(error)
+            _abort_ft_runtime(context, error)
+        return EmptyPB()
 
     def WaitGreenNetVerdict(self, multimodal_inputs: MultimodalInputsPB, context):
         """Start missing work and block until GreenNet decides for all inputs."""
@@ -379,6 +417,11 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             cancellation_event = self._register_rpc_completion(context)
             results = self.engine.get_embedding_result(
                 converted_inputs,
+                **(
+                    {"inspection_ticket": multimodal_inputs.inspection_ticket}
+                    if multimodal_inputs.inspection_ticket
+                    else {}
+                ),
                 timeout_ms=_rpc_timeout_ms(context, 120000),
                 request_id=multimodal_inputs.request_id,
                 cancellation_event=cancellation_event,

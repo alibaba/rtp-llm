@@ -91,6 +91,11 @@ class GenerateInput:
         default=None, init=False, repr=False
     )
 
+    # Bound to the ViT selected for this routing attempt.
+    deferred_inspection: Optional[Tuple[str, int, str]] = field(
+        default=None, init=False, repr=False
+    )
+
     class Config:
         arbitrary_types_allowed = True
 

@@ -1021,6 +1021,38 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.attempts, 2)
 
+    async def test_deferred_inspection_gates_dashscope_usage_packet(self):
+        for passed in (True, False):
+            with self.subTest(passed=passed):
+                started, release = asyncio.Event(), asyncio.Event()
+
+                class GatedClient:
+                    async def enqueue(self, inp):
+                        started.set()
+                        await release.wait()
+                        if not passed:
+                            raise FtRuntimeException(
+                                ExceptionType.UNSAFE_INPUT_CONTENT, "blocked"
+                            )
+                        yield "output"
+
+                visitor = self._visitor(GatedClient())
+                request = _FakeInput(is_streaming=True)
+                request.deferred_inspection = ("vit", 1, "ticket")
+                request.on_mm_routed = lambda _: "usage"
+                stream = await visitor.enqueue(request)
+                first = asyncio.create_task(stream.__anext__())
+                await asyncio.wait_for(started.wait(), 2)
+                self.assertFalse(first.done())
+                release.set()
+                if passed:
+                    self.assertEqual(await first, "usage")
+                    self.assertEqual(await stream.__anext__(), "output")
+                else:
+                    with self.assertRaises(FtRuntimeException):
+                        await first
+                await stream.aclose()
+
     async def test_enqueue_yields_early_packet_before_model_stream(self):
         client = _SuccessfulModelRpcClient(["real-output"])
         visitor = self._visitor(client)

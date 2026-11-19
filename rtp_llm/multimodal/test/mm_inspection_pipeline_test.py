@@ -527,6 +527,197 @@ class InspectionPipelineTest(TestCase):
             finally:
                 engine.stop()
 
+    def test_deferred_compute_precedes_verdict_and_strict_publication(self):
+        for passed in (False, True):
+            with self.subTest(passed=passed):
+                engine = self._make_engine(SourceModel())
+                provider = SourceProvider(passed, hold=True)
+                engine._inspection._greennet_provider = provider
+                media = self._make_input("fake://deferred")
+                key = media.cache_key()
+                tickets = engine._inspection.tickets
+                ticket = tickets.open([{"key": key}])
+                with concurrent.futures.ThreadPoolExecutor(2) as pool:
+                    try:
+                        hashes = engine.get_embedding_result(
+                            [media],
+                            hashes_only=True,
+                            inspection_ticket=ticket,
+                            timeout_ms=3000,
+                        )
+                        embeddings = engine.get_embedding_result(
+                            [media], inspection_ticket=ticket, timeout_ms=3000
+                        )
+                        self.assertEqual(len(embeddings[0].embeddings), 1)
+                        self.assertTrue(
+                            torch.equal(
+                                hashes[0].feature_hashes[0],
+                                embeddings[0].feature_hashes[0],
+                            )
+                        )
+                        entry = engine._embedding_cache.peek(key)
+                        self.assertFalse(entry.is_done)
+                        self.assertFalse(engine._hash_key_cache.contains(key))
+                        strict = pool.submit(
+                            engine.get_embedding_result, [media], request_id=17
+                        )
+                        query = pool.submit(tickets.wait, ticket, time.monotonic() + 5)
+                        with self.assertRaises(concurrent.futures.TimeoutError):
+                            query.result(0.05)
+                        self.assertFalse(strict.done())
+                        provider.release.set()
+                        self.assertEqual(query.result(3).passed, passed)
+                        if passed:
+                            self.assertEqual(len(strict.result(3)), 1)
+                        else:
+                            with self.assertRaises(FtRuntimeException) as raised:
+                                strict.result(3)
+                            self.assertEqual(
+                                raised.exception.exception_type,
+                                ExceptionType.UNSAFE_INPUT_CONTENT,
+                            )
+                            self.assertFalse(engine._hash_key_cache.contains(key))
+                        self.assertEqual(len(provider.calls), 1)
+                    finally:
+                        provider.release.set()
+                        engine.stop()
+
+    def test_hash_and_embedding_rpc_return_while_same_audit_is_pending(self):
+        import grpc
+
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+            GreenNetQueryPB,
+            MultimodalHashRequestPB,
+            MultimodalInputsPB,
+        )
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
+            MultimodalRpcServiceStub,
+            add_MultimodalRpcServiceServicer_to_server,
+        )
+        from rtp_llm.multimodal.multimodal_util import trans_mm_input
+        from rtp_llm.server.vit_rpc_server import MultimodalRpcServer
+
+        engine = self._make_engine(SourceModel())
+        engine._embedding_cache.resize(0, 0)
+        engine._hash_key_cache.resize(0)
+        provider = SourceProvider(hold=True)
+        engine._inspection._greennet_provider = provider
+        with concurrent.futures.ThreadPoolExecutor(4) as pool:
+            server = grpc.server(pool)
+            add_MultimodalRpcServiceServicer_to_server(
+                MultimodalRpcServer(engine), server
+            )
+            port = server.add_insecure_port("127.0.0.1:0")
+            server.start()
+            try:
+                with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                    stub = MultimodalRpcServiceStub(channel)
+                    wire = MultimodalInputsPB(request_id=721)
+                    url = "https://example.com/deferred"
+                    wire.multimodal_inputs.add(multimodal_url=url, multimodal_type=1)
+                    key = trans_mm_input(wire)[0].cache_key()
+                    probe = stub.GetMultimodalHashes(
+                        MultimodalHashRequestPB(
+                            keys=[key], defer_inspection=True, request_id=721
+                        ),
+                        timeout=3,
+                    )
+                    self.assertTrue(probe.inspection_ticket)
+                    wire.inspection_ticket = probe.inspection_ticket
+                    filled = stub.GetMultimodalHashes(
+                        MultimodalHashRequestPB(keys=[key], inputs=wire), timeout=3
+                    )
+                    self.assertTrue(filled.entries[0].hash_hit)
+                    self.assertFalse(filled.entries[0].greennet_passed)
+                    self.assertGreater(
+                        stub.RemoteMultimodalEmbedding(wire, timeout=3).ByteSize(), 0
+                    )
+                    self.assertIsNone(engine._embedding_cache.peek(key))
+                    query = stub.GetGreenNetVerdict.future(
+                        GreenNetQueryPB(
+                            inspection_ticket=wire.inspection_ticket, request_id=721
+                        ),
+                        timeout=3,
+                    )
+                    with self.assertRaises(grpc.FutureTimeoutError):
+                        query.result(timeout=0.05)
+                    provider.release.set()
+                    query.result(timeout=2)
+                    self.assertEqual(len(provider.calls), 1)
+                    self.assertEqual(engine.mm_part.forward_urls, [url])
+            finally:
+                provider.release.set()
+                server.stop(0).wait()
+                engine.stop()
+
+    def test_ticket_is_bound_to_worker_and_every_media_generation(self):
+        from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
+
+        store = InspectionTickets(ttl=30, capacity=2)
+        ticket = store.open(
+            [
+                {"key": "a", "entry_generation": "1", "greennet_passed": True},
+                {"key": "b"},
+            ]
+        )
+        with self.assertRaises(FtRuntimeException):
+            store.open([{"key": "c"}])
+        with self.assertRaises(FtRuntimeException):
+            store.wait(ticket, time.monotonic() + 1)
+        with self.assertRaises(FtRuntimeException):
+            InspectionTickets(30).wait(ticket, time.monotonic() + 1)
+        decision = concurrent.futures.Future()
+        with self.assertRaises(ValueError):
+            store.bind(ticket, "c", "2", decision)
+        store.bind(ticket, "b", "2", decision)
+        cancelled = threading.Event()
+        cancelled.set()
+        with self.assertRaises(concurrent.futures.CancelledError):
+            store.wait(ticket, time.monotonic() + 1, cancelled)
+        self.assertFalse(decision.cancelled())
+        denied = concurrent.futures.Future()
+        denied.set_result(GreenNetVerdict(False, 2))
+        store.bind(ticket, "a", "new-generation", denied)
+        decision.set_result(GreenNetVerdict(True))
+        self.assertEqual(store.wait(ticket, time.monotonic() + 1).code, 2)
+        self.assertTrue(store.open([{"key": "c"}]))
+        expired = InspectionTickets(ttl=0)
+        with self.assertRaises(FtRuntimeException):
+            expired.wait(expired.open([{"key": "c"}]), time.monotonic() + 1)
+
+    def test_unchecked_local_hit_starts_one_audit_without_reencoding(self):
+        engine = self._make_engine(SourceModel())
+        provider = SourceProvider(hold=True)
+        engine._inspection._greennet_provider = provider
+
+        async def reinspect(request, inputs):
+            return await provider.submit_sources(
+                request, inputs, [media.url.encode() for media in inputs]
+            )
+
+        provider.preprocess_and_submit = reinspect
+        media = self._make_input("fake://unchecked")
+        tickets = engine._inspection.tickets
+        ticket = tickets.open([{"key": media.cache_key()}])
+        try:
+            engine.get_embedding_result([media], input_inspection_enabled=False)
+            for hashes_only in (True, False):
+                engine.get_embedding_result(
+                    [media],
+                    inspection_ticket=ticket,
+                    hashes_only=hashes_only,
+                    timeout_ms=3000,
+                )
+            with self.assertRaises(TimeoutError):
+                tickets.wait(ticket, time.monotonic() + 0.05)
+            provider.release.set()
+            self.assertTrue(tickets.wait(ticket, time.monotonic() + 3).passed)
+            self.assertEqual(len(provider.calls), 1)
+            self.assertEqual(engine.mm_part.forward_urls, [media.url])
+        finally:
+            provider.release.set()
+            engine.stop()
+
     def test_source_audit_deadline_preserves_threaded_timeout_contract(self):
         engine = self._make_engine(SourceModel())
         engine._inspection._greennet_provider = SourceProvider(hold=True)

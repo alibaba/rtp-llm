@@ -2698,6 +2698,30 @@ class DownloadedImageCacheTest(unittest.TestCase):
         self.assertEqual(entry.remote_cache_context["key"], key)
         self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
 
+    def test_deferred_remote_hit_returns_before_background_rejection(self):
+        payload = self.image_bytes()
+        engine, store, provider, model, _ = self.engine(
+            payload, passed=False, hold=True
+        )
+        _, expected = self.seed(engine, store)
+        media = self.item()
+        tickets = engine._inspection.tickets
+        ticket = tickets.open([{"key": media.cache_key()}])
+        first = engine.get_embedding_result(
+            [media], hashes_only=True, inspection_ticket=ticket, timeout_ms=3000
+        )
+        second = engine.get_embedding_result(
+            [media], inspection_ticket=ticket, timeout_ms=3000
+        )
+        self.assertTrue(first[0].feature_hashes)
+        self.assertTrue(torch.equal(second[0].embeddings[0], expected[0]))
+        self.assertEqual(model.forward_count, 0)
+        self.assertFalse(store.saved.is_set())
+        provider.release.set()
+        self.assertEqual(tickets.wait(ticket, time.monotonic() + 3).code, 2)
+        self.assertEqual(provider.calls, [([media.url], [payload])])
+        self.assertEqual(engine._remote_embedding_cache.stats()["hit"], 1)
+
     def test_fresh_remote_hit_rejection_never_publishes_or_returns(self):
         from rtp_llm.config.exceptions import FtRuntimeException
 

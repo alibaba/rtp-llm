@@ -224,6 +224,78 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(hot["entries"][0]["embedding_hit"])
 
+    async def test_deferred_hash_fill_and_query_over_grpc(self):
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+            ErrorDetailsPB,
+            GreenNetQueryPB,
+        )
+        from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+        from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
+
+        tickets = InspectionTickets(ttl=30)
+        self.engine._inspection = SimpleNamespace(tickets=tickets)
+        self.engine._greennet_enabled.return_value = True
+        self.engine.supports_deferred_inspection = lambda: True
+        self.engine._hash_key_cache.put(self.keys[0], self.hashes)
+        future = futures.Future()
+
+        def fill(inputs, **kwargs):
+            tickets.bind(
+                kwargs["inspection_ticket"],
+                self.keys[0],
+                "generation",
+                future,
+                kwargs["request_id"],
+            )
+            return [MMEmbeddingRes([], feature_hashes=self.hashes)]
+
+        self.engine.get_embedding_result.side_effect = fill
+        metadata = await self.client.get_vit_cache_metadata(
+            self.address, self.keys, self.request
+        )
+        self.assertTrue(metadata["entries"][0]["hash_hit"])
+        self.assertFalse(metadata["entries"][0]["greennet_passed"])
+        ticket = metadata["inspection_ticket"]
+        self.assertEqual(
+            trans_input(self.request).multimodal_inputs.inspection_ticket, ticket
+        )
+        self.assertIsNone(self.request.greennet_verified_vit)
+        call = self.stub.GetGreenNetVerdict(
+            GreenNetQueryPB(
+                inspection_ticket=ticket, request_id=self.request.request_id
+            ),
+            timeout=2,
+        )
+        self.assertFalse(call.done())
+        future.set_result(GreenNetVerdict(False, 2, "blocked"))
+        with self.assertRaises(grpc.aio.AioRpcError) as rejected:
+            await call
+        details = ErrorDetailsPB.FromString(
+            rejected.exception.trailing_metadata()["grpc-status-details-bin"]
+        )
+        self.assertEqual(details.error_code, ExceptionType.UNSAFE_INPUT_CONTENT)
+        self.assertEqual(details.error_message, "blocked")
+        # A retried read on the same channel gets the typed frontend error even
+        # when the compute and hash entries have already been released.
+        from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+
+        self.request.generate_config.role_addrs = [self.address]
+        client = SimpleNamespace(
+            _channel_pool=SimpleNamespace(get=AsyncMock(return_value=self.channel))
+        )
+        with self.assertRaises(FtRuntimeException) as frontend_error:
+            await ModelRpcClient._wait_greennet_verdict(
+                client, self.request, trans_input(self.request)
+            )
+        self.assertEqual(
+            frontend_error.exception.exception_type, ExceptionType.UNSAFE_INPUT_CONTENT
+        )
+        with self.assertRaises(grpc.aio.AioRpcError):
+            await self.stub.GetGreenNetVerdict(
+                GreenNetQueryPB(inspection_ticket="unknown")
+            )
+        self.engine.get_embedding_result.assert_called_once()
+
     async def test_request_scoped_hash_hit_checks_each_caller(self):
         self.engine._greennet_enabled.return_value = True
         self.engine._request_scoped_inspection.return_value = True
@@ -294,7 +366,7 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             set(response.DESCRIPTOR.fields_by_name),
-            {"worker_instance", "entries"},
+            {"worker_instance", "entries", "inspection_ticket"},
         )
         self.assertFalse(self.engine._hash_key_cache.contains(self.keys[0]))
 

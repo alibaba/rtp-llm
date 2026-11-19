@@ -18,6 +18,7 @@ from typing import Any, List, Optional, Tuple
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCacheEntry
+from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
 from rtp_llm.multimodal.mm_work_item import _input_has_url
 from rtp_llm.multimodal.source_download_executor import SourceDownloadExecutor
 from rtp_llm.ops import MultimodalInput
@@ -132,6 +133,8 @@ class MMInspectionCoordinator:
         self._greennet_loop_thread = None
         self._greennet_loop_lock = threading.Lock()
         self._greennet_timeout_s = float(vit_config.mm_timeout_ms or 120000) / 1000.0
+        self.tickets = InspectionTickets(ttl=max(300, self._greennet_timeout_s * 2))
+        self._cached_inspection_lock = threading.Lock()
         self._source_download_executor = SourceDownloadExecutor(
             vit_config.vit_source_download_concurrency
         )
@@ -157,6 +160,27 @@ class MMInspectionCoordinator:
         for cache_key, entry in entries:
             entry.set_greennet_verdict(verdict, checked=True)
             self._hash_key_cache.mark_greennet_passed(cache_key, entry.generation)
+
+    def cached_decision(self, key, entry, media, deadline, request):
+        # Producer-backed entries already have a decision future. An unchecked
+        # cache hit needs its own asynchronous submission, shared across waiters.
+        with self._cached_inspection_lock:
+            if entry.expects_greennet or entry.greennet_passed:
+                return entry.inspection_decision()
+            scope = (request.user_id, request.service_name)
+            previous = getattr(entry, "_cached_inspection", None)
+            if previous is not None:
+                previous_scope, previous_request, future = previous
+                if previous_scope == scope and (
+                    previous_request == request.id or not future.done()
+                ):
+                    return future
+            _, future, handle = self._begin_sources(
+                [media], request, None, deadline, self._ensure_greennet_loop()
+            )
+            handle.supply([], [], [(key, entry, [media], request)])
+            entry._cached_inspection = (scope, request.id, future)
+            return future
 
     def _ensure_greennet_loop(self) -> asyncio.AbstractEventLoop:
         """Lazily start the dedicated asyncio loop that hosts greennet inspect

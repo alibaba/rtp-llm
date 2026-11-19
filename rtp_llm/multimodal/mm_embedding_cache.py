@@ -8,12 +8,13 @@ import time
 import uuid
 from bisect import bisect_left
 from collections import OrderedDict
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, Future
 from itertools import chain, islice
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
@@ -563,10 +564,12 @@ class MMEmbeddingCacheEntry:
         # A follower can wait for the async producer's verdict, including a
         # KVCM approval, instead of auditing the same in-flight URL again.
         self.expects_greennet = False
+        self.capture_compute_streams = False
         self._greennet_event = threading.Event()
         self._greennet_verdict: Optional[GreenNetVerdict] = None
         self._greennet_error: Optional[Exception] = None
         self._greennet_checked = False
+        self._inspection_decision = None
 
     @property
     def has_read_callback(self) -> bool:
@@ -696,6 +699,29 @@ class MMEmbeddingCacheEntry:
     def is_done(self) -> bool:
         return self._event.is_set()
 
+    def inspection_decision(self):
+        """A small future which a frontend ticket may retain after eviction."""
+        with self._state_lock:
+            if self._inspection_decision is None:
+                self._inspection_decision = Future()
+                self._resolve_inspection_decision()
+            return self._inspection_decision
+
+    def _resolve_inspection_decision(self):
+        future = self._inspection_decision
+        if future is None or future.done():
+            return
+        if self._greennet_error is not None:
+            # Never retain the producer traceback (which may own GPU tensors).
+            error = self._greennet_error
+            if isinstance(error, FtRuntimeException):
+                error = FtRuntimeException(error.exception_type, error.message)
+            else:
+                error = RuntimeError(str(error))
+            future.set_exception(error)
+        elif self._greennet_checked:
+            future.set_result(self._greennet_verdict)
+
     def set_greennet_verdict(
         self, verdict: GreenNetVerdict, *, checked: bool = True
     ) -> None:
@@ -707,6 +733,7 @@ class MMEmbeddingCacheEntry:
                 return
             self._greennet_verdict = verdict
             self._greennet_checked = checked
+            self._resolve_inspection_decision()
             self._greennet_event.set()
 
     def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
@@ -726,6 +753,7 @@ class MMEmbeddingCacheEntry:
                 # A later compute failure cannot change an actual inspection decision.
                 return
             self._greennet_error = error
+            self._resolve_inspection_decision()
             self._greennet_event.set()
 
     @property

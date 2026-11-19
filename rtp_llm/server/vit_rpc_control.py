@@ -1,4 +1,4 @@
-"""Keep scalar ViT status RPCs off the blocking embedding executor."""
+"""Keep status polling, inspection waits and embedding execution independent."""
 
 import threading
 from concurrent import futures
@@ -8,27 +8,27 @@ import grpc
 from rtp_llm.telemetry.vit_rpc import VitServerTraceInterceptor
 
 
-class _StatusExecutorInterceptor(grpc.ServerInterceptor):
-    def __init__(self, executor):
-        self.executor = executor
+class _VitExecutorInterceptor(grpc.ServerInterceptor):
+    def __init__(self, status_executor, inspection_executor):
+        self.executors = {
+            "/MultimodalRpcService/GetWorkerStatus": status_executor,
+            "/MultimodalRpcService/GetGreenNetVerdict": inspection_executor,
+        }
 
     def intercept_service(self, continuation, details):
         handler = continuation(details)
-        if (
-            handler is None
-            or details.method != "/MultimodalRpcService/GetWorkerStatus"
-            or handler.unary_unary is None
-        ):
+        executor = self.executors.get(details.method)
+        if handler is None or handler.unary_unary is None or executor is None:
             return handler
 
-        def status(request, context):
+        def dispatch(request, context):
             return handler.unary_unary(request, context)
 
         # gRPC Python supports a per-handler executor; keep the same port and
         # wire contract. Cache directory scans are deliberately NOT put here.
-        status.experimental_thread_pool = self.executor
+        dispatch.experimental_thread_pool = executor
         return grpc.unary_unary_rpc_method_handler(
-            status,
+            dispatch,
             request_deserializer=handler.request_deserializer,
             response_serializer=handler.response_serializer,
         )
@@ -41,11 +41,14 @@ def create_vit_rpc_server(max_workers=200):
     status_executor = futures.ThreadPoolExecutor(
         max_workers=4, thread_name_prefix="vit-status"
     )
+    inspection_executor = futures.ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="vit-inspection"
+    )
     try:
         server = grpc.server(
             data_executor,
             interceptors=[
-                _StatusExecutorInterceptor(status_executor),
+                _VitExecutorInterceptor(status_executor, inspection_executor),
                 VitServerTraceInterceptor(),
             ],
             options=[
@@ -59,6 +62,7 @@ def create_vit_rpc_server(max_workers=200):
     except BaseException:
         data_executor.shutdown(wait=False, cancel_futures=True)
         status_executor.shutdown(wait=False, cancel_futures=True)
+        inspection_executor.shutdown(wait=False, cancel_futures=True)
         raise
     original_stop = server.stop
 
@@ -71,6 +75,7 @@ def create_vit_rpc_server(max_workers=200):
             stopped.wait()
             data_executor.shutdown(wait=False)
             status_executor.shutdown(wait=False)
+            inspection_executor.shutdown(wait=False)
 
         threading.Thread(
             target=close_executors, name="vit-rpc-shutdown", daemon=True

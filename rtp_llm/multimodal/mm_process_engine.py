@@ -8,6 +8,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from functools import wraps
+from types import SimpleNamespace
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import torch
@@ -167,6 +168,8 @@ class _AsyncComputeTask:
         self.cache_key = cache_key
         self.entry = entry
         self.request_ids: Set[int] = set()
+        self.computed = None
+        self.ticket_key = None
         self.future: Optional[concurrent.futures.Future] = None
 
 
@@ -289,6 +292,7 @@ class MMProcessEngine:
         # callbacks synchronously in the cancelling thread.
         self._async_task_lock = threading.RLock()
         self._async_tasks: Dict[MMEmbeddingCacheEntry, _AsyncComputeTask] = {}
+        self._ticket_producers = {}
         self._async_request_tasks: Dict[int, Set[MMEmbeddingCacheEntry]] = {}
         logging.info(
             "MMProcessEngine: async compute executor max_workers=%d "
@@ -471,6 +475,13 @@ class MMProcessEngine:
 
     def _greennet_enabled(self):
         return self._inspection._greennet_enabled()
+
+    def supports_deferred_inspection(self):
+        return (
+            self._greennet_enabled()
+            and self.mm_part.supports_inspection_sources
+            and not self._request_scoped_inspection()
+        )
 
     def _request_scoped_inspection(self):
         return self._inspection._request_scoped_inspection()
@@ -1466,6 +1477,7 @@ class MMProcessEngine:
         external_request_id: str = "",
         region: Optional[str] = None,
         input_inspection_enabled: Optional[bool] = None,
+        inspection_ticket: str = "",
     ) -> List[MMEmbeddingRes]:
         """Retrieve embedding results, blocking until ready if necessary.
 
@@ -1482,6 +1494,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 cancellation_event=cancellation_event,
                 hashes_only=hashes_only,
+                inspection_ticket=inspection_ticket,
                 user_id=user_id,
                 service_name=service_name,
                 external_request_id=external_request_id,
@@ -1501,6 +1514,7 @@ class MMProcessEngine:
         external_request_id: str = "",
         region: Optional[str] = None,
         input_inspection_enabled: Optional[bool] = None,
+        inspection_ticket: str = "",
     ) -> List[MMEmbeddingRes]:
         claims: List[Tuple[str, MMEmbeddingCacheEntry]] = []
         cached_inspection_inputs: List[MultimodalInput] = []
@@ -1514,8 +1528,22 @@ class MMProcessEngine:
             self._raise_if_async_request_cancelled(request_id, cancellation_event)
             if time.monotonic() >= deadline:
                 raise TimeoutError("ViT request deadline expired before submission")
+            deferred_reads = [] if inspection_ticket else None
+            if inspection_ticket:
+                if not self.supports_deferred_inspection():
+                    raise RuntimeError("ViT cannot defer this inspection")
+                self._inspection.tickets.validate(
+                    inspection_ticket,
+                    (item.cache_key() for item in mm_inputs),
+                    request_id,
+                )
+            inspect_cached = (
+                bool(mm_inputs) and not inspection_ticket and self._greennet_enabled()
+            )
             claims = self._claim_and_submit_async(
                 mm_inputs,
+                deferred_reads=deferred_reads,
+                inspection_ticket=inspection_ticket,
                 request_id=request_id,
                 queue_timeout_ms=max(1, int((deadline - time.monotonic()) * 1000)),
                 cancellation_event=cancellation_event,
@@ -1525,12 +1553,26 @@ class MMProcessEngine:
                 region=region,
                 input_inspection_enabled=input_inspection_enabled,
                 cached_inspection_inputs=(
-                    cached_inspection_inputs if self._greennet_enabled() else None
+                    cached_inspection_inputs if inspect_cached else None
                 ),
                 cached_inspection_entries=(
-                    cached_inspection_entries if self._greennet_enabled() else None
+                    cached_inspection_entries if inspect_cached else None
                 ),
             )
+            if inspection_ticket:
+                request = SimpleNamespace(
+                    id=external_request_id or str(request_id),
+                    user_id=user_id,
+                    service_name=service_name,
+                    model_name="",
+                )
+                for media, (key, entry) in zip(mm_inputs, claims):
+                    decision = self._inspection.cached_decision(
+                        key, entry, media, deadline, request
+                    )
+                    self._inspection.tickets.bind(
+                        inspection_ticket, key, entry.generation, decision, request_id
+                    )
             verdict = self._inspect_cached_inputs(
                 cached_inspection_inputs,
                 deadline=deadline,
@@ -1555,6 +1597,16 @@ class MMProcessEngine:
             for input_index, (cache_key, entry) in enumerate(claims):
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
+                preview = (
+                    deferred_reads[input_index] if deferred_reads is not None else None
+                )
+                if preview is not None:
+                    results.append(
+                        self._read_computed_result(
+                            preview, hashes_only, deadline, cancellation_event
+                        )
+                    )
+                    continue
                 with vit_media.stage(
                     "cache_wait", vit_media.current()[input_index : input_index + 1]
                 ):
@@ -1562,7 +1614,8 @@ class MMProcessEngine:
                         timeout=remaining, cancellation_event=cancellation_event
                     )
                 if (
-                    self._greennet_enabled()
+                    not inspection_ticket
+                    and self._greennet_enabled()
                     and not entry.greennet_passed
                     and id(entry) not in inspected_entry_ids
                 ):
@@ -1628,7 +1681,8 @@ class MMProcessEngine:
                 GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
                 embedding_length,
             )
-            # Count only after every requested result and inspection succeeded.
+            # Count the ViT RPC's accepted results. With a ticket the frontend
+            # still gates delivery on a subsequent inspection query.
             # Origin survives local reuse; this is not a new-remote-read count.
             for _, entry in claims:
                 self._report_remote_acceptance(
@@ -1647,6 +1701,26 @@ class MMProcessEngine:
             self.report_vit_error(error, current_entry)
             raise error
 
+    @staticmethod
+    def _read_computed_result(preview, hashes_only, deadline, cancellation_event):
+        while not preview.done():
+            if cancellation_event is not None and cancellation_event.is_set():
+                raise concurrent.futures.CancelledError()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Waiting for ViT compute timed out")
+            concurrent.futures.wait((preview,), timeout=min(0.05, remaining))
+        raw, hashes, streams = preview.result()
+        if not hashes_only or hashes is None:
+            for stream in streams:
+                with cuda_graph_gate.operation():
+                    stream.synchronize()
+        if hashes is None:
+            hashes = work_item_ops._feature_hashes_from_result(raw)
+        if hashes_only:
+            return MMEmbeddingRes([], feature_hashes=hashes)
+        return MMProcessEngine._work_item_result_to_response(raw, hashes)
+
     def _claim_and_submit_async(
         self,
         mm_inputs: List[MultimodalInput],
@@ -1655,6 +1729,8 @@ class MMProcessEngine:
         cancellation_event: Optional[threading.Event] = None,
         user_id: str = "",
         service_name: str = "",
+        deferred_reads=None,
+        inspection_ticket: str = "",
         cached_inspection_inputs: Optional[List[MultimodalInput]] = None,
         cached_inspection_entries: Optional[
             List[Tuple[str, MMEmbeddingCacheEntry]]
@@ -1684,7 +1760,20 @@ class MMProcessEngine:
                 with self._async_task_lock:
                     if self._stopped:
                         raise RuntimeError("MMProcessEngine stopped")
-                    state, entry = self._async_cache.try_acquire(cache_key)
+                    # Cache-free workers still coalesce the hash and embedding RPCs
+                    # for one ticket while the original producer owns its audit.
+                    ticket_key = (
+                        (inspection_ticket, cache_key)
+                        if inspection_ticket and not self._embedding_cache.enabled
+                        else None
+                    )
+                    producer = (
+                        self._ticket_producers.get(ticket_key) if ticket_key else None
+                    )
+                    if producer is None:
+                        state, entry = self._async_cache.try_acquire(cache_key)
+                    else:
+                        state, entry = "in_progress", producer
                     vit_media.claim(media_inputs[input_index], entry, state)
                     claims.append((cache_key, entry))
                     if state != "miss" and cached_inspection_inputs is not None:
@@ -1697,8 +1786,22 @@ class MMProcessEngine:
                                 cached_inspection_entries.append((cache_key, entry))
                     if state == "miss":
                         entry.expects_greennet = producer_inspects
-                        self._async_tasks[entry] = _AsyncComputeTask(cache_key, entry)
+                        task = _AsyncComputeTask(cache_key, entry)
+                        self._async_tasks[entry] = task
+                        if ticket_key is not None:
+                            task.ticket_key = ticket_key
+                            self._ticket_producers[ticket_key] = entry
+                        if deferred_reads is not None or (
+                            producer_inspects and self.supports_deferred_inspection()
+                        ):
+                            entry.capture_compute_streams = True
+                            task.computed = concurrent.futures.Future()
                         pending.append((mm_input, cache_key, entry))
+                    if deferred_reads is not None:
+                        task = self._async_tasks.get(entry)
+                        deferred_reads.append(
+                            task.computed if task is not None else None
+                        )
                     if (
                         state == "complete"
                         and self._embedding_cache.peek(cache_key) is entry
@@ -1733,8 +1836,8 @@ class MMProcessEngine:
                 for _, cache_key, entry in pending:
                     task = self._async_tasks.get(entry)
                     if task is not None and task.future is None:
-                        self._forget_async_task_locked(entry)
                         self._fail_async_compute(cache_key, entry, error)
+                        self._forget_async_task_locked(entry)
             self.cancel_queued_request(
                 request_id, entries=[entry for _, entry in claims]
             )
@@ -1757,6 +1860,8 @@ class MMProcessEngine:
         task = self._async_tasks.pop(entry, None)
         if task is None:
             return
+        if task.ticket_key is not None:
+            self._ticket_producers.pop(task.ticket_key, None)
         for request_id in task.request_ids:
             request_tasks = self._async_request_tasks.get(request_id)
             if request_tasks is None:
@@ -1798,8 +1903,8 @@ class MMProcessEngine:
                         ExceptionType.CANCELLED_ERROR,
                         f"ViT request {request_id} was cancelled before submission",
                     )
-                    self._forget_async_task_locked(entry)
                     self._fail_async_compute(task.cache_key, entry, error)
+                    self._forget_async_task_locked(entry)
                     cancelled += 1
                 else:
                     try:
@@ -1876,6 +1981,14 @@ class MMProcessEngine:
     ) -> None:
         self.report_vit_error(error, entry)
         vit_media.finish_producer(entry, error)
+        with self._async_task_lock:
+            task = self._async_tasks.get(entry)
+            if (
+                task is not None
+                and task.computed is not None
+                and not task.computed.done()
+            ):
+                task.computed.set_exception(error)
         try:
             if isinstance(error, FtRuntimeException):
                 # Both embedding and inspection waiters need the original RPC code.
@@ -2029,9 +2142,9 @@ class MMProcessEngine:
                 logging.warning(error.message)
                 _report_vit_metric(AccMetrics.VIT_QUEUE_REJECT_QPS_METRIC, 1)
                 for _, cache_key, entry in active_pending:
-                    self._forget_async_task_locked(entry)
                     vit_media.end_compute_queue(entry, error)
                     self._fail_async_compute(cache_key, entry, error)
+                    self._forget_async_task_locked(entry)
                 raise error
 
             timeout_ms = self._resolve_async_timeout_ms(
@@ -2069,8 +2182,8 @@ class MMProcessEngine:
                 unsubmitted = active_pending[submitted:]
                 self._release_async_slots(len(unsubmitted))
                 for _, cache_key, entry in unsubmitted:
-                    self._forget_async_task_locked(entry)
                     self._fail_async_compute(cache_key, entry, error)
+                    self._forget_async_task_locked(entry)
                 raise
 
     def _async_compute(
@@ -2160,6 +2273,22 @@ class MMProcessEngine:
                     and not entry.has_read_callback
                 ),
             )
+
+            with self._async_task_lock:
+                task = self._async_tasks.get(entry)
+                if (
+                    task is not None
+                    and task.computed is not None
+                    and not task.computed.done()
+                ):
+                    item = work_items[0]
+                    task.computed.set_result(
+                        (
+                            item.embedding_result,
+                            item.feature_hashes,
+                            item.embedding_producer_streams or [],
+                        )
+                    )
 
             def publish(verdict):
                 if verdict is None:

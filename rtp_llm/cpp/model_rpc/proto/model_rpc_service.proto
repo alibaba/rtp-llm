@@ -208,6 +208,8 @@ message MultimodalInputsPB {
     // x-dashscope-datainspection. Unset follows the process configuration;
     // false forces inspection off; true still requires the provider enabled.
     google.protobuf.BoolValue input_inspection_enabled = 7;
+    // Issued by the selected ViT during hash routing.
+    string inspection_ticket = 8;
 }
 
 enum TensorDataTypePB {
@@ -1201,11 +1203,19 @@ service RpcService {
 // Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
 // because VIT proxy and LLM backend are always deployed together in this service.
 // Frontend routing metadata only. Omit inputs for a cache-only probe; supplying
-// inputs computes missing hashes and waits for any enabled safety inspection.
+// inputs computes missing hashes. A negotiated ticket gates frontend output.
+message GreenNetQueryPB {
+    string inspection_ticket = 1;
+    int64 request_id = 2;
+}
+
 message MultimodalHashRequestPB {
     repeated string keys = 1;
     MultimodalInputsPB inputs = 2;
     int64 timeout_ms = 3;
+    bool defer_inspection = 4;
+    google.protobuf.BoolValue input_inspection_enabled = 5;
+    int64 request_id = 6;
 }
 
 message MultimodalHashEntryPB {
@@ -1224,6 +1234,7 @@ message MultimodalHashResponsePB {
     string worker_instance = 1;
     reserved 2;
     repeated MultimodalHashEntryPB entries = 3;
+    string inspection_ticket = 4;
 }
 
 service MultimodalRpcService {
@@ -1234,5 +1245,6 @@ service MultimodalRpcService {
     rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
     rpc GetMultimodalHashes(MultimodalHashRequestPB) returns (MultimodalHashResponsePB);
     rpc AsyncSubmitEmbedding(MultimodalInputsPB) returns (EmptyPB);
+    rpc GetGreenNetVerdict(GreenNetQueryPB) returns (EmptyPB);
     rpc WaitGreenNetVerdict(MultimodalInputsPB) returns (EmptyPB);
 }

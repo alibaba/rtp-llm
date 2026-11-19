@@ -76,6 +76,7 @@ _RETRYABLE_ROUTE_EXCEPTION_TYPES = frozenset(
 )
 _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     {
+        ExceptionType.UNSAFE_INPUT_CONTENT,
         ExceptionType.PRIORITY_PREEMPTED,
         ExceptionType.PRIORITY_ADMISSION_REJECTED,
         ExceptionType.RESOURCE_EXHAUSTED,
@@ -285,6 +286,7 @@ class BackendRPCServerVisitor:
         # A retry re-routes the request; never expose a previous attempt's
         # expansion snapshot to the early-first-packet hook.
         input.mm_routing_snapshot = None
+        input.deferred_inspection = None
         vit_metadata_complete = False
         multimodal_cache_spans = []
         semantic_mm_token_id = -1
@@ -479,6 +481,7 @@ class BackendRPCServerVisitor:
                     selected_vit.ip,
                     selected_vit.grpc_port,
                 )
+                input.deferred_inspection = None
                 retry_vit_route = True
                 route_args.pop("selected_vit")
                 route_args.pop("seq_len", None)
@@ -623,6 +626,10 @@ class BackendRPCServerVisitor:
             route_result.error_code,
             route_result.error_message or "",
         )
+        # Only a successful pinned route may serialize its ticket to prefill.
+        input.deferred_inspection = None
+        input.greennet_verified_vit = None
+        input.mm_routing_snapshot = None
         return route_result
 
     def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:
@@ -993,10 +1000,10 @@ class BackendRPCServerVisitor:
                     stream = None
                     try:
                         routed_input = await route_only(attempt_input)
+                        early = None
                         if on_mm_routed is not None and not fake_sent:
                             # Best-effort: an early packet must never fail the
                             # request or trigger a route retry.
-                            fake_sent = True
                             try:
                                 early = on_mm_routed(routed_input)
                             except Exception:
@@ -1006,20 +1013,30 @@ class BackendRPCServerVisitor:
                                     exc_info=True,
                                 )
                                 early = None
-                            if early is not None:
+                            if early is not None and not getattr(
+                                routed_input, "deferred_inspection", None
+                            ):
+                                fake_sent = True
                                 yield early
+                                early = None
                         stream = self.model_rpc_client.enqueue(routed_input)
-                        if is_streaming:
-                            async for output in stream:
+                        buffered_outputs = []
+                        async for output in stream:
+                            if early is not None:
+                                # enqueue has now gated the first engine frame. Preserve
+                                # DashScope's usage packet and its TPM callback ordering.
+                                fake_sent = True
+                                yielded_output = True
+                                yield early
+                                early = None
+                            if is_streaming:
                                 yielded_output = True
                                 yield output
-                        else:
-                            buffered_outputs = []
-                            async for output in stream:
+                            else:
                                 buffered_outputs.append(output)
+                        for output in buffered_outputs:
                             yielded_output = True
-                            for output in buffered_outputs:
-                                yield output
+                            yield output
                         return
                     except (asyncio.CancelledError, GeneratorExit):
                         # Cancellation and generator teardown are control-flow signals,

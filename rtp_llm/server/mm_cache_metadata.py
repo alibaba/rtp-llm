@@ -99,6 +99,9 @@ def get_mm_cache_metadata(
     external_request_id="",
     region=None,
     input_inspection_enabled=None,
+    defer_inspection=False,
+    inspection_lifetime_ms=0,
+    inspection_request_id=0,
 ):
     if engine is None or engine.is_proxy_mode:
         # Routing metadata belongs to the exact worker selected by FlexLB.
@@ -128,7 +131,31 @@ def get_mm_cache_metadata(
     inspection_enabled = (
         greennet_enabled if input_inspection_enabled is not False else False
     )
-    if inspection_enabled:
+    ticket = inputs.inspection_ticket if inputs is not None else ""
+    if (
+        defer_inspection
+        and inputs is None
+        and keys
+        and inspection_enabled
+        and getattr(engine, "supports_deferred_inspection", lambda: False)()
+    ):
+        ticket = engine._inspection.tickets.open(
+            metadata["entries"], inspection_lifetime_ms / 1000, inspection_request_id
+        )
+    if ticket:
+        if not inspection_enabled or not engine.supports_deferred_inspection():
+            raise RuntimeError("Deferred inspection unavailable")
+        metadata["inspection_ticket"] = ticket
+        for entry in metadata["entries"]:
+            if entry.get("greennet_passed"):
+                engine._inspection.tickets.bind(
+                    ticket,
+                    entry["key"],
+                    entry["entry_generation"],
+                    None,
+                    inputs.request_id if inputs is not None else inspection_request_id,
+                )
+    elif inspection_enabled:
         request_scoped = engine._request_scoped_inspection()
         for entry in metadata["entries"]:
             # A scoped verdict can only authorize the call that obtained it.
@@ -137,6 +164,12 @@ def get_mm_cache_metadata(
                 for field in ("feature_hashes", "split_size", "entry_generation"):
                     entry.pop(field, None)
     missing = {entry["key"] for entry in metadata["entries"] if not entry["hash_hit"]}
+    if ticket and inputs is not None:
+        missing.update(
+            entry["key"]
+            for entry in metadata["entries"]
+            if not entry.get("greennet_passed")
+        )
     if not missing or inputs is None:
         return metadata
 
@@ -157,6 +190,8 @@ def get_mm_cache_metadata(
         if cancellation_event is not None
         else {}
     )
+    if ticket:
+        kwargs["inspection_ticket"] = ticket
     with vit_media.original_input_indices(original_inputs):
         results = engine.get_embedding_result(
             [by_key[key] for key in missing_keys],
@@ -176,7 +211,11 @@ def get_mm_cache_metadata(
         )
     tiers = engine._embedding_cache.resident_tiers(missing_keys)
     completed = {}
-    total_rows = sum(sum(entry.get("split_size", [])) for entry in metadata["entries"])
+    total_rows = sum(
+        sum(entry.get("split_size", []))
+        for entry in metadata["entries"]
+        if entry["key"] not in missing
+    )
     for key, result in zip(missing_keys, results):
         hashes = result.feature_hashes
         if not hashes or any(h.numel() == 0 for h in hashes):
@@ -191,7 +230,7 @@ def get_mm_cache_metadata(
             "key": key,
             "hit": True,
             "hash_hit": True,
-            "greennet_passed": inspection_enabled,
+            "greennet_passed": bool(inspection_enabled and not ticket),
             "embedding_hit": key in tiers,
             "embedding_tier": tiers.get(key),
             "split_size": sizes,
@@ -213,6 +252,7 @@ def get_mm_cache_metadata(
 def metadata_to_proto(metadata):
     response = MultimodalHashResponsePB(
         worker_instance=metadata["worker_instance"],
+        inspection_ticket=metadata.get("inspection_ticket", ""),
     )
     for entry in metadata["entries"]:
         response.entries.add(
@@ -262,5 +302,10 @@ def metadata_from_proto(response):
         )
     return {
         "worker_instance": response.worker_instance,
+        **(
+            {"inspection_ticket": response.inspection_ticket}
+            if response.inspection_ticket
+            else {}
+        ),
         "entries": entries,
     }
