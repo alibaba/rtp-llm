@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.flexlb.mock.frontend.FrontendProtocol.*;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 import org.junit.jupiter.api.Test;
@@ -80,6 +81,22 @@ class IndexedTrafficReaderTest {
                     ReplayWorker.delayNanos(item.requestId() - 100, item.entry().arrivalMs(), plan.qps(), null, null))));
                 assertEquals(expected.get(worker), times);
             }
+        }
+    }
+
+    @Test void fixedQpsDoesNotSubmitTheSecondRequestBeforeItsDeadline() throws Exception {
+        var path = InputFixture.write(directory.resolve("paced.mckidx"), List.of(0L, 0L));
+        try (var input = new IndexedTrafficReader(path)) {
+            var plan = new FrontendReplayPlan(1, null, path.toString(), 2, 0, 1,
+                100, input.identity, 4.0, null, 1, 4, 1000, 1000);
+            var elapsed = new ArrayList<Long>();
+            long startNanos = System.nanoTime();
+            ReplayWorker.play(plan, startNanos, MultimodalProtocol.IMAGE_TOKEN,
+                item -> elapsed.add(System.nanoTime() - startNanos));
+            assertEquals(2, elapsed.size());
+            long second = elapsed.get(1);
+            assertTrue(second >= TimeUnit.MILLISECONDS.toNanos(250),
+                () -> "Second request submitted after " + second + " ns, before the 250 ms deadline");
         }
     }
 
