@@ -1,29 +1,14 @@
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/l2norm.py
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
-
 import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
-
-from rtp_llm.models_py.triton_kernels.fla.utils import input_guard
 
 # Global address arithmetic is int64. make_block_ptr requires int32 tile
 # coordinates; these bounded coordinates are widened by Triton before strides.
 
 
-BT_LIST = [8, 16, 32, 64, 128]
-
-
-# @triton.autotune(
-#     configs=[
-#         triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8, 16, 32]
-#     ],
-#     key=["D"],
-# )
 @triton.jit
 def l2norm_fwd_kernel1(
     x,
@@ -47,14 +32,6 @@ def l2norm_fwd_kernel1(
     tl.store(y + cols, b_y, mask=mask)
 
 
-# @triton.autotune(
-#     configs=[
-#         triton.Config({"BT": BT}, num_warps=num_warps)
-#         for num_warps in [1, 2, 4, 8, 16]
-#         for BT in BT_LIST
-#     ],
-#     key=["D", "NB"],
-# )
 @triton.jit
 def l2norm_fwd_kernel(
     x,
@@ -82,8 +59,8 @@ def l2norm_fwd_kernel(
 def l2norm_fwd(
     x: torch.Tensor,
     eps: float = 1e-6,
-    output_dtype: Optional[torch.dtype] = None,
-    config_rows: Optional[int] = None,
+    output_dtype: torch.dtype | None = None,
+    config_rows: int | None = None,
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -143,33 +120,3 @@ def l2norm_fwd(
         )
 
     return y.view(x_shape_og)
-
-
-class L2NormFunction(torch.autograd.Function):
-
-    @staticmethod
-    @input_guard
-    def forward(ctx, x, eps=1e-6, output_dtype=None):
-        return l2norm_fwd(x, eps, output_dtype)
-
-
-def l2norm(
-    x: torch.Tensor,
-    eps: float = 1e-6,
-    output_dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    return L2NormFunction.apply(x, eps, output_dtype)
-
-
-l2_norm = l2norm
-
-
-class L2Norm(nn.Module):
-
-    def __init__(self, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None):
-        super().__init__()
-        self.eps = eps
-        self.output_dtype = output_dtype
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return l2norm(x, self.eps, self.output_dtype)

@@ -467,7 +467,96 @@ def test_glm53_fused_kpool_decode_matches_ordered_reference() -> None:
     assert torch.equal(kv_graph, kv_ref)
 
 
+def test_kpool_compressor_entry_points_normalize_before_cache_write() -> None:
+    from rtp_llm.models_py.modules.dsv4.cp import _CP_ROLE_INDEXER
+    from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
+        CompressorMeta,
+        _linear_bf16_bf16_fp32,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.glm53_compressor import CompressorFP8
+
+    device = torch.device("cuda")
+    gen = torch.Generator(device=device).manual_seed(53)
+    dim = 32
+    x = torch.randn(1, 4, dim, generator=gen, device=device, dtype=torch.bfloat16)
+    weights = {
+        "wkv": torch.randn(HEAD_DIM, dim, generator=gen, device=device),
+        "wgate": torch.randn(HEAD_DIM, dim, generator=gen, device=device),
+        "ape": torch.randn(COMPRESS_RATIO, HEAD_DIM, generator=gen, device=device),
+        "norm": torch.ones(HEAD_DIM, device=device),
+    }
+    compressor = CompressorFP8(
+        dim,
+        HEAD_DIM,
+        0,
+        COMPRESS_RATIO,
+        1,
+        cp_role=_CP_ROLE_INDEXER,
+        compressor_weights=weights,
+        overlap=False,
+        kpool_mode=True,
+        pre_norm_weight=torch.linspace(0.5, 1.5, HEAD_DIM, device=device),
+        pre_norm_bias=torch.linspace(-0.5, 0.5, HEAD_DIM, device=device),
+    )
+    fused = _linear_bf16_bf16_fp32(x, compressor._wkv_wgate_fused)[0]
+    key, score = fused.split(HEAD_DIM, -1)
+    key = torch.nn.functional.layer_norm(
+        key.bfloat16(),
+        (HEAD_DIM,),
+        compressor.pre_norm_weight,
+        compressor.pre_norm_bias,
+        compressor.norm_eps,
+    ).float()
+    pos = torch.arange(4, device=device)
+    table = torch.ones((1, 1), device=device, dtype=torch.int32)
+    state = torch.zeros(2, STATE_RING_ENTRIES, 2 * HEAD_DIM, device=device)
+    cache = torch.zeros(
+        2, KV_ENTRIES_PER_BLOCK, HEAD_DIM + 4, device=device, dtype=torch.uint8
+    )
+    _launch(
+        key,
+        score,
+        compressor.ape,
+        pos,
+        state_cache=state,
+        kv_cache=cache,
+        disable_raw_path=False,
+    )
+    meta = CompressorMeta(
+        positions=pos,
+        b_idx=torch.zeros_like(pos),
+        state_slots=_state_slots(pos),
+        kv_slots=_kv_slots(pos),
+        token_to_req=torch.zeros_like(pos, dtype=torch.int32),
+        has_prefix=False,
+        seq_start_per_req=table.new_tensor([0]),
+        cu_seq_per_req=table.new_tensor([0, pos.numel()]),
+    )
+    for mode in ("prefill", "split_prefill", "decode"):
+        actual_state, actual_cache = torch.zeros_like(state), torch.zeros_like(cache)
+        compressor.set_pool_context(
+            actual_cache,
+            table,
+            KV_ENTRIES_PER_BLOCK,
+            actual_state,
+            table,
+            STATE_RING_ENTRIES,
+            state_tokens_per_block=128,
+            kv_tokens_per_block=128,
+        )
+        if mode == "prefill":
+            compressor(x, 0, meta=meta, workspace=None)
+        elif mode == "split_prefill":
+            pending = compressor.start_prefill(x, 0, meta=meta, workspace=None)
+            compressor.finish_prefill(pending)
+        else:
+            compressor.forward_decode_vectorized(x, pos[:1], meta, position_ids=pos)
+        torch.testing.assert_close(actual_state, state, rtol=0, atol=0)
+        torch.testing.assert_close(actual_cache, cache, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     test_glm53_kpool_prefill_math()
     test_glm53_kpool_decode_reads_ring_state()
     test_glm53_fused_kpool_decode_matches_ordered_reference()
+    test_kpool_compressor_entry_points_normalize_before_cache_write()

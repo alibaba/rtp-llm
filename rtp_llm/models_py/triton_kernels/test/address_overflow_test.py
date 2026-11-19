@@ -39,18 +39,22 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
 from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
 )
-from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk_intra import (
+from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_intra import (
     chunk_kda_fwd_kernel_inter_solve_fused,
     chunk_kda_fwd_kernel_intra_sub_chunk,
 )
-from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.chunk_intra_token_parallel import (
+from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_intra_token_parallel import (
     chunk_kda_fwd_kernel_intra_token_parallel,
 )
+from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_o import chunk_gla_fwd_kernel_o
 from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.gate import (
     kda_gate_chunk_cumsum_vector_kernel,
 )
-from rtp_llm.models_py.triton_kernels.kimi_kda.fp32_state.wy_fast import (
+from rtp_llm.models_py.triton_kernels.kimi_kda.wy_fast import (
     recompute_w_u_fwd_kda_kernel,
+)
+from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
+    _convert_req_index_to_global_index_kernel,
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_prefill_rope_hadamard import (
     _fused_rope_qk_had_k_kernel,
@@ -161,6 +165,42 @@ class SparseMemory:
 
 
 class AddressOverflowTest(unittest.TestCase):
+    def test_sparse_topk_global_slot_large_strides_and_masked_tail(self):
+        mem = SparseMemory()
+        req, table, local, out = [
+            mem.buffer(name, tl.int32) for name in ("req", "table", "local", "out")
+        ]
+        row, stride = 1 << 16, 1 << 16
+        mem.window(req, row, [row])
+        mem.window(table, row * stride + 1, [7])
+        mem.window(local, row * stride + 4, [6])
+        actual = mem.window(out, row * stride + 4, [-1])
+        mem.run(
+            _convert_req_index_to_global_index_kernel,
+            (row, 1),
+            req_id_ptr=req,
+            block_table_ptr=table,
+            token_indices_ptr=local,
+            out_ptr=out,
+            prefill_request_id_ptr=req,
+            workspace_starts_ptr=req,
+            max_num_blocks_per_req=2,
+            TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=4,
+            ENTRIES_PER_BLOCK=4,
+            PHYSICAL_ENTRIES_PER_BLOCK=11,
+            BLOCKS_PER_PHYSICAL_BLOCK=2,
+            NUM_TOPK_TOKENS=5,
+            BLOCK_N=4,
+            HAS_PREFILL=False,
+            bt_stride0=stride,
+            bt_stride1=1,
+            ti_stride0=stride,
+            ti_stride1=1,
+            out_stride0=stride,
+            out_stride1=1,
+        )
+        np.testing.assert_array_equal(actual, [39])
+
     def test_rope_position_and_head_stride_boundary(self):
         for position, neox in product(
             ((1 << 25) - 1, 1 << 25, (1 << 25) + 1), (False, True)
@@ -590,6 +630,68 @@ class AddressOverflowTest(unittest.TestCase):
                         scale=1.0,
                     )
                     self.assertTrue(buffers["Aqk"]["windows"][0]["written"])
+
+    def test_kda_output_chunk_offsets(self):
+        heads, dim, chunk, tail = 8, 32, 16, 3
+        # The fixed batch also crosses int32 in its chunk-to-state offset.
+        boundary = (1 << 31) // (heads * dim)
+        for start, ragged, transpose_state in product(
+            (boundary - chunk, boundary + chunk, (1 << 31) - 1, (1 << 31) + chunk),
+            (False, True),
+            (False, True),
+        ):
+            with self.subTest(start=start, ragged=ragged, transpose=transpose_state):
+                mem = SparseMemory()
+                cu, ids = mem.buffer("cu", tl.int64), mem.buffer("ids", tl.int64)
+                buffers = {
+                    name: mem.buffer(name) for name in ("q", "v", "g", "h", "o", "A")
+                }
+                if ragged:
+                    mem.window(cu, 0, [0, start, start + tail])
+                    mem.window(ids, 0, [1, 0])
+                    batch_head, state_chunk, rows = 0, 0, tail
+                    length = start + tail
+                else:
+                    # The first chunk of the second fixed-length sequence.
+                    batch_head, rows = heads, chunk
+                    length = start
+                    state_chunk = (length + chunk - 1) // chunk
+                offset = start * heads * dim
+                for name, value in (("q", 1), ("g", 0), ("v", 0)):
+                    mem.window(
+                        buffers[name], offset, np.full(rows * heads * dim, value)
+                    )
+                mem.window(
+                    buffers["A"], start * heads * chunk, np.zeros(rows * heads * chunk)
+                )
+                mem.window(
+                    buffers["h"], state_chunk * heads * dim * dim, np.ones(dim * dim)
+                )
+                output = mem.window(
+                    buffers["o"], offset, np.full(rows * heads * dim, np.nan)
+                )
+                mem.run(
+                    chunk_gla_fwd_kernel_o,
+                    (0, 0, batch_head),
+                    **buffers,
+                    cu_seqlens=cu,
+                    chunk_indices=ids,
+                    scale=1.0,
+                    T=length,
+                    H=heads,
+                    K=dim,
+                    V=dim,
+                    BT=chunk,
+                    BK=16,
+                    BV=16,
+                    USE_EXP2=True,
+                    TRANSPOSE_STATE=transpose_state,
+                    IS_VARLEN=ragged,
+                )
+                output = output.reshape(rows, heads, dim)
+                np.testing.assert_array_equal(output[:, 0, :16], dim)
+                self.assertTrue(np.isnan(output[:, 0, 16:]).all())
+                self.assertTrue(np.isnan(output[:, 1:]).all())
 
     def test_shared_fla_cast_before_state_multiply(self):
         mem = SparseMemory()

@@ -2,13 +2,9 @@
 
 import functools
 import logging
-import os
 from pathlib import Path
 
 import torch
-
-# Batch-invariant FlashMLA disables split-KV and changes the reduction order.
-_BATCH_INVARIANT = os.environ.get("GLM53_NATIVE_SPARSE_BATCH_INVARIANT", "0") == "1"
 
 
 @functools.lru_cache(maxsize=1)
@@ -43,8 +39,7 @@ def native_query_length(attn_inputs, query_rows, requests):
 
 
 class Glm53NativeSparse:
-    def __init__(self, *, batch_invariant: bool = _BATCH_INVARIANT):
-        self._batch_invariant = batch_invariant
+    def __init__(self):
         self.schedulers = {}
         self.native = None
         if torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0):
@@ -85,7 +80,7 @@ class Glm53NativeSparse:
         tokens = tokens_per_request
         query = q.reshape(rows // tokens, tokens, heads, width)
         indices = physical_indices.reshape(rows // tokens, tokens, -1)
-        key = (rows, tokens, q.device.index, self._batch_invariant)
+        key = (rows, tokens, q.device.index)
         metadata, splits = self.schedulers.get(key, (None, None))
         # Actual kernel failures are propagated: the fallback handles explicit
         # applicability/dependency misses, not incorrect results or bad launches.
@@ -102,7 +97,6 @@ class Glm53NativeSparse:
             None,
             512,
             scale,
-            self._batch_invariant,
         )
         if key not in self.schedulers:
             self.schedulers[key] = (result[2], result[3])

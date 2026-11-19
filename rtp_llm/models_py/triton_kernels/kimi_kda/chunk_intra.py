@@ -85,16 +85,16 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
     5. Computes merged Akk_inv
     6. Writes Akk_inv to Akk
     """
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(
             chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        ).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        ).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
@@ -609,16 +609,20 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     IS_VARLEN: tl.constexpr,
     USE_GATHER: tl.constexpr,
 ):
-    i_t, i_i, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_t, i_i, i_bh = (
+        tl.program_id(0).to(tl.int64),
+        tl.program_id(1).to(tl.int64),
+        tl.program_id(2).to(tl.int64),
+    )
     i_b, i_h = i_bh // H, i_bh % H
 
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(
             chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        ).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        ).to(tl.int64)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T

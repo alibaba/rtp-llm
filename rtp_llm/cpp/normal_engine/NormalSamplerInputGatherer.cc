@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include "torch/all.h"
@@ -205,12 +204,7 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     // logical lengths and retain full history for every history-aware consumer.
     bool compact_mtp_history = false;
 #if USING_CUDA
-    static const bool compact_enabled = []() {
-        const char* value = std::getenv("RTP_LLM_MTP_COMPACT_SAMPLER_HISTORY");
-        return value == nullptr || std::string(value) == "1";
-    }();
-    compact_mtp_history =
-        compact_enabled && propose_step > 0 && !stream_groups.empty() && !stream_groups.needReturnCumLogProbs();
+    compact_mtp_history = propose_step > 0 && !stream_groups.empty() && !stream_groups.needReturnCumLogProbs();
     if (compact_mtp_history) {
         for (const auto& stream : stream_groups.allStreams()) {
             const auto& cfg = stream->generateConfig();

@@ -138,7 +138,7 @@ def init_vit_group_args(parser, vit_config):
     )
     vit_group.add_argument(
         "--mm_video_max_frames",
-        env_name="MM_VIDEO_MAX_FRAMES",
+        cli_only=True,
         bind_to=(vit_config, "mm_video_max_frames"),
         type=int,
         default=VitConfig.DEFAULT_MM_VIDEO_MAX_FRAMES,

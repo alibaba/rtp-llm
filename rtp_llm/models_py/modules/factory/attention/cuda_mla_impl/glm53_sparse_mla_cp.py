@@ -7,7 +7,6 @@ uses this implementation only to write/gather a page-RR sharded cache.
 
 import copy
 import logging
-import os
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -28,6 +27,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.distributed.glm53_collective_gemm import all_gather
 from rtp_llm.models_py.distributed.pynccl_cp import enabled as cp_opt_enabled
 from rtp_llm.models_py.distributed.pynccl_cp import warmup as warmup_pynccl
+from rtp_llm.models_py.distributed.zigzag_token_layout import zigzag_local_rows
 from rtp_llm.models_py.modules.dsv4.cp import (
     build_kv_allgather_restore_indices,
     cp_actual_owned_kv_lens,
@@ -489,6 +489,20 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
         self._fp8_kernel_metadata_q0_key = key
 
+    def configure_native_query_chunk(self, max_seq_len: int) -> None:
+        if (
+            self._dedicated_prefill
+            and self.sequence_parallel
+            and self.num_heads == self.kernel_num_heads
+            and self.prefill_cp_size > 1
+            and max_seq_len is not None
+            and max_seq_len > 0
+        ):
+            # A request contributes two zigzag fragments to this rank. Native
+            # FlashMLA reads the existing Q; padded heads keep the BF16 bound.
+            local_rows = zigzag_local_rows(max_seq_len, self.prefill_cp_size)
+            self.native_q_chunk_rows = max(self.bf16_q_chunk_rows, local_rows)
+
     def plan(
         self,
         mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
@@ -780,14 +794,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 )
             self.full_rope_pos_ids = None
 
-        # Gather path: prefill-only, gated by USE_GATHER_PATH (mirrors non-CP).
-        gather_enabled = (
-            (os.environ.get("USE_GATHER_PATH", "0") == "1" or self.kv_cache_sharded)
-            and attn_inputs is not None
-            and getattr(attn_inputs, "is_prefill", False)
-            and (not self.use_cuda_graph or self.kv_cache_sharded)
-        )
-        self._gather = self._build_gather_workspace() if gather_enabled else None
+        self._plan_prefill_gather(attn_inputs, kv_cache_sharded=self.kv_cache_sharded)
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Record the gather layout from prefill_ragged_kv_len_indptr_d.
@@ -813,7 +820,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         """CP: topk rows align with total_local_ids; req_id is precomputed_req_ids
         (= mla_params.batch_indice_d[total_global_ids]) so row i maps to the
         request id of the i-th GLOBAL q token. Returns [T, 1, topk]."""
-        from rtp_llm.models_py.triton_kernels.sparse_mla.glm53_block_index_to_global import (
+        from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
             triton_convert_req_index_to_global_index,
         )
 
@@ -825,17 +832,11 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         global_2d = triton_convert_req_index_to_global_index(
             req_id=self.precomputed_req_ids,
             block_table=self.block_table,
-            # REBASE CONFLICT CONTEXT(e2e00e570): source branch used
-            # `token_indices=topk_2d, BLOCK_SIZE=self.token_per_block`; new base
-            # uses explicit `TOKENS_PER_BLOCK_FOR_BLOCK_TABLE` and
-            # `ENTRIES_PER_BLOCK`. Keep that API while preserving the source
-            # branch's normalized `topk_2d` rows.
             token_indices=topk_2d,
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
             NUM_TOPK_TOKENS=topk,
-            BLOCK_N=min(128, topk),
-            HAS_PREFILL_WORKSPACE=False,
+            BLOCK_N=None,
         )
         return global_2d.unsqueeze(1)
 
@@ -1262,6 +1263,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             parallelism_config=parallelism_config,
             fmha_impl=SparseMlaFp8CPOp,
         )
+        self.fmha_impl.configure_native_query_chunk(max_seq_len)
         self.fmha_impl.kv_cache_write_op = self.kv_cache_write_op
         self.fmha_impl.write_cache_store_impl = self.write_cache_store_impl
         # Defensive: create_params (called from super().__init__()) already set

@@ -3,6 +3,19 @@ load("@arch_config//:arch_select.bzl", "requirement")
 requirement(["numpy", "packaging", "torch", "triton"])
 
 py_test(
+    name = "block_index_to_global_test",
+    srcs = ["block_index_to_global_test.py"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["SM103_CU13", "glm53_contract"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:sparse_mla",
+        ":torch",
+        ":triton",
+    ],
+)
+
+py_test(
     name = "address_overflow_gpu_test",
     srcs = ["address_overflow_gpu_test.py"],
     env = {"GPU_COUNT": "1"},
@@ -30,6 +43,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",
         "//rtp_llm/models_py/triton_kernels:kda_fp32_state",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
         "//rtp_llm/models_py/triton_kernels:sparse_mla",
         ":numpy",
         ":packaging",

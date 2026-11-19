@@ -60,10 +60,7 @@ def _extensions_impl(ctx):
         args.add("--patch", patch)
     pins = {}
     for name, src in BLACKWELL_SOURCES.items():
-        pin = {"repository": src.repository, "commit": src.commit}
-        if hasattr(src, "sha256"):
-            pin["sha256"] = src.sha256
-        pins[name] = pin
+        pins[name] = {"repository": src.repository, "commit": src.commit, "sha256": src.sha256}
     args.add("--pins", json.encode(pins))
     ctx.actions.run(
         executable = builder,

@@ -5,20 +5,15 @@ Two operators:
 - SparseMlaOp:    BF16 KV cache → flash_mla_sparse_fwd
 - SparseMlaFp8Op: FP8 paged KV cache. DeepSeek uses FlashMLA's packed-cache
   decode kernel; NoPE MLA gathers only selected entries into a BF16 workspace.
-  Prefill has two paths controlled by USE_GATHER_PATH env:
-    * USE_GATHER_PATH=1 (prefill): gather + upconvert FP8 → BF16 workspace,
-      then flash_mla_sparse_fwd. ~1.7x faster than with_kvcache for large s_q.
-    * Otherwise: flash_mla_with_kvcache directly on FP8 paged cache.
+  Dedicated Prefill gathers and upconverts the cache once. Decode and target
+  verification use the paged cache, with selected-KV dequantization for NoPE.
 """
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import torch
-
-_PREFILL_PAD_TOPK = os.environ.get("GLM53_PREFILL_PAD_TOPK", "0") == "1"
 
 # flash_mla requires CUDA >= 12.9. On unsupported envs the symbols stay
 # undefined and any caller using sparse MLA will fail fast at use time.
@@ -53,14 +48,14 @@ from rtp_llm.models_py.modules.indexer_grouping import (
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
+    triton_convert_req_index_to_global_index,
+)
 from rtp_llm.models_py.triton_kernels.sparse_mla.cache_view import (
     flat_sparse_cache_view,
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
-)
-from rtp_llm.models_py.triton_kernels.sparse_mla.glm53_block_index_to_global import (
-    triton_convert_req_index_to_global_index,
 )
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
@@ -69,6 +64,7 @@ from rtp_llm.ops import (
     FMHAType,
     KvCacheDataType,
     ParallelismConfig,
+    RoleType,
 )
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -86,11 +82,9 @@ from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
 _FLASHMLA_TOPK_ALIGNMENT = 128
 _FLASHMLA_SPARSE_Q_HEADS = (64, 128)
-_GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV = "GLM5_FLASH_MLA_SPARSE_Q_CHUNK"
 # GLM's semantic top-k=2051 is padded to 2176. With kv_lora_rank=512,
-# 4096 rows materialize an 8.5 GiB BF16 selected-KV workspace; the default
-# keeps each chunk bounded to roughly 544 MiB.
-_DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK = 256
+# 256 rows bound the temporary BF16 selected-KV buffer to 544 MiB.
+_SELECTED_KV_CHUNK_ROWS = 256
 
 
 def _topk_2d(topk_indices: torch.Tensor) -> torch.Tensor:
@@ -137,29 +131,6 @@ def _allocate_prefill_fused_kv(
     return torch.empty((total_kv_len, width), dtype=torch.bfloat16, device=device)
 
 
-def _glm5_sparse_q_chunk_rows() -> int:
-    raw_value = os.environ.get(
-        _GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV,
-        str(_DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK),
-    )
-    try:
-        chunk_rows = int(raw_value)
-    except (TypeError, ValueError):
-        logging.warning(
-            "invalid %s=%r; using default=%d",
-            _GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV,
-            raw_value,
-            _DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK,
-        )
-        chunk_rows = _DEFAULT_GLM5_FLASH_MLA_SPARSE_Q_CHUNK
-    if chunk_rows <= 0:
-        raise ValueError(
-            f"{_GLM5_FLASH_MLA_SPARSE_Q_CHUNK_ENV} must be positive, "
-            f"got {chunk_rows}"
-        )
-    return chunk_rows
-
-
 # ---------------------------------------------------------------------------
 # BF16 sparse MLA operator
 # ---------------------------------------------------------------------------
@@ -181,6 +152,9 @@ class SparseMlaOp(object):
         indexer_top_k: Optional[int] = None,
         indexer_group_size: int = 1,
     ):
+        self._dedicated_prefill = (
+            getattr(parallelism_config, "role_type", None) == RoleType.PREFILL
+        )
         self.num_heads = num_heads
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -199,16 +173,8 @@ class SparseMlaOp(object):
         ) * _FLASHMLA_TOPK_ALIGNMENT
         self.indexer_top_k = top_k if indexer_top_k is None else indexer_top_k
         self.indexer_group_size = indexer_group_size
-        self.bf16_q_chunk_rows = int(
-            os.environ.get("GLM53_SPARSE_MLA_BF16_Q_CHUNK", "4096")
-        )
-        self.native_q_chunk_rows = int(
-            os.environ.get(
-                "GLM53_SPARSE_MLA_NATIVE_Q_CHUNK", str(self.bf16_q_chunk_rows)
-            )
-        )
-        if self.bf16_q_chunk_rows <= 0 or self.native_q_chunk_rows <= 0:
-            raise ValueError("GLM53_SPARSE_MLA_BF16_Q_CHUNK must be positive")
+        self.bf16_q_chunk_rows = 4096
+        self.native_q_chunk_rows = self.bf16_q_chunk_rows
         self.kernel_num_heads = next(
             (
                 supported_heads
@@ -264,29 +230,16 @@ class SparseMlaOp(object):
         topk_2d = self._prepare_local_topk_indices(topk_indices, raw_lengths)
         topk = topk_2d.shape[1]
         assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
-        output_topk = topk
-        if _PREFILL_PAD_TOPK and self.num_heads != 8:
-            from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
-
-            if metadata_cache() is not None:
-                output_topk = self.kernel_top_k
         global_2d = triton_convert_req_index_to_global_index(
             req_id=self.mla_params.batch_indice_d,
             block_table=self.block_table,
-            # REBASE CONFLICT CONTEXT(e2e00e570): source branch passed
-            # `token_indices=topk_2d, BLOCK_SIZE=self.token_per_block`; new
-            # base renamed the kernel parameters to separate block-table tokens
-            # from physical cache entries. Keep the new API and the source
-            # branch's 2D topk normalization.
             token_indices=topk_2d,
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
+            NUM_TOPK_TOKENS=topk,
+            BLOCK_N=None,
             PHYSICAL_ENTRIES_PER_BLOCK=physical_entries_per_block,
             BLOCKS_PER_PHYSICAL_BLOCK=blocks_per_physical_block,
-            NUM_TOPK_TOKENS=topk,
-            OUTPUT_TOPK_TOKENS=output_topk,
-            BLOCK_N=min(128, topk),
-            HAS_PREFILL_WORKSPACE=False,
         )
         return global_2d.unsqueeze(1)
 
@@ -482,7 +435,6 @@ class SparseMlaFp8Op(SparseMlaOp):
 
     def __init__(self, *args, **kwargs):
         self.use_cuda_graph = bool(kwargs.pop("use_cuda_graph", False))
-        self._sparse_q_chunk_rows = _glm5_sparse_q_chunk_rows()
         super().__init__(*args, **kwargs)
         # In CUDA graph mode the captured kernels keep the scheduler storage
         # address. Replacing this object during replay leaves the graph with a
@@ -555,15 +507,25 @@ class SparseMlaFp8Op(SparseMlaOp):
             int(block_table.shape[0]),
         )
 
-        # Gather path: only for prefill, gated by env var.
-        gather_enabled = (
-            os.environ.get("USE_GATHER_PATH", "0") == "1"
-            and attn_inputs is not None
-            and getattr(attn_inputs, "is_prefill", False)
+        self._plan_prefill_gather(attn_inputs)
+
+    def _plan_prefill_gather(
+        self,
+        attn_inputs: Optional[PyAttentionInputs],
+        *,
+        kv_cache_sharded: bool = False,
+    ) -> None:
+        # Sharded Prefill always needs remote KV, including under graph capture.
+        gather = (
+            attn_inputs is not None
+            and attn_inputs.is_prefill
             and not _is_multi_token_decode(attn_inputs)
-            and not self.use_cuda_graph
+            and (
+                kv_cache_sharded
+                or (self._dedicated_prefill and not self.use_cuda_graph)
+            )
         )
-        self._gather = self._build_gather_workspace() if gather_enabled else None
+        self._gather = self._build_gather_workspace() if gather else None
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Slice the prefill indptr and record the gather layout.
@@ -692,15 +654,15 @@ class SparseMlaFp8Op(SparseMlaOp):
             dtype=torch.bfloat16,
         )
         max_workspace_rows = (
-            min(q.shape[0], self._sparse_q_chunk_rows) * self.kernel_top_k
+            min(q.shape[0], _SELECTED_KV_CHUNK_ROWS) * self.kernel_top_k
         )
         fused_kv_workspace = torch.empty(
             (max_workspace_rows, self.kv_lora_rank),
             dtype=torch.bfloat16,
             device=kv.device,
         )
-        for start in range(0, q.shape[0], self._sparse_q_chunk_rows):
-            end = min(start + self._sparse_q_chunk_rows, q.shape[0])
+        for start in range(0, q.shape[0], _SELECTED_KV_CHUNK_ROWS):
+            end = min(start + _SELECTED_KV_CHUNK_ROWS, q.shape[0])
             chunk_indices = _pad_flashmla_topk(
                 global_indices[start:end], self.kernel_top_k
             )

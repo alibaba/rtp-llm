@@ -7,7 +7,6 @@ Hybrid architecture:
 """
 
 import logging
-import os
 from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
@@ -482,7 +481,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
 
         if ssm_states is not None:
             cache_alignment = seq_size_per_block
-            if os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1":
+            if self.parallelism_config.role_type in (RoleType.PREFILL, RoleType.DECODE):
                 cache_alignment *= int(self.parallelism_config.get_attn_tp_size())
             if cache_alignment % DEFAULT_KDA_CHUNK_SIZE:
                 raise ValueError(
@@ -1090,9 +1089,7 @@ class KimiLinearDecoderLayer(nn.Module):
         super().__init__()
         self.layer_idx = layer_idx
         self._drain_pinned_mla_before_moe = (
-            os.environ.get("RTP_LLM_DSA_MLA_DRAIN_BEFORE_MOE", "1") == "1"
-            and layer_idx in config.moe_layer_index
-            and config.mega_moe_policy is not None
+            layer_idx in config.moe_layer_index and config.mega_moe_policy is not None
         )
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
@@ -1663,7 +1660,6 @@ class Glm53FlashModel(GptModelBase):
 
         use_deferred_mhc = (
             self.hc_enabled
-            and os.environ.get("DSV4_MHC_FUSED_POST_PRE", "1") != "0"
             and (not attention_inputs.is_prefill or is_target_verify)
             and len(self.layers) > 0
         )

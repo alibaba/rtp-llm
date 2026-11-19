@@ -19,7 +19,7 @@ from rtp_llm.config.quant_config import (
 from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.ops import DataType, HiddenStateCaptureDtype, KvCacheDataType
 from rtp_llm.ops import ModelConfig as CppModelConfig
-from rtp_llm.ops import TaskType, VitSeparation
+from rtp_llm.ops import MoeConfig, ParallelismConfig, TaskType, VitSeparation
 from rtp_llm.utils.base_model_datatypes import VitParameters
 from rtp_llm.utils.util import get_config_from_path, to_torch_dtype
 from rtp_llm.utils.weight_type import WEIGHT_TYPE
@@ -282,6 +282,11 @@ class ModelConfig(CppModelConfig):
         "output_vocab_ids",
         "output_vocab_padded_size",
     }
+
+    def prepare_moe_backend(
+        self, parallelism_config: ParallelismConfig, moe_config: MoeConfig
+    ) -> None:
+        """Resolve model-specific MoE requirements before creating communication buffers."""
 
     def __setattr__(self, name: str, value: Any) -> None:
         """Override __setattr__ to prevent assignment of undefined Python attributes.

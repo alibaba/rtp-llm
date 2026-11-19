@@ -2,6 +2,7 @@
 
 import argparse
 import ctypes
+import functools
 import importlib.util
 import json
 import os
@@ -117,8 +118,12 @@ def sparse():
 
     for invariant in (False, True):
         for tokens in (1, 4, 5, 6):
-            wrapper = native_module.Glm53NativeSparse(batch_invariant=invariant)
+            wrapper = native_module.Glm53NativeSparse()
             assert wrapper.native is not None, "Native sparse extension did not load"
+            if invariant:
+                wrapper.native = functools.partial(
+                    wrapper.native, enable_batch_invariant=True
+                )
             rows = batch * tokens
             q = (
                 torch.randn(rows, heads, width, device="cuda", dtype=torch.bfloat16)

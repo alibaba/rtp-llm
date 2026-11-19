@@ -63,6 +63,7 @@ class IndexerCPChunkPlan:
     restore_indices: torch.Tensor  # [chunk_T] int64
     block_size: int
     owner_block_size: int
+    actual_local_cu: Optional[torch.Tensor] = None
 
 
 @dataclass

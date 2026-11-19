@@ -5,7 +5,6 @@
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 
-import os
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -694,11 +693,15 @@ def causal_conv1d_fn(
         if bias is not None:
             assert bias.dim() == 1
             assert dim == bias.size(0)
+        assert prefix_lengths.dim() == 1
+        assert prefix_lengths.numel() == padded_batch
         if block_map is not None:
             assert block_map.dim() == 2
-            assert block_map.size(1) == padded_batch
-        assert prefix_lengths.dim() == 1
-        assert prefix_lengths.dim() == padded_batch
+            assert block_map.size(0) == padded_batch
+            if conv_states is not None:
+                _validate_prefix_state_blocks(
+                    block_map, prefix_lengths, conv_states.size(0), seq_size_per_block
+                )
         assert weight.stride(1) == 1
         assert (dim, width) == weight.shape
         assert is_channel_last, "Need to run in channel-last layout"
@@ -706,18 +709,6 @@ def causal_conv1d_fn(
     if batch_ptr.device != x.device:
         batch_ptr = batch_ptr.to(x.device)
         token_chunk_offset_ptr = token_chunk_offset_ptr.to(x.device)
-
-    if (
-        os.environ.get("GLM5_VALIDATE_CAUSAL_CONV_BLOCK_MAP", "0") == "1"
-        and block_map is not None
-        and conv_states is not None
-    ):
-        _validate_prefix_state_blocks(
-            block_map,
-            prefix_lengths,
-            conv_states.size(0),
-            seq_size_per_block,
-        )
 
     initial_states = (
         torch.empty([0], device=x.device, dtype=x.dtype)

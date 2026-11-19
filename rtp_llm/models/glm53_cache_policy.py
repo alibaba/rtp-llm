@@ -8,8 +8,6 @@ def configure_decode_request_state_pool(
     role_type,
     max_generate_batch_size: int,
     gen_num_per_cycle: int,
-    *,
-    enabled: bool,
 ):
     """Bound Decode's KDA state pool by live requests instead of KV pages.
 
@@ -18,8 +16,7 @@ def configure_decode_request_state_pool(
     Explicit main pool settings and shared byte arenas retain their policies.
     """
     if (
-        not enabled
-        or role_type != RoleType.DECODE
+        role_type != RoleType.DECODE
         or kv_cache_config.linear_pool_blocks != 0
         or kv_cache_config.shared_hybrid_cache == 1
     ):
