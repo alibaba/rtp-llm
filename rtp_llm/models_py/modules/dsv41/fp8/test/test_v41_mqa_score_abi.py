@@ -93,6 +93,60 @@ class MqaScoreAbiTest(unittest.TestCase):
     def test_current_contiguous_rejects_removed_keywords(self):
         self.check_contiguous(False)
 
+    def test_balanced_contiguous_passes_metadata_only_for_supported_bf16_abi(self):
+        starts = torch.tensor([2, 5], dtype=torch.int32)
+        ends = torch.tensor([7, 11], dtype=torch.int32)
+        result = torch.zeros(2, 6, dtype=torch.bfloat16)
+        metadata = object()
+
+        for accepts_schedule, has_builder, balanced in (
+            (True, True, True),
+            (True, False, True),
+            (False, True, True),
+            (True, True, False),
+        ):
+            with self.subTest(
+                abi=accepts_schedule, builder=has_builder, balanced=balanced
+            ):
+                operation = Mock(return_value=result)
+                operation.__doc__ = "schedule_meta: Tensor" if accepts_schedule else ""
+                backend, vendor = load_backend(operation, None)
+                builder = Mock(return_value=metadata)
+                if has_builder:
+                    vendor.get_mqa_logits_metadata = builder
+                inputs = (
+                    torch.zeros(2, 32, 64, dtype=torch.int8),
+                    torch.zeros(2, 32, dtype=torch.int32),
+                    torch.zeros(11, 64, dtype=torch.int8),
+                    torch.zeros(11, dtype=torch.int32),
+                    torch.ones(2, 32),
+                )
+                cache = {}
+                options = dict(
+                    max_seqlen_k=6,
+                    return_bf16=True,
+                    balance_kv_tiles=balanced,
+                    schedule_cache=cache,
+                )
+                actual = backend.fp8_fp4_mqa_indexer_score(
+                    *inputs, starts, ends, **options
+                )
+                self.assertIs(actual, result)
+                backend.fp8_fp4_mqa_indexer_score(*inputs, starts, ends, **options)
+                if accepts_schedule and has_builder and balanced:
+                    builder.assert_called_once_with(starts, ends, 11, 32)
+                    self.assertIs(operation.call_args.kwargs["schedule_meta"], metadata)
+                    replacement = ends.clone()
+                    backend.fp8_fp4_mqa_indexer_score(
+                        *inputs, starts, replacement, **options
+                    )
+                    self.assertEqual(builder.call_count, 2)
+                    self.assertIs(builder.call_args.args[1], replacement)
+                else:
+                    builder.assert_not_called()
+                    self.assertFalse(cache)
+                    self.assertNotIn("schedule_meta", operation.call_args.kwargs)
+
     def check_paged(self, legacy):
         calls = []
         result = torch.zeros(6, 256, dtype=torch.bfloat16)

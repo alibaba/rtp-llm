@@ -493,7 +493,7 @@ class _GroupedScores:
         )
         return (rows, *output.unbind(0))
 
-    def groups(self, *, mask_tail=True, return_bf16=False):
+    def groups(self, *, mask_tail=True, return_bf16=False, balance_kv_tiles=False):
         """Yield (packed row slice, logits, visible, (zeros, visible)).
 
         The conservative FP32 budget (default 256 MiB) also bounds BF16 output.
@@ -505,6 +505,19 @@ class _GroupedScores:
         """
         from ._indexer_score import fp8_fp4_mqa_indexer_score
 
+        score_options = {"balance_kv_tiles": True} if balance_kv_tiles else {}
+        # Ratio-2 source layers share bounds. L20 is the only ratio-1 source
+        # using balanced scheduling and has no later consumer of its schedule.
+        if (
+            balance_kv_tiles
+            and self.ratio == 2
+            and len(self.layout) <= _MAX_BOUNDS_GROUPS
+        ):
+            stream = torch.cuda.current_stream(self.q.device)
+            bounds_cache = self.shared.setdefault("prefill_score_bounds", {})
+            score_options["schedule_cache"] = bounds_cache.setdefault(
+                ("mqa_schedule", self.q.device, stream.cuda_stream), {}
+            )
         bounds_by_group = self._iter_bounds()
         for group, bounds, q, sf, weights in zip(
             self.layout,
@@ -525,6 +538,7 @@ class _GroupedScores:
                 clean_logits=False,
                 max_seqlen_k=group.width,
                 return_bf16=return_bf16,
+                **score_options,
             )
             if mask_tail:
                 _mask_tail_kernel[(logits.shape[0],)](

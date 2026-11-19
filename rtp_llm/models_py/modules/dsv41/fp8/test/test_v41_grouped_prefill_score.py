@@ -39,6 +39,94 @@ def key_views(widths, slab_counts, device="cpu"):
 
 
 class GroupedCEDDispatchCPU(unittest.TestCase):
+    def test_balanced_schedule_admission(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _indexer_score as scorer
+        from rtp_llm.models_py.modules.dsv41.fp8 import (
+            _v41_batched_prefill_select as batched,
+        )
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as topk
+
+        cases = (
+            (2, 2, "1", (10, 3), False, True, True),
+            (8, 2, "1", (10, 3), False, True, True),
+            (14, 2, "1", (10, 3), False, True, True),
+            (20, 1, "1", (10, 3), False, True, True),
+            (20, 1, "0", (10, 3), False, True, False),
+            (20, 1, "1", (10, 0), False, True, False),
+            (20, 1, "1", (10, 3), True, True, False),
+            (21, 1, "1", (10, 3), False, True, False),
+            (20, 1, "1", (10, 3), False, False, False),
+        )
+        cp = SimpleNamespace(
+            prefix_lengths=torch.tensor([1024]),
+            input_lengths_global=torch.tensor([256]),
+        )
+        for layer, ratio, flag, arch, capture, abi, expected in cases:
+            with self.subTest(
+                layer=layer, flag=flag, arch=arch, capture=capture, abi=abi
+            ):
+                calls = []
+
+                def groups(**kwargs):
+                    calls.append(kwargs)
+                    return iter(())
+
+                plan = SimpleNamespace(groups=groups, split_rows=lambda _: ())
+                owner = SimpleNamespace(
+                    _shared_attention={},
+                    _cp_ctx=cp,
+                    layer_id=layer,
+                    compress_ratio=ratio,
+                )
+                with ExitStack() as stack:
+                    stack.enter_context(
+                        patch.dict(
+                            os.environ, {"DSV41_PREFILL_INDEXER_BALANCED_SCORE": flag}
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(topk, "supports_bf16", return_value=True)
+                    )
+                    stack.enter_context(
+                        patch.object(grouped, "try_grouped_scores", return_value=plan)
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            torch.cuda, "get_device_capability", return_value=arch
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            batched, "prefill_stream_is_capturing", return_value=capture
+                        )
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            scorer,
+                            "balanced_mqa_schedule_builder",
+                            return_value=object() if abi else None,
+                        )
+                    )
+                    self.assertTrue(
+                        batched.try_select_batched(
+                            owner,
+                            SimpleNamespace(is_cuda=True, device="cuda"),
+                            None,
+                            None,
+                            [None],
+                            [slice(0, 1)],
+                            None,
+                            None,
+                            candidate_source=-1,
+                            publish_candidates=False,
+                            candidate_size=8,
+                            candidate_blocks=2048,
+                            req_ids=object(),
+                        )
+                    )
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0].get("balance_kv_tiles", False), expected)
+
     def test_compact_consumers_reuse_full_key_counts_and_invalidate_replaced_cp(self):
         from rtp_llm.models_py.modules.dsv41.fp8 import (
             _v41_batched_prefill_select as batched,
@@ -2089,7 +2177,10 @@ class GroupedTailSelectionTest(unittest.TestCase):
             )
             self.last_calls = dict(
                 selector=select.call_count,
-                native=raw_native.call_count,
+                native=sum(call.args[4] == 512 for call in raw_native.call_args_list),
+                candidate_native=sum(
+                    call.args[4] == 2048 for call in raw_native.call_args_list
+                ),
                 finite_native=(
                     finite_native.call_count if finite_native is not None else 0
                 ),
@@ -2217,14 +2308,9 @@ class GroupedTailSelectionTest(unittest.TestCase):
                         self.last_calls,
                         dict(
                             selector=1,
-                            # Token K512 and eligible candidate-block K2048
-                            # each invoke the native selector once.
-                            native=1
-                            + int(
-                                (width + 7) // 8 <= 2048
-                                and candidate_topk.is_available(
-                                    "prefill", logits.device
-                                )
+                            native=1,
+                            candidate_native=int(
+                                candidate_topk.is_available("prefill", logits.device)
                             ),
                             finite_native=0,
                             finish=0,

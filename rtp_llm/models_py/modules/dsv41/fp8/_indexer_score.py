@@ -101,6 +101,13 @@ def _mqa_accepts_logits_dtype(operation) -> bool:
     return "logits_dtype:" in (operation.__doc__ or "")
 
 
+def balanced_mqa_schedule_builder():
+    operation = getattr(_deep_gemm, "fp8_fp4_mqa_logits", None)
+    if "schedule_meta:" in (getattr(operation, "__doc__", None) or ""):
+        return getattr(_deep_gemm, "get_mqa_logits_metadata", None)
+    return None
+
+
 def fp8_fp4_mqa_indexer_score(
     q_payload: torch.Tensor,  # [M, H, 64] int8
     q_sf: torch.Tensor,  # [M, H] int32
@@ -113,6 +120,8 @@ def fp8_fp4_mqa_indexer_score(
     clean_logits: bool = True,
     max_seqlen_k: int = 0,
     return_bf16: bool = False,
+    balance_kv_tiles: bool = False,
+    schedule_cache: dict | None = None,
 ) -> torch.Tensor:
     """MX-mode FP4 prefill indexer logits via DeepGEMM.
 
@@ -141,6 +150,21 @@ def fp8_fp4_mqa_indexer_score(
     )
     starts = cu_seqlen_ks.contiguous()
     ends = cu_seqlen_ke.contiguous()
+    build_schedule = (
+        balanced_mqa_schedule_builder() if balance_kv_tiles and return_bf16 else None
+    )
+    if build_schedule is not None:
+        kv_rows, heads = k_payload.shape[0], q_payload.shape[1]
+        key = (id(starts), id(ends), kv_rows, heads)
+        cached = schedule_cache.get(key) if schedule_cache is not None else None
+        if cached is None:
+            schedule = build_schedule(starts, ends, kv_rows, heads)
+            if schedule_cache is not None:
+                # Keep the bound objects alive for the identity key.
+                schedule_cache[key] = (starts, ends, schedule)
+        else:
+            schedule = cached[2]
+        options["schedule_meta"] = schedule
     scores = operation(
         (q_payload.contiguous(), q_sf.contiguous()),
         (k_payload.contiguous(), k_sf.contiguous()),

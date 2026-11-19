@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from bisect import bisect_left
 
 import torch
+
+from .._prefill_stream import prefill_stream_is_capturing
 
 
 def _try_publish_with_tokens(
@@ -128,9 +131,11 @@ def try_select_batched(
         )
 
     from . import _v41_prefill_topk as topk
+    from ._indexer_score import balanced_mqa_schedule_builder
     from ._v41_grouped_prefill_score import _mask_tail_kernel, try_grouped_scores
     from .attention_v41 import _apply_prefill_candidates
 
+    return_bf16 = topk.supports_bf16()
     grouped = try_grouped_scores(
         q_payload,
         q_sf,
@@ -147,11 +152,20 @@ def try_select_batched(
     if grouped is None:
         return False
     publishing = candidates is not None and publish_candidates
+    balance_kv_tiles = (
+        os.environ.get("DSV41_PREFILL_INDEXER_BALANCED_SCORE") == "1"
+        and return_bf16
+        and (attn.layer_id, attn.compress_ratio) in ((2, 2), (8, 2), (14, 2), (20, 1))
+        and torch.cuda.get_device_capability(q_payload.device) == (10, 3)
+        and not prefill_stream_is_capturing()
+        and balanced_mqa_schedule_builder() is not None
+    )
+    score_options = {"balance_kv_tiles": True} if balance_kv_tiles else {}
     targets = iter(grouped.split_rows(out))
     # Keep the score generator directly in the loop: zip/enumerate can retain
     # its previous yielded tuple while allocating the next score chunk.
     for rows, logits, visible, bounds in grouped.groups(
-        mask_tail=False, return_bf16=topk.supports_bf16()
+        mask_tail=False, return_bf16=return_bf16, **score_options
     ):
         target = next(targets)
         count = min(attn.index_topk, logits.shape[1])
