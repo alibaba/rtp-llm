@@ -61,10 +61,20 @@ torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<in
     RTP_LLM_CHECK_WITH_INFO(tensor.dim() == (block_table ? 3 : 1)
                                 && tensor.size(0) == static_cast<int64_t>(rows.size()),
                             "cache payload row count must match its group tags (groups)");
-    if (rows.size() <= 1) {
+    // The caller supplies a permutation. Sorted rows already have the
+    // requested order and can use the original tensor.
+    if (std::is_sorted(rows.begin(), rows.end())) {
         return tensor;
     }
-    auto result = tensor.index_select(0, torch::tensor(rows, torch::kInt64).to(tensor.device()));
+    auto index_options = torch::TensorOptions().dtype(torch::kInt64);
+    auto indices = torch::empty({static_cast<int64_t>(rows.size())}, index_options.pinned_memory(tensor.is_cuda()));
+    std::memcpy(indices.data_ptr<int64_t>(), rows.data(), rows.size() * sizeof(int64_t));
+    // ATen keeps the pinned source alive for the async copy. index_select
+    // follows it on the same stream, while the CPU can publish TP metadata.
+    if (tensor.is_cuda()) {
+        indices = indices.to(tensor.device(), /*non_blocking=*/true);
+    }
+    auto result = tensor.index_select(0, indices);
     return tensor.is_pinned() && !result.is_pinned() ? result.pin_memory() : result;
 }
 
@@ -243,8 +253,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
 
 torch::Tensor makeModelInputShapeHintsTensor(const GptModelInputs& inputs) {
     const auto shape_hints = getModelInputShapeHints(inputs);
-    auto tensor =
-        torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())},
+                               torch::TensorOptions(torch::kInt64).pinned_memory(true));
     std::copy(shape_hints.begin(), shape_hints.end(), tensor.data_ptr<int64_t>());
     return tensor;
 }
@@ -321,8 +331,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
 
     // first sync stage: shape hints
-    auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
-    auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    auto shape_hints_t                                     = makeModelInputShapeHintsTensor(inputs);
+    auto shape_hints_ptr                                   = shape_hints_t.data_ptr<int64_t>();
     shape_hints_ptr[GptModelInputIndex::recordExecutionId] = inputs.record_execution_id;
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
@@ -381,8 +391,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto engram_width    = checkedHint(GptModelInputIndex::engramTokenWindowWidth, "engramTokenWindowWidth");
     const auto mm_features_num = checkedHint(GptModelInputIndex::mmFeaturesNum, "mmFeaturesNum");
     if (mm_features_num) {
-        mm_features_shape_t =
-            torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        mm_features_shape_t = torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int64_t>();
         for (int64_t i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =
