@@ -217,7 +217,7 @@ public:
     }
     void match(StorageRequest request, MatchDone done);
     void read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done);
-    StorageWriteTask prepareWrite(StorageRequest request);
+    virtual StorageWriteTask prepareWrite(StorageRequest request);
     // Returns admission only, not the I/O result; never waits for completion.
     // Retained source pins live through payload completion and publication.
     bool write(StorageWriteTask task);

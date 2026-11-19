@@ -42,6 +42,7 @@ public:
                        std::shared_ptr<kvcm::ClientWrapper>       client_wrapper   = nullptr);
     ~KVCMStorageBackend() override;
     BlockTreeQueueSizes queueSizes() const override;
+    StorageWriteTask prepareWrite(StorageRequest request) override;
 
     struct ControlConfig {
         std::string              instance_group;

@@ -981,8 +981,12 @@ public:
         }
     };
 
+    bool allowsWrite(const StorageRequest& request) const noexcept {
+        return kvcm::allowsPublication(decode_publication_enabled_, is_decode_role_, request.decode_completion);
+    }
+
     bool write(const StorageRequest& request, WriteCompletion done = {}, WritePinFilter retain_pins = {}) {
-        if (!kvcm::allowsPublication(decode_publication_enabled_, is_decode_role_, request.decode_completion)) {
+        if (!allowsWrite(request)) {
             return false;
         }
         if (completion_stopped_.load()) {
@@ -1045,7 +1049,7 @@ public:
         }
         // Preserve ordinary Prefill publication. D publishes through the EOS
         // transaction only; no benchmark flag may disable P's normal cache path.
-        if (!kvcm::allowsPublication(decode_publication_enabled_, is_decode_role_, request.decode_completion))
+        if (!allowsWrite(request))
             return false;
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata write must run on tp rank 0, got %ld",
@@ -2957,6 +2961,14 @@ BlockTreeQueueSizes KVCMStorageBackend::queueSizes() const {
 
 std::optional<KVCMStorageBackend::ControlConfig> KVCMStorageBackend::controlConfig() const {
     return impl_->controlConfig();
+}
+
+StorageWriteTask KVCMStorageBackend::prepareWrite(StorageRequest request) {
+    // Gate only new remote writes before source pins or executor work. Tree
+    // callers keep their local insertion; existing I/O still settles normally.
+    if (!impl_->allowsWrite(request))
+        return {};
+    return StorageBackend::prepareWrite(std::move(request));
 }
 
 bool KVCMStorageBackend::initImpl() {

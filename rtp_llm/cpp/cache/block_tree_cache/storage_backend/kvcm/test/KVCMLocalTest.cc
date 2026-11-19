@@ -441,6 +441,87 @@ TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
     EXPECT_EQ(*destruction_count, 1);
 }
 
+TEST(KVCMLocalTest, DecodeOffSkipsRemoteWritesBeforePinningButKeepsLocalTreeAndRemoteReads) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
+            const bool decode = role == RoleType::DECODE;
+            auto environment = makeBackendEnvironment("publication_write_admission");
+            const auto original_refs = environment.device_pool->refCount(environment.block_id);
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            kv_cache_manager::WriteLocation allocation;
+            allocation.write_session_id = "prefill-write";
+            allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+            allocation.locations = {{{"tp0_Fdefault", "write_uri"}}};
+            EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _))
+                .Times(decode ? 0 : 1).WillRepeatedly(Return(std::make_pair(true, allocation)));
+            EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _))
+                .Times(decode ? 0 : 1)
+                .WillRepeatedly(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"write_uri"})));
+            EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(decode ? 0 : 1)
+                .WillRepeatedly(Invoke([](const auto&, const auto&, const auto&, const auto& mask, const auto&) {
+                    const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
+                    EXPECT_NE(offset, nullptr);
+                    if (offset) {
+                        EXPECT_EQ(*offset, 1u);
+                    }
+                    return true;
+                }));
+            auto parallel = singleRankConfig();
+            parallel.role_type = role;
+            auto handle = makeBackend(environment, parallel, client);
+            auto backend = std::shared_ptr<KVCMStorageBackend>(std::move(handle.backend));
+            auto group = std::make_shared<FullGroupSet>(
+                std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
+            group->initialize(0, environment.cache_config.topologyPtr(), environment.cache_config.groupTags());
+            BlockTreeCacheConfig config;
+            config.enable_remote_cache = true;
+            auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({group}, config, backend);
+            ASSERT_NE(cache, nullptr);
+            ASSERT_TRUE(backend->remoteCacheEnabled());
+            // Exercise virtual dispatch through the same base type the tree uses.
+            StorageBackend& remote = *backend;
+            if (decode) {
+                for (const bool completion : {false, true}) {
+                    auto request = makeStorageRequest(environment);
+                    request.decode_completion = completion;
+                    EXPECT_FALSE(remote.prepareWrite(std::move(request)));
+                    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_refs);
+                }
+            }
+            std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+            resources[0][0].device_blocks = {environment.block_id};
+            cache->insert({101}, resources, Tier::DEVICE);
+            ASSERT_TRUE(waitForBackendOperationsForTest(remote));
+            EXPECT_EQ(cache->getKeySnapshot().keys, CacheKeysType({101}));
+            auto local = cache->match({101}, {}, /*enable_storage_backend=*/false);
+            EXPECT_EQ(local.matched_device_blocks, 1u);
+            block_tree_cache_test::releaseRequestRefsForTest(*cache, local.matched_device_resources);
+            local.matched_device_resources.clear();
+            EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_refs + 1);
+            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            if (decode) {
+                const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "read_uri"}}};
+                EXPECT_CALL(*client, match(_, _, _, _, _, _))
+                    .WillOnce(Return(std::make_pair(true, locations)));
+                EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
+                    .WillOnce(Return(true));
+                auto observation = match(*backend, makeStorageRequest(environment));
+                ASSERT_TRUE(observation.success);
+                ASSERT_NE(observation.match_meta, nullptr);
+                EXPECT_TRUE(read(*backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+                ASSERT_TRUE(waitForBackendOperationsForTest(remote));
+            }
+            cache.reset();
+            EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_refs);
+        });
+    }
+}
+
 TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_invalid_init_shape");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
@@ -709,7 +790,7 @@ TEST(KVCMLocalTest, DecodePublicationParsesSdkOptionsAndKeepsBackendContracts) {
         {R"([{"type":"pace_ssd"}])", 0, true, false},
         {R"([{"type":"pace"}])", 9, true, false},
         {R"([{"type":"pace_ssd"}])", 9, false, false},
-        {R"([{"type":"pace"}])", 0, false, false},
+        {R"([{"type":"pace"}])", 0, false, true},
         {R"([{"type":"pace"}])", 0, true, true},
         {R"(null)", 0, true, false},
         {R"([])", 0, true, false},

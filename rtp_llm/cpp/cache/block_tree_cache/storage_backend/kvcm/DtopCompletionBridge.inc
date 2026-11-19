@@ -119,10 +119,6 @@ bool configureDecodePublication(const CacheTopology&                            
             !kv_cache_config_.kvcm_client_config.empty());
         return false;
     }
-    if (!gdr_enabled_) {
-        RTP_LLM_LOG_ERROR("Decode publication requires GDR; CPU payload staging is not an alternative");
-        return false;
-    }
     RTP_LLM_LOG_INFO("DTOP_GPU layout target_cp=%d target_tp=%d shards=%d visible_tokens=%zu dp=%ld role=%d",
                      target_prefill_cp_,
                      target_prefill_tp_,
