@@ -433,7 +433,14 @@ class VLLMCachePolicyTest(unittest.TestCase):
         full = FullAttentionSpec(768)
         mamba = MambaSpec(768)
         wrapped = UniformTypeKVCacheSpecs(768, full, mamba)
-        with mock.patch.dict(sys.modules, {"vllm.v1.kv_cache_interface": None}):
+        native = importlib.import_module("vllm.v1.kv_cache_interface")
+        with mock.patch.object(native, "iter_layer_specs", None, create=True):
+            self.assertEqual((full,), module._vllm_layer_specs(full))
+            self.assertEqual((full, mamba), module._vllm_layer_specs(wrapped))
+        # Also cover an unavailable module, including Python's cached parent attribute.
+        parent = importlib.import_module("vllm.v1")
+        with mock.patch.dict(sys.modules, {"vllm.v1.kv_cache_interface": None}), \
+             mock.patch.object(parent, "kv_cache_interface", None):
             self.assertEqual((full,), module._vllm_layer_specs(full))
             self.assertEqual((full, mamba), module._vllm_layer_specs(wrapped))
 
