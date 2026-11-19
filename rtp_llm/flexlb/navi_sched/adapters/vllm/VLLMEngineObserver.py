@@ -2402,15 +2402,11 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 return
             touch_id = f"{os.getpid()}:{time.monotonic_ns()}"
             request_ids = tuple(dict.fromkeys(request_id for request_id, _ in touches))
-            future = self._v6d_scheduler.submit_local_cache_touches(hashes, touch_id=touch_id)
             logger.info(
-                "[navi-v6d-touch-submit] touch_id=%s request_count=%d request_ids=%s "
+                "[navi-v6d-touch-disabled] touch_id=%s request_count=%d request_ids=%s "
                 "block_count=%d block_hashes_sample=%s",
                 touch_id, len(request_ids), request_ids[:8], len(hashes), hashes[:4],
             )
-            future.add_done_callback(partial(
-                self._on_v6d_cache_touch_done, touch_id=touch_id,
-            ))
         except Exception:
             # A best-effort eviction hint must never reject or delay inference.
             logger.exception("failed to submit V6D resident cache touch")

@@ -29,44 +29,46 @@ def observer():
 
 
 class TouchDrainTest(unittest.TestCase):
-    def test_pending_snapshot_does_not_block_touch_submission_or_wait_for_result(self):
+    def test_control_drains_hints_without_native_submission_or_snapshot_wait(self):
         value, log = observer()
         value._poll_v6d_cache_source()
-        call = value._v6d_scheduler.submit_local_cache_touches.call_args
-        self.assertEqual(((11,22,33),), call.args)
-        touch_id = call.kwargs["touch_id"]
-        self.assertTrue(touch_id.startswith(str(os.getpid()) + ":"))
-        self.assertIn("[navi-v6d-touch-submit]", log.info.call_args.args[0])
-        self.assertEqual(touch_id, log.info.call_args.args[1])
+        value._v6d_scheduler.submit_local_cache_touches.assert_not_called()
+        self.assertIn("[navi-v6d-touch-disabled]", log.info.call_args.args[0])
+        self.assertEqual(2, log.info.call_args.args[2])
+        self.assertEqual(3, log.info.call_args.args[4])
         self.assertFalse(value._v6d_snapshot_future.done())
         self.assertFalse(value._v6d_scheduler.submit_local_cache_touches.return_value.done())
         log.exception.assert_not_called()
 
-    def test_completion_log_uses_same_id_and_counts_real_storage_results(self):
+    def test_shared_completion_parser_is_unchanged_in_control(self):
         value, log = observer()
-        value._drain_v6d_cache_touches()
-        touch_id = value._v6d_scheduler.submit_local_cache_touches.call_args.kwargs["touch_id"]
-        value._v6d_scheduler.submit_local_cache_touches.return_value.set_result([
+        touch_id = "unused-control-callback"
+        future = Future()
+        future.set_result([
             dict(requested=4, touched=3, missing=1, busy=0),
             dict(requested=4, touched=2, missing=0, busy=2),
             TimeoutError(),
         ])
+        value._on_v6d_cache_touch_done(future, touch_id=touch_id)
         args = log.info.call_args.args
         self.assertIn("[navi-v6d-touch-complete]", args[0])
         self.assertEqual((touch_id, 3, 1, 8, 5, 1, 2), args[1:])
         log.warning.assert_called_once()
         log.exception.assert_not_called()
 
-    def test_submit_failure_does_not_escape_to_inference_loop(self):
+    def test_native_submit_is_never_called_even_when_it_would_fail(self):
         value, log = observer()
         value._v6d_scheduler.submit_local_cache_touches.side_effect = RuntimeError('closed')
         value._poll_v6d_cache_source()
-        log.exception.assert_called_once()
+        log.exception.assert_not_called()
+        value._v6d_scheduler.submit_local_cache_touches.assert_not_called()
 
     def test_failed_storage_node_and_failed_future_are_both_ignored(self):
         value, log = observer()
         value._drain_v6d_cache_touches()
-        value._v6d_scheduler.submit_local_cache_touches.return_value.set_result([{'touched':2},TimeoutError()])
+        completed = Future()
+        completed.set_result([{'touched':2},TimeoutError()])
+        value._on_v6d_cache_touch_done(completed)
         log.warning.assert_called_once()
         failed = Future()
         failed.set_exception(RuntimeError('shutdown'))
