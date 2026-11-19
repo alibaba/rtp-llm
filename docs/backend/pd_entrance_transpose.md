@@ -32,7 +32,7 @@ Prefill 多模态瞬时错误可用 PREFILL_RETRY_TIMES 配置额外尝试次数
 
 旧启动参数及对应环境变量仍可解析。旧入口专用的线程池、等待、重试和轮询参数，以及旧传输的提前停止参数保留配置兼容。实际通信、取消与资源释放使用新路径的 deadline 和租约。
 
-KV 单次通信默认预算为 5 秒，从 worker 开始发送计时，上限为请求剩余时间。等待 Prefill 注册、产出 KV 和返回首 token 使用请求 deadline。冷启动或建链需要更长预算时，可调整 `--load_cache_timeout_ms`。RDMA 在传输 deadline 后等待 `--p2p_transfer_not_done_resource_hold_ms` 再尝试关闭连接。Decode 确认所有 rank 停写后立即释放 KV，隔离满 5 分钟仍未确认时强制释放。`--p2p_lease_query_timeout_ms` 控制单次查询的上限。
+KV 单次通信默认预算为 5 秒，从 worker 开始发送计时，上限为请求剩余时间。等待 Prefill 注册、产出 KV 和返回首 token 使用请求 deadline。冷启动或建链需要更长预算时，可调整 `--load_cache_timeout_ms`。RDMA 在传输 deadline 后等待 `--p2p_transfer_not_done_resource_hold_ms` 再尝试关闭连接。Decode 确认所有 rank 停写后释放 KV。`--p2p_lease_query_timeout_ms` 控制单次查询的上限。
 
 Decode 入口继续上报 `rtp_llm_rpc_allocate_resource_rt_us`、`rtp_llm_rpc_load_cache_from_prefill_rt_us` 和 `rtp_llm_rpc_local_generate_rt_us`，分别对应首次 KV 分配、KV 加载和本地生成。旧 RemoteLoad 的逐 rank 最短/最长耗时和轮询开销不再产生样本。流级加载指标与 P2P 协调/worker 指标仍可用于分层定位，计时边界不相同。
 

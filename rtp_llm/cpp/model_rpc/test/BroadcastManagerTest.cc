@@ -705,6 +705,19 @@ TEST_F(BroadcastManagerTest, PartialDispatchExceptionKeepsLegacyPropagation) {
         (manager.broadcast<FunctionRequestPB, FunctionResponsePB>(std::vector<FunctionRequestPB>(2), 1000, rpc_call)),
         RTPException);
     EXPECT_EQ(calls, 2);
+
+    calls = 0;
+    BroadcastManager p2p_manager({address, address, address});
+    ASSERT_TRUE(p2p_manager.init());
+    auto result = p2p_manager.broadcast<FunctionRequestPB, FunctionResponsePB>(
+        std::vector<FunctionRequestPB>(3), 1000, rpc_call, {}, BroadcastManager::DispatchFailurePolicy::kStop);
+    ASSERT_NE(result, nullptr);
+    ASSERT_TRUE(result->waitDone(2000));
+    EXPECT_EQ(calls, 2);
+    EXPECT_TRUE(result->rpcSucceeded(0));
+    EXPECT_FALSE(result->rpcSucceeded(1));
+    EXPECT_FALSE(result->rpcSucceeded(2));
+    EXPECT_NE(result->firstError().error.ToString().find("second rank dispatch failed"), std::string::npos);
 }
 
 TEST_F(BroadcastManagerTest, WaitDoneReportsTransportErrors) {
