@@ -50,21 +50,17 @@ public:
                                          const torch_ext::PyContextParallelParams& cp_params) = 0;
 
 protected:
-    /// @brief Process and distribute input tokens across context parallel ranks
-    ///
-    /// Plans the distribution of input tokens by splitting and padding as needed.
-    /// Each rank receives a processed chunk according to the processing strategy.
-    /// Valid shuffle_indices entries must reference total_input_tokens and be
-    /// strictly increasing. Invalid entries represent padding. handleInputs relies
-    /// on this ordering to remap per-token and multimodal side inputs in one pass;
-    /// every processing strategy must preserve this contract.
-    virtual bool plan(const std::vector<int>& total_input_tokens,
-                      std::vector<int>&       input_tokens,
-                      std::vector<int>&       shuffle_indices,
-                      int                     cp_rank,
-                      int                     cp_size,
-                      int                     cp_chunk_size,
-                      int                     cp_padding_size) = 0;
+    /** Valid shuffle indices must be strictly increasing for per-token and multimodal remapping.
+     * Indices outside [0, input_length) represent padding. CPU callers provide a zero-filled
+     * destination. CUDA callers pass two null pointers and use the indices to gather on device. */
+    virtual bool plan(int               input_length,
+                      const int*        cpu_src,
+                      int*              cpu_dst,
+                      std::vector<int>& shuffle_indices,
+                      int               cp_rank,
+                      int               cp_size,
+                      int               cp_chunk_size,
+                      int               cp_padding_size) = 0;
 
     /// @brief Generate indices to restore original QKV order after parallel processing
     virtual torch::Tensor generateQKVRestoreIndices(const torch::Tensor& prefill_cp_chunk_lengths, int cp_size) = 0;

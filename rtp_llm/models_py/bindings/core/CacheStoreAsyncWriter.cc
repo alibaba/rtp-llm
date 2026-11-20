@@ -381,10 +381,9 @@ void CacheStoreAsyncWriter::waitAllDone() {
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
     if (!active_cache_store_ || !cache_config_) {
-        // Fail closed when publication is tracked: the executor waits on this
-        // cycle and reduces the result across TP before dispatching decode. A
-        // silent skip here would leave zero pending callbacks, so the wait would
-        // report success while the KV transfer never happened.
+        /** Tracked publication must report a missing store or configuration as an
+         * error. Silently skipping would register no callbacks, causing the later
+         * completion check to report success without transferring any KV. */
         bool tracked = false;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);

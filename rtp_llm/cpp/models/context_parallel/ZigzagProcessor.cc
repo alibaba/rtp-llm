@@ -11,15 +11,15 @@ using namespace std;
 
 namespace rtp_llm {
 
-bool ZigZagProcessor::plan(const std::vector<int>& total_input_tokens,
-                           std::vector<int>&       input_tokens,
-                           std::vector<int>&       shuffle_indices,
-                           int                     cp_rank,
-                           int                     cp_size,
-                           int                     cp_chunk_size,
-                           int                     cp_padding_size) {
-    const int input_token_size      = static_cast<int>(total_input_tokens.size());
-    const int padded_seq_token_size = input_token_size + cp_padding_size;
+bool ZigZagProcessor::plan(int               input_length,
+                           const int*        cpu_src,
+                           int*              cpu_dst,
+                           std::vector<int>& shuffle_indices,
+                           int               cp_rank,
+                           int               cp_size,
+                           int               cp_chunk_size,
+                           int               cp_padding_size) {
+    const int padded_seq_token_size = input_length + cp_padding_size;
     RTP_LLM_CHECK(cp_rank >= 0 && cp_rank < cp_size);
 
     const int pair_size = padded_seq_token_size / (cp_size * 2);
@@ -33,16 +33,20 @@ bool ZigZagProcessor::plan(const std::vector<int>& total_input_tokens,
     std::iota(shuffle_indices.begin(), shuffle_indices.begin() + pair_size, even_source);
     std::iota(shuffle_indices.begin() + pair_size, shuffle_indices.begin() + pair_size * 2, odd_source);
 
+    if (cpu_src == nullptr) {
+        return true;
+    }
+
     // Even pair: source indices [even_source, even_source + pair_size)
-    if (even_source < input_token_size) {
-        const int copy_size = std::min(pair_size, input_token_size - even_source);
-        std::memcpy(input_tokens.data(), total_input_tokens.data() + even_source, copy_size * sizeof(int));
+    if (even_source < input_length) {
+        const int copy_size = std::min(pair_size, input_length - even_source);
+        std::memcpy(cpu_dst, cpu_src + even_source, copy_size * sizeof(int));
     }
 
     // Odd pair: source indices [odd_source, odd_source + pair_size)
-    if (odd_source < input_token_size) {
-        const int copy_size = std::min(pair_size, input_token_size - odd_source);
-        std::memcpy(input_tokens.data() + pair_size, total_input_tokens.data() + odd_source, copy_size * sizeof(int));
+    if (odd_source < input_length) {
+        const int copy_size = std::min(pair_size, input_length - odd_source);
+        std::memcpy(cpu_dst + pair_size, cpu_src + odd_source, copy_size * sizeof(int));
     }
     return true;
 }

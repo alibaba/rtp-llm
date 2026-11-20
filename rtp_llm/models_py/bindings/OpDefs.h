@@ -4,6 +4,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/embed.h>
 #include <torch/extension.h>
+#include <c10/core/Event.h>
 #include <algorithm>
 #include <map>
 #include <memory>
@@ -247,6 +248,8 @@ struct PyCacheStoreInputs {
     torch::Tensor request_id;             // int64, [context]
     torch::Tensor request_pd_separation;  // bool, [context]
     torch::Tensor cache_keys;             // int64, [context, global key width]
+    /** Null for ready host metadata; otherwise records D2H completion separately from KV readiness. */
+    std::shared_ptr<torch::Event> metadata_ready_event;
 };
 
 struct PyPrefillCudaGaphCopyParams {
