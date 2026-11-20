@@ -3,6 +3,7 @@
 import os
 import sys
 import unittest
+import weakref
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -17,6 +18,90 @@ from rtp_llm.models_py.modules.dsv41.prefill_workspace import PrefillWorkspace
 
 
 class PrefillQMemoryTest(unittest.TestCase):
+    def test_prefill_qkv_uses_the_owners_cache_layout(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import attention as base_attention
+
+        qr = torch.ones(1, 3, 4, dtype=torch.bfloat16)
+        raw = torch.ones(1, 3, 512, dtype=torch.bfloat16)
+        common = SimpleNamespace(rd=64, freqs_cis=object(), cp_on=False)
+        for layout in (True, False, None):
+            owner = SimpleNamespace(
+                _try_fused_qr_kv=lambda *args: (qr, raw),
+                kv_norm=object(),
+                eps=1e-6,
+            )
+            if layout is not None:
+                owner._use_v4_kv_cache = layout
+            with self.subTest(layout=layout), patch.object(
+                base_attention, "swa_kv_norm_rope", return_value=raw
+            ) as normalize:
+                for _ in range(2):
+                    result = base_attention.AttentionFP8._prefill_compute_qkv(
+                        owner, torch.zeros(3, 4), common
+                    )
+                    self.assertEqual(result.kv_full.data_ptr(), raw.data_ptr())
+                    self.assertEqual(result.qr.data_ptr(), qr.data_ptr())
+                self.assertEqual(normalize.call_count, 2)
+                self.assertIs(normalize.call_args.kwargs["v4_layout"], layout)
+
+    def test_prefill_output_lifetime_preserves_architecture_and_legacy_gates(self):
+        from rtp_llm.models_py.modules.dsv41 import block
+
+        class Output:
+            is_cuda = True
+            device = torch.device("cuda", 0)
+
+        for layout, legacy_sm90 in (
+            (True, False),
+            (False, True),
+            (None, True),
+            (None, False),
+        ):
+            references = []
+
+            class Attention:
+                def __call__(self, *args, **kwargs):
+                    output = Output()
+                    references.append(weakref.ref(output))
+                    return output
+
+            attn = Attention()
+            if layout is not None:
+                attn._use_v4_kv_cache = layout
+            release = legacy_sm90 if layout is None else layout
+            x = torch.ones(1, 1, 4)
+
+            def ffn(value, *args, **kwargs):
+                self.assertEqual(references[0]() is None, release)
+                return value
+
+            owner = SimpleNamespace(
+                attn=attn,
+                ffn=ffn,
+                _prefill_fast_hc_impls=lambda: (
+                    None,
+                    None,
+                    None,
+                    lambda value, *args: value,
+                ),
+                _try_mega_mhc=lambda *args, **kwargs: (x, x, None, None),
+                _sync_after_first_cp_prefill_attention=lambda: None,
+            )
+            with self.subTest(layout=layout, legacy_sm90=legacy_sm90), patch.object(
+                block, "is_sm90", return_value=legacy_sm90
+            ) as probe:
+                result = block.Block._forward_prefill_fast_fp8(
+                    owner,
+                    x,
+                    None,
+                    None,
+                    None,
+                    None,
+                    _prepared_attn=(x, x, None, None),
+                )
+                self.assertIs(result, x)
+                self.assertEqual(probe.call_count, int(layout is None))
+
     def test_short_metadata_fails_before_any_projection_or_mla(self):
         owner = SimpleNamespace(
             dim=5,

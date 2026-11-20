@@ -4438,7 +4438,12 @@ class AttentionFP8(nn.Module):
             else:
                 kv_in = self._lin(self.wkv, x_3d)
             kv = swa_kv_norm_rope(
-                kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+                kv_in,
+                self.kv_norm,
+                common.freqs_cis,
+                rd,
+                eps=self.eps,
+                v4_layout=getattr(self, "_use_v4_kv_cache", None),
             ).squeeze(0)
 
         if common.cp_on:
