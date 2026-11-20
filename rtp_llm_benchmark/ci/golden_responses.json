@@ -1,0 +1,102 @@
+{
+  "test_cases": [
+      {
+        "case_tag": "Qwen3_32B_bf16_dense",
+        "server_params": "USE_AITER_PA=1 SEQ_SIZE_PER_BLOCK=16 DEVICE_RESERVE_MEMORY_BYTES=-2048000000 RESERVER_RUNTIME_MEM_MB=102400 AITER_ASM_DIR=$(bazelisk info output_base)/external/aiter/aiter_meta/hsa/gfx942/ MAX_SEQ_LEN=150000 CONCURRENCY_LIMIT=1024 WORLD_SIZE=1 DP_SIZE=1 TP_SIZE=1 WARM_UP=0 ACT_TYPE=bf16 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-32B CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-32B MODEL_TYPE=qwen_3 FT_SERVER_TEST=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Explain the benefits of renewable energy", 
+        "timeout": 300,
+        "expected_response": " sources and how they can help reduce carbon emissions. Renewable energy sources, such as solar, wind, hydroelectric, geothermal, and biomass energy, offer numerous benefits that contribute to reducing carbon emissions and mitigating climate change. Here's a detailed explanation"
+      },
+      {
+        "case_tag": "Qwen3_8B_FP8_ptpc_dense_llmcompressor",
+        "server_params": "USE_AITER_PA=1 SEQ_SIZE_PER_BLOCK=16 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-8B-FP8-Dynamic CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-8B-FP8-Dynamic MODEL_TYPE=qwen_3 FP8_KV_CACHE=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Explain the benefits of renewable energy",
+        "timeout": 300,
+        "expected_response": "sources like solar and wind power, and how they contribute to a sustainable future. Renewable energy sources such as solar and wind power offer numerous benefits that contribute significantly to a sustainable future. Here's a breakdown of their advantages and their role in sustainability:  ### "
+      },
+      {
+        "case_tag": "Qwen3-32B_FP8_ptpc_dense_Quark",
+        "server_params": "USE_AITER_PA=1 SEQ_SIZE_PER_BLOCK=16 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-32B-ptpc-quark CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-32B-ptpc-quark MODEL_TYPE=qwen_3 FP8_KV_CACHE=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Explain the benefits of renewable energy",
+        "timeout": 300,
+        "expected_response": " sources for the environment and the economy.\nRenewable energy sources offer significant benefits for both the environment and the economy. Here's a breakdown of these advantages:\n\n### **Environmental Benefits**\n1. **Reduction in Greenhouse Gas Emissions**:\n"
+      },
+      {
+        "case_tag": "Qwen3_30B_A3B_bf16_moe",
+        "server_params": "USE_AITER_PA=1 SEQ_SIZE_PER_BLOCK=16 DEVICE_RESERVE_MEMORY_BYTES=-2048000000 RESERVER_RUNTIME_MEM_MB=102400 AITER_ASM_DIR=$(bazelisk info output_base)/external/aiter/aiter_meta/hsa/gfx942/ MAX_SEQ_LEN=150000 CONCURRENCY_LIMIT=1024 WORLD_SIZE=1 DP_SIZE=1 TP_SIZE=1 WARM_UP=0 ACT_TYPE=bf16 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-30B-A3B CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-30B-A3B MODEL_TYPE=qwen_3_moe FT_SERVER_TEST=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Explain the benefits of renewable energy",
+        "timeout": 400,
+        "expected_response": " sources and how they can help reduce carbon emissions.\n\nRenewable energy sources, such as solar, wind, hydro, and geothermal power, offer numerous benefits that make them a crucial component of a sustainable energy future. One of the most significant advantages"
+      },
+      {
+        "case_tag": "Qwen3_30B_A3B_fp8_ptpc_moe_llmcompressor",
+        "server_params": "USE_AITER_PA=1 SEQ_SIZE_PER_BLOCK=16 MODEL_TYPE=qwen_3_moe FP8_KV_CACHE=1 ACT_TYPE=bf16 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-30B-A3B-Thinking-2507-FP8-Dynamic CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-30B-A3B-Thinking-2507-FP8-Dynamic",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Explain the benefits of renewable energy",
+        "timeout": 800,
+        "expected_response": " sources for the environment.\n\nRenewable energy sources, such as solar, wind, hydro, and geothermal power, offer numerous environmental benefits compared to fossil fuels. Here are the key advantages:\n\n### 1. **Reduction in Greenhouse Gas"
+      },
+      {
+        "case_tag": "Qwen3_30B_A3B_fp8_ptpc_moe_Quark",
+        "server_params": "USE_AITER_PA=1 SEQ_SIZE_PER_BLOCK=16 MODEL_TYPE=qwen_3_moe FP8_KV_CACHE=1 ACT_TYPE=bf16 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-30B-A3B-Thinking-2507-FP8-ptpc-quark CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-30B-A3B-Thinking-2507-FP8-ptpc-quark",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Explain the benefits of renewable energy",
+        "timeout": 800,
+        "expected_response": " sources for the environment.\n\nRenewable energy sources, such as solar, wind, hydro, and geothermal power, offer numerous environmental benefits compared to fossil fuels. Here are the key advantages:\n\n### 1. **Reduction in Greenhouse Gas"
+      },
+      {
+        "case_tag": "Bert_fp16_4l_sku_mean_909",
+        "server_params": "MAX_CONTEXT_BATCH_SIZE=128 TASK_TYPE=SEQ_CLASSIFICATION EMBEDDING_MODEL=1 FT_SERVER_TEST=1 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/tokenizer/ CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/4l_sku_mean_909/ MODEL_TYPE=bert  WORLD_SIZE=1 DP_SIZE=1 TP_SIZE=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": ["hello", "what is your name", "gg"],
+        "timeout": 200,
+        "expected_response": [[0.03717041015625, -0.75927734375], [0.041748046875, -0.8515625], [0.038970947265625, -0.79541015625]]
+      },
+      {
+        "case_tag": "Bert_int8",
+        "server_params": "MAX_CONTEXT_BATCH_SIZE=128 TASK_TYPE=SEQ_CLASSIFICATION EMBEDDING_MODEL=1 FT_SERVER_TEST=1 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/tokenizer/ CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/quant/ MODEL_TYPE=bert  WORLD_SIZE=1 DP_SIZE=1 TP_SIZE=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": ["hello", "what is your name", "gg"],
+        "timeout": 200,
+        "expected_response": [[-0.0823974609375, -0.48291015625], [-0.119384765625, -0.45849609375], [-0.0582275390625, -0.440185546875]]
+      },
+      {
+        "case_tag": "Bert_fp8_4l_sku_mean_909",
+        "server_params": "ACT_TYPE=bf16 USE_SWIZZLEA=1 QUANTIZATION=FP8_PER_CHANNEL_COMPRESSED MAX_CONTEXT_BATCH_SIZE=128 TASK_TYPE=SEQ_CLASSIFICATION EMBEDDING_MODEL=1 FT_SERVER_TEST=1 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/tokenizer/ CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/4l_sku_mean_909/ MODEL_TYPE=bert  WORLD_SIZE=1 DP_SIZE=1 TP_SIZE=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": ["hello", "what is your name", "gg"],
+        "timeout": 200,
+        "expected_response": [[0.035400390625, -0.78125], [0.0390625, -0.85546875], [0.036376953125, -0.80078125]]
+      },
+      {
+        "case_tag": "Qwen_VL_TP1",
+        "server_params": "ACT_TYPE=bf16 SEQ_SIZE_PER_BLOCK=16 AITER_ASM_DIR=$(bazelisk info output_base)/external/aiter/aiter_meta/hsa/gfx942/ WARM_UP=0 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen2.5-VL-3B-Instruct/ CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen2.5-VL-3B-Instruct/  MODEL_TYPE=qwen2_5_vl FT_SERVER_TEST=1",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Describe this image.",
+        "image": "/mnt/raid0/pretrained_model/rtp_ci/test_VL.jpg",
+        "timeout": 400,
+        "expected_response": "This image features a stuffed panda bear. The panda is predominantly white with black patches around its eyes, ears, and limbs. The stuffed animal appears to be sitting or lying down, with its arms and legs slightly spread out. The background includes some blurred"
+      },
+      {
+        "case_tag": "Qwen_VL_TP4",
+        "server_params": "RESERVER_RUNTIME_MEM_MB=10240 DEVICE_RESERVE_MEMORY_BYTES=-4096000000 MAX_SEQ_LEN=32768 USE_SWIZZLEA=1 AITER_ASM_DIR=$(bazelisk info output_base)/external/aiter/aiter_meta/hsa/gfx942/ REUSE_CACHE=0 USE_ASM_PA=1 USE_AITER_PA=1 CONCURRENCY_LIMIT=1024 WORLD_SIZE=4 TP_SIZE=4 DP_SIZE=1 WARM_UP=0 ACT_TYPE=bf16 FORCE_CPU_LOAD_WEIGHTS=1 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen2.5-VL-72B-Instruct/ CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen2.5-VL-72B-Instruct/ MODEL_TYPE=qwen2_5_vl FT_SERVER_TEST=1 ",
+        "generate_config": {"max_new_tokens": 50, "seed": 42, "topk": 1, "top_p": 0, "temperature": 0.0},
+        "prompt": "Describe this image.",
+        "image": "/mnt/raid0/pretrained_model/rtp_ci/test_VL.jpg",
+        "timeout": 1200,
+        "expected_response":"The image shows a close-up of a giant panda. The panda has the characteristic black and white fur pattern, with black patches around its eyes, ears, and limbs, and white fur on its face and body. The panda appears to be sitting and "
+      },
+      {
+        "case_tag": "Qwen3_8B_FP8_ptpc_dense_llmcompressor_reuseCache",
+        "server_params": "REUSE_CACHE=1 USE_AITER_PA=1 USE_ASM_PA=1 ACT_TYPE=bf16 SEQ_SIZE_PER_BLOCK=16 AITER_ASM_DIR=$(bazelisk info output_base)/external/aiter/aiter_meta/hsa/gfx942/ WARM_UP=0 TOKENIZER_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-8B-FP8-Dynamic/ CHECKPOINT_PATH=/mnt/raid0/pretrained_model/rtp_ci/Qwen3-8B-FP8-Dynamic/  MODEL_TYPE=qwen_3 FT_SERVER_TEST=1",
+        "generate_config": {"temperature": 0.0, "max_tokens": 10, "top_p": 0.1, "top_k":1},
+        "system_content": "# 角色\n你是一位意图识别分析专家，你熟知AIDC供应链知识以及术语，能够结合商家的问题和历史对话，理解商家实际意图。\n\n# 术语解释\nbp：商家备货周期\n圈品：根据条件对划分出货品范围\n备货逻辑：商家备货周期\n\n# 任务n结合**最近**历史对话以及商家的问题，理解商家实际意图，只能返回意图简称。\n\n# 意图识别\n## 我可接收处理的意图列表\n格式为“【意图简称】意图的具体描述”，列表如下：\n【备货逻辑解释】：商家希望平台解释备货单的备货量下单依据\n【修改备货逻辑】：当商家的问题中涉及修改**备货周期**或者**备货逻辑**，则返回“修改备货逻辑”\n【圈品】：商家圈定一定范围的货品来修改备货逻辑，支持的圈品规则示例：选出历史7天销量大于20的品、选出历史14天销量大于20的品、选出历史30天销量大于20的品\n【备货量重算】：商家希望**重新计算**备货量\n【改量】：若最近历史对话以及商家问题中提到**确认修改**备货量，则返回“改量”\n【确认接单】：最近历史对话以及商家问题中，商家提到**确认备货单**或**确认一起接单**，则返回“确认接单”\n【多意图】：商家输入的问题里同时包含上述多个意图。\n\n## 注意事项\n在意图识别的时候请忽略历史对话中的`output`、`<actions>`和`<suggestions>`这三个XML中的内容，一定不要用这三个XML标签内部的内容作为你意图识别的根据，非意图识别场景请忽略。\n\n# 输出限制\n1.只能输出意图识别里的意图简称，禁止输出其他无关信息。\n2.检查商家输入和你的输出是否含有违法、涉政、涉秘的内容，若有，识别为其他 。\n3.若商家同时想要改量和确认接单，则意图只识别为改量。",
+        "user_content": "商家的问题:\n帮我解释货品的备货量 仓编码：CSC207 备货单号：PON204253155433402 货品 ID 809687885667",
+        "timeout": 300
+      }
+    ]
+  }
