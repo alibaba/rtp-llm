@@ -15,9 +15,8 @@ kernel. Inside a decode CUDA-graph capture that path is illegal on two counts:
 This op fixes both while preserving the exact prefill MRoPE numerics that are
 accuracy-critical (turning MRoPE off drops the C-Eval gate hard):
 
-* the cos/sin table is precomputed ONCE on device at construction (same fp32
-  ``inv_freq``/``cos``/``sin`` math, so cos/sin are bitwise-equal to the
-  per-step recompute);
+* attention instances on the same device with matching RoPE parameters share
+  FP32 cos/sin tables.
 * forward only does a device gather ``cache[positions]`` -> no host sync;
 * the Triton kernel is JIT-warmed once at construction so capture binds an
   already-compiled kernel.
@@ -27,6 +26,7 @@ contract is identical across phases.
 """
 
 import logging
+from functools import lru_cache
 from typing import Any, Optional
 
 import torch
@@ -34,11 +34,23 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
 )
-from rtp_llm.ops import AttentionConfigs
-
 from rtp_llm.models_py.modules.factory.attention.ppu_impl.mrope_kernel import (
     apply_mrope_triton_inplace,
 )
+from rtp_llm.ops import AttentionConfigs
+
+
+@lru_cache(maxsize=4)
+def _get_mrope_tables(
+    rotary_dim: int, base: float, max_pos: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Keep the original FP32 CPU math for bitwise parity.
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+    )
+    positions = torch.arange(max_pos, dtype=torch.float32)
+    freqs = torch.einsum("i,j -> ij", positions, inv_freq)
+    return freqs.cos().to(device), freqs.sin().to(device)
 
 
 class PpuMRopeOp(MhaRotaryEmbeddingOp):
@@ -62,18 +74,11 @@ class PpuMRopeOp(MhaRotaryEmbeddingOp):
             rope_config.mrope_dim3,
         ]
 
-        # Precompute cos/sin ONCE in fp32 on device. inv_freq / cos / sin math is
-        # identical to the per-step recompute path, so the gathered cos/sin are
-        # bitwise-equal -> prefill MRoPE accuracy is preserved.
-        inv_freq = 1.0 / (
-            base
-            ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim)
+        # Eager attention instances are recreated every engine step.
+        device = torch.device("cuda", torch.cuda.current_device())
+        self._cos_cache, self._sin_cache = _get_mrope_tables(
+            rotary_dim, base, max_pos, device
         )
-        positions = torch.arange(max_pos, dtype=torch.float32)
-        freqs = torch.einsum("i,j -> ij", positions, inv_freq)
-        device = torch.device("cuda")
-        self._cos_cache = freqs.cos().to(device)
-        self._sin_cache = freqs.sin().to(device)
 
         self._warm_kernel(attn_config, device)
 
@@ -106,6 +111,10 @@ class PpuMRopeOp(MhaRotaryEmbeddingOp):
                 "PpuMRopeOp supports text positions with one position per token"
             )
         # Device gather only -> no host sync, capture-safe.
+        # Protect gathers on other streams if a table is evicted.
+        stream = torch.cuda.current_stream(query.device)
+        self._cos_cache.record_stream(stream)
+        self._sin_cache.record_stream(stream)
         cos = self._cos_cache[positions].to(query.dtype)
         sin = self._sin_cache[positions].to(query.dtype)
         cos = torch.stack((cos, cos, cos), dim=0)
