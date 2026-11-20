@@ -141,6 +141,32 @@ TEST(BlockTreeTaskPoolTest, ExpiredAbsoluteDeadlineRunsTimeoutInsteadOfTask) {
     EXPECT_TRUE(timeout_ran.load());
 }
 
+TEST(BlockTreeTaskPoolTest, ExpiredTaskCaptureCanSubmitWhenReleased) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+    std::promise<void> unblock;
+    auto gate = unblock.get_future().share();
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [gate] { gate.wait(); }));
+    std::atomic<bool> timeout_ran{false};
+    std::atomic<bool> followup_ran{false};
+    auto lease = std::shared_ptr<int>(new int(0), [&](int* value) {
+        delete value;
+        EXPECT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&] { followup_ran.store(true); }));
+    });
+    EXPECT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [lease] { ADD_FAILURE() << "expired task ran"; },
+                            BlockTreeTaskPool::Clock::now() + std::chrono::hours(1),
+                            [&] { timeout_ran.store(true); }));
+    lease.reset();
+    {
+        std::lock_guard<std::mutex> lock(pool.lifecycle_mutex_);
+        pool.load_queue_.back().deadline = BlockTreeTaskPool::Clock::now() - std::chrono::seconds(1);
+    }
+    unblock.set_value();
+    pool.waitForIdle();
+    EXPECT_TRUE(timeout_ran.load());
+    EXPECT_TRUE(followup_ran.load());
+}
+
 TEST(BlockTreeTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
@@ -180,7 +206,14 @@ TEST(BlockTreeTaskPoolTest, ShutdownClearsPopulatedQueuesAndReclaimsPending) {
     std::atomic<bool> load_ran{false};
     std::atomic<bool> background_ran{false};
     std::atomic<bool> completion_ran{false};
-    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&load_ran] { load_ran.store(true); }));
+    std::atomic<bool> capture_released{false};
+    auto lease = std::shared_ptr<int>(new int(0), [&](int* value) {
+        delete value;
+        EXPECT_FALSE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
+        capture_released.store(true);
+    });
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&load_ran, lease] { load_ran.store(true); }));
+    lease.reset();
     ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&background_ran] { background_ran.store(true); }));
     ASSERT_TRUE(pool.submitCompletion([&completion_ran] { completion_ran.store(true); }));
     EXPECT_EQ(pool.pending_tasks_.load(), 4);
@@ -189,7 +222,7 @@ TEST(BlockTreeTaskPoolTest, ShutdownClearsPopulatedQueuesAndReclaimsPending) {
     EXPECT_EQ(queue_sizes.background, 1);
     EXPECT_EQ(queue_sizes.completion, 1);
 
-    // shutdown() clears the queues under the lock, then joins the worker, so run
+    // shutdown() removes the queues under the lock, then joins the worker, so run
     // it on another thread and release the worker only after the clear is
     // observable via shutdown_ (set inside the same critical section).
     std::thread shutdown_thread([&pool] { pool.shutdown(); });
@@ -206,6 +239,7 @@ TEST(BlockTreeTaskPoolTest, ShutdownClearsPopulatedQueuesAndReclaimsPending) {
     EXPECT_FALSE(load_ran.load());
     EXPECT_FALSE(background_ran.load());
     EXPECT_FALSE(completion_ran.load());
+    EXPECT_TRUE(capture_released.load());
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 

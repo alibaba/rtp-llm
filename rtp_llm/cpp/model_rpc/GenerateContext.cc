@@ -30,52 +30,64 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
     }
     const auto             time_info = stream->getTimeInfo();
     telemetry::PhaseTiming phase_timing;
-    phase_timing.begin_time_us           = time_info.begin_time_us;
-    phase_timing.running_started         = time_info.running_started;
-    phase_timing.running_started_time_us = time_info.running_started_time_us;
-    phase_timing.first_token_committed   = time_info.first_token_committed;
-    phase_timing.first_token_time_us     = time_info.first_token_time_us;
-    phase_timing.generation_done         = time_info.generation_done;
-    phase_timing.generation_done_time_us = time_info.generation_done_time_us;
-    phase_timing.synthesis_end_time_us   = currentTimeUs();
-    phase_timing.request_id              = request_id;
-    const bool request_ok                = error_status.ok() && !exception_unwinding;
+    phase_timing.begin_time_us               = time_info.begin_time_us;
+    phase_timing.running_started             = time_info.running_started;
+    phase_timing.running_started_time_us     = time_info.running_started_time_us;
+    phase_timing.first_token_committed       = time_info.first_token_committed;
+    phase_timing.first_token_time_us         = time_info.first_token_time_us;
+    phase_timing.generation_done             = time_info.generation_done;
+    phase_timing.generation_done_time_us     = time_info.generation_done_time_us;
+    phase_timing.synthesis_end_time_us       = currentTimeUs();
+    phase_timing.request_id                  = request_id;
+    phase_timing.scheduler_enqueue_time_us   = time_info.scheduler_enqueue_time_us;
+    phase_timing.can_run_time_us             = time_info.can_run_time_us;
+    phase_timing.kv_ready_time_us            = time_info.kv_ready_time_us;
+    phase_timing.prefill_previous_release_us = time_info.prefill_previous_release_us;
+    phase_timing.prefill_dispatch_time_us    = time_info.prefill_dispatch_time_us;
+    phase_timing.prefill_forward_time_us     = time_info.prefill_forward_time_us;
+    phase_timing.cache_exposed_wait_us       = time_info.cache_exposed_wait_us;
+
+    const bool request_ok = error_status.ok() && !exception_unwinding;
     if (request_ok && time_info.generation_done) {
         // Beam rows are an internal search width; Fusion exposes one primary
         // sequence (the remaining candidates live in beam_responses). Only
         // ordinary multi-return Fusion requests aggregate all active rows. PD
         // retains its existing per-sequence, per-hop usage contract.
-        const auto returned_sequence_count =
-            role != telemetry::PhaseRole::Fusion ? 1 :
-            stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
+        const auto returned_sequence_count = role != telemetry::PhaseRole::Fusion ? 1 :
+                                             stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) :
+                                                                     stream->currentBatchSize();
         telemetry::setUsageTokenAttributes(*trace_span_guard,
                                            (int64_t)stream->inputLength(),
                                            (int64_t)(stream->outputTokenLen() * returned_sequence_count));
     }
     const auto local_error = stream->firstError();
     const auto first_error = FirstError::earlier(local_error, dependency_failure);
-    const bool dependency_selected = dependency_failure.error.hasError()
-                                     && first_error.order == dependency_failure.order;
-    const bool priority_preempted = first_error.error.code() == ErrorCode::PRIORITY_PREEMPTED
-                                    || error_info.code() == ErrorCode::PRIORITY_PREEMPTED;
-    phase_timing.error_type = request_ok ? nullptr :
-                               priority_preempted ? "PRIORITY_PREEMPTED" :
-                               dependency_selected ? "DependencyFailure" :
-                               !error_status.ok() ? telemetry::grpcStatusCodeName(error_status.error_code()) :
+    const bool dependency_selected =
+        dependency_failure.error.hasError() && first_error.order == dependency_failure.order;
+    const bool priority_preempted =
+        first_error.error.code() == ErrorCode::PRIORITY_PREEMPTED || error_info.code() == ErrorCode::PRIORITY_PREEMPTED;
+    phase_timing.error_type = request_ok          ? nullptr :
+                              priority_preempted  ? "PRIORITY_PREEMPTED" :
+                              dependency_selected ? "DependencyFailure" :
+                              !error_status.ok()  ? telemetry::grpcStatusCodeName(error_status.error_code()) :
                                                     "Exception";
     if (role == telemetry::PhaseRole::Decode && time_info.loading_cache_start_time_us > 0) {
         const bool load_finished = time_info.loading_cache_done_time_us > 0;
         if (load_finished || !request_ok) {
             const bool load_ok = load_finished && time_info.loading_cache_succeeded;
-            const auto error = first_error.error.hasError() ? first_error.error :
-                               error_info.hasError() ? error_info : errorInfoFromGrpcStatus(error_status);
-            const auto reason = error.hasError() ? ErrorCodeToString(error.code()) : std::string{};
-            telemetry::synthesizeKvLoadSpan(
-                trace_span_guard->sharedSpan(), time_info.loading_cache_start_time_us,
-                load_finished ? time_info.loading_cache_done_time_us : phase_timing.synthesis_end_time_us,
-                request_id, load_ok, load_ok ? nullptr : phase_timing.error_type,
-                !load_ok && error.hasError() ? static_cast<int64_t>(error.code()) : -1,
-                !load_ok && !reason.empty() ? reason.c_str() : nullptr);
+            const auto error   = first_error.error.hasError() ? first_error.error :
+                                 error_info.hasError()        ? error_info :
+                                                                errorInfoFromGrpcStatus(error_status);
+            const auto reason  = error.hasError() ? ErrorCodeToString(error.code()) : std::string{};
+            telemetry::synthesizeKvLoadSpan(trace_span_guard->sharedSpan(),
+                                            time_info.loading_cache_start_time_us,
+                                            load_finished ? time_info.loading_cache_done_time_us :
+                                                            phase_timing.synthesis_end_time_us,
+                                            request_id,
+                                            load_ok,
+                                            load_ok ? nullptr : phase_timing.error_type,
+                                            !load_ok && error.hasError() ? static_cast<int64_t>(error.code()) : -1,
+                                            !load_ok && !reason.empty() ? reason.c_str() : nullptr);
         }
     }
     telemetry::synthesizePhaseSpans(trace_span_guard->sharedSpan(), phase_timing, role, request_ok);
@@ -84,7 +96,7 @@ void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exce
 void GenerateContext::recordRpcFailure(const ErrorInfo& error) {
     if (!error_info.hasError()) {
         const auto first = stream_ ? stream_->firstError() : FirstError::Snapshot{};
-        error_info = first.error.hasError() ? first.error : error;
+        error_info       = first.error.hasError() ? first.error : error;
     }
     error_status = grpcStatusFromErrorInfo(error_info);
 }
@@ -210,7 +222,7 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     collector.retry_times        = retry_times;
     collector.retry_cost_time_ms = retry_cost_time_ms;
     if (stream_ && stream_->resourceContext().role_type == RoleType::DECODE && stream_->queryPdSep()) {
-        const auto timing = stream_->getTimeInfo();
+        const auto timing                 = stream_->getTimeInfo();
         collector.allocate_resource_rt_us = timing.initial_kv_allocation_rt_us;
         if (timing.loading_cache_start_time_us > 0
             && timing.loading_cache_done_time_us >= timing.loading_cache_start_time_us) {

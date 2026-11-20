@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
@@ -9,20 +11,36 @@
 
 namespace rtp_llm {
 
+namespace block_tree_cache_detail {
+// Fault seam for a single publication-copy failure; null in production.
+inline std::atomic<void (*)()> before_transfer_publication_copy_for_test{nullptr};
+// A bounded test barrier after publication ownership is claimed; null in production.
+inline std::atomic<void (*)() noexcept> after_transfer_completion_claim_for_test{nullptr};
+// Registration can fail after RPC submission; its result must remain UNKNOWN.
+inline std::atomic<void (*)()> before_transfer_broadcast_subscription_for_test{nullptr};
+}  // namespace block_tree_cache_detail
+
 class BroadcastManager;
+class BlockTreeCacheMetricsReporter;
 
 class MultiRankBlockTransferEngine {
 public:
-    MultiRankBlockTransferEngine(std::vector<GroupSetPtr>          group_sets,
-                                 std::shared_ptr<BroadcastManager> broadcast_manager);
+    MultiRankBlockTransferEngine(std::vector<GroupSetPtr>                       group_sets,
+                                 std::shared_ptr<BroadcastManager>              broadcast_manager,
+                                 std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr);
 
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) const;
+    // One copy direction per request; the receiving PerRank engines own batching.
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task, const char* completion_operation = nullptr) const;
+
+    const std::vector<std::string>& participantAddresses() const;
+    const std::vector<GroupSetPtr>& groupSets() const noexcept {
+        return group_sets_;
+    }
 
 private:
-    friend class BlockTransferDispatcher;
-
-    std::vector<GroupSetPtr>          group_sets_;
-    std::shared_ptr<BroadcastManager> broadcast_manager_;
+    std::vector<GroupSetPtr>                       group_sets_;
+    std::shared_ptr<BroadcastManager>              broadcast_manager_;
+    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
 };
 
 using MultiRankBlockTransferEnginePtr = std::shared_ptr<MultiRankBlockTransferEngine>;

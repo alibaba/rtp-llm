@@ -37,6 +37,7 @@ cc_test(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/engine_base:profiler",
+        "@havenask//aios/autil:json",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,

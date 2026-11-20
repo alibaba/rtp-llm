@@ -136,14 +136,17 @@ class PortManager:
                 # fine, skip this one
                 continue
 
-    def get_consecutive_ports(self, num_ports: int = 1):
+    def get_consecutive_ports(self, num_ports: int = 1, extra_offsets=()):
         """get real consecutive ports by checking the file locks"""
         # always clean the stale lock files before getting the real available ports
         # try best to reuse all the available ports
         self.cleanup_stale_locks()
 
         range_start, range_end = self.port_range
-        last_base_port = range_end - num_ports + 1
+        offsets = list(dict.fromkeys([*range(num_ports), *extra_offsets]))
+        if num_ports < 1 or any(offset < 0 for offset in offsets):
+            raise ValueError("Port count must be positive and offsets nonnegative")
+        last_base_port = range_end - max(offsets)
         candidate_base_ports = range(range_start, last_base_port)
         if range_start > DEFAULT_PORT_RANGE_START:
             candidate_base_ports = list(candidate_base_ports) + list(
@@ -153,7 +156,7 @@ class PortManager:
         for base_port in candidate_base_ports:
             locks = []
             try:
-                ports = list(range(base_port, base_port + num_ports))
+                ports = [base_port + offset for offset in offsets]
 
                 # try to validate all the pre-claimed ports
                 for port in ports:
@@ -167,7 +170,7 @@ class PortManager:
                         raise PortInUseError(f"Port {port} is in use")
 
                 logging.info(f"alloc ports: {base_port}-{base_port + num_ports}")
-                return ports, locks
+                return ports[:num_ports], locks
 
             except PortInUseError:
                 # release all the pre-claimed locks

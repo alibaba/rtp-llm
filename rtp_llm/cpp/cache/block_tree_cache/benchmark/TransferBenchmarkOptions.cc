@@ -34,10 +34,12 @@ TransferOptions TransferOptions::parse(int& argc, char**& argv) {
             opts.descriptors_per_business = parseUnsigned(key, next);
         else if (key == "transfer-worker-count")
             opts.transfer_worker_count = parseUnsigned(key, next);
+        else if (key == "btc-crc-slot-count")
+            opts.btc_crc_slot_count = parseUnsigned(key, next);
+        else if (key == "transfer-queue-max-size")
+            opts.transfer_queue_max_size = parseUnsigned(key, next);
         else if (key == "transfer-descriptor-batch-size")
             opts.transfer_descriptor_batch_size = parseUnsigned(key, next);
-        else if (key == "copy-strategy")
-            opts.copy_strategy = next();
         else if (key == "min-measured-seconds")
             opts.min_measured_seconds = parseUnsigned(key, next);
         else if (key == "disk-path")
@@ -62,15 +64,15 @@ void TransferOptions::printHelp() {
         << "Transfer benchmark options:\n"
         << "  --group-set=NAME             full_context | swa (default: full_context)\n"
         << "  --transfer-directions=DIRS   comma list, e.g. d2h,h2d mixes both in one case\n"
-        << "                               (d2h|h2d|d2disk|disk2d|h2disk|disk2h, default: d2h)\n"
+        << "                               (d2h|h2d|h2disk|disk2d, default: d2h)\n"
         << "  --transfer-operation-count=N Number of transfer operations (default: 1024)\n"
         << "  --transfer-concurrency=N     Concurrent endpoint lanes per wave (default: 1)\n"
-        << "  --business-concurrency=N     Concurrent independent business requests (0 = legacy wave mode)\n"
+        << "  --business-concurrency=N     Concurrent independent business requests (0 = wave mode)\n"
         << "  --descriptors-per-business=N Same-direction descriptors owned by each business request\n"
-        << "  --transfer-worker-count=N    Lower transfer workers (default: 1)\n"
+        << "  --transfer-worker-count=N    WorkLoop owners per direction (default: 1)\n"
         << "  --transfer-descriptor-batch-size=N  Descriptors per engine submit (0 = concurrency)\n"
-        << "  --copy-strategy=STRATEGY     auto | batch (1D) | cuda-3d-batch | staged-sm (default: auto)\n"
-        << "                             cuda-3d-batch requires non-PPU CUDA 13 build/runtime, driver >= 13\n"
+        << "  --btc-crc-slot-count=N       Slots/device in each async CRC service (default: 8)\n"
+        << "  --transfer-queue-max-size=N  WorkLoop resident batch budget (default: 10000)\n"
         << "  --min-measured-seconds=N     Measured phase duration floor; pilot run scales op count (default: 30)\n"
         << "  --disk-path=PATH             Disk directory for disk transfers\n"
         << "  --disk-io-mode=MODE          direct | buffered (default: direct)\n"

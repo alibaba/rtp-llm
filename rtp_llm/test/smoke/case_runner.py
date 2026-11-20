@@ -160,7 +160,7 @@ class CaseRunner(object):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            env_dict["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            env_dict.update(self.remote_kvcm_server.client_env())
         task_states = TaskStates()
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
         server_manager = self.start_server(
@@ -298,6 +298,9 @@ class CaseRunner(object):
             raise FileNotFoundError(
                 "kv_cache_manager_bin is absent from Bazel runfiles"
             )
+        if str_to_bool(self.kvcm_config.get("PACE_REQUIRED", "false")):
+            # PACE startup configuration is stored beside the paired server binary.
+            server_path = os.path.realpath(server_path)
         server_path = os.path.dirname(os.path.dirname(server_path))
         kvcm_src_logs_path = os.path.join(os.environ["TEST_SRCDIR"], "rtp_llm/logs")
         bazel_outputs_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
@@ -305,7 +308,14 @@ class CaseRunner(object):
         remote_kvcm_server = RemoteKVCMServer(
             server_path, self.kvcm_config, kvcm_src_logs_path, kvcm_dst_logs_path
         )
-        if remote_kvcm_server.start_server():
+        started = False
+        try:
+            started = remote_kvcm_server.start_server()
+        finally:
+            if not started:
+                remote_kvcm_server.stop_server()
+                remote_kvcm_server.copy_logs()
+        if started:
             return remote_kvcm_server
         logging.error("start remote_kvcm_server")
         return None

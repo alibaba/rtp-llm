@@ -164,7 +164,6 @@ class ModelConfig(CppModelConfig):
         "moe_w1_layout",
         "moe_prefill_max_tokens_per_rank",
         "n_shared_experts",
-        "dsv4_fixed_pool_use_memory",
         "generate_env_config",
         "render_config",
         "phy2log_path",
@@ -788,7 +787,6 @@ class ModelConfig(CppModelConfig):
         # Canonical W.moe_w1 producers stack up_proj before gate_proj.
         self.moe_w1_layout: str = "up_gate"
         self.n_shared_experts: int = 0
-        self.dsv4_fixed_pool_use_memory: Optional[bool] = None
         # None uses max_seq_len until ModelFactory finalizes the scheduler bound.
         self.moe_prefill_max_tokens_per_rank: Optional[int] = None
 
@@ -1207,9 +1205,6 @@ def build_model_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
-    model_config.dsv4_fixed_pool_use_memory = bool(
-        kv_cache_config.dsv4_fixed_pool_use_memory
-    )
     model_config.attn_config.kernel_tokens_per_block = (
         kv_cache_config.kernel_seq_size_per_block
         if kv_cache_config.kernel_seq_size_per_block > 0

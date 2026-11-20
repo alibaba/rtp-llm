@@ -1,0 +1,303 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
+
+#include <algorithm>
+#include <chrono>
+#include <limits>
+#include <stdexcept>
+#include <thread>
+#include <utility>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
+#include "rtp_llm/cpp/utils/Logger.h"
+
+namespace rtp_llm {
+namespace {
+size_t checkedMultiply(size_t a, size_t b) {
+    if (a && b > std::numeric_limits<size_t>::max() / a)
+        throw std::overflow_error("CRC service capacity overflow");
+    return a * b;
+}
+
+int64_t steadyNowUs() noexcept {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+}  // namespace
+
+int CrcCopyExecutor::deviceFor(const GroupSet& group) {
+    return group.devicePools().front()->deviceIndex();
+}
+
+CrcCopyExecutor::CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
+                                 CrcCopyDirection                direction,
+                                 size_t                          max_batch,
+                                 size_t                          slots_per_device,
+                                 int64_t                         world_rank,
+                                 std::shared_ptr<CrcDumpWriter>  dump_writer):
+    direction_(direction) {
+    if (!CrcCopyWorkspace::available() || !max_batch || !slots_per_device)
+        throw std::invalid_argument("CRC requires CUDA 13 and positive workspace limits");
+    if (!dump_writer)
+        dump_writer = CrcDumpWriter::forRank(world_rank);
+    struct Geometry {
+        size_t payload{0}, tiles{0};
+    };
+    std::map<int, Geometry> geometry;
+    for (const auto& group : groups) {
+        if (!group)
+            throw std::invalid_argument("null CRC GroupSet");
+        groups_.emplace(group.get(), group);
+        if (!group->crcEnabled())
+            continue;
+        const auto& device_pools = group->devicePools();
+        if (device_pools.empty())
+            throw std::invalid_argument("CRC requires GPU-resident device pools");
+        const int device = deviceFor(*group);
+        if (device < 0 || std::any_of(device_pools.begin(), device_pools.end(), [device](const auto& pool) {
+                return pool->deviceIndex() != device;
+            }))
+            throw std::invalid_argument("CRC GroupSet requires backings on a single GPU device");
+        if ((group->hostPool() && group->hostPool()->strideBytes() < group->storageBytes())
+            || (group->diskPool() && group->diskPool()->strideBytes() < group->storageBytes()))
+            throw std::invalid_argument("CRC pool stride cannot hold payload and footer");
+        auto& shape   = geometry[device];
+        shape.payload = std::max(shape.payload, group->payloadBytes());
+        const std::vector<BlockIdxType> blocks(device_pools.size(), 0);
+        shape.tiles = std::max(shape.tiles, getDeviceHostCopyTiles(*group, blocks).size());
+    }
+    for (const auto& [device, shape] : geometry) {
+        const auto tiles              = checkedMultiply(shape.tiles, max_batch);
+        auto&      slots              = slots_[device];
+        size_t     total_device_bytes = 0, total_host_bytes = 0;
+        for (size_t i = 0; i < slots_per_device; ++i) {
+            Slot slot;
+            slot.device = device;
+            slot.copy   = std::make_unique<CrcCopyWorkspace>(device, max_batch, shape.payload, tiles, dump_writer);
+            if (i == 0) {
+                total_device_bytes = checkedMultiply(slots_per_device, slot.copy->deviceMemoryBytes());
+                total_host_bytes   = checkedMultiply(slots_per_device, slot.copy->hostMemoryBytes());
+                slots.reserve(slots_per_device);
+            }
+            slots.push_back(std::move(slot));
+        }
+        constexpr double mib = 1024.0 * 1024.0;
+        RTP_LLM_LOG_INFO("BlockTree CRC32C: device=%d batch=%zu payload=%zu slots_per_device_direction=%zu "
+                         "device_total=%.2f MiB host_total=%.2f MiB",
+                         device,
+                         max_batch,
+                         shape.payload,
+                         slots_per_device,
+                         total_device_bytes / mib,
+                         total_host_bytes / mib);
+    }
+}
+
+CrcCopyExecutor::~CrcCopyExecutor() {
+    stopAndWaitForIo();
+}
+
+TransferStatus CrcCopyExecutor::statusFor(CrcCopyState state) {
+    switch (state) {
+        case CrcCopyState::OK:
+            return TransferStatus::OK;
+        case CrcCopyState::INVALID_ARGS:
+            return TransferStatus::INVALID_ARGS;
+        case CrcCopyState::CRC_MISMATCH:
+            return TransferStatus::CRC_MISMATCH;
+        default:
+            return TransferStatus::DEVICE_IO_ERROR;
+    }
+}
+
+TransferResult CrcCopyExecutor::mapResult(CrcCopyState                       result,
+                                          CrcCopyDirection                   direction,
+                                          DescriptorView                     descriptors,
+                                          const std::vector<CrcCopyFailure>& failures) {
+    const auto     status = statusFor(result);
+    TransferResult transfer_result;
+    transfer_result.status.setErrorCode(status == TransferStatus::OK           ? ErrorCode::NONE_ERROR :
+                                        status == TransferStatus::INVALID_ARGS ? ErrorCode::INVALID_PARAMS :
+                                                                                 ErrorCode::EXECUTION_EXCEPTION);
+    transfer_result.copy_error = cacheCopyErrorFor(status);
+    try {
+        transfer_result.status = transferStatusToErrorInfo(status);
+        transfer_result.expandBlockErrors(descriptors.size());
+        if (result == CrcCopyState::CRC_MISMATCH) {
+            // A failed load may have scattered every item. Keep the whole batch
+            // uncommitted so callers discard its targets, including healthy items.
+            std::fill(transfer_result.block_errors.begin(),
+                      transfer_result.block_errors.end(),
+                      direction == CrcCopyDirection::EVICT ? CacheCopyError::NONE : CacheCopyError::NOT_EXECUTED);
+        }
+        for (const auto& failure : failures) {
+            const auto& descriptor                           = descriptors[failure.item_index];
+            const auto  failure_status                       = statusFor(failure.status);
+            transfer_result.block_errors[failure.item_index] = cacheCopyErrorFor(failure_status);
+            const auto failure_error                         = transferStatusToErrorInfo(failure_status);
+            transfer_result.merge(
+                {ErrorInfo(failure_error.code(),
+                           failure_error.ToString() + ", descriptor_index=" + std::to_string(failure.item_index) + ", "
+                               + descriptor.debugString()),
+                 cacheCopyErrorFor(failure_status)});
+        }
+    } catch (...) {
+        // Terminal CUDA evidence survives allocation/formatting failures. A
+        // uniform result is valid when per-block diagnostics cannot be built.
+        transfer_result.block_errors.clear();
+    }
+    // These states either rejected before CUDA submission or returned after
+    // the workspace completed diagnostics and drained all submitted accesses.
+    // Set the proof after merging diagnostic errors, whose default is unknown.
+    transfer_result.buffer_safe = result == CrcCopyState::OK || result == CrcCopyState::INVALID_ARGS
+                                  || result == CrcCopyState::CRC_MISMATCH || result == CrcCopyState::DEVICE_ERROR;
+    return transfer_result;
+}
+
+CrcCopyItem
+CrcCopyExecutor::makeItem(const HostBufferView& host, const TransferDescriptor& descriptor, const GroupSetPtr& group) {
+    CrcCopyItem item{host.base, group->payloadBytes(), host.capacity_bytes, {}};
+    for (const auto& tile : getDeviceHostCopyTiles(*group, descriptor.blocksAt(Tier::DEVICE)))
+        item.tiles.push_back({tile.buffer.addr, tile.host_offset, tile.buffer.size_bytes});
+    // The caller retains descriptor storage until finish() clears this capture.
+    item.dump_metadata = [descriptor_ptr = &descriptor, group_owner = group] {
+        return CrcDumpWriter::dumpMetadata(*descriptor_ptr, *group_owner);
+    };
+    return item;
+}
+
+bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>& hosts,
+                                DescriptorView                     descriptors,
+                                const GroupSetPtr&                 group,
+                                DoneCallback                       done,
+                                Timing*                            timing) {
+    if (!done)
+        throw std::invalid_argument("CRC stage callback is required");
+    const auto reject = [&] {
+        TransferResult result(TransferStatus::INVALID_ARGS);
+        result.buffer_safe = true;  // This request has not submitted any CUDA access.
+        done(std::move(result));
+        return true;
+    };
+    if (!accepting_ || !group || hosts.empty() || hosts.size() != descriptors.size()) {
+        return reject();
+    }
+    const bool evict = direction_ == CrcCopyDirection::EVICT;
+    if (!group->crcEnabled() || groups_.find(group.get()) == groups_.end())
+        return reject();
+    for (size_t i = 0; i < descriptors.size(); ++i) {
+        const auto& blocks = descriptors[i].blocksAt(Tier::DEVICE);
+        if ((descriptors[i].source_tier == Tier::DEVICE) != evict
+            || !isValidHostBufferView(hosts[i], group->payloadBytes(), group->storageBytes())
+            || blocks.size() != group->devicePools().size())
+            return reject();
+        for (size_t member = 0; member < blocks.size(); ++member)
+            if (!group->devicePools()[member]->validBlock(blocks[member]))
+                return reject();
+    }
+    Slot* slot = nullptr;
+    for (auto& candidate : slots_.at(deviceFor(*group)))
+        if (!candidate.operation) {
+            slot = &candidate;
+            break;
+        }
+    if (!slot)
+        return false;
+
+    // Every allocation and capture precedes the first possible CUDA enqueue.
+    auto& operation  = slot->operation.emplace(descriptors);
+    operation.timing = timing;
+    if (timing)
+        timing->slot_acquired_us = steadyNowUs();
+    try {
+        operation.group       = group;
+        std::vector<CrcCopyItem> items;
+        items.reserve(hosts.size());
+        for (size_t i = 0; i < descriptors.size(); ++i) {
+            const auto& descriptor = descriptors[i];
+            items.push_back(makeItem(hosts[i], descriptor, group));
+        }
+        TransferResult invalid(TransferStatus::INVALID_ARGS);
+        TransferResult failed(TransferStatus::DEVICE_IO_ERROR);
+        invalid.buffer_safe = failed.buffer_safe = true;
+        operation.done                           = std::move(done);
+        // The primitive returns only after draining any partial submission error.
+        const auto state = slot->copy->trySubmit(items, direction_);
+        if (state == CrcCopyState::PENDING) {
+            if (timing)
+                timing->submit_return_us = steadyNowUs();
+            return true;
+        }
+        auto callback = std::move(operation.done);
+        slot->operation.reset();
+        if (state != CrcCopyState::BUSY)
+            callback(state == CrcCopyState::INVALID_ARGS ? std::move(invalid) : std::move(failed));
+        return state != CrcCopyState::BUSY;
+    } catch (...) {
+        slot->operation.reset();
+        throw;
+    }
+}
+
+size_t CrcCopyExecutor::availableSlots(int device) const {
+    const auto slots = slots_.find(device);
+    if (slots == slots_.end())
+        return 0;
+    return std::count_if(slots->second.begin(), slots->second.end(), [](const Slot& slot) { return !slot.operation; });
+}
+
+void CrcCopyExecutor::advance(Slot& slot, bool deliver) {
+    if (!slot.operation)
+        return;
+    auto& operation = *slot.operation;
+    if (!operation.result) {
+        const auto state = slot.copy->poll();
+        if (state == CrcCopyState::PENDING)
+            return;
+        // First outer completion confirmation, including terminal error paths.
+        if (operation.timing && !operation.timing->completed_us)
+            operation.timing->completed_us = steadyNowUs();
+        // Construct the result before retiring the terminal workspace. Mapping
+        // preserves terminal safety even if diagnostic allocation fails.
+        operation.result = mapResult(state, direction_, operation.descriptors, slot.copy->failures());
+        slot.copy->finish();
+    }
+    if (!deliver)
+        return;
+    auto callback = std::move(operation.done);
+    auto result   = std::move(*operation.result);
+    slot.operation.reset();
+    callback(std::move(result));
+}
+
+bool CrcCopyExecutor::poll() {
+    bool pending = false;
+    for (auto& [device, slots] : slots_)
+        for (auto& slot : slots) {
+            advance(slot, true);
+            pending = pending || slot.operation.has_value();
+        }
+    return pending;
+}
+
+void CrcCopyExecutor::stopAdmission() {
+    accepting_ = false;
+}
+
+void CrcCopyExecutor::stopAndWaitForIo() {
+    stopAdmission();
+    for (;;) {
+        for (auto& [device, slots] : slots_)
+            for (auto& slot : slots)
+                advance(slot, false);
+        bool pending = false;
+        for (const auto& [device, slots] : slots_)
+            for (const auto& slot : slots)
+                pending = pending || (slot.operation && !slot.operation->result);
+        if (!pending)
+            return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+}  // namespace rtp_llm

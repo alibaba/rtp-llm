@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
 
+#include <utility>
+
 using namespace autil::legacy;
 
 namespace rtp_llm {
@@ -162,6 +164,13 @@ void SdkWrapperConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     }
 }
 
+void SdkWrapperConfig::parseBackendConfigs(const std::string& config) {
+    // Use the same polymorphic parser as KVCM_CLIENT_CONFIG. Parsing directly
+    // into base-class pointers would discard backend-specific fields.
+    const auto wrapper_json = "{\"sdk_backend_configs\":" + config + "}";
+    FromJsonString(*this, wrapper_json);
+}
+
 void ModelDeployment::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("model_name", model_name_);
     json.Jsonize("dtype", dtype_);
@@ -179,12 +188,43 @@ void MetaChannelConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("call_timeout", call_timeout_, call_timeout_);
 }
 
+std::string KVCMConfig::registerInstanceRequest() const {
+    json::JsonMap request;
+    request["instance_group"] = instance_group_;
+    request["instance_id"] = instance_id_;
+    request["block_size"] = block_size_;
+    request["default_query_type"] = default_query_type_;
+    request["model_deployment"] = ToJson(model_deployment_);
+    json::JsonArray infos;
+    if (location_spec_info_map_) {
+        for (const auto& [name, size] : *location_spec_info_map_) {
+            json::JsonMap info;
+            info["name"] = name;
+            info["size"] = size;
+            infos.emplace_back(std::move(info));
+        }
+    }
+    request["location_spec_infos"] = std::move(infos);
+    json::JsonArray groups;
+    if (location_spec_groups_) {
+        for (const auto& [name, specs] : *location_spec_groups_) {
+            json::JsonMap group;
+            group["name"] = name;
+            group["spec_names"] = ToJson(specs);
+            groups.emplace_back(std::move(group));
+        }
+    }
+    request["location_spec_groups"] = std::move(groups);
+    return ToJsonString(request, true);
+}
+
 void KVCMConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("enable_vipserver", enable_vipserver_, false);
     json.Jsonize("vipserver_domain", vipserver_domain_, "");
     json.Jsonize("instance_group", instance_group_);
     json.Jsonize("instance_id", instance_id_);
     json.Jsonize("block_size", block_size_);
+    json.Jsonize("default_query_type", default_query_type_, default_query_type_);
     json.Jsonize("location_spec_infos", location_spec_info_map_);
     json.Jsonize("address", addresses_);
     json.Jsonize("meta_channel_config", meta_channel_config_, meta_channel_config_);

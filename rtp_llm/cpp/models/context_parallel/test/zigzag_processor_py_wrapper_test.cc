@@ -36,8 +36,9 @@ zigzagProcessorPlanWrapper(const std::vector<int>& total_input_tokens,
     shuffle_indices.resize(cp_chunk_size);
 
     ZigZagProcessorTestWrapper processor;
-    bool                       result = processor.plan(
-        total_input_tokens, input_tokens, shuffle_indices, cp_rank, cp_size, cp_chunk_size, cp_padding_size);
+    bool result = processor.plan(
+        static_cast<int>(total_input_tokens.size()), total_input_tokens.data(), input_tokens.data(), shuffle_indices,
+        cp_rank, cp_size, cp_chunk_size, cp_padding_size);
 
     return std::make_tuple(result, input_tokens, shuffle_indices);
 }

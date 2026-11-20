@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
+#include "rtp_llm/cpp/metrics/RpcFailureMetrics.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -43,7 +44,9 @@ P2PConnectorPrefill::~P2PConnectorPrefill() = default;
 bool P2PConnectorPrefill::init() {
     if (config_.tp_rank == 0) {
         tp_broadcast_client_ = std::make_shared<P2PBroadcastClient>(
-            config_.scheduler_config.worker_grpc_addrs, config_.scheduler_config.p2p_cancel_broadcast_timeout_ms);
+            config_.scheduler_config.worker_grpc_addrs,
+            config_.scheduler_config.p2p_cancel_broadcast_timeout_ms,
+            makeConnectFailureReporter(metrics_reporter_));
         if (!tp_broadcast_client_->init()) {
             RTP_LLM_LOG_ERROR("prefill connector init failed: tp_broadcast_client init failed");
             return false;

@@ -143,6 +143,7 @@ void GenerateStateMachine::handleLoading() {
 void GenerateStateMachine::transitionToRunning() {
     auto stream = stream_cache_resource_->stream();
     if (stream != nullptr) {
+        stream->recordKvReadyTime(currentTimeUs());
         stream->recordRunningTime();
     }
     status.store(StreamState::RUNNING, std::memory_order_release);

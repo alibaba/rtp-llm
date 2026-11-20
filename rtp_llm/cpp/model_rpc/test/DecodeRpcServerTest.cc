@@ -4,7 +4,10 @@
 #include <functional>
 #include <future>
 #include <thread>
+#include <set>
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
 #include "rtp_llm/cpp/model_rpc/BatchStreamOutputCollector.h"
 #include <memory>
 
@@ -54,9 +57,197 @@ GenerateOutputsPB makeOutputsWithDecodeReuse(int total, int local, int remote, i
 
 }  // namespace
 
+TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    GenerateContext              context(/*request_id=*/1, /*timeout_ms=*/0, nullptr, metrics_reporter, nullptr);
+    context.markRpcHandlingCompleted();
+
+    EXPECT_FALSE(context.request_deadline.has_value());
+    EXPECT_FALSE(context.requestDeadlineExceeded());
+
+    context.setRequestTimeoutMs(1000);
+    ASSERT_TRUE(context.request_deadline.has_value());
+    const auto absolute_deadline = *context.request_deadline;
+    EXPECT_GT(absolute_deadline, std::chrono::system_clock::now());
+    EXPECT_EQ(context.request_timeout_ms, 1000);
+
+    context.setRequestTimeoutMs(1000);
+    EXPECT_EQ(context.request_deadline, absolute_deadline) << "reapplying a timeout must not extend its budget";
+
+    context.setRequestTimeoutMs(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    EXPECT_TRUE(context.requestDeadlineExceeded());
+
+    context.setRequestTimeoutMs(0);
+    EXPECT_FALSE(context.request_deadline.has_value());
+    EXPECT_FALSE(context.requestDeadlineExceeded());
+
+    context.setRequestTimeoutMs(-1);
+    EXPECT_FALSE(context.request_deadline.has_value());
+    EXPECT_FALSE(context.requestDeadlineExceeded());
+}
+
+TEST(DecodeRpcServerTest, InvalidPrefillOnlyFailsBeforeEngineAccess) {
+    LocalRpcServer  server;
+    GenerateInputPB request;
+    request.set_request_id(1);
+    request.add_token_ids(0);
+    request.mutable_generate_config()->set_max_new_tokens(1);
+    request.mutable_generate_config()->set_prefill_only(true);
+    const auto status = server.GenerateStreamCall(nullptr, &request, nullptr);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    ErrorDetailsPB details;
+    ASSERT_TRUE(details.ParseFromString(status.error_details()));
+    EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+    EXPECT_NE(details.error_message().find("max_new_tokens"), std::string::npos);
+}
+
+TEST(ModelRpcProtoTest, P2PControlFieldsPreserveReservedAndRoutingNumbers) {
+    // The old RemoteGenerate/BroadcastLoad protocol is retired. Its replacement
+    // retains explicit reservations instead of reusing removed control fields.
+    const auto* start = P2PConnectorStartLoadRequestPB::descriptor();
+    ASSERT_NE(start, nullptr);
+    EXPECT_TRUE(start->IsReservedNumber(5));
+    EXPECT_TRUE(start->IsReservedName("request_timeout_ms"));
+    EXPECT_EQ(start->FindFieldByName("workers")->number(), 2);
+    EXPECT_EQ(start->FindFieldByName("plan_digest")->number(), 6);
+    EXPECT_EQ(start->FindFieldByName("active_route_ids")->number(), 7);
+    EXPECT_EQ(start->FindFieldByName("decode_tp_size")->number(), 9);
+    EXPECT_EQ(start->FindFieldByName("decode_pipeline_layout")->number(), 10);
+    const auto* remote = RemoteOperationRequestPB::descriptor();
+    ASSERT_NE(remote, nullptr);
+    EXPECT_TRUE(remote->IsReservedNumber(3));
+    EXPECT_EQ(remote->FindFieldByName("group_ids"), nullptr);
+    EXPECT_EQ(remote->FindFieldByName("block_ids")->number(), 4);
+    EXPECT_EQ(remote->FindFieldByName("uris")->number(), 5);
+    EXPECT_EQ(remote->FindFieldByName("group_tags")->number(), 6);
+}
+
+TEST(ModelRpcProtoTest, RemoteCacheMetadataPreservesGdrStatusWireFormat) {
+    RemoteOperationResponsePB response;
+    // Existing GDR workers encode TIMEOUT as field 3 with enum value 3.
+    ASSERT_TRUE(response.ParseFromString(std::string("\x18\x03", 2)));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
+
+    response.add_hosts()->set_host_ip_port("host:1");
+    response.add_backend_locations()->add_locations()->add_specs()->set_uri("cache_uri");
+    std::string serialized;
+    ASSERT_TRUE(response.SerializeToString(&serialized));
+
+    RemoteOperationResponsePB parsed;
+    ASSERT_TRUE(parsed.ParseFromString(serialized));
+    EXPECT_EQ(parsed.transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
+    ASSERT_EQ(parsed.hosts_size(), 1);
+    EXPECT_EQ(parsed.hosts(0).host_ip_port(), "host:1");
+    ASSERT_EQ(parsed.backend_locations_size(), 1);
+    ASSERT_EQ(parsed.backend_locations(0).locations_size(), 1);
+    ASSERT_EQ(parsed.backend_locations(0).locations(0).specs_size(), 1);
+    EXPECT_EQ(parsed.backend_locations(0).locations(0).specs(0).uri(), "cache_uri");
+}
+
+TEST(DecodeRpcServerTest, P2PHandoffRequiresEveryRankIncludingOddTpWidths) {
+    // P2P publishes an atomic transfer result, rather than the old RPC's minimum
+    // partial-key prefix. Every rank (including an empty-route PP rank) must ack.
+    using Broadcast = P2PBroadcastClient::TpBroadcastResult;
+    for (size_t count : {3u, 4u, 5u}) {
+        std::vector<std::shared_ptr<Broadcast::WorkerRpcContext>> workers;
+        for (size_t rank = 0; rank < count; ++rank) {
+            auto worker    = std::make_shared<Broadcast::WorkerRpcContext>();
+            worker->status = grpc::Status::OK;
+            worker->response.mutable_p2p_response()->set_error_code(transErrorCodeToRPC(ErrorCode::NONE_ERROR));
+            workers.push_back(worker);
+        }
+        auto                       broadcast = std::make_shared<Broadcast>(workers);
+        P2PBroadcastClient::Result result("handoff", broadcast);
+        for (size_t rank = 0; rank + 1 < count; ++rank) {
+            broadcast->finishRank(rank, true);
+            EXPECT_FALSE(result.done());
+            EXPECT_FALSE(result.success());
+        }
+        broadcast->finishRank(count - 1, true);
+        EXPECT_TRUE(result.done());
+        EXPECT_TRUE(result.success());
+    }
+}
+
+TEST(DecodeRpcServerTest, P2PHandoffDoesNotPublishPartialRankSuccess) {
+    using Broadcast = P2PBroadcastClient::TpBroadcastResult;
+    std::vector<std::shared_ptr<Broadcast::WorkerRpcContext>> workers;
+    for (int rank = 0; rank < 2; ++rank) {
+        auto worker    = std::make_shared<Broadcast::WorkerRpcContext>();
+        worker->status = rank == 0 ? grpc::Status::OK : grpc::Status(grpc::StatusCode::UNAVAILABLE, "rank failed");
+        workers.push_back(worker);
+    }
+    auto                       broadcast = std::make_shared<Broadcast>(workers);
+    P2PBroadcastClient::Result result("handoff", broadcast);
+    broadcast->finishRank(0, true);
+    EXPECT_FALSE(result.done());
+    EXPECT_FALSE(result.success());
+    broadcast->finishRank(1, true);
+    EXPECT_TRUE(result.done());
+    EXPECT_FALSE(result.success());
+    EXPECT_TRUE(result.firstError().error.hasError());
+}
+
+TEST(DecodeRpcServerTest, PipelineHandoffCarriesStageLocalGeometry) {
+    P2PPipelineLayoutPB layout;
+    layout.set_worker_count(4);
+    for (int stage_id = 0; stage_id < 2; ++stage_id) {
+        auto* stage = layout.add_stages();
+        stage->set_main_layer_begin(stage_id * 2);
+        stage->set_main_layer_count(2);
+        stage->add_worker_indices(stage_id * 2);
+        stage->add_worker_indices(stage_id * 2 + 1);
+        for (int layer = 0; layer < 2; ++layer)
+            stage->add_layers()->add_tags("full");
+        auto* shards = stage->mutable_main_shards();
+        shards->set_tp_size(2);
+        shards->set_prefill_cp_size(1);
+        shards->set_cache_key_tokens_per_block(4);
+        auto* group = shards->add_groups();
+        group->set_tag("full");
+        group->set_group_type(static_cast<int>(CacheGroupType::FULL));
+        group->set_spec_type(KVCacheSpecType::MultiHeadAttention);
+        group->set_seq_size_per_block(4);
+        group->set_kv_block_stride_bytes(128);
+        group->set_k_block_payload_bytes(128);
+        group->set_global_kv_heads(2);
+    }
+    P2PConnectorStartLoadRequestPB request;
+    request.set_decode_tp_size(2);
+    request.set_decode_pipeline_layout(layout.SerializeAsString());
+    const auto decoded = decodeP2PPipelineLayout(request.decode_pipeline_layout(), RoleType::DECODE);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->worker_count, 4u);
+    ASSERT_EQ(decoded->stages.size(), 2u);
+    EXPECT_EQ(decoded->stages[0].main_layer_begin, 0);
+    EXPECT_EQ(decoded->stages[1].main_layer_begin, 2);
+    EXPECT_EQ(decoded->stages[0].worker_indices, (std::vector<int>{0, 1}));
+    EXPECT_EQ(decoded->stages[1].worker_indices, (std::vector<int>{2, 3}));
+    const auto plan = planP2PPipelineTransfer(layout.SerializeAsString(), request.decode_pipeline_layout(), "request");
+    ASSERT_TRUE(plan.ok()) << plan.error.ToString();
+    std::set<std::pair<int, int>> layers_by_rank;
+    for (const auto& route : plan.plan.routes) {
+        for (const auto& layer : route.layers) {
+            EXPECT_EQ(route.src_rank / 2, route.dst_rank / 2);
+            EXPECT_EQ(layer.src_local_id, layer.global_id % 2);
+            EXPECT_EQ(layer.dst_local_id, layer.global_id % 2);
+            layers_by_rank.emplace(layer.global_id, route.dst_rank);
+        }
+    }
+    EXPECT_EQ(layers_by_rank.size(), 8u);
+}
+
+TEST(DecodeRpcServerTest, EmptyRemoteLoadTopologyFailsBeforePlanning) {
+    EXPECT_FALSE(planP2PPipelineTransfer("", "", "request").ok());
+    P2PPipelineLayoutPB empty;
+    empty.set_worker_count(0);
+    EXPECT_FALSE(planP2PPipelineTransfer(empty.SerializeAsString(), empty.SerializeAsString(), "request").ok());
+}
+
 TEST(DecodeRpcServerTest, NullGenerateRequestReturnsInvalidParamsBeforeEngineAccess) {
     DecodeRpcServer server;
-    const auto status = server.GenerateStreamCall(nullptr, nullptr, nullptr);
+    const auto      status = server.GenerateStreamCall(nullptr, nullptr, nullptr);
     EXPECT_FALSE(status.ok());
     ErrorDetailsPB details;
     ASSERT_TRUE(details.ParseFromString(status.error_details()));
@@ -363,7 +554,7 @@ class LocalPrefillCancelService: public RpcService::Service {
 public:
     std::atomic<int>      calls{0};
     std::atomic<int>      status_calls{0};
-    bool         fail_cancel{false};
+    bool                  fail_cancel{false};
     bool                  wait_for_status{false};
     std::function<void()> on_cancel;
     std::atomic<int64_t>  request_id{0};
@@ -401,32 +592,32 @@ bool waitForCancel(Predicate predicate) {
 }  // namespace
 
 TEST(DecodeRpcServerTest, IndependentCancelStopsForwardedFallbackStream) {
-    auto prefill = std::make_shared<PrefillRpcServer>();
-    auto engine  = std::make_shared<FallbackPrefillEngine>();
+    auto prefill                                       = std::make_shared<PrefillRpcServer>();
+    auto engine                                        = std::make_shared<FallbackPrefillEngine>();
     prefill->maga_init_params_.pd_sep_config.role_type = RoleType::PREFILL;
-    prefill->engine_ = engine;
-    prefill->meta_ = std::make_shared<RpcServerRuntimeMeta>();
-    prefill->cancel_registry_ = std::make_shared<PDCancelRegistry>(prefill->meta_);
+    prefill->engine_                                   = engine;
+    prefill->meta_                                     = std::make_shared<RpcServerRuntimeMeta>();
+    prefill->cancel_registry_                          = std::make_shared<PDCancelRegistry>(prefill->meta_);
     RemoteRpcServiceImpl prefill_service;
-    prefill_service.local_server_ = prefill;
+    prefill_service.local_server_   = prefill;
     prefill_service.prefill_server_ = prefill;
     grpc::ServerBuilder prefill_builder;
-    int prefill_port = 0;
+    int                 prefill_port = 0;
     prefill_builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &prefill_port);
     prefill_builder.RegisterService(&prefill_service);
     auto prefill_rpc = prefill_builder.BuildAndStart();
     ASSERT_NE(prefill_rpc, nullptr);
 
-    auto decode = std::make_shared<DecodeRpcServer>();
+    auto decode                                       = std::make_shared<DecodeRpcServer>();
     decode->maga_init_params_.pd_sep_config.role_type = RoleType::DECODE;
-    decode->meta_ = std::make_shared<RpcServerRuntimeMeta>();
-    decode->prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
+    decode->meta_                                     = std::make_shared<RpcServerRuntimeMeta>();
+    decode->prefill_server_caller_                    = std::make_shared<PrefillServerCaller>();
     decode->initCancelRegistry();
     RemoteRpcServiceImpl decode_service;
-    decode_service.local_server_ = decode;
+    decode_service.local_server_  = decode;
     decode_service.decode_server_ = decode;
     grpc::ServerBuilder decode_builder;
-    int decode_port = 0;
+    int                 decode_port = 0;
     decode_builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &decode_port);
     decode_builder.RegisterService(&decode_service);
     auto decode_rpc = decode_builder.BuildAndStart();
@@ -451,10 +642,9 @@ TEST(DecodeRpcServerTest, IndependentCancelStopsForwardedFallbackStream) {
     auto generate = std::async(std::launch::async, [&] {
         grpc::ClientContext context;
         context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
-        auto reader = stub->GenerateStreamCall(&context, input);
+        auto              reader = stub->GenerateStreamCall(&context, input);
         GenerateOutputsPB output;
-        while (reader->Read(&output)) {
-        }
+        while (reader->Read(&output)) {}
         return reader->Finish();
     });
     ASSERT_EQ(enqueued.wait_for(std::chrono::seconds(3)), std::future_status::ready);
@@ -476,9 +666,8 @@ TEST(DecodeRpcServerTest, IndependentCancelStopsForwardedFallbackStream) {
     EXPECT_TRUE(stream->finishWithoutGenerate());
     const auto handle = decode->cancel_registry_->find(input.request_id());
     ASSERT_NE(handle, nullptr);
-    EXPECT_TRUE(waitForCancel([&] {
-        return handle->terminal.load() && !decode->cancel_registry_->needsDownstreamCancel(handle);
-    }));
+    EXPECT_TRUE(waitForCancel(
+        [&] { return handle->terminal.load() && !decode->cancel_registry_->needsDownstreamCancel(handle); }));
 }
 
 TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAndFencesLateRequest) {
@@ -486,14 +675,14 @@ TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAn
 
         LocalPrefillCancelService prefill;
         prefill.wait_for_status = code == ErrorCode::PRIORITY_PREEMPTED;
-        grpc::ServerBuilder       builder;
-        int                       port = 0;
+        grpc::ServerBuilder builder;
+        int                 port = 0;
         builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
         builder.RegisterService(&prefill);
         auto rpc_server = builder.BuildAndStart();
         ASSERT_TRUE(rpc_server);
         DecodeRpcServer decode;
-        decode.meta_            = std::make_shared<RpcServerRuntimeMeta>();
+        decode.meta_ = std::make_shared<RpcServerRuntimeMeta>();
         decode.initCancelRegistry();
         CancelRequestPB request;
         request.set_request_id(203);
@@ -533,7 +722,7 @@ TEST(DecodeRpcServerTest, FailedPrefillCancelBacksOffAfterLocalCompletion) {
     LocalPrefillCancelService prefill;
     prefill.fail_cancel = true;
     grpc::ServerBuilder builder;
-    int port = 0;
+    int                 port = 0;
     builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
     builder.RegisterService(&prefill);
     auto rpc_server = builder.BuildAndStart();
@@ -544,7 +733,7 @@ TEST(DecodeRpcServerTest, FailedPrefillCancelBacksOffAfterLocalCompletion) {
     CancelRequestPB request;
     request.set_request_id(205);
     request.set_prefill_address("127.0.0.1:" + std::to_string(port));
-    CancelResponsePB response;
+    CancelResponsePB    response;
     grpc::ServerContext context;
     ASSERT_TRUE(decode.Cancel(&context, &request, &response).ok());
     auto handle = decode.cancel_registry_->find(205);
@@ -567,7 +756,7 @@ TEST(DecodeRpcServerTest, SlowPrefillCancelDoesNotBlockOtherLocalTerminals) {
         gate.wait_for(std::chrono::seconds(2));
     };
     grpc::ServerBuilder builder;
-    int port = 0;
+    int                 port = 0;
     builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
     builder.RegisterService(&prefill);
     auto rpc_server = builder.BuildAndStart();
@@ -606,8 +795,8 @@ TEST(DecodeRpcServerTest, LocalReadMustStopBeforeTerminalEvenDuringRemoteCancelB
     GenerateInputPB input;
     input.set_request_id(206);
     PDCancelRegistry::Handle handle;
-    ASSERT_TRUE(decode.cancel_registry_->admit(
-        input, "local-read206", "127.0.0.1:1", currentTimeMs() + 1000, handle).ok());
+    ASSERT_TRUE(
+        decode.cancel_registry_->admit(input, "local-read206", "127.0.0.1:1", currentTimeMs() + 1000, handle).ok());
     decode.cancel_registry_->beginRead(handle->unique_key);
     decode.cancel_registry_->finishLocal(handle);
     ASSERT_EQ(decode.cancel_registry_->cancel(206, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(),
@@ -622,7 +811,7 @@ TEST(DecodeRpcServerTest, LocalReadMustStopBeforeTerminalEvenDuringRemoteCancelB
 
 TEST(DecodeRpcServerTest, UnreachablePrefillAllowsLocalTerminalButRetainsRemoteRetry) {
     DecodeRpcServer decode;
-    decode.meta_            = std::make_shared<RpcServerRuntimeMeta>();
+    decode.meta_ = std::make_shared<RpcServerRuntimeMeta>();
     decode.initCancelRegistry();
     CancelRequestPB request;
     request.set_request_id(204);
@@ -639,8 +828,8 @@ TEST(DecodeRpcServerTest, UnreachablePrefillAllowsLocalTerminalButRetainsRemoteR
 }
 TEST(DecodeRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFence) {
     DecodeRpcServer server;
-    server.meta_                              = std::make_shared<RpcServerRuntimeMeta>();
-    server.cancel_registry_                   = std::make_unique<PDCancelRegistry>(server.meta_);
+    server.meta_                               = std::make_shared<RpcServerRuntimeMeta>();
+    server.cancel_registry_                    = std::make_unique<PDCancelRegistry>(server.meta_);
     server.cancel_registry_->control_capacity_ = 1;
     ASSERT_TRUE(server.cancel_registry_->cancel(130, {ErrorCode::CANCELLED, "existing fence"}).ok());
     CancelRequestPB request;

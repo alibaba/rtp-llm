@@ -2,17 +2,155 @@ import json
 import logging
 import os
 import shutil
+import signal
 import socket
 import subprocess
+import tempfile
 import time
+from pathlib import Path
 from typing import Any, Dict, Union
+from urllib.request import urlopen
 
 import psutil
 import requests
 
 from rtp_llm.test.utils.port_util import PortManager
-from rtp_llm.utils.util import str_to_bool
 
+
+def str_to_bool(s: str):
+    true_values = ("yes", "true", "1")
+    false_values = ("no", "false", "0")
+    if s.lower() in true_values:
+        return True
+    elif s.lower() in false_values:
+        return False
+    else:
+        raise ValueError("Cannot covert {} to a bool".format(s))
+
+
+def require_ok(response):
+    code = response.get("header", {}).get("status", {}).get("code")
+    if code not in (1, "1", "OK"):
+        raise RuntimeError(f"KVCM request failed: {response}")
+    return response
+
+
+class PaceFixture:
+    def __init__(self, path):
+        with open(path, encoding="utf-8") as stream:
+            self.config = json.load(stream)
+        domain = self.config.get("domain", "")
+        if not domain.startswith(("http://", "https://")):
+            raise ValueError("PACE fixture requires an external Meta HTTP URL")
+        if not self.config.get("provider_status_urls"):
+            raise ValueError("PACE fixture requires provider_status_urls")
+        self.backend = "pace"
+        self.storage_type = 3
+        self.media_type = 2
+        self.instance_group = ""
+
+    def check_services(self):
+        for url in self.config["provider_status_urls"]:
+            with urlopen(url, timeout=10) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"PACE Provider unavailable: {url}")
+                # A byte round trip, rather than this readiness check, proves I/O.
+                try:
+                    json.load(response)
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise RuntimeError(
+                        f"PACE Provider status response is not valid JSON: {url}"
+                    ) from exc
+
+    def client_env(self):
+        env = dict(self.config.get("client_env", {}))
+        if any(not key.startswith(("TAIR_MEMPOOL_", "MC_")) for key in env):
+            raise ValueError("PACE client_env only accepts TAIR_MEMPOOL_* and MC_* settings")
+        if any(not isinstance(value, str) for value in env.values()):
+            raise ValueError("PACE client_env values must be strings")
+        env.update({
+            "RECO_INSTANCE_GROUP": self.instance_group,
+            "RECO_MODEL_SDK_CONFIG": json.dumps([{"type": self.backend}]),
+            "RECO_CLIENT_CONFIG": "",
+        })
+        return env
+
+    def write_startup(self, server_path, work_dir):
+        startup = json.loads((Path(server_path) / "etc/default_startup_config.json").read_text())
+        # No NFS backend is opened, including during manager bootstrap.
+        startup["storage_config"] = {
+            "type": self.backend, "global_unique_name": "pace_bootstrap",
+            "storage_spec": {"domain": self.config["domain"], "timeout": 10000,
+                             "media_type": self.media_type},
+        }
+        group = startup["instance_group"]
+        group["storage_candidates"] = ["pace_bootstrap"]
+        group["cache_config"]["cache_prefer_strategy"] = 5
+        group["cache_config"]["reclaim_strategy"]["storage_unique_name"] = "pace_bootstrap"
+        group["quota"] = {"capacity": 1073741824, "quota_config": [
+            {"storage_type": self.backend, "capacity": 1073741824},
+        ]}
+        path = Path(work_dir) / "startup.json"
+        path.write_text(json.dumps(startup), encoding="utf-8")
+        return str(path)
+
+    def configure(self, server):
+        # The manager is private to this test; all allocations use a small quota.
+        name = f"pace_smoke_{server.rpc_port}"
+        self.instance_group = name
+        server.post_json("addStorage", {
+            "trace_id": name,
+            "storage": {
+                "global_unique_name": name,
+                "storage_type": self.storage_type,
+                "tair_mem_pool": {
+                    "domain": self.config["domain"], "timeout": 10000,
+                    "media_type": self.media_type,
+                },
+                "check_storage_available_when_open": True,
+            },
+        }, admin=True)
+        event_name = name + "_events"
+        server.post_json("addStorage", {
+            "trace_id": name,
+            "storage": {
+                "global_unique_name": event_name,
+                "storage_type": 7,
+                "event_report": {
+                    "heartbeat_timeout_ms": 30000, "cleanup_grace_ms": 300000,
+                    "liveness_check_interval_ms": 5000,
+                    "snapshot_min_interval_ms": 1000,
+                },
+            },
+        }, admin=True)
+        server.post_json("createInstanceGroup", {
+            "trace_id": name,
+            "instance_group": {
+                "name": name, "storage_candidates": [name],
+                "event_report_storage_candidates": [event_name],
+                "global_quota_group_name": name, "max_instance_count": 32,
+                "quota": {"capacity": 1073741824, "quota_config": [
+                    {"storage_type": self.storage_type, "capacity": 1073741824},
+                ]},
+                "cache_config": {
+                    "data_storage_strategy": 5,
+                    "reclaim_strategy": {
+                        "storage_unique_name": name, "reclaim_policy": 1,
+                        "trigger_strategy": {"used_percentage": 0.8},
+                        "delay_before_delete_ms": 1000,
+                    },
+                    "meta_indexer_config": {
+                        "max_key_count": 10000, "mutex_shard_num": 16,
+                        "batch_key_size": 16,
+                        "meta_storage_backend_config": {"storage_type": "local"},
+                        "meta_cache_policy_config": {"type": "LRU", "capacity": 10000},
+                    },
+                },
+            },
+        }, admin=True)
+        group = server.post_json("getInstanceGroup", {"name": name}, admin=True)["instance_group"]
+        if group.get("storage_candidates") != [name]:
+            raise RuntimeError("PACE smoke group must have exactly one payload backend")
 
 class RemoteKVCMServer:
     def __init__(
@@ -24,37 +162,75 @@ class RemoteKVCMServer:
     ):
         self._kvcm_config = kvcm_config
         self._server_path = server_path
-        self._server_process = None
         self._block_path = server_path + "/block/"
         self._bin_path = server_path + "/bin/kv_cache_manager_bin"
         self._fault_trigger = False
         self._enable_debug_service = False
+        self._server_process = None
+        self.pace_fixture = None
+        if str_to_bool(kvcm_config.get("PACE_REQUIRED", "false")):
+            fixture_path = os.environ.get("KVCM_PACE_FIXTURE", "")
+            if not fixture_path:
+                raise RuntimeError(
+                    "PACE smoke requires --test_env=KVCM_PACE_FIXTURE=<config.json>"
+                )
+            self.pace_fixture = PaceFixture(fixture_path)
         logging.info(
             f"kvcm_server_path:{server_path}\nblock_path:{self._block_path}\nbin_path:{self._bin_path}\nkvcm_src_logs_path:{kvcm_src_logs_path}\nkvcm_dst_logs_path:{kvcm_dst_logs_path}"
         )
-        if os.path.exists(self._block_path) and os.path.isdir(self._block_path):
+        if self.pace_fixture is None and os.path.isdir(self._block_path):
             shutil.rmtree(self._block_path)
 
-        ports, self._locks = PortManager().get_consecutive_ports(4)
+        debug_offsets = (3002,) if str_to_bool(
+            self._kvcm_config.get("ENABLE_DEBUG_SERVICE", "false")
+        ) else ()
+        ports, self._locks = PortManager().get_consecutive_ports(
+            4, extra_offsets=debug_offsets
+        )
         self._rpc_port, self._admin_rpc_port, self._http_port, self._admin_http_port = (
             ports
         )
         self._address = f"127.0.0.1:{self._rpc_port}"
         self._kvcm_src_logs_path = kvcm_src_logs_path
         self._kvcm_dst_logs_path = kvcm_dst_logs_path
+        self._work_dir = None
+        if self.pace_fixture is not None:
+            self._work_dir = tempfile.mkdtemp(prefix="pace-kvcm-", dir=os.environ.get("TEST_TMPDIR"))
+            self._kvcm_src_logs_path = os.path.join(self._work_dir, "logs")
+            os.makedirs(self._kvcm_src_logs_path)
 
     def copy_logs(self):
-        if not os.path.exists(self._kvcm_src_logs_path):
-            logging.warning(f"path [{self._kvcm_src_logs_path}] not exist")
+        if self.pace_fixture is not None and self._work_dir is None:
             return
-        shutil.copytree(
-            self._kvcm_src_logs_path, self._kvcm_dst_logs_path, dirs_exist_ok=True
-        )
+        try:
+            if not os.path.exists(self._kvcm_src_logs_path):
+                logging.warning(f"path [{self._kvcm_src_logs_path}] not exist")
+                return
+            shutil.copytree(self._kvcm_src_logs_path, self._kvcm_dst_logs_path, dirs_exist_ok=True)
+            # Keep diagnostics until the manager has stopped and logs are saved.
+            if self._work_dir is not None and self._server_process is None:
+                shutil.rmtree(self._work_dir)
+                self._work_dir = None
+        except Exception:
+            logging.exception(
+                "Failed to collect KVCM logs or remove its working directory: %s",
+                self._kvcm_src_logs_path,
+            )
+
+    @property
+    def rpc_port(self) -> int:
+        return self._rpc_port
+
+    @property
+    def http_port(self) -> int:
+        return self._http_port
 
     def address(self) -> str:
         return self._address
 
     def start_server(self, timeout: int = 120) -> bool:
+        if self.pace_fixture is not None:
+            self.pace_fixture.check_services()
         os.environ["RECO_SERVER_ADDRESS"] = f"127.0.0.1:{self._rpc_port}"
         self._enable_debug_service = str_to_bool(
             self._kvcm_config.get("ENABLE_DEBUG_SERVICE", "false")
@@ -75,11 +251,29 @@ class RemoteKVCMServer:
             f"--env",
             f"KVCM_LOG_LEVEL={kvcm_log_level}",
         ]
+        if self.pace_fixture is not None:
+            startup_path = self.pace_fixture.write_startup(self._server_path, self._work_dir)
+            cmd.extend(["--env", f"kvcm.startup_config={startup_path}",
+                        "--env", "kvcm.registry_storage.uri=local://",
+                        "--env", "kvcm.coordination.uri=memory://"])
         logging.info(f"Starting kv_cache_manager with command: {' '.join(cmd)}")
         self._server_process = subprocess.Popen(
             cmd,
+            cwd=self._work_dir,
+            start_new_session=True,
         )
         if self.wait_sever_done(timeout):
+            if self.pace_fixture is not None:
+                try:
+                    self.pace_fixture.configure(self)
+                    if self.check_fault_requested():
+                        self._fault_trigger = self.check_fault_injection()
+                        if not self._fault_trigger:
+                            raise RuntimeError("PACE smoke fault injection was not installed")
+                    return True
+                except Exception:
+                    self.stop_server()
+                    raise
             storage_config_path = self._kvcm_config.get("STORAGE_CONFIG", "")
             instance_group_config_path = self._kvcm_config.get(
                 "INSTANCE_GROUP_CONFIG", ""
@@ -107,9 +301,14 @@ class RemoteKVCMServer:
                 )
             logging.info(f"addStorage and createInstanceGroup success")
 
-            self._fault_trigger = self.check_fault_injection()
+            if self.check_fault_requested():
+                self._fault_trigger = self.check_fault_injection()
+                if not self._fault_trigger:
+                    self.stop_server()
+                    raise RuntimeError("Smoke fault injection was not installed")
             return True
 
+        self.stop_server()
         return False
 
     def wait_sever_done(self, timeout: int = 120):
@@ -126,6 +325,8 @@ class RemoteKVCMServer:
             self._http_port,
             self._admin_rpc_port,
         ]
+        if self._enable_debug_service:
+            ports_to_check.append(self._http_port + 3000)
         checked_ports = set()
 
         while True:
@@ -158,37 +359,39 @@ class RemoteKVCMServer:
             time.sleep(retry_interval)
 
     def stop_server(self):
-        if self._server_process is None:
+        process = self._server_process
+        if process is None:
             return
-        if self._fault_trigger:
-            if self.clearFaults():
-                logging.info("clear faults injection success")
-            else:
-                logging.warning("clear faults injection failed")
-        if self._server_process is not None and self._server_process.pid is not None:
+        if self._fault_trigger and process.poll() is None:
             try:
-                logging.info(
-                    "stop remote kvcm server and children: %d", self._server_process.pid
+                if self.clearFaults():
+                    logging.info("clear faults injection success")
+                else:
+                    logging.warning("clear faults injection failed")
+            except Exception:
+                logging.exception(
+                    "clear faults injection failed; continuing process cleanup"
                 )
-                parent = psutil.Process(self._server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
-                parent.terminate()
-                try:
-                    parent.wait(timeout=5)
-                except psutil.TimeoutExpired:
-                    parent.kill()
-                    parent.wait(timeout=5)
-                self._server_process = None
-            except Exception as e:
-                logging.warning("failed to get process with: " + str(e))
-                self._server_process = None
+        try:
+            # start_new_session makes this PID the group ID. Descendants keep
+            # that group after the manager exits, even if poll() has reaped it.
+            logging.info("stop remote kvcm process group: %d", process.pid)
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    process.poll()
+                    os.killpg(process.pid, 0)
+                    time.sleep(0.1)
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+        except Exception:
+            logging.exception("failed to stop remote kvcm process group: %d", process.pid)
+            return
+        self._server_process = None
+        self._fault_trigger = False
 
     def check_fault_injection(self):
         fault_map = {
@@ -212,7 +415,7 @@ class RemoteKVCMServer:
 
         if self.api(
             "injectFault", "", self._http_port + 3000, config_json
-        ):  # TODO: port
+        ):
             logging.info("inject fault for kvcm success")
             return True
         else:
@@ -221,6 +424,23 @@ class RemoteKVCMServer:
 
     def clearFaults(self):
         return self.api("clearFaults", "", self._http_port + 3000)
+
+    def check_fault_requested(self):
+        return any(str_to_bool(self._kvcm_config.get(key, "false")) for key in (
+            "TEST_MATCH_FAILURE", "TEST_START_WRITE_FAILURE", "TEST_FINISH_WRITE_FAILURE"
+        ))
+
+    def client_env(self):
+        env = {"RECO_SERVER_ADDRESS": self.address()}
+        if self.pace_fixture is not None:
+            env.update(self.pace_fixture.client_env())
+        return env
+
+    def post_json(self, api, config, admin=False):
+        port = self._admin_http_port if admin else self._http_port
+        response = requests.post(f"http://127.0.0.1:{port}/api/{api}", json=config, timeout=15)
+        response.raise_for_status()
+        return require_ok(response.json())
 
     def get_storage_config(self) -> Dict[str, Any]:
         return {
@@ -256,8 +476,10 @@ class RemoteKVCMServer:
         for i in range(retry_times):
             try:
                 logging.info(f"{url} {config}")
-                response = requests.post(url, json=config)
+                response = requests.post(url, json=config, timeout=15)
                 if response.status_code == 200:
+                    if self.pace_fixture is not None:
+                        require_ok(response.json())
                     logging.info(
                         f"curl -X POST {url} success, response:{response.text}"
                     )

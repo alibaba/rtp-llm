@@ -5,9 +5,11 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
+#include <functional>
 #include <memory>
 #include <optional>
 #include <atomic>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -20,8 +22,9 @@ public:
     /// 每个 worker 一份 route 列表，顺序与 worker_addrs 一致。空表示该 worker 无任务。
     using RankRoutes = std::vector<std::vector<TransferRoutePB>>;
 
-    explicit P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
-                                int64_t                         cancel_broadcast_timeout_ms = 1000);
+    explicit P2PBroadcastClient(const std::vector<std::string>&         worker_addrs,
+                                int64_t                                 cancel_broadcast_timeout_ms = 1000,
+                                std::function<void(const std::string&)> connect_failure_reporter    = {});
     ~P2PBroadcastClient() = default;
 
 public:
@@ -29,8 +32,10 @@ public:
     bool init();
 
     struct Result {
-        Result(const std::string& unique_key, const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result):
-            unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()) {}
+        Result(const std::string& unique_key, const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result,
+               std::optional<int64_t> request_id = std::nullopt):
+            unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()),
+            request_id_(request_id) {}
         explicit Result(const std::string& unique_key):
             unique_key_(unique_key), start_time_us_(currentTimeUs()), locally_completed_(true) {}
         ~Result() {}
@@ -69,6 +74,9 @@ public:
         }
         ErrorCode   errorCode() const;
         std::string errorMessage() const;
+        std::optional<int64_t> requestId() const {
+            return request_id_;
+        }
 
     private:
         std::string                        unique_key_;
@@ -76,6 +84,7 @@ public:
         int64_t                            start_time_us_;
         mutable std::atomic<int64_t>       total_cost_time_us_{0};
         bool                               locally_completed_{false};
+        std::optional<int64_t>             request_id_;
     };
 
     /// @brief 向所有 TP worker 广播一次 P2P 传输请求。
@@ -150,10 +159,11 @@ private:
                              std::vector<TransferRoutePB>*       routes_of_worker);
 
 private:
-    std::vector<std::string>          worker_addrs_;
-    int64_t                           cancel_broadcast_timeout_ms_;
-    std::shared_ptr<RPCPool>          rpc_pool_;
-    std::shared_ptr<BroadcastManager> tp_broadcast_manager_;
+    std::vector<std::string>                worker_addrs_;
+    int64_t                                 cancel_broadcast_timeout_ms_;
+    std::function<void(const std::string&)> connect_failure_reporter_;
+    std::shared_ptr<RPCPool>                rpc_pool_;
+    std::shared_ptr<BroadcastManager>       tp_broadcast_manager_;
 };
 
 }  // namespace rtp_llm

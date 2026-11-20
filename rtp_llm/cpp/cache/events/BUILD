@@ -1,4 +1,12 @@
 load("//:def.bzl", "copts")
+load("//bazel:tf_proto.bzl", "cc_proto_library")
+
+cc_proto_library(
+    name = "kvcm_discovery_proto",
+    srcs = ["kvcm_discovery.proto"],
+    cc_libs = ["@com_google_protobuf//:protobuf"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],
+)
 
 cc_library(
     name = "kv_cache_event",
@@ -44,8 +52,11 @@ cc_library(
     deps = [
         ":kv_cache_event",
         ":kv_cache_event_queue",
+        ":kvcm_discovery_proto",
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
         "//rtp_llm/cpp/utils:core_utils",
         "@curl//:curl",
+        "@grpc//:grpc++",
         "@rapidjson//:rapidjson",
     ],
 )

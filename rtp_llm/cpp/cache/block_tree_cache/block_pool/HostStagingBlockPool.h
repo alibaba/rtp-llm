@@ -49,6 +49,10 @@ public:
             return pool_->blockBuffer(block_id_, payload_bytes);
         }
 
+        bool belongsTo(const HostStagingBlockPool* pool) const {
+            return pool_ == pool;
+        }
+
     private:
         HostStagingBlockPool* pool_{nullptr};
         size_t                block_id_{0};
@@ -59,8 +63,19 @@ public:
 
     HostStagingBlockPool(size_t block_count, size_t stride_bytes);
 
-    // Test seam: no production caller; lets tests occupy staging blocks atomically.
+    // Nonblocking all-or-nothing allocation. Each load WorkLoop owns private pools
+    // and a local wait queue; it allocates and returns all of its staging leases.
     std::optional<HostStagingBlockBatch> tryMallocBatch(size_t count);
+
+    size_t capacity() const {
+        return block_count_;
+    }
+    size_t strideBytes() const {
+        return stride_bytes_;
+    }
+    size_t backingBytes() const {
+        return backing_.backingBytes();
+    }
 
     // Fair, all-or-nothing allocation; existing async waiters are never bypassed.
     // Invokes callback outside mutex_. A null result means expiration, cancellation, or an invalid request.

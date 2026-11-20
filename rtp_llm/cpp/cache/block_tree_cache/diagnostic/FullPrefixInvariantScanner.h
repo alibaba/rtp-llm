@@ -1,6 +1,10 @@
 #pragma once
 
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
+
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -61,11 +65,18 @@ void detectNodeViolations(const BlockTree& tree, const TreeNode& node, std::vect
 
 std::string formatViolationDetail(const FullViolationDetail& detail);
 
-// Periodically checks the FULL prefix invariant in bounded batches. Observation only:
-// it never mutates the tree, resources, block pools or refcounts.
+// Each interval targets 5% of the tree (at least one batch), spreading batches of at
+// most 128 nodes across the interval. Cache lock acquisition retries with sleeps
+// for up to 10 ms; a timeout skips the window/batch without advancing the cursor.
+// Observation only: it never mutates the tree, resources, block pools or refcounts.
+class BlockTreeCacheMetricsReporter;
+
 class FullPrefixInvariantScanner {
 public:
-    FullPrefixInvariantScanner(const BlockTree& tree, std::mutex& cache_mutex, int64_t interval_ms);
+    FullPrefixInvariantScanner(const BlockTree&                     tree,
+                               std::mutex&                          cache_mutex,
+                               int64_t                              interval_ms,
+                               const BlockTreeCacheMetricsReporter* metrics_reporter = nullptr);
     ~FullPrefixInvariantScanner();
 
     FullPrefixInvariantScanner(const FullPrefixInvariantScanner&)            = delete;
@@ -75,21 +86,27 @@ public:
     void stop();
 
 private:
-    void runBatchGuarded();
-    void runBatch();
-    void publishBatch(const std::vector<FullViolationDetail>& details,
-                      size_t                                  nodes_scanned,
-                      size_t                                  tree_size,
-                      bool                                    cycle_complete);
+    friend class FullPrefixScannerTest;
 
+    void                         runScanGuarded();
+    void                         runScan();
+    void                         runBatch();
+    CacheLockGuard               tryLockCacheUntil(std::chrono::steady_clock::time_point deadline);
+    void                         publishBatch(const std::vector<FullViolationDetail>& details,
+                                              size_t                                  nodes_scanned,
+                                              size_t                                  tree_size,
+                                              bool                                    cycle_complete);
+
+    const BlockTreeCacheMetricsReporter* metrics_reporter_;
     const BlockTree& tree_;
     std::mutex&      cache_mutex_;
     const int64_t    interval_ms_;
 
-    // LoopThread::stop() cannot interrupt a batch that is already waiting for the cache
-    // mutex, so the batch re-checks this flag once it owns the lock.
-    std::atomic<bool>    stopping_{false};
-    autil::LoopThreadPtr loop_thread_;
+    // Cancels scheduled batches and wakes lock-retry/inter-batch waits on shutdown.
+    std::atomic<bool>       stopping_{false};
+    autil::LoopThreadPtr    loop_thread_;
+    std::mutex              wait_mutex_;
+    std::condition_variable stop_condition_;
 
     // Touched only by the thread running a batch.
     size_t   cursor_{0};

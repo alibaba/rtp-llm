@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -37,6 +39,64 @@ std::vector<size_t> computeTierBlockCounts(size_t                     capacity_b
         block_counts.push_back(physical_blocks);
     }
     return block_counts;
+}
+
+std::vector<size_t> computeHostUsableBlockCounts(size_t                             capacity_bytes,
+                                                 const std::vector<size_t>&         strides,
+                                                 const std::vector<CacheGroupType>& types,
+                                                 double                             swa_full_ratio) {
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(swa_full_ratio) && swa_full_ratio > 0,
+                            "MEMORY_CACHE_SWA_BLOCK_RATIO must be finite and positive, got %f",
+                            swa_full_ratio);
+    RTP_LLM_CHECK_WITH_INFO(strides.size() == types.size(), "HOST stride/type count mismatch");
+    if (strides.empty()) {
+        return {};
+    }
+    const bool split = std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
+                       && std::find(types.begin(), types.end(), CacheGroupType::SWA) != types.end();
+    size_t min_stride = std::numeric_limits<size_t>::max();
+    for (const auto stride : strides) {
+        RTP_LLM_CHECK_WITH_INFO(stride > 0, "HOST pool stride must be positive");
+        min_stride = std::min(min_stride, stride);
+    }
+    const auto max_physical_blocks = static_cast<size_t>(std::numeric_limits<BlockIdxType>::max());
+    auto       fit                 = [&](size_t baseline, std::vector<size_t>* counts) {
+        size_t remaining = capacity_bytes;
+        for (size_t i = 0; i < strides.size(); ++i) {
+            const long double scaled = split && types[i] == CacheGroupType::SWA ?
+                                                                 std::ceil(static_cast<long double>(baseline) * swa_full_ratio) :
+                                                                 static_cast<long double>(baseline);
+            // Leave room for block zero before converting or multiplying.
+            if (scaled >= static_cast<long double>(max_physical_blocks)) {
+                return false;
+            }
+            const auto count = static_cast<size_t>(scaled);
+            if (count + 1 > remaining / strides[i]) {
+                return false;
+            }
+            remaining -= (count + 1) * strides[i];
+            if (counts) {
+                (*counts)[i] = count;
+            }
+        }
+        return true;
+    };
+    size_t low  = 0;
+    size_t high = std::min(capacity_bytes / min_stride, max_physical_blocks - 1);
+    while (low < high) {
+        const size_t distance = high - low;
+        const size_t mid      = low + distance / 2 + distance % 2;
+        if (fit(mid, nullptr)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    std::vector<size_t> result(strides.size(), 0);
+    if (low > 0) {
+        RTP_LLM_CHECK(fit(low, &result));
+    }
+    return result;
 }
 
 }  // namespace rtp_llm
