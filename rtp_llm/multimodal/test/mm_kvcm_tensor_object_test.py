@@ -70,6 +70,27 @@ class TensorObjectTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_cuda_reads_short_header_once_and_fetches_large_header_suffix(self):
+        self._assert_cuda_header_reads(blocking_cuda_events=False)
+
+    @unittest.skipUnless(torch.cuda.is_available() and torch.version.cuda, "CUDA required")
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE_RESTORE") == "1", "native restore required"
+    )
+    def test_native_cuda_header_reads_on_current_stream(self):
+        import librtp_compute_ops
+
+        with patch.object(
+            librtp_compute_ops,
+            "read_emb_cuda_header",
+            wraps=librtp_compute_ops.read_emb_cuda_header,
+        ) as read_header, torch.cuda.stream(torch.cuda.Stream()):
+            self._assert_cuda_header_reads(blocking_cuda_events=True)
+        self.assertEqual(read_header.call_count, 4)
+        self.assertEqual(
+            [call.args[1] for call in read_header.call_args_list], [0, 0, 1024, 0]
+        )
+
+    def _assert_cuda_header_reads(self, *, blocking_cuda_events):
         stages = []
 
         @contextmanager
@@ -87,7 +108,10 @@ class TensorObjectTest(unittest.TestCase):
                 )
                 stages.clear()
                 restored = unpack_object(
-                    packed, observe_stage=observe, expected_key="key"
+                    packed,
+                    observe_stage=observe,
+                    expected_key="key",
+                    blocking_cuda_events=blocking_cuda_events,
                 )
                 actual, metadata = restored["result"]
                 torch.testing.assert_close(actual, tensor)
@@ -101,7 +125,9 @@ class TensorObjectTest(unittest.TestCase):
         stages.clear()
         packed[8:16].fill_(255)
         with self.assertRaisesRegex(ValueError, "object header"):
-            unpack_object(packed, observe_stage=observe)
+            unpack_object(
+                packed, observe_stage=observe, blocking_cuda_events=blocking_cuda_events
+            )
         self.assertEqual(stages, [("read", "d2h_header")])
 
     def test_pack_into_reused_buffer_matches_zero_initialized_wire_bytes(self):

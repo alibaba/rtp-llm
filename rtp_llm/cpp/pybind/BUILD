@@ -112,6 +112,12 @@ cc_library(
         ],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
         "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
     }) + no_block_copy_link_deps(),
     copts = copts(),
     alwayslink = True,

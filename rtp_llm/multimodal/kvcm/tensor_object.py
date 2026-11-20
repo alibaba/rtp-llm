@@ -239,6 +239,7 @@ def unpack_object(
     observe_stage=None,
     consumer_stream=None,
     expected_key=None,
+    blocking_cuda_events=False,
 ):
     """Validate the layout before materializing any destination tensor.
 
@@ -260,11 +261,22 @@ def unpack_object(
         or not _PREFIX.size <= size <= max_bytes
     ):
         raise ValueError("invalid multimodal object buffer")
+    read_native_header = None
+    if buffer.is_cuda and _USE_NATIVE_RESTORE and blocking_cuda_events:
+        import librtp_compute_ops
+
+        read_native_header = getattr(librtp_compute_ops, "read_emb_cuda_header", None)
+
+    def copy_header(start, end):
+        with stage("d2h_header"):
+            if read_native_header is not None:
+                return read_native_header(buffer, start, end - start)
+            return buffer[start:end].cpu()
+
     if buffer.is_cuda:
         # Fetch the usual prefix and metadata together. Large headers still
         # copy only the missing suffix after validating the declared length.
-        with stage("d2h_header"):
-            head = buffer[:_CUDA_HEADER_READ_BYTES].cpu()
+        head = copy_header(0, min(size, _CUDA_HEADER_READ_BYTES))
     else:
         head = buffer
     view = memoryview(head.numpy())
@@ -279,8 +291,7 @@ def unpack_object(
         raise ValueError("invalid multimodal object header")
     raw_header = bytes(view[_PREFIX.size : header_end])
     if header_end > len(view):
-        with stage("d2h_header"):
-            suffix = buffer[len(view) : header_end].cpu()
+        suffix = copy_header(len(view), header_end)
         raw_header += suffix.numpy().tobytes()
     with stage("decode_header"):
         try:

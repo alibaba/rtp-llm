@@ -6,6 +6,11 @@
 #include <pybind11/stl.h>
 #include <torch/csrc/utils/pybind.h>
 
+#if USING_CUDA
+#include <ATen/cuda/CUDAEvent.h>
+#include <c10/cuda/CUDAGuard.h>
+#endif
+
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -73,7 +78,26 @@ inline void packEmbTensorSlices(const at::Tensor& output,
     }
 }
 
+#if USING_CUDA
+inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, int64_t size) {
+    TORCH_CHECK(buffer.is_cuda() && buffer.dim() == 1 && buffer.is_contiguous() && buffer.scalar_type() == at::kByte,
+                "expected a contiguous CUDA byte buffer");
+    TORCH_CHECK(offset >= 0 && offset <= buffer.numel() && size > 0 && size <= buffer.numel() - offset,
+                "invalid EMB header extent");
+    const c10::cuda::CUDAGuard deviceGuard(buffer.device());
+    auto header = at::empty({size}, at::TensorOptions().dtype(at::kByte).pinned_memory(true));
+    header.copy_(buffer.narrow(0, offset, size), /*non_blocking=*/true);
+    at::cuda::CUDAEvent ready(cudaEventBlockingSync | cudaEventDisableTiming);
+    ready.record(c10::cuda::getCurrentCUDAStream(buffer.get_device()));
+    ready.synchronize();
+    return header;
+}
+#endif
+
 inline void registerEmbTensorCodec(pybind11::module& module) {
+#if USING_CUDA
+    module.def("read_emb_cuda_header", &readEmbCudaHeader, pybind11::call_guard<pybind11::gil_scoped_release>());
+#endif
     module.def("pack_emb_tensor_slices", &packEmbTensorSlices, pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def(
         "restore_emb_tensor_slices",

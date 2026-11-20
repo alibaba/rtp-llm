@@ -413,6 +413,7 @@ class RegisteredObjectTransport:
                     observe_stage=self._observe_stage,
                     consumer_stream=consumer_stream,
                     expected_key=expected_key,
+                    blocking_cuda_events=self._owner.blocking_cuda_events,
                 )
                 with self._stage("read", "restore_ready_wait"):
                     self._wait_for_stream_completion()
