@@ -47,3 +47,9 @@ py_test(
     srcs = ["glm5_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "vision_bert_test",
+    srcs = ["vision_bert_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

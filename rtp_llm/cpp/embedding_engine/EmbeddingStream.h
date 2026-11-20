@@ -44,7 +44,7 @@ public:
 
     int64_t batchSize() const;
 
-    void updateTensorOutput(torch::Tensor t);
+    void updateTensorOutput(torch::Tensor t, std::shared_ptr<c10::Event> ready = nullptr);
     void updateMapOutput(std::vector<std::map<std::string, torch::Tensor>>& map);
 
     void setMetricReporter(const kmonitor::MetricsReporterPtr& metric_reporter);
@@ -76,6 +76,7 @@ protected:
     std::condition_variable          cond_;
     std::mutex                       lock_;
     StreamState                      stream_state_;
+    std::shared_ptr<c10::Event>      result_ready_;
     size_t                           begin_time_us_    = 0;
     size_t                           wait_time_us_     = 0;
     kmonitor::MetricsReporterPtr     metrics_reporter_ = nullptr;

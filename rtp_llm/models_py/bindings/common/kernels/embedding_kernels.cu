@@ -43,7 +43,8 @@ __global__ void embedding_lookup_kernel(T*            from_tensor,
                                         const int*    input_type,
                                         const int*    input_mask,
                                         const int     token_num,
-                                        const int64_t hidden_units) {
+                                        const int64_t hidden_units,
+                                        const int     type_vocab_size) {
     for (int64_t index = blockIdx.x * blockDim.x + threadIdx.x; index < (int64_t)(token_num * hidden_units);
          index += blockDim.x * gridDim.x) {
         const int64_t token_index = index / hidden_units;
@@ -59,7 +60,15 @@ __global__ void embedding_lookup_kernel(T*            from_tensor,
         }
         if constexpr (USE_TYPE_ID_EMB) {
             assert(type_table != nullptr);
-            type_embed = type_table[input_type[token_index] * hidden_units + col_index];
+            int type_id = input_type[token_index];
+            if constexpr (USE_MASK) {
+                // Masked visual rows may carry sentinel or out-of-range IDs.
+                // Keep valid type embeddings while making skipped rows safe.
+                if (input_mask[token_index] == 0 && (type_id < 0 || type_id >= type_vocab_size)) {
+                    type_id = 0;
+                }
+            }
+            type_embed = type_table[type_id * hidden_units + col_index];
         }
         if constexpr (USE_MASK) {
             assert(input_mask != nullptr);
@@ -173,7 +182,8 @@ __global__ void embedding_lookup_kernel_vec(T*            from_tensor,
                                                                                        input_type,                     \
                                                                                        input_mask,                     \
                                                                                        token_num,                      \
-                                                                                       hidden_units);
+                                                                                       hidden_units,                   \
+                                                                                       type_vocab_size);
 
 template<typename T>
 void invokeEmbeddingLookupVec(T*           from_tensor,
@@ -213,6 +223,7 @@ void invokeEmbeddingLookup(T*           from_tensor,
                            const int*   input_mask,
                            const int    token_num,
                            const int    hidden_units,
+                           const int    type_vocab_size,
                            cudaStream_t stream) {
     dim3 grid(std::min(token_num, 65536));
     dim3 block(std::min(hidden_units, 1024));
@@ -263,6 +274,7 @@ template void invokeEmbeddingLookup(float*       from_tensor,
                                     const int*   input_mask,
                                     const int    token_num,
                                     const int    hidden_units,
+                                    const int    type_vocab_size,
                                     cudaStream_t stream);
 
 template void invokeEmbeddingLookup(half*        from_tensor,
@@ -276,6 +288,7 @@ template void invokeEmbeddingLookup(half*        from_tensor,
                                     const int*   input_mask,
                                     const int    token_num,
                                     const int    hidden_units,
+                                    const int    type_vocab_size,
                                     cudaStream_t stream);
 #ifdef ENABLE_BF16
 template void invokeEmbeddingLookup(__nv_bfloat16*       from_tensor,
@@ -289,6 +302,7 @@ template void invokeEmbeddingLookup(__nv_bfloat16*       from_tensor,
                                     const int*           input_mask,
                                     const int            token_num,
                                     const int            hidden_units,
+                                    const int            type_vocab_size,
                                     cudaStream_t         stream);
 #endif
 

@@ -52,6 +52,7 @@ _CLASS_TO_MODULE: Dict[str, str] = {
     "Qwen3DSpark": "rtp_llm.models.qwen_3_dspark",
     "StarCoder": "rtp_llm.models.starcoder",
     "StarCoder2": "rtp_llm.models.starcoder2",
+    "VisionBert": "rtp_llm.models.vision_bert.vision_bert",
 }
 
 __all__ = sorted(_CLASS_TO_MODULE) + ["load_all_models"]

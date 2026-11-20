@@ -8,10 +8,12 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <ATen/TensorIndexing.h>
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <torch/extension.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <algorithm>
+#include <chrono>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 using namespace std;
 using namespace at::indexing;
@@ -70,16 +72,24 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     RTP_LLM_LOG_INFO("init executor with python model");
     // Model-input dumps target autoregressive Normal/MTP replay. Embedding and
     // rerank use a different input contract and intentionally do not need it.
-    model_.reset(new PyWrappedModel(model_init_params, params.py_model, true));
+    auto model = std::make_unique<PyWrappedModel>(model_init_params, params.py_model, true);
 
     init_position_ids(model_config_.max_seq_len);
     std::vector<std::string> handler_args;
     {
         py::gil_scoped_acquire acquire;
+        pooled_output_ = model->usePooledEmbeddingForward(handler_);
+        if (pooled_output_) {
+            RTP_LLM_LOG_INFO("embedding executor enabled pooled token rows for scoring");
+        }
+        device_output_handler_ = py::hasattr(handler_, "extend_forward_on_device");
+        requires_host_input_metadata_ =
+            py::getattr(params.py_model, "requires_host_input_metadata", py::bool_(false)).cast<bool>();
         torch_type_  = py::module::import("torch").attr("Tensor");
         handler_args = py::cast<std::vector<std::string>>(handler_.attr("extend_forward_args")());
     }
 
+    model_ = std::move(model);
     for (const auto& name : handler_args) {
         if (!HandlerArgs::set_by_str(handler_args_, name.c_str())) {
             RTP_LLM_LOG_WARNING("unknown handler arg: \"%s\", ignored", name.c_str());
@@ -153,6 +163,9 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                 new_locs.push_back(mm_locs_data[i] + token_idx);
             }
             const auto text_token_mask = mm_feature.value().text_tokens_mask;
+            if (text_token_mask.numel() != length) {
+                return absl::InvalidArgumentError("text_tokens_mask length does not match input length");
+            }
             memcpy(merged_text_mask.data() + token_idx,
                    text_token_mask.data_ptr<int>(),
                    text_token_mask.numel() * sizeof(int));
@@ -216,10 +229,14 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
-    model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
-    model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
-    model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
-    model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    // Models that prepare attention from host tokens reuse the pinned inputs;
+    // PyWrappedModel also supplies device IDs for embedding lookup.
+    if (!requires_host_input_metadata_) {
+        model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+        model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+        model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+        model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    }
 #endif
     return model_input;
 }
@@ -231,8 +248,12 @@ ModelRequest EmbeddingExecutor::generateOldModelRequest(GptModelInputs& model_in
         return tensor.defined() && tensor.is_cuda() ? tensor.cpu() : tensor;
     };
     ModelRequest model_request;
-    model_request.generate_batch_size  = 0;
-    model_request.context_batch_size   = model_input.input_lengths.size(0);
+    model_request.generate_batch_size = 0;
+    model_request.context_batch_size  = model_input.input_lengths.size(0);
+    if (pooled_output_) {
+        // The compact scorer consumes only the encoder output.
+        return model_request;
+    }
     model_request.combo_tokens         = to_cpu(model_input.combo_tokens);
     model_request.combo_position_ids   = to_cpu(model_input.combo_position_ids);
     model_request.combo_token_type_ids = to_cpu(model_input.combo_tokens_type_ids);
@@ -262,14 +283,25 @@ unique_ptr<GptModelOutputs> EmbeddingExecutor::copyResultToCPU(th::Tensor gpu_ou
 
 absl::Status EmbeddingExecutor::sliceTensor(py::object                           tensor,
                                             const std::list<EmbeddingStreamPtr>& streams,
-                                            int                                  total_batch_size) const {
+                                            int                                  total_batch_size,
+                                            bool                                 overlap) {
     auto gpu_tensors = py::cast<torch::Tensor>(tensor);
-    auto cpu_tensors = gpu_tensors.cpu();
-    if (total_batch_size != cpu_tensors.size(0)) {
+    if (total_batch_size != gpu_tensors.size(0)) {
         std::ostringstream error_msg;
         error_msg << "total batch size not equal to output tensor at dim 0: " << total_batch_size << " vs "
-                  << cpu_tensors.size(0);
+                  << gpu_tensors.size(0);
         return absl::InternalError(error_msg.str());
+    }
+    torch::Tensor               cpu_tensors;
+    std::shared_ptr<c10::Event> ready;
+    if (overlap && gpu_tensors.is_cuda()) {
+        cpu_tensors = torch::empty(gpu_tensors.sizes(), gpu_tensors.options().device(torch::kCPU).pinned_memory(true));
+        cpu_tensors.copy_(gpu_tensors, /*non_blocking=*/true);
+        ready            = runtimeCreateEvent();
+        oldest_result_   = std::move(previous_result_);
+        previous_result_ = ready;
+    } else {
+        cpu_tensors = gpu_tensors.cpu();
     }
     int index = 0;
     for (auto& stream : streams) {
@@ -280,7 +312,7 @@ absl::Status EmbeddingExecutor::sliceTensor(py::object                          
             return absl::InternalError(error_msg.str());
         }
         torch::Tensor sliced_tensor = cpu_tensors.slice(0, index, index + stream->batchSize(), 1);
-        stream->updateTensorOutput(sliced_tensor);
+        stream->updateTensorOutput(sliced_tensor, ready);
         index += stream->batchSize();
     }
     return absl::OkStatus();
@@ -316,22 +348,26 @@ absl::Status EmbeddingExecutor::slicePyList(py::object                          
 // 2. list<map<str, tensor>, which shape is [total_batch_size]
 absl::Status EmbeddingExecutor::updateStreams(py::object                           post_process_output,
                                               const std::list<EmbeddingStreamPtr>& streams,
-                                              int                                  total_batch_size) const {
+                                              int                                  total_batch_size,
+                                              bool                                 overlap) {
     if (pybind11::isinstance<py::list>(post_process_output)) {
         return slicePyList(post_process_output, streams, total_batch_size);
         // need use python class type to check
     } else if (py::isinstance(post_process_output, torch_type_)) {
-        return sliceTensor(post_process_output, streams, total_batch_size);
+        return sliceTensor(post_process_output, streams, total_batch_size, overlap);
     } else {
         return absl::InternalError("unknown output type");
     }
 }
 
-absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&    model_request,
-                                                          const GptModelOutputs& gpu_outputs) {
+absl::StatusOr<py::object>
+EmbeddingExecutor::postProcess(const ModelRequest& model_request, const GptModelOutputs& gpu_outputs, bool overlap) {
     using namespace HandlerArgs;
 
     try {
+        if (pooled_output_) {
+            return py::object(handler_.attr("score_pooled_rows")(gpu_outputs.all_hidden_states));
+        }
         py::dict kwargs;
         if (has_arg(handler_args_, Arg::INPUT_LENGTHS)) {
             kwargs[get_name(Arg::INPUT_LENGTHS)] = model_request.input_lengths;
@@ -357,26 +393,49 @@ absl::StatusOr<py::object> EmbeddingExecutor::postProcess(const ModelRequest&   
             kwargs[get_name(Arg::MOE_GATING)] = moe_gating;
         }
 
-        py::object output = handler_.attr("extend_forward")(**kwargs);
+        py::object output = handler_.attr(overlap ? "extend_forward_on_device" : "extend_forward")(**kwargs);
         return output;
     } catch (const exception& e) {
         return absl::InternalError("meet error when run handler " + std::string(e.what()));
     }
 }
 
-absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams) {
+void EmbeddingExecutor::drainTensorOutput() {
+    if (previous_result_) {
+        previous_result_->synchronize();
+    }
+}
+
+absl::Status EmbeddingExecutor::process(const std::list<EmbeddingStreamPtr>& streams, bool overlap) {
+    // TensorHolder retains two generations of host copies. Bound submissions
+    // to that same window, including when a non-pipelined request intervenes.
+    if (oldest_result_) {
+        oldest_result_->synchronize();
+        oldest_result_.reset();
+    }
     CHECK_AND_RETURN_REF(model_input, gatherModelInput(streams));
     auto            merged_output = std::make_unique<MergedOutput>();
     GptModelOutputs model_output;
     ModelRequest    model_request    = generateOldModelRequest(model_input);
     auto            total_batch_size = model_request.context_batch_size;
-    model_->releaseBuffers();
-    model_output = std::move(model_->forward(model_input));
+    // Rotate host staging once per pipelined batch. A second rotation
+    // here could release the preceding batch before its result event.
+    if (!overlap) {
+        model_->releaseBuffers();
+    }
+    model_output                                = std::move(model_->forward(model_input));
+    const auto             result_process_start = std::chrono::steady_clock::now();
     py::gil_scoped_acquire acquire;
     // for py::list, handler should ensure object to cpu in the python impl,
     // for torch::Tensor, we manually move it to cpu during updateStreams()
-    CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output));
-    auto res = updateStreams(post, streams, total_batch_size);
+    CHECK_AND_RETURN_REF(post, postProcess(model_request, model_output, overlap));
+    auto res = updateStreams(post, streams, total_batch_size, overlap);
+    if (metrics_reporter_) {
+        RtpEmbeddingStageMetricsCollector collector;
+        collector.result_process_latency_us =
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - result_process_start).count();
+        metrics_reporter_->report<RtpEmbeddingStageMetrics, RtpEmbeddingStageMetricsCollector>(nullptr, &collector);
+    }
     model_->releaseBuffers();
     return res;
 }
