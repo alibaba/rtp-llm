@@ -62,6 +62,11 @@ final class VitScheduler implements AutoCloseable {
 
     void checkHealthy() { if(failure!=null) throw failure; if(closed) throw new IllegalStateException("V scheduler closed"); }
 
+    synchronized long inflightInputs() {
+        checkHealthy();
+        return (long) running + waiting.size();
+    }
+
     private void run() {
         List<Work> batch=List.of();
         try {

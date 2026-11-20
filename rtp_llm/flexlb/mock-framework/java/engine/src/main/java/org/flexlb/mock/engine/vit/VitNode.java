@@ -122,7 +122,11 @@ public final class VitNode implements AutoCloseable {
         }
 
         @Override public void getWorkerStatus(StatusVersionPB input,StreamObserver<WorkerStatusPB> response) {
-            try { scheduler.checkHealthy();response.onNext(WorkerStatusPB.newBuilder().setRole("VIT").setAlive(true).setStatusVersion(1).build());response.onCompleted(); }
+            try {
+                response.onNext(WorkerStatusPB.newBuilder().setRole("VIT").setAlive(true).setStatusVersion(1)
+                    .setMmInflightInputs(com.google.protobuf.Int64Value.of(scheduler.inflightInputs())).build());
+                response.onCompleted();
+            }
             catch(RuntimeException error) { response.onError(Status.UNAVAILABLE.withCause(error).asRuntimeException()); }
         }
 

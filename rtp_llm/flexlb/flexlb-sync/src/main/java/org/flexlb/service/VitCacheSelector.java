@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Selects cache-affine ViT endpoints and owns temporary cold-key placements.
@@ -27,6 +28,7 @@ public class VitCacheSelector {
     private static final long MIN_PENDING_TTL_MS = 120_000;
     private static final long MAX_PENDING_TTL_MS = 600_000;
     private static final int MAX_PENDING = 100_000;
+    private static final long MAX_LOAD_AGE_NANOS = TimeUnit.SECONDS.toNanos(1);
 
     private final VitCacheDirectory directory;
     private final WorkerDirectory workers;
@@ -69,15 +71,18 @@ public class VitCacheSelector {
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
+        int mediaCount = ctx.getRequest().isVitRouteOnly() ? keys.size() : 0;
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         long now = System.currentTimeMillis();
+        long nowNanos = System.nanoTime();
         if (now - pendingPrunedAt >= 5000) {
             pending.values().removeIf(p -> !p.matches(candidates.get(p.worker().getIpPort()), now));
             pendingPrunedAt = now;
         }
         List<Candidate> best = new ArrayList<>();
         MatchScore bestScore = null;
+        long bestLoad = Long.MAX_VALUE;
         for (Candidate candidate : candidates.values()) {
             if (group != null && !Objects.equals(group, candidate.worker().getGroup())) {
                 continue;
@@ -96,9 +101,14 @@ public class VitCacheSelector {
                             candidate.gpuHits(),
                             pendingHits);
             int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
+            long load = candidate.worker().vitLoadEstimate(nowNanos, MAX_LOAD_AGE_NANOS);
+            if (comparison == 0) {
+                comparison = Long.compare(bestLoad, load);
+            }
             if (comparison > 0) {
                 best.clear();
                 bestScore = score;
+                bestLoad = load;
             }
             if (comparison >= 0) {
                 best.add(candidate);
@@ -108,6 +118,9 @@ public class VitCacheSelector {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
+        if (mediaCount > 0) {
+            selected.worker().recordVitRoute(mediaCount);
+        }
         long timeout = ctx.getRequest().getGenerateTimeout();
         long ttl =
                 timeout <= 0

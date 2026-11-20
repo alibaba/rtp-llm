@@ -910,6 +910,26 @@ class VitProxyRpcServerStatusTest(TestCase):
         self.assertTrue(response.alive)
         self.assertEqual(context.code, None)
 
+    def test_worker_status_reports_load_only_with_all_child_samples(self):
+        first = WorkerStatusPB(role="VIT", alive=True)
+        first.mm_inflight_inputs.value = 0
+        second = WorkerStatusPB(role="VIT", alive=True)
+        second.mm_inflight_inputs.value = 7
+        server = self._make_server(
+            {
+                "first": self._make_status_stub(first),
+                "second": self._make_status_stub(second),
+            }
+        )
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.HasField("mm_inflight_inputs"))
+        self.assertEqual(result.mm_inflight_inputs.value, 7)
+
+        second.ClearField("mm_inflight_inputs")
+        result = server.GetWorkerStatus(StatusVersionPB(), FakeContext())
+        self.assertTrue(result.alive)
+        self.assertFalse(result.HasField("mm_inflight_inputs"))
+
     def test_worker_status_continues_after_timeout_with_parallel_probe(self):
         timeout_stub = self._make_status_stub(error=RpcDeadlineExceeded())
         live_stub = self._make_status_stub(
