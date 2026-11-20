@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -94,7 +95,59 @@ inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, in
 }
 #endif
 
+// Own routing hashes without keeping Python tensor wrappers or lists alive.
+// The batch is immutable and readers receive independent CPU tensor copies.
+class EmbHashTensorBatch {
+public:
+    explicit EmbHashTensorBatch(const std::vector<at::Tensor>& inputs) {
+        hashes_.reserve(inputs.size());
+        for (const auto& input : inputs) {
+            hashes_.push_back(input.detach().to(input.options().dtype(at::kInt).device(at::kCPU),
+                                                 /*non_blocking=*/false,
+                                                 /*copy=*/true));
+        }
+    }
+
+    std::vector<at::Tensor> cloneHashes() const {
+        std::vector<at::Tensor> copies;
+        copies.reserve(hashes_.size());
+        for (const auto& hash : hashes_) {
+            copies.push_back(hash.clone());
+        }
+        return copies;
+    }
+
+private:
+    std::vector<at::Tensor> hashes_;
+};
+
+inline constexpr char kEmbHashBatchName[] = "rtp_llm.EmbHashTensorBatch";
+
+inline pybind11::capsule storeEmbHashes(const std::vector<at::Tensor>& inputs) {
+    std::unique_ptr<EmbHashTensorBatch> batch;
+    {
+        pybind11::gil_scoped_release release;
+        batch = std::make_unique<EmbHashTensorBatch>(inputs);
+    }
+    pybind11::capsule handle(batch.get(), kEmbHashBatchName, [](void* pointer) {
+        delete static_cast<EmbHashTensorBatch*>(pointer);
+    });
+    batch.release();
+    return handle;
+}
+
+inline std::vector<at::Tensor> cloneEmbHashes(const pybind11::capsule& handle) {
+    auto* batch = static_cast<EmbHashTensorBatch*>(PyCapsule_GetPointer(handle.ptr(), kEmbHashBatchName));
+    if (batch == nullptr) {
+        throw pybind11::error_already_set();
+    }
+    pybind11::gil_scoped_release release;
+    return batch->cloneHashes();
+}
+
 inline void registerEmbTensorCodec(pybind11::module& module) {
+    module.def("store_emb_hashes", &storeEmbHashes);
+    module.def("clone_emb_hashes", &cloneEmbHashes);
 #if USING_CUDA
     module.def("read_emb_cuda_header", &readEmbCudaHeader, pybind11::call_guard<pybind11::gil_scoped_release>());
 #endif

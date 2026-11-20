@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import sys
 import threading
@@ -796,17 +797,15 @@ class _HashCacheValue:
         "hashes",
         "generation",
         "charge_bytes",
-        "owners",
         "greennet_passed",
         "readers",
         "retired",
     )
 
     def __init__(self, generation, charge_bytes, greennet_passed):
-        self.hashes = []
+        self.hashes = None
         self.generation = generation
         self.charge_bytes = charge_bytes
-        self.owners = []
         self.greennet_passed = bool(greennet_passed)
         self.readers = 0
         self.retired = False
@@ -836,6 +835,13 @@ class MMHashKeyCache:
         self._building_bytes = 0
         self._retired_bytes = 0
         self.instance_id = uuid.uuid4().hex
+        self._native_store_hashes = None
+        self._native_clone_hashes = None
+        if os.environ.get("MM_EMB_NATIVE_HASH_CACHE") == "1":
+            from librtp_compute_ops import clone_emb_hashes, store_emb_hashes
+
+            self._native_store_hashes = store_emb_hashes
+            self._native_clone_hashes = clone_emb_hashes
 
     @property
     def enabled(self) -> bool:
@@ -960,11 +966,13 @@ class MMHashKeyCache:
             # linear free-list scan to every publication; store the CPU tensors
             # directly and let the byte-bounded LRU own eviction.
             with cuda_graph_gate.operation():
-                value.hashes = [
-                    h.detach().to(device="cpu", dtype=torch.int32).clone()
-                    for h in feature_hashes
-                ]
-            value.owners = []
+                if self._native_store_hashes is not None:
+                    value.hashes = self._native_store_hashes(feature_hashes)
+                else:
+                    value.hashes = [
+                        h.detach().to(device="cpu", dtype=torch.int32).clone()
+                        for h in feature_hashes
+                    ]
 
             def publish():
                 with self._lock:
@@ -1002,8 +1010,6 @@ class MMHashKeyCache:
 
     def _release_retired(self, values: List[_HashCacheValue]) -> None:
         for value in values:
-            for owner in value.owners:
-                owner.release()
             with self._lock:
                 self._retired_bytes -= value.charge_bytes
                 self._drained.notify_all()
@@ -1020,13 +1026,14 @@ class MMHashKeyCache:
             value.readers += 1
             approval = value.greennet_passed
         try:
-            # Same copy as before, now protected by a lease rather than holding
-            # the global index lock. Pool views still never escape this cache.
-            return (
-                [tensor.clone() for tensor in value.hashes],
-                value.generation,
-                approval,
+            # The lease keeps the batch alive while it is copied outside the
+            # index lock. Callers receive independent tensors.
+            hashes = (
+                self._native_clone_hashes(value.hashes)
+                if self._native_clone_hashes is not None
+                else [tensor.clone() for tensor in value.hashes]
             )
+            return hashes, value.generation, approval
         finally:
             with self._lock:
                 value.readers -= 1
