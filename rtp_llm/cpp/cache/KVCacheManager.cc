@@ -1,8 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -747,23 +744,6 @@ std::shared_ptr<CacheStore> KVCacheManager::getCacheStore() const {
 std::shared_ptr<KVCacheResource>
 KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector) {
     return coordinator_manager_->incrKVCacheRef(resource, cache_keys, is_connector);
-}
-
-std::vector<std::shared_ptr<FrozenTask>> KVCacheManager::frozenTasks() const {
-    return block_tree_cache_ ? block_tree_cache_->reclaimer().frozenTasks() : std::vector<std::shared_ptr<FrozenTask>>{};
-}
-TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const TransferCompletionKey& trace) const {
-    return block_tree_cache_ ? block_tree_cache_->reclaimer().localTransferCompletion(trace) : TransferTaskRegistry::State::UNKNOWN;
-}
-TransferTaskRegistry::ForgetResult KVCacheManager::localForgetTransferCompletion(const TransferCompletionKey& trace) const {
-    return block_tree_cache_ ? block_tree_cache_->reclaimer().localForgetTransferCompletion(trace) : TransferTaskRegistry::ForgetResult::FAILED;
-}
-TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution, int timeout) const {
-    return block_tree_cache_->reclaimer().queryTransferCompletion(execution, timeout);
-}
-TransferCompletionForgetResult KVCacheManager::forgetTransferCompletion(const TransferCompletionTarget& target,
-    const std::vector<TransferCompletionKey>& traces, int timeout) const {
-    return block_tree_cache_->reclaimer().forgetTransferCompletion(target, traces, timeout);
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {

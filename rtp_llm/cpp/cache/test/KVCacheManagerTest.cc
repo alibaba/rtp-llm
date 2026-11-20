@@ -2247,15 +2247,16 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         config.block_tree_frozen_force_release_timeout_ms = timeout_ms;
         auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
         ASSERT_TRUE(manager->init());
-        ASSERT_NE(manager->block_tree_cache_->reclaimer().frozen_task_recovery_, nullptr);
-        auto recovery = std::move(manager->block_tree_cache_->reclaimer().frozen_task_recovery_);
+        auto& reclaimer = manager->blockTreeCache()->reclaimer();
+        ASSERT_NE(reclaimer.frozen_task_recovery_, nullptr);
+        auto recovery = std::move(reclaimer.frozen_task_recovery_);
         recovery->stop();
         manager->block_tree_cache_->stopBackgroundTasks();
         const auto& groups = manager->blockTreeCache()->groupSets();
         auto engine = std::make_shared<RecordingBatchTransferEngine>(groups);
         engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O outcome unknown");
         manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
-        manager->block_tree_cache_->setCompletionCleanup(manager->block_tree_cache_->reclaimer().completion_cleanup_);
+        manager->block_tree_cache_->setCompletionCleanup(reclaimer.completion_cleanup_);
         auto pool = groups.front()->hostPool();
         ASSERT_NE(pool, nullptr);
         const auto block = pool->malloc();
@@ -2267,14 +2268,14 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
                 EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
                 pool->decTreeRef(*block, BlockTreeRefType::EVICT);
             }, "evict");
-        const auto records = manager->frozenTasks();
+        const auto records = reclaimer.frozenTasks();
         ASSERT_EQ(records.size(), 1u);
         ASSERT_NE(engine->last_proof, nullptr);
         const auto& dispatcher = manager->block_tree_cache_->transfer_dispatcher_;
-        auto& queue = *manager->block_tree_cache_->reclaimer().completion_cleanup_;
+        auto& queue = *reclaimer.completion_cleanup_;
         auto drain = [&] {
             return queue.drain([&](const auto& target, const auto& traces, int timeout) {
-                return manager->forgetTransferCompletion(target, traces, timeout);
+                return reclaimer.forgetTransferCompletion(target, traces, timeout);
             }, 1000);
         };
         FrozenTask other(FrozenTask::prepare(records.front()->execution()), records.front()->failure());
