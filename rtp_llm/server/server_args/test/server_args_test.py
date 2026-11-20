@@ -2917,6 +2917,55 @@ class ResidentWeightsArgsTest(TestCase):
         self.assertEqual(draft.mode, "dev")
         self.assertEqual(resident.role, "target")
 
+    def test_idle_timers_and_host_reserve_defaults_and_validation(self):
+        dev = self.parse_load_config(
+            ["--resident_weights_mode", "dev"], {}
+        ).resident_weights_config
+        self.assertEqual(dev.store_timers(), (600.0, 3600.0))
+        self.assertEqual(dev.store_host_reserve(), (0.2, 0.0))
+
+        prod = self.parse_load_config(
+            ["--resident_weights_mode", "prod"], {}
+        ).resident_weights_config
+        self.assertEqual(prod.store_timers(), (-1.0, -1.0))
+
+        disabled = self.parse_load_config(
+            [],
+            {
+                "RESIDENT_WEIGHTS_MODE": "dev",
+                "RESIDENT_WEIGHTS_OFFLOAD_AFTER_S": "-1",
+                "RESIDENT_WEIGHTS_IDLE_TTL_S": "-1",
+                "RESIDENT_WEIGHTS_OFFLOAD_HOST_RESERVE_RATIO": "0.15",
+                "RESIDENT_WEIGHTS_OFFLOAD_HOST_RESERVE_MIN_GB": "32",
+            },
+        ).resident_weights_config
+        self.assertEqual(disabled.store_timers(), (-1.0, -1.0))
+        self.assertEqual(disabled.store_host_reserve(), (0.15, 32.0))
+
+        for bad in ("0", "-2"):
+            with self.subTest(bad=bad):
+                cfg = self.parse_load_config(
+                    [
+                        "--resident_weights_mode",
+                        "dev",
+                        "--resident_weights_offload_after_s",
+                        bad,
+                    ],
+                    {},
+                ).resident_weights_config
+                with self.assertRaises(ValueError):
+                    cfg.store_timers()
+        bad_ratio = self.parse_load_config(
+            ["--resident_weights_offload_host_reserve_ratio", "1.0"], {}
+        ).resident_weights_config
+        with self.assertRaises(ValueError):
+            bad_ratio.store_host_reserve()
+        bad_min_gb = self.parse_load_config(
+            ["--resident_weights_offload_host_reserve_min_gb", "-1"], {}
+        ).resident_weights_config
+        with self.assertRaises(ValueError):
+            bad_min_gb.store_host_reserve()
+
 
 if __name__ == "__main__":
     main()

@@ -43,6 +43,7 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.resident_weights import ResidentWeights, checkpoint_digest, vmm
+from rtp_llm.resident_weights.store import StoreSettings
 from rtp_llm.resident_weights.weights import all_ranks_true
 from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import W, sp_0_pad8_size
@@ -337,11 +338,21 @@ class BaseModel(object):
             # which read-only resident mappings would fault on.
             logging.warning("resident weights disabled: not supported with EPLB")
             return None
+        offload_after_s, idle_ttl_s = self.resident_weights_config.store_timers()
+        host_reserve_ratio, host_reserve_min_gb = (
+            self.resident_weights_config.store_host_reserve()
+        )
         resident = ResidentWeights(
             self.resident_weights_config.role,
             self.parallelism_config.local_rank,
             self._resident_fingerprint(),
             self.resident_weights_config.verify,
+            StoreSettings(
+                offload_after_s=offload_after_s,
+                idle_ttl_s=idle_ttl_s,
+                host_reserve_ratio=host_reserve_ratio,
+                host_reserve_min_gb=host_reserve_min_gb,
+            ),
         )
         return resident if resident.ensure_store_running() else None
 

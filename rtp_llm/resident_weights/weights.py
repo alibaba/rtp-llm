@@ -19,6 +19,8 @@ import json
 import logging
 import os
 import resource
+import socket
+import time
 import weakref
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -63,6 +65,20 @@ if TYPE_CHECKING:
     from rtp_llm.model_loader.loader import ModelLoader
     from rtp_llm.model_loader.model_weight_info import ModelWeights
 
+# Safety ceiling on client-side polling for an in-flight restore; slightly past the store's own
+# 600 s move_timeout_s so the store aborts and reports cleanly first.
+_RESTORE_WAIT_S = 660.0
+
+
+class _RestoreWaitTimeoutError(RuntimeError):
+    """Client-side restore wait exceeded the store's move bound; handled like RESTORE_FAILED."""
+
+
+# Three-state attach consensus across WORLD ranks (combined with ReduceOp.MIN):
+# restore failure wins over cold miss, which wins over warm hit.
+_ATTACH_RESTORE_FAILED = 0
+_ATTACH_MISS = 1
+_ATTACH_HIT = 2
 # Storages this large get their own allocation, so the memory of a consumed input is released.
 _DEDICATED_MIN_BYTES = 1 << 20
 _CHUNK_BYTES = 16 << 20
@@ -333,8 +349,17 @@ class ResidentWeights:
         device: int,
         fingerprint: Dict[str, str],
         verify: bool,
+        store_settings: Optional[store.StoreSettings] = None,
     ):
         self.device = device
+        self._store_settings = store_settings or store.StoreSettings()
+        # Open while this process uses the record; closed on drop/release or process exit.
+        self._hold: Optional[socket.socket] = None
+        # Generation token observed on attach; engine-side cleanup drops only this generation.
+        self._seen_generation: Optional[str] = None
+        self._attach_attempted = False
+        # Set when attach() gets RESTORE_FAILED; raised after multi-rank consensus.
+        self._restore_error: Optional[str] = None
         self.role = role
         self._gpu_uuid = str(torch.cuda.get_device_properties(device).uuid)
         self.slot_key = f"{self._gpu_uuid}/{role}"
@@ -369,7 +394,17 @@ class ResidentWeights:
         try:
             soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
             resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
-            store.ensure_running(self._store_name)
+            running = store.ensure_running(
+                self._store_name, settings=self._store_settings
+            )
+            if running != self._store_settings:
+                logging.warning(
+                    "resident weight store %s keeps its current settings (%s), "
+                    "not %s; use `store.py config` to update them live or stop it",
+                    self._store_name,
+                    running,
+                    self._store_settings,
+                )
             return True
         except (OSError, store.StoreError) as error:
             logging.warning(
@@ -379,14 +414,26 @@ class ResidentWeights:
             )
             return False
 
-    def drop(self) -> None:
+    def drop(self, expected_generation: Optional[str] = None) -> None:
         """Release this slot's record, so the next start loads from the checkpoint."""
-        store.drop_slot(self._store_name, self.slot_key)
+        self._release_hold()
+        store.drop_slot(
+            self._store_name, self.slot_key, expected_generation=expected_generation
+        )
 
-    def _drop_quietly(self) -> None:
+    def _release_hold(self) -> None:
+        hold = getattr(self, "_hold", None)
+        if hold is not None:
+            hold.close()
+            self._hold = None
+
+    def __del__(self) -> None:
+        self._release_hold()
+
+    def _drop_quietly(self, expected_generation: Optional[str] = None) -> None:
         """Drop on an error path, where the error being handled is what matters."""
         try:
-            self.drop()
+            self.drop(expected_generation=expected_generation)
         except (OSError, store.StoreError) as error:
             logging.warning(
                 "resident weights %s: could not drop the record: %s",
@@ -411,14 +458,34 @@ class ResidentWeights:
         cold start leaves both where they are. Verify mode always loads from the checkpoint,
         because what it verifies is the published record against a fresh one.
         """
+        self._restore_error = None
         if self.verify:
             self.begin_verify()
             restored = None
         else:
             restored = self.attach()
-        # fastsafetensors broadcasts on WORLD. A hit may skip loading only when all
-        # participating ranks hit; a post-load barrier cannot repair mismatched collectives.
-        if synchronize_ranks and not all_ranks_true(restored is not None, device):
+        if self._restore_error is not None:
+            local_state = _ATTACH_RESTORE_FAILED
+        elif restored is not None:
+            local_state = _ATTACH_HIT
+        else:
+            local_state = _ATTACH_MISS
+        # fastsafetensors broadcasts on WORLD. All participating ranks must agree on whether to
+        # attach, cold-load, or fail on a host restore error before anyone enters load_weights.
+        state = (
+            all_ranks_min_state(local_state, device)
+            if synchronize_ranks
+            else local_state
+        )
+        if state == _ATTACH_RESTORE_FAILED:
+            self.release_attach()
+            raise RuntimeError(
+                self._restore_error
+                or f"resident weights {self.slot_key}: another rank failed to restore its "
+                f"resident weights from host memory; free GPU memory on that rank and start "
+                f"again, or drop the record to load from the checkpoint"
+            )
+        if synchronize_ranks and state == _ATTACH_MISS:
             restored = None
             self.discard_attach()
         if restored is not None:
@@ -431,13 +498,82 @@ class ResidentWeights:
         self.move_to_vmm(weights, tuple(global_weight_aliases) + tuple(excluded_names))
         return weights
 
-    def discard_attach(self) -> None:
-        """Drop a local hit before a coordinated cold load releases its GPU memory."""
+    def release_attach(self) -> None:
+        """Drop this process's local mappings and hold without deleting the store's record."""
         self._replay = None
         self._attached = False
         self._allocation_refs.clear()
         self.initialize_gpu_growth_bytes = 0
-        self._drop_quietly()
+        self._release_hold()
+
+    def discard_attach(self) -> None:
+        """Drop a local hit before a coordinated cold load releases its GPU memory."""
+        gen = getattr(self, "_seen_generation", None)
+        attempted = getattr(self, "_attach_attempted", False)
+        self._seen_generation = None
+        self.release_attach()
+        if attempted and gen is None:
+            # ABSENT or already dropped: never delete a record another client published meanwhile.
+            return
+        self._drop_quietly(expected_generation=gen)
+
+    def _attach_slot(self) -> store.AttachResult:
+        """attach_slot, waiting while the store moves an idle record back to the GPU."""
+        try:
+            result = store.attach_slot(
+                self._store_name, self.slot_key, self.fingerprint, hold=True
+            )
+        except TimeoutError as error:
+            # The store may have already received ATTACH and started to_gpu; do not cold-load.
+            raise _RestoreWaitTimeoutError(
+                f"timed out waiting for store attach reply: {error}"
+            ) from error
+        except ConnectionError as error:
+            if not isinstance(error, ConnectionRefusedError):
+                # Only fall back to cold loading when the store is definitely gone
+                # (ConnectionRefusedError); any other probe outcome leaves restore state unknown.
+                try:
+                    store.list_store(self._store_name)
+                except (ConnectionRefusedError, FileNotFoundError):
+                    raise error from None
+                except (OSError, store.StoreError) as probe_error:
+                    raise _RestoreWaitTimeoutError(
+                        f"lost connection to store during attach ({error}); "
+                        f"store probe failed ({probe_error})"
+                    ) from error
+                raise _RestoreWaitTimeoutError(
+                    f"lost connection to store during attach: {error}"
+                ) from error
+            raise
+        if result.status is not AttachStatus.MOVING:
+            return result
+        logging.info(
+            "resident weights %s: moving the record from host memory back to the GPU",
+            self.slot_key,
+        )
+        start = time.monotonic()
+        wait_s = _RESTORE_WAIT_S
+        while result.status is AttachStatus.MOVING:
+            if result.settings is not None:
+                wait_s = max(_RESTORE_WAIT_S, result.settings.move_timeout_s + 60.0)
+            if time.monotonic() - start > wait_s:
+                # Raise a restore-wait error rather than StoreError so attach() reports
+                # RESTORE_FAILED through multi-rank consensus instead of dropping & cold-loading.
+                raise _RestoreWaitTimeoutError(
+                    f"the record was still moving back to the GPU after {wait_s:.0f} s"
+                )
+            time.sleep(1.0)
+            try:
+                result = store.attach_slot(
+                    self._store_name, self.slot_key, self.fingerprint, hold=True
+                )
+            except (OSError, store.StoreError) as error:
+                # Once MOVING was observed, a poll timeout/disconnect must not fall back to
+                # cold loading while a to_gpu mover may still own GPU memory.
+                raise _RestoreWaitTimeoutError(
+                    f"lost contact with the store while moving back to the GPU: {error}"
+                ) from error
+        return result
 
     # ---- restart ------------------------------------------------------------------------
 
@@ -445,12 +581,20 @@ class ResidentWeights:
         """Map the published weights read-only.
 
         Returns the loader's own tensors for ``T1`` to put back into the weight dicts, or None
-        when this process must load from the checkpoint instead.
+        when this process must load from the checkpoint instead (or when ``_restore_error`` was
+        recorded for the caller to raise after multi-rank consensus).
         """
+        self._restore_error = None
+        self._seen_generation = None
+        self._attach_attempted = True
         try:
-            result = store.attach_slot(
-                self._store_name, self.slot_key, self.fingerprint
+            result = self._attach_slot()
+        except _RestoreWaitTimeoutError as error:
+            self._restore_error = (
+                f"resident weights {self.slot_key}: {error}. The record stays in the store: "
+                f"wait for the move to finish or check the store log, then retry or drop it"
             )
+            return None
         except (OSError, store.StoreError) as error:
             logging.warning(
                 "resident weights %s: attach failed, loading from the checkpoint: %s",
@@ -458,6 +602,7 @@ class ResidentWeights:
                 error,
             )
             return None
+        gen = getattr(result, "generation", None) or None
         if result.status is AttachStatus.MISMATCH:
             logging.warning(
                 "resident weights on %s were published for another configuration; dropping them "
@@ -467,14 +612,24 @@ class ResidentWeights:
                     result.published_fingerprint_text, self.fingerprint_text
                 ),
             )
-            self._drop_quietly()
+            self._drop_quietly(expected_generation=gen)
+            return None
+        if result.status is AttachStatus.RESTORE_FAILED:
+            # Record for attach_or_load_weights() to raise after multi-rank consensus: a
+            # checkpoint load needs the same GPU memory, so it would fail too, and throwing
+            # before all_ranks_min_state() would hang peer ranks in the collective.
+            self._restore_error = (
+                f"resident weights {self.slot_key}: {result.restore_error}. The record stays in "
+                f"host memory: free GPU memory and start again, or drop it to load from the "
+                f"checkpoint"
+            )
             return None
         if result.status is AttachStatus.EPLB_DIRTY:
             logging.warning(
                 "resident weights on %s were left mid EPLB rearrangement; dropping them",
                 self.slot_key,
             )
-            self._drop_quietly()
+            self._drop_quietly(expected_generation=gen)
             return None
         if result.status is not AttachStatus.HIT:
             logging.info(
@@ -482,10 +637,15 @@ class ResidentWeights:
                 self.slot_key,
             )
             return None
+        self._seen_generation = gen
         record = result.record
         assert record is not None  # a hit always carries one
         try:
             loaded = self._import(record, result.allocation_fds)
+        except BaseException:
+            if result.hold_sock is not None:
+                result.hold_sock.close()
+            raise
         finally:
             # from_fd imports the handle; the engine's own FDs are never needed afterwards, and a
             # failure half-way through must not leave the rest of them pinned here.
@@ -494,6 +654,8 @@ class ResidentWeights:
             int(k): v for k, v in record.eplb_placement.items()
         } or None
         self.initialize_gpu_growth_bytes = record.initialize_gpu_growth_bytes
+        self._release_hold()
+        self._hold = result.hold_sock
         logging.info(
             "attached resident weights %s: %.2f GiB in %d allocations; the cold start's "
             "initialize() changed resident GPU memory by %+.2f GiB",
@@ -507,7 +669,9 @@ class ResidentWeights:
     def _import(self, record: SlotRecord, fds: Sequence[int]) -> List[RestoredTensor]:
         manifest = record.manifest
         if len(fds) != len(manifest.allocations):
-            self._drop_quietly()
+            self._drop_quietly(
+                expected_generation=getattr(self, "_seen_generation", None)
+            )
             raise RuntimeError(
                 f"resident weights {self.slot_key}: the store sent {len(fds)} descriptors for "
                 f"{len(manifest.allocations)} allocations; the record has been dropped, "
@@ -921,7 +1085,7 @@ class ResidentWeights:
 
     def _fail_replay(self, scope: ScopeKey, key: str, what: str) -> None:
         """A replay asked for something the published record does not have: give up on it."""
-        self._drop_quietly()
+        self._drop_quietly(expected_generation=getattr(self, "_seen_generation", None))
         raise RuntimeError(
             f"resident weights {self.slot_key}: the published record has no {what} {key!r} for "
             f"scope {scope}. This initialization took a different branch than the run that "
@@ -1000,7 +1164,7 @@ class ResidentWeights:
             self._recorder = None
 
     def _fail_unrequested_keys(self, unrequested: List[str]) -> None:
-        self._drop_quietly()
+        self._drop_quietly(expected_generation=getattr(self, "_seen_generation", None))
         raise RuntimeError(
             f"resident weights {self.slot_key}: {len(unrequested)} published results were "
             f"never asked for: {', '.join(unrequested[:20])}. This initialization took a different branch "
@@ -1057,7 +1221,9 @@ class ResidentWeights:
             if self.verify:
                 self._compare_with_store(manifest)
             try:
-                store.publish_slot(self._store_name, self.slot_key, record, fds)
+                hold_sock = store.publish_slot(
+                    self._store_name, self.slot_key, record, fds, hold=True
+                )
             except (OSError, store.StoreError) as error:
                 logging.warning(
                     "resident weights %s not published: %s", self.slot_key, error
@@ -1066,6 +1232,8 @@ class ResidentWeights:
         finally:
             _close_fds(fds)
         self._published = True
+        self._release_hold()
+        self._hold = hold_sock
         logging.info(
             "published resident weights %s: %.2f GiB in %d allocations",
             self.slot_key,
@@ -1549,12 +1717,17 @@ def checkpoint_digest(path: str, follow_index: bool = False) -> str:
     return hashlib.sha256("\n".join(sorted(entries)).encode()).hexdigest()
 
 
-def all_ranks_true(value: bool, device: str) -> bool:
-    """Agree before entering or skipping checkpoint-loader WORLD collectives."""
+def all_ranks_min_state(state: int, device: str) -> int:
+    """Agree on the minimum integer state across participating WORLD ranks."""
     dist = torch.distributed
     if not dist.is_initialized() or dist.get_world_size() <= 1:
-        return value
+        return state
     tensor_device = device if dist.get_backend() == "nccl" else "cpu"
-    flag = torch.tensor(int(value), dtype=torch.int32, device=tensor_device)
+    flag = torch.tensor(int(state), dtype=torch.int32, device=tensor_device)
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
-    return bool(flag.item())
+    return int(flag.item())
+
+
+def all_ranks_true(value: bool, device: str) -> bool:
+    """Agree before entering or skipping checkpoint-loader WORLD collectives."""
+    return bool(all_ranks_min_state(int(value), device))

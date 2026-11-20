@@ -12,13 +12,47 @@ import mmap
 import os
 import sys
 import warnings
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import torch
 
 # Linux UAPI; some supported Conda builds omit the corresponding Python names.
 _F_ADD_SEALS, _F_GET_SEALS, _SEALS = 1033, 1034, 0x000F
 _deferred_releases: List["CpuAllocation"] = []
+
+
+def sealed_memfd(
+    size_bytes: int, write: Callable[[torch.Tensor], None], preallocate: bool = False
+) -> int:
+    """A read-only FD of a new sealed memfd of ``size_bytes``, filled by ``write``.
+
+    ``write`` gets a writable uint8 tensor over the whole file. ``preallocate`` allocates every
+    page before ``write`` runs, so a host short of memory fails here with an error instead of
+    faulting pages in while copying.
+    """
+    create = ctypes.CDLL(None, use_errno=True).memfd_create
+    create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+    create.restype = ctypes.c_int
+    fd = create(b"rtp-resident-cpu", 3)  # CLOEXEC | ALLOW_SEALING
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "memfd_create")
+    try:
+        os.ftruncate(fd, size_bytes)
+        if preallocate:
+            os.posix_fallocate(fd, 0, size_bytes)
+        with mmap.mmap(
+            fd, size_bytes, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE
+        ) as mapping:
+            staging = torch.frombuffer(mapping, dtype=torch.uint8, count=size_bytes)
+            try:
+                write(staging)
+            finally:
+                del staging
+        fcntl.fcntl(fd, _F_ADD_SEALS, _SEALS)
+        # dup/SCM_RIGHTS preserve O_RDWR; reopen to obtain a read-only description.
+        return os.open(f"/proc/self/fd/{fd}", os.O_RDONLY | os.O_CLOEXEC)
+    finally:
+        os.close(fd)
 
 
 class CpuAllocation(mmap.mmap):
@@ -37,33 +71,13 @@ class CpuAllocation(mmap.mmap):
         data = torch.empty(0, dtype=torch.uint8).set_(source)
         cuda_access = torch.cuda.is_available() and data.is_pinned()
         size = (logical_bytes + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
-        create = ctypes.CDLL(None, use_errno=True).memfd_create
-        create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
-        create.restype = ctypes.c_int
-        fd = create(b"rtp-resident-cpu", 3)  # CLOEXEC | ALLOW_SEALING
-        if fd < 0:
-            raise OSError(ctypes.get_errno(), "memfd_create")
+        readonly = sealed_memfd(
+            size, lambda staging: staging[:logical_bytes].copy_(data)
+        )
         try:
-            os.ftruncate(fd, size)
-            with mmap.mmap(
-                fd, size, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE
-            ) as mapping:
-                staging = torch.frombuffer(
-                    mapping, dtype=torch.uint8, count=logical_bytes
-                )
-                try:
-                    staging.copy_(data)
-                finally:
-                    del staging
-            fcntl.fcntl(fd, _F_ADD_SEALS, _SEALS)
-            # dup/SCM_RIGHTS preserve O_RDWR; reopen to obtain a read-only description.
-            readonly = os.open(f"/proc/self/fd/{fd}", os.O_RDONLY | os.O_CLOEXEC)
-            try:
-                return cls.from_fd(readonly, size, device, cuda_access)
-            finally:
-                os.close(readonly)
+            return cls.from_fd(readonly, size, device, cuda_access)
         finally:
-            os.close(fd)
+            os.close(readonly)
 
     @classmethod
     def from_fd(

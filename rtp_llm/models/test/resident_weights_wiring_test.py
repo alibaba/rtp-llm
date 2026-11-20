@@ -19,7 +19,7 @@ import torch.multiprocessing as mp
 from rtp_llm.config.py_config_modules import ResidentWeightsConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.resident_weights import vmm
-from rtp_llm.resident_weights.store import StoreOp
+from rtp_llm.resident_weights.store import StoreOp, StoreSettings
 from rtp_llm.resident_weights.weights import ResidentWeights, all_ranks_true
 from rtp_llm.utils.model_weight import W
 
@@ -288,6 +288,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
         manager._store_name = "rtp_llm_resident_weights.500.29940"
         manager.slot_key = "GPU-a/target"
         manager._allocation_refs = []
+        manager._hold = None
         manager.attach_or_load_weights = Mock(side_effect=AssertionError("attached"))
         with self.assertLogs(level="WARNING") as logs:
             events = self._consensus_failure_load(manager)
@@ -320,7 +321,9 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
                     result = model._create_resident_weights()
                 if available and not eplb:
                     self.assertIs(result, create.return_value)
-                    create.assert_called_once_with("draft", 0, {}, True)
+                    create.assert_called_once_with(
+                        "draft", 0, {}, True, StoreSettings(600.0, 3600.0)
+                    )
                 else:
                     self.assertIsNone(result)
                     create.assert_not_called()
@@ -360,6 +363,7 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
         manager._store_name = "test"
         manager.slot_key = "gpu0/target"
         manager.fingerprint = "fingerprint"
+        manager._hold = None
         manager._drop_quietly = Mock()
         manager._import = Mock(return_value=[])
         record = SimpleNamespace(
@@ -369,7 +373,10 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
             initialize_gpu_growth_bytes=0,
         )
         result = SimpleNamespace(
-            status=store.AttachStatus.HIT, record=record, allocation_fds=[]
+            status=store.AttachStatus.HIT,
+            record=record,
+            allocation_fds=[],
+            hold_sock=None,
         )
         with patch.object(store, "attach_slot", return_value=result), patch(
             "builtins.open", side_effect=AssertionError("no source scan")
@@ -377,6 +384,267 @@ class ResidentWeightsRegressionTest(unittest.TestCase):
             self.assertEqual(manager.attach(), [])
         manager._import.assert_called_once_with(record, [])
         manager._drop_quietly.assert_not_called()
+
+    def test_restore_failed_joins_collective_and_peers_release_without_dropping_host_copy(
+        self,
+    ):
+        from rtp_llm.resident_weights import store
+
+        # Rank A failed to restore from host memory: attach() records _restore_error instead
+        # of raising before the collective, so Rank B does not hang in all_reduce.
+        rank_a = ResidentWeights.__new__(ResidentWeights)
+        rank_a._store_name = "test"
+        rank_a.slot_key = "gpu0/target"
+        rank_a.fingerprint = "fp"
+        rank_a.verify = False
+        rank_a._allocation_refs = []
+        rank_a._hold = None
+        rank_a._replay = None
+        rank_a._attached = False
+        rank_a._restore_error = None
+        rank_a._drop_quietly = Mock()
+        failed_result = store.AttachResult(
+            store.AttachStatus.RESTORE_FAILED, restore_error="GPU OOM"
+        )
+        seen_states = []
+
+        def fake_consensus(state, _device):
+            seen_states.append(state)
+            return 0  # _ATTACH_RESTORE_FAILED
+
+        loader = Mock()
+        with patch.object(store, "attach_slot", return_value=failed_result), patch(
+            "rtp_llm.resident_weights.weights.all_ranks_min_state",
+            side_effect=fake_consensus,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "GPU OOM"):
+                rank_a.attach_or_load_weights(
+                    loader, "cuda:0", {}, synchronize_ranks=True
+                )
+        self.assertEqual(seen_states, [0])
+        rank_a._drop_quietly.assert_not_called()
+        loader.load_weights.assert_not_called()
+
+        # Rank B hit locally, sees the collective fail, releases its mapping and hold socket,
+        # and raises WITHOUT calling drop_slot so Rank A's host copy stays intact.
+        hold_sock = Mock()
+        rank_b = ResidentWeights.__new__(ResidentWeights)
+        rank_b._store_name = "test"
+        rank_b.slot_key = "gpu1/target"
+        rank_b.fingerprint = "fp"
+        rank_b.verify = False
+        rank_b._allocation_refs = [Mock()]
+        rank_b._hold = hold_sock
+        rank_b._replay = Mock()
+        rank_b._attached = True
+        rank_b._restore_error = None
+        rank_b._drop_quietly = Mock()
+        seen_states.clear()
+        with patch.object(rank_b, "attach", return_value=[]), patch(
+            "rtp_llm.resident_weights.weights.all_ranks_min_state",
+            side_effect=fake_consensus,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "another rank failed to restore"):
+                rank_b.attach_or_load_weights(
+                    loader, "cuda:1", {}, synchronize_ranks=True
+                )
+        self.assertEqual(seen_states, [2])
+        hold_sock.close.assert_called_once()
+        self.assertIsNone(rank_b._hold)
+        self.assertFalse(rank_b._attached)
+        rank_b._drop_quietly.assert_not_called()
+        loader.load_weights.assert_not_called()
+
+    def test_restore_wait_timeout_aborts_without_dropping_or_cold_loading(self):
+        from rtp_llm.resident_weights.store import AttachResult, AttachStatus
+        from rtp_llm.resident_weights.weights import ResidentWeights
+
+        loader = Mock()
+        rank_a = ResidentWeights.__new__(ResidentWeights)
+        rank_a._store_name = "test"
+        rank_a.slot_key = "gpu0/target"
+        rank_a.fingerprint = "fp"
+        rank_a.fingerprint_text = ""
+        rank_a.verify = False
+        rank_a._allocation_refs = []
+        rank_a._hold = None
+        rank_a._seen_generation = None
+        rank_a._restore_error = None
+        rank_a._drop_quietly = Mock()
+
+        seen_states = []
+
+        def fake_consensus(state, _device):
+            seen_states.append(state)
+            return 0
+
+        # Simulate _attach_slot timing out while store still reports MOVING:
+        # must enter collective as RESTORE_FAILED (0), never drop_slot or cold-load.
+        moving = AttachResult(AttachStatus.MOVING)
+        with patch(
+            "rtp_llm.resident_weights.weights.store.attach_slot", return_value=moving
+        ), patch("rtp_llm.resident_weights.weights._RESTORE_WAIT_S", 0.0), patch(
+            "rtp_llm.resident_weights.weights.time.monotonic",
+            side_effect=[0.0, 1.0],
+        ), patch(
+            "rtp_llm.resident_weights.weights.all_ranks_min_state",
+            side_effect=fake_consensus,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "still moving back to the GPU"):
+                rank_a.attach_or_load_weights(
+                    loader, "cuda:0", {}, synchronize_ranks=True
+                )
+        self.assertEqual(seen_states, [0])
+        rank_a._drop_quietly.assert_not_called()
+        loader.load_weights.assert_not_called()
+
+    def test_moving_poll_rpc_timeout_aborts_without_dropping_or_cold_loading(self):
+        from rtp_llm.resident_weights.store import AttachResult, AttachStatus
+        from rtp_llm.resident_weights.weights import ResidentWeights
+
+        loader = Mock()
+        rank_a = ResidentWeights.__new__(ResidentWeights)
+        rank_a._store_name = "test"
+        rank_a.slot_key = "gpu0/target"
+        rank_a.fingerprint = "fp"
+        rank_a.fingerprint_text = ""
+        rank_a.verify = False
+        rank_a._allocation_refs = []
+        rank_a._hold = None
+        rank_a._seen_generation = None
+        rank_a._attach_attempted = False
+        rank_a._restore_error = None
+        rank_a._drop_quietly = Mock()
+
+        seen_states = []
+
+        def fake_consensus(state, _device):
+            seen_states.append(state)
+            return 0
+
+        with patch(
+            "rtp_llm.resident_weights.weights.store.attach_slot",
+            side_effect=[
+                AttachResult(AttachStatus.MOVING),
+                TimeoutError("rpc timeout"),
+            ],
+        ), patch("rtp_llm.resident_weights.weights.time.sleep"), patch(
+            "rtp_llm.resident_weights.weights.all_ranks_min_state",
+            side_effect=fake_consensus,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "lost contact with the store"):
+                rank_a.attach_or_load_weights(
+                    loader, "cuda:0", {}, synchronize_ranks=True
+                )
+        self.assertEqual(seen_states, [0])
+        rank_a._drop_quietly.assert_not_called()
+        loader.load_weights.assert_not_called()
+
+    def test_discard_attach_after_absent_does_not_drop_newly_published_record(self):
+        from rtp_llm.resident_weights.store import AttachResult, AttachStatus
+        from rtp_llm.resident_weights.weights import ResidentWeights
+
+        manager = ResidentWeights.__new__(ResidentWeights)
+        manager._store_name = "test"
+        manager.slot_key = "gpu0/target"
+        manager.fingerprint = "fp"
+        manager.fingerprint_text = ""
+        manager.verify = False
+        manager._allocation_refs = []
+        manager._hold = None
+        manager._seen_generation = None
+        manager._attach_attempted = False
+        manager._restore_error = None
+        manager._drop_quietly = Mock()
+
+        with patch(
+            "rtp_llm.resident_weights.weights.store.attach_slot",
+            return_value=AttachResult(AttachStatus.ABSENT),
+        ):
+            self.assertIsNone(manager.attach())
+        manager.discard_attach()
+        manager._drop_quietly.assert_not_called()
+
+    def test_initial_attach_reply_timeout_aborts_without_cold_loading(self):
+        from rtp_llm.resident_weights.weights import ResidentWeights
+
+        loader = Mock()
+        rank_a = ResidentWeights.__new__(ResidentWeights)
+        rank_a._store_name = "test"
+        rank_a.slot_key = "gpu0/target"
+        rank_a.fingerprint = "fp"
+        rank_a.fingerprint_text = ""
+        rank_a.verify = False
+        rank_a._allocation_refs = []
+        rank_a._hold = None
+        rank_a._seen_generation = None
+        rank_a._attach_attempted = False
+        rank_a._restore_error = None
+        rank_a._drop_quietly = Mock()
+
+        seen_states = []
+
+        def fake_consensus(state, _device):
+            seen_states.append(state)
+            return 0
+
+        with patch(
+            "rtp_llm.resident_weights.weights.store.attach_slot",
+            side_effect=TimeoutError("reply timed out"),
+        ), patch(
+            "rtp_llm.resident_weights.weights.all_ranks_min_state",
+            side_effect=fake_consensus,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "timed out waiting for store"):
+                rank_a.attach_or_load_weights(
+                    loader, "cuda:0", {}, synchronize_ranks=True
+                )
+        self.assertEqual(seen_states, [0])
+        rank_a._drop_quietly.assert_not_called()
+        loader.load_weights.assert_not_called()
+
+    def test_attach_disconnect_followed_by_probe_timeout_aborts_without_cold_loading(
+        self,
+    ):
+        from rtp_llm.resident_weights.weights import ResidentWeights
+
+        loader = Mock()
+        rank_a = ResidentWeights.__new__(ResidentWeights)
+        rank_a._store_name = "test"
+        rank_a.slot_key = "gpu0/target"
+        rank_a.fingerprint = "fp"
+        rank_a.fingerprint_text = ""
+        rank_a.verify = False
+        rank_a._allocation_refs = []
+        rank_a._hold = None
+        rank_a._seen_generation = None
+        rank_a._attach_attempted = False
+        rank_a._restore_error = None
+        rank_a._drop_quietly = Mock()
+
+        seen_states = []
+
+        def fake_consensus(state, _device):
+            seen_states.append(state)
+            return 0
+
+        with patch(
+            "rtp_llm.resident_weights.weights.store.attach_slot",
+            side_effect=ConnectionError("closed mid-reply"),
+        ), patch(
+            "rtp_llm.resident_weights.weights.store.list_store",
+            side_effect=TimeoutError("probe timed out"),
+        ), patch(
+            "rtp_llm.resident_weights.weights.all_ranks_min_state",
+            side_effect=fake_consensus,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "store probe failed"):
+                rank_a.attach_or_load_weights(
+                    loader, "cuda:0", {}, synchronize_ranks=True
+                )
+        self.assertEqual(seen_states, [0])
+        rank_a._drop_quietly.assert_not_called()
+        loader.load_weights.assert_not_called()
 
     @staticmethod
     def _fingerprint_model(directory):
