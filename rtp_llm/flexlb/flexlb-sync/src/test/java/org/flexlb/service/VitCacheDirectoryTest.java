@@ -29,6 +29,7 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -89,6 +90,28 @@ class VitCacheDirectoryTest {
     @AfterEach
     void tearDown() {
         directory.stop();
+    }
+
+    @Test
+    void vitOnlyRoutesAccountForMediaAssignedSinceThePollStarted() {
+        snapshot(a, "a1");
+        snapshot(b, "b1");
+        long aPollCursor = a.vitRoutedInputs();
+        a.recordVitLoad(OptionalLong.of(0), aPollCursor, System.nanoTime());
+        b.recordVitLoad(OptionalLong.of(1), b.vitRoutedInputs(), System.nanoTime());
+
+        var route = context("cold", "cold");
+        route.getRequest().setVitRouteOnly(true);
+        assertEquals(a.getIp(), selector.select(route, null).getServerIp());
+        assertEquals(2L, a.vitRoutedInputs());
+
+        // A cold key still follows its pending placement while an unrelated key
+        // follows current load. A poll started before assignment keeps the charge.
+        a.recordVitLoad(OptionalLong.of(0), aPollCursor, System.nanoTime());
+        assertEquals(a.getIp(), selector.select(context("cold"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(context("independent"), null).getServerIp());
+        a.recordVitLoad(OptionalLong.of(0), a.vitRoutedInputs(), System.nanoTime());
+        assertEquals(a.getIp(), selector.select(context("another"), null).getServerIp());
     }
 
     @Test
