@@ -321,7 +321,10 @@ def _pool_result(
     copied: Dict[Tuple[int, torch.device], torch.Tensor] = {}
     gpu_bytes = cpu_bytes = 0
     try:
-        collect(result, devices)
+        try:
+            collect(result, devices)
+        finally:
+            del collect
         for pool, identities in grouped.items():
             total = 0
             for identity in identities:
@@ -365,7 +368,10 @@ def _pool_result(
                 return {key: rebuild(item, target[key]) for key, item in value.items()}
             return value
 
-        pooled = rebuild(result, devices)
+        try:
+            pooled = rebuild(result, devices)
+        finally:
+            del rebuild
         events = _record_cuda_events(pooled)
         owners = list(reservations.values())
         for owner in owners:
@@ -376,8 +382,7 @@ def _pool_result(
             reservation.release()
         raise
     finally:
-        # Recursive collectors/rebuilders form closure cycles. Neither producer
-        # tensors nor pool views should wait for cyclic GC to release ownership.
+        # An error can retain this frame through its traceback.
         specs.clear()
         copied.clear()
 
@@ -413,8 +418,7 @@ def _copy_pooled_result_to_devices(result: Any, devices: Any) -> Any:
     try:
         return visit(result, devices)
     finally:
-        # The recursive visitor forms a closure cycle. Drop its tensor owners
-        # immediately, including when copying one of the later leaves fails.
+        del visit
         copied.clear()
 
 
@@ -456,7 +460,10 @@ def _compact_tensor_tier_bytes(result: Any, devices: Any) -> Tuple[int, int]:
             for key, item in value.items():
                 visit(item, target[key])
 
-    visit(result, devices)
+    try:
+        visit(result, devices)
+    finally:
+        del visit
     return tuple(sizes)
 
 
@@ -492,32 +499,29 @@ def _copy_result_to_devices(result: Any, devices: Any) -> Any:
     try:
         return visit(result, devices)
     finally:
-        # The recursive visitor forms a closure cycle. Drop its tensor owners
-        # immediately, including when copying one of the later leaves fails.
+        del visit
         copied.clear()
+
+
+def _tree_output_tokens(value: Any) -> int:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return 0
+        if value.ndim >= 2 and value.shape[-1] > 0:
+            return value.numel() // value.shape[-1]
+        # A one-dimensional embedding represents a single token vector.
+        return 1
+    if isinstance(value, (list, tuple)):
+        return sum(_tree_output_tokens(item) for item in value)
+    if isinstance(value, dict):
+        return sum(_tree_output_tokens(item) for item in value.values())
+    return 0
 
 
 def _embedding_output_tokens(result: Any) -> int:
     """Count tokens in the primary embedding, excluding position metadata."""
-
-    def output_tokens(value: Any) -> int:
-        if isinstance(value, torch.Tensor):
-            if value.numel() == 0:
-                return 0
-            if value.ndim >= 2 and value.shape[-1] > 0:
-                return value.numel() // value.shape[-1]
-            # A one-dimensional embedding is one token vector, not a sequence
-            # of scalar tokens. Keep this consistent with the request-level
-            # embedding length metric.
-            return 1
-        if isinstance(value, (list, tuple)):
-            return sum(output_tokens(item) for item in value)
-        if isinstance(value, dict):
-            return sum(output_tokens(item) for item in value.values())
-        return 0
-
     primary = result[0] if isinstance(result, tuple) and result else result
-    return output_tokens(primary)
+    return _tree_output_tokens(primary)
 
 
 class MMEmbeddingCacheEntry:

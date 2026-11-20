@@ -180,6 +180,38 @@ class TensorObjectTest(unittest.TestCase):
                 gc.enable()
             gc.collect()
 
+    def test_unpack_releases_tensor_table_without_cyclic_gc(self):
+        class TensorTable(list):
+            pass
+
+        source = {"cache_key": "key", "result": torch.arange(4)}
+        packed = pack_object(plan_object(source, checksum=False))
+        tables = []
+        loads = json.loads
+
+        def track_table(data):
+            header = loads(data)
+            header["tensors"] = TensorTable(header["tensors"])
+            tables.append(weakref.ref(header["tensors"]))
+            return header
+
+        was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with patch(
+                "rtp_llm.multimodal.kvcm.tensor_object.json.loads",
+                side_effect=track_table,
+            ):
+                restored = unpack_object(packed, expected_key="key")
+                torch.testing.assert_close(restored["result"], source["result"])
+                with self.assertRaisesRegex(ValueError, "key mismatch"):
+                    unpack_object(packed, expected_key="different-key")
+            self.assertEqual([table() is None for table in tables], [True, True])
+        finally:
+            if was_enabled:
+                gc.enable()
+            gc.collect()
+
     def test_whole_result_mixed_types_empty_and_alias(self):
         emb = torch.arange(24, dtype=torch.bfloat16).reshape(3, 8)
         pos = torch.arange(9, dtype=torch.int64).reshape(3, 3)

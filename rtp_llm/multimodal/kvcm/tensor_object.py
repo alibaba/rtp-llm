@@ -230,6 +230,57 @@ def pack_object(
     return output
 
 
+def _rebuild_tree(tree, tensor_count, referenced, tensors=None):
+    nodes = 0
+
+    def rebuild(node, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if (
+            nodes > _MAX_NODES
+            or depth > _MAX_DEPTH
+            or not isinstance(node, list)
+            or len(node) != 2
+        ):
+            raise ValueError("invalid multimodal structure")
+        kind, content = node
+        if kind == "tensor":
+            if type(content) is not int or not 0 <= content < tensor_count:
+                raise ValueError("invalid multimodal tensor reference")
+            referenced.add(content)
+            return tensors[content] if tensors is not None else None
+        if kind in ("list", "tuple") and isinstance(content, list):
+            result = [rebuild(v, depth + 1) for v in content]
+            return tuple(result) if kind == "tuple" else result
+        if kind == "dict" and isinstance(content, list):
+            result = {}
+            for pair in content:
+                if (
+                    not isinstance(pair, list)
+                    or len(pair) != 2
+                    or not isinstance(pair[0], str)
+                    or pair[0] in result
+                ):
+                    raise ValueError("invalid multimodal dictionary")
+                result[pair[0]] = rebuild(pair[1], depth + 1)
+            return result
+        if kind == "scalar" and (
+            content is None
+            or type(content) in (bool, int, str)
+            or type(content) is float
+            and math.isfinite(content)
+        ):
+            return content
+        raise ValueError("invalid multimodal node")
+
+    try:
+        return rebuild(tree)
+    finally:
+        # A recursive closure otherwise keeps the metadata and tensors alive
+        # until cyclic GC. Release both on parse errors and successful reads.
+        del rebuild
+
+
 def unpack_object(
     buffer: torch.Tensor,
     *,
@@ -350,49 +401,8 @@ def unpack_object(
             end = spec["offset"] + spec["nbytes"]
         if end != size - offset:
             raise ValueError("invalid multimodal object length")
-        nodes, referenced = 0, set()
-
-        def rebuild(node, tensors=None, depth=0):
-            nonlocal nodes
-            nodes += 1
-            if (
-                nodes > _MAX_NODES
-                or depth > _MAX_DEPTH
-                or not isinstance(node, list)
-                or len(node) != 2
-            ):
-                raise ValueError("invalid multimodal structure")
-            kind, content = node
-            if kind == "tensor":
-                if type(content) is not int or not 0 <= content < len(specs):
-                    raise ValueError("invalid multimodal tensor reference")
-                referenced.add(content)
-                return tensors[content] if tensors is not None else None
-            if kind in ("list", "tuple") and isinstance(content, list):
-                result = [rebuild(v, tensors, depth + 1) for v in content]
-                return tuple(result) if kind == "tuple" else result
-            if kind == "dict" and isinstance(content, list):
-                result = {}
-                for pair in content:
-                    if (
-                        not isinstance(pair, list)
-                        or len(pair) != 2
-                        or not isinstance(pair[0], str)
-                        or pair[0] in result
-                    ):
-                        raise ValueError("invalid multimodal dictionary")
-                    result[pair[0]] = rebuild(pair[1], tensors, depth + 1)
-                return result
-            if kind == "scalar" and (
-                content is None
-                or type(content) in (bool, int, str)
-                or type(content) is float
-                and math.isfinite(content)
-            ):
-                return content
-            raise ValueError("invalid multimodal node")
-
-        layout = rebuild(header["tree"])
+        referenced = set()
+        layout = _rebuild_tree(header["tree"], len(specs), referenced)
         if magic == _MAGIC_V2 and expected_key is not None:
             if not isinstance(layout, dict) or layout.get("cache_key") != expected_key:
                 raise ValueError(
@@ -459,5 +469,4 @@ def unpack_object(
                     if spec["device"] == "cuda":
                         tensors[index] = tensors[index].to(cuda_device or "cuda")
     with stage("tree_restore"):
-        nodes = 0
-        return rebuild(header["tree"], tensors)
+        return _rebuild_tree(header["tree"], len(specs), referenced, tensors)
