@@ -144,7 +144,7 @@ class DecodeBatchNumerics(unittest.TestCase):
         )
         for seed in range(5):
             torch.manual_seed(seed)
-            weight = mhc.prepare_tf32_weight(
+            weight = mhc.prepare_sm90_tf32_rne_weight(
                 torch.randn((24, 20480), device="cuda") / 20480**0.5
             )
             for m in (32, 33, 40, 48, 60, 64):

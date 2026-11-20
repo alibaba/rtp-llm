@@ -113,6 +113,14 @@ class Sm90DelayedHCTest(unittest.TestCase):
                     )
                     residual_gpu = residual_cpu.cuda()
                     with (
+                        # The upstream big-pre eligibility check probes the
+                        # configured GEMM backend before its SM100-only gate.
+                        # Select TileLang explicitly for this fallback fixture;
+                        # keep the independent no-DeepGEMM assertion below.
+                        patch.dict(
+                            "os.environ",
+                            {"DSV4_MHC_PRE_GEMM_BACKEND": "tilelang_single"},
+                        ),
                         patch.object(v41_prenorm, "is_supported", return_value=False),
                         patch.object(
                             ops, "mhc_pre_norm_fn", wraps=ops.mhc_pre_norm_fn

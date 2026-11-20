@@ -1,12 +1,15 @@
 """SM90 numerical and graph gates for the vLLM two-kernel MegaMHC path."""
 
 import unittest
+from unittest import mock
 
 import torch
 
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel import (
     _WARMED_STREAMS,
+    prepare_sm90_tf32_rne_weight,
+    try_vllm_two_kernel_post_pre,
 )
 from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
 from rtp_llm.models_py.modules.dsv41.moe.shared_expert import PendingCombine
@@ -116,7 +119,7 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_low_token_outputs(self):
-        for tokens in (1, 4, 8, 16, 24, 32):
+        for tokens in (1, 4, 8, 16, 24, 32, 33, 63, 64):
             with self.subTest(tokens=tokens):
                 reference = _case(tokens, 20261029 + tokens)
                 candidate = _case(tokens, 20261029 + tokens)
@@ -128,6 +131,75 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
                 _assert_outputs(self, actual, expected)
 
     @torch.inference_mode()
+    def test_above_64_rows_falls_back_without_launching(self):
+        case = _case(65, 20261120 + 65)
+        residual = case["residual"].clone()
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel.run",
+            side_effect=AssertionError("out-of-range rows must not launch fused HC"),
+        ):
+            self.assertIsNone(try_vllm_two_kernel_post_pre(**case))
+            self.assertIsNone(try_fused_post_pre(**case))
+        self.assertTrue(torch.equal(case["residual"], residual))
+
+    @torch.inference_mode()
+    def test_tf32_halfway_weights_match_native_tma_rounding(self):
+        reference = _case(1, 20261120)
+        candidate = _case(1, 20261120)
+        # Positive/negative ties above an even/odd retained TF32 mantissa.
+        halfway_bits = torch.tensor(
+            [0x3B001000, 0xBB001000, 0x3B003000, 0xBB003000],
+            device="cuda",
+            dtype=torch.int64,
+        ).to(torch.int32)
+        expected_bits = torch.tensor(
+            [0x3B000000, 0xBB000000, 0x3B004000, 0xBB004000],
+            device="cuda",
+            dtype=torch.int64,
+        ).to(torch.int32)
+        for case in (reference, candidate):
+            case["attn_out"].zero_()
+            case["residual"].fill_(1)
+            case["post"].zero_()
+            case["comb"].copy_(torch.eye(HC, device="cuda").view(1, 1, HC, HC))
+            case["previous"].pre_mix_out.fill_(0.25)
+            case["next_hc"].base.zero_()
+            case["next_hc"].fn.zero_()
+            case["next_hc"].fn[HC : 2 * HC, :4].copy_(
+                halfway_bits.view(torch.float32).view(HC, 1).expand(HC, 4)
+            )
+
+        rounded = prepare_sm90_tf32_rne_weight(candidate["next_hc"].fn)
+        torch.testing.assert_close(
+            rounded[HC : 2 * HC, :4].contiguous().view(torch.int32),
+            expected_bits.view(HC, 1).expand(HC, 4),
+            rtol=0,
+            atol=0,
+        )
+        self.assertEqual(
+            rounded.data_ptr(),
+            prepare_sm90_tf32_rne_weight(candidate["next_hc"].fn).data_ptr(),
+        )
+        expected = tuple(value.clone() for value in _golden(reference))
+        actual = _candidate(candidate)
+        torch.cuda.synchronize()
+        _assert_outputs(self, actual, expected)
+
+        # This fixture detects the old half-up projection without changing the
+        # existing 1e-6 post/pre/comb or BF16 byte-equality contracts.
+        fn = candidate["next_hc"].fn
+        biased = ((fn.view(torch.int32) + 0x1000) & -8192).view(torch.float32)
+        biased_projection = biased[HC : 2 * HC].sum(-1) * torch.rsqrt(
+            torch.tensor(1.0 + EPS, device="cuda")
+        )
+        biased_post = 2 * torch.sigmoid(
+            biased_projection * candidate["next_hc"].scale[1]
+        )
+        self.assertGreater(
+            (biased_post - expected[2].reshape(HC)).abs().max().item(), 1e-6
+        )
+
+    @torch.inference_mode()
     def test_add_cast_fold(self):
         """The deferred routed/shared pair must replace add+cast bit-exactly.
 
@@ -136,7 +208,7 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
         operands directly. A fold that skips the intermediate BF16 rounding is
         not equivalent, which the last assertion pins down.
         """
-        for tokens in (1, 3, 4, 16, 32):
+        for tokens in (1, 3, 4, 16, 32, 64):
             with self.subTest(tokens=tokens):
                 reference = _case(tokens, 20261105 + tokens)
                 candidate = _case(tokens, 20261105 + tokens)
@@ -169,7 +241,7 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_alternating_input_graph_replay(self):
-        for tokens in (1, 8, 32):
+        for tokens in (1, 8, 32, 64):
             with self.subTest(tokens=tokens):
                 eager = _case(tokens, 20300000 + tokens)
                 captured_case = _case(tokens, 20300000 + tokens)
@@ -213,7 +285,7 @@ class MhcSm90MegaCudaTest(unittest.TestCase):
     @torch.inference_mode()
     def test_deferred_combine_graph_replay(self):
         """The deferred pair must replay identically under a captured graph."""
-        for tokens in (1, 8, 32):
+        for tokens in (1, 8, 32, 64):
             with self.subTest(tokens=tokens):
                 eager = _case(tokens, 20400000 + tokens)
                 captured_case = _case(tokens, 20400000 + tokens)
