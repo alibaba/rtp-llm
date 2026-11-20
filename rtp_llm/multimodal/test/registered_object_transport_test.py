@@ -330,6 +330,49 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         pool.close()
         client.close.assert_called_once()
 
+    def test_lease_metrics_do_not_hold_the_allocator_lock(self):
+        reporting_release = threading.Event()
+        resume_report = threading.Event()
+
+        def observe_lease(for_write, delta, nbytes):
+            if delta == -1 and not reporting_release.is_set():
+                reporting_release.set()
+                resume_report.wait(4)
+
+        pool = self.pool(observe_lease=observe_lease)
+        slot = pool.acquire()
+        acquired = None
+        with ThreadPoolExecutor(2) as workers:
+            released = workers.submit(pool.release, slot)
+            try:
+                self.assertTrue(reporting_release.wait(1))
+                acquired = workers.submit(pool.acquire)
+                self.assertIs(acquired.result(timeout=1), slot)
+            finally:
+                resume_report.set()
+                released.result(timeout=1)
+                if acquired is not None:
+                    next_slot = acquired.result(timeout=1)
+                    if next_slot is not None:
+                        pool.release(next_slot)
+
+    def test_acquire_deadline_includes_contended_allocator_lock(self):
+        pool = self.pool()
+        with ThreadPoolExecutor(1) as workers:
+            acquired = None
+            try:
+                with pool._condition:
+                    acquired = workers.submit(pool.acquire, timeout=0.03)
+                    self.assertIsNone(acquired.result(timeout=1))
+            finally:
+                if acquired is not None:
+                    slot = acquired.result(timeout=1)
+                    if slot is not None:
+                        pool.release(slot)
+        slot = pool.acquire()
+        self.assertIsNotNone(slot)
+        pool.release(slot)
+
     def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
         pool = self.pool(
             direct_payload=True,

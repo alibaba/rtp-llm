@@ -734,41 +734,45 @@ class RegisteredTransportPool:
             type(nbytes) is not int or not 0 < nbytes <= self._max_object_bytes
         ):
             raise ValueError("invalid GDR object size")
-        deadline = time.monotonic() + timeout
-        with self._condition:
-            slot = self._acquire_locked(nbytes, for_write, sized, deadline)
-        # Metrics must not block another read or write from leasing an extent.
+        wait_seconds = max(timeout, 0)
+        deadline = time.monotonic() + wait_seconds
+        if not self._condition.acquire(timeout=wait_seconds):
+            return None
+        slot = None
+        try:
+            while self._accepting and not self.quarantined:
+                # Condition.wait() reacquires the lock before returning.
+                if wait_seconds and time.monotonic() >= deadline:
+                    break
+                if sized:
+                    slot = self._take_range(nbytes, for_write)
+                else:
+                    healthy = [slot for slot in self._slots if not slot.quarantined]
+                    # A multi-slot pool reserves one healthy slot for read leases.
+                    writable = len(healthy)
+                    if for_write and len(self._slots) > 1:
+                        if len(healthy) <= 1:
+                            return None
+                        writable -= 1 + sum(
+                            self._in_use.get(slot, False) for slot in healthy
+                        )
+                    if writable > 0:
+                        slot = next(
+                            (item for item in healthy if item not in self._in_use),
+                            None,
+                        )
+                if slot is not None:
+                    self._in_use[slot] = for_write
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if not self._condition.wait(remaining):
+                    break
+        finally:
+            self._condition.release()
         if slot is not None and self._observe_lease is not None:
             self._observe_lease(for_write, 1, slot._capacity)
-        return slot
-
-    def _acquire_locked(self, nbytes, for_write, sized, deadline):
-        while self._accepting and not self.quarantined:
-            if sized:
-                slot = self._take_range(nbytes, for_write)
-                if slot is not None:
-                    return self._lease(slot, for_write)
-            else:
-                healthy = [slot for slot in self._slots if not slot.quarantined]
-                # A multi-slot pool reserves one healthy slot for read leases.
-                writable = len(healthy)
-                if for_write and len(self._slots) > 1:
-                    if len(healthy) <= 1:
-                        return None
-                    writable -= 1 + sum(
-                        self._in_use.get(slot, False) for slot in healthy
-                    )
-                if writable > 0:
-                    for slot in healthy:
-                        if slot not in self._in_use:
-                            return self._lease(slot, for_write)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0 or not self._condition.wait(remaining):
-                break
-        return None
-
-    def _lease(self, slot, for_write):
-        self._in_use[slot] = for_write
         return slot
 
     def stop_acquiring(self):
@@ -779,12 +783,12 @@ class RegisteredTransportPool:
     def release(self, slot):
         with self._condition:
             for_write = self._in_use.pop(slot)
-            capacity = slot._capacity
+
             if self._free_ranges is not None and not slot.quarantined:
                 self._return_range(slot)
             self._condition.notify_all()
         if self._observe_lease is not None:
-            self._observe_lease(for_write, -1, -capacity)
+            self._observe_lease(for_write, -1, -slot._capacity)
 
     def close(self):
         self.stop_acquiring()

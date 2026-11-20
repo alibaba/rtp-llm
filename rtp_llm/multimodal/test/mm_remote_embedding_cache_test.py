@@ -759,6 +759,23 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
+    def test_read_timeout_cancels_queued_transfer_and_returns_budget(self):
+        value = torch.arange(8)
+        store = Store({"hit": pack_object(plan_object((value, None)))})
+        remote = self.remote(store, read_transfer_workers=1)
+        resume = threading.Event()
+        blocker = remote._transfer_executor.submit(resume.wait)
+        try:
+            self.assertIsNone(remote.load("hit", timeout_ms=30))
+            self.assertEqual(remote.stats()["inflight_tasks"], 0)
+            self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        finally:
+            resume.set()
+            blocker.result(timeout=1)
+        remote._transfer_executor.submit(lambda: None).result(timeout=1)
+        self.assertFalse(store.read_started.is_set())
+        torch.testing.assert_close(remote.load("hit")[0], value)
+
     def test_cancelled_or_rejected_transfer_returns_permit(self):
         value = torch.arange(8)
         store = Store({"hit": pack_object(plan_object((value, None)))})
