@@ -176,6 +176,7 @@ struct GptModelOutputs {
 
     /** Downstream activations from a non-last target stage. */
     std::map<std::string, torch::Tensor> pp_intermediates;
+    torch::Tensor draft_token_ids;
 };
 
 struct CopyParams {

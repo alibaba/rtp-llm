@@ -23,7 +23,8 @@ public:
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
                                bool                               warm_up,
-                               int                                async_worker_count = 0);
+                               int                                async_worker_count = 0,
+                               bool                               device_input       = false);
     virtual ~NormalBatchStreamProcessor() = default;
 
     StreamGroups::NormalDeviceStates prepareDeviceStateInputs(const std::list<GenerateStreamPtr>& streams) const {
@@ -51,7 +52,8 @@ protected:
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
                                         size_t              total_batch_size_in,
                                         size_t              total_batch_size_out,
-                                        size_t              propose_step = 0) const;
+                                        size_t              propose_step          = 0,
+                                        bool                include_token_history = true) const;
 
     void setCommonSamplerInputs(SamplerInputs&                sampler_inputs,
                                 std::list<GenerateStreamPtr>& all_streams,

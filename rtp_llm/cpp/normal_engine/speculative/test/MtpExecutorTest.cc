@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -10,12 +11,14 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <pybind11/embed.h>
@@ -67,6 +70,108 @@ void registerExecCtxOps(pybind11::module& m);
 
 using namespace std;
 namespace spec = speculative;
+
+#if USING_CUDA
+TEST(TensorHolderAsyncTest, PinnedCopiesSurviveReleaseWithoutWaitingForGpu) {
+    const auto        stream = at::cuda::getStreamFromPool();
+    const auto        pinned = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    auto              source = torch::full({65536}, 73, pinned);
+    auto              output = torch::empty({65536}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    std::atomic<bool> ready{false};
+    std::thread       unblock([&ready] {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        ready.store(true, std::memory_order_release);
+    });
+    auto              join = std::shared_ptr<void>(nullptr, [&unblock, &ready](void*) {
+        ready.store(true, std::memory_order_release);
+        unblock.join();
+    });
+    C10_CUDA_CHECK(cudaLaunchHostFunc(
+        stream.stream(),
+        [](void* context) {
+            auto* ready = static_cast<std::atomic<bool>*>(context);
+            while (!ready->load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+        },
+        &ready));
+    C10_CUDA_CHECK(cudaMemcpyAsync(
+        output.data_ptr(), source.data_ptr(), source.nbytes(), cudaMemcpyHostToDevice, stream.stream()));
+    TensorHolder holder;
+    holder.hold_host(source);
+    source = torch::Tensor();
+    // Retire an older phase too: switching from count-based to stream-owned
+    // retention must protect every outstanding pinned allocation.
+    holder.release();
+    holder.release(stream);
+    EXPECT_TRUE(holder.clear_tensors.empty());
+    EXPECT_TRUE(holder.tensors.empty());
+    EXPECT_EQ(cudaErrorNotReady, cudaStreamQuery(stream.stream()));
+    auto overwrite = torch::zeros({65536}, pinned);
+    ready.store(true, std::memory_order_release);
+    stream.synchronize();
+    EXPECT_TRUE(torch::equal(output.cpu(), torch::full({65536}, 73, torch::kInt32)));
+}
+
+TEST(TensorHolderAsyncTest, ExternalHostOwnershipFollowsConsumerEvent) {
+    for (bool destroy_while_pending : {false, true}) {
+        const auto stream       = at::cuda::getStreamFromPool();
+        const auto other_stream = at::cuda::getStreamFromPool();
+        void*      allocation   = nullptr;
+        C10_CUDA_CHECK(cudaHostAlloc(&allocation, 65536 * sizeof(int32_t), cudaHostAllocDefault));
+        auto              memory = std::shared_ptr<void>(allocation, [](void* p) { cudaFreeHost(p); });
+        std::atomic<bool> released{false};
+        auto              source = torch::from_blob(
+            allocation,
+            {65536},
+            [&released](void*) { released.store(true, std::memory_order_release); },
+            torch::kInt32);
+        source.fill_(91);
+        auto              output = torch::empty({65536}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        std::atomic<bool> ready{false};
+        std::thread       unblock([&ready] {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            ready.store(true, std::memory_order_release);
+        });
+        auto              join = std::shared_ptr<void>(nullptr, [&unblock, &ready](void*) {
+            ready.store(true, std::memory_order_release);
+            unblock.join();
+        });
+        C10_CUDA_CHECK(cudaLaunchHostFunc(
+            stream.stream(),
+            [](void* context) {
+                auto* gate = static_cast<std::atomic<bool>*>(context);
+                while (!gate->load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+            },
+            &ready));
+        C10_CUDA_CHECK(cudaMemcpyAsync(
+            output.data_ptr(), source.data_ptr(), source.nbytes(), cudaMemcpyHostToDevice, stream.stream()));
+        auto holder = std::make_unique<TensorHolder>();
+        holder->hold_host(source);
+        source = torch::Tensor();
+        holder->release();
+        holder->release(stream);
+        EXPECT_EQ(cudaErrorNotReady, cudaStreamQuery(stream.stream()));
+        EXPECT_FALSE(released.load(std::memory_order_acquire));
+        // A later release on an idle stream must not retire this allocation.
+        holder->release(other_stream);
+        EXPECT_FALSE(released.load(std::memory_order_acquire));
+        if (destroy_while_pending) {
+            holder.reset();
+            EXPECT_EQ(cudaSuccess, cudaStreamQuery(stream.stream()));
+        } else {
+            ready.store(true, std::memory_order_release);
+            stream.synchronize();
+            holder->release();
+        }
+        EXPECT_TRUE(released.load(std::memory_order_acquire));
+        EXPECT_TRUE(torch::equal(output.cpu(), torch::full({65536}, 91, torch::kInt32)));
+    }
+}
+
+#endif
 
 TEST(MtpExecutorPolicyTest, SpeculativePrefillCPRequiresPrefillRole) {
     PrefillCPConfig prefill_cp_config;
@@ -174,7 +279,7 @@ TEST(MtpExecutorPolicyTest, DSparkPositionStateAdvancesByAcceptedLength) {
     auto accept_len = torch::tensor({2, 4}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
 
     auto next_positions =
-        MtpExecutor::advanceDSparkPositionIds(verify_positions, accept_len, /*batch_size=*/2, /*verify_width=*/4);
+        MtpExecutor::advanceVerifyPositionIds(verify_positions, accept_len, /*batch_size=*/2, /*verify_width=*/4);
 
     EXPECT_TRUE(
         torch::equal(next_positions.reshape({-1}).cpu(), torch::tensor({12, 22, 32, 104, 204, 304}, torch::kInt32)));
@@ -492,6 +597,7 @@ public:
         if (input_observer_) {
             input_observer_(inputs);
         }
+        prepared_attention_ = true;
         ++prepare_attention_count_;
         recordEvent("prepare_attention");
         if (prepare_input_holder.test_data.empty()) {
@@ -505,6 +611,14 @@ public:
                          inputs.sequence_lengths_plus_1,
                          expected_inputs.sequence_lengths_plus_1);
         checkTensorField("prepared lm_output_indexes", inputs.lm_output_indexes, expected_inputs.lm_output_indexes);
+    }
+
+    void discardPreparedAttentionInputs() noexcept override {
+        prepared_attention_ = false;
+    }
+
+    bool hasPreparedAttentionInputs() const {
+        return prepared_attention_;
     }
 
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
@@ -655,6 +769,7 @@ private:
     std::function<void(const GptModelInputs&)> input_observer_;
     std::shared_ptr<std::vector<std::string>>  event_log_;
     std::string                                event_name_;
+    bool                                       prepared_attention_                 = false;
     size_t                                     prepare_attention_count_            = 0;
     bool                                       speculative_target_commit_enabled_  = false;
     bool                                       speculative_target_prepare_throws_  = false;
@@ -858,6 +973,8 @@ class TestableMtpExecutor: public MtpExecutor {
 public:
     using MtpExecutor::MtpExecutor;
     using MtpExecutor::asyncPrepareAllowed;
+    using MtpExecutor::dispatchDecodeAsync;
+    using MtpExecutor::waitPendingTargetCommit;
     using MtpExecutor::prepareAndCommitSpeculativeTargetState;
     using MtpExecutor::reduceSpeculativeTargetPrepareStatus;
     using MtpExecutor::rendezvousSpeculativeTargetPhaseStatus;
@@ -4108,7 +4225,10 @@ TEST_F(MtpExecutorTest, testMissingIndexerSeedUsesSeedGraphOnlyForFirstProposal)
     runMultiBatchDecodeScenario(0);
 }
 
-TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
+class MtpExecutorPositionTest: public MtpExecutorTest, public ::testing::WithParamInterface<std::tuple<bool, bool>> {};
+
+TEST_P(MtpExecutorPositionTest, DraftModelDecodeExpandsTargetVerifyPositionIds) {
+    const auto [prepare_geometry, captured_loop] = GetParam();
     size_t propose_step = 4;
     size_t batch_size   = 2;
     size_t vocab_size   = 4;
@@ -4173,7 +4293,15 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
         makeDraftInput({12, 22}, {6, 8}, draft_output_1.all_hidden_states, {6, 6, 6, 8, 8, 8}),
         makeDraftInput({13, 23}, {7, 9}, draft_output_2.all_hidden_states, {7, 7, 7, 9, 9, 9}),
     });
-    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
+    if (captured_loop) {
+        GptModelOutputs proposal;
+        proposal.draft_token_ids = torch::tensor({12, 13, 14, 22, 23, 24}, torch::kInt32).reshape({2, 3}).cuda();
+        components.fake_draft_model->setOutputs({proposal});
+    } else {
+        components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
+    }
+    auto* active_draft_model   = components.fake_draft_model.get();
+    auto* active_draft_sampler = components.fake_fast_topk_sampler.get();
 
     spec::FastTopKSamplerOutput draft_sampler_output_1;
     draft_sampler_output_1.token_ids = torch::tensor({12, 22}, torch::kInt32).reshape({(int64_t)batch_size, 1});
@@ -4197,11 +4325,26 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     components.executor->setDraftModel(std::move(components.fake_draft_model));
     components.executor->setFastTopKSampler(std::move(components.fake_fast_topk_sampler));
 
-    std::vector<torch::Tensor> draft_probs_list;
+    std::optional<GptModelInputs> geometry;
+    if (prepare_geometry) {
+        components.fake_target_model->enableSpeculativeTargetCommit();
+        components.executor->setTargetModel(std::move(components.fake_target_model));
+        components.executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+        geometry = components.executor->launchTargetVerifyPrepareAsync(model_input, batch_size);
+        ASSERT_TRUE(geometry.has_value());
+    }
     torch::Tensor              draft_token_ids_t;
     int64_t                    model_forward_us = 0;
     components.executor->draftModelDecode(
-        model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+        model_input, stream_groups, draft_token_ids_t, model_forward_us, geometry ? &*geometry : nullptr);
+    EXPECT_EQ(active_draft_model->forwardCount(), captured_loop ? 1u : propose_step - 1);
+    EXPECT_EQ(active_draft_sampler->forwardCount(), captured_loop ? 0u : propose_step - 1);
+    if (geometry) {
+        components.executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        EXPECT_EQ(model_input.input_lengths.data_ptr(), geometry->input_lengths.data_ptr());
+        EXPECT_EQ(model_input.lm_output_indexes.data_ptr(), geometry->lm_output_indexes.data_ptr());
+        EXPECT_EQ(model_input.combo_position_ids.data_ptr(), geometry->combo_position_ids.data_ptr());
+    }
 
     EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
@@ -4228,6 +4371,10 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
     components.executor->setTargetModel(std::move(components.fake_target_model));
     components.executor->runTargetVerifyForward(model_input, stream_groups);
 }
+
+INSTANTIATE_TEST_SUITE_P(ImmutableGeometry,
+                         MtpExecutorPositionTest,
+                         ::testing::Combine(::testing::Bool(), ::testing::Bool()));
 
 TEST_F(MtpExecutorTest, testDSparkDraftMasksInvalidTemperatureAndUsesProbabilitySampling) {
     constexpr int32_t gamma      = 3;
@@ -4585,6 +4732,318 @@ TEST_F(MtpExecutorTest, testSpeculativeTargetCommitExceptionRollsBack) {
     EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
     EXPECT_FALSE(target_model->speculativeTargetStateCommitted());
     EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
+}
+
+TEST_F(MtpExecutorTest, PreparedVerifyGeometryPreservesDevicePositionAxes) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    components.fake_target_model->enableSpeculativeTargetCommit();
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    components.executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+    const auto     i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+    GptModelInputs input;
+    input.combo_tokens     = torch::tensor({10, 20}, i32);
+    input.input_lengths    = torch::ones({2}, i32);
+    input.sequence_lengths = torch::tensor({63, 127}, i32);
+    input.prefix_lengths   = input.sequence_lengths;
+    // Different per-axis offsets must survive without consulting host streams.
+    input.combo_position_ids = torch::tensor({63, 69, 101, 127, 203, 511}, i32);
+    auto geometry            = components.executor->launchTargetVerifyPrepareAsync(input, 2);
+    ASSERT_TRUE(geometry.has_value());
+    components.executor->target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+    const int64_t    width = components.executor->propose_step_ + 1;
+    std::vector<int> expected;
+    for (const auto& tuple : {std::vector<int>{63, 69, 101}, std::vector<int>{127, 203, 511}}) {
+        for (int64_t step = 0; step < width; ++step) {
+            for (int value : tuple) {
+                expected.push_back(value + step);
+            }
+        }
+    }
+    EXPECT_EQ(expected, toVec<int>(geometry->combo_position_ids));
+    EXPECT_EQ((std::vector<int>{63, 69, 101, 127, 203, 511}), toVec<int>(input.combo_position_ids));
+    EXPECT_EQ((std::vector<int>{63, 127}), toVec<int>(geometry->prefix_lengths));
+    EXPECT_EQ((std::vector<int>{64, 128}), toVec<int>(geometry->sequence_lengths_plus_1));
+    EXPECT_EQ(2 * width, geometry->lm_output_indexes.numel());
+    EXPECT_TRUE(torch::equal(geometry->lm_output_indexes, torch::arange(2 * width, i32)));
+}
+
+TEST_F(MtpExecutorTest, DeviceHandoffPreparesDenseExtendBeforeRejectionOnlyOnce) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* executor   = components.executor.get();
+    auto* draft      = components.fake_draft_prefill_model.get();
+    components.fake_target_model->enableSpeculativeTargetCommit();
+    executor->setTargetModel(std::move(components.fake_target_model));
+    executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
+    executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+    EXPECT_TRUE(executor->useStreamAsync());
+    EXPECT_TRUE(executor->useDeviceInput());
+    EXPECT_TRUE(executor->useDropBroadSync());
+
+    const auto     i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    GptModelInputs input;
+    input.combo_tokens       = torch::zeros({8}, i32);
+    input.input_lengths      = torch::full({2}, 4, i32);
+    input.prefix_lengths     = torch::tensor({63, 127}, i32);
+    input.sequence_lengths   = torch::empty({0}, i32);
+    input.combo_position_ids = torch::tensor({63, 64, 65, 66, 127, 128, 129, 130}, i32);
+    input.is_target_verify   = true;
+    GptModelInputs prepared;
+    draft->setInputObserver([&](const GptModelInputs& inputs) { prepared = inputs; });
+    executor->launchDraftPrefillPrepareAsync(input);
+    // Acceptance changes values and output rows, never attention geometry.
+    input.combo_tokens      = torch::ones({8}, i32);
+    input.lm_output_indexes = torch::tensor({0, 7}, i32);
+    executor->launchDraftPrefillPrepareAsync(input, /*post_rejection=*/true);
+    executor->draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+    EXPECT_EQ(draft->prepareAttentionCount(), 1u);
+    EXPECT_FALSE(prepared.is_target_verify);
+    EXPECT_TRUE(torch::equal(prepared.input_lengths, input.input_lengths));
+    EXPECT_TRUE(torch::equal(prepared.prefix_lengths, input.prefix_lengths));
+    EXPECT_TRUE(torch::equal(prepared.combo_position_ids, input.combo_position_ids));
+    EXPECT_EQ(prepared.combo_tokens.sum().item<int>(), 0);
+}
+
+TEST_F(MtpExecutorTest, DeviceHandoffUploadsInitialPositionsBeforePublishingNextRound) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* executor   = components.executor.get();
+    executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+    GptModelInputs input;
+    input.combo_position_ids = torch::tensor({5, 8, 11, 6, 9, 12, 7, 10, 13, 8, 11, 14},
+                                             torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    executor->ensureModelInputsOnCuda(input, "test.first_decode");
+    ASSERT_TRUE(input.combo_position_ids.is_cuda());
+    const auto accept = torch::full({1}, 2, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto       next   = MtpExecutor::advanceVerifyPositionIds(input.combo_position_ids, accept, 1, 4);
+    EXPECT_TRUE(torch::equal(next.cpu().reshape({-1}), torch::tensor({7, 10, 13}, torch::kInt32)));
+}
+
+TEST_F(MtpExecutorTest, DeferredTargetCommitPropagatesFailureAfterRollingBack) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* target     = components.fake_target_model.get();
+    target->enableSpeculativeTargetCommit();
+    target->setSpeculativeTargetCommitThrows(true);
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+
+    const auto main_stream = cuda_graph::graphGetCurrentStream();
+    components.executor->target_commit_runner_.emplace(cuda_graph::graphGetStreamFromPool(false));
+    auto accept_len = torch::full({1}, 2, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    std::shared_future<absl::Status> completion;
+    ASSERT_TRUE(components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1, &completion).ok());
+    ASSERT_TRUE(completion.valid());
+
+    components.executor->target_commit_runner_->sync(main_stream);
+
+    components.executor->pending_target_commit_ = completion;
+    EXPECT_FALSE(components.executor->waitPendingTargetCommit().ok());
+    EXPECT_FALSE(components.executor->pending_target_commit_.valid());
+    EXPECT_FALSE(completion.get().ok());
+    EXPECT_NE(completion.get().ToString().find("injected commit exception"), std::string::npos);
+    EXPECT_EQ(target->speculativeTargetAbortCount(), 1u);
+    EXPECT_FALSE(target->speculativeTargetStateCommitted());
+    EXPECT_FALSE(target->speculativeTargetUndoRetained());
+}
+
+TEST_F(MtpExecutorTest, OutputPublicationWaitsForTargetCommitVerdict) {
+    for (bool commit_ok : {false, true}) {
+        MtpExecutorTestConfig config;
+        config.gen_num_per_cycle = 3;
+        auto components          = createMtpExecutorComponents(config);
+        auto stream              = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1}, 8);
+        auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();
+        output->tokens = torch::full({1, 2}, -1, torch::kInt32);
+        stream->setSPOutputBuffer(output);
+        StreamGroups groups({stream});
+        components.executor->batch_stream_processor_->device_handoff_ = true;
+        speculative::SpeculativeSamplerOutput accepted;
+        accepted.accept_len_cpu    = torch::tensor({1}, torch::kInt32);
+        accepted.accept_tokens_cpu = torch::tensor({{2, 0, 0, 0}}, torch::kInt32);
+        accepted.accept_len        = accepted.accept_len_cpu.cuda();
+        accepted.accept_tokens     = accepted.accept_tokens_cpu.cuda();
+        MergedOutput draft;
+        draft.sampler_output.token_ids = torch::tensor({{3L}}, torch::kInt64).cuda();
+        draft.model_output.all_hidden_states =
+            torch::zeros({4, 2}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+        GenerateStream::MtpAsyncDeviceState next;
+        next.last_hidden_states_gpu = draft.model_output.all_hidden_states.narrow(0, 0, 1);
+        next.accept_len_gpu         = accepted.accept_len;
+        next.accept_tokens_gpu      = accepted.accept_tokens;
+        next.propose_tokens_gpu     = draft.sampler_output.token_ids;
+        auto ready                  = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        ready->record(cuda_graph::graphGetCurrentStream());
+        // Destroy the promise before the executor on a failed assertion so a
+        // broken-promise exception wakes the worker instead of hanging cleanup.
+        std::promise<absl::Status> verdict;
+        auto                       completion = verdict.get_future().share();
+        ASSERT_TRUE(components.executor->dispatchDecodeAsync(groups, accepted, draft, ready, {next}, completion).ok());
+        EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), (std::vector<int>{0, 1}));
+        // GPU continuation is available while CPU output is still fenced.
+        EXPECT_TRUE(stream->getMtpAsyncDeviceState().last_hidden_states_gpu.is_same(next.last_hidden_states_gpu));
+        verdict.set_value(commit_ok ? absl::OkStatus() : absl::InternalError("injected target commit failure"));
+        components.executor->spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+        EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+        EXPECT_EQ(stream->hasError(), !commit_ok);
+        EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0),
+                  commit_ok ? (std::vector<int>{0, 1, 2}) : (std::vector<int>{0, 1}));
+        EXPECT_EQ(completion.get().ok(), commit_ok);
+    }
+}
+
+TEST_F(MtpExecutorTest, DeviceContinuationIsPrivateAndBoundedUntilCommit) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle = 3;
+    auto components          = createMtpExecutorComponents(config);
+    auto first =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto second =
+        createContextStream(components.model_config, components.runtime_config, components.resource_context, {1, 0});
+    const auto i32         = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+    int        next_length = 10;
+    for (const auto& stream : {first, second}) {
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_seq_len_gpu = torch::full({1}, next_length, i32);
+        stream->setMtpAsyncDeviceState(std::move(state));
+        next_length += 10;
+    }
+    const auto                            first_epoch  = first->getMtpAsyncDeviceState().epoch;
+    const auto                            second_epoch = second->getMtpAsyncDeviceState().epoch;
+    StreamGroups                          groups({first, second});
+    speculative::SpeculativeSamplerOutput rejected;
+    rejected.accept_tokens = torch::arange(8, i32).reshape({2, 4});
+    MergedOutput draft;
+    draft.model_output.all_hidden_states =
+        torch::arange(16, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)).reshape({8, 2});
+    draft.sampler_output.token_ids = torch::tensor({100, 200}, i32).reshape({2, 1});
+    draft.sampler_output.all_probs = torch::ones({2, 4}, draft.model_output.all_hidden_states.options());
+
+    for (const auto& lengths : {std::vector<int>{1, 4}, std::vector<int>{-2, 99}}) {
+        rejected.accept_len = torch::tensor(lengths, i32);
+        auto prepared = components.executor->prepareDecodeDeviceStates(groups, rejected, {}, {}, {}, draft, nullptr);
+        ASSERT_EQ(prepared.size(), 2u);
+        EXPECT_EQ((std::vector<int>{11}), toVec<int>(prepared[0].next_seq_len_gpu));
+        EXPECT_EQ((std::vector<int>{24}), toVec<int>(prepared[1].next_seq_len_gpu));
+        EXPECT_EQ((std::vector<float>{0, 1}), toVec<float>(prepared[0].last_hidden_states_gpu));
+        EXPECT_EQ((std::vector<float>{14, 15}), toVec<float>(prepared[1].last_hidden_states_gpu));
+        // The real commit must still see invalid input and reject it; private
+        // preparation must neither sanitize that verdict nor publish state.
+        EXPECT_EQ(lengths, toVec<int>(rejected.accept_len));
+        EXPECT_EQ(first_epoch, first->getMtpAsyncDeviceState().epoch);
+        EXPECT_EQ(second_epoch, second->getMtpAsyncDeviceState().epoch);
+        EXPECT_EQ((std::vector<int>{10}), toVec<int>(first->getNextSeqLenGpu()));
+        EXPECT_EQ((std::vector<int>{20}), toVec<int>(second->getNextSeqLenGpu()));
+        EXPECT_FALSE(first->hasPendingAsyncBookkeeping());
+        EXPECT_FALSE(second->hasPendingAsyncBookkeeping());
+    }
+}
+
+TEST_F(MtpExecutorTest, EarlyDraftPreparationSurvivesPollingButNotEmptyDecode) {
+    auto  components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto* draft      = components.fake_draft_model.get();
+    components.executor->setDraftModel(std::move(components.fake_draft_model));
+    const auto     i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+    GptModelInputs input;
+    input.input_lengths    = torch::ones({2}, i32);
+    input.sequence_lengths = torch::tensor({63, 127}, i32);
+    input.prefix_lengths   = input.sequence_lengths;
+    GptModelInputs prepared;
+    draft->setInputObserver([&](const GptModelInputs& value) { prepared = value; });
+    components.executor->prepareNextDraftAttentionInputs(input);
+    ASSERT_TRUE(draft->hasPreparedAttentionInputs());
+    EXPECT_EQ(prepared.prefix_lengths.numel(), 0);
+    EXPECT_TRUE(torch::equal(prepared.sequence_lengths, input.sequence_lengths));
+    EXPECT_TRUE(torch::equal(input.prefix_lengths, input.sequence_lengths));
+
+    MtpMetricsCollector metrics;
+    ASSERT_TRUE(components.executor->prefillStep({}, metrics, 0).ok());
+    EXPECT_TRUE(draft->hasPreparedAttentionInputs());
+    // Completion or an empty scheduling round invalidates the old preparation.
+    ASSERT_TRUE(components.executor->decodeStep({}, metrics).ok());
+    EXPECT_FALSE(draft->hasPreparedAttentionInputs());
+    EXPECT_EQ(draft->forwardCount(), 0u);
+}
+
+TEST_F(MtpExecutorTest, RankLocalContinuationPreservesAcceptedStateAndInputOwnership) {
+    MtpExecutorTestConfig config;
+    config.gen_num_per_cycle  = 3;
+    auto           components = createMtpExecutorComponents(config);
+    const auto     i32        = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
+    GptModelInputs input;
+    input.combo_tokens                                    = torch::tensor({30, 40}, i32);
+    input.input_lengths                                   = torch::ones({2}, i32);
+    input.sequence_lengths                                = torch::tensor({63, 127}, i32);
+    input.prefix_lengths                                  = input.sequence_lengths;
+    input.kv_cache_block_id                               = torch::arange(256, i32).reshape({1, 2, 128});
+    input.kv_cache_kernel_block_id                        = input.kv_cache_block_id + 100;
+    input.kv_cache_update_mapping                         = torch::ones({1, 3}, i32);
+    const auto                            original_blocks = input.kv_cache_block_id.clone();
+    const auto                            original_kernel = input.kv_cache_kernel_block_id.clone();
+    const auto                            previous        = input.sequence_lengths + 1;
+    const auto                            positions       = torch::arange(24, i32).reshape({2, 4, 3});
+    speculative::SpeculativeSamplerOutput accepted;
+    accepted.accept_tokens = torch::arange(8, i32).reshape({2, 4});
+    MergedOutput draft;
+    draft.sampler_output.token_ids       = torch::tensor({100, 200}, i32).reshape({2, 1});
+    draft.model_output.all_hidden_states = torch::arange(16, i32).to(torch::kFloat32).reshape({8, 2});
+
+    for (int count = 1; count <= 4; ++count) {
+        accepted.accept_len = torch::tensor({count, 5 - count}, i32);
+        auto next           = components.executor->prepareDecodeBatchState(previous,
+                                                                 accepted,
+                                                                 positions.reshape({-1}),
+                                                                 input.kv_cache_block_id,
+                                                                 input.kv_cache_kernel_block_id,
+                                                                 draft,
+                                                                 &input,
+                                                                 /*cache_snapshot=*/true);
+        EXPECT_EQ((std::vector<int>{64 + count, 133 - count}), toVec<int>(next->next_seq_lengths));
+        EXPECT_EQ((std::vector<int>{count - 1, 8 - count}), toVec<int>(next->target_tokens));
+        EXPECT_EQ((std::vector<int>{100, 200}), toVec<int>(next->draft_inputs.combo_tokens));
+        EXPECT_EQ(
+            (std::vector<float>{
+                float(2 * (count - 1)), float(2 * (count - 1) + 1), float(16 - 2 * count), float(17 - 2 * count)}),
+            toVec<float>(next->draft_inputs.last_hidden_states));
+        EXPECT_EQ((std::vector<int>{count, count + 1, count + 2, 17 - count, 18 - count, 19 - count}),
+                  toVec<int>(next->draft_inputs.combo_position_ids));
+        EXPECT_FALSE(next->draft_inputs.kv_cache_update_mapping.defined());
+        // A peer can compute values before the scheduling header, then advance
+        // both cache tables only after the root has confirmed capacity.
+        auto early = components.executor->prepareDecodeBatchState(previous,
+                                                                  accepted,
+                                                                  positions.reshape({-1}),
+                                                                  input.kv_cache_block_id,
+                                                                  input.kv_cache_kernel_block_id,
+                                                                  draft,
+                                                                  &input,
+                                                                  /*cache_snapshot=*/false);
+        EXPECT_FALSE(early->draft_inputs.kv_cache_block_id.defined());
+        components.executor->advanceDecodeCacheTables(early->draft_inputs,
+                                                      previous,
+                                                      early->accept_lengths,
+                                                      input.kv_cache_block_id,
+                                                      input.kv_cache_kernel_block_id);
+        EXPECT_TRUE(torch::equal(early->draft_inputs.combo_position_ids, next->draft_inputs.combo_position_ids));
+        EXPECT_TRUE(torch::equal(early->draft_inputs.sequence_lengths, next->draft_inputs.sequence_lengths));
+        EXPECT_TRUE(torch::equal(early->draft_inputs.last_hidden_states, next->draft_inputs.last_hidden_states));
+        EXPECT_TRUE(torch::equal(early->draft_inputs.kv_cache_block_id, next->draft_inputs.kv_cache_block_id));
+        EXPECT_TRUE(
+            torch::equal(early->draft_inputs.kv_cache_kernel_block_id, next->draft_inputs.kv_cache_kernel_block_id));
+        EXPECT_TRUE(torch::equal(input.kv_cache_block_id, original_blocks));
+        EXPECT_TRUE(torch::equal(input.kv_cache_kernel_block_id, original_kernel));
+        EXPECT_EQ((std::vector<int>{63, 127}), toVec<int>(input.sequence_lengths));
+    }
+    // A rejected cache snapshot must not index an undersized table at all.
+    auto no_snapshot = components.executor->prepareDecodeBatchState(previous,
+                                                                    accepted,
+                                                                    positions.reshape({-1}),
+                                                                    input.kv_cache_block_id.narrow(2, 0, 0),
+                                                                    input.kv_cache_kernel_block_id.narrow(2, 0, 0),
+                                                                    draft,
+                                                                    &input,
+                                                                    false);
+    EXPECT_FALSE(no_snapshot->draft_inputs.kv_cache_block_id.defined());
+    EXPECT_FALSE(no_snapshot->draft_inputs.kv_cache_kernel_block_id.defined());
 }
 
 TEST_F(MtpExecutorTest, testSpeculativeTargetPeerCommitFailureRollsBackLocalCommit) {

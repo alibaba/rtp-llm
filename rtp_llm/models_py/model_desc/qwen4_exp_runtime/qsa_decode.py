@@ -19,6 +19,10 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    graph_decode_visible_lengths,
+    host_input_mirror,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_base_rope,
@@ -104,7 +108,7 @@ def select_decode_tokens(
         self,
         ("decode_lengths", graph_decode, tensor_signature(length_source), q.device),
         lambda: (
-            length_source - 1
+            graph_decode_visible_lengths(self.main_inputs, batch_size, q.device) - 1
             if graph_decode
             else length_source.to(device=q.device, dtype=torch.int32, non_blocking=True)
         ).contiguous(),
@@ -174,10 +178,11 @@ def select_decode_tokens(
     position_state = self.positions(ratio, checks)
     if (
         graph_decode
-        and not self.main_inputs.is_s_padded
+        and getattr(self.main_inputs, "is_exact_cuda_graph_batch", False)
         and position_state is None
-        and target_mrope
+        and (self.is_mtp_draft or target_mrope)
         and ratio == 4
+        and kv_tokens_per_block == int(self.indexer_state_cache.seq_size_per_block)
     ):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.decode_prepare_triton import (
             try_prepare_decode,
@@ -192,6 +197,7 @@ def select_decode_tokens(
             kv_table,
             state_pool,
             state_table,
+            target_mrope=target_mrope,
             query=q if raw_query else None,
             query_gamma=indexer.q_norm_gamma if raw_query else None,
             norm_eps=float(indexer.norm_eps),

@@ -23,14 +23,14 @@ def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
     if not (
         q.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (12, 0)
+        and torch.cuda.get_device_capability(q.device) in ((9, 0), (12, 0))
         and q.dtype == torch.bfloat16
         and q.ndim == 3
         and q.shape[1:] == (4, 128)
         and q.stride(-1) == 1
         and q.stride(-2) == 128
         and q.stride(0) >= 512
-        and 1 <= q.shape[0] <= 32
+        and 1 <= q.shape[0] <= 128
         and positions.shape == sources.shape == (q.shape[0],)
         and positions.dtype == sources.dtype == torch.int64
         and visible.dtype == torch.int32
@@ -94,7 +94,7 @@ def try_prepare_metadata(
     if not (
         q.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (12, 0)
+        and torch.cuda.get_device_capability(q.device) in ((9, 0), (12, 0))
         and q.dtype == torch.bfloat16
         and q.ndim == 3
         and q.shape[1:] == (4, 128)
@@ -102,7 +102,7 @@ def try_prepare_metadata(
         and q.stride(-2) == 128
         and q.stride(0) >= 512
         and row_lengths.ndim == prefixes.ndim == cu.ndim == 1
-        and 1 <= row_lengths.numel() <= 8
+        and 1 <= row_lengths.numel() <= 32
         and q.shape[0] == row_lengths.numel() * 4
         and prefixes.shape == row_lengths.shape
         and cu.numel() == row_lengths.numel() + 1

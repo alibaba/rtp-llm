@@ -166,14 +166,18 @@ void PyWrappedModel::cleanupAfterConstructionFailure() noexcept {
     }
 }
 
-void PyWrappedModel::releaseBuffers() {
+void PyWrappedModel::releaseBuffers(std::optional<torch::Stream> consumer_stream) {
     if (held_attn_pyobj_.ptr()) {
         py::gil_scoped_acquire gil;
         held_attn_pyobj_ = py::object();
     }
     // TensorHolder release point (PyWrappedModel): advances model-internal
     // host staging buffers from tensorHoldHostAndToCuda()/holdInputsHostBuffers().
-    buffer_holder_.release();
+    if (consumer_stream) {
+        buffer_holder_.release(*consumer_stream);
+    } else {
+        buffer_holder_.release();
+    }
 }
 
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
@@ -214,6 +218,10 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
 
 bool PyWrappedModel::hasSpeculativeTargetCommitHooks() const {
     return has_speculative_target_commit_hooks_;
+}
+
+bool PyWrappedModel::supportsDeviceSpeculativeHandoff() const {
+    return supports_device_speculative_handoff_;
 }
 
 std::optional<bool> PyWrappedModel::reduceSpeculativeTargetPrepareStatus(bool local_ok) {
@@ -1106,7 +1114,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     graph_state.generation_prefill_status;
         }
         if (can_run_graph) {
-            py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             RTP_LLM_LOG_DEBUG(
                 "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
@@ -1114,7 +1121,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
+            // Native preparation/replay may wait in CUDA. Leave the GIL to
+            // async prepare/commit workers; the runner guards its Python callbacks.
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            {
+                py::gil_scoped_acquire gil;
+                if (!py_model_outputs.draft_token_ids.defined() && !py_model_inputs.attention_inputs.is_prefill
+                    && py::hasattr(py_model_, "activate_draft_lm_head_graph")) {
+                    py_model_.attr("activate_draft_lm_head_graph")(graph_state.current_real_graph_bs);
+                }
+            }
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
@@ -1128,6 +1144,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
+        }
+
+        if (py_model_outputs.draft_token_ids.defined()) {
+            cache_store_write_cycle.finish();
+            GptModelOutputs outputs;
+            outputs.draft_token_ids = py_model_outputs.draft_token_ids.clone();
+            return with_generation_prefill_cuda_graph_status(std::move(outputs));
         }
 
         cache_store_write_cycle.finish();
@@ -1247,6 +1270,25 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
         throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }
+}
+
+torch::Tensor PyWrappedModel::sampleDraftGraphTokens(const PyModelInputs& inputs, const PyModelOutputs& outputs) {
+    // Share the ordinary head, TP gather and vocabulary mapping with eager
+    // MTP. The sampler is deterministic and needs no dense proposal distribution.
+    py::gil_scoped_acquire gil;
+    if (py::hasattr(py_model_, "activate_draft_lm_head_graph")) {
+        py_model_.attr("activate_draft_lm_head_graph")(outputs.hidden_states.size(0));
+    }
+    GptModelInputs draft_inputs;
+    draft_inputs.combo_tokens      = inputs.input_ids;
+    draft_inputs.input_lengths     = inputs.attention_inputs.input_lengths;
+    draft_inputs.sequence_lengths  = inputs.attention_inputs.sequence_lengths;
+    draft_inputs.lm_output_indexes = inputs.input_ids;
+    draft_inputs.need_all_logits   = false;
+    auto logits                    = callForwardPostLayers(outputs.hidden_states, draft_inputs, true).logits;
+    auto tokens                    = torch::argmax(logits, -1, true);
+    execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
+    return tokens.to(torch::kInt32);
 }
 
 // --- Methods absorbed from GptModel ---

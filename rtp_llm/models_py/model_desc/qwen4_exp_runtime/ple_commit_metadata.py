@@ -111,15 +111,16 @@ _VERDICT_CHANNEL = {}
 
 
 def _verdict_channel(device):
-    """Per-device pinned flag buffer and event, reused across decode steps."""
+    """Pinned flag and event owned by one commit stream across decode steps."""
+    key = (device, torch.cuda.current_stream(device).cuda_stream)
     with _VERDICT_CHANNEL_LOCK:
-        channel = _VERDICT_CHANNEL.get(device)
+        channel = _VERDICT_CHANNEL.get(key)
         if channel is None:
             channel = (
                 torch.empty(1, dtype=torch.int64, pin_memory=True),
                 torch.cuda.Event(),
             )
-            _VERDICT_CHANNEL[device] = channel
+            _VERDICT_CHANNEL[key] = channel
         return channel
 
 
@@ -134,7 +135,7 @@ def begin_accepted_pair_resolution(transaction, accept_len):
     if not (
         torch.version.hip is None
         and accept_len.is_cuda
-        and torch.cuda.get_device_capability(accept_len.device) == (12, 0)
+        and torch.cuda.get_device_capability(accept_len.device) in ((9, 0), (12, 0))
         and accept_len.dtype == torch.int32
         and accept_len.ndim == 1
         and accept_len.is_contiguous()

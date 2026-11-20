@@ -3,8 +3,10 @@
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <algorithm>
 #include <cstdlib>
 #include <string>
+#include <tuple>
 
 using namespace std;
 
@@ -14,6 +16,19 @@ namespace {
 bool asyncDebugEnabled() {
     const char* env = std::getenv("RTP_LLM_ASYNC_DEBUG");
     return env != nullptr && std::string(env) == "1";
+}
+
+using CacheBlockLayout = std::vector<std::tuple<int, std::string, BlockIndicesType, BlockIndicesType>>;
+
+CacheBlockLayout cacheBlockLayout(const BatchKVCacheResource& cache) {
+    CacheBlockLayout layout;
+    for (int batch = 0; batch < cache.batchSize(); ++batch) {
+        const auto& resource = cache.cacheResource(batch);
+        for (const auto& tag : resource.groupTags()) {
+            layout.emplace_back(batch, tag, resource.blocks(tag), resource.kernelBlocks(tag));
+        }
+    }
+    return layout;
 }
 
 }  // namespace
@@ -160,20 +175,43 @@ void GenerateStateMachine::handleRunning() {
         && stream_cache_resource_->isContextStream()) {
         return;
     }
-    // A pending MTP round may already own a complete device page-table
-    // snapshot for the next execution.  If the existing allocation also has
-    // enough reserved slots, do not touch the mutable host table: the worker
-    // will commit the identical swaps before a later capacity boundary.
-    int             seq_len_override = -1;
+    // Keep a valid MTP page-table snapshot until its reserved capacity is
+    // exhausted. Drain committed history together with growth, rather than
+    // invalidating the same continuation again on the following round.
+    int                             seq_len_override   = -1;
+    int                             allocation_seq_len = -1;
     GenerateStream* stream           = stream_cache_resource_->stream();
+    std::optional<CacheBlockLayout> committed_cache_layout;
     if (stream != nullptr) {
         const bool  pending   = stream->hasPendingAsyncBookkeeping();
         const auto mtp_state = stream->getMtpAsyncDeviceState();
-        if (pending && GenerateStream::hasMtpCacheSnapshot(mtp_state) && mtp_state.next_seq_len_upper_bound > 0
-            && stream_cache_resource_->singleBatchNeedBlocks(mtp_state.next_seq_len_upper_bound,
-                                                             static_cast<int>(reserve_step_))
+        const int   reservation_seq_len = pending ? mtp_state.next_seq_len_upper_bound : stream->seqLength();
+        if (GenerateStream::hasMtpCacheSnapshot(mtp_state) && reservation_seq_len > 0
+            && stream_cache_resource_->singleBatchNeedBlocks(reservation_seq_len, static_cast<int>(reserve_step_))
                    == 0) {
             return;
+        }
+
+        // Once bookkeeping catches up, the host table represents the same
+        // committed layout as the device snapshot. Allocation/reclamation may
+        // still change it; retain the cached mappings only if neither table
+        // changes. Value copies are required because BlockIds owners alias.
+        if (!pending && GenerateStream::hasMtpCacheSnapshot(mtp_state)) {
+            committed_cache_layout = cacheBlockLayout(stream_cache_resource_->kvCache());
+            if (mtp_state.batch && reserve_step_ > 1) {
+                // Host commit can lag one speculative round. Reserve the next
+                // round as well, so FULL and LINEAR groups grow together. Bound
+                // the lookahead to one page and the model context limit; this
+                // also keeps the current LINEAR tail inside its retained range.
+                const int64_t committed  = stream->seqLength();
+                const int64_t next_round = std::max<int64_t>(committed, mtp_state.next_seq_len_upper_bound)
+                                           + static_cast<int64_t>(reserve_step_);
+                const int64_t lookahead = std::min<int64_t>(
+                    {next_round, committed + stream->seqSizePerBlock(), static_cast<int64_t>(stream->maxSeqLen())});
+                if (lookahead > committed) {
+                    allocation_seq_len = static_cast<int>(lookahead);
+                }
+            }
         }
 
         // Only use publish-time overrides while the host commit is still in
@@ -201,14 +239,20 @@ void GenerateStateMachine::handleRunning() {
                                 seq_len_override);
         }
     }
-    // incrKVBlock may append or compact host block slots even when no new
-    // physical allocation is ultimately needed.  Invalidate the old device
-    // snapshot before entering that mutation path; the gatherer will use the
-    // now-authoritative host table for this round.
-    if (stream != nullptr) {
-        stream->clearMtpCacheSnapshot();
+    // An unfinished host commit cannot be used to validate device page tables.
+    if (stream != nullptr && !committed_cache_layout) {
+        stream->clearMtpCacheSnapshot(/*retain_batch=*/true);
     }
-    auto result = stream_cache_resource_->incrKVBlock(seq_len_override);
+    auto result = stream_cache_resource_->incrKVBlock(allocation_seq_len >= 0 ? allocation_seq_len : seq_len_override);
+    if (!result.ok() && allocation_seq_len >= 0) {
+        // Lookahead is optional under memory pressure. The allocator rolls
+        // back a failed growth; retry only the original required capacity.
+        result = stream_cache_resource_->incrKVBlock(seq_len_override);
+    }
+    if (committed_cache_layout
+        && (!result.ok() || *committed_cache_layout != cacheBlockLayout(stream_cache_resource_->kvCache()))) {
+        stream->clearMtpCacheSnapshot(/*retain_batch=*/result.ok());
+    }
     if (!result.ok()) {
         // Report Error event so moveToNext() won't be called again on this stream
         reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "incrKVBlock failed: LACK MEM");

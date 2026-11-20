@@ -365,6 +365,65 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImplicitPointMassDraft) 
     EXPECT_EQ(output_token_ids.cpu()[0][1].item<int>(), -1);
 }
 
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PointMassMatchesDenseOneHot) {
+    constexpr int batch_size = 4;
+    constexpr int vocab_size = 17;
+    for (const int num_spec : {1, 3}) {
+        // Mixed greedy/stochastic requests, full acceptance, partial acceptance,
+        // and rejection. Token IDs are already in the target vocabulary.
+        auto draft_cpu = (torch::arange(batch_size * num_spec, torch::kInt32) * 7 + 5)
+                             .remainder(vocab_size)
+                             .reshape({batch_size, num_spec});
+        auto target_cpu = torch::empty({batch_size, num_spec + 1}, torch::kInt32);
+        for (int row = 0; row < batch_size; ++row) {
+            for (int step = 0; step < num_spec; ++step) {
+                const int token = draft_cpu.data_ptr<int>()[row * num_spec + step];
+                target_cpu.data_ptr<int>()[row * (num_spec + 1) + step] =
+                    (token + (row == 2 && step >= num_spec / 2)) % vocab_size;
+            }
+            target_cpu.data_ptr<int>()[row * (num_spec + 1) + num_spec] = vocab_size - 1 - row;
+        }
+        auto draft_ids    = draft_cpu.to(torch::kCUDA);
+        auto target_ids   = target_cpu.to(torch::kCUDA);
+        auto target_probs = torch::full({batch_size, num_spec + 1, vocab_size}, 1.0f / vocab_size, floatCuda());
+        auto dense_probs  = torch::zeros({batch_size, num_spec, vocab_size}, floatCuda());
+        dense_probs.scatter_(2, draft_ids.to(torch::kInt64).unsqueeze(-1), 1.0);
+        auto uniforms = torch::zeros({batch_size, num_spec + 1}, floatCuda());
+        uniforms[3].fill_(0.9f);
+        auto                       do_sample = torch::tensor({false, true, false, true}, torch::kBool).to(torch::kCUDA);
+        std::vector<torch::Tensor> tokens, accepted;
+        for (bool implicit : {false, true}) {
+            tokens.push_back(torch::full({batch_size, num_spec + 1}, -1, intCuda()));
+            accepted.push_back(torch::zeros({batch_size}, intCuda()));
+            // Test inputs were prepared on PyTorch's current stream; the
+            // kernel fixture deliberately launches on its independent stream.
+            ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+            const auto status =
+                rtp_llm::invokeRejectionSampling<float, int>(implicit ? nullptr : dense_probs.data_ptr<float>(),
+                                                             draft_ids.data_ptr<int>(),
+                                                             uniforms.data_ptr<float>(),
+                                                             target_probs.data_ptr<float>(),
+                                                             target_ids.data_ptr<int>(),
+                                                             1,
+                                                             tokens.back().data_ptr<int>(),
+                                                             accepted.back().data_ptr<int>(),
+                                                             do_sample.data_ptr<bool>(),
+                                                             batch_size,
+                                                             num_spec,
+                                                             vocab_size,
+                                                             stream_,
+                                                             implicit);
+            ASSERT_EQ(status, cudaSuccess);
+            ASSERT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
+        }
+        EXPECT_TRUE(torch::equal(tokens[0], tokens[1]));
+        EXPECT_TRUE(torch::equal(accepted[0], accepted[1]));
+        EXPECT_EQ(accepted[1].cpu()[0].item<int>(), num_spec + 1);
+        EXPECT_EQ(accepted[1].cpu()[1].item<int>(), num_spec + 1);
+        EXPECT_EQ(accepted[1].cpu()[3].item<int>(), 1);
+    }
+}
+
 TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BatchSizeZero) {
     auto status = rtp_llm::invokeRejectionSampling<float, int>(
         nullptr, nullptr, nullptr, nullptr, nullptr, 1, nullptr, nullptr, nullptr, 0, 3, 16, stream_);

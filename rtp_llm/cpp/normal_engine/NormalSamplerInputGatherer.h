@@ -21,10 +21,13 @@ public:
                                          const GptModelInputs&  model_inputs,
                                          const GptModelOutputs& model_output) const;
 
+    // Output-only callers can omit history after ruling out every history
+    // consumer; absolute step/sequence lengths retain their original meaning.
     SamplerInputs allocateSamplerInputs(const StreamGroups& stream_groups,
                                         size_t              total_batch_size_in,
                                         size_t              total_batch_size_out,
-                                        size_t              propose_step = 0) const;
+                                        size_t              propose_step          = 0,
+                                        bool                include_token_history = true) const;
 
     void fillSamplerCommonInputs(SamplerInputs&                sampler_inputs,
                                  std::list<GenerateStreamPtr>& all_streams,

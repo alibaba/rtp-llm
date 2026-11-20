@@ -46,10 +46,7 @@ def _decode_positions_config(
                 and torch.cuda.get_device_capability(sequence.device) == (12, 0)
                 and sequence.numel() <= 32
             )
-            or (
-                target_mrope
-                and torch.cuda.get_device_capability(sequence.device) == (9, 0)
-            )
+            or torch.cuda.get_device_capability(sequence.device) == (9, 0)
         )
         and sequence.ndim == 1
         and sequence.dtype == torch.int32

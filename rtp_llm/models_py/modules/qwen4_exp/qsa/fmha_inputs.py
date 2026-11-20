@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    graph_decode_visible_lengths,
     host_input_mirror,
     prefill_step_plan_hit,
 )
@@ -96,7 +97,15 @@ def _prepare_paged_inputs(
     cached = getattr(self, "_qsa_target_visible_lengths", None)
     self._qsa_target_visible_lengths = None
     use_cached_lengths = graph_paged and self.is_target_verify and cached is not None
-    if use_cached_lengths:
+    if graph_paged and not self.is_target_verify:
+        if query_len != 1:
+            raise RuntimeError(
+                "QSA ordinary decode Graph requires one query per request"
+            )
+        kv_lens = graph_decode_visible_lengths(
+            self.attn_inputs, batch, qkv.device
+        ).view(batch, 1)
+    elif use_cached_lengths:
         owner_inputs, owner_tokens, kv_lens = cached
         if not (
             owner_inputs is self.attn_inputs

@@ -1,4 +1,5 @@
 import unittest
+from itertools import product
 from unittest.mock import patch
 
 import torch
@@ -17,6 +18,9 @@ class DecodeSnapshotTest(TargetWriterFixture, unittest.TestCase):
     def setUp(self):
         if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
             self.skipTest("SM90/SM120 fast path")
+        self.page_sizes = (
+            (64, 128) if torch.cuda.get_device_capability() == (9, 0) else (128,)
+        )
         torch.manual_seed(20261019)
 
     def write(self, args, fused):
@@ -32,30 +36,35 @@ class DecodeSnapshotTest(TargetWriterFixture, unittest.TestCase):
             return write_decode_key_with_undo_(*args, norm_eps=1.0e-6)
 
     def test_complete_writer_and_rollback_match_at_every_residue_and_page_edge(self):
-        for positions in (
-            [0],
-            [1],
-            [2],
-            [3],
-            [127],
-            [128],
-            [4093],
-            [32749],
-            [124, 125, 126, 127, 128, 129, 130],
-        ):
-            self.compare(self.case(positions, 1))
-        args = self.case([5, 127, 128], 1)
-        args[6][0].zero_()
-        args[8][1].zero_()
-        args[8][2].fill_(args[7].shape[0] + 1)
-        self.compare(args)
+        for page_size in self.page_sizes:
+            for positions in (
+                [0],
+                [1],
+                [2],
+                [3],
+                [page_size - 1],
+                [page_size],
+                [4093],
+                [32749],
+                list(range(page_size - 4, page_size + 3)),
+            ):
+                self.compare(self.case(positions, 1, page_size=page_size))
+            args = self.case([5, page_size - 1, page_size], 1, page_size=page_size)
+            args[6][0].zero_()
+            args[8][1].zero_()
+            args[8][2].fill_(args[7].shape[0] + 1)
+            self.compare(args)
 
     def test_snapshot_int64_arithmetic_and_unsupported_layout_fallback(self):
+        for page_size in self.page_sizes:
+            self._check_snapshot_int64_arithmetic(page_size)
+
+    def _check_snapshot_int64_arithmetic(self, page_size):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.decode_snapshot import (
             try_snapshot_decode,
         )
 
-        args = self.case([0, 127, 128, 4095], 1)
+        args = self.case([0, page_size - 1, page_size, 4095], 1, page_size=page_size)
         args[1].copy_(
             torch.tensor(
                 [-2147483648, -1, 2147483646, 2147483647],
@@ -79,12 +88,13 @@ class DecodeSnapshotTest(TargetWriterFixture, unittest.TestCase):
             )
 
     def test_graph_replay_refreshes_all_snapshots_before_original_writer(self):
-        for batch in (
+        batches = (
             (1, 3, 8, 16, 32, 64)
             if torch.cuda.get_device_capability() == (9, 0)
             else (1, 3, 8, 32)
-        ):
-            args = list(self.case([128] * batch, 1))
+        )
+        for batch, page_size in product(batches, self.page_sizes):
+            args = list(self.case([page_size] * batch, 1, page_size=page_size))
             if torch.cuda.get_device_capability() == (9, 0):
                 projection = torch.empty(
                     (batch, 640), device="cuda", dtype=torch.bfloat16
@@ -101,7 +111,10 @@ class DecodeSnapshotTest(TargetWriterFixture, unittest.TestCase):
                 for generation in range(32):
                     args[1].copy_(
                         torch.tensor(
-                            [124 + (generation + row) % 12 for row in range(batch)],
+                            [
+                                page_size - 4 + (generation + row) % 12
+                                for row in range(batch)
+                            ],
                             device="cuda",
                             dtype=torch.int32,
                         )

@@ -320,6 +320,9 @@ class SparseGqaImplForwardTest(unittest.TestCase):
             torch.tensor([3, 2, 1], dtype=torch.int32, device=_DEV)
         )
         graph.replay()
+        torch.cuda.synchronize()
+        # Keep capture-time CPU lengths stale until the replay has finished.
+        impl.attn_inputs.sequence_lengths[0] = 5
 
         eager = self._decode_impl(batch=1)
         eager.attn_inputs.sequence_lengths = impl.attn_inputs.sequence_lengths

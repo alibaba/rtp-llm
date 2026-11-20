@@ -149,6 +149,22 @@ _MIRROR_CACHE: "OrderedDict[tuple, tuple[Any, torch.Tensor, tuple]]" = OrderedDi
 _MIRROR_STATS = {"readbacks": 0}
 
 
+def graph_decode_visible_lengths(
+    inputs: Any, batch: int, device: torch.device
+) -> torch.Tensor:
+    """Read the replay-updated GPU length, never a captured host-to-device copy."""
+    lengths = getattr(inputs, "sequence_lengths_plus_1_device", None)
+    if (
+        not isinstance(lengths, torch.Tensor)
+        or lengths.device != device
+        or lengths.dtype != torch.int32
+        or tuple(lengths.shape) != (batch,)
+        or not lengths.is_contiguous()
+    ):
+        raise RuntimeError("QSA decode Graph requires device int32 visible lengths [B]")
+    return lengths
+
+
 def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
     """CPU mirror of a small metadata tensor on the inputs object.
 

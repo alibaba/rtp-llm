@@ -154,6 +154,21 @@ void graphMemcpyAsync(void* dst, const void* src, size_t size, GraphMemcpyKind k
 #endif
 }
 
+void graphMemcpy2DDeviceToHostAsync(
+    void* dst, size_t dst_pitch, const void* src, size_t src_pitch, size_t width, size_t height, void* stream) {
+#if USING_ROCM
+    graphCheck(
+        hipMemcpy2DAsync(
+            dst, dst_pitch, src, src_pitch, width, height, hipMemcpyDeviceToHost, static_cast<hipStream_t>(stream)),
+        "hipMemcpy2DAsync");
+#else
+    graphCheck(
+        cudaMemcpy2DAsync(
+            dst, dst_pitch, src, src_pitch, width, height, cudaMemcpyDeviceToHost, static_cast<cudaStream_t>(stream)),
+        "cudaMemcpy2DAsync");
+#endif
+}
+
 void graphDeviceSynchronize() {
 #if USING_ROCM
     graphCheck(hipDeviceSynchronize(), "hipDeviceSynchronize");

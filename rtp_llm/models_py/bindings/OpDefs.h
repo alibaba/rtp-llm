@@ -396,6 +396,8 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Native graph-owned ordinary MTP proposal, [batch, remaining draft steps].
+    torch::Tensor draft_token_ids;
     // Optional model-side features consumed by speculative decoders.  This is
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.

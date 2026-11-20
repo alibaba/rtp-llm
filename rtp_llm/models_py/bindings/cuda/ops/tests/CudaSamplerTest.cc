@@ -209,6 +209,57 @@ TEST_F(CudaSamplerTest, testLastColumnWritePreservesCpuAndStridedTokenStorage) {
                 at::cuda::getCurrentCUDAStream().synchronize();
                 ASSERT_TRUE(!result.success.defined() || result.success.all().item<bool>());
                 ASSERT_TRUE(torch::equal(storage.cpu(), expected.cpu()));
+}
+
+TEST_F(CudaSamplerTest, TopKOneProbabilityContracts) {
+    constexpr int64_t batch = 2, vocab = 10, step = 3;
+    const auto        logits =
+        cudaTensor({-3, 1, 4, 2, 0, -1, -2, 3, -4, -5, -3, 1, 2, 3, 0, -1, -2, 4, -4, 5}, {batch, vocab});
+    const auto expected_tokens = logits.argmax(-1);
+    const auto point_mass      = torch::zeros_like(logits).scatter_(1, expected_tokens.unsqueeze(1), 1.0);
+    const auto original_probs  = torch::softmax(logits, -1);
+    for (bool original : {false, true}) {
+        for (bool log_probs : {false, true}) {
+            for (int64_t width : {vocab, vocab - 2}) {
+                SCOPED_TRACE(::testing::Message() << original << "," << log_probs << "," << width);
+                auto         history       = cudaIntTensor({1, 2, 3, -1, 3, 2, 1, -1}, {batch, step + 1});
+                auto         probabilities = torch::full({batch, width}, -7.0, logits.options());
+                auto         cumulative    = torch::full({batch}, -2.0, logits.options());
+                GreedyParams params;
+                params.logits                    = logits.clone();
+                params.input_lengths             = pinnedIntTensor({3, 3});
+                params.sequence_lengths          = pinnedIntTensor({3, 3});
+                params.token_ids                 = history;
+                params.step                      = step;
+                params.top_k                     = pinnedIntTensor({1, 1});
+                params.top_p                     = pinnedFloatTensor({1.0, 1.0});
+                params.temperature               = pinnedFloatTensor({1.0, 1.0});
+                params.return_original_all_probs = original;
+                params.output_all_probs          = probabilities;
+                for (int64_t i = 0; i < batch; ++i) {
+                    auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+                    generator.set_current_seed(1800 + i);
+                    params.generator.push_back(generator);
+                }
+                if (log_probs) {
+                    params.cum_log_probs = cumulative;
+                }
+                auto output = execSampleGreedy(params);
+                check_cuda_error();
+                for (const auto& generator : params.generator) {
+                    EXPECT_EQ(std::get<1>(get_seed_and_offset(0, generator)), 32);
+                }
+                ASSERT_TRUE(torch::equal(history.select(1, step).to(torch::kInt64), expected_tokens));
+                ASSERT_TRUE(torch::equal(history.narrow(1, 0, step), cudaIntTensor({1, 2, 3, 3, 2, 1}, {batch, step})));
+                auto expected_probs = original ? original_probs : point_mass;
+                ASSERT_TRUE(torch::allclose(probabilities, expected_probs.narrow(1, 0, width), 1e-6, 1e-7));
+                if (log_probs) {
+                    auto expected = -2.0 + expected_probs.gather(1, expected_tokens.unsqueeze(1)).log().flatten();
+                    ASSERT_TRUE(torch::allclose(cumulative, expected, 1e-6, 1e-7));
+                }
+                if (output.success.defined()) {
+                    assertAllValid(output.success);
+                }
             }
         }
     }

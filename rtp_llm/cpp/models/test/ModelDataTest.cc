@@ -299,6 +299,31 @@ void expectIntTensor(const torch::Tensor& actual, const torch::Tensor& expected)
     EXPECT_TRUE(torch::equal(actual, expected));
 }
 
+TEST_F(ModelDataTest, SingleRankCacheRefreshKeepsContinuationAndNewTables) {
+    GptModelInputs continuation;
+    continuation.combo_tokens             = torch::tensor({17, 29}, torch::kInt32);
+    continuation.kv_cache_block_id        = torch::ones({1, 2, 2}, torch::kInt32);
+    continuation.kv_cache_kernel_block_id = torch::ones({1, 2, 3}, torch::kInt32);
+    GptModelInputs inputs;
+    inputs.kv_cache_block_id        = torch::full({1, 2, 4}, 41, torch::kInt32);
+    inputs.kv_cache_kernel_block_id = torch::full({1, 2, 5}, 51, torch::kInt32);
+    const auto        physical      = inputs.kv_cache_block_id;
+    const auto        kernel        = inputs.kv_cache_kernel_block_id;
+    ParallelismConfig config;
+    config.tp_size = 1;
+    tpSyncModelInputs(
+        inputs,
+        config,
+        [&](GptModelInputs& current, bool reuse_cache_tables) {
+            EXPECT_FALSE(reuse_cache_tables);
+            current = continuation;
+        },
+        true);
+    EXPECT_TRUE(inputs.combo_tokens.is_same(continuation.combo_tokens));
+    EXPECT_TRUE(inputs.kv_cache_block_id.is_same(physical));
+    EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_same(kernel));
+}
+
 void checkGroupedTpRound(GptModelInputs&                 inputs,
                          int                             rank,
                          const std::vector<std::string>& root_tags,
@@ -431,8 +456,71 @@ TEST(ModelInputTpSyncChild, DISABLED_RunRank) {
     broadcaster.initialize(rank, 2, base_env);
     GptModelInputs inputs;
     checkGroupedTpRound(inputs, rank, {"z_group", "a_group", std::string("\x80") + "_group"}, false);
+    checkGroupedTpRound(inputs, rank, {"a_group", "z_group"}, false);
     checkGroupedTpRound(inputs, rank, {"single_group"}, false);
     checkGroupedTpRound(inputs, rank, {"z_group", "a_group"}, true);
+    checkLegacyUntaggedTpRound(inputs, rank);
+
+    ParallelismConfig continuation_config;
+    continuation_config.tp_size = 2;
+    continuation_config.tp_rank = rank;
+    // Distinct rank-local buffers prove that reuse does not rebroadcast the
+    // root payload or replace the peer's committed tensors.
+    const auto local_tokens = torch::tensor({100 + rank, 200 + rank}, torch::kInt32);
+    bool       resumed      = false;
+    bool       cache_reused = false;
+    auto       resume       = [&](GptModelInputs& current, bool reuse_cache_tables) {
+        resumed              = true;
+        cache_reused         = reuse_cache_tables;
+        current.combo_tokens = local_tokens;
+    };
+    tpSyncModelInputs(inputs, continuation_config, resume);
+    EXPECT_TRUE(resumed);
+    EXPECT_TRUE(cache_reused);
+    EXPECT_TRUE(inputs.combo_tokens.is_same(local_tokens));
+
+    // Allocator changes preserve rank-local continuation owners, while both
+    // tables grow and retired sentinels travel in canonical group order.
+    for (int width : {2, 5, 3}) {
+        inputs = GptModelInputs{};
+        inputs.kv_cache_group_tags =
+            rank == 0 ? vector<string>{"z_group", "a_group"} : vector<string>{"a_group", "z_group"};
+        const auto physical = torch::arange(4 * width, torch::kInt32).reshape({2, 2, width});
+        physical.select(2, 0).fill_(-1);
+        const auto kernel    = torch::arange(4 * (width + 1), torch::kInt32).reshape({2, 2, width + 1}) + 100;
+        inputs.input_lengths = torch::ones({2}, torch::kInt32);
+        if (rank == 0) {
+            inputs.kv_cache_block_id        = physical.pin_memory();
+            inputs.kv_cache_kernel_block_id = kernel.pin_memory();
+        }
+        resumed      = false;
+        cache_reused = true;
+        tpSyncModelInputs(inputs, continuation_config, resume, rank == 0);
+        EXPECT_TRUE(resumed);
+        // The root's decision controls both ranks, including peers whose
+        // local refresh argument is false. They must not advance old tables.
+        EXPECT_FALSE(cache_reused);
+        EXPECT_TRUE(inputs.combo_tokens.is_same(local_tokens));
+        expectIntTensor(inputs.kv_cache_block_id, rank == 0 ? physical : physical.flip({0}));
+        expectIntTensor(inputs.kv_cache_kernel_block_id, rank == 0 ? kernel : kernel.flip({0}));
+        EXPECT_TRUE(inputs.kv_cache_block_id.is_pinned());
+        EXPECT_TRUE(inputs.kv_cache_kernel_block_id.is_pinned());
+    }
+
+    // A scheduler boundary on root discards a peer's still-available candidate.
+    resumed = false;
+    if (rank == 0) {
+        inputs.combo_tokens = torch::tensor({31, 32}, torch::kInt32);
+    }
+    tpSyncModelInputs(inputs, continuation_config, rank == 0 ? std::function<void(GptModelInputs&, bool)>{} : resume);
+    EXPECT_FALSE(resumed);
+    expectIntTensor(inputs.combo_tokens, torch::tensor({31, 32}, torch::kInt32));
+
+    // Empty rounds obey the same root header even with cached local state.
+    inputs.skip_run = rank == 0;
+    tpSyncModelInputs(inputs, continuation_config, resume);
+    EXPECT_TRUE(inputs.skip_run);
+    EXPECT_FALSE(resumed);
     checkLegacyUntaggedTpRound(inputs, rank);
 
     if (rank == 0) {

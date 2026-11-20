@@ -31,7 +31,7 @@ class DraftQsaLayoutTest(unittest.TestCase):
         return result if gate is None else result * torch.sigmoid(gate)
 
     def test_ragged_ownership_and_two_graphs_refresh_all_metadata(self):
-        for batch in (1, 3, 8):
+        for batch in (1, 3, 8, 16):
             rows = batch * 4
             qkv = torch.randn(rows, 4096, device="cuda", dtype=torch.bfloat16)[:, :3584]
             selection = torch.randint(
@@ -113,6 +113,37 @@ class DraftQsaLayoutTest(unittest.TestCase):
                     actual.view(torch.int16)[finite], expected.view(torch.int16)[finite]
                 )
             )
+
+    def test_sm90_layout_keeps_sm120_attention_qualification(self):
+        if torch.cuda.get_device_capability() != (9, 0):
+            self.skipTest("SM90 qualification check")
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_paged_fmha import (
+            try_draft_paged_attention,
+        )
+
+        qkv = torch.zeros(4, 3584, device="cuda", dtype=torch.bfloat16)
+        selected = torch.zeros(4, 2051, device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([4], device="cuda", dtype=torch.int32)
+        cu = torch.tensor([0, 4], device="cuda", dtype=torch.int32)
+        cache = torch.zeros(3, 65536, device="cuda").to(torch.float8_e4m3fn)
+        table = torch.ones(1, 2, device="cuda", dtype=torch.int32)
+        scale = torch.ones(3, 256, device="cuda")
+        self.assertIsNone(
+            try_draft_paged_attention(
+                qkv,
+                selected,
+                lengths,
+                lengths,
+                cu,
+                cache,
+                table,
+                heads=12,
+                kv_heads=1,
+                head_dim=256,
+                page_size=128,
+                kv_scale=scale,
+            )
+        )
 
     def test_unqualified_layouts_fall_back(self):
         qkv = torch.zeros(4, 3584, device="cuda", dtype=torch.bfloat16)

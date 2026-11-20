@@ -343,6 +343,12 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
         )
         return super().forward(inputs, fmha_impl)
 
+    def supports_cuda_graph_draft_loop(self) -> bool:
+        # Ordinary MTP is deterministic; the loop may reuse its captured
+        # forward as a child without PyTorch generator replay bookkeeping.
+        return True
+
+
     def word_embedding(self, inputs: PyModelInputs) -> torch.Tensor:
         input_hiddens: Optional[torch.Tensor] = getattr(inputs, "input_hiddens", None)
         if not isinstance(input_hiddens, torch.Tensor) or not input_hiddens.numel():

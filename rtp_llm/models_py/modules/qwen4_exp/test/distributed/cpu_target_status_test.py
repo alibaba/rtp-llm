@@ -158,6 +158,43 @@ class CpuTargetStatusTest(unittest.TestCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual(results, {0: 0, 1: 0})
 
+    def test_local_cuda_mtp_does_not_require_sm120_or_only_two_visible_gpus(self):
+        config = SimpleNamespace(
+            is_mtp=False, enable_qwen4_ple=True, gen_num_per_cycle=3
+        )
+        pc = SimpleNamespace(
+            role_type="PDFUSION", tp_size=2, dp_size=1, local_world_size=2
+        )
+
+        def agree(peers, identity, **kwargs):
+            peers[:] = [identity, identity]
+
+        with (
+            patch("rtp_llm.models_py.distributed.collective_torch._get_group"),
+            patch.object(policy.dist, "all_gather_object", side_effect=agree),
+            patch.object(policy.torch.version, "hip", None),
+            patch.object(policy.torch.cuda, "is_available", return_value=True),
+            patch.object(
+                policy.torch.cuda, "get_device_capability", side_effect=AssertionError
+            ),
+            patch.object(policy.torch.cuda, "device_count", side_effect=AssertionError),
+            patch.object(policy, "create_cpu_tp_status") as create,
+        ):
+            self.assertIs(
+                policy.prepare_cpu_target_status(config, pc), create.return_value
+            )
+            create.assert_called_once()
+
+    def test_colocated_target_without_mtp_does_not_bootstrap(self):
+        config = SimpleNamespace(
+            is_mtp=False, enable_qwen4_ple=True, gen_num_per_cycle=0
+        )
+        pc = SimpleNamespace(
+            role_type="PDFUSION", tp_size=2, dp_size=1, local_world_size=2
+        )
+        with patch.object(policy, "create_cpu_tp_status", side_effect=AssertionError):
+            self.assertIsNone(policy.prepare_cpu_target_status(config, pc))
+
     def test_timeout_poisoning_and_late_peer_are_fail_stop(self):
         mapping, pointer = self.mapping()
         self.assertEqual(ops.cpu_status_reduce(pointer, 0, 1, 1, 20), -errno.ETIMEDOUT)

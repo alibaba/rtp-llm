@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <torch/version.h>
 
+#include <memory>
 #include <string>
 
 namespace rtp_llm {
@@ -74,6 +75,7 @@ public:
 
 public:
     py::object               attn_pyobj_{py::none()};
+    bool                     device_attention_preparation_{false};
     at::Tensor               decoder_layer_hidden_states_;
     at::Tensor               mtp_target_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;
@@ -90,6 +92,10 @@ public:
 #endif
     at::cuda::CUDAGraph graph_;
     CaptureMemoryHold   mem_hold_;
+    // The child graph and its pool outlive the composed loop. Each child uses
+    // the same model storage serially; the loop has its own allocator pool.
+    std::unique_ptr<at::cuda::CUDAGraph> draft_loop_graph_;
+    torch::Tensor                        draft_token_ids_;
 };
 
 class CudaGraphStreamLife {

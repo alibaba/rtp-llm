@@ -7,7 +7,6 @@ including reserved sentinel rows shared by inactive completion slots.
 
 import torch
 import triton
-import triton.language as tl
 
 from rtp_llm.models_py.kernels.cuda.qsa.decode_snapshot import _snapshot_decode
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
@@ -29,7 +28,8 @@ def prepare_decode_snapshot(positions, kv, kt, state, st):
         and 1 <= positions.numel() <= 64
         and positions.dtype == torch.int32
         and kv.ndim == state.ndim == 3
-        and kv.shape[1:] == (32, 128)
+        and kv.shape[1] in (16, 32)
+        and kv.shape[2] == 128
         and state.shape[1:] == (8, 128)
         and kv.dtype == torch.bfloat16
         and state.dtype == torch.float32
@@ -79,6 +79,7 @@ def try_snapshot_decode(positions, kv, kt, state, st):
         st.shape[1],
         kv.shape[0],
         state.shape[0],
+        ENTRIES=kv.shape[1],
         num_warps=4,
     )
     return undo

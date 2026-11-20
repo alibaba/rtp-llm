@@ -18,13 +18,21 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
+                            bool                               warm_up,
+                            bool                               device_handoff = false):
+        NormalBatchStreamProcessor(model_config,
+                                   pd_sep_config,
+                                   profiling_debug_logging_config,
+                                   cache_config,
+                                   warm_up,
+                                   /*async_worker_count=*/0,
+                                   device_handoff),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_block_draft_(isBlockDraftType(sp_config.type)),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
-        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor) {}
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor),
+        device_handoff_(device_handoff) {}
 
     mtp::DraftInputLayout draftInputLayout() const;
 
@@ -53,7 +61,8 @@ public:
     absl::Status dispatchDecode(const StreamGroups&                          stream_groups,
                                 const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                 const MergedOutput&                          draft_prefill_output,
-                                MtpTargetLogprobs                            target_logprobs) const;
+                                MtpTargetLogprobs                            target_logprobs,
+                                const std::vector<torch::Tensor>& prepared_draft_hiddens = {}) const;
 
     void finalizeDecodeTargetLogprobs(const StreamGroups&                          stream_groups,
                                       const speculative::SpeculativeSamplerOutput& spec_decode_output,
@@ -61,6 +70,12 @@ public:
 
     absl::StatusOr<GptModelInputs> gatherDecodeModelInput(const StreamGroups& stream_groups,
                                                           TensorHolder&       host_holder) const;
+
+    // Reuse only the same ordered requests from one publication. Admission,
+    // removal and reordering use the normal gather path. Cache-only invalidation
+    // may retain the continuation while requiring fresh physical/kernel tables.
+    static std::shared_ptr<const MtpDecodeBatchState> publishedDecodeBatch(const StreamGroups& stream_groups,
+                                                                           bool require_cache_snapshot = true);
 
     // Produce the next round's immutable page table by applying the exact
     // linear-cache permutation used by GenerateStream::specUpdate.  FULL/SWA
@@ -136,22 +151,16 @@ public:
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                                          const size_t                                 batch_size,
-                                         torch::Tensor&                               hidden_states_d_t,
                                          TensorHolder&                                host_holder);
 
     void updateOneStepDraftSamplerOutput(const StreamGroups& stream_groups,
                                          SamplerOutput&      draft_sampler_output,
-                                         torch::Tensor&      draft_token_probs_d_t,
                                          TensorHolder&       host_holder);
 
-    void updateMultiStepDraftSamplerOutput(const StreamGroups&         stream_groups,
-                                           SamplerOutput&              draft_sampler_output,
-                                           torch::Tensor&              draft_token_ids_d_t,
-                                           torch::Tensor&              spec_token_ids_d_t,
-                                           torch::Tensor&              draft_token_probs_d_t,
-                                           std::vector<torch::Tensor>& draft_token_probs_list);
-
 protected:
+    bool useMtpDeviceInput() const;
+    bool useMtpDeviceState() const;
+
     void overlayMtpCacheSnapshots(const StreamGroups& stream_groups,
                                   GptModelInputs&     model_input,
                                   TensorHolder&       host_holder) const;
@@ -174,6 +183,7 @@ protected:
                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                      const MergedOutput&                          draft_prefill_output,
                                      MtpTargetLogprobs&                           target_logprobs,
+                                     const std::vector<torch::Tensor>&            prepared_draft_hiddens,
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
@@ -188,6 +198,7 @@ protected:
     bool    is_block_draft_                = false;
     int32_t dspark_mask_token_id_         = -1;
     bool    dspark_sample_from_anchor_     = true;
+    bool    device_handoff_            = false;
 
     // DSpARK proposal constants are grow-only device buffers. Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

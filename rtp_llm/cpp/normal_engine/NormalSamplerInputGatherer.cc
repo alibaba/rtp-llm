@@ -166,7 +166,8 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGroups& stream_groups,
                                                                 size_t              total_batch_size_in,
                                                                 size_t              total_batch_size_out,
-                                                                size_t              propose_step) const {
+                                                                size_t              propose_step,
+                                                                bool                include_token_history) const {
     // TODO(xinfei.sxf) don't sample for chunk stream
     SamplerInputs sampler_inputs;
     sampler_inputs.step             = stream_groups.maxSeqLen() + propose_step;
@@ -199,8 +200,9 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
     // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
     // at bs=128 / step=65552).
-    sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
+    sampler_inputs.token_ids = include_token_history ?
+                                   torch::empty({bs, (int64_t)(sampler_inputs.step + 1)}, pinned_i32) :
+                                   torch::empty({bs, 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }

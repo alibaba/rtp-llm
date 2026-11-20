@@ -36,6 +36,18 @@ namespace rtp_llm {
 class RecordedRequest;
 struct RecordedTokenTiming;
 
+// Immutable, batched continuation of an ordinary MTP round. Per-request views
+// keep the existing scheduler/output interfaces; an unchanged decode batch can
+// consume these tensors directly without rebuilding them from those views.
+struct MtpDecodeBatchState {
+    GptModelInputs       draft_inputs;
+    torch::Tensor        target_tokens;
+    torch::Tensor        next_seq_lengths;
+    torch::Tensor        accept_lengths;
+    torch::Tensor        accept_tokens;
+    std::vector<int64_t> stream_ids;
+};
+
 // GenerateStream-owned buffers stay on host by default; KV cache is the device-side exception.
 
 struct StreamUpdateInfo {
@@ -714,6 +726,11 @@ public:
         sp_output_buffer_ = sp_output_buffer;
     }
 
+    // Set during admission, before any speculative bookkeeping can run.
+    void enableAsyncSpeculativeReserve() {
+        stream_async_reserve_ = true;
+    }
+
     SpeculativeExecutorStreamOutputPtr getSPOutputBuffer() {
         return sp_output_buffer_;
     }
@@ -737,9 +754,8 @@ public:
         torch::Tensor accept_len_gpu;
         torch::Tensor accept_tokens_gpu;
         torch::Tensor next_seq_len_gpu;
-        // Position tuple of the next round's newest committed token.  DSpARK
-        // carries this beside next_seq_len so MRoPE target-verify graphs can
-        // be prepared without consulting worker-owned host bookkeeping.
+        // Position tuple of the next round's newest committed token. Draft
+        // and DSpARK verify preparation use this without reading host history.
         torch::Tensor next_position_ids_gpu;
         torch::Tensor engram_token_window_gpu;
         torch::Tensor propose_tokens_gpu;
@@ -769,6 +785,8 @@ public:
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
         int next_seq_len_upper_bound = -1;
+        std::shared_ptr<const MtpDecodeBatchState> batch;
+        int64_t                                    batch_row = -1;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -848,18 +866,20 @@ public:
     bool hasMtpCacheSnapshot() const {
         return hasMtpCacheSnapshot(getMtpAsyncDeviceState());
     }
-    void clearMtpCacheSnapshot() {
+    // Allocation changes only page mappings. The immutable token/hidden-state
+    // continuation remains valid for the same ordered batch after a table refresh.
+    void clearMtpCacheSnapshot(bool retain_batch = false) {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         mtp_async_state_.next_kv_cache_block_id_gpu        = torch::Tensor();
         mtp_async_state_.next_kv_cache_kernel_block_id_gpu = torch::Tensor();
+        if (!retain_batch) {
+            mtp_async_state_.batch.reset();
+            mtp_async_state_.batch_row = -1;
+        }
     }
     torch::Tensor getLastHiddenStatesGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.last_hidden_states_gpu;
-    }
-    torch::Tensor getDraftAllProbsGpu() const {
-        std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
-        return mtp_async_state_.draft_all_probs_gpu;
     }
     void clearSpecDecodeDeviceState() {
         // Unconditional legacy/testing escape hatch. Active MTP decode paths

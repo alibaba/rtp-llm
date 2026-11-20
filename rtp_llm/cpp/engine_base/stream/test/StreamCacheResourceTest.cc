@@ -506,6 +506,32 @@ protected:
         ASSERT_FALSE(stream_->hasError());
     }
 
+    GenerateStream::MtpAsyncDeviceState publishMtpCacheSnapshot() {
+        const auto& cache        = stream_->streamCacheResource().kvCache();
+        const auto& resource     = cache.cacheResource(0);
+        const auto  tags         = resource.groupTags();
+        size_t      kernel_width = 0;
+        for (const auto& tag : tags) {
+            kernel_width = std::max(kernel_width, resource.kernelBlocks(tag).size());
+        }
+        auto physical = torch::full({cache.groupNums(), 1, cache.curBlocksNum()}, -1, torch::kInt32);
+        auto kernel   = torch::full({cache.groupNums(), 1, static_cast<int64_t>(kernel_width)}, -1, torch::kInt32);
+        for (size_t group = 0; group < tags.size(); ++group) {
+            const auto& blocks = resource.blocks(tags[group]);
+            const auto& slots  = resource.kernelBlocks(tags[group]);
+            physical[group][0].narrow(0, 0, blocks.size()).copy_(torch::tensor(blocks, torch::kInt32));
+            kernel[group][0].narrow(0, 0, slots.size()).copy_(torch::tensor(slots, torch::kInt32));
+        }
+        GenerateStream::MtpAsyncDeviceState state;
+        state.next_kv_cache_block_id_gpu        = physical.to(torch::kCUDA);
+        state.next_kv_cache_kernel_block_id_gpu = kernel.to(torch::kCUDA);
+        state.next_seq_len_upper_bound          = stream_->seqLength();
+        state.batch                             = std::make_shared<MtpDecodeBatchState>();
+        state.batch_row                         = 0;
+        state.epoch                             = stream_->setMtpAsyncDeviceState(state);
+        return state;
+    }
+
 #define CHECK_BLOCK(block_vec, outter_size, inner_size)                                                                \
     do {                                                                                                               \
         SCOPED_TRACE("checkBlockFunc");                                                                                \
@@ -577,6 +603,136 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDefersAsyncWorkerMutationUnt
     }
     EXPECT_EQ(resource.kvCache().blocks(0, "linear")[4], before[4]);
     EXPECT_EQ(resource.kvCache().blocks(0, "linear")[5], before[5]);
+}
+
+TEST_F(StreamCacheResourceTest, CompletedMtpBookkeepingPreservesUnchangedPageTables) {
+    prepareLinearHistoryResource();
+    auto& resource = stream_->streamCacheResource();
+    commitLinearHistoryToken();
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    ASSERT_FALSE(stream_->hasPendingAsyncBookkeeping());
+    const auto state = publishMtpCacheSnapshot();
+
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+        const auto after = stream_->getMtpAsyncDeviceState();
+        EXPECT_TRUE(after.next_kv_cache_block_id_gpu.is_same(state.next_kv_cache_block_id_gpu));
+        EXPECT_TRUE(after.next_kv_cache_kernel_block_id_gpu.is_same(state.next_kv_cache_kernel_block_id_gpu));
+        EXPECT_EQ(after.batch, state.batch);
+        EXPECT_EQ(after.batch_row, state.batch_row);
+        EXPECT_EQ(after.epoch, state.epoch);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, CompletedMtpBookkeepingDefersReclaimUntilCapacityBoundary) {
+    prepareLinearHistoryResource();
+    auto& resource = stream_->streamCacheResource();
+    // Committing host history alone must not force another page-table refresh.
+    ASSERT_TRUE(resource.incrKVBlock(/*seq_len_override=*/16).ok());
+    commitLinearHistoryToken();
+    ASSERT_EQ(resource.singleBatchNeedBlocks(stream_->seqLength(), 0), 0);
+    const auto before = resource.kvCache().blocks(0, "linear");
+    const auto state  = publishMtpCacheSnapshot();
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear"), before);
+    EXPECT_TRUE(stream_->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.is_same(state.next_kv_cache_block_id_gpu));
+    // Reclaim and physical growth share the next allocator boundary.
+    while (resource.singleBatchNeedBlocks(stream_->seqLength(), 0) == 0) {
+        commitLinearHistoryToken();
+    }
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_NE(resource.kvCache().blocks(0, "linear"), before);
+    const auto after = stream_->getMtpAsyncDeviceState();
+    EXPECT_FALSE(after.next_kv_cache_block_id_gpu.defined());
+    EXPECT_FALSE(after.next_kv_cache_kernel_block_id_gpu.defined());
+    EXPECT_EQ(after.batch, state.batch);
+    EXPECT_EQ(after.batch_row, state.batch_row);
+}
+
+TEST_F(StreamCacheResourceTest, MtpLookaheadGrowthKeepsActiveLinearTailAndNextRoundCapacity) {
+    prepareLinearHistoryResource();
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto state = publishMtpCacheSnapshot();
+    commitLinearHistoryToken();
+    const int  active       = (stream_->seqLength() - 1) / stream_->seqSizePerBlock();
+    const auto active_block = resource.kvCache().blocks(0, "linear")[active];
+    ASSERT_NE(active_block, NULL_BLOCK_IDX);
+    ASSERT_GT(resource.singleBatchNeedBlocks(stream_->seqLength(), 4), 0);
+
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear")[active], active_block);
+    EXPECT_EQ(resource.singleBatchNeedBlocks(stream_->seqLength() + stream_->seqSizePerBlock(), 4), 0);
+    EXPECT_FALSE(stream_->hasMtpCacheSnapshot());
+    EXPECT_EQ(stream_->getMtpAsyncDeviceState().batch, state.batch);
+    const auto next = publishMtpCacheSnapshot();
+    commitLinearHistoryToken();
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_TRUE(stream_->getMtpAsyncDeviceState().next_kv_cache_block_id_gpu.is_same(next.next_kv_cache_block_id_gpu));
+}
+
+TEST_F(StreamCacheResourceTest, MtpLookaheadShortfallRetriesRequiredCapacity) {
+    prepareLinearHistoryResource(/*enable_reclaim=*/false);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    publishMtpCacheSnapshot();
+    commitLinearHistoryToken();
+    const auto  original_full = resource.kvCache().blocks(0, "full1");
+    const auto& tags          = cache_manager_->cacheConfig().groupTags();
+    const auto  index         = std::distance(tags.begin(), std::find(tags.begin(), tags.end(), "full1"));
+    ASSERT_LT(index, tags.size());
+    auto pool = cache_manager_->coordinator_manager_->groupBlockPools()[index];
+    // FULL includes all four reserve tokens: this round needs one new block,
+    // while the optional next-round bound needs two. Only the former fits.
+    auto held = pool->malloc(pool->freeBlocksNum() - 1);
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    auto       release  = std::shared_ptr<void>(nullptr, [pool, blocks = *held](void*) { pool->decRef(blocks); });
+    const auto failures = resource.mallocFailedTimes();
+
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_GT(resource.mallocFailedTimes(), failures);
+    const auto& full = resource.kvCache().blocks(0, "full1");
+    ASSERT_EQ(full.size(), original_full.size() + 1);
+    EXPECT_TRUE(std::equal(original_full.begin(), original_full.end(), full.begin()));
+    EXPECT_EQ(resource.singleBatchNeedBlocks(stream_->seqLength(), 4), 0);
+}
+
+TEST_F(StreamCacheResourceTest, MtpLookaheadDoesNotExtendPastModelContext) {
+    prepareLinearHistoryResource(/*enable_reclaim=*/false);
+    auto& resource = stream_->streamCacheResource();
+    stream_->setReserveStep(4);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    publishMtpCacheSnapshot();
+    commitLinearHistoryToken();
+    stream_->max_seq_len_ = stream_->seqLength() + 1;
+
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear").size(),
+              (stream_->maxSeqLen() + stream_->seqSizePerBlock() - 1) / stream_->seqSizePerBlock() + 3);
+    EXPECT_EQ(resource.singleBatchNeedBlocks(stream_->maxSeqLen(), 4), 0);
+}
+
+TEST_F(StreamCacheResourceTest, CompletedMtpBookkeepingInvalidatesGrownPageTables) {
+    prepareLinearHistoryResource(/*enable_reclaim=*/false);
+    auto& resource = stream_->streamCacheResource();
+    commitLinearHistoryToken();
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto before = resource.kvCache().blocks(0, "full1");
+    const auto state  = publishMtpCacheSnapshot();
+    commitLinearHistoryToken();
+    commitLinearHistoryToken();
+    ASSERT_GT(resource.singleBatchNeedBlocks(stream_->seqLength(), 0), 0);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::RUNNING);
+    EXPECT_GT(resource.kvCache().blocks(0, "full1").size(), before.size());
+    const auto after = stream_->getMtpAsyncDeviceState();
+    EXPECT_FALSE(after.next_kv_cache_block_id_gpu.defined());
+    EXPECT_FALSE(after.next_kv_cache_kernel_block_id_gpu.defined());
+    EXPECT_EQ(after.batch, state.batch);
+    EXPECT_EQ(after.batch_row, state.batch_row);
 }
 
 TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDisabledFoldsHistoryToDecodeTail) {

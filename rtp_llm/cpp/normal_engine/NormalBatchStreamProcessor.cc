@@ -8,7 +8,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
     const CacheConfig&                 cache_config,
     bool                               warm_up,
-    int                                async_worker_count) {
+    int                                async_worker_count,
+    bool                               device_input) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
@@ -48,7 +49,7 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.enable_detail_log       = profiling_debug_logging_config.enable_detail_log;
     model_input_gatherer_config_.enable_model_inputs_log = profiling_debug_logging_config.enable_model_inputs_log;
 
-    model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_);
+    model_input_gatherer_   = std::make_unique<NormalModelInputGatherer>(model_input_gatherer_config_, device_input);
     sampler_input_gatherer_ = std::make_unique<NormalSamplerInputGatherer>();
     output_dispatcher_ = std::make_unique<NormalOutputDispatcher>(model_config.output_vocab_ids, async_worker_count);
 }
@@ -100,9 +101,10 @@ absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlo
 SamplerInputs NormalBatchStreamProcessor::allocateSamplerInputs(const StreamGroups& stream_groups,
                                                                 size_t              total_batch_size_in,
                                                                 size_t              total_batch_size_out,
-                                                                size_t              propose_step) const {
+                                                                size_t              propose_step,
+                                                                bool                include_token_history) const {
     return sampler_input_gatherer_->allocateSamplerInputs(
-        stream_groups, total_batch_size_in, total_batch_size_out, propose_step);
+        stream_groups, total_batch_size_in, total_batch_size_out, propose_step, include_token_history);
 }
 
 void NormalBatchStreamProcessor::fillSamplerCommonInputs(SamplerInputs&                sampler_inputs,

@@ -18,8 +18,8 @@ def try_write_draft_window(
     if not (
         raw.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(raw.device) == (12, 0)
-        and kv.shape[1:] == (32, 128)
+        and torch.cuda.get_device_capability(raw.device) in ((9, 0), (12, 0))
+        and kv.shape[1:] in ((16, 128), (32, 128))
         and 1 <= raw.shape[0] <= 32
         and 1 <= prefixes.numel() <= 8
         and raw.stride(1) == 1
@@ -37,6 +37,7 @@ def try_write_draft_window(
         STW=st.shape[1],
         KB=kv.shape[0],
         SB=state.shape[0],
+        ENTRIES=kv.shape[1],
         BQ=4,
         num_warps=4,
     )

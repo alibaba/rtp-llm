@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <future>
 #include <list>
 #include <map>
 #include <memory>
@@ -113,6 +115,7 @@ protected:
         bool                       valid = false;
     };
 
+    absl::Status waitPendingTargetCommit();
     bool isTpRank0() const;
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
@@ -123,8 +126,11 @@ protected:
     bool                speculativeTargetTransactionsEnabled() const;
     absl::Status        rendezvousSpeculativeTargetPhaseStatus(const absl::Status& local_status, const char* phase);
     absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
-    absl::Status
-    prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false);
+    absl::Status        prepareAndCommitSpeculativeTargetState(torch::Tensor&                    accept_len,
+                                                               size_t                            batch_size,
+                                                               bool                              is_fake_stream = false,
+                                                               std::shared_future<absl::Status>* pending_commit = nullptr);
+    absl::Status        commitSpeculativeTargetState(const torch::Tensor& accept_len);
     void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
     void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
 
@@ -149,7 +155,7 @@ protected:
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
     void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    std::optional<GptModelInputs> launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     // post_rejection=true forks with the final post-commit input, which is
     // safe under speculative target hooks; the default pre-rejection fork
     // keeps its historical useAsyncPrepare() gate.
@@ -184,29 +190,28 @@ protected:
                                                       std::shared_ptr<torch::Event>                rejection_event);
     void         finishEarlyMtpTargetLogprobsFinalize(std::shared_ptr<MtpTargetLogprobs>& early_finalize_state,
                                                       MtpTargetLogprobs&                  target_logprobs);
-    absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
+    absl::Status dispatchDecodeOutput(const StreamGroups&                              stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
-                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                      const torch::Tensor&                         verify_position_ids,
-                                      const torch::Tensor&                         kv_cache_block_id,
-                                      const torch::Tensor&                         kv_cache_kernel_block_id,
-                                      GptModelOutputs                              draft_prefill_model_output,
-                                      SamplerOutput                                draft_prefill_sampler_output,
-                                      std::shared_ptr<torch::Event>                rejection_event,
-                                      std::shared_ptr<torch::Event>                draft_event,
+                                      const speculative::SpeculativeSamplerOutput&     speculative_sampler_output,
+                                      const torch::Tensor&                             verify_position_ids,
+                                      GptModelOutputs                                  draft_prefill_model_output,
+                                      SamplerOutput                                    draft_prefill_sampler_output,
+                                      std::shared_ptr<torch::Event>                    draft_event,
+                                      std::vector<GenerateStream::MtpAsyncDeviceState> next_device_states,
                                       std::shared_ptr<RecordedBatch>               recorded_batch,
-                                      MtpTargetLogprobs                            target_logprobs);
+                                      MtpTargetLogprobs                            target_logprobs,
+                                      std::shared_future<absl::Status>                 target_commit = {});
 
     torch::Tensor gatherPreviousTargetTokens(const StreamGroups& stream_groups,
                                              int64_t             batch_size,
                                              bool                use_device_state,
                                              bool&               from_device_state);
 
-    void draftModelDecode(GptModelInputs&             model_input,
-                          const StreamGroups&         stream_groups,
-                          std::vector<torch::Tensor>& draft_probs_list,
-                          torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+    void draftModelDecode(GptModelInputs&       model_input,
+                          const StreamGroups&   stream_groups,
+                          torch::Tensor&        draft_token_ids_t,
+                          int64_t&              model_forward_us,
+                          const GptModelInputs* verify_geometry = nullptr);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -223,12 +228,11 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
-    // Env-gated stream-async switch. Default off unless
-    // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
+    // Models advertising device handoff enable the shared async pipeline as
+    // one policy. Existing environment opt-ins remain for other models.
     bool useStreamAsync() const;
 
-    // Device-state feature gates. Defaults stay off; each consumer keeps its
-    // own runtime guard before taking an async path.
+    // Device state remains authoritative until the next round is prepared.
     bool useAsyncDeviceState() const;
 
     bool useAsyncPrepare() const;
@@ -240,23 +244,50 @@ protected:
     // Enable with RTP_LLM_MTP_ASYNC_DRAFT_PREPARE_POST_REJECTION=1.
     bool useAsyncDraftPreparePostRejection() const;
 
-    // Opt-in gate to skip the broad sync at decodeStep start.
+    // Device handoff skips the broad sync at decodeStep start.
     // Device state, epoch-guarded clears, and single-slotted workers preserve
     // correctness while bookkeeping overlaps the next step.
     bool useDropBroadSync() const;
 
-    // Attach next-step device state, then fork a worker that waits on caller-
-    // recorded rejection/draft events and runs D2H/specUpdate/KV release off
-    // the main thread.
-    absl::Status dispatchDecodeAsync(const StreamGroups&                          stream_groups,
-                                     const speculative::SpeculativeSamplerOutput& spec_decode_output,
-                                     const torch::Tensor&                         verify_position_ids,
-                                     const torch::Tensor&                         kv_cache_block_id,
-                                     const torch::Tensor&                         kv_cache_kernel_block_id,
-                                     MergedOutput                                 draft_prefill_output,
-                                     std::shared_ptr<torch::Event>                rejection_event,
-                                     std::shared_ptr<torch::Event>                draft_event,
-                                     MtpTargetLogprobs                            target_logprobs);
+    // Build an unpublished continuation while the target commit runs. Its GPU
+    // operations depend on rejection/extend outputs, not the host verdict.
+    std::vector<GenerateStream::MtpAsyncDeviceState>
+    prepareDecodeDeviceStates(const StreamGroups&                          stream_groups,
+                              const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                              const torch::Tensor&                         verify_position_ids,
+                              const torch::Tensor&                         kv_cache_block_id,
+                              const torch::Tensor&                         kv_cache_kernel_block_id,
+                              const MergedOutput&                          draft_prefill_output,
+                              const GptModelInputs*                        draft_input_template);
+
+    // Prepare immutable continuation tensors while the current GPU round runs.
+    // Peers advance cache tables only after the next root capacity decision.
+    std::shared_ptr<MtpDecodeBatchState>
+    prepareDecodeBatchState(const torch::Tensor&                         previous_seq_lengths,
+                            const speculative::SpeculativeSamplerOutput& spec_decode_output,
+                            const torch::Tensor&                         verify_position_ids,
+                            const torch::Tensor&                         kv_cache_block_id,
+                            const torch::Tensor&                         kv_cache_kernel_block_id,
+                            const MergedOutput&                          draft_prefill_output,
+                            const GptModelInputs*                        draft_input_template,
+                            bool                                         cache_snapshot);
+
+    void advanceDecodeCacheTables(GptModelInputs&      next,
+                                  const torch::Tensor& previous_seq_lengths,
+                                  const torch::Tensor& accept_lengths,
+                                  const torch::Tensor& blocks,
+                                  const torch::Tensor& kernel_blocks);
+    void prepareNextDraftAttentionInputs(const GptModelInputs& inputs);
+
+    // Publish immutable device continuation immediately. The host bookkeeping
+    // worker waits for target commit and sampler/draft readiness before output.
+    absl::Status dispatchDecodeAsync(const StreamGroups&                              stream_groups,
+                                     const speculative::SpeculativeSamplerOutput&     spec_decode_output,
+                                     MergedOutput                                     draft_prefill_output,
+                                     std::shared_ptr<torch::Event>                    draft_event,
+                                     std::vector<GenerateStream::MtpAsyncDeviceState> next_device_states,
+                                     MtpTargetLogprobs                            target_logprobs,
+                                     std::shared_future<absl::Status>                 target_commit = {});
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -265,7 +296,7 @@ protected:
                                    const torch::Tensor&                         verify_position_ids,
                                    const MergedOutput&                          draft_prefill_output);
 
-    static torch::Tensor advanceDSparkPositionIds(const torch::Tensor& verify_position_ids,
+    static torch::Tensor advanceVerifyPositionIds(const torch::Tensor& verify_position_ids,
                                                   const torch::Tensor& accept_len,
                                                   int64_t              batch_size,
                                                   int64_t              verify_width);
@@ -350,9 +381,8 @@ private:
 
     AsyncRunner target_verify_prepare_runner_;
     AsyncRunner draft_prefill_prepare_runner_;
-    // True between the post-rejection prepare fork and runDraftPrefillForward:
-    // the forked worker already prepared the final input, so the hooks-mode
-    // synchronous rebuild inside the forward is skipped for that call only.
+    // One preparation per round, consumed after its worker is joined.
+    bool target_verify_prepare_forked_ = false;
     bool draft_prefill_prepare_forked_ = false;
     // Declare the worker after its target so destruction joins the worker first.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
@@ -370,6 +400,15 @@ private:
     std::function<bool(bool)> speculative_target_status_reducer_for_test_;
     std::function<void()>     before_model_forward_;
     std::function<void()>     after_model_forward_;
+    // Destroy the worker before the model and transaction status transport.
+    std::optional<AsyncRunner> target_commit_runner_;
+    // GPU continuation can be queued before the host verdict. The next target
+    // phase and output worker both consume this immutable completion.
+    std::shared_future<absl::Status> pending_target_commit_;
+    // Consumed once at the next decode boundary. A peer's transition is lazy:
+    // the root must first confirm its batch/cache snapshot is still reusable.
+    std::function<void(GptModelInputs&, bool)> next_decode_inputs_;
+    std::shared_ptr<const MtpDecodeBatchState> published_decode_batch_;
     bool                      profile_work_started_ = false;
 };
 }  // namespace rtp_llm

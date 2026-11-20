@@ -27,9 +27,12 @@ public:
     std::vector<std::optional<ErrorInfo>> processor_errors;
 
     SpeculativeSamplerOutput(): transfer_done_event(std::make_shared<torch::Event>(cuda_graph::makeGraphEvent())) {}
+
+    void enqueueHostTransferIfNeeded();
 };
 
 struct FastTopKSamplerOutput {
+    // Undefined for top_k == 1: token_ids encode the exact point-mass proposal.
     torch::Tensor all_probs;
     torch::Tensor token_ids;
 };
@@ -61,7 +64,8 @@ torch::Tensor dflashDraftProbabilities(const torch::Tensor& logits, const Genera
 
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
+    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step):
+        d2t_map_(std::move(d2t_map)), propose_step_(propose_step) {}
 
     virtual SpeculativeSamplerOutput forward(const SpeculativeSamplingParams& params,
                                              SamplerOutput&                   draft_sampler_output,
