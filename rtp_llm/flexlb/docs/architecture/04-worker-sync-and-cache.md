@@ -4,10 +4,32 @@ worker 健康与容量信息由后台线程高频异步同步；KV cache 元数�
 本分支（feature/flexlb-kvcm）支持三种 cache 匹配源：LOCAL_SYNC（本地全量索引）、
 KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
-主要代码：`flexlb-sync/src/main/java/org/flexlb/sync/`、`service/grpc/`，
-`flexlb-cache/src/main/java/org/flexlb/cache/`，`flexlb-grpc/.../KvcmGrpcClient.java`。
+主要代码：`flexlb-worker/src/main/java/org/flexlb/worker/status/`，
+`flexlb-cache/src/main/java/org/flexlb/cache/`、`cache/kvcm/KvcmGrpcClient.java`。
 
 ## Worker 状态同步
+
+ViT 图片与 embedding 缓存信息由 `VitWorkerCacheManager` 管理：保存各 Worker 的
+缓存快照、查询命中情况并记录待完成请求的缓存预留；Worker 替换和快照过期时使旧数据失效。
+`VitWorkerCacheSynchronizer` 负责定时拉取，通过 `MasterStatusView` 判断本机是否应执行同步：
+独立部署正常拉取，开启一致性时仅 Master 拉取，观察到本机重新成为 Master 后立即刷新。
+同步器每 5 秒检查一次，单个 Worker 的拉取间隔为 30 秒，RPC 超时 2 秒、并发上限 4；
+失败不覆盖已有快照，快照在 60 秒后失效。Manager 在响应写入时再次校验 Worker 身份，
+拒绝替换前实例的晚到响应；它不依赖选主服务、RPC 客户端或定时线程。
+
+每份有效响应统一通过 Endpoint 的 `applyWorkerStatus` 完整校准请求和资源，随后发布
+Worker 快照及游标；同版本响应也执行完整更新，版本倒退仍被拒绝。
+`WorkerEndpoint` 统一负责代际检查、Endpoint 加锁、异常时停止接纳和快照发布；
+各角色只在 `updateStatusLocked` 中更新本地请求与容量事实。请求事件通过父类统一构造和发送，
+各角色保留自己的请求身份检查、事件类型及容量通知条件；发送仍由 Runner 在锁外触发。
+Decode 的 RequestRegistration 只保存登记身份，通知接收器由 Endpoint 的 RequestRecord 持有。
+状态更新在锁内同时捕获登记和接收器，锁外发送使用这份通知；关闭通知使用已移出的资源记录，
+不按 requestId 重新查找接收器，因此同 ID 的新登记不会接收旧登记的反馈。
+Runner 统一调用 Registry 的 `updateEndpoint`：查找 Endpoint，不存在则创建，随后统一更新；
+新建 Endpoint 更新成功后再注册为可路由节点。返回的请求通知在 WorkerStatus 锁外发布。
+完成任务按本地请求记录去重，`latestFinishedTaskVersion` 保留为后续 RPC 获取增量完成记录的游标。
+请求通知和指标在锁外执行。Prefill 在一次持锁更新中处理完成请求和未知运行工作量，
+按请求释放 compute tokens；不保存批次阶段、执行时间预测或学习样本。
 
 ### 请求 ID 协议
 
@@ -30,11 +52,6 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 相关转换仅发生在对接这些 Engine RPC 的边界，不用于 Master 内部请求标识。
 `GenerateInputPB`、`EnqueueBatchSuccessPB` 和 `EnqueueBatchErrorPB` 的 ID 仍是 int64，
 对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
-BATCH Generation 的 Schedule 入口在入队前检查 `generate_input` 是有效的 GenerateInputPB，
-并要求字符串 request_id 与该 PB 的 int64 ID 的规范十进制写法完全一致；`"007"`、非数字、
-越界或不一致的 ID 返回 INVALID_REQUEST。大于 JS 精确整数范围的 ID
-通过字符串与支持 int64 的 protobuf 编码传输，不转换为浮点数。
-NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需要 Engine 生成 payload。
 对当前 Engine 的取消 RPC 单独要求规范 int64 字符串，拒绝 `"007"` 被归一化后误取消 ID `"7"`。
 
 ### 调度拓扑
@@ -50,6 +67,11 @@ NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需�
     一个在途状态检查**；
   - **仅当 `!kvcmEnabled`** 时提交 `GrpcCacheStatusCheckRunner`（`cacheCheckInProgress` CAS）。
 
+`RoutingServiceDiscovery` 只选择 Provider 并返回原始 `DiscoveredHost`，不推导 Worker 端口。
+`WorkerAddressService.expandWorkerHosts` 按 `WorkerDiscoveryEndpoint` 推导 HTTP/gRPC、状态端口和多 Engine 地址，
+产生 `WorkerHost`；Worker 状态拉取和 `EngineAddressResolver` 的初始查询、轮询、订阅均复用这处转换。
+KVCM 使用原始发现地址，不经过 Worker 展开。
+
 `WorkerAddressService` 按 Endpoint 保存最近一次成功的非空发现快照。查询异常、超过 500ms、
 线程池拒绝任务或返回空列表时保留该快照，已有 worker 继续接受状态探测；首次发现尚无缓存时
 返回空列表。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
@@ -63,11 +85,7 @@ NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需�
 
 Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不覆盖旧地址。
 
-`OptimizerClient` 保留可显式调用的 trace 接口，当前调度链路没有调用该接口。初始化仅注册指标，
-首次具备 block keys 与有效 namespace 的 `traceQuery` 才启动 `OptimizerAddressResolver`；
-重复调用复用同一发现任务。动态发现由后台轮询更新地址快照，首次快照尚未就绪时跳过本次 trace。
-关闭后不再启动发现；关闭仅停止自有任务，不关闭共享的 `ServiceDiscovery`。trace 启动或发送
-失败仅记录日志和指标，不改变调度结果。
+当前调度链路不发送 optimizer trace，也不启动 optimizer 地址发现任务。
 
 一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
 统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
@@ -77,7 +95,7 @@ Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不
 
 `EngineAddressResolver` 向唯一的 pooled `EngineGrpcClient` 发布结构化 `WorkerHost`，保留业务
 gRPC 端口和 worker status 端口。客户端按 `ip:实际RPC端口:serviceType` 复用 channel：
-`GetWorkerStatus` / `GetCacheStatus` 使用 `worker_status_port + i`，`EnqueueBatch` / `Cancel`
+`GetWorkerStatus` / `GetCacheStatus` 使用 `worker_status_port + i`，`Cancel`
 使用共享 frontend gRPC 端口。多引擎的业务 channel 去重，状态 channel 按 engine 端口独立创建。
 KVCM 开启时不创建 `GetCacheStatus` channel。该规则对所有 discovery provider 一致；worker IP
 完全退出发现集合后关闭其 channel。endpoint 配置不热更新，端口变更依赖进程重启。
@@ -137,7 +155,7 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 完成上报按请求与 endpoint generation 归属交给调度器清理。Decode RETURN 抢占的 incoming
 在引擎确认或首次 Finished 上报后清除本地可回滚记录，victim 的声明与 KV hold 继续等待其完成证据。
 
-`EngineHealthReporter` 使用任务里的引擎时间戳上报 received→waiting、waiting→running
+`ServiceMetricsReporter` 使用任务里的引擎时间戳上报 received→waiting、waiting→running
 及执行时间；时间戳 `0` 表示未知并跳过，但合法耗时 `0` 可以上报。
 阶段耗时取 WorkerStatus 携带的引擎时间戳，不使用 Master 首次探测到状态的时间。
 即使轮询跳过中间阶段，完成任务包含完整时间戳时仍能计算该阶段耗时。
@@ -147,8 +165,11 @@ PAI-vLLM 端的 Encoder 状态上报不属于 FlexLB 实现范围。
 
 `GrpcCacheStatusCheckRunner`：挂在 20ms 同步 tick 上，但 PREFILL/PDFUSION 按
 `DynamicCacheIntervalService.getCurrentIntervalMs()` 降频（跳 tick 实现）。请求携带当前
-cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `cached_keys`（block hash 集合）
+cache 版本做增量。Decode 只拉元数据，初始化后按至少 1000ms 的 tick 周期拉取；是否到期在执行器交接前决定。
+响应恒更新 KV token 总量，版本更新时把 `cached_keys`（block hash 集合）
 经 `CacheAwareService.updateFromWorkerStatus()` 喂给本地索引（仅 PREFILL/PDFUSION）。
+索引成功后在缓存锁外通知当前 Endpoint 代际的容量等待者；失败或旧代际不能发布可用通知。
+WorkerStatus 的 running/waiting 数分别取 Engine 汇总与有效任务明细计数的较大值，排除纯取消覆盖条目。
 
 **动态间隔**：`DefaultDynamicCacheIntervalService` 维护 30 样本滚动平均 diff 大小，目标
 `CACHE_STATUS_DIFF_SIZE(30)`；偏差 >10% 时按 ±30% 调整间隔，钳制在
@@ -179,7 +200,7 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   KVCM address/namespace/port/discovery 定位信息；
   `CacheMatchConfiguration` 推导不变量 **`localSyncEnabled = !kvcmEnabled`、
   `localStandbyEnabled = kvcmEnabled`**。
-- `KvcmGrpcClient`（flexlb-grpc）：向 KVCM **leader** 发 `GetHostCacheState`
+- `KvcmGrpcClient`（flexlb-cache）：向 KVCM **leader** 发 `GetHostCacheState`
   （namespace = `deploymentName_blockSize`，QueryType 按 worker `kvCacheGroupMode` 映射
   QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port, local,
 global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命中块数，已包含 `local`。
@@ -209,7 +230,7 @@ global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命�
 ### LOCAL_STANDBY（兜底索引）
 
 - 近似索引，**只由已路由请求写入**（write-on-route）：PREFILL/PDFUSION 路由成功后
-  `FlexlbServiceImpl` 在本地调度成功后调 `updateFromRoutedRequest`，由独立线程池异步落库，
+  `RequestRoutingService` 在本地调度成功后调 `updateFromRoutedRequest`，由独立线程池异步落库，
   不等待索引写入完成；更新失败不影响调度响应。转发成功的 follower 不写入，
   follower 在本地兜底调度成功时写入自己的索引。master/follower 之间不复制。
 - `LocalStandbyCacheIndex`：`ConcurrentHashMap<Long blockHash, ConcurrentHashMap<worker,

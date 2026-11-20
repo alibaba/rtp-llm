@@ -5,7 +5,7 @@ import io.grpc.stub.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeLayout;
 import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;

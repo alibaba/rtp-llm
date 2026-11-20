@@ -4,7 +4,7 @@ import com.google.protobuf.ByteString;
 import io.grpc.Status;
 import java.nio.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.protocol.PromptCacheKeys;

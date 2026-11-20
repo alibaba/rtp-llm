@@ -2,8 +2,8 @@ package org.flexlb.mock.engine;
 
 import io.grpc.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.MultimodalRpcServiceGrpc;
 
 /**
  * Sends real RPC work to exercise the service process failure path.

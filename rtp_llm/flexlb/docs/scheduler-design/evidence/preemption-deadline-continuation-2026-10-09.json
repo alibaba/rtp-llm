@@ -1,0 +1,246 @@
+{
+  "base_commit": "e26a60a0b89bf149056c3e1c1625d1a87cd6d65c",
+  "scope": "Only the preemption aggregate-wait settlement boundary; independent candidate excludes concurrent worktree edits.",
+  "baseline_reproduction": {
+    "test": "blockedPreemptionSettlementDoesNotDelayOtherCleanupDeadlines",
+    "result": "Expected failure: with two blocked endpoint aborts, a subsequent cleanup deadline did not execute within one second.",
+    "mechanism": "Real runtime timer and continuation executors; mocked endpoint abort deliberately blocks on a latch. This establishes execution-boundary interference, not a production latency regression or deadlock."
+  },
+  "implementation": [
+    "The incoming BalanceContext supplies the existing serial continuation identity.",
+    "Freeze victim-resolution eligibility when aggregate waiting ends, before queuing settlement.",
+    "Run finish and dependent result callbacks on the continuation, leaving the deadline thread free of endpoint/request settlement.",
+    "Preserve ACK timing, late victim observers, exact identities and runtime producer-before-executor drain order."
+  ],
+  "tests": {
+    "targeted": {
+      "tests": 56,
+      "failures": 0,
+      "errors": 0
+    },
+    "full_sync_reactor": {
+      "tests": 2032,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "added_cases": [
+      "Two blocked preemption settlements do not delay another cleanup deadline.",
+      "Successful settlement respects the same-request FIFO and shutdown drains queued work.",
+      "Timeout settlement respects FIFO; a terminal arriving while queued cannot reopen incoming admission; shutdown drains work."
+    ]
+  },
+  "performance": {
+    "tested_commit": "81b068f3229e23ec6f29955a531f98987e453fa5",
+    "host": "11.163.39.110",
+    "container": "luoli_gpu",
+    "heap": "-Xms64g -Xmx64g",
+    "gc_flags": "-XX:+UseZGC -XX:+ZGenerational -XX:+AlwaysPreTouch",
+    "topology": "750P/750D",
+    "warmup_ms": 10000,
+    "measurement_ms": 10000,
+    "warmup_requests_per_prefill": 16,
+    "gates": {
+      "min_client_qps_ratio": 0.98,
+      "max_client_p99_ms": 50,
+      "max_server_p99_ms": 50,
+      "max_batch_wait_p99_ms": 50
+    },
+    "result": "All four cases passed; source manifest verified after execution.",
+    "cases": [
+      {
+        "mode": "BATCH",
+        "target_qps": 3000,
+        "client_qps": 2996.8,
+        "client_p99_ms": 11.759,
+        "server_p99": "11ms",
+        "batch_wait_p99": "10ms"
+      },
+      {
+        "mode": "BATCH",
+        "target_qps": 10000,
+        "client_qps": 9962.9,
+        "client_p99_ms": 11.987,
+        "server_p99": "11ms",
+        "batch_wait_p99": "10ms"
+      },
+      {
+        "mode": "NON_BATCH",
+        "target_qps": 3000,
+        "client_qps": 2999.2,
+        "client_p99_ms": 0.689,
+        "server_p99": "<1ms",
+        "batch_wait_p99": "N/A"
+      },
+      {
+        "mode": "NON_BATCH",
+        "target_qps": 10000,
+        "client_qps": 9990.4,
+        "client_p99_ms": 0.705,
+        "server_p99": "<1ms",
+        "batch_wait_p99": "N/A"
+      }
+    ],
+    "source_archive_sha256": "d87def39e25e4c327977c29166af0c5d20553a91cb60237c3591aa42efba7f47",
+    "remote_artifacts": "/home/luoli.hn/work/rtp_llm_4/github-opensource/.tmp/flexlb-preemption-perf-20261009/evidence/perf",
+    "local_artifacts": "/tmp/flexlb-preemption-perf-20261009/remote-evidence/evidence/perf",
+    "raw_log_sha256": {
+      "BATCH": "556d1f8752875dc0775fdb9573b131fabbd8dfdd7c0eba2e55fd6637aae31840",
+      "NON_BATCH": "2787f6f36392edd34b664661ff63f697a1ccedf8161a9fb36b96aeef4af53dfa"
+    },
+    "limits": "This existing loopback fleet test checks general scheduling throughput and latency after warmup. It does not establish a preemption-heavy SLO, production tail-latency stability, or improvement caused by the continuation change. Warmup traffic is excluded from the reported measurements."
+  },
+  "source_sha256": {
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodeCapacityAcquirer.java": "db66e8c06001bf462389018b36cbbf43d23f6630ad11a3f4153b2e7c71b083da",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java": "a658e834e76ff474fae52eafbdaef7c4699054521f55f71c068b2aaa8ffbe20c",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/eviction/DecodeCapacityAcquirerProtocolTest.java": "040cf5dfb36685ea5625e83ab829fae2eec1e436ca497225c11f1b71f239c3e9",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/eviction/DecodeCapacityAcquirerTest.java": "6a334aaf6ca4c281c50e6d9c330c635b3644c8f54839303b723392f5b7bc386a"
+  },
+  "logs": {
+    "/tmp/flexlb-cleanup-boundary-baseline.log": "e42e49cfdd9bcfd4107c4ef1929f5656432564c407be375afb80cc59a0ed53f2",
+    "/tmp/flexlb-cleanup-boundary-fixed.log": "c2b3fe7901dc67371b647931ac206fb3347d269c778c1f97de9465c95038cdc5",
+    "/tmp/flexlb-cleanup-boundary-ut.log": "1f515949e4169db51e9c580751474004643ee9581777ea949b1d66d912803fc6"
+  },
+  "benchmark_audit": {
+    "measurement_boundary": "Planned open-loop arrival through Schedule onNext response; includes issue pacing lag. Client serialization and payload construction happen before timing. It excludes frontend fetch and real model processing.",
+    "workers": "BATCH uses 750 real loopback gRPC Mock Prefill servers and 750 logical Decode endpoints. NON_BATCH uses logical role endpoints and omits frontend-to-Worker delivery. No GPU inference.",
+    "resource_model": "Decode capacity is published as one billion available KV tokens and two billion total. The NON_BATCH fixture sets per-Prefill delivery inflight to 64. This is not a constrained-capacity or preemption workload.",
+    "terminal_model": "BATCH accepted-batch callback immediately schedules synthetic finished-task status through real endpoint reconciliation. NON_BATCH successful route callback schedules synthetic terminal status. Simulated execution time is one millisecond; no actual inference duration is waited.",
+    "timing_distribution": [
+      {
+        "target_qps": 3000,
+        "requests": 30000,
+        "acknowledged_before_schedule_response": 373,
+        "terminal_before_observed_ack": 29627,
+        "terminal_before_observed_ack_ratio": 0.9875666666666667
+      },
+      {
+        "target_qps": 10000,
+        "requests": 100000,
+        "acknowledged_before_schedule_response": 5589,
+        "terminal_before_observed_ack": 94411,
+        "terminal_before_observed_ack_ratio": 0.94411
+      }
+    ],
+    "covered_correctness": [
+      "Every measured response is successful and has the expected role and delivery mode.",
+      "Every measured request has exactly one response timing sample; all configured role endpoints are used.",
+      "BATCH Mock Worker receives the exact request-id set without duplicates; accepted targets match published routes.",
+      "After synthetic terminal reconciliation, active requests and P/D ledger resources and permits drain to zero."
+    ],
+    "not_covered": [
+      "Actual frontend fetch/delivery for NON_BATCH.",
+      "Real Engine execution and real WorkerStatus polling delays.",
+      "Real Decode delivery/network or transfer costs.",
+      "Cancellation, priority preemption, generation retirement, unknown RPC outcomes, and shutdown races in this traffic profile.",
+      "Stable production P99 under the production JVM/logging/monitoring/capacity configuration."
+    ],
+    "correctness_conclusion": "The targeted 56 tests and 2032-test sync reactor verify specific request protocol, deadline, ordering and drain behaviors. They do not prove overall correctness for all event interleavings. The fleet benchmark alone cannot verify the preemption-timeout fix.",
+    "performance_conclusion": "Only the explicit 64g ZGC + AlwaysPreTouch mock-scheduling profile passed all gates. The default-G1 control failed the BATCH 10K client-P99 gate. Overall production performance qualification remains unestablished."
+  },
+  "default_gc_control": {
+    "date": "2026-10-09",
+    "tested_commit": "81b068f3229e23ec6f29955a531f98987e453fa5",
+    "heap": "-Xms64g -Xmx64g",
+    "collector": "JDK21 default G1; no ZGC, no AlwaysPreTouch and no G1 tuning flags. GC/safepoint logging enabled.",
+    "other_conditions": "Same source archive, host/container, 750P/750D, test method, offered rates, warmup/duration and strict gates as the ZGC profile.",
+    "result": "FAILED: BATCH 10000 QPS client P99 90.082ms exceeds 50ms; remaining three cases passed. Source checksums verified after execution.",
+    "mode_exit_codes": {
+      "BATCH": 1,
+      "NON_BATCH": 0
+    },
+    "cases": [
+      {
+        "mode": "BATCH",
+        "target_qps": 3000,
+        "client_qps": 2996.8,
+        "client_p99_ms": 38.838,
+        "server_p99": "12ms",
+        "passed_client_p99_gate": true,
+        "gc_pauses_in_measured_window": 4,
+        "max_gc_pause_ms_in_measured_window": 42.24
+      },
+      {
+        "mode": "BATCH",
+        "target_qps": 10000,
+        "client_qps": 9983.4,
+        "client_p99_ms": 90.082,
+        "server_p99": "21ms",
+        "passed_client_p99_gate": false,
+        "gc_pauses_in_measured_window": 4,
+        "max_gc_pause_ms_in_measured_window": 122.117
+      },
+      {
+        "mode": "NON_BATCH",
+        "target_qps": 3000,
+        "client_qps": 2999.6,
+        "client_p99_ms": 0.934,
+        "server_p99": "<1ms",
+        "passed_client_p99_gate": true,
+        "gc_pauses_in_measured_window": 1,
+        "max_gc_pause_ms_in_measured_window": 31.04
+      },
+      {
+        "mode": "NON_BATCH",
+        "target_qps": 10000,
+        "client_qps": 9995.5,
+        "client_p99_ms": 23.454,
+        "server_p99": "4ms",
+        "passed_client_p99_gate": true,
+        "gc_pauses_in_measured_window": 5,
+        "max_gc_pause_ms_in_measured_window": 38.783
+      }
+    ],
+    "raw_log_sha256": {
+      "BATCH": "f4906b9024adc007f15e517980036507c29a574e9e4d6ca96deb9bdd30104fe5",
+      "NON_BATCH": "c4bb50db44a2b98d95c6ffe24ccd0bf7b45976355727cb128ae57e1c9b83b136"
+    },
+    "gc_log_sha256": {
+      "gc-1668469.log": "5e03d0ce89b244bbb98face8d43b0575094367254d3b8ce8fe01362bc2122617",
+      "gc-1668645.log": "0ef83606687c09d21c447a3af6bf737ee3f9b2f4e049287356f66b5a9c3117b5",
+      "gc-1668685.log": "15570b691caba38ad7babda0e4670bc023c7bb66c96679f23b2da999204839cb",
+      "gc-1666778.log": "e344a5141cb65bca2fabab324a249a7d93542ebaa161320c4dcd259adef043e2",
+      "gc-1666578.log": "580d756a4bcf0172a45f63d8f469e8183e60198c5b9b25737b1a2035a556433c",
+      "gc-1666561.log": "4819d8e6902acc3a7e32bcc29b0dfa5ff418162c48f4e5c5a169cffe1e90ef4e",
+      "gc-1666738.log": "cfeeb34532d0703a951de43b71ecb18f3f29e3fef8f7faef2fb89495d703329f"
+    },
+    "local_artifacts": "/tmp/flexlb-preemption-perf-20261009/remote-evidence/evidence/perf-default-gc",
+    "remote_artifacts": "/home/luoli.hn/work/rtp_llm_4/github-opensource/.tmp/flexlb-preemption-perf-20261009/evidence/perf-default-gc",
+    "conclusion": "The passing ZGC profile is insufficient to qualify production performance. Measured-window G1 pauses are consistent with latency sensitivity to JVM settings; one run does not isolate every contribution or establish a refactor-specific regression."
+  },
+  "winner_fix": {
+    "base_commit": "b5ad655b2592c811854d97592d4746c5cf4c042d",
+    "scope": "Standalone candidate on the committed version; ongoing RequestContext and other shared worktree refactors excluded.",
+    "implementation": "Aggregate victim-resolution completion and timeout compete to complete one CompletableFuture<Boolean>. Timeout completes false. Only the first completion supplies the immutable eligibility consumed by the existing serial continuation. No extra lifecycle field, executor, or lock-order change.",
+    "reproduction": {
+      "test": "timeoutBeforeScheduleReturnsCannotBeReopenedByLateResolution",
+      "baseline": "FAILED: timeout fired before schedule returned, late victim resolution followed, yet incoming admission committed.",
+      "fixed": "PASSED: timeout result remains false, no commit, endpoint abort occurs, and the canonical late victim resolution remains available.",
+      "method": "Controlled timer invokes the real scheduled callback then completes the victim resolution before returning; real runtime continuation executes settlement. This deterministically forces the registration window, rather than relying on sleep timing.",
+      "provenance": "The shared worktree already contained this Boolean-future fix and timer regression from parallel work. This change extracts and validates that minimal fix independently."
+    },
+    "tests": {
+      "full_sync_reactor": 2034,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "cases": [
+        "Timeout before continuation registration cannot be overridden by a late resolution.",
+        "Timeout while same-request continuation is queued cannot reopen admission.",
+        "Resolved victim followed by closed admission before settlement does not call commit and aborts the attempt.",
+        "Successful settlement follows earlier request facts; later facts follow settlement; runtime shutdown drains accepted work.",
+        "Two blocked endpoint settlements do not occupy cleanup deadline threads."
+      ]
+    },
+    "source_sha256": {
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodeCapacityAcquirer.java": "d5767eb2876fc4769a56640bc7279ba1ba6130ae54653923f27ac736c3ebe550",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/eviction/DecodeCapacityAcquirerProtocolTest.java": "de4a67ad90384912f30d757b33d2674f3ca1991c1c770475bec3aea62537d312"
+    },
+    "logs_sha256": {
+      "/tmp/flexlb-preemption-winner-baseline.log": "0b2b653987059e856aaa1f778a67badccea51e7f8419f42f088c1df242960789",
+      "/tmp/flexlb-preemption-winner-fixed.log": "e1a22f362749572d31980f4c28bbe792ecbd86d6649275557ce76e804a7a6790",
+      "/tmp/flexlb-preemption-winner-ut.log": "801e1e7a7f99e06be8f41b017ca2f0f8eccbe101e16239bf17922959539b3f08"
+    },
+    "limits": "Continuation queueing can still delay result publication and resource settlement. Timeout freezes admission eligibility, not a hard wall-clock bound on returning a result. Existing producer-before-executor shutdown ordering is retained. No claim of a preemption-heavy performance SLO or proof for every interleaving. Previously recorded default-G1 fleet P99 failure remains unresolved."
+  }
+}

@@ -1,17 +1,16 @@
 package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.CacheHitComparisonResult;
-import org.flexlb.cache.domain.CacheMatchQuery;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.cache.CacheMatchQuery;
+import org.flexlb.cache.CacheMatchResult;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.localstandby.LocalStandbyComparisonService;
+import org.flexlb.cache.metrics.CacheMetricsReporter;
+import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.cache.CacheHitComparisonResult;
+import org.flexlb.worker.cache.WorkerCacheUpdateResult;
+import org.flexlb.worker.status.ServerStatus;
+import org.flexlb.worker.status.WorkerStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -26,7 +25,7 @@ import java.util.concurrent.CompletableFuture;
  */
 @Slf4j
 @Service
-public class CacheAwareService {
+public class CacheAwareService implements org.flexlb.worker.cache.WorkerCaches {
     private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchQueryOrchestrator queryOrchestrator;
     private final CacheHitFeedbackTracker feedbackTracker;
@@ -73,8 +72,13 @@ public class CacheAwareService {
         updateOrchestrator.removeEngineBlockCache(engineIpPort);
     }
 
-    public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
-        updateOrchestrator.updateFromRoutedRequest(request, selectedWorkers);
+    public void updateFromRoutedRequest(
+            String requestId,
+            long blockSize,
+            List<Long> cacheKeys,
+            List<ServerStatus> selectedWorkers) {
+        updateOrchestrator.updateFromRoutedRequest(
+                requestId, blockSize, cacheKeys, selectedWorkers);
     }
 
     public void trackRoutingPrediction(
@@ -108,6 +112,19 @@ public class CacheAwareService {
             CacheMatchResult result) {
         if (result.source() == CacheMatchSource.KVCM && result.querySucceeded()) {
             try {
+                var match = result.hostMatch(worker);
+                cacheMetricsReporter.reportKvcmSelectedMatch(
+                        role,
+                        worker.getMetricIpPort(),
+                        match == null
+                                ? 0L
+                                : CacheMatchResult.matchedTokens(
+                                        match.localMatchBlocks(), result.blockSize(), inputTokens),
+                        match == null
+                                ? 0L
+                                : CacheMatchResult.matchedTokens(
+                                        match.globalMatchBlocks(), result.blockSize(), inputTokens),
+                        inputTokens);
                 cacheMetricsReporter.reportKvcmPrediction(
                         role, worker.getMetricIpPort(), predictedHitTokens, inputTokens);
             } catch (RuntimeException error) {

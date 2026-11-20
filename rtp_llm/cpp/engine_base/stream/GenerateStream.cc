@@ -183,7 +183,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                                                             !resource_context.defer_grammar_to_pp_tail,
                                                                             output_vocab_size_ > 0);
     if (processors_result.ok()) {
-        auto processors = std::move(processors_result.value());
+        auto processors                   = std::move(processors_result.value());
         sampling_state_.logits_processors = std::move(processors);
     } else {
         const auto& err = processors_result.status();
@@ -566,7 +566,7 @@ int GenerateStream::nextChunkBoundaryToken() const {
 }
 
 int GenerateStream::initialReuseLength() const {
-    return __atomic_load_n(&initial_reuse_length_, __ATOMIC_RELAXED);
+    return initial_reuse_length_.tokens.load(std::memory_order_relaxed);
 }
 
 void GenerateStream::setReuseLength(int reuse_length) {
@@ -621,7 +621,7 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     // connector reuse lengths are accounted in canonical block tokens
     // (seq_size_per_block * cp_size), which can legitimately exceed the
     // rank-local sequence length.
-    __atomic_store_n(&initial_reuse_length_, initial_reuse_length, __ATOMIC_RELAXED);
+    initial_reuse_length_.tokens.store(initial_reuse_length, std::memory_order_relaxed);
 }
 
 void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory) {
@@ -736,7 +736,7 @@ int32_t GenerateStream::generateNextPositionId(int32_t* now_pos, std::optional<i
     // argument and would reintroduce a racy read for device-authoritative MTP.
     const int32_t effective_sequence_length = sequence_length.has_value() ? sequence_length.value() : seqLength();
     if (isMiddleChunk()) {
-        const auto position_ids          = generateContextPositionIds();
+        const auto position_ids           = generateContextPositionIds();
         const auto position_id_len_factor = mm_position_ids_style_ == PositionIdsStyle::MROPE ? 3 : 1;
         const auto boundary_pos           = prefixLength() + contextLength();
         std::memcpy(now_pos,

@@ -3,21 +3,17 @@ package org.flexlb.mock.engine.forward;
 import static org.junit.jupiter.api.Assertions.*;
 import java.time.Duration;
 import java.util.*;
-import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.junit.jupiter.api.Test;
 
 /**
  * Checks the forward latency formulas for representative batch shapes.
  */
 class FormulaForwardTest {
-    @Test void agreesWithProductionPrefillBindingsWithoutCopyingFormulaImplementation() {
+    @Test void evaluatesPrefillBatchWithCachedAndUncachedTokens() {
         String expression = "param(baseMs, 1.25) + 2*batchSize + 0.5*totalComputeTokens"
             + " + 0.01*sum(computeTokens^2) + 0.25*maxInputTokens";
-        var production = PrefillTimeFormula.parse(expression);
-        double[] outer = {2, 0, 0, 0, 0, 30, 6, 24, 20, 16};
-        var items = List.of(new double[]{2, 10, 2, 8, 1}, new double[]{2, 20, 4, 16, 1});
         var result = new FormulaForward(expression).estimate(batch(request("a", 10, 2), request("b", 20, 4)));
-        assertEquals(production.evaluateAsDouble(outer, items), result.toNanos() / 1e6);
+        assertEquals(Duration.ofNanos(25_450_000), result);
     }
 
     static ForwardBatch batch(ForwardBatch.Request... requests) {

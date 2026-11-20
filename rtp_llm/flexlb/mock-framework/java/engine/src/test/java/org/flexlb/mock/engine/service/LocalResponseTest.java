@@ -3,7 +3,7 @@ package org.flexlb.mock.engine.service;
 import static org.junit.jupiter.api.Assertions.*;
 
 import java.nio.ByteOrder;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.junit.jupiter.api.Test;
 
 /**

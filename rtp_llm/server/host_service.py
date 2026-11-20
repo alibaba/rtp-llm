@@ -42,15 +42,22 @@ class FlexlbHeartbeatInfo:
     consecutive_failures: int = 0
     last_error: Optional[str] = None
     queue_length: int = 0
+    requires_generate_input: Optional[bool] = None
 
     def mark_success(
-        self, real_master_host: Optional[str] = None, queue_length: int = 0
+        self,
+        real_master_host: Optional[str] = None,
+        queue_length: int = 0,
+        requires_generate_input: Optional[bool] = None,
     ):
         self.health_status = HostHealthStatus.HEALTHY
         self.last_heartbeat_time = time.time()
         self.consecutive_failures = 0
         self.last_error = None
         self.queue_length = queue_length
+        self.requires_generate_input = (
+            requires_generate_input if type(requires_generate_input) is bool else None
+        )
         if real_master_host:
             self.is_master = f"{self.host.ip}:{self.host.port}" == real_master_host
 
@@ -58,6 +65,7 @@ class FlexlbHeartbeatInfo:
         self.last_heartbeat_time = time.time()
         self.consecutive_failures += 1
         self.last_error = error
+        self.requires_generate_input = None
         if self.consecutive_failures >= 2:
             self.health_status = HostHealthStatus.UNHEALTHY
 
@@ -72,6 +80,7 @@ class HostHealthView:
     consecutive_failures: int
     last_heartbeat_time: Optional[float]
     queue_length: int
+    requires_generate_input: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -344,6 +353,7 @@ class MasterService:
                 return {
                     "real_master_host": result.get("real_master_host"),
                     "queue_length": result.get("queue_length", 0),
+                    "requires_generate_input": result.get("requires_generate_input"),
                 }
         except Exception as e:
             route_logger.debug(f"Heartbeat failed for {master_addr}: {e}")
@@ -365,6 +375,7 @@ class MasterService:
             heartbeat_info.mark_success(
                 real_master_host=result.get("real_master_host"),
                 queue_length=result.get("queue_length", 0),
+                requires_generate_input=result.get("requires_generate_input"),
             )
             route_logger.debug(
                 f"Host {host_addr} healthy, is_master={heartbeat_info.is_master}, "
@@ -480,6 +491,7 @@ class MasterService:
                     consecutive_failures=info.consecutive_failures,
                     last_heartbeat_time=info.last_heartbeat_time,
                     queue_length=info.queue_length,
+                    requires_generate_input=info.requires_generate_input,
                 )
                 for addr, info in host_health_map.items()
             }
@@ -530,6 +542,15 @@ class MasterService:
             snapshot = self._route_snapshot
         return snapshot.queue_length
 
+    def requires_generate_input(self, addr: str) -> bool:
+        with self._snapshot_lock:
+            info = self._route_snapshot.host_health_status.get(addr)
+        return not (
+            info is not None
+            and info.health == HostHealthStatus.HEALTHY.value
+            and info.requires_generate_input is False
+        )
+
     def get_host_health_status(self) -> Dict[str, Dict]:
         with self._snapshot_lock:
             snapshot = self._route_snapshot
@@ -540,6 +561,7 @@ class MasterService:
                 "consecutive_failures": info.consecutive_failures,
                 "last_heartbeat_time": info.last_heartbeat_time,
                 "queue_length": info.queue_length,
+                "requires_generate_input": info.requires_generate_input,
             }
             for addr, info in snapshot.host_health_status.items()
         }
@@ -586,6 +608,9 @@ class HostService:
 
     def get_slave_addr(self) -> Optional[str]:
         return self.master_service.get_slave_addr()
+
+    def requires_generate_input(self, addr: str) -> bool:
+        return self.master_service.requires_generate_input(addr)
 
     def get_backend_role_addrs(
         self, role_list: List[RoleType], refresh: bool = False

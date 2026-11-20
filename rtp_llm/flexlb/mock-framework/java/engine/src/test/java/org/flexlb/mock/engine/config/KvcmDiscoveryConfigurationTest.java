@@ -6,7 +6,7 @@ import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.kvcm.grpc.*;
+import org.flexlb.cache.kvcm.protocol.*;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;

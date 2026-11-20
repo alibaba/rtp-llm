@@ -137,6 +137,7 @@ class ExceptionType(IntEnum):
     MASTER_NO_PDFUSION_WORKER = 8404, ExceptionCategory.CAPACITY
     MASTER_NO_VIT_WORKER = 8405, ExceptionCategory.CAPACITY
     MASTER_INVALID_REQUEST = 8406, ExceptionCategory.BAD_REQUEST
+    MASTER_GENERATE_INPUT_REQUIRED = 8409, ExceptionCategory.BAD_REQUEST
     PRIORITY_PREEMPTED = 8429, ExceptionCategory.CAPACITY
     PRIORITY_ADMISSION_REJECTED = 8430, ExceptionCategory.CAPACITY
     RESOURCE_EXHAUSTED = 8431, ExceptionCategory.CAPACITY
@@ -158,6 +159,7 @@ class ExceptionType(IntEnum):
     WORKER_EXECUTION_FAILED = 8513, ExceptionCategory.CAPACITY
     BATCH_TOKEN_CAPACITY_EXCEEDED = 8514, ExceptionCategory.CAPACITY
     SCHEDULER_PLAN_CONFLICT = 8515, ExceptionCategory.CAPACITY
+    SCHEDULER_UNAVAILABLE = 8518, ExceptionCategory.CAPACITY
 
     # multimodal error
     MM_LONG_PROMPT_ERROR = 901, ExceptionCategory.TOO_LONG

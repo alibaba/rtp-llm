@@ -2,16 +2,16 @@ package org.flexlb.cache.match;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import org.flexlb.cache.domain.CacheHitComparisonResult;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
-import org.flexlb.dao.cache.HostCacheMatch;
-import org.flexlb.dao.master.CacheHitFeedback;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.TaskPhase;
+import org.flexlb.cache.CacheHitFeedback;
+import org.flexlb.cache.CacheMatchResult;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.HostCacheMatch;
+import org.flexlb.cache.localstandby.LocalStandbyComparisonService;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.util.JsonUtils;
+import org.flexlb.worker.cache.CacheHitComparisonResult;
+import org.flexlb.worker.status.TaskPhase;
+import org.flexlb.worker.status.WorkerStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -173,7 +173,6 @@ final class CacheHitFeedbackTracker {
             pv.put(
                     "inputTokensDelta",
                     task.inputLength() > 0 ? task.inputLength() - seed.inputTokens() : null);
-            pv.put("batchId", task.batchId());
             pv.put("errorCode", task.errorCode());
             pv.put("prefixLengthValid", telemetry.prefixLengthValid());
             pv.put("actualHitTokens", telemetry.prefixLengthValid() ? task.prefixLength() : null);

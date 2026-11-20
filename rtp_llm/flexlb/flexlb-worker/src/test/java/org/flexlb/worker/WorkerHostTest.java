@@ -1,0 +1,32 @@
+package org.flexlb.worker;
+
+import org.flexlb.util.discovery.DiscoveredHost;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+/**
+ * Checks worker host parsing and address representation.
+ */
+class WorkerHostTest {
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = "cn-hangzhou")
+    void discoveryFactoryPreservesSiteAndProviderPort(String site) {
+        // Keep the three-argument API used by the separately built internal VipServer adapter.
+        List<DiscoveredHost> hosts =
+                List.of("127.0.0.1").stream()
+                        .map(ip -> new DiscoveredHost(ip, 8080, site))
+                        .collect(Collectors.toList());
+
+        DiscoveredHost host = hosts.get(0);
+        assertEquals("127.0.0.1:8080", host.getIpPort());
+        assertEquals(8080, host.getPort());
+        assertEquals(site == null ? "" : site, host.getSite());
+    }
+}

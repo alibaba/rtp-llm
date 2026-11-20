@@ -6,11 +6,11 @@ import com.google.common.net.HostAndPort;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.ConfigService;
-import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.dao.route.Endpoint;
-import org.flexlb.discovery.ServiceDiscoveryProvider;
-import org.flexlb.discovery.ServiceDiscoveryType;
-import org.flexlb.discovery.ServiceHostListener;
+import org.flexlb.util.discovery.DiscoveredHost;
+import org.flexlb.util.discovery.DiscoveryEndpoint;
+import org.flexlb.util.discovery.ServiceDiscoveryProvider;
+import org.flexlb.util.discovery.ServiceDiscoveryType;
+import org.flexlb.util.discovery.ServiceHostListener;
 import org.springframework.stereotype.Component;
 
 import java.nio.file.Files;
@@ -38,7 +38,7 @@ public final class LocalFileServiceDiscoveryProvider implements ServiceDiscovery
     private final Path file;
 
     /** Last fully-parsed snapshot; replaced wholesale on every successful read. */
-    private volatile Map<String, List<WorkerHost>> lastGoodSnapshot;
+    private volatile Map<String, List<DiscoveredHost>> lastGoodSnapshot;
 
     private final AtomicLong lastFallbackLogNanos = new AtomicLong();
 
@@ -52,12 +52,12 @@ public final class LocalFileServiceDiscoveryProvider implements ServiceDiscovery
     }
 
     @Override
-    public void validate(Endpoint endpoint) {
+    public void validate(DiscoveryEndpoint endpoint) {
         getHosts(endpoint);
     }
 
     @Override
-    public List<WorkerHost> getHosts(Endpoint endpoint) {
+    public List<DiscoveredHost> getHosts(DiscoveryEndpoint endpoint) {
         String address = endpoint.getAddress();
         if (StringUtils.isBlank(address)) {
             return List.of();
@@ -75,7 +75,7 @@ public final class LocalFileServiceDiscoveryProvider implements ServiceDiscovery
     }
 
     @Override
-    public void listen(Endpoint endpoint, ServiceHostListener listener) {
+    public void listen(DiscoveryEndpoint endpoint, ServiceHostListener listener) {
         // Deliver the initial snapshot. Subsequent updates are read through getHosts().
         if (listener != null) {
             listener.onHostsChanged(getHosts(endpoint));
@@ -90,11 +90,11 @@ public final class LocalFileServiceDiscoveryProvider implements ServiceDiscovery
      * malformed JSON, wrong shape, invalid host entry) aborts the ENTIRE parse
      * so callers can never observe a half list.
      */
-    private static Map<String, List<WorkerHost>> parseHosts(JsonNode root) {
+    private static Map<String, List<DiscoveredHost>> parseHosts(JsonNode root) {
         if (root == null || !root.isObject()) {
             throw new IllegalArgumentException("discovery hosts must be an object");
         }
-        Map<String, List<WorkerHost>> result = new LinkedHashMap<>();
+        Map<String, List<DiscoveredHost>> result = new LinkedHashMap<>();
         for (Iterator<Map.Entry<String, JsonNode>> it = root.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> entry = it.next();
             JsonNode array = entry.getValue();
@@ -104,7 +104,7 @@ public final class LocalFileServiceDiscoveryProvider implements ServiceDiscovery
                                 "discovery entry for domain '%s' must be an array of ip:port strings",
                                 entry.getKey()));
             }
-            List<WorkerHost> hosts = new ArrayList<>(array.size());
+            List<DiscoveredHost> hosts = new ArrayList<>(array.size());
             for (JsonNode node : array) {
                 if (node == null || !node.isTextual()) {
                     throw new IllegalArgumentException(
@@ -120,12 +120,12 @@ public final class LocalFileServiceDiscoveryProvider implements ServiceDiscovery
     }
 
     /** Port interpretation follows the endpoint protocol. */
-    private static WorkerHost parseHost(String hostStr) {
+    private static DiscoveredHost parseHost(String hostStr) {
         HostAndPort address = HostAndPort.fromString(hostStr.trim());
         if (address.getHost().isBlank() || !address.hasPort() || address.getPort() == 0) {
             throw new IllegalArgumentException("Invalid host:port: " + hostStr);
         }
-        return WorkerHost.of(address.getHost(), address.getPort());
+        return DiscoveredHost.of(address.getHost(), address.getPort());
     }
 
     /** Debug-log a read fallback at most once per interval (avoids log flooding at 20ms poll cadence). */

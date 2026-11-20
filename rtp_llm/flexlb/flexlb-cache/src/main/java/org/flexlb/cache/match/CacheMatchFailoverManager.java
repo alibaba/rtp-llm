@@ -1,11 +1,11 @@
 package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
-import org.flexlb.engine.grpc.client.KvcmGrpcClient;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.kvcm.KvcmGrpcClient;
+import org.flexlb.cache.kvcm.KvcmHealthSnapshot;
+import org.flexlb.cache.metrics.CacheMetricsReporter;
+import org.flexlb.config.cache.CacheMatchConfiguration;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -51,7 +51,15 @@ public class CacheMatchFailoverManager {
         }
     }
 
-    public synchronized void activateFallbackManually() {
+    public CacheMatchSource activeSource() {
+        return activeSource.get();
+    }
+
+    public KvcmHealthSnapshot healthSnapshot() {
+        return kvcmGrpcClient.healthSnapshot();
+    }
+
+    synchronized void activateFallbackManually() {
         manualFallbackActive.set(true);
         if (!updateActiveSource(CacheMatchSource.LOCAL_STANDBY, "manual failover activated")) {
             lastFailoverReason.set("manual failover activated");
@@ -60,7 +68,7 @@ public class CacheMatchFailoverManager {
         log.info("Manual cache failover activated; Local Standby is the active cache source");
     }
 
-    public synchronized void recoverPrimaryManually() {
+    synchronized void recoverPrimaryManually() {
         KvcmHealthSnapshot health = kvcmGrpcClient.healthSnapshot();
         if (!health.isHealthy()) {
             throw new IllegalStateException("cannot recover KVCM primary while KVCM is unhealthy");
@@ -72,22 +80,6 @@ public class CacheMatchFailoverManager {
                 activeSource());
     }
 
-    public CacheMatchSource activeSource() {
-        return activeSource.get();
-    }
-
-    public long lastFailoverTimeMs() {
-        return lastFailoverTimeMs.get();
-    }
-
-    public String lastFailoverReason() {
-        return lastFailoverReason.get();
-    }
-
-    public KvcmHealthSnapshot healthSnapshot() {
-        return kvcmGrpcClient.healthSnapshot();
-    }
-
     /**
      * Reconciles the active cache source with the latest KVCM health snapshot.
      * This method is called after every scheduled heartbeat and must remain idempotent.
@@ -97,6 +89,14 @@ public class CacheMatchFailoverManager {
             return;
         }
         updateFromKvcmHealth(kvcmGrpcClient.healthSnapshot());
+    }
+
+    long lastFailoverTimeMs() {
+        return lastFailoverTimeMs.get();
+    }
+
+    String lastFailoverReason() {
+        return lastFailoverReason.get();
     }
 
     private void updateFromKvcmHealth(KvcmHealthSnapshot health) {

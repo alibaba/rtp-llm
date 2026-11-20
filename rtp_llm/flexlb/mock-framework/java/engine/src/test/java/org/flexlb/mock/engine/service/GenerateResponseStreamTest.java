@@ -3,7 +3,7 @@ package org.flexlb.mock.engine.service;
 import io.grpc.stub.ServerCallStreamObserver;
 import java.util.ArrayDeque;
 import java.util.concurrent.*;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.AfterEach;
 import static org.junit.jupiter.api.Assertions.*;

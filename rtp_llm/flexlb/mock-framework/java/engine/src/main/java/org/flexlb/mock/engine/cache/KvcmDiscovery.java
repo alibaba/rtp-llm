@@ -10,10 +10,10 @@ import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.kvcm.grpc.ErrorCode;
-import org.flexlb.kvcm.grpc.GetClusterInfoRequest;
-import org.flexlb.kvcm.grpc.MetaServiceGrpc;
+import org.flexlb.util.discovery.ServiceDiscovery;
+import org.flexlb.cache.kvcm.protocol.ErrorCode;
+import org.flexlb.cache.kvcm.protocol.GetClusterInfoRequest;
+import org.flexlb.cache.kvcm.protocol.MetaServiceGrpc;
 
 /**
  * Engine cache reporting endpoint. Reporting owns lookup; close can cancel outstanding discovery.

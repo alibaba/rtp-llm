@@ -1,20 +1,20 @@
 package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.cache.domain.CacheMatchFailoverAction;
-import org.flexlb.cache.domain.CacheMatchQuery;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.domain.CacheMatchStatus;
-import org.flexlb.cache.match.kvcm.KvcmCacheMatchProvider;
-import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
-import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
-import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
-import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.dao.cache.HostCacheMatch;
-import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
+import org.flexlb.cache.CacheMatchFailoverAction;
+import org.flexlb.cache.CacheMatchQuery;
+import org.flexlb.cache.CacheMatchResult;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.CacheMatchStatus;
+import org.flexlb.cache.HostCacheMatch;
+import org.flexlb.cache.kvcm.KvcmCacheMatchProvider;
+import org.flexlb.cache.kvcm.KvcmHealthSnapshot;
+import org.flexlb.cache.localstandby.LocalStandbyCacheManager;
+import org.flexlb.cache.localstandby.LocalStandbyCacheMatchProvider;
+import org.flexlb.cache.localstandby.LocalStandbyComparisonService;
+import org.flexlb.cache.localsync.LocalSyncCacheMatchProvider;
+import org.flexlb.cache.metrics.CacheMetricsReporter;
+import org.flexlb.config.cache.CacheMatchConfiguration;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 

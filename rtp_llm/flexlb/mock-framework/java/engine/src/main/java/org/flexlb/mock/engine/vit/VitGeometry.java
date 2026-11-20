@@ -1,7 +1,7 @@
 package org.flexlb.mock.engine.vit;
 
 import io.grpc.Status;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**

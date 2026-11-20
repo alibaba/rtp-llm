@@ -69,9 +69,9 @@ class VitConfigTest {
         assertEquals(-1, parsed.maxFileSizeKb()); assertEquals(65537, parsed.hidden());
         assertEquals(0, parsed.timeoutMs());
         var image = VitTest.input("http://example/" + "x".repeat(5000)).getMultimodalInputs(0).toBuilder()
-            .setMmPreprocessConfig(org.flexlb.engine.grpc.EngineRpcService.MMPreprocessConfigPB.newBuilder()
+            .setMmPreprocessConfig(org.flexlb.worker.rpc.protocol.EngineRpcService.MMPreprocessConfigPB.newBuilder()
                 .setWidth(40000).setHeight(40000)).build();
-        var inputs = org.flexlb.engine.grpc.EngineRpcService.MultimodalInputsPB.newBuilder();
+        var inputs = org.flexlb.worker.rpc.protocol.EngineRpcService.MultimodalInputsPB.newBuilder();
         for (int i = 0; i < 257; i++) inputs.addMultimodalInputs(image);
         assertDoesNotThrow(() -> VitGeometry.validate(inputs.build(), true));
         assertTrue(VitGeometry.plan(40000, 40000, 14, 3, 0, 1024).rows() <= 1024);

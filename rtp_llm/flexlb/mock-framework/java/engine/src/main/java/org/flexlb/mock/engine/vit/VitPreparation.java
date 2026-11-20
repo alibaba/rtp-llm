@@ -11,7 +11,7 @@ import java.util.*;
 import java.util.concurrent.*;
 import javax.imageio.ImageIO;
 import javax.imageio.stream.MemoryCacheImageInputStream;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 
 /**

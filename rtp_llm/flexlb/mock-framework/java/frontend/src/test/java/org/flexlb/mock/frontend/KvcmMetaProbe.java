@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.*;
 import com.sun.net.httpserver.HttpServer;
 import io.grpc.*;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.kvcm.grpc.*;
+import org.flexlb.cache.kvcm.protocol.*;
 import java.net.*;
 import java.nio.file.*;
 import java.util.*;
@@ -19,7 +19,7 @@ public final class KvcmMetaProbe {
         var json = new ObjectMapper();
         var spaces = new ConcurrentHashMap<String, ConcurrentHashMap<String, Set<Long>>>();
         var queries = new AtomicLong(); var positive = new AtomicLong(); var rpcPort = new AtomicInteger(); var httpPort = new AtomicInteger();
-        var ok = CommonResponseHeader.newBuilder().setStatus(org.flexlb.kvcm.grpc.Status.newBuilder().setCode(ErrorCode.OK)).build();
+        var ok = CommonResponseHeader.newBuilder().setStatus(org.flexlb.cache.kvcm.protocol.Status.newBuilder().setCode(ErrorCode.OK)).build();
         var rpc = ServerBuilder.forPort(0).addService(new MetaServiceGrpc.MetaServiceImplBase() {
             @Override public void getClusterInfo(GetClusterInfoRequest request, StreamObserver<GetClusterInfoResponse> out) {
                 out.onNext(GetClusterInfoResponse.newBuilder().setHeader(ok).setLeaderNodeId("leader").setLeaderEndpoint(

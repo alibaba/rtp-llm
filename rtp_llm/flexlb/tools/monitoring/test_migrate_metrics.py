@@ -228,7 +228,8 @@ class MetricMigrationTest(unittest.TestCase):
     def test_all_retained_metric_names_exist_in_the_production_contract(self):
         root = Path(__file__).resolve().parents[2]
         source = (
-            root / "flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java"
+            root
+            / "flexlb-util/src/main/java/org/flexlb/util/metrics/MetricConstant.java"
         ).read_text()
         names = set(
             re.findall(r'public static final String\s+\w+\s*=\s*"([^"]+)"', source)

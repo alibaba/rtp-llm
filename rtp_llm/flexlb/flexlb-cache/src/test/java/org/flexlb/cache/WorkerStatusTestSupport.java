@@ -1,12 +1,14 @@
 package org.flexlb.cache;
 
-import org.flexlb.dao.master.CacheStatus;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.KvCacheGroupMode;
+import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.cache.CacheStatus;
+import org.flexlb.worker.cache.KvCacheGroupMode;
+import org.flexlb.worker.status.WorkerStatus;
+import org.flexlb.worker.status.WorkerStatusResponse;
 
 import java.util.Map;
+
+import static org.flexlb.worker.status.WorkerStatusTestSupport.createDiscovered;
 
 /**
  * Creates worker status fixtures with explicit topology and engine observations.
@@ -31,15 +33,14 @@ public final class WorkerStatusTestSupport {
             boolean alive,
             CacheStatus cacheStatus,
             int cacheMatchRollbackBlocks) {
-        WorkerStatus workerStatus =
-                WorkerStatus.createDiscovered(role, "default", ip, port, port + 1, "");
+        WorkerStatus workerStatus = createDiscovered(role, "default", ip, port, port + 1, "");
         publishObservation(workerStatus, role, alive, cacheMatchRollbackBlocks);
         if (cacheStatus != null) {
-            workerStatus.lock.lock();
+            workerStatus.cacheMutationLock.lock();
             try {
                 workerStatus.publishCacheStatus(cacheStatus);
             } finally {
-                workerStatus.lock.unlock();
+                workerStatus.cacheMutationLock.unlock();
             }
         }
         return workerStatus;
@@ -60,10 +61,12 @@ public final class WorkerStatusTestSupport {
         workerStatus.lock.lock();
         try {
             WorkerStatus.StatusObservation observation =
-                    workerStatus.freezeStatusResponse(response);
-            WorkerStatus.PreparedStatus prepared = workerStatus.prepareNewStatus(observation);
-            workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(alive);
+                    org.flexlb.worker.status.WorkerStatusTestSupport.freezeStatusResponse(
+                            workerStatus, response);
+            WorkerStatus.PreparedStatus prepared = workerStatus.prepareStatus(observation);
+            workerStatus.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    workerStatus, alive);
         } finally {
             workerStatus.lock.unlock();
         }

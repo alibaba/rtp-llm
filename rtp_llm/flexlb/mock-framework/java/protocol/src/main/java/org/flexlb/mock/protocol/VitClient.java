@@ -3,8 +3,8 @@ package org.flexlb.mock.protocol;
 import io.grpc.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.MultimodalRpcServiceGrpc;
 import org.flexlb.mock.protocol.grpc.MockVitServiceGrpc;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 

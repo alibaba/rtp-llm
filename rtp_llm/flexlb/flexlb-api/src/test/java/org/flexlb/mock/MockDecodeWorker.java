@@ -1,6 +1,6 @@
 package org.flexlb.mock;
 
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 
 /**
  * Runs a mock Decode gRPC worker with configurable response timing, failures and status

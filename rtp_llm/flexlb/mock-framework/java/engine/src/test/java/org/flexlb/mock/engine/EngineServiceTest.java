@@ -9,8 +9,8 @@ import java.nio.file.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 
 import org.junit.jupiter.api.Test;
 

@@ -2,15 +2,15 @@ package org.flexlb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.net.InetAddresses;
-import org.flexlb.config.DeploymentIdentity;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.mock.master.LoopbackGrpcServer;
-import org.flexlb.mock.master.LoopbackLBStatusConsistencyService;
-import org.flexlb.mock.master.LoopbackZookeeperMasterElectService;
+import org.flexlb.config.service.DeploymentIdentity;
+import org.flexlb.master.MasterStatusService;
+import org.flexlb.api.server.LoopbackGrpcServer;
+import org.flexlb.api.Application;
+import org.flexlb.master.LoopbackZookeeperMasterElectService;
 import org.flexlb.mock.protocol.ControlHttpServer;
 import org.flexlb.mock.protocol.Role;
-import org.flexlb.service.grace.ApplicationLifecycle;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.api.ApplicationLifecycle;
+import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.springframework.beans.factory.support.BeanDefinitionRegistry;
 import org.springframework.beans.factory.support.RootBeanDefinition;
 import org.springframework.boot.SpringApplication;
@@ -61,7 +61,7 @@ public final class MasterMain {
         if (!"ZOOKEEPER".equals(election.path("type").asText()))
             throw new IllegalArgumentException("Master requires ZooKeeper election");
         SpringProperties.setFlag(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
-        org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
+        org.flexlb.api.OpenTelemetryBootstrap.configureFromEnvironment();
         var application = new SpringApplication(Application.class);
         // Replace the scanned services before Spring initializes their resources.
         application.addInitializers(
@@ -75,10 +75,6 @@ public final class MasterMain {
                                             registry,
                                             "zookeeperMasterElectService",
                                             LoopbackZookeeperMasterElectService.class);
-                                    replaceBean(
-                                            registry,
-                                            "LBStatusConsistencyService",
-                                            LoopbackLBStatusConsistencyService.class);
                                 }));
         application.setRegisterShutdownHook(false);
         var context =
@@ -91,9 +87,9 @@ public final class MasterMain {
                         "--flexlb.log.path=" + directory.resolve("logs"));
         try {
             var lifecycle = context.getBean(ApplicationLifecycle.class);
-            var consistency = context.getBean(LBStatusConsistencyService.class);
+            var consistency = context.getBean(MasterStatusService.class);
             var deploymentId = context.getBean(DeploymentIdentity.class).getDeploymentId();
-            var workers = context.getBean(WorkerDirectory.class);
+            var workers = context.getBean(EndpointRegistry.class);
             lifecycle.online();
             long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
             while (consistency.getMasterHostIpPort() == null) {
@@ -109,7 +105,7 @@ public final class MasterMain {
                             role ->
                                     workers
                                             .statusSnapshot(
-                                                    org.flexlb.dao.route.RoleType.valueOf(
+                                                    org.flexlb.config.service.RoleType.valueOf(
                                                             role.name().toUpperCase(Locale.ROOT)))
                                             .values()
                                             .stream()

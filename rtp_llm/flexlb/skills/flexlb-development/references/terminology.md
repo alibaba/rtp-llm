@@ -110,7 +110,7 @@ FIFO / PRIORITY 表达排队顺序。这些概念不能互换，也不能仅从�
 
 Endpoint 的两阶段关闭统一使用 `stopAcceptingRequests()` 和 `closeAsync()`：前者停止接纳及
 对应 WorkerStatus 的更新，后者安排资源清理并返回完成结果。Registry 的后续清理用
-`WorkerCleanup`，角色清理移出的请求用 `RemovedRequests`，通知调度器的关闭事件用
+`WorkerCleanup`，通知调度器的关闭事件用
 `EndpointClosed`；不再用 `Retirement` 混称这些不同对象。已停止接纳不等于已清理完成。
 已有诊断阶段、配置键和序列化字段中的旧名称属于兼容边界，不能因内部改名直接改变。
 

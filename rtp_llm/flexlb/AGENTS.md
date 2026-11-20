@@ -38,6 +38,10 @@ FlexLB 的开发技能统一维护在本目录下的 `skills/`，以仓库中的
 - **不同含义分开表达。** “引擎当前是否在执行”“是否占用容量”“是否收到完成反馈”
   “是否保留请求关联”是不同问题，不能用一个含糊的状态或多个难以理解的布尔组合混在一起。
   状态转换应能从相邻代码中看清条件和结果，避免为了显得抽象而增加跳转层次。
+- **校验有明确的负责位置。** 参数所属对象在入口检查；接纳状态、记录身份和容量在实际
+  提交变化的位置检查。同一次持锁调用中，包装方法不重复被调方法已经负责的检查。
+  登记、入队和交付等不同阶段之间可能发生取消或下线，提交各阶段变化前仍需核对当前状态；
+  不把这种必要复查与同一调用中的重复校验混为一谈。
 - **注释解释业务原因和约束。** 用具体对象描述保留什么、释放什么、等待什么；必要时给一个
   简短请求示例。避免用另一组抽象术语重复代码，也不要依赖修改历史才能理解当前行为。
 - **审核时逐项检查可读性。** 对新增或修改的名称、状态和方法，检查读者能否仅根据命名及
@@ -50,9 +54,9 @@ FlexLB is a high-performance, intelligent load balancer for AI model inference w
 (part of RTP-LLM). Multi-module Maven project on Java 21 / Spring Boot 2.7.18 (WebFlux
 reactive architecture).
 
-Modules: `flexlb-api` (web layer), `flexlb-common` (shared models/config), `flexlb-grpc`
-(gRPC stubs), `flexlb-sync` (core load balancing logic), `flexlb-cache` (KV cache
-management).
+Modules: `flexlb-api`, `flexlb-config`, `flexlb-balance`, `flexlb-worker`,
+`flexlb-cache`, `flexlb-master`, `flexlb-util`. Source roots match these seven business
+modules. `mock-framework/` builds its own test reactor.
 
 ## Architecture Docs
 
@@ -78,7 +82,7 @@ management).
 ./mvnw clean package -DskipTests
 
 # Build a specific module
-./mvnw clean package -pl flexlb-sync -DskipTests
+./mvnw clean package -pl flexlb-balance -DskipTests
 
 # Build a module with its dependencies
 ./mvnw clean package -pl flexlb-api -am -DskipTests
@@ -90,7 +94,7 @@ management).
 ./mvnw test
 
 # Run tests for a specific module
-./mvnw test -pl flexlb-sync -am
+./mvnw test -pl flexlb-balance -am
 
 # Run a single test class
 ./mvnw test -Dtest=DefaultRouterTest

@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+The approved refactor target is [the proposed component design](docs/scheduler-design/proposed-component-classes.html). Follow its complete responsibilities and budgets; [the current implementation diagram](docs/current-class-diagram.md) records partial progress, not completion. Historical proposals that delete RequestLifecycle or add SchedulerLoop do not supersede this target.
+
 ## Project Overview
 
 FlexLB is a high-performance, intelligent load balancer designed for AI model inference workloads. It provides advanced load balancing strategies, request batching, caching mechanisms, and automatic failover to optimize AI service deployments.
@@ -31,55 +33,29 @@ New HTTP endpoints in `HttpLoadBalanceServer`:
 - `POST /rtp_llm/update_log_level`: Debug log level control
 - `GET /rtp_llm/queue_snapshot`: Get queue snapshot
 
-### flexlb-common
+### Business module boundaries
 
-Shared utilities, data models, exception handling, and common configurations used across all modules.
+Seven business modules own matching Java root packages. See
+[architecture](docs/architecture/00-overview.md) for the directory tree and dependency graph.
 
-Key classes:
+| Maven 模块 / Java 根包       | 职责                                                       |
+| ---------------------------- | ---------------------------------------------------------- |
+| `flexlb-api` / `api`         | FlexLB 应用入口、装配、对外服务及调度协议。                |
+| `flexlb-config` / `config`   | 配置定义、来源、解析、合并与校验。                         |
+| `flexlb-balance` / `balance` | 调度、队列、路由选择、请求生命周期及清理。                 |
+| `flexlb-worker` / `worker`   | Worker 身份与状态、Endpoint 账本、状态同步及 Engine 通信。 |
+| `flexlb-cache` / `cache`     | 缓存匹配、索引、反馈和 KVCM 集成。                         |
+| `flexlb-master` / `master`   | 主节点选举、主地址查询和变更通知。                         |
+| `flexlb-util` / `util`       | 公共组件、连接、服务发现、常量及通用定义。                 |
 
-- `ServerStatus`: Worker node status representation
-- `Request`/`Response`: API request/response models
-- `RoleType`: Enum defining worker roles (PREFILL, DECODE, PDFUSION, VIT, FRONTEND)
-- `RoutingConfig`: Role-specific Prefill/Decode selection configuration
-- `ConfigService`: Strict schema-v3 configuration loader and validator
+生产依赖只向下：`api → balance → cache → worker → master → config → util`；
+各模块可直接依赖其所需的更底层模块，底层不依赖上层。Worker 消费请求、路由、缓存及
+指标的窄接口；balance/cache 提供实现，api 完成装配。接口回调不要求反向 Maven 依赖。
+服务发现只依赖通用地址与发现配置，不引用 Worker 或请求状态。
 
-Role-derived routing policy lives in `RoutingConfig.PrefillConfig` and
-`RoutingConfig.DecodeConfig`. Their selection pipelines read role-specific availability
-thresholds directly, evaluate coherent endpoint snapshots, and leave authoritative capacity
-acquisition to endpoint admission or dispatch.
-`RoleType` remains an identity enum and does not own mutable routing policy.
-
-### flexlb-grpc
-
-gRPC client implementation for model service communication. Contains protocol buffer definitions and generated stubs for communicating with backend AI worker nodes.
-
-### flexlb-sync
-
-Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
-
-Key concepts:
-
-- **Routing**: `DefaultRouter` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
-- **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
-- **Resource measurement**: Endpoint resource views used by routing strategies
-- **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
-- **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
-- **Graceful lifecycle**: `ApplicationLifecycle` owns the fixed online, health, and shutdown workflow
-
-Queue scheduling components:
-
-- `RequestScheduler`: Public QUEUE submission/cancellation/query facade with no request-state ownership
-- `GlobalQueueCoordinator`: One ordered placement owner per model; bounded planning and endpoint-conflict-aware commit
-- `RequestRegistry`: Canonical owner of request generations, deadlines, cancellation, delivery claims, and publication
-- `WorkerBatcher`: Endpoint-facing decision-window and delivery runtime after placement
-- `RouteService`: High-level service that delegates queued work to `RequestScheduler`
-
-Capacity management components:
-
-- Prefill and Decode selection pipelines evaluate immutable full-fleet snapshots.
-- Endpoint admission and dispatch own exact capacity, one-shot permits, and capacity-change signals.
-
-See flexlb-sync/CLAUDE.md for detailed module-specific guidance.
+Engine 协议由 `flexlb-worker` 生成，调度协议由 `flexlb-api` 生成，KVCM 协议由
+`flexlb-cache` 生成；wire package、字段号及 RPC 方法保持兼容。
+`mock-framework/` 使用独立 Maven reactor 构建，不属于上述七个业务模块。
 
 ### flexlb-cache
 
@@ -126,23 +102,23 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ### Testing
 
 ```bash
-# Run all functional tests (performance regressions are excluded)
+# Run all tests, including performance regressions
 ./mvnw test
 
 # Run FlexLB Sync performance regressions in a dedicated Maven invocation
-./mvnw -Psync-performance-regression -pl flexlb-sync -am test
+./mvnw -Psync-performance-regression -pl flexlb-balance -am test
 
 # Run the FlexLB API end-to-end performance regression separately
 ./mvnw -Papi-performance-regression -pl flexlb-api -am test
 
 # Run tests for specific module
-./mvnw test -pl flexlb-sync
+./mvnw test -pl flexlb-balance
 
 # Run specific test class
-./mvnw test -Dtest=DefaultRouterTest
+./mvnw test -Dtest=RequestRouteSelectorTest
 
 # Run specific test method
-./mvnw test -Dtest=DefaultRouterTest#testRouteSuccess
+./mvnw test -Dtest=RequestRouteSelectorTest#testRouteSuccess
 ```
 
 ### Code Formatting
@@ -158,8 +134,8 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ### Build Specific Module
 
 ```bash
-# Build only flexlb-sync
-./mvnw clean package -pl flexlb-sync -DskipTests
+# Build only flexlb-balance
+./mvnw clean package -pl flexlb-balance -DskipTests
 
 # Build module with dependencies
 ./mvnw clean package -pl flexlb-api -am -DskipTests
@@ -176,12 +152,12 @@ FlexLB routes inference requests through multiple worker stages based on model r
 3. **PDFUSION**: Prefill-Decode fusion workers (combined processing)
 4. **VIT**: Vision-language model processing
 
-The `DefaultRouter` orchestrates routing across these stages. If a later stage fails (e.g., DECODE unavailable), the system rolls back local state changes for earlier stages (flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultRouter.java:93).
+The `RequestRouteSelector` orchestrates routing across these stages. If a later stage fails (e.g., DECODE unavailable), the router discards the incomplete selection without closing the selected Workers. Resource reservations are acquired and rolled back by the request scheduler after selection.
 
 ### Load Balancing Strategies
 
-`DefaultRouter` uses explicit role selectors: `CostBasedPrefillStrategy` for
-PREFILL/PDFUSION, `DecodeSelector` for DECODE, and `RandomStrategy`
+`RequestRouteSelector` uses explicit role selectors: `CostBasedPrefillStrategy` for
+PREFILL/PDFUSION, `DecodeSelector` for DECODE, and `VitWorkerSelector`
 for VIT. Both selectors evaluate the complete live fleet before
 reducing to one generation-fenced winner. Prefill uses fixed BEST_ONLY with
 optional cache affinity under `router.roles.prefill.cacheAffinity`. Decode uses
@@ -201,16 +177,15 @@ non-finite preferred tier fails routing with a formula error.
 
 Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
-- `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
-- `scheduler.type=QUEUE`: Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns cancellation and request/decision lifetimes. Queue ordering is `FIFO` or `PRIORITY`.
+- `scheduler.type=DIRECT`: Routes immediately through `RequestRouteSelector`.
+- `scheduler.type=QUEUE`: Uses `QueuedRequestScheduler` for ordered placement; `RequestContext` owns cancellation and request/decision lifetime decisions. Queue ordering is `FIFO` or `PRIORITY`.
 - `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
 - `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
 - `dispatcher.type=NON_BATCH`: The frontend delivers requests from the formed group.
 - `dispatcher.type=BATCH`: Master delivers the formed group with `EnqueueBatch`.
 
-Every QUEUE combination follows the same lifecycle: `RouteService` submits to
-`RequestScheduler`, `GlobalQueueCoordinator` selects and commits all required
-endpoints once, and the selected Prefill `WorkerBatcher` performs the configured
+Every QUEUE combination enters through `RequestScheduler.submit`; `QueuedRequestScheduler` selects and commits all required
+endpoints once, and the selected Prefill `PrefillEndpoint` performs the configured
 decision-window and delivery. There is no secondary routing queue, earlier-entry
 scan, or multi-stage placement retry loop. The global decision thread waits only
 on an exact capacity event or queue mutation; endpoint workers independently wait
@@ -221,7 +196,7 @@ on their delivery-capacity, window, and deadline predicates.
 Worker health and capacity information is synchronized asynchronously:
 
 - `GrpcWorkerStatusRunner`: Periodically fetches worker status via gRPC
-- `EndpointRegistry`: Generation-fenced endpoint owner; `WorkerDirectory` exposes immutable routing snapshots and exact captures
+- `EndpointRegistry`: Owns discovered worker identities, generation-fenced endpoint publication, immutable routing snapshots and exact captures
 - `GrpcCacheStatusCheckRunner`: Syncs KV cache information with `KvCacheManager`
 
 Routing reads from these shared data structures which are concurrently updated by background threads.
@@ -240,14 +215,14 @@ During routing, the system queries matching cache blocks to prefer workers with 
 `ApplicationLifecycle` owns the fixed online/offline state machine. It starts
 and stops consistency registration, exposes health state, waits for the active
 request counter to remain quiet, and reports each phase through
-`GracefulLifecycleReporter`. There is no dynamic hook registry.
+`ServiceMetricsReporter`. There is no dynamic hook registry.
 
 ### Master Election and Consistency
 
 For high availability, FlexLB uses ZooKeeper-based master election:
 
 - `ZookeeperMasterElectService`: Handles leader election
-- `LBStatusConsistencyService`: Manages master-slave state consistency
+- `MasterStatusService`: Manages master-slave state consistency
 - Only the elected master performs routing decisions
 
 ## Configuration
@@ -311,15 +286,15 @@ ZooKeeper connection configuration for distributed coordination.
 
 ### Endpoint Selection
 
-`DefaultRouter` calls the explicit selector for each required role. Prefill and
+`RequestRouteSelector` calls the explicit selector for each required role. Prefill and
 Decode selectors consume complete immutable fleet snapshots and return an exact
 generation capability; do not add a second selector pass or endpoint fallback
 after ordered QUEUE commit begins.
 
 ### Rollback Mechanism
 
-When multi-stage routing partially fails, `DefaultRouter` closes the exact
-`SelectedRole` capabilities that were already selected. Direct-placement owners
+When multi-stage routing partially fails, `RequestRouteSelector` discards the selection;
+it does not close shared Worker endpoints. Direct-placement owners
 also roll back their exact endpoint reservations before returning the failure.
 
 ### Concurrent Data Access
@@ -330,16 +305,16 @@ captures; writers publish status through the endpoint lifecycle transaction.
 
 ### Queue Concurrency
 
-`RequestRegistry` owns request lifecycle. `dispatcher.maxInflightPerPrefillWorker`
+`RequestContext` owns request event acceptance and lifecycle decisions; `AbstractRequestScheduler` coordinates endpoint ledgers and external effects. `dispatcher.maxInflightPerPrefillWorker`
 limits batches in BATCH and requests in NON_BATCH / DIRECT, default 2.
 `decision.maxRequests` only controls group size. DIRECT has no queue timer.
 The global queue has no request-count cap; TTL bounds queue residence.
 Reservation and release paths must remain idempotent across
 completion, timeout, and cancellation races.
 
-### BalanceContext Extensions
+### RequestContext Extensions
 
-`BalanceContext` (request state) includes queue-related fields:
+`RequestContext` (request state) includes queue-related fields:
 
 - `future`: `CompletableFuture<Response>` for async response
 - `enqueueTime`: Timestamp when request entered queue
@@ -347,7 +322,9 @@ completion, timeout, and cancellation races.
 
 Methods:
 
-- Cancellation and lifecycle state are owned by `RequestRegistry`, keyed by exact request generation rather than request id alone.
+- Lifecycle fields are private. Context behavior methods validate exact request/route/operation identities under its monitor; callers never assemble transitions through setters. Route publication, endpoint cleanup, and user callbacks run outside that monitor. Delivery eligibility, time checks, and local endpoint handoff remain one atomic request operation.
+- `AdmissionHandle` is a top-level admission identity; response futures belong to `ResponseCompletionExecutor.RequestFuture`, and delivery identity belongs to `Delivery.Member`. `RequestLifecycle` executes request effects and drains admission; `RequestRepository` owns active/terminal indexes. `AbstractRequestScheduler` only shares lifecycle wiring.
+- `ApplicationLifecycle.closeScheduling()` orders shutdown: stop registration and scheduling, settle requests and delivery cleanup, close endpoints, then drain and close execution components. Each component owns its own waiting and closure. Timer shutdown closes registration before detaching handles.
 
 ### Reactive Programming
 
@@ -372,7 +349,7 @@ OpenTelemetry integration for distributed tracing (configured via `RTP_LLM_TRACE
 
 Monitoring enhancements:
 
-- `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
+- `DeliveryMetricsReporter`: Reports canonical worker-queue size and wait-time metrics
 - `RequestSchedulerReporter`: Reports admission and lifecycle metrics
 
 Graceful shutdown starts a quiet period only when explicitly stopping the service.
@@ -425,7 +402,7 @@ Examples:
 - **Java**: 21 (required)
 - **Spring Boot**: 2.7.18
 - **Project Reactor**: 2024.0.10
-- **gRPC**: 1.65.0
+- **gRPC**: 1.65.1
 - **Apache Curator**: 5.4.0 (ZooKeeper client)
 - **Mockito**: 5.20.0 (testing)
 - **Netty**: 4.1.127.Final
@@ -449,6 +426,8 @@ Most development uses the opensource profile.
 4. Do not proactively create documentation files (\*.md) or README files unless explicitly requested.
 5. When fixing issues in code, such as using solution A to fix problem X, don't write comments that explain why solution A was used to fix problem X. Make the code appear as if problem X never existed in the first place. For example, avoid comments like:
    // Request queue (using configured capacity parameter to control queue size, avoiding race conditions)
-   private final BlockingDeque<BalanceContext> queue;
+   private final BlockingDeque<RequestContext> queue;
 
 The parenthetical content in such comments is unnecessary because it makes readers wonder about a problem X they weren't aware of. The code should look naturally correct from the beginning. 5. To run Maven commands, use the Maven wrapper from rtp_llm/flexlb directory: `./mvnw` 6. **IMPORTANT**: Do not repeatedly read the same file multiple times. Once you have sufficient context from a file read, proceed to edit directly. Avoid excessive redundant Read operations on the same file or code snippets.
+
+Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared PrefillEndpoint settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.

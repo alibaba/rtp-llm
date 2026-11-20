@@ -3,7 +3,7 @@ package org.flexlb.mock.engine.service;
 import static org.junit.jupiter.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.EngineLoop;

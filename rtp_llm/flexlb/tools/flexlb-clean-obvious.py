@@ -1,8 +1,11 @@
-"""Find unused Java imports, fields and production methods in FlexLB.
+"""Find unused Java imports, fields, production methods and private constructors in FlexLB.
 
 This is a conservative source audit, not a Java type checker. Method references
 are indexed across all modules, including tests. Ambiguous names are retained;
 framework callbacks and generated accessors are not treated as ordinary calls.
+Private constructors are matched by simple type name and argument count.
+Constructor references, potential reflection and generated calls are retained.
+A sole no-arg private constructor also controls default constructor visibility.
 The commit hook audits the entire source tree, including methods orphaned by
 deleting their last caller. It only reports findings; it never edits sources.
 """
@@ -51,6 +54,7 @@ CALLBACKS = {
     "Inject",
     "Value",
 }
+CONSTRUCTOR_GENERATORS = {"Builder", "SuperBuilder", "Jacksonized"}
 GENERATED_ACCESSORS = {"Data", "Getter", "Setter", "Value", "Builder", "SuperBuilder"}
 
 
@@ -100,10 +104,29 @@ def production(path):
     return "/src/main/" in f"/{path}" or path.startswith("tools/")
 
 
+def simple_type_name(source, node):
+    if node is None:
+        return ""
+    if node.type in {"generic_type", "superclass"}:
+        return simple_type_name(source, node.named_children[0])
+    if node.type in {"scoped_type_identifier", "field_access"}:
+        return simple_type_name(source, node.named_children[-1])
+    return text(source, node)
+
+
+def count_arguments(node):
+    return sum(
+        child.type not in {"line_comment", "block_comment"}
+        for child in node.named_children
+    )
+
+
 def audit(sources):
     """Accept relative paths and bytes so tests and Git snapshots use identical rules."""
     parsed = {}
     calls = defaultdict(set)
+    constructor_calls = defaultdict(set)
+    indirect_construction = set()
     strings = defaultdict(set)
     findings = []
     for path, source in sources.items():
@@ -113,7 +136,34 @@ def audit(sources):
         nodes = list(walk(tree.root_node))
         parsed[path] = source, nodes
         for node in nodes:
-            if node.type == "method_invocation":
+            if node.type == "object_creation_expression":
+                name = simple_type_name(source, node.child_by_field_name("type"))
+                arity = count_arguments(node.child_by_field_name("arguments"))
+                constructor_calls[name].add((path, arity))
+            elif node.type == "explicit_constructor_invocation":
+                container = owner(node)
+                target = text(source, node.child_by_field_name("constructor"))
+                if target == "this":
+                    name = text(source, container.child_by_field_name("name"))
+                else:
+                    name = simple_type_name(
+                        source, container.child_by_field_name("superclass")
+                    )
+                arity = count_arguments(node.child_by_field_name("arguments"))
+                constructor_calls[name].add((path, arity))
+            elif node.type == "class_declaration":
+                # A subclass can invoke a no-arg superclass constructor implicitly.
+                superclass = simple_type_name(
+                    source, node.child_by_field_name("superclass")
+                )
+                if superclass:
+                    constructor_calls[superclass].add((path, 0))
+            elif node.type == "class_literal":
+                # Class literals can pass the type to reflection or a framework.
+                indirect_construction.add(
+                    simple_type_name(source, node.named_children[0])
+                )
+            elif node.type == "method_invocation":
                 name = text(source, node.child_by_field_name("name"))
                 enclosing = node.parent
                 while enclosing and enclosing.type != "method_declaration":
@@ -126,12 +176,20 @@ def audit(sources):
                 ):
                     calls[name].add(path)
             elif node.type == "method_reference":
+                if node.children[-1].type == "new":
+                    indirect_construction.add(
+                        simple_type_name(source, node.named_children[0])
+                    )
+                    continue
                 # The final named child is the method identifier (or type arguments).
                 names = [c for c in node.named_children if c.type == "identifier"]
                 if names:
                     calls[text(source, names[-1])].add(path)
-            elif node.type == "string_literal" and production(path):
-                strings[text(source, node)[1:-1]].add(path)
+            elif node.type == "string_literal":
+                value = text(source, node)[1:-1]
+                indirect_construction.add(re.split(r"[.$]", value)[-1])
+                if production(path):
+                    strings[value].add(path)
 
     for path, (source, nodes) in parsed.items():
         imports = [n for n in nodes if n.type == "import_declaration"]
@@ -190,6 +248,55 @@ def audit(sources):
                                 "unused-private-field",
                             )
                         )
+
+            if node.type == "constructor_declaration" and production(path):
+                container = owner(node)
+                modifiers = next(
+                    (c for c in node.named_children if c.type == "modifiers"), None
+                )
+                name = text(source, node.child_by_field_name("name"))
+                if (
+                    container.type != "class_declaration"
+                    or not modifiers
+                    or not any(child.type == "private" for child in modifiers.children)
+                    or (annotations(source, node) | annotations(source, container))
+                    & (CALLBACKS | CONSTRUCTOR_GENERATORS)
+                    or name in indirect_construction
+                ):
+                    continue
+                parameters = node.child_by_field_name("parameters")
+                arity = sum(
+                    child.type in {"formal_parameter", "spread_parameter"}
+                    for child in parameters.named_children
+                )
+                varargs = any(
+                    child.type == "spread_parameter"
+                    for child in parameters.named_children
+                )
+                if (
+                    arity == 0
+                    and sum(
+                        member.type == "constructor_declaration"
+                        for member in node.parent.named_children
+                    )
+                    == 1
+                ):
+                    continue
+                # Direct access to a private constructor stays within its source file.
+                if not any(
+                    caller == path
+                    and (arguments == arity or (varargs and arguments >= arity - 1))
+                    for caller, arguments in constructor_calls[name]
+                ):
+                    findings.append(
+                        Finding(
+                            path,
+                            node.start_point.row + 1,
+                            f"{symbol(source, node)}/{arity}",
+                            "unused-private-constructor",
+                        )
+                    )
+                continue
 
             if node.type != "method_declaration" or not production(path):
                 continue

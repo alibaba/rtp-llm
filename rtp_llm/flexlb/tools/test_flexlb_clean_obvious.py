@@ -129,6 +129,67 @@ class UnusedJavaTest(unittest.TestCase):
             2, len(self.findings("class A { void helper() {} void helper(int n) {} }"))
         )
 
+    def test_unused_private_constructor_overload_is_reported(self):
+        findings = self.findings(
+            """
+            class A {
+                private A(int value) {}
+                private A(String value, long id) {}
+                static A instance = new A(1);
+            }
+        """
+        )
+        self.assertEqual(
+            [("A.A/2", "unused-private-constructor")],
+            [(f.symbol, f.rule) for f in findings],
+        )
+
+    def test_constructor_with_same_name_in_another_file_does_not_hide_finding(self):
+        findings = self.findings(
+            "class A { private A(int value) {} }",
+            other="class B { static class A { A(int x) {} } A instance = new A(1); }",
+        )
+        self.assertEqual([f.rule for f in findings], ["unused-private-constructor"])
+
+    def test_constructor_delegation_and_varargs_are_retained(self):
+        self.assertEqual(
+            [],
+            self.findings(
+                """
+            class A {
+                private A() { this(1, 2); }
+                private A(int... values) {}
+                static A instance = new A();
+            }
+        """
+            ),
+        )
+        self.assertEqual(
+            [],
+            self.findings(
+                """
+            class A {
+                private A(int x) {}
+                static class B extends A { B() { super(1); } }
+            }
+        """
+            ),
+        )
+
+    def test_private_constructor_can_prevent_default_construction(self):
+        self.assertEqual([], self.findings("class A { private A() {} }"))
+
+    def test_generated_and_indirect_constructor_calls_are_retained(self):
+        for source in (
+            "@Builder @Jacksonized class A { private A(int value) {} }",
+            "class A { @Builder private A(int value) {} }",
+            "class A { private A(int value) {} static IntFunction<A> f = A::new; }",
+            "class A { private A(int value) {} static Class<?> type = A.class; }",
+            'class A { private A(int value) {} static String type = "com.example.A"; }',
+        ):
+            with self.subTest(source=source):
+                self.assertEqual([], self.findings(source))
+
     def test_invalid_syntax_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "invalid Java syntax"):
             self.findings("class A {")

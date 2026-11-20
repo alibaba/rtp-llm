@@ -1,0 +1,1473 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FlexLB 生产枚举与语义收敛审核</title>
+    <style>
+      :root {
+        --ink: #1b293b;
+        --muted: #65758a;
+        --line: #dce4ed;
+        --blue: #2359ba;
+        --paper: #fff;
+        --bg: #f3f6fa;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        color: var(--ink);
+        background: var(--bg);
+        font:
+          15px/1.7 system-ui,
+          -apple-system,
+          "PingFang SC",
+          sans-serif;
+      }
+      header {
+        background: #142b49;
+        color: white;
+        padding: 42px max(24px, calc((100vw - 1180px) / 2)) 30px;
+      }
+      h1 {
+        font-size: 32px;
+        line-height: 1.3;
+        margin: 0 0 12px;
+      }
+      header p {
+        color: #c8d7e9;
+        max-width: 900px;
+        margin: 8px 0;
+      }
+      .stats {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 22px;
+      }
+      .stats span {
+        padding: 6px 13px;
+        background: #ffffff12;
+        border: 1px solid #ffffff23;
+        border-radius: 7px;
+      }
+      main {
+        max-width: 1180px;
+        margin: auto;
+        padding: 24px;
+      }
+      .intro {
+        background: #e9f0fc;
+        border: 1px solid #d2def3;
+        padding: 18px 22px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+      }
+      .intro p {
+        margin: 5px 0;
+      }
+      .toolbar {
+        position: sticky;
+        top: 0;
+        background: #f3f6faf5;
+        backdrop-filter: blur(10px);
+        z-index: 2;
+        padding: 14px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .inputs {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+      input,
+      select,
+      button {
+        font: inherit;
+        border: 1px solid #cbd6e4;
+        border-radius: 7px;
+        background: white;
+        padding: 9px 12px;
+        color: var(--ink);
+      }
+      input {
+        flex: 1;
+        min-width: 240px;
+      }
+      button {
+        cursor: pointer;
+      }
+      button:hover {
+        background: #eaf0fa;
+      }
+      #count {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 10px 0 0;
+      }
+      .group-title {
+        font-size: 22px;
+        margin: 30px 0 14px;
+      }
+      .card {
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        margin-bottom: 14px;
+        overflow: hidden;
+        scroll-margin-top: 150px;
+      }
+      .card summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 18px 22px;
+        display: flex;
+        align-items: start;
+        gap: 12px;
+      }
+      .card summary::-webkit-details-marker {
+        display: none;
+      }
+      .card summary:before {
+        content: "▾";
+        color: var(--muted);
+      }
+      .card:not([open]) summary:before {
+        content: "▸";
+      }
+      .name {
+        font-size: 17px;
+        font-weight: 650;
+        overflow-wrap: anywhere;
+      }
+      .purpose {
+        color: var(--muted);
+        font-size: 14px;
+        margin-top: 3px;
+      }
+      .badge {
+        margin-left: auto;
+        white-space: nowrap;
+        font-size: 12px;
+        padding: 2px 9px;
+        border-radius: 20px;
+        background: #e8f3ee;
+        color: #246044;
+      }
+      .badge.warn {
+        background: #fff0d9;
+        color: #8b5b10;
+      }
+      .badge.event {
+        background: #e9eefc;
+        color: #38548b;
+      }
+      .body {
+        padding: 0 22px 20px 46px;
+      }
+      .meta {
+        padding: 12px 15px;
+        background: #f6f8fb;
+        border-radius: 7px;
+        margin-bottom: 14px;
+      }
+      .meta p {
+        margin: 4px 0;
+      }
+      .meta strong {
+        display: inline-block;
+        min-width: 75px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+      th {
+        text-align: left;
+        color: var(--muted);
+        font-weight: 500;
+        background: #f8fafc;
+      }
+      th,
+      td {
+        padding: 8px 12px;
+        border-bottom: 1px solid #e7edf4;
+        vertical-align: top;
+      }
+      td:first-child {
+        width: 43%;
+        font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+        font-size: 12px;
+        overflow-wrap: anywhere;
+        color: #244b80;
+      }
+      .source {
+        font-size: 12px;
+        color: var(--muted);
+        overflow-wrap: anywhere;
+        margin-top: 12px;
+      }
+      .source a {
+        color: var(--blue);
+      }
+      .notes {
+        border-left: 3px solid #d79c38;
+        padding: 8px 15px;
+        background: #fff8eb;
+        margin-top: 14px;
+      }
+      .notes p {
+        margin: 4px 0;
+      }
+      footer {
+        margin: 35px 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .empty {
+        padding: 40px;
+        text-align: center;
+        color: var(--muted);
+      }
+      @media (max-width: 650px) {
+        main {
+          padding: 14px;
+        }
+        header {
+          padding: 28px 20px;
+        }
+        h1 {
+          font-size: 27px;
+        }
+        .body {
+          padding: 0 14px 16px;
+        }
+        .card summary {
+          padding: 14px;
+        }
+        .badge {
+          white-space: normal;
+          min-width: 65px;
+        }
+        td:first-child {
+          width: 49%;
+        }
+        th,
+        td {
+          padding: 7px;
+        }
+        select {
+          max-width: 100%;
+        }
+      }
+      @media print {
+        header {
+          background: white;
+          color: #142b49;
+          padding: 0;
+        }
+        header p {
+          color: #555;
+        }
+        .toolbar,
+        button {
+          display: none;
+        }
+        body {
+          background: white;
+        }
+        main {
+          padding: 0;
+          max-width: none;
+        }
+        .card {
+          break-inside: avoid;
+        }
+        .body {
+          padding-left: 20px;
+        }
+        .stats span {
+          border: 1px solid #aaa;
+        }
+        .group-title {
+          break-after: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>FlexLB 生产枚举与语义收敛审核</h1>
+      <p>
+        每个名字在描述什么、所有枚举值的含义、按什么原则分类，以及业务上是否互斥。
+      </p>
+      <p>
+        以当前工作区源码为依据 · 不含 UT / 测试夹具 / Mock · 不含 target
+        自动生成代码 · 2026-11-16
+      </p>
+      <div class="stats">
+        <span>58 个生产 Java 枚举</span><span>2 个 Proto 枚举</span>
+      </div>
+    </header>
+    <main>
+      <section class="intro" id="review">
+        <h2>先看结论：名称相近，不代表应该共用一个状态机</h2>
+        <p>
+          本页仅列生产代码的 58 个 Java 枚举和 2 个 Proto 枚举，排除
+          UT、testFixtures 和 Mock
+          Engine。以下是源码审核结论与改造建议，ReleaseReason
+          已按下述方案移除，其他合并建议尚未实施。
+        </p>
+        <p>
+          <b>优先收敛：</b>DecodeRequestStatus.Kind 与 RequestEventType
+          存在直接转换；容量拒绝的原因词表在 CapacityFailure 与
+          AdmissionRejectReason
+          中重复。前者适合复用事件类型，后者适合统一拒绝原因，而不是简单合并整个结果枚举。
+        </p>
+        <p>
+          <b>优先重新划分职责：</b>已删除混合触发原因与释放方式的
+          ReleaseReason，回滚与请求结束清理分别落在现有流程中，不增加管理器或替代枚举。
+        </p>
+        <p>
+          <b>保留独立：</b
+          >业务阶段、请求查询状态、清理进度、引擎观察和响应执行任务是不同对象或不同维度；统一到一个
+          RequestState 会丢失可以同时成立的事实。
+        </p>
+        <p>
+          <a href="#release-review">① ReleaseReason 移除方案</a>　<a
+            href="#overlap-review"
+            >② 跨类语义对照与合并建议</a
+          >　<a href="#layer-review">③ State / Phase 分层</a>　<a
+            href="#catalog"
+            >④ 完整枚举清单</a
+          >
+        </p>
+      </section>
+      <section class="card" id="release-review">
+        <div class="body" style="padding-top: 20px">
+          <h2>① ReleaseReason 已删除：由实际流程决定资源处理</h2>
+          <p>
+            没有新增类、状态或方法。原有四个相关方法收敛为三个：finishUnpublishedRoute、rollbackSelectedRouteResources、cleanupRequest。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>现有入口</th>
+                <th>职责</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>rollbackSelectedRouteResources(route)</td>
+                <td>
+                  撤销本次选址的 Encoder / Prefill / Decode 登记；Decode
+                  已确认时不允许本地回滚。只回滚资源，不结束选址。
+                </td>
+              </tr>
+              <tr>
+                <td>finishUnpublishedRoute(route, selection)</td>
+                <td>
+                  回滚本次资源后完成选址收尾。等待容量时可仅调用资源回滚方法，不提前结束仍需参与抢占的选址。
+                </td>
+              </tr>
+              <tr>
+                <td>cleanupRequest(ctx)</td>
+                <td>
+                  请求进入 ENDING
+                  且无进行中选址时，直接根据提交、远端释放确认和无反馈过期处理资源。已提交而释放依据不足时保留
+                  Decode；未提交只释放未确认登记；超期清理本地登记不清除 Worker
+                  上报占用。保留部分成功、通知和归档契约。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            旧的 LOCAL_ROLLBACK 由回滚流程表达；REMOTE_CLEANUP / EXPIRED
+            由已有事实直接判断；COUNTERPART_FINISHED
+            兜底名不再存在；只被测试指定的 NOT_SENT 已删除，测试改为在真实
+            Endpoint 账本上验证结束清理和失败重试。
+          </p>
+          <p class="source">
+            源码：<a
+              href="flexlb-balance/src/main/java/org/flexlb/balance/schedule/AbstractRequestScheduler.java"
+              >AbstractRequestScheduler</a
+            >
+          </p>
+        </div>
+      </section>
+      <section class="card" id="overlap-review">
+        <div class="body" style="padding-top: 20px">
+          <h2>② 哪些含义近似、哪些应该合并</h2>
+          <p>
+            “建议统一”指复用同一业务词表并删除无意义的转换，不要求把两个枚举的所有值拼起来。以下区分源码已确认的对应关系与建议；除
+            ReleaseReason 移除外，以下跨类收敛尚未修改实现。
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>跨类枚举 / 值</th>
+                <th>关系、结论与建议</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>DecodeRequestStatus.Kind<br />↔ RequestEventType</td>
+                <td>
+                  <b>建议统一事件表达，优先级高。</b
+                  >DecodeEndpoint.workerEventType 当前执行直接转换：CONFIRMED →
+                  ALLOCATED；TERMINAL + errorCode=0 → COMPLETED；TERMINAL +
+                  非零错误 → FAILED。前者没有带来独立决策含义。建议
+                  DecodeRequestStatus 直接携带已有 RequestEventType
+                  的这三个值，保留精确 reservation 和
+                  errorCode，限制合法组合，然后删除 Kind 和转换方法。<b
+                    >不是删除事件身份或错误码，也不是把全部 RequestEventType
+                    值无约束开放给这个对象。</b
+                  >
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  DecodeEndpoint.CapacityFailure<br />↔ AdmissionRejectReason
+                </td>
+                <td>
+                  <b>建议统一重复的拒绝原因词表，优先级中。</b
+                  >BLOCKED_BY_HIGHER_PRIORITY ↔
+                  HIGHER_PRIORITY_AHEAD；BLOCKED_BY_SAME_PRIORITY ↔
+                  SAME_PRIORITY_AHEAD；INSUFFICIENT_CAPACITY ↔
+                  RESOURCE_EXHAUSTED。但 CapacityFailure 另有 NONE 和
+                  UNKNOWN_BLOCKER，AdmissionRejectReason.UNSPECIFIED
+                  不等于明确的“来源未知”。因此<b
+                    >不能直接用 UNSPECIFIED 吞掉 UNKNOWN_BLOCKER</b
+                  >。可让内部容量结果携带公共拒绝原因，并明确表达未知来源；若扩展原因协议，需评估外部兼容。具体错误码仍在响应边界映射，不与原因枚举合为一个。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  RequestEventType 的结束事件<br />↔ RequestContext.EndCause 的
+                  Worker 子集
+                </td>
+                <td>
+                  <b
+                    >相同事件在两层重复命名，适合进一步收敛；不建议合并整个枚举。</b
+                  >workerEnd 中 COMPLETED → WORKER_COMPLETED、FAILED →
+                  WORKER_FAILED、PRIORITY_CANCELLED →
+                  PRIORITY_PREEMPTED、ENDPOINT_CLOSED →
+                  ENDPOINT_CLOSED。RequestEventType
+                  还含活跃、资源分配、远端清理；EndCause
+                  还含本地发布失败、请求截止、调度器关闭等。建议在结束处理边界直接解释已有
+                  Worker
+                  事件，避免构造只换名字的中间事件；保留本地结束原因。是否还需归一化历史原因，应按实际查询/归档消费者核对后决定。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  EngineGrpcClient.CancelReply<br />↔
+                  RequestEventType.REMOTE_FENCED / REMOTE_CLEANED
+                </td>
+                <td>
+                  <b>部分保证相同，保留协议边界。</b>REQUEST_FENCED /
+                  REQUEST_CLEANED
+                  对应业务上的远端阻止后续入队/确认清理。CancelReply 另外有
+                  ACCEPTED、NOT_FOUND、FAILED，不能全部转为成功业务事件；同一保证也可能来自不同反馈通道。建议集中做一次协议解释，不将
+                  RPC 回复类型直接扩散成资源状态。尤其 ACCEPTED 与
+                  REQUEST_CLEANED 绝不能合并。
+                </td>
+              </tr>
+              <tr>
+                <td>CancelReason<br />↔ EndCause<br />↔ ReleaseReason</td>
+                <td>
+                  <b>均带“原因”，但不是同一事实，不合成通用 Reason。</b
+                  >CancelReason 记录取消的触发来源；EndCause
+                  记录结束证据/来源；ReleaseReason
+                  当前实际控制资源清理策略。客户端先取消后 Worker
+                  完成可同时发生，不能丢失其中之一。应重点移除 ReleaseReason
+                  对既有事实的重复编码，而不是向它追加更多结束原因。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  RequestContext.ResponseKind<br />↔ RequestFuture.Completion
+                </td>
+                <td>
+                  <b>同有取消，但不合并。</b>ACK / TERMINAL / CANCELLATION
+                  表示响应候选的用途；RESPONSE / FAILURE / CANCELLATION 表示
+                  Future 的完成通道。ACK 和 TERMINAL
+                  都可能通过响应值完成；一个错误响应也不一定通过异常通道完成。两者不是同一分类。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  WorkerEndpoint.RegistrationPhase<br />↔
+                  DecodeResources.RegistrationState
+                </td>
+                <td>
+                  <b>词面相近，不合并。</b>REGISTERED / COMMITTED
+                  表示登记是否已提交；NOT_REGISTERED / UNCONFIRMED / CONFIRMED
+                  表示 Decode
+                  是否存在登记及是否得到引擎确认。提交不等于确认。若二值提交阶段改为布尔属性，也应独立于引擎确认事实，不增加一个包含全部组合的总枚举。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  RequestRepository.RegistrationResult<br />↔
+                  WorkerEndpoint.RegistrationStatus<br />↔
+                  WorkerEndpoint.CommitStatus
+                </td>
+                <td>
+                  <b>均为登记/提交结果，但对象不同，不合并。</b>请求仓库检查
+                  ID、上下文绑定；Endpoint
+                  接纳检查容量、快照版本及端点可用性；提交检查具体登记身份及提交条件。统一成一个大
+                  Result 会让每个消费者看到大量不可能出现的值。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  WorkerStatus.CloseReason<br />↔
+                  AbstractGrpcClient.CloseReason
+                </td>
+                <td>
+                  <b>只有 DISCOVERY_REMOVED 相同，不合并。</b>前者关闭 Worker
+                  状态跟踪，还可因连续失败触发；后者关闭连接客户端，还区分替换、整体关闭与重复实例丢弃。对象和生命周期不同。同一发现删除事件可导致两个对象关闭，不代表它们共用一个关闭状态。
+                </td>
+              </tr>
+              <tr>
+                <td>CacheMatchMode<br />↔ CacheMatchSource</td>
+                <td>
+                  <b>LOCAL_SYNC / KVCM 重复，但不合并。</b>Mode
+                  是配置的主方式；Source 是本次结果的实际来源，还含
+                  LOCAL_STANDBY。配置 KVCM
+                  时结果可来自备用本地；若合并，会把“想用什么”和“实际用了什么”混在一起。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  StrategyErrorType / BalanceStatusEnum / StatusEnum<br />↔
+                  GrpcFailure.Kind / Proto ErrorCode
+                </td>
+                <td>
+                  <b>都有超时/连接失败/内部错误，不做全局错误枚举。</b
+                  >分别服务调度响应、状态同步、公共异常映射、异常根因诊断和外部协议。保留边界映射与数值兼容，不从对外错误码反推内部事实。另有独立问题：StrategyErrorType.NO_ENCODER_WORKER
+                  与 VIT_ROUTE_STALE 都是
+                  8408，数字冲突应单独处理，不能把它们当成同一语义合并。
+                </td>
+              </tr>
+              <tr>
+                <td>ApiMetricsReporter.Event<br />↔ ZkMasterEvent</td>
+                <td>
+                  <b>部分上下线里程碑接近，不合并。</b
+                  >前者记录指标里程碑，后者驱动主身份、连接及服务生命周期；指标完成点不必等于触发事件。可复用真实事件生成指标，但不让指标词表反过来控制生命周期。
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  GrpcCallTrace.Stage / EndpointTrace.Stage<br />↔
+                  GrpcTransportObserver.Event
+                </td>
+                <td>
+                  <b>RPC 与连接词语相近，不合并。</b>调用阶段、Endpoint
+                  同步打点、底层传输异常分别具有不同粒度；一次 Endpoint
+                  轮询可包含多个调用/锁事件，一条连接也可服务多次调用。保持追踪关联，而不是共享一个
+                  Stage。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="source">
+            重点证据：<a
+              href="flexlb-worker/src/main/java/org/flexlb/worker/endpoint/DecodeEndpoint.java"
+              >DecodeEndpoint.workerEventType</a
+            >；<a
+              href="flexlb-balance/src/main/java/org/flexlb/balance/strategy/DecodeStrategy.java"
+              >DecodeStrategy 容量失败映射</a
+            >；<a
+              href="flexlb-balance/src/main/java/org/flexlb/balance/schedule/RequestContext.java"
+              >RequestContext.workerEnd / selectResponse / recordCancellation</a
+            >。
+          </p>
+        </div>
+      </section>
+      <section class="card" id="layer-review">
+        <div class="body" style="padding-top: 20px">
+          <h2>③ State / Phase：相似的“阶段”到底在描述谁</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>类型</th>
+                <th>准确对象与应保留的边界</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>RequestPhase</td>
+                <td>业务工作种类：编码还是生成。不是排队、运行、清理阶段。</td>
+              </tr>
+              <tr>
+                <td>RequestState.State</td>
+                <td>
+                  对外查询的进展/最终结果。RequestState.from
+                  优先取已有归档结果，其次最终结果，再次取消请求，再按路由是否提交区分已接纳/排队。属于派生视图，不应另维护一套可独立写入的进行中状态。
+                </td>
+              </tr>
+              <tr>
+                <td>RequestContext.Phase</td>
+                <td>
+                  上下文是否还开放、正在结束、已归档。phase() 根据归档记录和
+                  endState 派生，并非另一份可变状态字段。对外显示 CANCELLED
+                  时内部仍可处于 ENDING 等待清理；不能和查询状态合并。
+                </td>
+              </tr>
+              <tr>
+                <td>ResponseCompletionExecutor.Registration.Phase</td>
+                <td>
+                  一个响应完成任务的执行器进度，不是请求进度。任务已 COMPLETED
+                  仍不代表请求远端资源已清理。
+                </td>
+              </tr>
+              <tr>
+                <td>TaskPhase ↔ DecodeTaskPhase</td>
+                <td>
+                  TaskPhase 是引擎上报阶段；DecodeTaskPhase 是 Master
+                  用于抢占成本/取消方式判断的分类，额外表达本地预留、未交付、引擎可能已看到等不确定状态。RUNNING
+                  有相同观察基础，但不能把 MASTER_QUEUED_NOT_DISPATCHED
+                  塞进引擎协议枚举；映射应在持有本地登记和引擎观察的边界集中生成。
+                </td>
+              </tr>
+              <tr>
+                <td>PriorityPreemptionProgress</td>
+                <td>
+                  一次抢占取消的进展，不是引擎运行状态，也不是资源全部释放的证明。是否能从已有取消操作派生需继续沿具体持有者核对，不能只因为有
+                  CANCELED 就复用 RequestState.CANCELLED。
+                </td>
+              </tr>
+              <tr>
+                <td>WorkerEndpoint.EndpointState</td>
+                <td>
+                  端点是否接纳及端点自身清理阶段。与请求上下文的 OPEN / ENDING /
+                  CLOSED 是不同对象，不能因为都能关闭就统一为一个
+                  LifecycleState。
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            <b>审核顺序：</b>先确定对象与事实 → 找权威维护位置 → 判断是否可派生
+            → 仅在必要边界转换 → 删掉同义类型与中间转换。不是按每个类各配一套
+            State / Phase，也不是机械要求所有阶段共用一个枚举。
+          </p>
+        </div>
+      </section>
+      <h2 id="catalog">④ 完整生产枚举清单</h2>
+      <div class="intro">
+        <p>
+          <b>如何理解“互斥”：</b>Java
+          的一个枚举变量只能保存一个值，但这不代表对应的业务事实只能发生一种。
+        </p>
+        <p>
+          <b>状态互斥</b
+          >：同一对象同一时刻只处于一个状态，之后可以转换。<b>结果单选</b>：一次操作只返回一个分类，但多个失败条件可能同时成立。<b>事件可共存</b>：同一请求或同一轮操作可以先后产生多个事件。<b>语义重叠</b>：存在包含关系、兜底类别或混合分类维度。
+        </p>
+        <p>
+          所有“互斥”判断均限定具体对象、时刻或单次操作；不是说这些值在整个系统中不能同时出现。分类原则和设计判断是结合定义与调用代码得出的分析。
+        </p>
+      </div>
+      <div class="toolbar">
+        <div class="inputs">
+          <input
+            id="search"
+            type="search"
+            placeholder="搜索枚举名、枚举值或中文含义…"
+            aria-label="搜索"
+          /><select id="module" aria-label="模块">
+            <option value="">所有模块</option></select
+          ><select id="scope" aria-label="范围">
+            <option value="">全部范围</option>
+            <option value="生产">生产 Java</option>
+            <option value="协议">Proto 协议</option></select
+          ><select id="kind" aria-label="互斥性">
+            <option value="">所有互斥性判断</option>
+            <option>配置单选</option>
+            <option>状态互斥</option>
+            <option>结果单选</option>
+            <option>事件可共存</option>
+            <option>语义重叠</option>
+            <option>集合配置</option></select
+          ><button id="expand">全部展开</button
+          ><button id="collapse">全部收起</button
+          ><button id="print">打印 / PDF</button>
+        </div>
+        <p id="count" aria-live="polite"></p>
+      </div>
+      <div id="list"></div>
+      <footer>
+        源码路径相对于 FlexLB
+        根目录；将本文件保留在根目录时可通过链接打开对应源码。此文件离线可读，不加载外部资源。枚举数按声明计数，嵌套枚举单独计算。
+      </footer>
+    </main>
+    <script>
+      // module, type, purpose, classification, exclusivity label, explanation, values, source, scope
+      const data = [];
+      function add(m, n, p, c, k, e, v, s, scope = "生产") {
+        data.push({
+          m,
+          n,
+          p,
+          c,
+          k,
+          e,
+          v: v.split("|").map((x) => {
+            const i = x.indexOf("=");
+            return [x.slice(0, i), x.slice(i + 1)];
+          }),
+          s,
+          scope,
+        });
+      }
+      const C = "flexlb-config/src/main/java/org/flexlb/config/";
+      add(
+        "config",
+        "RoleType",
+        "标识一个服务端点承担的角色",
+        "按端点的服务职责分类",
+        "语义重叠",
+        "单个角色字段单选；能力不严格互斥：PDFUSION 同时提供 P/D 能力，VIT 与 ENCODER 也不能理解成完全无关的能力集合。",
+        "PDFUSION=P/D 合一服务|PREFILL=提示词阶段计算|DECODE=逐 token 生成|VIT=Vision Transformer 视觉服务|ENCODER=多模态编码服务|FRONTEND=前端服务",
+        C + "service/RoleType.java",
+      );
+      add(
+        "config",
+        "SchedulerConfig.Type",
+        "选择请求调度方式",
+        "是否经过调度队列",
+        "配置单选",
+        "一个调度配置选择一种模式；DIRECT 不代表永远不会遇到容量不足。",
+        "DIRECT=直接调度|QUEUE=进入队列调度",
+        C + "scheduler/SchedulerConfig.java",
+      );
+      add(
+        "config",
+        "QueueOrderingConfig.Type",
+        "选择队列排序规则",
+        "比较队列中请求的先后顺序",
+        "配置单选",
+        "一种排序配置只选一种规则；PRIORITY 内仍可能需要同优先级的先后规则。",
+        "FIFO=先来先服务|PRIORITY=优先级排序",
+        C + "scheduler/QueueOrderingConfig.java",
+      );
+      add(
+        "config",
+        "PreemptionStage",
+        "限定允许抢占的请求阶段",
+        "按被抢占请求所在的执行阶段",
+        "集合配置",
+        "配置使用 Set<PreemptionStage>，不是单选；目前只有一个值，因此暂不存在值之间的互斥问题。",
+        "DECODE_ENGINE_OWNED=Decode 请求已交由引擎处理的阶段",
+        C + "scheduler/PreemptionStage.java",
+      );
+      add(
+        "config",
+        "CacheMatchMode",
+        "配置缓存匹配实现",
+        "按缓存信息获取方式",
+        "配置单选",
+        "一个缓存匹配配置选择一个主模式；备用数据仍可能同时维护。",
+        "LOCAL_SYNC=根据同步到本地的缓存状态匹配|KVCM=通过 KVCM 查询缓存匹配",
+        C + "cache/CacheMatchMode.java",
+      );
+      add(
+        "config",
+        "ConfigSourceSelection",
+        "选出实际使用的配置来源",
+        "按配置提供方；源码按优先顺序选择",
+        "配置单选",
+        "候选条件可能同时成立；实现优先选择 UNICONFIG，其次 NACOS，否则 ENVIRONMENT，并非环境条件天然互斥。",
+        "UNICONFIG=启用 UniConfig 时选择该来源|NACOS=配置了 Nacos 地址时选择该来源|ENVIRONMENT=使用环境变量来源",
+        C + "loading/source/ConfigSourceSelection.java",
+      );
+      const B = "flexlb-balance/src/main/java/org/flexlb/balance/";
+      add(
+        "balance",
+        "SelectionResult.Status",
+        "一次选址调用的结果",
+        "按调用方下一步应如何处理",
+        "结果单选",
+        "一次结果只有一种状态，构造器约束其载荷；BLOCKED 表示带明确 blocker 的等待，RETRY 表示重新尝试，二者不能仅凭“暂未选中”混为一类。",
+        "RETRY=需重新尝试|SUCCESS=成功选中，携带选址结果|REJECTED=拒绝，携带失败响应|BLOCKED=受阻，携带阻塞对象|CLOSED=相关组件已关闭",
+        B + "strategy/SelectionResult.java",
+      );
+      add(
+        "balance",
+        "RequestPhase",
+        "区分请求所属业务处理阶段",
+        "按编码与生成业务阶段",
+        "状态互斥",
+        "一条阶段记录只表示一个阶段；同一完整业务请求可先编码再生成，并非整个请求永远只涉及一种阶段。",
+        "ENCODER=编码阶段|GENERATION=生成阶段",
+        B + "schedule/RequestPhase.java",
+      );
+      add(
+        "balance",
+        "RequestContext.Phase",
+        "控制请求上下文的生命周期",
+        "是否继续接受处理以及结束清理进度",
+        "状态互斥",
+        "同一上下文同一时刻单选；不等同于引擎执行阶段或对外请求状态。",
+        "OPEN=仍可处理请求进展|ENDING=正在执行结束处理|CLOSED=上下文已关闭",
+        B + "schedule/RequestContext.java",
+      );
+      add(
+        "balance",
+        "RequestContext.ResponseKind",
+        "区分待交付响应的用途",
+        "按响应在协议中的作用",
+        "语义重叠",
+        "一次响应分类单选；ACK 与最终响应可在请求生命周期先后出现。取消本身也是一种结束结果，CANCELLATION 与 TERMINAL 在宽泛语义上有包含关系。",
+        "ACK=接纳或路由确认响应|TERMINAL=最终完成或失败响应|CANCELLATION=取消对应的完成通知",
+        B + "schedule/RequestContext.java",
+      );
+      add(
+        "balance",
+        "RequestContext.EndCause",
+        "记录结束请求的具体原因",
+        "按触发结束的事件或失败来源",
+        "结果单选",
+        "一次记录保留一个原因；超时、关闭、取消、Worker 失败可能竞争发生，原因条件并不天然互斥。",
+        "ROUTE_PUBLICATION_FAILED=路由发布失败|WORKER_COMPLETED=Worker 执行完成|WORKER_FAILED=Worker 执行失败|ENDPOINT_CLOSED=端点关闭|PRIORITY_PREEMPTED=被高优先级请求抢占|WORKER_REPORT_TIMEOUT=等待 Worker 状态上报超时|REQUEST_DEADLINE_EXCEEDED=请求截止时间已到|SCHEDULER_SHUTDOWN=调度器关闭|CANCELLATION_REQUESTED=收到取消请求|EXTERNAL_RESPONSE_FAILED=外部响应处理失败",
+        B + "schedule/RequestContext.java",
+      );
+      add(
+        "balance",
+        "RequestState.State",
+        "提供实时查询和清理后保留的请求状态",
+        "按对外可见进展及最终结果",
+        "状态互斥",
+        "一个查询快照只返回一个状态；取消状态优先于普通进展，最终状态优先于进行中状态。最终结果已确定不代表资源清理已经完成。",
+        "QUEUED=尚未提交路由，等待处理|ACKNOWLEDGED=路由已提交，已接纳|CANCEL_REQUESTED=已请求取消|CANCELLED=最终取消|TIMED_OUT=最终超时|FAILED=最终失败|COMPLETED=最终完成",
+        B + "schedule/RequestState.java",
+      );
+      add(
+        "balance",
+        "CancelReason",
+        "描述为什么发起取消",
+        "按取消的触发来源",
+        "结果单选",
+        "一次已记录取消只有一个原因；客户端取消、超时、关闭、抢占可以竞争触发。",
+        "CLIENT_CANCELLED=客户端主动取消|DEADLINE_EXCEEDED=请求超过截止时间|SHUTDOWN=服务关闭期间取消|PRIORITY_PREEMPTED=被更高优先级请求抢占",
+        B + "schedule/CancelReason.java",
+      );
+      add(
+        "balance",
+        "RequestRepository.RegistrationResult",
+        "返回请求仓库的登记结果",
+        "按是否成功及阻止登记的条件",
+        "结果单选",
+        "一次登记返回一个结果；重复 ID、上下文已绑定、关闭等条件可能同时成立，实际检查顺序决定返回值。",
+        "REGISTERED=登记成功|DUPLICATE_ID=请求 ID 已存在|CONTEXT_BOUND=上下文已绑定|CLOSED=仓库已关闭",
+        B + "schedule/RequestRepository.java",
+      );
+      add(
+        "balance",
+        "ExpirationTimer.Kind",
+        "区分定时器检查的期限",
+        "按被检查的时间约束",
+        "事件可共存",
+        "一个请求可同时持有多类期限；VISIBILITY 超期标记不可见，不直接等同请求失败，另外两类也不是同一含义。",
+        "REQUEST=请求调度等受请求截止时间约束的期限|VISIBILITY=提交后等待引擎可见，超期标记疑似丢失|INACTIVITY=长时间没有匹配的引擎状态进展",
+        B + "schedule/ExpirationTimer.java",
+      );
+      add(
+        "balance",
+        "ResponseCompletionExecutor.Registration.Phase",
+        "管理一个响应完成任务的提交和执行",
+        "按任务生命周期进度",
+        "状态互斥",
+        "同一任务同一时刻单选；COMPLETED 是执行完成，CLOSED 是登记被关闭，不能直接当作两个业务结果。",
+        "RESERVED=已预留任务登记|SUBMITTED=已提交到执行器|RUNNING=正在执行|COMPLETED=执行完成|CLOSED=登记已关闭",
+        B + "schedule/ResponseCompletionExecutor.java",
+      );
+      add(
+        "balance",
+        "ResponseCompletionExecutor.RequestFuture.Completion",
+        "区分 Future 的完成方式",
+        "按响应值、异常、取消三个通道",
+        "结果单选",
+        "同一 Future 最终只能成功完成一次；多个完成尝试可竞争发生。",
+        "RESPONSE=以响应值完成|FAILURE=以异常完成|CANCELLATION=以取消完成",
+        B + "schedule/ResponseCompletionExecutor.java",
+      );
+      const W = "flexlb-worker/src/main/java/org/flexlb/worker/";
+      add(
+        "worker",
+        "WorkerEndpoint.RegistrationStatus",
+        "返回 Endpoint 接纳登记结果",
+        "成功或具体拒绝原因",
+        "结果单选",
+        "一次登记返回一个结果；版本冲突、容量不足和不可用等条件可能共存。",
+        "REGISTERED=登记成功|VERSION_CONFLICT=快照版本与当前状态冲突|CAPACITY_FULL=容量不足|ALREADY_REGISTERED=该请求已登记|UNAVAILABLE=端点不可用",
+        W + "endpoint/WorkerEndpoint.java",
+      );
+      add(
+        "worker",
+        "WorkerEndpoint.RegistrationPhase",
+        "标记已有登记是否提交",
+        "按本地登记到提交的进度",
+        "状态互斥",
+        "同一记录当前阶段单选；COMMITTED 的记录在宽泛意义上仍是已登记，REGISTERED 专指尚未提交阶段。",
+        "REGISTERED=已登记但尚未提交|COMMITTED=登记已提交",
+        W + "endpoint/WorkerEndpoint.java",
+      );
+      add(
+        "worker",
+        "WorkerEndpoint.CommitStatus",
+        "返回提交既有登记的结果",
+        "按提交成功或无法提交的原因",
+        "结果单选",
+        "单次提交结果单选；端点不可用与登记无效可能同时成立。",
+        "COMMITTED=提交成功|UNAVAILABLE=端点不可用|INVALID_REGISTRATION=登记身份或阶段无效",
+        W + "endpoint/WorkerEndpoint.java",
+      );
+      add(
+        "worker",
+        "WorkerEndpoint.EndpointState",
+        "管理端点停止接纳与清理过程",
+        "按端点服务和清理生命周期",
+        "状态互斥",
+        "字段作为状态机单选；从自然语义看，清理和关闭也都“不接收请求”，NOT_ACCEPTING_REQUESTS 指特定阶段。",
+        "ACCEPTING_REQUESTS=正在接收请求|NOT_ACCEPTING_REQUESTS=停止接收，尚未进入后续清理阶段|CLEANUP_SCHEDULED=清理任务已安排|CLEANING=正在清理|CLOSED=清理结束，端点关闭",
+        W + "endpoint/WorkerEndpoint.java",
+      );
+      add(
+        "worker",
+        "DecodeResources.RegistrationState",
+        "查询 Decode 资源登记及确认情况",
+        "先区分有无记录，再区分是否确认",
+        "状态互斥",
+        "同一记录的查询结果互斥；这是查询结果，不授予资源预留或发送权限。",
+        "NOT_REGISTERED=没有登记记录|UNCONFIRMED=已登记但尚未确认|CONFIRMED=已登记且已确认",
+        W + "endpoint/DecodeResources.java",
+      );
+      add(
+        "worker",
+        "DecodeResources.DecodeRequestStatus.Kind",
+        "向外发布与精确预留记录匹配的状态反馈",
+        "按资源确认或请求已结束",
+        "事件可共存",
+        "单条反馈只有一种；同一请求可先收到确认再收到结束反馈。",
+        "CONFIRMED=对应 Decode 预留得到确认|TERMINAL=对应请求已结束，可携带错误码",
+        W + "endpoint/DecodeResources.java",
+      );
+      add(
+        "worker",
+        "DecodeEndpoint.CapacityFailure",
+        "解释一次容量检查是否受阻",
+        "按容量不足及已识别的优先级阻塞来源",
+        "结果单选",
+        "单次结果单选；资源不足与优先级阻塞在现实中可能同时存在，分类体现本次判定。",
+        "NONE=没有容量失败|INSUFFICIENT_CAPACITY=容量不足|BLOCKED_BY_HIGHER_PRIORITY=被更高优先级请求阻塞|BLOCKED_BY_SAME_PRIORITY=被同优先级请求阻塞|UNKNOWN_BLOCKER=无法确定阻塞来源",
+        W + "endpoint/DecodeEndpoint.java",
+      );
+      add(
+        "worker",
+        "DecodeEndpoint.ReleaseResult",
+        "描述释放请求记录的实际效果",
+        "按记录存在性及本次是否删除",
+        "结果单选",
+        "对一次释放操作互斥；RETAINED 说明记录仍保留，不等于成功释放。",
+        "ABSENT=记录不存在|RETAINED=因条件不满足而保留记录|REMOVED=已移除记录",
+        W + "endpoint/DecodeEndpoint.java",
+      );
+      add(
+        "worker",
+        "AdmissionRejectReason",
+        "结构化表达请求为何未被接纳",
+        "按优先级阻塞或资源不足",
+        "结果单选",
+        "一次拒绝附一个分类；高优先级、同优先级和资源短缺可能共存，需依据实际判定归类。",
+        "UNSPECIFIED=没有指定拒绝原因|HIGHER_PRIORITY_AHEAD=有更高优先级请求在前|SAME_PRIORITY_AHEAD=有同优先级请求在前|RESOURCE_EXHAUSTED=资源不足",
+        W + "endpoint/AdmissionRejectReason.java",
+      );
+      add(
+        "worker",
+        "StrategyErrorType",
+        "把调度与执行错误映射为响应码及重试属性",
+        "按业务失败场景分类；混合了层次、原因和阶段",
+        "语义重叠",
+        "一次响应选择一个错误；类别并非严格独立，通用错误与具体错误有包含关系。还存在相同数值：NO_ENCODER_WORKER 和 VIT_ROUTE_STALE 都是 8408，仅靠数字无法区分。",
+        "CONNECT_FAILED=8202，连接失败|CONNECT_TIMEOUT=8203，连接超时|NO_AVAILABLE_WORKER=8400，无可用 Worker|NO_PREFILL_WORKER=8402，无 Prefill Worker|NO_DECODE_WORKER=8403，无 Decode Worker|NO_PDFUSION_WORKER=8404，无 P/D 合一 Worker|NO_VIT_WORKER=8405，无 VIT Worker|NO_FRONTEND_WORKER=8407，无 Frontend Worker|NO_ENCODER_WORKER=8408，无 Encoder Worker|INVALID_REQUEST=8406，请求无效|VIT_ROUTE_STALE=8408，VIT 路由过期|GENERATE_INPUT_REQUIRED=8409，缺少生成输入|QUEUE_TIMEOUT=8503，排队超时|REQUEST_CANCELLED=8504，请求被取消|DISPATCH_FAILED=8510，请求交付失败|SCHEDULING_DEADLINE_EXCEEDED=8511，调度截止时间到达|WORKER_EXECUTION_FAILED=8513，Worker 执行失败|SCHEDULER_PLAN_CONFLICT=8515，调度计划因并发冲突耗尽重试|NOT_MASTER=8517，当前节点不是 Master|SCHEDULER_UNAVAILABLE=8518，调度器不可用|PRIORITY_PREEMPTED=8429，已接纳请求被高优先级抢占|PRIORITY_ADMISSION_REJECTED=8430，新请求被明确的优先级阻塞拒绝|RESOURCE_EXHAUSTED=8431，接纳容量不足，范围不只 GPU 内存|ADMISSION_UNAVAILABLE=8432，接纳受阻但无法确定占用者优先级来源",
+        W + "endpoint/StrategyErrorType.java",
+      );
+      add(
+        "worker",
+        "RequestEventType",
+        "传播引擎执行和资源清理反馈",
+        "按收到的业务观察事件",
+        "事件可共存",
+        "同一请求可先活跃、再分配、再完成；远端清理包含更强的保证，REMOTE_CLEANED 与 REMOTE_FENCED 不是独立能力。",
+        "ACTIVE=观察到请求活跃|ALLOCATED=观察到资源已分配|COMPLETED=执行完成|FAILED=执行失败|PRIORITY_CANCELLED=因优先级抢占取消|ENDPOINT_CLOSED=关联端点关闭|REMOTE_CLEANED=远端确认 Prefill 和 Decode 资源均已清理|REMOTE_FENCED=远端已阻止 Prefill 后续执行，Decode 释放仍未确认",
+        W + "endpoint/RequestEventType.java",
+      );
+      add(
+        "worker",
+        "TaskPhase",
+        "表示引擎上报的任务进展",
+        "按引擎接收、资源分配及执行阶段",
+        "状态互斥",
+        "一条引擎状态记录只报一个阶段；已运行请求通常也已经分配 KV，值表达当前阶段而非独立事实。",
+        "PENDING=待处理|RECEIVED=已收到请求|KV_ALLOCATED=已分配 KV|RUNNING=正在执行",
+        W + "status/TaskPhase.java",
+      );
+      add(
+        "worker",
+        "DecodeTaskPhase",
+        "帮助 Master 判断 Decode 请求如何抢占",
+        "按交付进度、引擎确认情况及取消成本",
+        "状态互斥",
+        "同一跟踪记录当前阶段单选；ENGINE_MAY_HAVE_SEEN 是不确定性描述，可能覆盖实际上已接纳或运行的请求。枚举顺序同时承担抢占阶段顺序。",
+        "LOCAL_RESERVED=仅在本地预留，尚未发布交付|MASTER_QUEUED_NOT_DISPATCHED=仍在 Master 队列，引擎不可能已收到|ENGINE_MAY_HAVE_SEEN=已开始交付或交付在途，引擎可能已收到|ACCEPTED_NOT_RUNNING=引擎已接纳并分配 KV，但尚未运行|RUNNING=引擎正在执行",
+        W + "status/DecodeTaskPhase.java",
+      );
+      add(
+        "worker",
+        "PriorityPreemptionProgress",
+        "跟踪抢占取消的进展",
+        "按取消操作生命周期",
+        "状态互斥",
+        "同一进度字段单选；取消完成不应脱离具体协议解释为所有资源必然释放。",
+        "NONE=尚无抢占取消进展|CANCELING=正在取消|CANCELED=取消进展已完成",
+        W + "status/PriorityPreemptionProgress.java",
+      );
+      add(
+        "worker",
+        "BalanceStatusEnum",
+        "表示服务发现、Worker 状态和缓存同步结果",
+        "按子系统及错误场景",
+        "语义重叠",
+        "单次结果单选；例如缓存超时也可能导致服务不可用，通用和具体类别并非严格分区。",
+        "SUCCESS=0，成功|UNKNOWN_ERROR=1000，未知错误|SERVICE_DISCOVERY_ERROR=1001，服务发现错误|SERVICE_DISCOVERY_TIMEOUT=1002，服务发现超时|RESPONSE_NULL=1004，返回空响应|CACHE_STATUS_INVALID_VERSION=3000，缓存状态版本无效|CACHE_UPDATE_FAILED=3001，缓存更新失败|CACHE_SERVICE_UNAVAILABLE=3002，缓存服务不可用|CACHE_GRPC_CONNECTION_FAILED=3003，缓存 gRPC 连接失败|CACHE_GRPC_TIMEOUT=3004，缓存 gRPC 超时|WORKER_SERVICE_UNAVAILABLE=3102，Worker 服务不可用|WORKER_STATUS_GRPC_TIMEOUT=3104，Worker 状态 gRPC 超时",
+        W + "status/BalanceStatusEnum.java",
+      );
+      add(
+        "worker",
+        "WorkerStatus.CloseReason",
+        "记录 Worker 状态对象为何关闭",
+        "按触发关闭的来源",
+        "结果单选",
+        "一次关闭记录一个原因；发现删除和连续失败可以竞争发生。",
+        "DISCOVERY_REMOVED=服务发现中已移除|CONSECUTIVE_WORKER_FAILURES=连续 Worker 失败达到关闭条件",
+        W + "status/WorkerStatus.java",
+      );
+      add(
+        "worker",
+        "WorkerStatus.PollKind",
+        "区分轮询任务",
+        "按轮询内容分类",
+        "事件可共存",
+        "一项任务选择一种类别；同一 Worker 可以分别进行这些轮询。",
+        "STATUS=Worker 状态轮询|APPLICATION=应用信息轮询|CACHE=缓存状态轮询",
+        W + "status/WorkerStatus.java",
+      );
+      add(
+        "worker",
+        "EndpointTrace.Stage",
+        "记录 Endpoint 状态同步与清理中的详细打点",
+        "按子流程、动作与进展/结果组合命名",
+        "事件可共存",
+        "它是事件词表，不是一条线性的互斥状态机；同一轮操作会产生多个值，锁事件还可能重复出现。",
+        "CACHE_CLEANUP_BEGIN=开始清理缓存|CACHE_CLEANUP_END=缓存清理结束|CACHE_CLEANUP_FAILED=缓存清理失败|CACHE_INDEX_LOCK_ACQUIRED=已获得缓存索引锁|CACHE_INDEX_LOCK_ATTEMPT=尝试获得缓存索引锁|CACHE_INDEX_LOCK_RELEASED=已释放缓存索引锁|CACHE_INDEX_UPDATE_BEGIN=开始更新缓存索引|CACHE_INDEX_UPDATE_END=缓存索引更新结束|CACHE_INDEX_UPDATE_FAILED=缓存索引更新失败|CACHE_MUTATION_LOCK_ACQUIRED=已获得缓存变更锁|CACHE_MUTATION_LOCK_ATTEMPT=尝试获得缓存变更锁|CACHE_MUTATION_LOCK_RELEASED=已释放缓存变更锁|CACHE_RESPONSE_FAILED=缓存响应处理失败|CACHE_VERSION_UNCHANGED=缓存版本没有变化|CALLBACK_ENDED=回调结束|CALLBACK_FAILED=回调失败|CALLBACK_READY=回调已就绪|CALLBACK_STARTED=回调开始|CALLBACK_SUBMISSION_FAILED=回调提交失败|CONVERSION_STARTED=响应转换开始|CONVERSION_COMPLETED=响应转换完成|CONVERSION_FAILED=响应转换失败|DISCOVERY_POLL_SKIPPED=跳过本次发现轮询|ENDPOINT_AWAIT_BEGIN=开始等待 Endpoint|ENDPOINT_AWAIT_END=等待 Endpoint 结束|ENDPOINT_AWAIT_FAILED=等待 Endpoint 失败|ENDPOINT_GATE_CLOSED=Endpoint 接纳入口已关闭|ENDPOINT_PUBLISHED=Endpoint 已发布|ENDPOINT_WITHDRAWN=Endpoint 已撤下|RETIREMENT_CHECK_LOCK_ACQUIRED=已获得退役检查锁|RETIREMENT_CHECK_LOCK_ATTEMPT=尝试获得退役检查锁|RETIREMENT_CHECK_LOCK_RELEASED=已释放退役检查锁|FINALIZE_FAILED=收尾处理失败|GENERATION_RETIRING=当前代实例开始退役|LEASE_RELEASED=租约已释放|RESPONSE_DISCARDED=响应被丢弃|RETIREMENT_CLEANUP_BEGIN=开始退役清理|RETIREMENT_CLEANUP_END=退役清理结束|RETIREMENT_CACHE_LOCK_ACQUIRED=已获得退役缓存锁|RETIREMENT_CACHE_LOCK_ATTEMPT=尝试获得退役缓存锁|RETIREMENT_CACHE_LOCK_RELEASED=已释放退役缓存锁|RPC_COMPLETED=RPC 完成|RPC_INITIATION_FAILED=RPC 发起失败|RPC_STARTED=RPC 开始|RUNNER_FAILED=执行任务失败|RUNNER_REJECTED=执行任务被拒绝|RUNNER_STARTED=执行任务开始|RUNNER_SUBMITTED=执行任务已提交|STATUS_APPLIED=状态已应用|STATUS_COMMITTED=状态已提交|STATUS_HEALTH_UPDATED=状态健康信息已更新|STATUS_LOCK_ACQUIRED=已获得状态锁|STATUS_LOCK_ATTEMPT=尝试获得状态锁|STATUS_LOCK_RELEASED=已释放状态锁|STATUS_PROJECTION_FAILED=状态视图转换失败|STATUS_RECONCILIATION_FAILED=状态核对失败|STATUS_REMOVED=状态已移除|STATUS_RESPONSE_FAILED=状态响应处理失败|UNAVAILABLE_DECISION=决定端点不可用",
+        W + "status/EndpointTrace.java",
+      );
+      add(
+        "api",
+        "ApiMetricsReporter.Event",
+        "记录服务上下线生命周期事件",
+        "按触发来源和里程碑",
+        "事件可共存",
+        "一次上线或下线流程可以产生多个事件；预热完成和上线完成不是互斥状态。",
+        "HEALTH_CHECK_OFFLINE=健康检查触发下线|ZK_NODE_OFFLINE=ZK 节点下线|SHUTDOWN_COMPLETE=关闭完成|ZK_NODE_ONLINE=ZK 节点上线|WARMER_COMPLETE=预热完成|ONLINE_COMPLETE=上线完成",
+        "flexlb-api/src/main/java/org/flexlb/api/metrics/ApiMetricsReporter.java",
+      );
+      add(
+        "worker",
+        "AbstractGrpcClient.CloseReason",
+        "说明 gRPC 客户端关闭的原因",
+        "按客户端移除或替换来源",
+        "结果单选",
+        "单次关闭记录单选；不同关闭触发可竞争发生。",
+        "DISCOVERY_REMOVED=服务发现移除|REPLACED=被新客户端替换|CLIENT_SHUTDOWN=客户端整体关闭|DUPLICATE_DISCARDED=重复创建的客户端被丢弃",
+        W + "rpc/AbstractGrpcClient.java",
+      );
+      add(
+        "worker",
+        "AbstractGrpcClient.ServiceType",
+        "标记具体 RPC 服务用途",
+        "按普通/多模态对象和 RPC 操作组合分类",
+        "结果单选",
+        "一条服务标签单选；同一 Worker 或连接池可服务多个类别，不是 Worker 能力互斥划分。",
+        "WORKER_STATUS=普通 Worker 状态查询|CACHE_STATUS=普通缓存状态查询|MULTIMODAL_WORKER_STATUS=多模态 Worker 状态查询|MULTIMODAL_CACHE_STATUS=多模态缓存状态查询|ENGINE_CANCEL=引擎取消 RPC",
+        W + "rpc/AbstractGrpcClient.java",
+      );
+      add(
+        "worker",
+        "EngineGrpcClient.CancelReply",
+        "表达取消回复提供的保证",
+        "按协议证据强度与异常结果",
+        "语义重叠",
+        "一次回复映射一个值；保证存在包含关系：REQUEST_CLEANED 包含阻止后续入队的保证，ACCEPTED 不等于执行停止或资源释放。",
+        "ACCEPTED=接受取消意图，执行仍可能继续|NOT_FOUND=未找到请求，但不能阻止并发到达的 Enqueue|REQUEST_FENCED=已阻止该请求 ID 后续 Enqueue|REQUEST_CLEANED=已阻止后续 Enqueue，并明确确认下游资源清理|FAILED=回复未指定、无法识别或取消结果不明",
+        W + "rpc/EngineGrpcClient.java",
+      );
+      add(
+        "worker",
+        "EngineGrpcClient.MetricOperation",
+        "区分引擎 RPC 指标记录动作",
+        "按监控记录的内容",
+        "事件可共存",
+        "同一调用可记录多个指标，不是调用结果的互斥分类。",
+        "CALL_METRICS=调用指标|CONNECTION_DURATION=连接耗时|CALL_FAILURE=调用失败|DELIVERY_DELAY=交付延迟",
+        W + "rpc/EngineGrpcClient.java",
+      );
+      add(
+        "worker",
+        "KvCacheGroupMode",
+        "表示 KV cache 的组结构模式",
+        "按是否仅 Full Attention、是否包含 Mamba",
+        "状态互斥",
+        "一个组模式字段单选；WITH_MAMBA 可以同时含 Attention，不能把它理解成“只有 Mamba”；UNSPECIFIED 是未知/未指定。",
+        "UNSPECIFIED=未指定模式|FULL_ATTENTION_ONLY=仅 Full Attention|WITH_MAMBA=包含 Mamba",
+        W + "cache/KvCacheGroupMode.java",
+      );
+      const K = "flexlb-cache/src/main/java/org/flexlb/cache/";
+      add(
+        "cache",
+        "CacheMatchSource",
+        "标记某份缓存匹配结果的实际来源",
+        "按结果提供方及主备身份",
+        "结果单选",
+        "单个结果只有一个来源；同一请求可以同时进行主查询和备用对比，来源并非在全局互斥。",
+        "LOCAL_SYNC=本地同步缓存匹配|KVCM=KVCM 服务返回的匹配|LOCAL_STANDBY=备用本地缓存匹配",
+        K + "CacheMatchSource.java",
+      );
+      add(
+        "cache",
+        "CacheMatchFailoverAction",
+        "表示缓存匹配来源切换动作",
+        "按切换方向",
+        "事件可共存",
+        "一次切换动作二选一；同一服务可以先降级再恢复。",
+        "ACTIVATE_FALLBACK=启用备用来源|RECOVER_PRIMARY=恢复主来源",
+        K + "CacheMatchFailoverAction.java",
+      );
+      add(
+        "cache",
+        "KvcmHealthState",
+        "描述 KVCM 当前健康判断",
+        "按健康判定的二值结果",
+        "状态互斥",
+        "同一健康快照二选一；没有单独的 UNKNOWN 状态，不代表所有底层故障都只存在一种原因。",
+        "HEALTHY=健康|UNHEALTHY=不健康",
+        K + "kvcm/KvcmHealthState.java",
+      );
+      const A = "flexlb-api/src/main/java/org/flexlb/api/server/";
+      add(
+        "api",
+        "FlexlbServiceImpl.ScheduleOrigin",
+        "记录调度入口走过的路径",
+        "按转发结果、本机身份及兜底路径",
+        "结果单选",
+        "一次路径分类单选；FORWARD_FAILED 与 LOCAL_FALLBACK 在实际时间线上可能前后发生，分类维度混合了路径和结果。",
+        "FORWARDED_TO_MASTER=转发给 Master|FORWARD_FAILED=转发失败|LOCAL_MASTER=本机作为 Master 处理|LOCAL_FALLBACK=转发等异常后本机兜底|LOCAL_STANDALONE=本机独立运行处理|ENTRY_ERROR=入口处理异常",
+        A + "FlexlbServiceImpl.java",
+      );
+      add(
+        "api",
+        "FlexlbGrpcForwarder.ForwardOperation",
+        "区分被转发的 RPC 操作",
+        "按接口用途",
+        "结果单选",
+        "一次转发只属于一种操作；同一请求生命周期可以包含调度、查询和取消。",
+        "SCHEDULE=调度|CANCEL=取消|STATE_QUERY=状态查询",
+        A + "FlexlbGrpcForwarder.java",
+      );
+      add(
+        "api",
+        "FlexlbGrpcForwarder.ForwardBlockReason",
+        "解释为什么阻止转发",
+        "按防循环检查命中的条件",
+        "结果单选",
+        "单次拒绝报告一个原因；跳数超限与目标为自己可以同时成立。",
+        "HOP_LIMIT=转发跳数超过上限|SELF_TARGET=转发目标为本机",
+        A + "FlexlbGrpcForwarder.java",
+      );
+      const M = "flexlb-master/src/main/java/org/flexlb/master/";
+      add(
+        "master",
+        "ZkMasterEvent",
+        "驱动主选举与服务生命周期处理",
+        "组合了主身份、ZK 连接事件和服务生命周期事件",
+        "事件可共存",
+        "不是单维度状态枚举：ZK 已连接与当前持有主身份可以同时成立，服务还会先后经历启动和下线。",
+        "MASTER_TAKE_LEADERSHIP=获得主身份|MASTER_RELEASE_LEADERSHIP=释放主身份|ZK_CONNECTED=ZK 首次连接|ZK_RECONNECTED=ZK 重连|ZK_SUSPENDED=ZK 连接挂起|ZK_LOST=ZK 会话丢失|ZK_READ_ONLY=ZK 只读连接|LB_SERVICE_INIT=负载均衡服务初始化|LB_SERVICE_START=负载均衡服务启动|LB_SERVICE_OFFLINE=负载均衡服务下线|SERVICE_DESTROY=服务销毁",
+        M + "ZkMasterEvent.java",
+      );
+      const U = "flexlb-util/src/main/java/org/flexlb/util/";
+      add(
+        "util",
+        "StatusEnum",
+        "公共响应状态及异常映射",
+        "按成功、通用失败、具体异常及通配值",
+        "语义重叠",
+        "单次响应状态单选，但 INTERNAL_ERROR 与具体异常存在宽泛包含关系；ALL 是通配用途，不能当作普通业务结果。",
+        "SUCCESS=200，成功|INTERNAL_ERROR=500，内部错误|NETTY_CATCH_ERROR=519，Netty 捕获的错误|JSON_MAPPER_ERROR=522，JSON 映射错误|READ_TIME_OUT=523，读取引擎响应超时|ALL=-9，全部状态通配值|ENGINE_ABNORMAL_DISCONNECT_EXCEPTION=8000，引擎异常断连",
+        U + "StatusEnum.java",
+      );
+      add(
+        "util",
+        "ServiceDiscoveryType",
+        "选择服务发现实现",
+        "按地址来源或发现提供方",
+        "配置单选",
+        "一份发现配置选择一种实现；一个系统中可存在不同配置使用不同来源。",
+        "VIPSERVER=VipServer 服务发现|DASHSCOPE=DashScope 服务发现|STATIC_ENV=环境变量静态地址",
+        U + "discovery/ServiceDiscoveryType.java",
+      );
+      add(
+        "util",
+        "BackendServiceProtocolEnum",
+        "标记后端访问协议",
+        "按使用的访问方式",
+        "语义重叠",
+        "单个协议字段单选；协议层次并非平行独立：HTTPS 是带 TLS 的 HTTP，WSS 是带 TLS 的 WebSocket，gRPC 通常运行于 HTTP/2。",
+        "HTTP=HTTP|HTTPS=带 TLS 的 HTTP|WS=WebSocket|WSS=带 TLS 的 WebSocket|GRPC=gRPC",
+        U + "network/BackendServiceProtocolEnum.java",
+      );
+      add(
+        "util",
+        "LogLevel",
+        "指定日志严重程度或详细程度",
+        "按有序日志等级",
+        "配置单选",
+        "一条日志只有一个等级；如果用作过滤阈值，INFO 通常同时允许 WARN/ERROR，因此允许的日志集合不是互斥集合。",
+        "TRACE=最细粒度跟踪|DEBUG=调试信息|INFO=一般运行信息|WARN=警告|ERROR=错误",
+        U + "log/LogLevel.java",
+      );
+      add(
+        "util",
+        "FlexMetricType",
+        "声明指标如何被记录与汇总",
+        "按监控系统的指标类型",
+        "配置单选",
+        "单次指标注册选择一种类型；同一业务现象可同时有计数、速率和耗时指标。",
+        "GAUGE=瞬时值，可增可减|COUNTER=累计计数|QPS=每秒发生速率|TIMER=耗时分布及统计",
+        U + "metrics/FlexMetricType.java",
+      );
+      add(
+        "util",
+        "FlexPriorityType",
+        "声明监控指标的精度或重要程度等级",
+        "按监控采样优先等级",
+        "配置单选",
+        "一次指标注册单选；名称混合了精度 PRECISE 与重要程度 CRITICAL 等维度，源码枚举未规定各档具体采样率。",
+        "PRECISE=精确采样档|CRITICAL=关键档|MAJOR=重要档|NORMAL=普通档|TRIVIAL=低重要程度档",
+        U + "metrics/FlexPriorityType.java",
+      );
+      add(
+        "util",
+        "ArithmeticFormulaAst.Function",
+        "指定公式 AST 中的数学函数",
+        "按函数运算及参数个数",
+        "结果单选",
+        "一个函数节点只有一个运算；一条完整公式可嵌套使用多个函数。",
+        "SQRT=平方根，1 个参数|LOG=自然对数，1 个参数|EXP=指数函数，1 个参数|ABS=绝对值，1 个参数|MAX=最大值，2 个参数|MIN=最小值，2 个参数|POW=乘方，2 个参数",
+        U + "formula/ArithmeticFormulaAst.java",
+      );
+      add(
+        "util",
+        "GrpcCallTrace.Stage",
+        "表示单次 gRPC 调用的当前追踪阶段",
+        "按传输、请求写出与响应进度",
+        "状态互斥",
+        "同一调用当前阶段单选；一次调用会先后经过多个阶段，不代表调用只能发生其中一个事件。",
+        "WAITING_TRANSPORT=等待传输连接|WAITING_HEADERS_WRITE=等待请求头写出|WAITING_RESPONSE=等待响应|RECEIVING_RESPONSE=正在接收响应|RESPONSE_TRAILERS_RECEIVED=已收到响应尾部",
+        U + "network/GrpcCallTrace.java",
+      );
+      add(
+        "util",
+        "GrpcTransportObserver.Event",
+        "表示底层传输观察到的异常事件",
+        "按读/写方向和异常现象",
+        "事件可共存",
+        "同一连接可能产生多个异常事件；RESET 也是 FAILURE 的具体形式，不是天然互斥事实。",
+        "PEER_EOF=对端结束字节流|READ_RESET=读取时连接重置|WRITE_RESET=写入时连接重置|WRITE_BROKEN_PIPE=写入时管道断开|READ_FAILURE=读取失败|WRITE_FAILURE=写入失败",
+        U + "network/GrpcTransportObserver.java",
+      );
+      add(
+        "util",
+        "GrpcFailure.Kind",
+        "把异常链归类为一种主要故障",
+        "按本地资源、网络、编解码、协议与 RPC 状态",
+        "语义重叠",
+        "异常链可包含多类证据；实现收集后按 CAUSE_PRECEDENCE 选一个主要类别，再以 gRPC 状态兜底。CONNECT_TIMEOUT、IO_TIMEOUT、DEADLINE_EXCEEDED 分别是不同层次的超时。",
+        "LOCAL_MEMORY_EXHAUSTED=本地内存耗尽|LOCAL_EXECUTOR_REJECTED=本地执行器拒绝任务|LOCAL_BIND_FAILED=本地地址绑定失败|CONNECT_TIMEOUT=建立连接超时|CONNECT_REFUSED=连接被拒绝|CONNECT_FAILED=其他连接失败|NO_ROUTE=没有到目标主机的路由|CONNECTION_RESET=连接被重置|BROKEN_PIPE=写入断开的管道|IO_INTERRUPTED=IO 被中断|ASYNC_CHANNEL_CLOSED=异步关闭通道|CHANNEL_CLOSED=通道已关闭|UNEXPECTED_EOF=意外遇到流结束|IO_TIMEOUT=IO 读写超时|SOCKET_FAILURE=其他 Socket 错误|PROTOBUF_FAILURE=Protobuf 解析失败|IO_FAILURE=其他 IO 错误|HTTP2_FAILURE=HTTP/2 协议错误|DEADLINE_EXCEEDED=gRPC 截止时间到达|CANCELLED=gRPC 调用被取消|RPC_FAILURE=其他 RPC 失败兜底",
+        U + "network/GrpcFailure.java",
+      );
+      const P = "flexlb-cache/src/main/proto/kvcm_meta_service.proto";
+      add(
+        "cache",
+        "ErrorCode（KVCM Proto）",
+        "KVCM RPC 返回状态码",
+        "按服务端错误场景及协议保留值",
+        "语义重叠",
+        "一次 Status.code 单选；通用与具体错误有包含关系。ERROR_MAX 是上界哨兵，不是普通失败原因；UNSPECIFIED 表示未指定。",
+        "UNSPECIFIED=0，未指定|OK=1，成功|UNSUPPORTED=2，不支持|INTERNAL_ERROR=3，内部错误|SERVICE_NOT_READY=4，服务未就绪|INVALID_ARGUMENT=5，参数无效|DUPLICATE_ENTITY=6，实体重复|REACH_MAX_ENTITY_CAPACITY=7，实体数达到容量上限|INSTANCE_NOT_EXIST=8，实例不存在|SERVER_NOT_LEADER=9，当前服务不是 Leader|NODE_NOT_REGISTERED=10，节点未注册|SNAPSHOT_IN_PROGRESS=11，正在生成快照|SNAPSHOT_RATE_LIMITED=13，快照操作被限流|SNAPSHOT_REQUIRED=14，需要快照|IO_ERROR=20，IO 错误|UNKNOWN_ERROR=100，未知错误|ERROR_MAX=65535，错误码上界哨兵",
+        P,
+        "协议",
+      );
+      add(
+        "cache",
+        "QueryType（KVCM Proto）",
+        "选择 KVCM 缓存查询算法",
+        "按查询方式及模型缓存特性",
+        "语义重叠",
+        "单个 query_type 单选；带 Mamba 的前缀匹配仍是前缀匹配的特化，未指定也不是一种实际算法。",
+        "QT_UNSPECIFIED=0，未指定|QT_BATCH_GET=1，批量获取|QT_PREFIX_MATCH=2，前缀匹配|QT_REVERSE_ROLL_SW_MATCH=3，反向滚动滑动窗口匹配|QT_PREFIX_MATCH_WITH_MAMBA=4，支持 Mamba 的前缀匹配",
+        P,
+        "协议",
+      );
+      const order = [
+        "config",
+        "balance",
+        "worker",
+        "cache",
+        "api",
+        "master",
+        "util",
+      ];
+      const labels = {
+        config: "配置与模式",
+        balance: "调度与请求生命周期",
+        worker: "Worker、资源与引擎通信",
+        cache: "缓存匹配与 KVCM",
+        api: "服务入口与转发",
+        master: "主选举与服务事件",
+        util: "公共协议、日志与监控",
+      };
+      const $ = (s) => document.querySelector(s);
+      for (const m of order) {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = "flexlb-" + m;
+        $("#module").append(o);
+      }
+      function el(tag, cls, txt) {
+        const x = document.createElement(tag);
+        if (cls) x.className = cls;
+        if (txt !== undefined) x.textContent = txt;
+        return x;
+      }
+      function render() {
+        const q = $("#search").value.trim().toLowerCase();
+        const rows = data.filter(
+          (x) =>
+            (!$("#module").value || x.m === $("#module").value) &&
+            (!$("#scope").value || x.scope === $("#scope").value) &&
+            (!$("#kind").value || x.k === $("#kind").value) &&
+            (!q ||
+              [x.n, x.p, x.c, x.e, x.s, ...x.v.flat()]
+                .join(" ")
+                .toLowerCase()
+                .includes(q)),
+        );
+        const root = $("#list");
+        root.replaceChildren();
+        $("#count").textContent =
+          `显示 ${rows.length} / ${data.length} 个枚举 · 搜索支持枚举值 · 点击卡片标题可折叠`;
+        for (const m of order) {
+          const group = rows.filter((x) => x.m === m);
+          if (!group.length) continue;
+          root.append(
+            el(
+              "h2",
+              "group-title",
+              `flexlb-${m} · ${labels[m]}（${group.length}）`,
+            ),
+          );
+          for (const x of group) {
+            const d = el("details", "card");
+            d.open = true;
+            const sum = el("summary");
+            const title = el("div");
+            title.append(
+              el("div", "name", x.n),
+              el("div", "purpose", `${x.scope} · ${x.p} · ${x.v.length} 个值`),
+            );
+            sum.append(
+              title,
+              el(
+                "span",
+                "badge" +
+                  (x.k === "语义重叠"
+                    ? " warn"
+                    : x.k === "事件可共存"
+                      ? " event"
+                      : ""),
+                x.k,
+              ),
+            );
+            d.append(sum);
+            const body = el("div", "body");
+            const meta = el("div", "meta");
+            for (const [key, value] of [
+              ["分类原则", x.c],
+              ["互斥性", x.e],
+            ]) {
+              const p = el("p");
+              p.append(
+                el("strong", "", key + "："),
+                document.createTextNode(value),
+              );
+              meta.append(p);
+            }
+            body.append(meta);
+            const table = el("table");
+            const head = el("thead");
+            const hr = el("tr");
+            hr.append(el("th", "", "枚举值"), el("th", "", "含义"));
+            head.append(hr);
+            const tb = el("tbody");
+            for (const [v, meaning] of x.v) {
+              const tr = el("tr");
+              tr.append(el("td", "", v), el("td", "", meaning));
+              tb.append(tr);
+            }
+            table.append(head, tb);
+            body.append(table);
+            const source = el("div", "source");
+            const link = el("a", "", x.s);
+            link.href = x.s;
+            source.append(document.createTextNode("源码："), link);
+            body.append(source);
+            d.append(body);
+            root.append(d);
+          }
+        }
+        if (!rows.length)
+          root.append(
+            el("div", "empty", "没有匹配的枚举，请调整搜索或筛选条件。"),
+          );
+      }
+      for (const id of ["search", "module", "scope", "kind"])
+        $("#" + id).addEventListener("input", render);
+      $("#expand").onclick = () =>
+        document.querySelectorAll("details").forEach((x) => (x.open = true));
+      $("#collapse").onclick = () =>
+        document.querySelectorAll("details").forEach((x) => (x.open = false));
+      $("#print").onclick = () => {
+        document.querySelectorAll("details").forEach((x) => (x.open = true));
+        window.print();
+      };
+      render();
+    </script>
+  </body>
+</html>

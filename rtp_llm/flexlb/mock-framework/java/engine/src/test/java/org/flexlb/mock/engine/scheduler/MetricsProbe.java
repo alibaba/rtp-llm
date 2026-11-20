@@ -6,8 +6,8 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 
 /**
  * Test-only native traffic for Prometheus ingestion; this is not the production Frontend.

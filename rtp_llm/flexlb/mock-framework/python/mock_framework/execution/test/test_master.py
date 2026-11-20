@@ -41,7 +41,7 @@ async def sample_engine_addresses(
 
 def configuration():
     return {
-        "FLEXLB_CONFIG": '{ "schemaVersion": 3, "requestLifecycle": {"request": {"timeoutMs": 60000}} }',
+        "FLEXLB_CONFIG": '{ "schemaVersion": 5, "requestLifecycle": {"dispatchTimeoutMs": 60000} }',
         "MODEL_SERVICE_CONFIG": json.dumps(
             {
                 "service_id": "aigc.text-generation.generation.mock",
@@ -185,10 +185,9 @@ def test_real_master_routes_to_isolated_rtp_processes(
         ]
     )
     native = {
-        "schemaVersion": 3,
+        "schemaVersion": 5,
         "scheduler": {"type": "QUEUE" if batched else "DIRECT"},
-        "dispatcher": {"type": "BATCH" if batched else "NON_BATCH"},
-        "requestLifecycle": {"request": {"timeoutMs": 60000}},
+        "requestLifecycle": {"dispatchTimeoutMs": 60000},
         "grpcServer": {
             "executorCoreSize": 4,
             "executorMaxSize": 8,
@@ -196,12 +195,6 @@ def test_real_master_routes_to_isolated_rtp_processes(
             "shutdownQuietPeriodMs": 10,
         },
     }
-    if batched:
-        native["scheduler"]["decision"] = {
-            "type": "FIXED_WINDOW",
-            "maxRequests": 2,
-            "maxCollectionWaitMs": 20,
-        }
     master_config = configuration()
     master_config["FLEXLB_CONFIG"] = json.dumps(native)
     meta = native_kvcm() if kvcm else None
@@ -508,7 +501,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
     behavior = json.loads(effective["FLEXLB_CONFIG"])
     election = behavior.pop("consistency")
     expected_behavior = json.loads(master_config["FLEXLB_CONFIG"])
-    expected_behavior.setdefault("schemaVersion", 3)
+    expected_behavior.setdefault("schemaVersion", 5)
     assert behavior == expected_behavior
     assert election["type"] == "ZOOKEEPER"
     assert election["connectString"]

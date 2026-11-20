@@ -1,7 +1,7 @@
 package org.flexlb.cache.hash;
 
-import org.flexlb.dao.loadbalance.TokenIds;
 import org.flexlb.util.BlockCacheKeyCalculator;
+import org.flexlb.util.TokenIds;
 
 import java.util.List;
 

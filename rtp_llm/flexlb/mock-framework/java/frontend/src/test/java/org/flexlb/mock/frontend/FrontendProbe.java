@@ -10,10 +10,10 @@ import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol.*;
+import org.flexlb.api.protocol.FlexlbServiceGrpc;
 
 /**
  * Network fixture for the real production protobuf; this is not the production Master.

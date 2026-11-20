@@ -4,7 +4,7 @@ import io.grpc.*;
 import io.grpc.stub.StreamObserver;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 
 /**
  * Single-DP native envelope; admission is acknowledged independently of Fetch.

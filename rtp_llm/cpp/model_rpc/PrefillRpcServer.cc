@@ -195,9 +195,9 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
             }                                                                                                          \
         }                                                                                                              \
         auto status = prefill_context.closeGrpcStream(ErrorCodeToString(new_error_code));                              \
-        if (prefill_context.isRequestCancelled()) {                                                                     \
-            new_error_code = ErrorCode::CANCELLED;                                                                       \
-            new_error_msg  = "request is cancelled";                                                                    \
+        if (prefill_context.isRequestCancelled()) {                                                                    \
+            new_error_code = ErrorCode::CANCELLED;                                                                     \
+            new_error_msg  = "request is cancelled";                                                                   \
         } else if (!status.ok()) {                                                                                     \
             const auto& error_msg = status.error_message();                                                            \
             if (error_msg.find("Connect Failed") != std::string::npos) {                                               \
@@ -524,7 +524,7 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
         client_context->set_deadline(*rpc_deadline);
     }
     std::atomic_store(&prefill_context.client_context, client_context);
-    // Close the publish-before-cancel window: either requestPriorityPreempt()
+    // Close the publish-before-cancel window: either requestCancellation()
     // observes this ClientContext, or this check observes its cancel latch.
     if (prefill_context.cancel_state->load(std::memory_order_seq_cst)) {
         client_context->TryCancel();
@@ -535,9 +535,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     } else {
         // Batch enqueue opens the stream before FetchResponse binds its ServerContext.
         prefill_context.client_stream = std::make_shared<CancellableDecodeClientStream>(
-            prefill_context.grpc_connection.stub.get(),
-            client_context,
-            [&prefill_context] { return prefill_context.isRequestCancelled(); });
+            prefill_context.grpc_connection.stub.get(), client_context, [&prefill_context] {
+                return prefill_context.isRequestCancelled();
+            });
     }
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request = buildAllocateRequest(prefill_context);
@@ -906,14 +906,13 @@ grpc::Status PrefillRpcServer::finishStream(PrefillGenerateContext& prefill_cont
     return grpc::Status::OK;
 }
 
-grpc::Status PrefillRpcServer::preferPriorityPreemption(PrefillGenerateContext& prefill_context,
-                                                        const grpc::Status&     fallback) {
-    if (!prefill_context.isPriorityPreempted()) {
+grpc::Status PrefillRpcServer::preferCancellation(PrefillGenerateContext& prefill_context,
+                                                  const grpc::Status&     fallback) {
+    if (!prefill_context.isCancellationRequested()) {
         return fallback;
     }
-    return serializeErrorMsg(prefill_context.request_key,
-                             prefill_context.request_info,
-                             ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request"));
+    return serializeErrorMsg(
+        prefill_context.request_key, prefill_context.request_info, prefill_context.cancellationError());
 }
 
 grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*                   server_context,
@@ -1064,19 +1063,23 @@ PrefillRpcServer::Cancel(grpc::ServerContext* /*context*/, const CancelRequestPB
     if (request == nullptr || request->request_id() <= 0) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "cancel request missing request_id");
     }
-    const auto result = onCancelRequest(request->request_id());
+    if (!RequestCancelReasonPB_IsValid(request->reason())) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown cancel reason");
+    }
+    const auto result = onCancelRequest(request->request_id(), request->reason());
     switch (result) {
-        case PriorityCancelResult::ACCEPTED:
+        case RequestCancelResult::ACCEPTED:
             response->set_status(CancelStatusPB::CANCEL_STATUS_ACCEPTED);
-            RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel accepted", request->request_id());
+            RTP_LLM_LOG_DEBUG("request [%ld] cancel accepted", request->request_id());
             break;
-        case PriorityCancelResult::TOMBSTONED:
+        case RequestCancelResult::TOMBSTONED:
             response->set_status(CancelStatusPB::CANCEL_STATUS_TOMBSTONED);
-            RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel tombstoned", request->request_id());
+            response->set_decode_cleanup_complete(isDecodeCleanupComplete(request->request_id()));
+            RTP_LLM_LOG_DEBUG("request [%ld] cancel tombstoned", request->request_id());
             break;
-        case PriorityCancelResult::NOT_FOUND:
+        case RequestCancelResult::NOT_FOUND:
             response->set_status(CancelStatusPB::CANCEL_STATUS_NOT_FOUND);
-            RTP_LLM_LOG_DEBUG("request [%ld] priority-preemption cancel not found", request->request_id());
+            RTP_LLM_LOG_DEBUG("request [%ld] cancel not found", request->request_id());
             break;
     }
     return grpc::Status::OK;

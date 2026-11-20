@@ -3,10 +3,9 @@ package org.flexlb.mock.engine.forward;
 import java.time.Duration;
 import java.util.*;
 import java.util.function.ToDoubleFunction;
-import org.flexlb.balance.prediction.ArithmeticFormula;
 
 /**
- * Uses the real Master's formula engine; no copied parser or historical calibration fallback.
+ * Evaluates the configured mock Engine forward time from request and batch variables.
  */
 public final class FormulaForward {
     private static final Map<String, ToDoubleFunction<ForwardBatch.Request>> REQUEST_VARIABLES = variables();

@@ -14,9 +14,9 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.zip.CRC32;
-import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
-import org.flexlb.engine.grpc.EngineRpcService.MMPreprocessConfigPB;
-import org.flexlb.engine.grpc.EngineRpcService.MultimodalInputPB;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.GenerateInputPB;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.MMPreprocessConfigPB;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.MultimodalInputPB;
 
 /**
  * Reads requests by ordinal from an immutable traffic dataset and reconstructs their input.

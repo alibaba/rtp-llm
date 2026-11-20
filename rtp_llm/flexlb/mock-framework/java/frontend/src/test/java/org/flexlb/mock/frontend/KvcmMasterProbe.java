@@ -6,8 +6,8 @@ import java.time.*;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol.*;
 
 /**
  * Cold/warm calls against the unmodified DSV route path with native KVCM lookup enabled.

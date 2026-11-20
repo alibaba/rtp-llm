@@ -17,12 +17,10 @@ public abstract class MockWorker {
     private static final Logger log = LoggerFactory.getLogger(MockWorker.class);
 
     protected final MockRpcService rpcService;
-    protected final MockWorkerBehavior behavior;
     private Server server;
     private int actualPort = -1;
 
     protected MockWorker(MockWorkerBehavior behavior) {
-        this.behavior = behavior;
         this.rpcService = new MockRpcService();
         this.rpcService.setBehavior(behavior);
     }
@@ -34,8 +32,9 @@ public abstract class MockWorker {
      * @throws IOException if the server cannot start
      */
     public void start(int port) throws IOException {
+        // Bind the same IPv4 loopback address used by every mock engine client.
         server =
-                NettyServerBuilder.forPort(port)
+                NettyServerBuilder.forAddress(new java.net.InetSocketAddress("127.0.0.1", port))
                         .addService(rpcService)
                         .maxInboundMessageSize(16 * 1024 * 1024)
                         // Match EngineGrpcClient's production keepalive contract.  The
@@ -93,10 +92,6 @@ public abstract class MockWorker {
 
     public MockRpcService getRpcService() {
         return rpcService;
-    }
-
-    public MockWorkerBehavior getBehavior() {
-        return behavior;
     }
 
     /**

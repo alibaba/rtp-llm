@@ -6,7 +6,7 @@ import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.*;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
 import org.flexlb.mock.engine.*;
 import org.flexlb.mock.engine.execution.EngineLoop;

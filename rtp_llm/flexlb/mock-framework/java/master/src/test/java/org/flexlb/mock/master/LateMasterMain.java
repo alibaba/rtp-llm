@@ -2,10 +2,10 @@ package org.flexlb.mock.master;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.ManagedChannelBuilder;
-import org.flexlb.engine.grpc.EngineRpcService.GenerateConfigPB;
-import org.flexlb.engine.grpc.EngineRpcService.GenerateInputPB;
-import org.flexlb.engine.grpc.EngineRpcService.StatusVersionPB;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.GenerateConfigPB;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.GenerateInputPB;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.StatusVersionPB;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 
 import java.nio.file.Path;
 import java.util.List;

@@ -2,12 +2,12 @@ package org.flexlb.cache.match;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
-import org.flexlb.enums.TaskPhase;
+import org.flexlb.cache.CacheMatchResult;
+import org.flexlb.cache.CacheMatchSource;
+import org.flexlb.cache.localstandby.LocalStandbyComparisonService;
+import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.status.TaskPhase;
+import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
@@ -71,7 +71,6 @@ class CacheHitFeedbackTrackerTest {
                             0,
                             0,
                             "",
-                            0,
                             TaskPhase.RUNNING,
                             0,
                             null,
@@ -122,7 +121,6 @@ class CacheHitFeedbackTrackerTest {
                         0,
                         0,
                         "",
-                        0,
                         TaskPhase.RUNNING,
                         0,
                         null,

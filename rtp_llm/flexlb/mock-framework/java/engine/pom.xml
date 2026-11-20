@@ -30,7 +30,7 @@
     </dependency>
     <dependency>
       <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-grpc</artifactId>
+      <artifactId>flexlb-worker</artifactId>
       <version>1.0.0-SNAPSHOT</version>
       <exclusions>
         <exclusion>
@@ -39,7 +39,18 @@
         </exclusion>
       </exclusions>
     </dependency>
-    <!-- Native CacheStatusPB uses the primitive cache map from flexlb-common. -->
+    <dependency>
+      <groupId>org.flexlb</groupId>
+      <artifactId>flexlb-cache</artifactId>
+      <version>1.0.0-SNAPSHOT</version>
+      <exclusions>
+        <exclusion>
+          <groupId>*</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- Native CacheStatusPB uses the primitive cache map from flexlb-util. -->
     <dependency>
       <groupId>it.unimi.dsi</groupId>
       <artifactId>fastutil</artifactId>
@@ -67,7 +78,7 @@
     </dependency>
     <dependency>
       <groupId>org.flexlb</groupId>
-      <artifactId>flexlb-common</artifactId>
+      <artifactId>flexlb-util</artifactId>
       <version>1.0.0-SNAPSHOT</version>
       <exclusions>
         <exclusion>

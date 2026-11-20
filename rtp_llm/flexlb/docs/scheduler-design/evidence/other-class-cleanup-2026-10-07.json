@@ -1,0 +1,191 @@
+{
+  "date": "2026-10-07",
+  "base_commit": "246fc5d9f98f444e073c0779af263cdf519a9ee8",
+  "scope": "Remove unused adapters, overloads and duplicate/dead state in other FlexLB classes",
+  "source_manifest_sha256": "163f097c84b67c583fdbd5e5b067b69df888b331fb08d7368c19d70ea6490583",
+  "changed_files": [
+    "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/OpenTelemetryBootstrap.java",
+    "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbGrpcForwarder.java",
+    "rtp_llm/flexlb/flexlb-api/src/test/java/org/flexlb/OpenTelemetryBootstrapTest.java",
+    "rtp_llm/flexlb/flexlb-api/src/test/java/org/flexlb/httpserver/FlexlbGrpcForwarderAsyncTest.java",
+    "rtp_llm/flexlb/flexlb-api/src/test/java/org/flexlb/httpserver/FlexlbGrpcForwarderTest.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/netty/HttpNettyChannelContext.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/EngineAbnormalDisconnectException.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/EngineReadTimeoutException.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/FlexLBException.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/JsonMapperException.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/NettyCatchException.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/transport/HttpNettyClientHandler.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/transport/HttpNettyConfig.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/Prioritized.java",
+    "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/PriorityOrdering.java",
+    "rtp_llm/flexlb/flexlb-common/src/test/java/org/flexlb/util/PriorityOrderingTest.java",
+    "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/AbstractGrpcClient.java",
+    "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/EngineGrpcClient.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRoute.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/WorkerBatcher.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/LBStatusConsistencyService.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/ZookeeperMasterElectService.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/SyncSchedulerConfig.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/consistency/LBStatusConsistencyLifecycleTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/consistency/ZkLeaderElectionTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/service/monitor/SyncSchedulerConfigTest.java"
+  ],
+  "production_java_net_lines_removed": 197,
+  "sync_production_java_lines": 25173,
+  "changes": [
+    "Removed unused Prioritized interface and typed comparator adapters; preserved primitive total ordering.",
+    "Removed Netty buffer and never-installed channel enhancement callback.",
+    "Removed zero-caller exception constructors; retained reflective StatusEnum constructors.",
+    "Merged gRPC forwarding overloads; removed write-only Invoker.lastUsedTime.",
+    "Removed forceSync=false getter flag and redundant consistency refresh forwarding method.",
+    "Removed unused taskMetricScheduler bean; verified real Spring selection of the four-thread taskScheduler.",
+    "Moved OpenTelemetry reset-for-test behavior into test fixture."
+  ],
+  "preserved_contracts": [
+    "BATCH_ENQUEUE and ENGINE_CANCEL have no automatic or manual retry.",
+    "Compensating cancellation targets the frozen master and retains independent finite deadline and trace.",
+    "Connection creation/expiration metrics retain their real read chain.",
+    "Master notification requires consistency enabled and matching role.",
+    "Netty channelInactive/read/error handling unchanged.",
+    "Priority descending, FIFO enqueue sequence ascending, request id ascending; 100000 random and extreme-key cases."
+  ],
+  "review": {
+    "agents": [
+      "regression_hotspot_review",
+      "lock_contract_review",
+      "state_boundary_review"
+    ],
+    "blocking_findings": 0,
+    "final_interface_removal_cross_review": "passed; stale local class deleted and remote module class/test-class directories cleared before compile"
+  },
+  "remote": {
+    "host": "luoli.hn@11.163.39.110",
+    "host_checkout": "/home/luoli.hn/work/rtp_llm_4/github-opensource",
+    "container": "luoli_gpu",
+    "container_checkout": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource",
+    "java": "Corretto 21.0.12.1",
+    "cpu_count": 256,
+    "java_tool_options": "-Xms64g -Xmx64g",
+    "source_verified_before_and_after": true
+  },
+  "verification": [
+    {
+      "name": "complete regression before final unused-interface removal",
+      "command": "./mvnw -B -P 'opensource,!internal' -pl flexlb-api,flexlb-mock-engine -am test",
+      "source_sha256": "d981f2c4c0ab6b878ed4d518f58875f7272e448ef6d30ced139cc0dcc3a20c34",
+      "exit_code": 0,
+      "modules": [
+        {
+          "tests": 226,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "tests": 37,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "tests": 15,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "tests": 1677,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "tests": 175,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1
+        },
+        {
+          "tests": 400,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      ],
+      "totals": {
+        "tests": 2530,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      "log_sha256": "5d4bd52431771704f4244c87029a30cc6250fd133db62b92153f80aac5d796c3"
+    },
+    {
+      "name": "final source regression for common/cache/grpc/sync",
+      "command": "./mvnw -B -P 'opensource,!internal' -pl flexlb-sync -am test",
+      "source_sha256": "ad7f83f39d86ba51fbd3f1b30ee5c45a2dd184e5502e6ddf6a8109be81da5aa0",
+      "exit_code": 0,
+      "modules": [
+        {
+          "tests": 226,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "tests": 37,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "tests": 15,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        {
+          "tests": 1677,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      ],
+      "totals": {
+        "tests": 1955,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "log_sha256": "8416effdf45c3e8120fb8c6b765d48815dabd527ee884bf04c1f247fa5559020"
+    },
+    {
+      "name": "final source fresh main and test compilation across six modules",
+      "command": "./mvnw -B -P 'opensource,!internal' -pl flexlb-api,flexlb-mock-engine -am test-compile -DskipTests",
+      "source_sha256": "ad7f83f39d86ba51fbd3f1b30ee5c45a2dd184e5502e6ddf6a8109be81da5aa0",
+      "exit_code": 0,
+      "log_sha256": "1450a9250ee1b30bdd6cc04fdf2e1cdc748945346f56831b591546d72f346fa2"
+    }
+  ],
+  "local_regression": {
+    "tests": 2530,
+    "failures": 1,
+    "errors": 0,
+    "skipped": 1,
+    "failure": "ProductionCaliberDecodeTest.lowBatchDrainRateMatchesProductionAnchor",
+    "observed_tokens_per_second": 380,
+    "unchanged_anchor_tokens_per_second": 519,
+    "tolerance_percent": 15,
+    "remote_same_test_tokens_per_second": 514,
+    "test_assertion_relaxed": false,
+    "note": "The full local rerun failed the wall-clock throughput anchor. The same unchanged gate passed remotely; no claim of local full-suite success."
+  },
+  "performance_scope": "Remote UT includes ProductionCaliberDecodeTest throughput calibration. No new 750P/750D scheduler performance matrix for this adapter-only cleanup; no claim of a new scheduler P99 measurement.",
+  "excluded_existing_work": [
+    "Uncommitted PrefillState Javadoc edit",
+    "review-regression-2026-10-06.json"
+  ],
+  "raw_logs_local_directory": "/tmp/flexlb-other-cleanup-20261007",
+  "verification_note": "Complete 2530-test suite covers the first snapshot. Final snapshot differs only in removal of unused Prioritized and associated implementation/import/Javadoc references and test name; verified with 1955 tests and all-module fresh main/test compilation."
+}

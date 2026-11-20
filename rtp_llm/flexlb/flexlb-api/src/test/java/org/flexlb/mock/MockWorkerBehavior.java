@@ -1,6 +1,6 @@
 package org.flexlb.mock;
 
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.worker.rpc.protocol.EngineRpcService;
 
 /**
  * Builds mock-worker response settings for enqueue delays, failures and worker status.

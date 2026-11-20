@@ -10,11 +10,11 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.function.BooleanSupplier;
-import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.dao.route.Endpoint;
-import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.discovery.ServiceHostListener;
-import org.flexlb.kvcm.grpc.*;
+import org.flexlb.util.discovery.DiscoveredHost;
+import org.flexlb.util.discovery.DiscoveryEndpoint;
+import org.flexlb.util.discovery.ServiceDiscovery;
+import org.flexlb.util.discovery.ServiceHostListener;
+import org.flexlb.cache.kvcm.protocol.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -32,7 +32,7 @@ class KvcmDiscoveryTest {
             invalid.valid = false;
             int unused;
             try (var socket = new ServerSocket(0)) { unused = socket.getLocalPort(); }
-            var vip = new Vip(); vip.hosts.set(List.of(WorkerHost.of("127.0.0.1", unused, ""), invalid.host(), healthy.host()));
+            var vip = new Vip(); vip.hosts.set(List.of(DiscoveredHost.of("127.0.0.1", unused, ""), invalid.host(), healthy.host()));
             try (var resolver = new KvcmDiscovery(null, "kvcm-domain", "shared_128", vip)) {
                 assertEquals(healthy.endpoint(), resolver.get());
                 assertEquals("shared_128", healthy.instance);
@@ -44,7 +44,7 @@ class KvcmDiscoveryTest {
 
     @Test void invalidVipAddressIsReportedWhenNoLeaderCanBeFound() {
         var vip = new Vip();
-        vip.hosts.set(List.of(WorkerHost.of("bad host", 1234, "")));
+        vip.hosts.set(List.of(DiscoveredHost.of("bad host", 1234, "")));
         try (var resolver = new KvcmDiscovery(null, "kvcm-domain", "shared_128", vip)) {
             var failure = assertThrows(IllegalStateException.class, resolver::get);
             var errors = failure.getSuppressed();
@@ -107,7 +107,7 @@ class KvcmDiscoveryTest {
     @Test void closeCancelsBlockedVipLookupWithoutWaitingForItsMonitor() throws Exception {
         var entered = new CountDownLatch(1); var interrupted = new CountDownLatch(1);
         var vip = new Vip() {
-            @Override public List<WorkerHost> getHosts(String domain) {
+            @Override public List<DiscoveredHost> getHosts(String domain) {
                 entered.countDown();
                 try { new CountDownLatch(1).await(); }
                 catch (InterruptedException expected) { interrupted.countDown(); Thread.currentThread().interrupt(); }
@@ -151,12 +151,12 @@ class KvcmDiscoveryTest {
      * Supplies bootstrap hosts and exposes discovery shutdown to the tests.
      */
     static class Vip implements ServiceDiscovery {
-        final AtomicReference<List<WorkerHost>> hosts = new AtomicReference<>(List.of());
+        final AtomicReference<List<DiscoveredHost>> hosts = new AtomicReference<>(List.of());
         boolean closed;
-        public List<WorkerHost> getHosts(String domain) { assertEquals("kvcm-domain", domain); return hosts.get(); }
-        @Override public void validate(Endpoint endpoint) { fail("Only address-based bootstrap is expected"); }
-        @Override public List<WorkerHost> getHosts(Endpoint endpoint) { return fail("Only address-based bootstrap is expected"); }
-        @Override public void listen(Endpoint endpoint, ServiceHostListener listener) { fail("No watcher is needed"); }
+        public List<DiscoveredHost> getHosts(String domain) { assertEquals("kvcm-domain", domain); return hosts.get(); }
+        @Override public void validate(DiscoveryEndpoint endpoint) { fail("Only address-based bootstrap is expected"); }
+        @Override public List<DiscoveredHost> getHosts(DiscoveryEndpoint endpoint) { return fail("Only address-based bootstrap is expected"); }
+        @Override public void listen(DiscoveryEndpoint endpoint, ServiceHostListener listener) { fail("No watcher is needed"); }
         public void shutdown() { closed = true; }
     }
 
@@ -206,7 +206,7 @@ class KvcmDiscoveryTest {
 
         @Override public void close() throws Exception { http.stop(0); rpc.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
 
-        WorkerHost host() { return WorkerHost.of("127.0.0.1", rpc.getPort(), ""); }
+        DiscoveredHost host() { return DiscoveredHost.of("127.0.0.1", rpc.getPort(), ""); }
 
         URI endpoint() { return URI.create("http://127.0.0.1:" + http.getAddress().getPort()); }
     }

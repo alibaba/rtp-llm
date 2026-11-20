@@ -11,10 +11,10 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 import java.util.function.*;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol.*;
+import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.junit.jupiter.api.Test;
 
 /**

@@ -1,42 +1,32 @@
 FLEXLB_CONFIG: |-
   {
-    "schemaVersion": 3,
+    "schemaVersion": 5,
     "scheduler": {
       "type": "QUEUE",
-      "queueTimeoutMs": 60000,
       "ordering": {
-        "type": "PRIORITY"
-      },
-      "decision": {
-        "type": "FIXED_WINDOW",
-        "maxRequests": 128,
-        "maxCollectionWaitMs": 0,
-        "maxPredictedExecutionMs": 800
+        "priority": {
+          "enabled": true
+        },
+        "policy": {
+          "type": "FIFO"
+        }
       }
-    },
-    "dispatcher": {
-      "type": "NON_BATCH",
-      "maxInflightPerPrefillWorker": 128,
-      "fetchAttachTimeoutMs": 3000
     },
     "requestLifecycle": {
-      "request": {
-        "timeoutMs": 60000
-      },
-      "decision": {
-        "lifetime": 2
-      }
+      "dispatchTimeoutMs": 60000,
+      "inactivityTimeoutMs": 60000
     },
     "router": {
       "roles": {
         "prefill": {
-          "executionTimeEstimator": {
-            "type": "FORMULA",
-            "expression": "max(150, 0.0045 * sum(computeTokens) + 0.00005 * sum(hitCacheTokens))"
+          "selection": {
+            "type": "COST_BASED",
+            "cacheAffinity": {
+              "minPrefixHitPercent": 30
+            }
           },
-          "cacheAffinity": {
-            "maxExtraTtftMs": 10000,
-            "minPrefixHitPercent": 30
+          "admission": {
+            "maxInflightRequests": 128
           }
         },
         "decode": {
@@ -47,7 +37,6 @@ FLEXLB_CONFIG: |-
           "costEstimator": {
             "expression": "1.0 * running_size / max_running_size "
           }
-
         }
       }
     },
@@ -62,7 +51,6 @@ FLEXLB_CONFIG: |-
     "grpcServer": {
       "executorCoreSize": 64,
       "executorMaxSize": 64
-
     }
   }
 MODEL_SERVICE_CONFIG: |-

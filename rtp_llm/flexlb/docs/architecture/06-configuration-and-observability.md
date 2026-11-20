@@ -44,28 +44,27 @@ native allocation 的实际占用仍取决于负载。
 `EnvironmentConfigSource` 仍负责读取独立的 `MODEL_SERVICE_CONFIG` 启动拓扑。
 来源选择和连接参数在启动时确定，修改它们需要重启进程。
 
-三种来源都返回原始字符串，复用 `ConfigDocumentParserResolver` 和 v0/v3 解析器：
+三种来源都返回原始字符串，复用 `ConfigDocumentParserResolver` 和 v0/v5 解析器：
 优先使用文档内的 `schemaVersion`，否则使用 `FLEXLB_CONFIG_SCHEMA_VERSION`（默认 `0`）。
 UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装层。
 
 格式归一化后，由现有 `FlexlbConfigMerger` 执行递归部分更新：
 对象字段递归覆盖，未出现或从外部配置删除的字段保留当前内存值，数组和标量整体替换；
-`cacheMatching`、`consistency`、`scheduler.ordering` 和 `scheduler.decision` 的 `type`
-变化会替换整个分支，避免保留新模式不支持的抢占或凑批参数。`scheduler`、`dispatcher`
-自身的 `type` 字段变化仍按递归覆盖处理，
-保留未出现的兄弟字段。v3 文档 `{"schemaVersion":3}` 是 no-op；
+`cacheMatching`、`consistency`、`scheduler.ordering.policy` 和 `router.roles.prefill.selection` 的 `type`
+变化会替换整个分支，避免保留新策略不支持的字段。`scheduler.type` 的启动模式保持不变。
+v5 文档 `{"schemaVersion":5}` 是 no-op；
 没有显式版本的 `{}` 则按版本选择规则解析，默认走 v0 兼容转换。
 每次合并后都使用与 `FLEXLB_CONFIG` 相同的严格解析和跨字段校验：
 
 - 拒绝重复 key、未知字段、`null`、标量 coercion、数值枚举和尾随 JSON；
 - 拒绝 tagged union 非活动分支的字段；
-- 拒绝违反 scheduler / dispatcher / router 等组合约束的配置。
+- 拒绝违反 scheduler / router 等组合约束的配置。
 
 选定的外部来源初次读取或校验失败会阻止应用启动，不会自动切换到低优先级来源。
 运行时读取失败或非法更新不会替换当前 last-known-good 快照，后续更新恢复正常后
 继续应用；合法更新原子替换 `FlexlbConfig`，随后通知监听器。
 
-`scheduler.type`、`dispatcher.type` 和 `scheduler.decision.type` 在启动时确定，运行时保持
+`scheduler.type` 在启动时确定，运行时保持
 当前模式。部分更新中已知但不同的模式值会被忽略，同一对象中的数值参数仍继续合并；未知模式值
 仍会校验失败并保留当前快照。切换模式需要重启 Master，并在启动文档中配置完整的目标分支。
 其余业务组件每次读取快照的参数可以热生效；在 Bean 初始化时缓存的值，则在重启后生效。
@@ -121,22 +120,11 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 
 ### Decode 抢占交付方式
 
-`scheduler.ordering.preemption.allowedVictimStages` 包含 `DECODE_ENGINE_OWNED` 时，
-`engineCancellation.mode` 可设为 `RPC` 或 `RETURN`，默认 `RPC`。
-`RPC` 使用主动 Cancel 和完成确认；`RETURN` 将待抢占请求的字符串 ID 随目标 Decode
-路由返回，由客户端/Decode 消费，要求 `dispatcher.type=NON_BATCH`。
-抢占整体超时由 `scheduler.ordering.preemption.timeoutMs` 控制。该配置随请求快照绑定，
+`scheduler.ordering.priority.preemption.allowedVictimStages` 包含 `DECODE_ENGINE_OWNED` 时，
+使用主动 Cancel RPC，并根据引擎回复和状态上报确认清理。
+不提供取消交付模式配置；旧的 `engineCancellation.mode` 配置应删除，否则配置解析失败。
+抢占整体超时由 `scheduler.ordering.priority.preemption.timeoutMs` 控制。该配置随请求快照绑定，
 外部配置来源与其他调度字段一致。
-
-### 凑批窗口热更新
-
-`scheduler.decision.maxCollectionWaitMs` 在每次固定窗口决策时从配置服务的当前内存快照读取。
-同一次决策的预检查与最终组选择共用一个窗口值。路由预估缓存将窗口值作为有效性条件，
-窗口变化时重新生成预估输入。读取不会触发 UniConfig 或 Nacos 网络请求。
-
-配置更新不主动打断已有定时等待；队列事件、状态事件或原定截止时间触发下一次决策时，
-使用最新窗口值。因此缩短窗口不会保证已有等待立即结束，后续窗口无需重启即可使用新值。
-此行为仅覆盖窗口时长，不承诺调度模式、交付模式或其他启动时配置的热切换。
 
 ### Nacos 连接
 
@@ -162,11 +150,11 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 读取异常均导致启动失败。配置缺失或空白的错误包含 DataId、group 和 namespace；读取异常保留原始原因。
 启动过程不回退其他 DataId、环境变量配置或默认配置。
 
-UniConfig / Nacos 的 v3 部分更新示例：
+UniConfig / Nacos 的 v5 部分更新示例：
 
 ```json
 {
-  "schemaVersion": 3,
+  "schemaVersion": 5,
   "router": {
     "availabilityHysteresisPercent": 12
   },
@@ -181,14 +169,24 @@ UniConfig / Nacos 的 v3 部分更新示例：
 
 ## FLEXLB_CONFIG 结构
 
-公共 schema 当前为 version 3，按责任分区：
+公共 schema 当前为 version 5，按责任分区。v4、旧队列超时和计算量上限必须显式迁移，不能自动换算成请求数：
 
-- `scheduler`：`DIRECT` / `QUEUE`；QUEUE 拥有 ordering、capacity 和 lifecycle。
-- `dispatcher`：`BATCH` / `NON_BATCH`。QUEUE 模式可用
-  `maxInflightPerEncoderWorker` 限制每台 Encoder 的在途请求数；未配置时不设额外上限，
-  不影响 DIRECT 或未配置 Encoder 的模型。
-- `router`：角色 availability、execution estimator、selector、cache affinity 和
-  group selector。
+- `requestLifecycle`：dispatchTimeoutMs=60000、inactivityTimeoutMs=60000、
+  engineVisibilityMultiplier=2.0；DIRECT/QUEUE 共用，VISIBILITY 只诊断。
+- `scheduler`：DIRECT 没有队列，不接受 ordering、扫描间隔等 QUEUE 字段。
+  QUEUE 的 ordering.priority.enabled 独立于 ordering.policy.type（FIFO / PREFILL_COST）；
+  抢占配置位于 priority.preemption，仅启用优先级时允许。
+- `router.roles.prefill`：remoteDiscount=0.2 为共同缓存折扣。
+  selection.type=COST_BASED 保留普通 cacheAffinity 与 costExpression（默认 computeTokens）；
+  selection.type=TOKEN_BALANCE 接受 minPrefixHitPercent=5，使用严格热缓存候选组。
+  admission.maxInflightRequests=128 两种策略通用，统计本地与 Engine 未覆盖请求。
+  admission.engineQueue 仅 TOKEN_BALANCE 使用，省略时默认 waitingThreshold=10；
+  超水位立即阻止准入，不配置没有实际消费方的持续拥塞计时。
+  没有计算量硬上限或缓存亲和计算量上限；Encoder 仍使用 maxRequests。
+- `router.roles.decode.costEstimator.expression` 默认 running_size，对齐目标 commit；
+  显式 kvcache_used_ratio 保留 KV 使用率排序。组选择、可用性和 KV 约束保持独立。
+  COST_BASED 的计算量评分不是时间，不能用于可见性期限。可见性采用单请求毫秒估计，
+  未知工作量不生成预测期限，详情见调度文档。
 - `workerRegistry`：worker health 与 cache-status 刷新策略。
 - `observability.cacheHit`：recent-key window、指标和理论命中日志。理论命中查询、历史池更新、
   指标与请求日志由独立单线程按入队顺序处理；请求线程仅提交任务。
@@ -215,12 +213,9 @@ UniConfig / Nacos 的 v3 部分更新示例：
   刷新参数。
 - `enableFallback`：默认 `false`；启用时调度入口在转发和路由前返回错误码 `8600`，
   由调用方执行 domain fallback。
-- `fallbackBatchTokenCapacity`：默认 `1048576`；Engine 未声明
-  `max_batch_tokens_size` 和 `max_seq_len` 时使用的最终 batch token 容量兜底值。
-  优先使用 Engine 上报的 `max_batch_tokens_size`，其次使用 `max_seq_len`。
 - `internalRuntime`：代码内部设置，不接受公共 JSON 输入。
 
-`DIRECT + BATCH` 非法；可选配置应省略，不能写 `null`。完整示例和 selector
+可选配置应省略，不能写 `null`。完整示例和 selector
 矩阵见根目录 [README](../../README.md)。
 
 ## MODEL_SERVICE_CONFIG
@@ -281,20 +276,11 @@ PV 顶层与嵌套 `response` 的成功标识、错误码和错误消息表达�
 `requestMessageBytes`（gRPC 接收的未压缩 protobuf 字节数，不含帧头）。transport tracer
 累计已读取/解压的字节，并通过 gRPC Context 传到入口；调度线程不为监控额外遍历 PB。
 `app.request.message.bytes` 保留该 Message 口径；绕过 transport 的直接调用不制造 0 样本。
-`cacheMatchCount/cacheMatchUs`累计实际缓存查询尝试，角色的缓存选择和决策记录反映最近一次路由尝试。
+角色的缓存选择记录反映最近一次路由尝试。PV 不输出没有生产采集来源的缓存查询次数、耗时和候选决策字段。
 
 路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
 终态读取依赖处理链的完成发布，不与写入并发；字段记录和角色 Map 操作不使用同步锁。
 PV 读取时创建不可变 `RoutingTelemetry` 快照，选路中的次数与原因读取不创建快照。
-WorkerBatcher 的 `decisionGroup` 独立发布，包含提交组 ID、policy、dispatcher、
-worker、committedSize、reason、提交时间及请求等待时长；提交组大小不等于保证交付数量，
-Engine 的 `batchId` 标识交付批次。
-
-`routingDecisions` 记录 CostBased 的实际候选值。每个角色最多记录 5 个候选并标注截断，
-Prefill 包含选中、最短 TTFT、最高有效缓存命中候选。`projectedTtftMs`、`projectedDrainMs`、
-`incomingPrefillMs` 的单位为毫秒；无法建模的估计省略。Prefill 记录策略参数、缓存亲和阈值、
-候选总体最小/最大命中、pending 和 ownershipVersion；Decode 记录 KV 用量、可用量与采样 logWeight。
-
 缓存反馈以请求 ID、角色和 Worker 实例代次关联路由预测，`worker` 使用完整的
 `ip:port@engineIndex` 逻辑身份；`prefill_worker_status` 同时记录 `workerIp` 和 `engineIndex`。
 选定 Worker 时上报 `app.cache.kvcm.predicted.tokens/ratio`；Local Standby 预测结果与所选 Worker 齐备时上报
@@ -315,6 +301,10 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 及缓存对照。回归测试验证原始 PV 到工作簿、HTML 的字段传递、单位、角色和实例隔离。
 
 ## 指标
+
+`ApiMetricsReporter` 负责请求到达、Master 转发和应用生命周期，并实现 Master 事件上报接口。
+`RequestSchedulerReporter` 负责选择结果及选中 Worker 的指标；Worker 的 `ServiceMetricsReporter`
+只报告 Worker、状态同步与缓存观测。三者复用 `FlexMonitor`，指标名、类型及标签保持一致。
 
 `FlexMonitor` 提供 GAUGE、COUNTER、QPS 与优先级窗口抽象。opensource 默认使用
 `NoOpFlexMonitor`；internal profile 可启用 KMonitor/Prometheus provider。
@@ -367,7 +357,7 @@ Engine received→waiting 和 waiting→running 使用 WorkerStatus 中 Engine �
 阶段时间戳计算。轮询间隔影响 Master 收到样本的时间，不用探测到状态的时间估算阶段耗时；
 完成任务的时间戳完整时，无需在轮询中逐个观察到这些阶段。
 
-gRPC 服务端执行器与批次发送执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
+gRPC 服务端执行器初始化后立即通过 `FlexMonitor` 上报一次状态，之后每 2 秒上报忙碌线程数、总线程数和
 排队任务数；gRPC 服务端另报最大线程数、累计拒绝任务数。它们与其它线程池使用相同的
 provider：KMonitor 部署上报 `whale-lb.grpc.server.executor.*` 和
 `whale-lb.dispatch.executor.*`，无需单独接入 Micrometer 采集。

@@ -9,11 +9,7 @@
   <version>1.0-SNAPSHOT</version>
   <packaging>pom</packaging>
   <modules>
-    <module>../flexlb-common</module>
-    <module>../flexlb-grpc</module>
-    <module>../flexlb-cache</module>
-    <module>../flexlb-sync</module>
-    <module>../flexlb-api</module>
+    <module>..</module>
     <module>java/protocol</module>
     <module>java/metrics</module>
     <module>java/engine</module>

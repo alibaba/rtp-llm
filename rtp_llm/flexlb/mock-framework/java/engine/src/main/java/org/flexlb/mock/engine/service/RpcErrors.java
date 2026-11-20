@@ -1,7 +1,7 @@
 package org.flexlb.mock.engine.service;
 
 import io.grpc.*;
-import org.flexlb.engine.grpc.EngineRpcService.ErrorDetailsPB;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.ErrorDetailsPB;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import static org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure.Reason.*;
 

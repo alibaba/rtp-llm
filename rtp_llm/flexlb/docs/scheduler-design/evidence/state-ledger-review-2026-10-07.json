@@ -1,0 +1,210 @@
+{
+  "date": "2026-10-07",
+  "baseline_commit": "413f6055389efb250ab7acc746cb4677dbb5e916",
+  "scope": "PrefillState / DecodeState resource facts, preparation consumption, batch ownership, exact generation fences, preemption protocol ownership and queue wakeups",
+  "review_result": "No remaining blocking finding in the reviewed scope; latest full UT and repeated complete performance matrix passed.",
+  "fixes": [
+    "Keep Prefill work captures and projection versions when full Worker observations change only activity timestamps. Activity facts still reach Scheduler; changed phases, unknown occupancy, terminal members and repacked predictions invalidate the capture.",
+    "Reject observations belonging to another Worker generation before Prefill status reduction and Decode initialization can mutate resources or retire the valid Endpoint."
+  ],
+  "design_contract_clarifications": [
+    "Ordinary Decode completion must allow a newer authoritative ACTIVE observation and a new reservation token. Universal completion tombstones were tested, contradicted existing contracts, and reverted. WorkerStatus fences older status versions; special cancellation/local-release/absence history retains its existing scope.",
+    "Callback-free exact resource CAS may remain inside the Context monitor to linearize resource settlement and request protocol. Capacity notifications, RPC, prediction and workflow effects execute outside the corresponding ownership locks."
+  ],
+  "verified_boundaries": [
+    "Prepared Prefill capabilities are consumed on commit; committed records do not retain reservation lifecycle.",
+    "Committed batches own member sets; no whole-request-table batch membership reconstruction remains.",
+    "PreemptionCancelPhase has one protocol owner in PreemptionRegistration; DecodeState retains resource claims and cancellation handoff facts only.",
+    "Decode resource records, victim claims and settled history have separate ownership; engineLifecycleOwned is removed.",
+    "WorkerBatcher uses the shared queue lock for selection revalidation, commit, control-inbox checks and Condition waits; capacity listeners subscribe before availability checks.",
+    "States do not invoke Scheduler, RequestRepository retention callbacks, prediction or capacity listeners. Endpoint executes returned facts/effects.",
+    "Exact route / reservation token / generation checks prevent old callbacks from affecting replacements."
+  ],
+  "source_verification": {
+    "build_inputs_in_flexlb": 516,
+    "manifest_sha256": "e3ab7f11e2eb9d8a34427b6c5f4eed66cee4bdbf62e816ff7fc9499f42ab1dff",
+    "remote_inputs_match": true,
+    "unchanged_through_latest_regressions": true,
+    "external_protos": {
+      "rtp_llm/cpp/model_rpc/proto/model_rpc_service.proto": "7512ca46580b0474c0d348ddbea7fbeca1a5309857bb75055f7772fe90cbee4b",
+      "rtp_llm/cpp/model_rpc/proto/flexlb_schedule_service.proto": "29acd7e72c33260821ee84b9ada88dcca243c8b376a01cd82e5722018593626a"
+    },
+    "external_protos_match_remote": true
+  },
+  "ut": {
+    "remote_totals": {
+      "tests": 2523,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1
+    },
+    "local_targeted_tests": 209,
+    "local_failures": 0,
+    "local_errors": 0
+  },
+  "performance": {
+    "host": "luoli.hn@11.163.39.110",
+    "container": "luoli_gpu",
+    "jvm": "-Xms64g -Xmx64g",
+    "fleet": "750P/750D",
+    "warmup_ms": 10000,
+    "measurement_ms": 10000,
+    "unchanged_gates": {
+      "minimum_qps_ratio": 0.98,
+      "maximum_client_p99_ms": 50,
+      "maximum_master_p99_ms": 50,
+      "maximum_batch_wait_p99_ms": 50
+    },
+    "first_unprofiled_matrix": {
+      "passed": false,
+      "cases": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3000.7",
+          "client_p99": "23.999ms",
+          "master_p99": "11ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms"
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9651.7",
+          "master_qps": "10006.4",
+          "client_p99": "49.002ms",
+          "master_p99": "25ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "10ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2999.7",
+          "master_qps": "3000.4",
+          "client_p99": "0.912ms",
+          "master_p99": "<1ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9994.7",
+          "master_qps": "10001.3",
+          "client_p99": "14.384ms",
+          "master_p99": "2ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "2ms"
+        }
+      ],
+      "failure": "BATCH 10000 client throughput 9651.7 < 9800; all other cases passed."
+    },
+    "isolated_batch_with_gc_logging": {
+      "passed": true,
+      "cases": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9988.7",
+          "master_qps": "10001.3",
+          "client_p99": "36.160ms",
+          "master_p99": "24ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "6ms"
+        }
+      ],
+      "gc_max_pause_ms_entire_run": 57.484,
+      "gc_note": "Includes startup/warmup/measurement; does not establish the cause of the first matrix failure."
+    },
+    "latest_unprofiled_matrix": {
+      "passed": true,
+      "cases": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3000.6",
+          "client_p99": "14.401ms",
+          "master_p99": "12ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms"
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9989.1",
+          "master_qps": "10005.6",
+          "client_p99": "44.218ms",
+          "master_p99": "19ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "6ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2999.7",
+          "master_qps": "3000.9",
+          "client_p99": "0.886ms",
+          "master_p99": "<1ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9991.4",
+          "master_qps": "10002.2",
+          "client_p99": "19.658ms",
+          "master_p99": "2ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "1ms"
+        }
+      ]
+    },
+    "limitation": "The same source produced one failed BATCH throughput result and two passing repeats. No threshold was relaxed; run-to-run variability remains and its cause is not proven."
+  },
+  "raw_artifacts": "/tmp/flexlb-state-review-20261007",
+  "commands": {
+    "ut_script": "/tmp/flexlb-state-review-20261007/run-ut.sh",
+    "matrix_script": "/tmp/flexlb-state-review-20261007/run-perf.sh",
+    "repeat_script": "/tmp/flexlb-state-review-20261007/run-matrix-repeat.sh"
+  }
+}

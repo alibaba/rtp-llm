@@ -1,0 +1,1280 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>FlexLB · 角色登记与事件反馈流程</title>
+    <style>
+      :root {
+        --ink: #192b42;
+        --muted: #5f7085;
+        --line: #dce4ed;
+        --blue: #2c5cd7;
+        --bg: #f4f7fb;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+        scroll-padding-top: 88px;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font:
+          16px/1.8 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+      }
+      header {
+        background: #13253e;
+        color: white;
+        padding: 54px max(24px, calc((100vw - 1120px) / 2)) 42px;
+      }
+      header .eyebrow {
+        color: #a6c4ff;
+        font-size: 13px;
+        letter-spacing: 2px;
+      }
+      h1 {
+        font-size: 36px;
+        line-height: 1.35;
+        margin: 12px 0;
+      }
+      header p {
+        max-width: 850px;
+        color: #d0dbea;
+      }
+      .badge {
+        display: inline-block;
+        padding: 3px 12px;
+        border: 1px solid #677d9b;
+        border-radius: 24px;
+        font-size: 13px;
+      }
+      nav {
+        position: sticky;
+        top: 0;
+        background: #ffffffed;
+        backdrop-filter: blur(12px);
+        z-index: 2;
+        border-bottom: 1px solid var(--line);
+      }
+      nav .inner {
+        max-width: 1160px;
+        margin: auto;
+        display: flex;
+        gap: 8px;
+        overflow: auto;
+        padding: 12px 20px;
+      }
+      nav a {
+        white-space: nowrap;
+        text-decoration: none;
+        color: var(--muted);
+        padding: 5px 13px;
+        border-radius: 8px;
+      }
+      nav a:hover,
+      nav a:focus {
+        background: #eaf0ff;
+        color: var(--blue);
+      }
+      main {
+        max-width: 1160px;
+        margin: auto;
+        padding: 26px 20px 70px;
+      }
+      section {
+        background: white;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        margin: 0 0 26px;
+        padding: 28px;
+      }
+      h2 {
+        font-size: 25px;
+        margin: 0 0 8px;
+      }
+      h3 {
+        font-size: 18px;
+        margin: 20px 0 8px;
+      }
+      .intro {
+        color: var(--muted);
+        margin: 0 0 20px;
+      }
+      .num {
+        font: 13px monospace;
+        color: var(--blue);
+        margin-right: 12px;
+      }
+      .callout {
+        border-left: 4px solid #d29a2c;
+        background: #fff7e7;
+        padding: 14px 18px;
+        border-radius: 0 10px 10px 0;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+      }
+      .card {
+        background: #f6f8fc;
+        padding: 18px;
+        border-radius: 12px;
+      }
+      .card strong {
+        display: block;
+      }
+      .card p {
+        margin: 5px 0;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .diagram {
+        overflow: auto;
+        margin: 20px 0;
+        background: #fff;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+      }
+      .diagram svg {
+        width: 100%;
+        min-width: 900px;
+        height: auto;
+        display: block;
+      }
+      .node rect {
+        stroke-width: 1.4;
+      }
+      .node text {
+        font-size: 15px;
+        fill: var(--ink);
+        font-weight: 600;
+      }
+      .node .sub,
+      .sub {
+        font-size: 12px;
+        fill: #607187;
+        font-weight: 400;
+      }
+      .blue rect {
+        fill: #edf3ff;
+        stroke: #b4c8f2;
+      }
+      .green rect {
+        fill: #eaf6f0;
+        stroke: #9acdb7;
+      }
+      .amber rect {
+        fill: #fff5df;
+        stroke: #dfc38a;
+      }
+      .lane {
+        fill: #f8fafc;
+        stroke: #e0e7ef;
+      }
+      .lane-title {
+        font-size: 13px;
+        fill: #354962;
+        font-weight: 700;
+      }
+      .edge {
+        stroke: #65758b;
+        stroke-width: 1.6;
+        fill: none;
+      }
+      .dash {
+        stroke-dasharray: 7 5;
+      }
+      .edge-label {
+        font-size: 12px;
+        fill: #52647c;
+        paint-order: stroke;
+        stroke: white;
+        stroke-width: 5px;
+        stroke-linejoin: round;
+      }
+      .band {
+        fill: #e7ecf4;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+      td,
+      th {
+        text-align: left;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      th {
+        background: #f5f7fb;
+      }
+      td:first-child {
+        font-weight: 600;
+      }
+      code {
+        font:
+          13px/1.7 ui-monospace,
+          SFMono-Regular,
+          Consolas,
+          monospace;
+        background: #eef2f8;
+        padding: 2px 5px;
+        border-radius: 4px;
+      }
+      pre {
+        background: #14253c;
+        color: #e6eefb;
+        padding: 20px;
+        overflow: auto;
+        border-radius: 12px;
+        font-size: 13px;
+        line-height: 1.8;
+      }
+      pre code {
+        background: none;
+        color: inherit;
+        padding: 0;
+      }
+      details {
+        border-top: 1px solid var(--line);
+        padding: 14px 0;
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+      }
+      li {
+        margin: 8px 0;
+      }
+      a {
+        color: #2457c5;
+      }
+      .legend {
+        display: flex;
+        gap: 20px;
+        flex-wrap: wrap;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .legend i {
+        display: inline-block;
+        width: 11px;
+        height: 11px;
+        border-radius: 3px;
+        margin-right: 6px;
+      }
+      .toolbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+      }
+      button {
+        border: 1px solid #ccd8e8;
+        background: #fff;
+        color: #304c77;
+        border-radius: 8px;
+        padding: 8px 12px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 13px;
+      }
+      button:hover {
+        background: #eef3fc;
+      }
+      .table-wrap {
+        overflow: auto;
+      }
+      footer {
+        color: var(--muted);
+        font-size: 13px;
+        text-align: center;
+      }
+      svg:fullscreen {
+        background: white;
+        width: 100vw;
+        height: 100vh;
+        min-width: 0;
+      }
+      .small {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      @media (max-width: 720px) {
+        h1 {
+          font-size: 28px;
+        }
+        header {
+          padding: 32px 22px;
+        }
+        .cards {
+          grid-template-columns: 1fr;
+        }
+        section {
+          padding: 20px;
+        }
+        main {
+          padding: 20px 12px;
+        }
+        .toolbar {
+          align-items: flex-start;
+        }
+      }
+      @media print {
+        nav,
+        button {
+          display: none;
+        }
+        header {
+          background: white;
+          color: #192b42;
+          padding: 20px;
+        }
+        header p {
+          color: #5f7085;
+        }
+        main {
+          padding: 0;
+        }
+        section {
+          break-inside: avoid;
+          border: 0;
+          padding: 16px;
+        }
+        .diagram svg {
+          min-width: 0;
+        }
+        .diagram {
+          overflow: visible;
+        }
+        body {
+          background: white;
+        }
+        details {
+          display: block;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">FLEXLB / DESIGN REVIEW</div>
+      <h1>角色登记与 Worker 事件反馈</h1>
+      <p>
+        资源记账按角色保留；反馈在登记创建时关联本次选路；完整路由由 Balance
+        持有。
+      </p>
+      <span class="badge">目标方案 · 尚未实施</span>
+      <span class="badge">2026-11-16</span>
+    </header>
+    <nav aria-label="章节导航">
+      <div class="inner">
+        <a href="#why">问题与原因</a><a href="#main">完整流程</a
+        ><a href="#resources">P / D 差异</a><a href="#early">提交前反馈</a
+        ><a href="#cancel">取消与旧事件</a><a href="#interfaces">职责与接口</a
+        ><a href="#verify">验证与迁移</a>
+      </div>
+    </nav>
+    <main>
+      <section id="why">
+        <h2><span class="num">01</span>问题不是角色不同，而是关联方式不一致</h2>
+        <p class="intro">
+          当前实现把“建立事件关联”和 P / Encoder 的“本地提交”绑定；Decode
+          没有相同提交步骤，转而反查上层对象。
+        </p>
+        <div class="cards">
+          <div class="card">
+            <strong>Prefill / Encoder</strong>
+            <p>
+              提交时保存完整 WorkerRoute；反馈沿 route → ctx → scheduler 传递。
+            </p>
+          </div>
+          <div class="card">
+            <strong>Decode</strong>
+            <p>
+              保存角色登记；反馈时按 ID 查 Repository，再读 Context 的当前
+              route。
+            </p>
+          </div>
+          <div class="card">
+            <strong>Scheduler</strong>
+            <p>将 Worker 接口强转回上层类型，再逐字段构造内容近似的事件。</p>
+          </div>
+        </div>
+        <p>
+          Decode
+          多轮执行需要持续跟踪实际占用；登记与上报存在时间差，需要本地未确认预留。这些事实支持不同的记账规则，但不要求不同的请求导航方式。
+        </p>
+        <div class="callout">
+          <strong>设计边界：</strong>Worker
+          报告“本机哪个精确登记发生了什么”；Balance
+          判断“属于哪次选路，是否影响整个请求”。不能把本地 COMMITTED 与 Worker
+          confirmed 当作同一种状态。
+        </div>
+      </section>
+      <section id="main">
+        <div class="toolbar">
+          <h2><span class="num">02</span>完整流程 · 从选路到结束</h2>
+          <button class="expand" type="button">全屏查看流程图</button>
+        </div>
+        <p class="intro">
+          从上向下阅读；横向箭头表示职责交接。每个角色重复步骤
+          ③—⑤。异步上报可能穿插在登记之后的任何阶段。
+        </p>
+        <div class="legend">
+          <span><i style="background: #b4c8f2"></i>Balance 业务处理</span
+          ><span><i style="background: #9acdb7"></i>Endpoint 资源处理</span
+          ><span><i style="background: #dfc38a"></i>失败与清理边界</span
+          ><span>虚线：锁外事件通知</span>
+        </div>
+        <div class="diagram">
+          <svg
+            viewBox="0 0 980 1180"
+            role="img"
+            aria-label="登记、路由提交与异步反馈泳道图"
+          >
+            <title>登记、路由提交与异步反馈泳道图</title>
+            <defs>
+              <marker
+                id="arrow0"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0 L10 5 L0 10Z" fill="#65758b" />
+              </marker>
+            </defs>
+            <rect
+              class="lane"
+              x="20"
+              y="10"
+              width="300"
+              height="1150"
+              rx="18"
+            />
+            <text class="lane-title" x="170.0" y="42" text-anchor="middle">
+              BALANCE · Scheduler / Context
+            </text>
+            <text class="sub" x="170.0" y="65" text-anchor="middle">
+              请求状态、选路身份、跨角色清理
+            </text>
+            <rect
+              class="lane"
+              x="340"
+              y="10"
+              width="300"
+              height="1150"
+              rx="18"
+            />
+            <text class="lane-title" x="490.0" y="42" text-anchor="middle">
+              BALANCE · Selector / Route
+            </text>
+            <text class="sub" x="490.0" y="65" text-anchor="middle">
+              比较机器、汇总角色登记
+            </text>
+            <rect
+              class="lane"
+              x="660"
+              y="10"
+              width="300"
+              height="1150"
+              rx="18"
+            />
+            <text class="lane-title" x="810.0" y="42" text-anchor="middle">
+              WORKER · 各角色 Endpoint
+            </text>
+            <text class="sub" x="810.0" y="65" text-anchor="middle">
+              精确登记、资源账本、事件发布
+            </text>
+            <g class="node blue">
+              <rect x="40" y="96" width="260" height="72" rx="12" />
+              <text x="170.0" y="125" text-anchor="middle">
+                ① 接收请求，开始 S1
+              </text>
+              <text class="sub" x="170.0" y="148" text-anchor="middle">
+                创建本次 SelectionAttempt
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M170,168 L170,202"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node blue">
+              <rect x="40" y="202" width="260" height="72" rx="12" />
+              <text x="170.0" y="231" text-anchor="middle">
+                ② 准备事件接收入口
+              </text>
+              <text class="sub" x="170.0" y="254" text-anchor="middle">
+                关联请求实例 + S1；不读取完整路由
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M300,238 L360,238"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node blue">
+              <rect x="360" y="202" width="260" height="72" rx="12" />
+              <text x="490.0" y="231" text-anchor="middle">
+                ③ 为每个角色比较候选
+              </text>
+              <text class="sub" x="490.0" y="254" text-anchor="middle">
+                调用登记入口，传入事件接收方
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M620,238 L680,238"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node green">
+              <rect x="680" y="202" width="260" height="72" rx="12" />
+              <text x="810.0" y="231" text-anchor="middle">
+                ④ 持锁检查并创建登记
+              </text>
+              <text class="sub" x="810.0" y="254" text-anchor="middle">
+                容量 / 身份 / 分组 / 接纳状态
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M810,274 L810,310"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node green">
+              <rect x="680" y="310" width="260" height="72" rx="12" />
+              <text x="810.0" y="339" text-anchor="middle">
+                登记加入账本并计入资源
+              </text>
+              <text class="sub" x="810.0" y="362" text-anchor="middle">
+                此刻反馈关联必须已经可用
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M680,346 L620,346"
+              marker-end="url(#arrow0)"
+            />
+            <text class="edge-label" x="650.0" y="337.0" text-anchor="middle">
+              返回
+            </text>
+            <g class="node blue">
+              <rect x="360" y="310" width="260" height="72" rx="12" />
+              <text x="490.0" y="339" text-anchor="middle">
+                ⑤ 收集各角色登记
+              </text>
+              <text class="sub" x="490.0" y="362" text-anchor="middle">
+                失败：清理已经取得的登记
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M490,382 L490,424"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node blue">
+              <rect x="360" y="424" width="260" height="72" rx="12" />
+              <text x="490.0" y="453" text-anchor="middle">
+                ⑥ 创建完整 RequestRoute
+              </text>
+              <text class="sub" x="490.0" y="476" text-anchor="middle">
+                只由 Balance 持有
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M360,460 L300,460"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node blue">
+              <rect x="40" y="424" width="260" height="72" rx="12" />
+              <text x="170.0" y="453" text-anchor="middle">
+                ⑦ 关联路由并检查当前事实
+              </text>
+              <text class="sub" x="170.0" y="476" text-anchor="middle">
+                取消 / S1 / Endpoint / 精确登记
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M170,496 L170,538"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node blue">
+              <rect x="40" y="538" width="260" height="72" rx="12" />
+              <text x="170.0" y="567" text-anchor="middle">
+                ⑧ 提交本角色选择
+              </text>
+              <text class="sub" x="170.0" y="590" text-anchor="middle">
+                仅 P / Encoder 的现有提交语义
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M300,574 L680,574"
+              marker-end="url(#arrow0)"
+            />
+            <text class="edge-label" x="490.0" y="565.0" text-anchor="middle">
+              commitSelection(本角色登记)
+            </text>
+            <g class="node green">
+              <rect x="680" y="538" width="260" height="72" rx="12" />
+              <text x="810.0" y="567" text-anchor="middle">
+                持锁核对登记并提交
+              </text>
+              <text class="sub" x="810.0" y="590" text-anchor="middle">
+                D 不增加无业务意义的 commit
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M680,610 L300,650"
+              marker-end="url(#arrow0)"
+            />
+            <text class="edge-label" x="490.0" y="621.0" text-anchor="middle">
+              返回提交结果
+            </text>
+            <g class="node blue">
+              <rect x="40" y="650" width="260" height="72" rx="12" />
+              <text x="170.0" y="679" text-anchor="middle">
+                ⑨ 提交路由结果并发布响应
+              </text>
+              <text class="sub" x="170.0" y="702" text-anchor="middle">
+                仍须防止取消 / 超时抢先发生
+              </text>
+            </g>
+            <rect class="band" x="40" y="755" width="900" height="38" rx="8" />
+            <text class="sub" x="490" y="779" text-anchor="middle">
+              异步 Worker 反馈可与上述步骤交错；不要求先存在完整 RequestRoute
+            </text>
+            <g class="node green">
+              <rect x="680" y="826" width="260" height="72" rx="12" />
+              <text x="810.0" y="855" text-anchor="middle">
+                ⑩ 接收 Worker 原始上报
+              </text>
+              <text class="sub" x="810.0" y="878" text-anchor="middle">
+                先正确匹配本机精确登记
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M810,898 L810,934"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node green">
+              <rect x="680" y="934" width="260" height="72" rx="12" />
+              <text x="810.0" y="963" text-anchor="middle">
+                ⑪ 持锁更新资源，生成事件
+              </text>
+              <text class="sub" x="810.0" y="986" text-anchor="middle">
+                解锁之后调用登记事件接收入口
+              </text>
+            </g>
+            <path
+              class="edge dash"
+              d="M680,970 L300,970"
+              marker-end="url(#arrow0)"
+            />
+            <text class="edge-label" x="490.0" y="961.0" text-anchor="middle">
+              精确登记 + Endpoint + 事件事实
+            </text>
+            <g class="node blue">
+              <rect x="40" y="934" width="260" height="72" rx="12" />
+              <text x="170.0" y="963" text-anchor="middle">
+                ⑫ 匹配请求实例及 S1
+              </text>
+              <text class="sub" x="170.0" y="986" text-anchor="middle">
+                旧事件不改变新请求或新选路
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M170,1006 L170,1048"
+              marker-end="url(#arrow0)"
+            />
+            <g class="node blue">
+              <rect x="40" y="1048" width="260" height="72" rx="12" />
+              <text x="170.0" y="1077" text-anchor="middle">
+                ⑬ 推进请求与跨角色清理
+              </text>
+              <text class="sub" x="170.0" y="1100" text-anchor="middle">
+                P 完成可等 D；最终角色完成则结束
+              </text>
+            </g>
+            <g class="node amber">
+              <rect x="360" y="1048" width="260" height="72" rx="12" />
+              <text x="490.0" y="1077" text-anchor="middle">
+                任何提交失败 → 清理
+              </text>
+              <text class="sub" x="490.0" y="1100" text-anchor="middle">
+                纯本地预留回滚；已确认走清理
+              </text>
+            </g>
+          </svg>
+        </div>
+        <details>
+          <summary>部分角色登记失败时，如何退出？</summary>
+          <p>
+            例如 D 已登记而 P 容量不足：Balance
+            清理已经取得的精确登记。纯本地预留可以回滚；Worker
+            已确认占用时不能当作回滚成功，需要进入必要的远端清理。只有旧选路资源达到允许重试的条件，才能开始
+            S2。Direct / Queue 根据失败结果决定拒绝、等待或抢占。
+          </p>
+        </details>
+        <details>
+          <summary>为什么要检查精确登记，而不只检查 Endpoint 在线？</summary>
+          <p>
+            Endpoint
+            可能仍可用，但本次登记已被完成反馈移除。最终提交必须检查本次登记仍然有效，而不是只检查机器在线。具体检查位置和原子边界需通过并发测试确认，不能把多次检查解释为全局原子提交。
+          </p>
+        </details>
+      </section>
+      <section id="resources">
+        <h2><span class="num">03</span>资源实现保留角色差异</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>角色</th>
+                <th>登记时</th>
+                <th>执行期间</th>
+                <th>结束与回滚</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Prefill</td>
+                <td>预留计算量</td>
+                <td>本地提交选择，处理活动与完成反馈</td>
+                <td>按登记阶段回滚；完成后清理本角色资源</td>
+              </tr>
+              <tr>
+                <td>Decode</td>
+                <td>预留请求数、硬 KV、预估 KV</td>
+                <td>Worker 确认后扣除未确认预留；持续跟踪多轮占用</td>
+                <td>已确认占用不可当作纯本地预留回滚</td>
+              </tr>
+              <tr>
+                <td>Encoder</td>
+                <td>预留自身资源</td>
+                <td>提交并处理执行反馈</td>
+                <td>按自身登记与完成规则处理</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="diagram">
+          <svg
+            viewBox="0 0 980 225"
+            role="img"
+            aria-label="Decode 资源占用转换"
+          >
+            <title>Decode 资源占用转换</title>
+            <defs>
+              <marker
+                id="arrow1"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0 L10 5 L0 10Z" fill="#65758b" />
+              </marker>
+            </defs>
+            <g class="node blue">
+              <rect x="20" y="20" width="270" height="72" rx="12" />
+              <text x="155.0" y="49" text-anchor="middle">本地登记</text>
+              <text class="sub" x="155.0" y="72" text-anchor="middle">
+                计入未确认请求数与 KV
+              </text>
+            </g>
+            <path class="edge" d="M290,56 L350,56" marker-end="url(#arrow1)" />
+            <g class="node green">
+              <rect x="350" y="20" width="280" height="72" rx="12" />
+              <text x="490.0" y="49" text-anchor="middle">Worker 确认占用</text>
+              <text class="sub" x="490.0" y="72" text-anchor="middle">
+                扣除未确认统计；保留精确登记
+              </text>
+            </g>
+            <path class="edge" d="M630,56 L690,56" marker-end="url(#arrow1)" />
+            <g class="node green">
+              <rect x="690" y="20" width="270" height="72" rx="12" />
+              <text x="825.0" y="49" text-anchor="middle">持续多轮迭代</text>
+              <text class="sub" x="825.0" y="72" text-anchor="middle">
+                依据 Worker 观测更新占用
+              </text>
+            </g>
+            <path class="edge" d="M825,92 L825,132" marker-end="url(#arrow1)" />
+            <g class="node green">
+              <rect x="690" y="132" width="270" height="72" rx="12" />
+              <text x="825.0" y="161" text-anchor="middle">
+                完成 / 确认释放
+              </text>
+              <text class="sub" x="825.0" y="184" text-anchor="middle">
+                清理对应登记
+              </text>
+            </g>
+            <g class="node blue">
+              <rect x="20" y="132" width="610" height="72" rx="12" />
+              <text x="325.0" y="161" text-anchor="middle">
+                容量 = Worker 实际占用 + 本地未确认预留
+              </text>
+              <text class="sub" x="325.0" y="184" text-anchor="middle">
+                多轮执行决定持续跟踪；上报时间差决定需要本地预留
+              </text>
+            </g>
+          </svg>
+        </div>
+        <p class="small">
+          统一反馈边界不意味着统一容量公式、提交阶段或资源释放条件。Decode
+          不新增仅为形式一致而存在的 commit。
+        </p>
+      </section>
+      <section id="early">
+        <div class="toolbar">
+          <h2><span class="num">04</span>提交前反馈 · 三个阶段分别处理</h2>
+          <button class="expand" type="button">全屏查看流程图</button>
+        </div>
+        <p class="intro">
+          SelectionAttempt
+          早于完整路由存在。角色登记对外可见时，必须已经能把事件交给这次选路。
+        </p>
+        <div class="diagram">
+          <svg viewBox="0 0 980 365" role="img" aria-label="三个阶段的反馈处理">
+            <title>三个阶段的反馈处理</title>
+            <defs>
+              <marker
+                id="arrow2"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0 L10 5 L0 10Z" fill="#65758b" />
+              </marker>
+            </defs>
+            <g class="node blue">
+              <rect x="20" y="20" width="280" height="78" rx="12" />
+              <text x="160.0" y="49" text-anchor="middle">
+                A · 角色登记已创建
+              </text>
+              <text class="sub" x="160.0" y="72" text-anchor="middle">
+                完整路由尚未形成
+              </text>
+            </g>
+            <g class="node blue">
+              <rect x="350" y="20" width="280" height="78" rx="12" />
+              <text x="490.0" y="49" text-anchor="middle">B · 路由已关联</text>
+              <text class="sub" x="490.0" y="72" text-anchor="middle">
+                请求路由尚未提交
+              </text>
+            </g>
+            <g class="node blue">
+              <rect x="680" y="20" width="280" height="78" rx="12" />
+              <text x="820.0" y="49" text-anchor="middle">C · 路由已提交</text>
+              <text class="sub" x="820.0" y="72" text-anchor="middle">
+                等待执行 / 清理完成
+              </text>
+            </g>
+            <path class="edge" d="M300,59 L350,59" marker-end="url(#arrow2)" />
+            <path class="edge" d="M630,59 L680,59" marker-end="url(#arrow2)" />
+            <path class="edge" d="M160,98 L160,137" marker-end="url(#arrow2)" />
+            <g class="node green">
+              <rect x="20" y="137" width="280" height="80" rx="12" />
+              <text x="160.0" y="166" text-anchor="middle">
+                Endpoint 先更新本机账本
+              </text>
+              <text class="sub" x="160.0" y="189" text-anchor="middle">
+                通过 S1 接收，不因 route 为空丢弃
+              </text>
+            </g>
+            <path class="edge" d="M490,98 L490,137" marker-end="url(#arrow2)" />
+            <g class="node green">
+              <rect x="350" y="137" width="280" height="80" rx="12" />
+              <text x="490.0" y="166" text-anchor="middle">
+                按当前事实决定提交或回滚
+              </text>
+              <text class="sub" x="490.0" y="189" text-anchor="middle">
+                关闭可回滚重试；不可一律失败
+              </text>
+            </g>
+            <path class="edge" d="M820,98 L820,137" marker-end="url(#arrow2)" />
+            <g class="node green">
+              <rect x="680" y="137" width="280" height="80" rx="12" />
+              <text x="820.0" y="166" text-anchor="middle">
+                Balance 判断跨角色影响
+              </text>
+              <text class="sub" x="820.0" y="189" text-anchor="middle">
+                更新活动时间 / 结束 / 清理
+              </text>
+            </g>
+            <g class="node amber">
+              <rect x="20" y="265" width="940" height="80" rx="12" />
+              <text x="490.0" y="294" text-anchor="middle">
+                不新增通用事件缓冲队列
+              </text>
+              <text class="sub" x="490.0" y="317" text-anchor="middle">
+                资源事实保留在 Endpoint；必要的延后结束优先复用现有
+                pendingEndEvent
+              </text>
+            </g>
+          </svg>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>事件</th>
+                <th>Endpoint 先做什么</th>
+                <th>Balance 决定什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>活跃 / Decode 确认</td>
+                <td>更新本机占用和观测</td>
+                <td>更新请求活动与可见性；已确认资源不能直接回滚</td>
+              </tr>
+              <tr>
+                <td>Endpoint 关闭</td>
+                <td>停止接纳，处理对应登记</td>
+                <td>阻止无效提交；未发布且可安全回滚时允许重试</td>
+              </tr>
+              <tr>
+                <td>完成 / 执行失败</td>
+                <td>先确认上报属于本次登记，再处理资源</td>
+                <td>根据角色、阶段与有效选路决定请求是否结束</td>
+              </tr>
+              <tr>
+                <td>P 完成且仍有 D</td>
+                <td>清理 P 资源</td>
+                <td>继续等待 D，而非结束整个请求</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <strong>未决前提：</strong>当前 P / D / Encoder
+          对提交前完成反馈的处理不同。目标方案不能机械扩大接受范围；先核实生产协议、完成记录保留规则和请求
+          ID 重用约束，再用测试固定行为。
+        </div>
+      </section>
+      <section id="cancel">
+        <div class="toolbar">
+          <h2><span class="num">05</span>取消、超时与晚到事件</h2>
+          <button class="expand" type="button">全屏查看流程图</button>
+        </div>
+        <div class="diagram">
+          <svg viewBox="0 0 980 365" role="img" aria-label="取消和旧事件处理">
+            <title>取消和旧事件处理</title>
+            <defs>
+              <marker
+                id="arrow3"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0 L10 5 L0 10Z" fill="#65758b" />
+              </marker>
+            </defs>
+            <g class="node amber">
+              <rect x="20" y="20" width="280" height="72" rx="12" />
+              <text x="160.0" y="49" text-anchor="middle">
+                取消 / 超时 / 停止
+              </text>
+              <text class="sub" x="160.0" y="72" text-anchor="middle">
+                Balance 标记不再允许提交
+              </text>
+            </g>
+            <path class="edge" d="M300,56 L350,56" marker-end="url(#arrow3)" />
+            <g class="node blue">
+              <rect x="350" y="20" width="280" height="72" rx="12" />
+              <text x="490.0" y="49" text-anchor="middle">
+                移出等待，阻止成功发布
+              </text>
+              <text class="sub" x="490.0" y="72" text-anchor="middle">
+                普通容量等待与抢占等待
+              </text>
+            </g>
+            <path class="edge" d="M630,56 L680,56" marker-end="url(#arrow3)" />
+            <g class="node blue">
+              <rect x="680" y="20" width="280" height="72" rx="12" />
+              <text x="820.0" y="49" text-anchor="middle">
+                逐角色处理精确登记
+              </text>
+              <text class="sub" x="820.0" y="72" text-anchor="middle">
+                不按 requestId 直接删除
+              </text>
+            </g>
+            <path class="edge" d="M820,92 L820,135" marker-end="url(#arrow3)" />
+            <g class="node green">
+              <rect x="680" y="135" width="280" height="72" rx="12" />
+              <text x="820.0" y="164" text-anchor="middle">
+                纯本地预留 → 回滚
+              </text>
+              <text class="sub" x="820.0" y="187" text-anchor="middle">
+                已确认执行 → 必要的远端取消
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M680,171 L630,171"
+              marker-end="url(#arrow3)"
+            />
+            <g class="node amber">
+              <rect x="350" y="135" width="280" height="72" rx="12" />
+              <text x="490.0" y="164" text-anchor="middle">
+                等待必要清理事实
+              </text>
+              <text class="sub" x="490.0" y="187" text-anchor="middle">
+                发出取消 ≠ 已释放容量
+              </text>
+            </g>
+            <path
+              class="edge"
+              d="M350,171 L300,171"
+              marker-end="url(#arrow3)"
+            />
+            <g class="node blue">
+              <rect x="20" y="135" width="280" height="72" rx="12" />
+              <text x="160.0" y="164" text-anchor="middle">
+                结束 / 归档请求
+              </text>
+              <text class="sub" x="160.0" y="187" text-anchor="middle">
+                按现有响应与清理契约完成
+              </text>
+            </g>
+            <g class="node amber">
+              <rect x="20" y="265" width="940" height="80" rx="12" />
+              <text x="490.0" y="294" text-anchor="middle">
+                晚到事件：分开判断执行结果和资源清理
+              </text>
+              <text class="sub" x="490.0" y="317" text-anchor="middle">
+                S1 不得改变 S2；但 S1 的清理完成事件仍可推进旧登记清理
+              </text>
+            </g>
+          </svg>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>交错场景</th>
+                <th>必须保留的隔离</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>S1 结束，S2 已开始</td>
+                <td>S1 事件不改变 S2 的执行结果；仍可完成 S1 的必要资源清理</td>
+              </tr>
+              <tr>
+                <td>相同 requestId 的新请求实例</td>
+                <td>旧接收关联仍指向旧实例，不能按 ID 转投新实例</td>
+              </tr>
+              <tr>
+                <td>旧 Endpoint 代际晚到事件</td>
+                <td>不能应用于新 Endpoint 的登记，核对精确来源与登记身份</td>
+              </tr>
+              <tr>
+                <td>旧原始上报匹配到新登记</td>
+                <td>
+                  不能靠回调解决：必须先确认协议提供的执行身份或 ID 唯一性约束
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section id="interfaces">
+        <h2><span class="num">06</span>职责与接口 · 保留什么，删除什么</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>对象</th>
+                <th>负责</th>
+                <th>不应暴露 / 承担</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Endpoint</td>
+                <td>本角色登记、容量、上报匹配、锁外通知</td>
+                <td>读取上层快照、寻找完整路由、决定其他角色清理</td>
+              </tr>
+              <tr>
+                <td>Registration</td>
+                <td>精确身份、角色状态、窄事件接收入口</td>
+                <td>访问其他角色登记的导航接口</td>
+              </tr>
+              <tr>
+                <td>SelectionAttempt</td>
+                <td>标识一次选路，关联请求实例并隔离重试</td>
+                <td>重复保存 Endpoint 资源账本</td>
+              </tr>
+              <tr>
+                <td>RequestRoute</td>
+                <td>Balance 内汇总角色结果，供响应与清理使用</td>
+                <td>作为 Worker 反馈和排序的万能入口</td>
+              </tr>
+              <tr>
+                <td>RequestContext / Scheduler</td>
+                <td>请求状态、跨角色影响、超时取消、清理协调</td>
+                <td>复制本机资源确认状态作为另一份容量来源</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>接口示意 · 不是已落地代码</h3>
+        <pre><code>// Balance：选路开始时建立关联，完整路由此时还不存在。
+var selection = context.beginSelection();
+WorkerEventSink events = event -&gt; scheduler.onWorkerEvent(selection, event);
+
+// Endpoint：回调与精确登记一起创建，再将登记发布进本地账本。
+var registration = endpoint.tryRegisterSelection(roleInputs, events);
+
+// P / Encoder：只提交本角色登记，不接收完整 RequestRoute。
+prefillEndpoint.commitSelection(prefillRegistration);
+
+// Endpoint：持锁处理资源；解锁后发布精确登记事件。
+events.onEvent(event);
+
+// Balance：使用原来的请求实例和选路身份，不按 ID 寻找当前路由。
+scheduler.onWorkerEvent(selection, event);</code></pre>
+        <p>
+          事件优先复用现有登记身份和事件类型。Endpoint、role
+          若可由登记可靠取得，就不重复保存。完整路由的 REMOTE_CLEANED /
+          REMOTE_FENCED 仍由 Balance 处理，不强塞进角色登记事件。
+        </p>
+        <div class="cards">
+          <div class="card">
+            <strong>删除导航与转换</strong>
+            <p>
+              Worker 中完整 route 引用；Decode 为反馈反查
+              Repository；接口强转与重复事件搬运。
+            </p>
+          </div>
+          <div class="card">
+            <strong>逐调用方清理</strong>
+            <p>
+              排序只传所需序号；TTL 继续精确核对登记。WorkerRequest
+              的抢占用途须单独核对，不能直接整类删除。
+            </p>
+          </div>
+          <div class="card">
+            <strong>不增加平行机制</strong>
+            <p>
+              不新增全局登记映射、通用事件总线、事件缓冲队列或第二套资源状态。
+            </p>
+          </div>
+        </div>
+        <p class="small">
+          回调可能间接保留上层请求引用，因此还需核对登记、事件与清理结束后的引用释放；“不暴露导航”并不等于对象之间完全无引用。
+        </p>
+      </section>
+      <section id="verify">
+        <h2><span class="num">07</span>验证先行 · 再替换旧路径</h2>
+        <ol>
+          <li>
+            <strong>先核对原始上报身份。</strong>同一 Endpoint 代际内能否重用
+            ID？完成记录保留多久？旧记录如何避免匹配新登记？
+          </li>
+          <li>
+            <strong>固定提交前行为。</strong
+            >角色登记已创建、完整路由未关联时发生完成、确认或关闭；不得静默错误提交，也不得误伤可回滚重试的请求。
+          </li>
+          <li>
+            <strong>固定身份隔离。</strong>S1 晚到事件、相同 ID 新实例、旧
+            Endpoint 代际，以及旧登记清理仍需完成的情况。
+          </li>
+          <li>
+            <strong>验证资源与请求分工。</strong>P 完成继续等 D；Decode
+            确认后不重复记账、不直接回滚；失败清理其他角色。
+          </li>
+          <li>
+            <strong>验证并发边界。</strong
+            >用锁存器控制登记发布、事件回调、取消与提交交错；证明回调在 Endpoint
+            锁外。
+          </li>
+          <li>
+            <strong>迁移后删除旧机制。</strong
+            >核对关闭、TTL、排序和抢占调用方，再删除导航接口和重复事件转换；运行相关
+            UT 与全项目格式检查。
+          </li>
+        </ol>
+        <div class="callout">
+          <strong>方案状态：</strong
+          >本文是目标流程说明，并非实现完成报告。尤其“早期事件如何改变当前选路”“最终提交如何核对已移除的
+          Decode 登记”“原始反馈的执行身份”仍需源码与测试证据收敛。
+        </div>
+        <h3>当前源码定位</h3>
+        <p class="small">
+          <a
+            href="../flexlb-balance/src/main/java/org/flexlb/balance/schedule/AbstractRequestScheduler.java"
+            >AbstractRequestScheduler</a
+          >
+          ·
+          <a
+            href="../flexlb-balance/src/main/java/org/flexlb/balance/schedule/RequestContext.java"
+            >RequestContext</a
+          >
+          ·
+          <a
+            href="../flexlb-worker/src/main/java/org/flexlb/worker/endpoint/PrefillEndpoint.java"
+            >PrefillEndpoint</a
+          >
+          ·
+          <a
+            href="../flexlb-worker/src/main/java/org/flexlb/worker/endpoint/DecodeEndpoint.java"
+            >DecodeEndpoint</a
+          >
+          ·
+          <a
+            href="../flexlb-worker/src/main/java/org/flexlb/worker/endpoint/WorkerRoute.java"
+            >WorkerRoute</a
+          >
+        </p>
+      </section>
+      <footer>
+        FlexLB · 角色登记与事件反馈设计 / 独立 HTML · SVG 流程图 · 无外部依赖<br />窄屏可横向滚动查看图表；图表支持全屏，页面支持浏览器打印。
+      </footer>
+    </main>
+    <script>
+      document.querySelectorAll(".expand").forEach((button) =>
+        button.addEventListener("click", async () => {
+          const chart = button.closest("section").querySelector("svg");
+          try {
+            if (chart.requestFullscreen) await chart.requestFullscreen();
+            else chart.scrollIntoView({ behavior: "smooth", block: "center" });
+          } catch {
+            chart.scrollIntoView({ behavior: "smooth", block: "center" });
+          }
+        }),
+      );
+    </script>
+  </body>
+</html>

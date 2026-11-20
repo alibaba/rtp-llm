@@ -12,7 +12,7 @@ import java.util.concurrent.locks.LockSupport;
 import java.util.function.Consumer;
 import org.flexlb.mock.frontend.FrontendProtocol.*;
 import org.flexlb.mock.protocol.JsonFiles;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 
 /**
  * Owns one round of local playback, from pacing through drain.

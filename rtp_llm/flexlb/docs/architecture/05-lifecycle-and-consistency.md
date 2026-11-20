@@ -3,15 +3,15 @@
 FlexLB 的上线由同机 HTTP hook 驱动；下线由 HTTP hook 或 Spring 容器关闭事件驱动。
 高可用由 ZooKeeper LeaderSelector 主选举与 follower 请求转发实现。
 
-主要代码：`flexlb-api/src/main/java/org/flexlb/service/grace/ApplicationLifecycle.java`、
-`flexlb-common/.../listener/ApplicationWarmupState.java`，`flexlb-api/.../AppStateHookServer.java`、
-`HealthCheckServer.java`、`FlexlbGrpcServer.java`，以及 `flexlb-sync/.../consistency/`。
+主要代码：`flexlb-api/src/main/java/org/flexlb/api/ApplicationLifecycle.java`、
+`flexlb-util/src/main/java/org/flexlb/util/ApplicationWarmupState.java`，`flexlb-api/src/main/java/org/flexlb/api/server/AppStateHookServer.java`、
+`HealthCheckServer.java`、`api/server/FlexlbGrpcServer.java`，以及 `flexlb-master/.../master/`。
 
 ## 生命周期 Hook
 
 ### 预热状态
 
-`flexlb-common` 中的 `ApplicationWarmupState` 是独立 Spring Bean，使用 volatile 字段
+`flexlb-util` 中的 `ApplicationWarmupState` 是独立 Spring Bean，使用 volatile 字段
 共享预热状态。`ApplicationLifecycle` 通过 `setWarmupFinished()` 更新状态，
 KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 gRPC 服务、调度器
 或生命周期编排器。
@@ -49,6 +49,30 @@ KVCM 客户端通过 `isWarmupFinished()` 读取状态。该状态类不依赖 g
 
 `ApplicationLifecycle` 以最高优先级处理所属 Spring 容器的 `ContextClosedEvent`，
 同步执行下线流程；子容器的关闭事件不触发服务下线。成功完成后的重复下线调用直接返回。
+
+`ApplicationLifecycle` 在入口排空后负责共享调度资源的关停顺序：停止 Repository 接纳、
+等待响应、停止 Scheduler、清理请求，再关闭 EndpointRegistry、过期计时器和共享执行器。
+宽限期由应用计算。Scheduler 只停止自身调度、取消自身请求、等待自身清理，不关闭共享资源，
+也不从请求记录中寻找其他 Scheduler 来执行跨实例关停。当前装配只创建一个 Scheduler。
+
+`SchedulerConfiguration` 创建并启动调度组件；应用生命周期通过构造器接收需要关闭的共享组件。
+`taskTimer` 和 `deadlineTaskTimer` 的底层线程池由 Spring 在下线事件处理完成后的 bean
+销毁阶段关闭；手工创建计时器的测试夹具负责释放自己的线程池。
+
+调度资源关闭时，先停止接收新请求，等待已接受请求响应至调用方指定的截止时间；随后关闭请求注册，
+停止并等待 scheduler 和抢占任务，取消剩余请求。DIRECT 等待已提交的选路任务，QUEUE
+等待调度线程、planner 和剩余计划处理完成。接着等待投递及其准备资源释放回调、请求处理
+任务结束，再关闭 Endpoint。Endpoint 关闭产生的后续清理任务在关闭请求执行器前再次排空。
+这些等待复用各组件的执行状态，调度基类不另维护选路操作计数。
+
+请求任务池在改变接纳状态之前拒绝自身任务调用 close，避免任务等待自己完成。
+本地清理和远端 stop 使用不同排空条件；提交者尚未完成交接时也保留工作登记。
+执行器关闭期间仅允许正在执行的准确请求续接，防止丢失已接纳工作或重新开放无关请求。
+响应失败不重新建立发布登记，也不承担计时器安装恢复；deadline 在响应构造前通过 Timer.update 同步。
+
+停止接收后，尚未注册的新请求返回 `SCHEDULER_UNAVAILABLE`（8518）。Frontend 在响应
+不含入队标记、路由结果或生命周期记录时，以原请求重试不同的备用 FlexLB 节点。
+已接收请求的取消不使用此错误码；备用节点也不可用时保留拒绝结果，不无限重试。
 
 ### 健康检查
 

@@ -1,20 +1,19 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.balance.request.Response;
+import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.route.RoleType;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
+import org.flexlb.worker.status.ServerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -23,7 +22,30 @@ import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks that scheduling distributes requests across two registered mock Prefill workers.
+ * Multiple workers: start two mock prefill workers and verify that requests
+ * are distributed across both, not all sent to a single worker.
+ *
+ * <p>Flow:
+ * 1. Worker A is started by the base class (default behavior)
+ * 2. Worker B is started via {@link #addPrefillWorker} (registered in EndpointRegistry)
+ * 3. Reconfigure the mock RequestRouteSelector to alternate between A and B
+ * 4. Submit 4 requests
+ * 5. Verify: both workers received at least 1 EnqueueBatch call
+ * 6. Verify: total EnqueueBatch count matches the number of submitted requests
+ *
+ * <p>Key mechanism:
+ * <ul>
+ *   <li>The base class starts one prefill worker (worker A) and registers it in
+ *       {@code EndpointRegistry} and {@code EndpointRegistry}</li>
+ *   <li>{@link #addPrefillWorker} starts an additional worker B, creates its
+ *       {@code WorkerStatus} and {@code PrefillEndpoint}, and registers both</li>
+ *   <li>The mock {@code RequestRouteSelector} is reset and reconfigured to return routing
+ *       responses that alternate between A and B</li>
+ *   <li>Each routing response contains {@code ServerStatus} entries for the
+ *       selected prefill worker and the shared decode worker</li>
+ *   <li>The scheduler looks up the prefill endpoint by {@code ip:httpPort}
+ *       and offers the request to that worker's {@code PrefillQueueScheduler}</li>
+ * </ul>
  */
 class MultipleWorkersTest extends FlexLBMockTestBase {
 
@@ -46,22 +68,22 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         workerBHttpPort = workerB.getHttpPort();
         workerBIpPort = workerIpPort(workerB);
 
-        // 2. Reconfigure DefaultRouter to alternate between worker A and B
-        AtomicInteger routeCounter = new AtomicInteger(0);
+        // 2. Reconfigure RequestRouteSelector to alternate between worker A and B
         reset(router);
-        when(router.select(any(BalanceContext.class), any()))
+        when(router.selectAndRegister(any(RequestContext.class), any()))
                 .thenAnswer(
                         inv -> {
-                            BalanceContext ctx = inv.getArgument(0);
-                            boolean useB = routeCounter.getAndIncrement() % 2 == 1;
-                            return admittedRoute(ctx, buildRouteResponse(ctx.getRequestId(), useB));
+                            RequestContext ctx = inv.getArgument(0);
+                            // A retry must not consume another request's turn in this fixture.
+                            boolean useB = Long.parseLong(ctx.getRequestId()) % 2 == 0;
+                            return routeResult(ctx, buildRouteResponse(ctx.getRequestId(), useB));
                         });
 
         // 3. Submit 4 requests — should alternate A, B, A, B
         long[] requestIds = {40001, 40002, 40003, 40004};
         CompletableFuture<Response>[] futures = new CompletableFuture[requestIds.length];
         for (int i = 0; i < requestIds.length; i++) {
-            futures[i] = submitRequest(String.valueOf(requestIds[i]));
+            futures[i] = submitRequest(requestIds[i]);
         }
 
         // 4. Wait for all requests to complete (ACK)
@@ -77,34 +99,19 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
                             + resp.getErrorMessage());
         }
 
-        // 5. Verify: worker A received at least 1 EnqueueBatch
-        int countA = mockPrefillWorker.getEnqueueCount();
-        assertTrue(
-                countA >= 1,
-                "Worker A should have received at least 1 EnqueueBatch, got " + countA);
-
-        // 6. Verify: worker B received at least 1 EnqueueBatch
-        int countB = workerB.getEnqueueCount();
-        assertTrue(
-                countB >= 1,
-                "Worker B should have received at least 1 EnqueueBatch, got " + countB);
-
-        // 7. Verify: total EnqueueBatch count matches number of submitted requests
-        int totalCount = countA + countB;
-        assertTrue(
-                totalCount >= requestIds.length,
-                "Total EnqueueBatch count ("
-                        + totalCount
-                        + ") should be >= "
-                        + requestIds.length
-                        + " submitted requests");
-
-        // 8. Verify: decode worker received no enqueue (PD-separated — decode
-        //    only gets requests after prefill completes, which mock doesn't simulate)
-        assertEquals(
-                0,
-                mockDecodeWorker.getEnqueueCount(),
-                "Decode worker should not have received any enqueue request");
+        for (int i = 0; i < requestIds.length; i++) {
+            var selected =
+                    futures[i].join().getServerStatus().stream()
+                            .filter(worker -> worker.getRole() == RoleType.PREFILL)
+                            .findFirst()
+                            .orElseThrow();
+            assertEquals(
+                    requestIds[i] % 2 == 0 ? workerBHttpPort : prefillHttpPort,
+                    selected.getHttpPort());
+        }
+        assertEquals(0, mockPrefillWorker.getEnqueueCount());
+        assertEquals(0, workerB.getEnqueueCount());
+        assertEquals(0, mockDecodeWorker.getEnqueueCount());
     }
 
     // ==================== Helper: build routing response ====================

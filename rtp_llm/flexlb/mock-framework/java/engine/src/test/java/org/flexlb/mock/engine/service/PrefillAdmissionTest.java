@@ -6,7 +6,7 @@ import io.grpc.Status;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
-import org.flexlb.engine.grpc.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
 import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import org.flexlb.mock.engine.config.RtpConfig;

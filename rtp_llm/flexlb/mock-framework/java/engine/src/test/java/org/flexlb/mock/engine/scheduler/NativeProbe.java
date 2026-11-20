@@ -9,8 +9,8 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.LinkedBlockingQueue;
 import io.grpc.stub.StreamObserver;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
 
 /**
  * Test-only external native client. No Engine substitution.

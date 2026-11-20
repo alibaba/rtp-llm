@@ -6,10 +6,10 @@ import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.engine.grpc.EngineRpcService.*;
-import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.*;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.worker.rpc.protocol.EngineRpcService.*;
+import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
+import org.flexlb.api.protocol.FlexlbScheduleProtocol.*;
+import org.flexlb.api.protocol.FlexlbServiceGrpc;
 
 /**
  * End-to-end probe against a separately launched, unmocked production Master.
