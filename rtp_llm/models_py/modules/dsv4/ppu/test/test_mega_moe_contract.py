@@ -18,6 +18,9 @@ from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
     PpuMegaMoEResources,
 )
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import PpuMoeConfig
+from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+    PpuSharedExpertExecutor,
+)
 
 
 class MegaMoEContractTest(unittest.TestCase):
@@ -140,11 +143,132 @@ class MegaMoEContractTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be deepep or megamoe"):
             PpuDecodeProvider({**options, "DSV4_PPU_DECODE_MOE_BACKEND": "typo"})
 
+    def test_megamoe_mode_is_snapshotted_and_validated(self):
+        options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
+        plain = PpuDecodeProvider(options)
+        streamed = PpuDecodeProvider({**options, "DSV4_PPU_MEGAMOE_MODE": "streamed"})
+        staged = PpuDecodeProvider({**options, "DSV4_PPU_MEGAMOE_MODE": "staged"})
+        self.assertFalse(plain._mega_streamed)
+        self.assertTrue(streamed._mega_streamed)
+        self.assertTrue(staged._shared_staged)
+        self.assertFalse(staged._mega_streamed)
+        with self.assertRaisesRegex(ValueError, "plain, streamed or staged"):
+            PpuDecodeProvider({**options, "DSV4_PPU_MEGAMOE_MODE": "split"})
+        with self.assertRaisesRegex(ValueError, "require the MegaMoE backend"):
+            PpuDecodeProvider(
+                {
+                    **options,
+                    "DSV4_PPU_DECODE_MOE_BACKEND": "deepep",
+                    "DSV4_PPU_MEGAMOE_MODE": "streamed",
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "replaced by DSV4_PPU_MEGAMOE_MODE"):
+            PpuDecodeProvider({**options, "DSV4_PPU_MEGAMOE_STREAMED": "1"})
+
+    def test_staged_shared_options_are_snapshotted_and_validated(self):
+        options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_MOE_BACKEND": "megamoe"}
+        default = PpuDecodeProvider(options)
+        staged = PpuDecodeProvider({**options, "DSV4_PPU_MEGAMOE_MODE": "staged"})
+        self.assertFalse(default.build_shared_expert_executor().staged)
+        self.assertTrue(staged.build_shared_expert_executor().staged)
+        with self.assertRaisesRegex(ValueError, "MegaMoE backend"):
+            PpuDecodeProvider(
+                {
+                    **options,
+                    "DSV4_PPU_DECODE_MOE_BACKEND": "deepep",
+                    "DSV4_PPU_MEGAMOE_MODE": "staged",
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "early overlap"):
+            PpuSharedExpertExecutor(staged=True)
+
+    def test_streamed_dispatch_and_callback_rejection(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._sym = object()
+        strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
+        strategy._mega = Mock()
+        x = torch.zeros((8, 4096), dtype=torch.bfloat16)
+        indices = torch.zeros((8, 8), dtype=torch.int64)
+        weights = torch.ones((8, 8))
+        for streamed in (False, True):
+            strategy._streamed = streamed
+            strategy._mega.reset_mock()
+            strategy.forward(x, weights, indices)
+            selected = (
+                strategy._mega.fp4_fp4_mega_moe_streamed
+                if streamed
+                else strategy._mega.fp4_fp4_mega_moe
+            )
+            selected.assert_called_once()
+            self.assertTrue(selected.call_args.kwargs["preserve_bf16"])
+            self.assertEqual("fuse_reduce" in selected.call_args.kwargs, not streamed)
+        strategy._mega.reset_mock()
+        strategy._streamed = True
+        with self.assertRaisesRegex(ValueError, "after_gemm1"):
+            strategy.forward(x, weights, indices, after_gemm1=lambda: None)
+        strategy._mega.mega_moe_pre_dispatch.assert_not_called()
+
+    def test_streamed_tile_rejection_falls_back_to_plain_kernel(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._sym = object()
+        strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
+        strategy._mega = Mock()
+        strategy._mega.fp4_fp4_mega_moe_streamed.side_effect = RuntimeError(
+            "streamed MegaMoE requires Flash EP8 BM64/BN128 and G2 BM32"
+        )
+        strategy._streamed = True
+        x = torch.zeros((8, 4096), dtype=torch.bfloat16)
+        indices = torch.zeros((8, 8), dtype=torch.int64)
+        weights = torch.ones((8, 8))
+        strategy.forward(x, weights, indices)
+        self.assertFalse(strategy._streamed)
+        plain = strategy._mega.fp4_fp4_mega_moe
+        plain.assert_called_once()
+        self.assertFalse(plain.call_args.kwargs["fuse_reduce"])
+        self.assertTrue(plain.call_args.kwargs["preserve_bf16"])
+        strategy.forward(x, weights, indices)
+        self.assertEqual(strategy._mega.fp4_fp4_mega_moe_streamed.call_count, 1)
+        self.assertEqual(plain.call_count, 2)
+
+    def test_streamed_unrelated_runtime_error_still_raises(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy.cfg = self.cfg
+        strategy._sym = object()
+        strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
+        strategy._mega = Mock()
+        strategy._mega.fp4_fp4_mega_moe_streamed.side_effect = RuntimeError("boom")
+        strategy._streamed = True
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            strategy.forward(
+                torch.zeros((8, 4096), dtype=torch.bfloat16),
+                torch.ones((8, 8)),
+                torch.zeros((8, 8), dtype=torch.int64),
+            )
+        self.assertTrue(strategy._streamed)
+        strategy._mega.fp4_fp4_mega_moe.assert_not_called()
+
+    def test_missing_native_phase_api_rejected_before_forward(self):
+        strategy = object.__new__(PpuMegaMoEFP4Strategy)
+        torch.nn.Module.__init__(strategy)
+        strategy._mega = SimpleNamespace(fp4_fp4_mega_moe=lambda *args: None)
+        with self.assertRaisesRegex(RuntimeError, "after_gemm1"):
+            strategy.require_staged_shared()
+        strategy._mega = SimpleNamespace(
+            fp4_fp4_mega_moe=lambda *args, after_gemm1=None: None
+        )
+        strategy.require_staged_shared()
+
     def test_dispatch_preserves_bf16_and_separate_reduction(self):
         strategy = object.__new__(PpuMegaMoEFP4Strategy)
         torch.nn.Module.__init__(strategy)
         strategy.cfg = self.cfg
         strategy._sym = object()
+        strategy._streamed = False
         strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
         strategy._mega = Mock()
         x = torch.zeros((8, 4096), dtype=torch.bfloat16)
@@ -252,6 +376,7 @@ class MegaMoEContractTest(unittest.TestCase):
         strategy.cfg = replace(self.cfg, ep_size=32, n_local_experts=8,
                                local_expert_end=8)
         strategy._sym = object()
+        strategy._streamed = False
         strategy._w13 = strategy._s13 = strategy._w2 = strategy._s2 = object()
         strategy._mega = Mock()
         x = torch.zeros((6, 4096), dtype=torch.bfloat16)
