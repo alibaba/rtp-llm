@@ -95,6 +95,47 @@ def _ple_conv(
         )
 
 
+@triton.jit(do_not_specialize=["LENGTH"])
+def _ple_verify_conv(
+    Gated,
+    Normed,
+    Initial,
+    Weight,
+    Residual,
+    Output,
+    LENGTH,
+    INITIAL_BATCH_STRIDE,
+    INITIAL_ROW_STRIDE,
+    WIDTH: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    batch, token = tl.program_id(1), tl.program_id(2)
+    col = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = col < WIDTH
+    row = batch.to(tl.int64) * LENGTH + token
+    offset = row * WIDTH + col
+    acc = tl.full((BLOCK,), 0, tl.float32)
+    for k in tl.static_range(4):
+        position = token - 9 + 3 * k
+        if position < 0:
+            ptr = (
+                Initial
+                + batch.to(tl.int64) * INITIAL_BATCH_STRIDE
+                + (position + 9) * INITIAL_ROW_STRIDE
+            )
+        else:
+            ptr = Normed + (row - 9 + 3 * k) * WIDTH
+        value = tl.load(ptr + col, valid, other=0).to(tl.float32)
+        weight = tl.load(Weight + col * 4 + k, valid, other=0).to(tl.float32)
+        acc = tl.fma(value, weight, acc)
+    conv = acc.to(tl.bfloat16).to(tl.float32)
+    activated = (conv * tl.sigmoid(conv)).to(tl.bfloat16).to(tl.float32)
+    gated = tl.load(Gated + offset, valid, other=0).to(tl.float32)
+    output = (gated + activated).to(tl.bfloat16).to(tl.float32)
+    residual = tl.load(Residual + offset, valid, other=0).to(tl.float32)
+    tl.store(Output + offset, residual + output, valid)
+
+
 def try_ple_conv(
     gated,
     normed,
@@ -105,6 +146,7 @@ def try_ple_conv(
     residual=None,
     roll_state=False,
     tune_bf16_prefill=False,
+    verify=False,
 ):
     if not (
         gated.is_cuda
@@ -154,6 +196,34 @@ def try_ple_conv(
     ):
         return None
     output = torch.empty_like(gated)
+    batch, length, width = gated.shape
+    # Opt in from target verification. Each program handles one token so
+    # all lanes select the same history row.
+    if (
+        verify
+        and initial is not None
+        and residual is not None
+        and not roll_state
+        and 0 < batch < 65536
+        and 1 < length <= 32
+        and torch.cuda.get_device_capability(gated.device) == (9, 0)
+    ):
+        block = 512
+        _ple_verify_conv[(triton.cdiv(width, block), batch, length)](
+            gated,
+            normed,
+            initial,
+            weight,
+            residual,
+            output,
+            LENGTH=length,
+            WIDTH=width,
+            INITIAL_BATCH_STRIDE=initial.stride(0),
+            INITIAL_ROW_STRIDE=initial.stride(1),
+            BLOCK=block,
+            num_warps=4,
+        )
+        return output
     rolled_state = (
         torch.empty(initial.shape, dtype=initial.dtype, device=initial.device)
         if roll_state

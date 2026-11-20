@@ -528,9 +528,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             # the model stream so each replay reads its own current history.
             # Eager prefetch and its ready/consumed lifecycle remain unchanged.
             if (
-                seq_len == 1
-                and self.ngram_size == 3
-                and self.heads_per_ngram == 8
+                self.ngram_size == 3
                 and self._cpu_uva_pointers is not None
                 and type(self) is Qwen4ExpNGramEmbedding
                 and type(self).hashed_ids is _NGRAM_HASHED_IDS
@@ -549,6 +547,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     self._cpu_uva_pointers,
                     self.total_shards,
                     self.eos_token_id,
+                    scale=self.weight_scale,
                 )
                 if rows is not None:
                     return self._reduce_rows(rows)
@@ -728,8 +727,7 @@ class Qwen4ExpPLELayer(nn.Module):
         if (
             decode
             and packed is not None
-            and seq_len == 1
-            and embeddings.shape == (hyper_states.shape[0], 1, packed.shape[1])
+            and embeddings.shape == (*hyper_states.shape[:-1], packed.shape[1])
             and embeddings.device == packed.device
             and embeddings.dtype == packed.dtype
             and embeddings.is_contiguous()
@@ -766,9 +764,12 @@ class Qwen4ExpPLELayer(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        decode: bool = False,
     ) -> tuple:
         """Return the gated values and normalized convolution inputs."""
-        key, value = self._project_key_value(hyper_states, token_history, embeddings)
+        key, value = self._project_key_value(
+            hyper_states, token_history, embeddings, decode=decode
+        )
         return self._gate_projected_values(key, value, hyper_states, padding_mask)
 
     def _gate_projected_values(self, key, value, hyper_states, padding_mask=None):
@@ -1163,6 +1164,7 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_buffer: torch.Tensor,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate a speculative decode chunk without committing its state.
 
@@ -1178,6 +1180,8 @@ class Qwen4ExpPLELayer(nn.Module):
         applying the dilated convolution once is numerically identical to
         calling :meth:`decode_step` in order, while keeping persistent cache
         mutation outside the target-verify forward.
+        With ``add_residual``, include the outer residual after rounding the
+        PLE output to its activation dtype.
         """
         if hyper_states.dim() != 3:
             raise ValueError(
@@ -1214,7 +1218,7 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("qwen4_exp PLE decode chunk inputs must share one device")
 
         gated_value, candidate_inputs = self._gated_values(
-            hyper_states, token_history, embeddings=embeddings
+            hyper_states, token_history, embeddings=embeddings, decode=True
         )
         if hyper_states.is_cuda and torch.version.hip is None:
             from .ple_conv_triton import try_ple_conv
@@ -1225,6 +1229,8 @@ class Qwen4ExpPLELayer(nn.Module):
                 conv_buffer,
                 self.conv_weight,
                 self.conv_dilation,
+                residual=hyper_states if add_residual else None,
+                verify=add_residual,
             )
             if fused is not None:
                 return fused, candidate_inputs
@@ -1242,4 +1248,5 @@ class Qwen4ExpPLELayer(nn.Module):
                 "qwen4_exp PLE decode chunk convolution returned "
                 f"{conv_out.shape[1]} rows, expected {query_len}"
             )
-        return gated_value + conv_out, candidate_inputs
+        output = gated_value + conv_out
+        return (hyper_states + output if add_residual else output), candidate_inputs

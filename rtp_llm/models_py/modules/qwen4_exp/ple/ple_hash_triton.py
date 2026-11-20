@@ -6,11 +6,14 @@ import triton.language as tl
 
 
 @triton.jit
-def _hash_two_three(current, previous, oldest, head, vocab, offset, multipliers, EOS: tl.constexpr):
+def _hash_two_three(
+    current, previous, oldest, head, vocab, offset, multipliers,
+    EOS: tl.constexpr, HEADS_PER_ORDER: tl.constexpr = 8,
+):
     oldest = tl.where(previous == EOS, EOS, oldest)
     two = (current * tl.load(multipliers)) ^ (previous * tl.load(multipliers + 1))
     three = two ^ (oldest * tl.load(multipliers + 2))
-    mixed = tl.where(head < 8, two, three)
+    mixed = tl.where(head < HEADS_PER_ORDER, two, three)
     remainder = mixed % vocab
     return tl.where(remainder < 0, remainder + vocab, remainder) + offset
 

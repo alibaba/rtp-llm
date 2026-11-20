@@ -48,7 +48,13 @@ class _FixturePLE(Qwen4ExpPLELayer):
         )
 
     def _gated_values(
-        self, hyper_states, token_history, padding_mask=None, *, embeddings=None
+        self,
+        hyper_states,
+        token_history,
+        padding_mask=None,
+        *,
+        embeddings=None,
+        decode=False,
     ):
         # Include each candidate's n-gram history in the conv input so a stale
         # prefix or swapped request affects the output as well as cache checks.
