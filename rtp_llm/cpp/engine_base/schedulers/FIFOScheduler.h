@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <list>
+#include <thread>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -23,6 +24,7 @@ public:
                            const int                              max_score_len    = 1);
 
     ~FIFOScheduler() override;
+    absl::Status stop() override;
 
     // Group-aware enqueue: streams enter the dedicated group queues and are
     // co-scheduled at an isolated execution boundary. Falls back to individual
@@ -40,6 +42,12 @@ public:
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
 
 private:
+    void        cachePrepareLoop();
+    bool        async_cache_prepare_enabled_ = false;
+    int         cache_prepare_device_        = 0;
+    std::thread cache_prepare_thread_;
+    std::mutex  cache_prepare_stop_mutex_;
+
     using StreamGroup      = std::list<GenerateStreamPtr>;
     using StreamGroupQueue = std::list<StreamGroup>;
 
@@ -70,12 +78,13 @@ private:
                                const GenerateStreamPtr&            new_stream) override;
     // Counter-based admission check used by admitWaitingStreams(). evaluateRunningMemory()
     // is the list-based FIFOSchedulerBase entry point and delegates here.
-    bool   evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
+    bool evaluateRunningBatch(const ScheduleRuntime& schedule_runtime, const GenerateStreamPtr& new_stream) const;
     // Overload for group-queue admission: the admitted streams are tracked as a list
     // because ScheduleRuntime is not built in the group-queue path.
     bool   evaluateRunningBatch(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     bool   fitsPrefillTokenLimits(size_t                   admitted_stream_count,
                                   size_t                   admitted_tokens,
+                                  size_t                   admitted_tokens_without_cache,
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
                                   const GenerateStreamPtr& candidate) const;
@@ -120,7 +129,8 @@ private:
 
     // Context-parallel prefill can opt into single-request admission until
     // the model-side path supports per-request layouts.
-    const bool cp_force_single_prefill_ = false;
+    const bool   cp_force_single_prefill_ = false;
+    const size_t max_batch_kv_len_        = 0;
     // Soft per-round quota on the tokens that are actually recomputed (prefix-cache hits
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;

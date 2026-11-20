@@ -56,6 +56,11 @@ void GenerateStateMachine::handleWaiting() {
     if (!events_.has(StreamEvents::CanRun)) {
         return;
     }
+    if (events_.has(StreamEvents::CachePrepared)) {
+        stream_cache_resource_->stream()->recordWaitLatency();
+        transitionToRunning();
+        return;
+    }
     // LoadInitiated 未设置时，必须先执行 initKVBlock 和 asyncLoadCache
     if (!events_.has(StreamEvents::LoadInitiated)) {
         auto stream = stream_cache_resource_->stream();
@@ -89,6 +94,11 @@ void GenerateStateMachine::handleWaiting() {
             // 当前decodeRpcServer会调用moveToNext，判断role type避免decodeRpcServer在enqueue前提早走到running状态
             transitionToRunning();
         }
+        return;
+    }
+
+    if (stream_cache_resource_->asyncLoadCache()) {
+        status.store(StreamState::LOADING_CACHE, std::memory_order_release);
         return;
     }
 
@@ -151,7 +161,7 @@ void GenerateStateMachine::handleRunning() {
     int             seq_len_override = -1;
     GenerateStream* stream           = stream_cache_resource_->stream();
     if (stream != nullptr) {
-        const bool  pending   = stream->hasPendingAsyncBookkeeping();
+        const bool pending   = stream->hasPendingAsyncBookkeeping();
         const auto mtp_state = stream->getMtpAsyncDeviceState();
         if (pending && GenerateStream::hasMtpCacheSnapshot(mtp_state) && mtp_state.next_seq_len_upper_bound > 0
             && stream_cache_resource_->singleBatchNeedBlocks(mtp_state.next_seq_len_upper_bound,

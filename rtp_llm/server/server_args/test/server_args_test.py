@@ -862,6 +862,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
+        os.environ["MAX_BATCH_KV_LEN"] = "16384"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["PREFILL_CHUNK_SIZE"] = "256"
         os.environ["WARM_UP"] = "1"
@@ -941,6 +942,11 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(restored_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            16384,
+        )
+        self.assertEqual(restored_fifo_config.max_batch_kv_len, 16384)
         # Old pickles carry only the two original slots; every field added later
         # must fall back to its default instead of raising.
         fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
@@ -954,6 +960,13 @@ class ServerArgsSetTest(TestCase):
         seven_slot_fifo_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048))
         self.assertEqual(seven_slot_fifo_config.max_batch_tokens_without_cache, 2048)
         self.assertEqual(seven_slot_fifo_config.prefill_chunk_size, 0)
+        self.assertEqual(seven_slot_fifo_config.max_batch_kv_len, 0)
+        eight_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        eight_slot_fifo_config.__setstate__(
+            (32, 8192, "ratio", "2", False, 16, 2048, 256)
+        )
+        self.assertEqual(eight_slot_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(eight_slot_fifo_config.max_batch_kv_len, 0)
 
         # Verify frontend and DashSc pre-stop windows are configured independently.
         self.assertEqual(
@@ -1035,6 +1048,8 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--max_batch_tokens_without_cache",
             "4096",
+            "--max_batch_kv_len",
+            "32768",
             "--prefill_chunk_size",
             "512",
             "--cp_force_single_prefill",
@@ -1116,6 +1131,10 @@ class ServerArgsSetTest(TestCase):
             16,
         )
 
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.max_batch_kv_len,
+            32768,
+        )
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, False)  # bool in C++
         self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
@@ -1803,6 +1822,68 @@ class ServerArgsSetTest(TestCase):
             runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type,
             1,
         )
+
+    def test_async_prepare_cache_config_and_pickle(self):
+        from rtp_llm.server.server_args import server_args
+
+        cases = (
+            ({}, [], False),
+            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "1"}, [], True),
+            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "0"}, [], False),
+            (
+                {"RTP_LLM_ASYNC_PREPARE_CACHE": "1"},
+                ["--async_prepare_cache", "false"],
+                False,
+            ),
+            (
+                {"RTP_LLM_ASYNC_PREPARE_CACHE": "0"},
+                ["--async_prepare_cache=true"],
+                True,
+            ),
+        )
+        for env, args, expected in cases:
+            with (
+                self.subTest(env=env, args=args),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                config = server_args.setup_args(
+                    ["--max_batch_kv_len", "16384", *args]
+                ).runtime_config.fifo_scheduler_config
+                self.assertEqual(config.async_prepare_cache, expected)
+                self.assertEqual(
+                    pickle.loads(pickle.dumps(config)).async_prepare_cache, expected
+                )
+                self.assertEqual(
+                    pickle.loads(pickle.dumps(config)).max_batch_kv_len, 16384
+                )
+
+        config_type = type(config)
+        for last_slot, expected_kv, expected_async in (
+            (False, 0, False),
+            (True, 0, True),
+            (0, 0, False),
+            (1, 1, False),
+            (16384, 16384, False),
+        ):
+            with self.subTest(legacy_last_slot=last_slot):
+                previous = config_type.__new__(config_type)
+                previous.__setstate__(
+                    (32, 8192, "ratio", "2", False, 16, 2048, 256, last_slot)
+                )
+                self.assertEqual(previous.max_batch_kv_len, expected_kv)
+                self.assertEqual(previous.async_prepare_cache, expected_async)
+        legacy_config = config_type.__new__(config_type)
+        legacy_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048, 256))
+        self.assertFalse(legacy_config.async_prepare_cache)
+        self.assertEqual(legacy_config.prefill_chunk_size, 256)
+        with patch.dict(
+            os.environ, {"RTP_LLM_ASYNC_PREPARE_CACHE": "invalid"}, clear=True
+        ):
+            with (
+                self.assertRaises(SystemExit),
+                patch("sys.stderr", new_callable=io.StringIO),
+            ):
+                server_args.setup_args([])
 
     def test_pdfusion_scheduler_mode_config(self):
         """Test that pdfusion_scheduler_mode is opt-in and decode_prefill_ratio is configurable."""

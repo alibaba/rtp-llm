@@ -245,13 +245,14 @@ inline std::string StreamStateToString(StreamState state) {
 class StreamEvents {
 public:
     enum EventType : uint32_t {
-        None               = 0,
-        LoadInitiated      = 1 << 0,  // 已尝试加载缓存
-        CanRun             = 1 << 1,  // 调度器允许运行
-        GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
-        Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
-        NeedRemoteGenerate = 1 << 4,  // 需要远程生成
-        CachePrepared      = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
+        None                 = 0,
+        LoadInitiated        = 1 << 0,  // 已尝试加载缓存
+        CanRun               = 1 << 1,  // 调度器允许运行
+        GenerateDone         = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
+        Error                = 1 << 3,  // 出错，任何状态 -> FINISHED
+        NeedRemoteGenerate   = 1 << 4,  // 需要远程生成
+        CachePrepared        = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
+        CachePrepareDeferred = 1 << 6,  // Preparation attempted but blocked by allocation capacity or quota
     };
 
     void append(EventType event) {
@@ -267,8 +268,14 @@ public:
     }
 
     void clearLoadInitiated() {
-        flags_ =
-            static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::LoadInitiated));
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
+                                        & ~static_cast<uint32_t>(EventType::LoadInitiated | EventType::CachePrepared
+                                                                 | EventType::CachePrepareDeferred));
+    }
+
+    void clearCachePrepareDeferred() {
+        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
+                                        & ~static_cast<uint32_t>(EventType::CachePrepareDeferred));
     }
 
 private:
