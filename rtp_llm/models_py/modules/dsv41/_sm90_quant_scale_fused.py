@@ -24,7 +24,10 @@ def use_v2(rows, width):
     policy = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
     if policy not in ("auto", "legacy", "v2"):
         raise ValueError("DSV4_FP8_QUANT_KERNEL must be one of auto, legacy, v2")
-    return policy == "v2" or (policy == "auto" and rows * width >= 4 * 1024 * 1024)
+    # Upstream dense G32 auto dispatch now uses legacy-compatible v3 at
+    # every matrix size. Keep its scale floor when writing FP32 scales too;
+    # crossing the old 4M-element threshold must not change a group's Q/S.
+    return policy == "v2"
 
 
 @triton.jit
@@ -288,8 +291,8 @@ def quantize_wo_a_g32(
 ):
     """Return logical [M,G,K] and [M,G,K/32], both physically group-major.
 
-    Dispatch policy is per original linear's M*K, never G*M*K. BF16 inverse
-    RoPE is materialized in registers before group absmax/quantization.
+    Match the original dense G32 policy, including the explicit v2 override.
+    BF16 inverse RoPE is materialized before group absmax/quantization.
     """
     if (
         o.ndim not in (3, 4)

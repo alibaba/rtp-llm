@@ -106,11 +106,11 @@ class QuantizationPolicyCPU(unittest.TestCase):
             expected = 0x00400000 if code == 0 else code << 23
             self.assertEqual(bits, expected)
 
-    def test_dispatch_uses_original_per_linear_threshold(self):
+    def test_dispatch_matches_dense_g32_auto_legacy_policy(self):
         for policy in ("legacy", "v2", "auto"):
             with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": policy}):
                 self.assertEqual(fused.use_v2(1023, 4096), policy == "v2")
-                self.assertEqual(fused.use_v2(1024, 4096), policy != "legacy")
+                self.assertEqual(fused.use_v2(1024, 4096), policy == "v2")
                 self.assertEqual(fused.use_v2(0, 4096), policy == "v2")
         with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "invalid"}):
             with self.assertRaises(ValueError):
@@ -124,10 +124,14 @@ class SM90QuantScaleFusedTest(unittest.TestCase):
             self.skipTest("requires SM90")
         torch.manual_seed(241016)
 
-    def _compare(self, x, *, oracle=True):
+    def _compare(self, x, *, oracle=True, reference_policy=None):
         before = x.clone()
         actual = fused.quantize_g32(x)
-        reference = _baseline(x)
+        with patch.dict(
+            os.environ,
+            {} if reference_policy is None else {"DSV4_FP8_QUANT_KERNEL": reference_policy},
+        ):
+            reference = _baseline(x)
         for a, b in zip(actual, reference):
             _bytes_equal(a, b)
         _bytes_equal(x, before)
@@ -205,8 +209,42 @@ class SM90QuantScaleFusedTest(unittest.TestCase):
             with self.subTest(policy=policy), patch.dict(
                 os.environ, {"DSV4_FP8_QUANT_KERNEL": policy}
             ):
-                self._compare(x, oracle=False)
+                # Auto v3 requires finite inputs. Preserve the nonfinite byte
+                # contract against the explicit legacy CUDA implementation,
+                # while finite auto inputs below still exercise upstream v3.
+                self._compare(
+                    x,
+                    oracle=False,
+                    reference_policy="legacy" if policy == "auto" else None,
+                )
                 self._compare(x[:9])
+
+    def test_auto_tiny_groups_do_not_change_across_old_size_threshold(self):
+        values = torch.tensor(
+            [0.0, -0.0, 2**-36, -(2**-36), 2**-100, -(2**-100), 2**-133, 1.0],
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        # A group's input values are identical on either side of the former
+        # 4M-element threshold, including values below the legacy scale floor.
+        small = values.repeat_interleave(32).repeat(16).reshape(1, 4096)
+        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "auto"}):
+            small_q, small_scale = self._compare(small)
+            for rows in (1023, 1024):
+                with self.subTest(rows=rows):
+                    large_q, large_scale = self._compare(small.repeat(rows, 1))
+                    _bytes_equal(large_q, small_q.expand_as(large_q))
+                    _bytes_equal(large_scale, small_scale.expand_as(large_scale))
+                    attention = small.repeat(rows, 1).reshape(rows, 8, 512)
+                    frequencies = torch.ones((1, 32), device="cuda", dtype=torch.complex64)
+                    grouped_q, grouped_scale = fused.quantize_wo_a_g32(
+                        attention, frequencies, n_groups=1, heads_per_group=8
+                    )
+                    expected_q, expected_scale = _baseline(
+                        _inverse_rope(attention, frequencies).reshape(rows, 4096)
+                    )
+                    _bytes_equal(grouped_q[:, 0], expected_q)
+                    _bytes_equal(grouped_scale[:, 0], expected_scale)
 
     def test_unpack_all_exponent_bytes_including_strided_packed_input(self):
         from rtp_llm.models_py.modules.dsv41.sm90_dense import unpack_ue8m0_input_scales
