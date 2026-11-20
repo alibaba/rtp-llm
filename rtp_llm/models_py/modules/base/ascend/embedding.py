@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -20,7 +22,18 @@ class Embedding(nn.Module):
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        input: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+        token_types: Optional[torch.Tensor] = None,
+        text_tokens_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # Qwen-family models have no absolute position/type embedding tables
+        # (positions are applied by RoPE in the attention layers), so the
+        # multimodal-overload arguments are accepted for signature parity with
+        # the common Embedding and ignored; multimodal feature insertion is
+        # handled by MultimodalEmbeddingInjector.
         output = F.embedding(input, self.weight)
         if self.tp_size > 1:
             m, n = output.shape

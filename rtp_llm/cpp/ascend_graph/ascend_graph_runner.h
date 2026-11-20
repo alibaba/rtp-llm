@@ -1,13 +1,15 @@
-// AscendGraphRunner: ACL Graph (c10_npu::NPUGraph) runner for decode phase.
+// AscendGraphRunner: ACL Graph (c10_npu::NPUGraph) runner.
 //
-// Ascend counterpart of CudaGraphRunner: decode-only, reuses the existing
+// Ascend counterpart of CudaGraphRunner, reuses the existing
 // GraphBase/CaptureMemoryHold infrastructure.
 //
 // Key differences from CudaGraphRunner:
 //   * Uses c10_npu::NPUGraph instead of at::cuda::CUDAGraph.
 //   * Uses c10_npu::NPUStream instead of CUDAStream.
 //   * Uses aclrtMemcpyAsync (via tensor copy_) instead of custom fused kernels.
-//   * Prefill graph mode is not supported (ACL Graph is decode-only today).
+//   * Decode-only: every captured graph is a decode-loop forward (plain
+//     decode, target verify, dense draft re-prop); variable-length context
+//     prefill always stays eager.
 
 #pragma once
 
