@@ -164,13 +164,17 @@ bool GroupSet::hasDeviceCoverage(const std::vector<TreeNode*>& path, size_t toke
         return false;
     }
     for (const size_t index : requiredPathIndices(path, token_end)) {
-        const auto& resource = path[index]->group_set_resources[group_set_id_];
-        if (!resource.isMatchUsable() || !resource.hasCompleteDeviceValue()
-            || resource.device_blocks.size() != group_tags_.size()) {
+        if (!hasUsableDeviceResource(*path[index])) {
             return false;
         }
     }
     return true;
+}
+
+bool GroupSet::hasUsableDeviceResource(const TreeNode& node) const {
+    const auto& resource = node.group_set_resources[group_set_id_];
+    return resource.isMatchUsable() && resource.hasCompleteDeviceValue()
+           && resource.device_blocks.size() == group_tags_.size();
 }
 
 bool GroupSet::hasPhysicalCoverage(const std::vector<TreeNode*>& path, size_t token_end) const {

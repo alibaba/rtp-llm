@@ -16,7 +16,6 @@ struct PrefixCacheGroupSaveBinding {
     PrefixCacheSaveState     state{PrefixCacheSaveState::REGISTERED};
     PrefixCacheSaveOwnership ownership{PrefixCacheSaveOwnership::NONE};
     std::string              unfulfilled_reason;
-    std::vector<size_t>       cached_path_indices;  // Indices into registration.cached_path_resources; no per-binding ref.
 };
 
 struct PrefixCacheRegistrationPoint {

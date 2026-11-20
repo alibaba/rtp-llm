@@ -102,7 +102,7 @@ struct GroupSetResource {
 
 // Lower-layer transfer object: owned request references acquired atomically
 // from existing immutable DEVICE histories. The caller must move the pins into
-// request lifetime storage and release them; group paths only refer to indices.
+// request lifetime storage and release them.
 struct CachedPrefixResources {
     struct Pin {
         std::string tag;
@@ -116,7 +116,6 @@ struct CachedPrefixResources {
     struct Group {
         bool ready{false};
         GroupSetResource endpoint_resource;
-        std::vector<size_t> path_indices;
     };
     std::vector<Pin> pins;
     std::vector<PathResource> path_resources;

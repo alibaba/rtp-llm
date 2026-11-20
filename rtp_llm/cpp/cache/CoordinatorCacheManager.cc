@@ -1349,7 +1349,6 @@ void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& reg
             auto& existing = cached.groups[row][binding.group_set_id];
             if (existing.ready) {
                 binding.resource            = std::move(existing.endpoint_resource);
-                binding.cached_path_indices = std::move(existing.path_indices);
                 binding.state               = PrefixCacheSaveState::CACHED_REF;
                 binding.ownership           = PrefixCacheSaveOwnership::CACHED_REQUEST;
                 binding.unfulfilled_reason.clear();
@@ -1546,7 +1545,6 @@ void CoordinatorCacheManager::releaseRegisteredSave(PrefixCacheRegistration& reg
                         {binding.resource.device_blocks[member]});
                 }
             }
-            binding.cached_path_indices.clear();
             if (binding.state == PrefixCacheSaveState::CACHED_REF) {
                 binding.state = PrefixCacheSaveState::REGISTERED;
             }
@@ -1604,7 +1602,6 @@ bool CoordinatorCacheManager::relinquishOptionalRegisteredSave(PrefixCacheRegist
             if (binding.ownership == PrefixCacheSaveOwnership::CACHED_REQUEST
                 || binding.ownership == PrefixCacheSaveOwnership::PINNED_RUNTIME) {
                 binding.resource = {};
-                binding.cached_path_indices.clear();
                 binding.ownership          = PrefixCacheSaveOwnership::NONE;
                 binding.state              = PrefixCacheSaveState::UNFULFILLED;
                 binding.unfulfilled_reason = "runtime_priority";

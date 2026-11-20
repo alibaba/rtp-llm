@@ -136,6 +136,7 @@ public:
     // DEVICE readiness includes actual retained token coverage, not merely a
     // present ID: opaque SWA rings only retain the suffix of their source node.
     bool hasDeviceCoverage(const std::vector<TreeNode*>& path, size_t token_end) const;
+    bool hasUsableDeviceResource(const TreeNode& node) const;
     bool hasPhysicalCoverage(const std::vector<TreeNode*>& path, size_t token_end) const;
     bool hasCanonicalCoverage(size_t count, size_t canonical_size_per_block) const;
     bool hasZeroStateDemand(size_t token_end) const;

@@ -94,7 +94,7 @@ enum class PrefixCacheSaveOwnership : uint8_t {
     NONE = 0,
     REQUIRED_RUNTIME,  // The existing BatchKVCacheResource owns this block's request reference.
     OPTIONAL_REQUEST,  // This registration owns a separate request reference until T04 releases it.
-    CACHED_REQUEST,    // cached_path_indices refer to shared registration-owned cached source pins.
+    CACHED_REQUEST,    // Uses shared registration-owned cached source pins.
     PINNED_RUNTIME,    // Dense SWA runtime value protected by shared registration-owned pins; no snapshot.
 };
 

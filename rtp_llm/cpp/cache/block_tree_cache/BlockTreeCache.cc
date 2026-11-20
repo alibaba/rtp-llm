@@ -271,6 +271,54 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     return resident_prefix_length;
 }
 
+namespace {
+
+std::vector<const TreeNode*> selectRegisteredFullSources(const std::vector<BlockTreeContentRange>& ranges,
+                                                         const std::vector<size_t>&                endpoints,
+                                                         const GroupSet&                           group) {
+    std::set<std::pair<size_t, size_t>> pending;
+    for (size_t row = 0; row < endpoints.size(); ++row) {
+        pending.emplace(endpoints[row], row);
+    }
+    std::vector<const TreeNode*>              selected(endpoints.size(), nullptr);
+    std::unordered_map<const TreeNode*, bool> covered;
+    std::vector<const TreeNode*>              unchecked;
+    // Ranges are already in match priority order. The first covered range
+    // containing a requested endpoint wins even when sibling ranges overlap.
+    for (const auto& range : ranges) {
+        if (pending.empty()) {
+            break;
+        }
+        auto next = pending.lower_bound({range.node->parent->token_end + 1, 0});
+        if (next == pending.end() || next->first > range.matched_end) {
+            continue;
+        }
+        const TreeNode* ancestor = range.node;
+        auto            known    = covered.find(ancestor);
+        while (ancestor->parent != nullptr && known == covered.end()) {
+            unchecked.push_back(ancestor);
+            ancestor = ancestor->parent;
+            known    = covered.find(ancestor);
+        }
+        bool ready = ancestor->parent == nullptr || known->second;
+        for (auto it = unchecked.rbegin(); it != unchecked.rend(); ++it) {
+            ready = ready && group.hasUsableDeviceResource(**it);
+            covered.emplace(*it, ready);
+        }
+        unchecked.clear();
+        if (!ready) {
+            continue;
+        }
+        while (next != pending.end() && next->first <= range.matched_end) {
+            selected[next->second] = range.node;
+            next                   = pending.erase(next);
+        }
+    }
+    return selected;
+}
+
+}  // namespace
+
 CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>& tokens,
                                                            const CacheKeysType& base_keys,
                                                            size_t base_tokens,
@@ -309,49 +357,76 @@ CachedPrefixResources BlockTreeCache::pinRegisteredGroups(const std::vector<int>
             return lhs.matched_end > rhs.matched_end;
         });
     }
+    if (ranges.empty()) {
+        return result;
+    }
     std::map<std::pair<size_t, const TreeNode*>, size_t> path_indices;
     std::set<std::pair<std::string, BlockIdxType>> unique_pins;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> acquisitions;
+    const auto&                                                  groups = tree_->groupSets();
+    std::vector<std::vector<const TreeNode*>>                    full_sources(groups.size());
+    for (size_t id = 0; id < groups.size(); ++id) {
+        if (groups[id]->groupType() == CacheGroupType::FULL && !groups[id]->requiresExactStateEndpoint()) {
+            full_sources[id] = selectRegisteredFullSources(ranges, endpoints, *groups[id]);
+        }
+    }
+    const auto collect_source = [&](size_t id, const TreeNode* source) {
+        if (path_indices.try_emplace({id, source}, result.path_resources.size()).second) {
+            const auto&      value = source->group_set_resources[id];
+            GroupSetResource device_only;
+            device_only.device_blocks = value.device_blocks;
+            result.path_resources.push_back({id, source->token_end, std::move(device_only)});
+            const auto& group = groups[id];
+            for (size_t member = 0; member < group->groupTags().size(); ++member) {
+                const auto& tag   = group->groupTags()[member];
+                const auto  block = value.device_blocks[member];
+                if (unique_pins.emplace(tag, block).second) {
+                    result.pins.push_back({tag, block});
+                    acquisitions.emplace_back(group->devicePools()[member], BlockIndicesType{block});
+                }
+            }
+        }
+    };
     size_t acquired = 0;
     try {
         // Finish descriptor allocation before acquiring references. Incomplete
         // groups contribute no partial pins; complete groups may be retained.
+        std::vector<const TreeNode*> new_ancestors;
         for (size_t row = 0; row < endpoints.size(); ++row) {
             const size_t endpoint = endpoints[row];
-            for (size_t id = 0; id < tree_->groupSets().size(); ++id) {
+            for (size_t id = 0; id < groups.size(); ++id) {
                 auto& output = result.groups[row][id];
-                const auto& group = tree_->groupSets()[id];
+                const auto& group  = groups[id];
+                if (!full_sources[id].empty()) {
+                    const auto* source = full_sources[id][row];
+                    if (source == nullptr) {
+                        continue;
+                    }
+                    for (auto* node = source; node->parent != nullptr && path_indices.count({id, node}) == 0;
+                         node       = node->parent) {
+                        new_ancestors.push_back(node);
+                    }
+                    for (auto it = new_ancestors.rbegin(); it != new_ancestors.rend(); ++it) {
+                        collect_source(id, *it);
+                    }
+                    new_ancestors.clear();
+                    output.ready             = true;
+                    output.endpoint_resource = result.path_resources[path_indices.at({id, source})].resource;
+                    continue;
+                }
                 const auto sources = tree_->coveredDeviceGroupPath(ranges, endpoint, id);
                 if (!sources) {
                     continue;
                 }
                 output.ready = true;
                 for (auto* source : *sources) {
-                    const auto& value = source->group_set_resources[id];
-                    const auto key = std::make_pair(id, static_cast<const TreeNode*>(source));
-                    auto existing = path_indices.find(key);
-                    if (existing == path_indices.end()) {
-                        const size_t entry = result.path_resources.size();
-                        GroupSetResource device_only;
-                        device_only.device_blocks = value.device_blocks;
-                        result.path_resources.push_back({id, source->token_end, std::move(device_only)});
-                        existing = path_indices.emplace(key, entry).first;
-                    }
-                    output.path_indices.push_back(existing->second);
-                    for (size_t member = 0; member < group->groupTags().size(); ++member) {
-                        const auto& tag = group->groupTags()[member];
-                        const auto block = value.device_blocks[member];
-                        if (unique_pins.emplace(tag, block).second) {
-                            result.pins.push_back({tag, block});
-                            acquisitions.push_back({group->devicePools()[member], BlockIndicesType{block}});
-                        }
-                    }
+                    collect_source(id, source);
                 }
                 // A later immutable dense source can alias the same physical
                 // prefix at F. Exact-state groups only resolve a node at F.
                 if (!sources->empty() && (!group->requiresExactStateEndpoint()
                                           || sources->back()->token_end == endpoint)) {
-                    output.endpoint_resource = result.path_resources[output.path_indices.back()].resource;
+                    output.endpoint_resource = result.path_resources[path_indices.at({id, sources->back()})].resource;
                 }
             }
         }

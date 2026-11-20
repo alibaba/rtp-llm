@@ -540,11 +540,15 @@ TEST_F(BlockTreeCacheTest, RegisteredGroupPinsRequireTheSamePhysicalCoverageAsMa
     // P512 needs [129,512), but its sole SWA resource only owns slot1
     // [256,512). An ID must not turn the missing slot0 into CACHED_REF.
     EXPECT_FALSE(registered.groups[0][1].ready);
-    EXPECT_TRUE(registered.groups[0][1].path_indices.empty());
+    EXPECT_FALSE(registered.groups[0][1].endpoint_resource.hasCompleteDeviceValue());
     // P700 needs [317,700), fully covered by slot1 and slot2.
     EXPECT_TRUE(registered.groups[1][0].ready);
     EXPECT_TRUE(registered.groups[1][1].ready);
-    EXPECT_EQ(registered.groups[1][1].path_indices.size(), 2u);
+    EXPECT_EQ(registered.groups[1][1].endpoint_resource.device_blocks, (BlockIndicesType{43}));
+    EXPECT_EQ(std::count_if(registered.path_resources.begin(),
+                            registered.path_resources.end(),
+                            [](const auto& resource) { return resource.group_set_id == 1; }),
+              2);
     EXPECT_EQ(registered.pins.size(), 4u);
     for (const auto& pin : registered.pins) {
         (pin.tag == full->groupTags().front() ? full_pool : swa_pool)->decRef(pin.block);
@@ -595,7 +599,49 @@ TEST_F(BlockTreeCacheTest, RegisteredInternalPointUsesItsExactEndpointKey) {
     const std::vector<PrefixCachePlanPoint> points{{1, 300, 300}};
     auto pinned = cache->pinRegisteredGroups(tokens, base_keys, 256, endpoints, &points);
     ASSERT_TRUE(pinned.groups[0][0].ready);
-    EXPECT_EQ(pinned.groups[0][0].path_indices.size(), 2u);
+    ASSERT_EQ(pinned.path_resources.size(), 2u);
+    EXPECT_EQ(pinned.path_resources[0].endpoint, 256u);
+    EXPECT_EQ(pinned.path_resources[1].endpoint, 300u);
+    EXPECT_EQ(pinned.groups[0][0].endpoint_resource.device_blocks, (BlockIndicesType{43}));
+    for (const auto& pin : pinned.pins) {
+        pool->decRef(pin.block);
+    }
+}
+
+TEST_F(BlockTreeCacheTest, RegisteredFullPathFallsBackFromDetachedLongerRange) {
+    auto pool  = makeStructuralDevicePool(0);
+    auto full  = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool}, nullptr, nullptr);
+    auto cache = makeBlockTreeCacheForTest({full}, {}, nullptr, nullptr, nullptr, 256);
+    for (const auto& [end, block] : {std::pair<size_t, BlockIdxType>{300, 43}, {350, 44}}) {
+        std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+        resources[0][0].device_blocks = {42};
+        resources[1][0].device_blocks = {block};
+        pool->incRef(BlockIndicesType{42, block});
+        const std::vector<std::vector<int>> segments{std::vector<int>(256, 1), std::vector<int>(end - 256, 1)};
+        const std::vector<size_t>           ends{256, end};
+        cache->tree()->insertNode({256, static_cast<CacheKeyType>(end)}, resources, false, false, &segments, &ends);
+        pool->decRef(BlockIndicesType{42, block});
+    }
+    const auto longer_path = cache->tree()->findNode({256, 350});
+    ASSERT_EQ(longer_path.size(), 2u);
+    longer_path.back()->group_set_resources.front().transfer_detached = true;
+    const auto authenticate = [](size_t parent, const std::vector<int>& segment, CacheKeyType key) {
+        return key == static_cast<CacheKeyType>(parent + segment.size());
+    };
+    auto pinned = cache->pinRegisteredGroups(
+        std::vector<int>(325, 1), {256, 300}, 256, {280, 325, 256, 280}, nullptr, authenticate);
+    longer_path.back()->group_set_resources.front().transfer_detached = false;
+    ASSERT_EQ(pinned.groups.size(), 4u);
+    EXPECT_FALSE(pinned.groups[1][0].ready);
+    for (const size_t row : {0u, 2u, 3u}) {
+        EXPECT_TRUE(pinned.groups[row][0].ready);
+        EXPECT_EQ(pinned.groups[row][0].endpoint_resource.device_blocks, (BlockIndicesType{row == 2 ? 42 : 43}));
+    }
+    EXPECT_EQ(pinned.path_resources.size(), 2u);
+    EXPECT_EQ(pinned.pins.size(), 2u);
+    EXPECT_EQ(pool->refCount(42), 2u);
+    EXPECT_EQ(pool->refCount(43), 2u);
+    EXPECT_EQ(pool->refCount(44), 1u);
     for (const auto& pin : pinned.pins) {
         pool->decRef(pin.block);
     }

@@ -1794,13 +1794,13 @@ TEST_F(StreamCacheResourceTest, RegisteredHistoricalGroupsRecordMissingWithoutRe
             EXPECT_TRUE(binding.unfulfilled_reason.empty());
             EXPECT_EQ(binding.ownership, PrefixCacheSaveOwnership::CACHED_REQUEST);
             EXPECT_TRUE(binding.resource.hasCompleteDeviceValue());
-            EXPECT_FALSE(binding.cached_path_indices.empty());
         }
     }
     EXPECT_TRUE(cached.copy_mappings.empty());
     EXPECT_TRUE(cached.source_pins.empty());
     EXPECT_TRUE(cached.content_completed);            // Existing saved content satisfies the registered intent.
-    EXPECT_EQ(cached.cached_source_pins.size(), 3u);  // Shared across the FULL prefixes 2/4/5.
+    EXPECT_EQ(cached.cached_source_pins.size(), 3u);
+    EXPECT_EQ(cached.cached_path_resources.size(), 3u);
     EXPECT_EQ(pool->freeBlocksNum(), cached_free);
     cache_manager_->releaseRegisteredSave(cached);
     stream_->releaseResource();
@@ -1898,7 +1898,14 @@ TEST_F(StreamCacheResourceTest, CachedRegistrationPinsSwaHistoryAndYieldsToRunti
                     EXPECT_EQ(binding.unfulfilled_reason, missing_history ? "missing_history_before_resume" : "");
                 }
                 const auto& swa_tail = probe.points.back().group_bindings[swa_id];
-                ASSERT_EQ(swa_tail.cached_path_indices.size(), 2u);  // Previous and current SWA physical nodes.
+                EXPECT_EQ(swa_tail.resource.device_blocks, (BlockIndicesType{swa_blocks->back()}));
+                for (const size_t index : {2u, 3u}) {
+                    EXPECT_TRUE(std::any_of(
+                        probe.cached_path_resources.begin(), probe.cached_path_resources.end(), [&](const auto& path) {
+                            return path.group_set_id == swa_id && path.endpoint == endpoints[index]
+                                   && path.resource.device_blocks == BlockIndicesType{(*swa_blocks)[index]};
+                        }));
+                }
                 for (const auto& pin : probe.cached_source_pins) {
                     const auto pool = pin.tag == "full" ? full_pool : swa_pool;
                     EXPECT_EQ(pool->refCount(pin.block), 2u);  // One tree + one request ref, even across points.
