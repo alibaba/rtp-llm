@@ -236,6 +236,13 @@ class ModelWeightInfo:
 
 class ModelDeployWeightInfo:
 
+    # Environment variables read directly by this model's code that change how its weights are
+    # processed (for example the MoE strategy transforming them in initialize()). Resident weights
+    # put their values into the fingerprint. Config fields count only when
+    # BaseModel._resident_fingerprint lists them; to_string() omits Python-only fields.
+    # MOE_MEGA_SHARED_EXPERT: the fused-MoE factory then fuses the shared expert into MegaMoE.
+    resident_weights_env_vars: Tuple[str, ...] = ("MOE_MEGA_SHARED_EXPERT",)
+
     TRT_ENGINE_LAYER_WEIGHT_MAP = {
         W.pre_ln_beta: "transformer.layers.{i}.input_layernorm.bias",
         W.pre_ln_gamma: "transformer.layers.{i}.input_layernorm.weight",
@@ -959,12 +966,9 @@ class ModelDeployWeightInfo:
 class ModelWeights:
     def __init__(self, num_layers: int, device: str, dtype: torch.dtype):
         self.device = device
-        self.weights: List[Dict[str, torch.Tensor]] = []
+        self.weights: List[Dict[str, torch.Tensor]] = [{} for _ in range(num_layers)]
         self.global_weights: Dict[str, torch.Tensor] = {}
         self._dtype = dtype
-
-        for _ in range(num_layers):
-            self.weights.append({})
 
     def set_layer_weight(self, layer_id: int, name: str, tensor: torch.Tensor):
         self.weights[layer_id][name] = tensor

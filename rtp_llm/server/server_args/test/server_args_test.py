@@ -2276,5 +2276,142 @@ class BatchRecordArgsTest(TestCase):
                 self.assertEqual(config.record_decode_sample_rate, float(good))
 
 
+class ResidentWeightsArgsTest(TestCase):
+    """--resident_weights_mode / --verify_resident_weights bind to the nested
+    ResidentWeightsConfig, not to LoadConfig itself."""
+
+    def parse_load_config(self, args, env):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.load_group_args import init_load_group_args
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        cfgs = PyEnvConfigs()
+        parser = EnvArgumentParser()
+        parser.set_root_config(cfgs)
+        init_load_group_args(parser, cfgs.load_config, cfgs.model_args)
+        with patch.dict(os.environ, env, clear=True):
+            parser.parse_args(args)
+        return cfgs.load_config
+
+    def test_defaults_keep_the_feature_off(self):
+        resident = self.parse_load_config([], {}).resident_weights_config
+        self.assertEqual(resident.mode, "none")
+        self.assertFalse(resident.enable)
+        self.assertFalse(resident.verify)
+        self.assertEqual(resident.role, "target")
+
+    def test_cli_sets_the_nested_fields(self):
+        for mode in ("dev", "prod"):
+            with self.subTest(mode=mode):
+                resident = self.parse_load_config(
+                    [
+                        "--resident_weights_mode",
+                        mode,
+                        "--verify_resident_weights",
+                        "true",
+                    ],
+                    {},
+                ).resident_weights_config
+                self.assertEqual(resident.mode, mode)
+                self.assertTrue(resident.enable)
+                self.assertTrue(resident.verify)
+
+    def test_env_sets_the_nested_fields(self):
+        resident = self.parse_load_config(
+            [],
+            {
+                "RESIDENT_WEIGHTS_MODE": "prod",
+                "VERIFY_RESIDENT_WEIGHTS": "true",
+            },
+        ).resident_weights_config
+        self.assertEqual(resident.mode, "prod")
+        self.assertTrue(resident.verify)
+
+    def test_an_unknown_mode_is_rejected(self):
+        with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(SystemExit):
+                self.parse_load_config(["--resident_weights_mode", "true"], {})
+            self.assertIn("--resident_weights_mode", stderr.getvalue())
+
+    def test_the_old_flag_names_are_gone(self):
+        """Retired names must fail, not resolve to an abbreviation of another flag.
+
+        This is why the verify switch is --verify_resident_weights: with a
+        --resident_weights_verify spelling, argparse accepts the retired
+        --resident_weights as its unambiguous prefix and silently turns verify on.
+        """
+        for flag in ("--resident_weights", "--enable_resident_weights"):
+            with self.subTest(flag=flag):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    with self.assertRaises(SystemExit):
+                        self.parse_load_config([flag, "true"], {})
+                    self.assertIn(flag, stderr.getvalue())
+
+    def test_to_string_reports_every_field(self):
+        load_config = self.parse_load_config(["--resident_weights_mode", "dev"], {})
+        text = load_config.to_string()
+        self.assertIn("resident_weights_mode: dev", text)
+        self.assertIn("resident_weights_verify: False", text)
+        self.assertIn("resident_weights_role: target", text)
+
+    def test_with_role_leaves_the_original_alone(self):
+        resident = self.parse_load_config(
+            ["--resident_weights_mode", "dev"], {}
+        ).resident_weights_config
+        draft = resident.with_role("draft")
+        self.assertEqual(draft.role, "draft")
+        self.assertEqual(draft.mode, "dev")
+        self.assertEqual(resident.role, "target")
+
+    def test_idle_timers_and_host_reserve_defaults_and_validation(self):
+        dev = self.parse_load_config(
+            ["--resident_weights_mode", "dev"], {}
+        ).resident_weights_config
+        self.assertEqual(dev.store_timers(), (600.0, 3600.0))
+        self.assertEqual(dev.store_host_reserve(), (0.2, 0.0))
+
+        prod = self.parse_load_config(
+            ["--resident_weights_mode", "prod"], {}
+        ).resident_weights_config
+        self.assertEqual(prod.store_timers(), (-1.0, -1.0))
+
+        disabled = self.parse_load_config(
+            [],
+            {
+                "RESIDENT_WEIGHTS_MODE": "dev",
+                "RESIDENT_WEIGHTS_OFFLOAD_AFTER_S": "-1",
+                "RESIDENT_WEIGHTS_IDLE_TTL_S": "-1",
+                "RESIDENT_WEIGHTS_OFFLOAD_HOST_RESERVE_RATIO": "0.15",
+                "RESIDENT_WEIGHTS_OFFLOAD_HOST_RESERVE_MIN_GB": "32",
+            },
+        ).resident_weights_config
+        self.assertEqual(disabled.store_timers(), (-1.0, -1.0))
+        self.assertEqual(disabled.store_host_reserve(), (0.15, 32.0))
+
+        for bad in ("0", "-2"):
+            with self.subTest(bad=bad):
+                cfg = self.parse_load_config(
+                    [
+                        "--resident_weights_mode",
+                        "dev",
+                        "--resident_weights_offload_after_s",
+                        bad,
+                    ],
+                    {},
+                ).resident_weights_config
+                with self.assertRaises(ValueError):
+                    cfg.store_timers()
+        bad_ratio = self.parse_load_config(
+            ["--resident_weights_offload_host_reserve_ratio", "1.0"], {}
+        ).resident_weights_config
+        with self.assertRaises(ValueError):
+            bad_ratio.store_host_reserve()
+        bad_min_gb = self.parse_load_config(
+            ["--resident_weights_offload_host_reserve_min_gb", "-1"], {}
+        ).resident_weights_config
+        with self.assertRaises(ValueError):
+            bad_min_gb.store_host_reserve()
+
+
 if __name__ == "__main__":
     main()

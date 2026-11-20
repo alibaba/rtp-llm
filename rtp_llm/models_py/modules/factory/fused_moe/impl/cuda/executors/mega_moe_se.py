@@ -30,6 +30,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_buffer import
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
     stage_shared_fp8_input_scales,
 )
+from rtp_llm.resident_weights import resident_init_tensors
 from rtp_llm.utils.model_weight import W
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase
@@ -82,18 +83,38 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     def setup_weights(self, layer_weights):
         if self._prepared_policy is not None:
             return super().setup_weights(layer_weights)
-        from rtp_llm.utils.model_weight import W
-
         super().setup_weights(layer_weights)
-        self.setup_shared_expert_from_fp8(
-            layer_weights.pop(W.ffn_w13),
-            layer_weights.pop(W.ffn_s13),
-            layer_weights.pop(W.ffn_w2),
-            layer_weights.pop(W.ffn_s2),
-        )
+        # The loader's dict itself, so a resident restart replays the shared transform too.
+        self._setup_shared_expert(layer_weights)
         self.maybe_warmup_fused_shared_jit_once()
 
     def _setup_shared_expert_weights(self, layer_weights, deep_gemm, D, inter):
+        cfg = self.cfg
+        group = (
+            f"fp8_fp4.mega_moe_se.shared:e{cfg.n_shared_experts}:d{D}"
+            f":i{inter}:b{cfg.shared_fp8_block_size}"
+        )
+        (
+            self._shared_l1_w,
+            self._shared_l1_sf,
+            self._shared_l2_w,
+            self._shared_l2_sf,
+        ) = resident_init_tensors(
+            layer_weights,
+            transform_key=group,
+            output_names=(
+                f"{group}.l1_w",
+                f"{group}.l1_sf",
+                f"{group}.l2_w",
+                f"{group}.l2_sf",
+            ),
+            consumed_names=(W.ffn_w13, W.ffn_s13, W.ffn_w2, W.ffn_s2),
+            builder=lambda: self._build_shared_expert_weights(
+                layer_weights, deep_gemm, D, inter
+            ),
+        )
+
+    def _build_shared_expert_weights(self, layer_weights, deep_gemm, D, inter):
         w13_fp8 = layer_weights.pop(W.ffn_w13)
         w13_scale = layer_weights.pop(W.ffn_s13)
         w2_fp8 = layer_weights.pop(W.ffn_w2)
@@ -133,10 +154,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         )
         del w13_fp8, w13_sf_int, w2_fp8, w2_sf_int
         torch.cuda.empty_cache()
-        self._shared_l1_w = se_l1_w
-        self._shared_l1_sf = se_l1_sf
-        self._shared_l2_w = se_l2_w
-        self._shared_l2_sf = se_l2_sf
+        return se_l1_w, se_l1_sf, se_l2_w, se_l2_sf
 
     @staticmethod
     def _shared_expert_sf_to_int(deep_gemm, scale, mn, k, block_size):
@@ -177,6 +195,11 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     def setup_shared_expert_from_fp8(self, w1_w, w1_s, w2_w, w2_s):
         if self._prepared_policy is not None:
             return super().setup_shared_expert_from_fp8(w1_w, w1_s, w2_w, w2_s)
+        self._setup_shared_expert(
+            {W.ffn_w13: w1_w, W.ffn_s13: w1_s, W.ffn_w2: w2_w, W.ffn_s2: w2_s}
+        )
+
+    def _setup_shared_expert(self, layer_weights):
         import deep_gemm
 
         inter = _mega_intermediate_size(self.cfg)
@@ -184,12 +207,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
             raise RuntimeError(
                 "MegaMoE-SE does not support padded routed intermediate sizes"
             )
-        self._setup_shared_expert_weights(
-            {W.ffn_w13: w1_w, W.ffn_s13: w1_s, W.ffn_w2: w2_w, W.ffn_s2: w2_s},
-            deep_gemm,
-            self.cfg.dim,
-            inter,
-        )
+        self._setup_shared_expert_weights(layer_weights, deep_gemm, self.cfg.dim, inter)
         self._num_shared_experts = self.cfg.n_shared_experts
         self._setup_buffer_and_warmup()
 
