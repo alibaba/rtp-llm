@@ -4,6 +4,7 @@ load("@rules_python//python:pip.bzl", "compile_pip_requirements")
 load(":pip.bzl", "PIP_EXTRA_ARGS")
 exports_files([
     "http.bzl",
+    "pip.bzl",
     "requirements_base.txt",
     "requirements_lock_rocm.txt",
     "requirements_rocm.txt",
@@ -125,4 +126,19 @@ compile_pip_requirements(
     extra_data = ["//:requirements_base.txt"],
     requirements_txt = "requirements_lock_rocm.txt",
     tags = ["manual"],
+)
+
+# Standalone CPU validation of both dependency-repository annotations.
+py_test(
+    name = "cutlass_sm90_annotations_test",
+    srcs = ["cutlass_sm90_annotations_test.py"],
+    data = [
+        ":pip.bzl",
+        "@rtp_deps//:pip.bzl",
+        "@rtp_llm//patches/cutlass:0001-bazel-split-package-paths.patch",
+        "@rtp_llm//patches/cutlass:0002-bazel-toolkit-library-paths.patch",
+        "@rtp_llm//patches/cutlass:0003-sm90-481-split-package-paths.patch",
+        "@rtp_llm//patches/cutlass:0004-sm90-481-toolkit-library-paths.patch",
+    ],
+    env = {"GPU_COUNT": "0", "WORLD_SIZE": "1"},
 )

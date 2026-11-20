@@ -69,6 +69,26 @@ CUDA13_ANNOTATIONS["flash-attn-4"] = package_annotation(
     },
 )
 
+# Hopper uses a separate 4.8.1 wheel closure. Keep default/ARM 4.7.1
+# annotations unchanged, including their exact wheel allowlists.
+CUDA13_SM90_ANNOTATIONS = dict(CUDA13_ANNOTATIONS)
+CUDA13_SM90_ANNOTATIONS["nvidia-cutlass-dsl-libs-core"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/cutlass:0003-sm90-481-split-package-paths.patch": json.encode({
+            "whls": ["nvidia_cutlass_dsl_libs_core-4.8.1-py3-none-any.whl"],
+            "patch_strip": 1,
+        }),
+    },
+)
+CUDA13_SM90_ANNOTATIONS["nvidia-cutlass-dsl-libs-base"] = package_annotation(
+    whl_patches = {
+        "@rtp_llm//patches/cutlass:0004-sm90-481-toolkit-library-paths.patch": json.encode({
+            "whls": ["nvidia_cutlass_dsl_libs_base-4.8.1-cp310-cp310-manylinux_2_28_x86_64.whl"],
+            "patch_strip": 1,
+        }),
+    },
+)
+
 def pip_deps():
     pip_parse(
         name = "pip_cpu_torch",
@@ -127,7 +147,7 @@ def pip_deps():
     # upstream pip_gpu_cuda13_torch closure with Hopper packages.
     pip_parse(
         name = "pip_gpu_cuda13_sm90_torch",
-        annotations = CUDA13_ANNOTATIONS,
+        annotations = CUDA13_SM90_ANNOTATIONS,
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda13_sm90.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = [arg for arg in PIP_EXTRA_ARGS if not arg.startswith("--cache-dir=")] + ["--quiet"],
