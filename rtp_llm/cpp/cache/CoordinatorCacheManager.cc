@@ -1727,13 +1727,31 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
     RTP_LLM_CHECK_WITH_INFO(unit > 0 && base > 0 && unit % base == 0, "invalid registered save key geometry");
     const auto& group_sets         = block_tree_cache_->groupSets();
     size_t      completed_endpoint = registration.prepared_resume_endpoint;
+    std::unordered_map<size_t, const PrefixCacheRegistrationPoint*> points_by_endpoint;
+    points_by_endpoint.reserve(registration.points.size());
+    const PrefixCacheRegistrationPoint* fork = nullptr;
     for (const auto& point : registration.points) {
+        points_by_endpoint.try_emplace(point.endpoint.pos, &point);
+        if (fork == nullptr && point.internal_only) {
+            fork = &point;
+        }
         if (std::any_of(point.group_bindings.begin(), point.group_bindings.end(), [](const auto& binding) {
                 return binding.state == PrefixCacheSaveState::CONTENT_COMPLETE;
             })) {
             completed_endpoint = std::max(completed_endpoint, point.endpoint.pos);
         }
     }
+    const auto index_resources = [&](const auto& entries) {
+        std::vector<std::unordered_map<size_t, const GroupSetResource*>> by_group(group_sets.size());
+        for (const auto& entry : entries) {
+            if (entry.group_set_id < by_group.size()) {
+                by_group[entry.group_set_id].try_emplace(entry.endpoint, &entry.resource);
+            }
+        }
+        return by_group;
+    };
+    const auto                                 cached_by_group  = index_resources(registration.cached_path_resources);
+    const auto                                 runtime_by_group = index_resources(registration.runtime_path_resources);
     CacheKeysType                              keys;
     std::vector<size_t>                        token_ends;
     std::vector<std::vector<int>>              token_segments;
@@ -1745,13 +1763,11 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
         if (key_index >= registration.base_keys.size() || endpoint > registration.token_ids.size()) {
             break;
         }
-        const auto point_it = std::find_if(registration.points.begin(),
-                                           registration.points.end(),
-                                           [endpoint](const auto& point) { return point.endpoint.pos == endpoint; });
+        const auto  point_it = points_by_endpoint.find(endpoint);
+        const auto* point    = point_it == points_by_endpoint.end() ? nullptr : point_it->second;
         // A noncanonical N belongs to the tail policy only. Internal-only
         // recovery appends its distinct F point after the original plan.
-        if (endpoint == registration.original_input_tokens && endpoint % unit != 0
-            && point_it == registration.points.end()) {
+        if (endpoint == registration.original_input_tokens && endpoint % unit != 0 && point == nullptr) {
             break;
         }
         std::vector<GroupSetResource> per_group(group_sets.size());
@@ -1762,27 +1778,20 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
                 full_ready = false;
                 break;
             }
-            const auto cached = std::find_if(
-                registration.cached_path_resources.begin(),
-                registration.cached_path_resources.end(),
-                [&](const auto& entry) { return entry.group_set_id == group_set_id && entry.endpoint == endpoint; });
-            if (cached != registration.cached_path_resources.end()) {
-                per_group[group_set_id] = cached->resource;
-            } else if (point_it != registration.points.end() && !point_it->internal_only
-                       && endpoint > registration.prepared_resume_endpoint) {
-                const auto& binding = point_it->group_bindings[group_set_id];
+            const auto& cached_resources = cached_by_group[group_set_id];
+            const auto  cached           = cached_resources.find(endpoint);
+            if (cached != cached_resources.end()) {
+                per_group[group_set_id] = *cached->second;
+            } else if (point != nullptr && !point->internal_only && endpoint > registration.prepared_resume_endpoint) {
+                const auto& binding = point->group_bindings[group_set_id];
                 if (binding.group_set_id == group_set_id && binding.state == PrefixCacheSaveState::CONTENT_COMPLETE) {
                     per_group[group_set_id] = binding.resource;
                 }
             } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::SWA) {
-                const auto saved =
-                    std::find_if(registration.runtime_path_resources.begin(),
-                                 registration.runtime_path_resources.end(),
-                                 [&](const auto& entry) {
-                                     return entry.group_set_id == group_set_id && entry.endpoint == endpoint;
-                                 });
-                if (saved != registration.runtime_path_resources.end()) {
-                    per_group[group_set_id] = saved->resource;
+                const auto& runtime_resources = runtime_by_group[group_set_id];
+                const auto  saved             = runtime_resources.find(endpoint);
+                if (saved != runtime_resources.end()) {
+                    per_group[group_set_id] = *saved->second;
                 }
             } else if (endpoint <= completed_endpoint && group_set->groupType() == CacheGroupType::FULL) {
                 auto& blocks = per_group[group_set_id].device_blocks;
@@ -1827,32 +1836,30 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
         block_tree_cache_->observePublicationSkipped(
             insert_info.observation_request_id, insert_info.target_tier, "no_publishable_full_prefix");
     }
-    const auto fork_it = std::find_if(
-        registration.points.begin(), registration.points.end(), [](const auto& point) { return point.internal_only; });
-    if (fork_it != registration.points.end() && fork_it->endpoint.pos > registration.prepared_resume_endpoint
-        && fork_it->endpoint.pos <= completed_endpoint) {
+    if (fork != nullptr && fork->endpoint.pos > registration.prepared_resume_endpoint
+        && fork->endpoint.pos <= completed_endpoint) {
         CacheKeysType                              fork_keys;
         std::vector<size_t>                        fork_ends;
         std::vector<std::vector<int>>              fork_segments;
         std::vector<std::vector<GroupSetResource>> fork_resources;
         size_t                                     previous_fork_end = 0;
         bool                                       ancestors_ready   = true;
-        for (size_t index = 0; index < token_ends.size() && token_ends[index] < fork_it->endpoint.pos; ++index) {
+        for (size_t index = 0; index < token_ends.size() && token_ends[index] < fork->endpoint.pos; ++index) {
             fork_keys.push_back(keys[index]);
             fork_ends.push_back(token_ends[index]);
             fork_segments.push_back(token_segments[index]);
             fork_resources.emplace_back(group_sets.size());  // Retained ancestors already own their blocks.
             previous_fork_end = token_ends[index];
         }
-        const size_t required_ancestor = (fork_it->endpoint.pos - 1) / unit;
+        const size_t required_ancestor = (fork->endpoint.pos - 1) / unit;
         ancestors_ready                = fork_ends.size() == required_ancestor;
         std::vector<GroupSetResource> fork_group_resources(group_sets.size());
         for (size_t group_id = 0; group_id < group_sets.size() && ancestors_ready; ++group_id) {
-            if (group_id >= fork_it->group_bindings.size()) {
+            if (group_id >= fork->group_bindings.size()) {
                 ancestors_ready = false;
                 break;
             }
-            const auto& binding = fork_it->group_bindings[group_id];
+            const auto& binding = fork->group_bindings[group_id];
             if (binding.group_set_id != group_id
                 || (binding.state != PrefixCacheSaveState::CONTENT_COMPLETE
                     && binding.state != PrefixCacheSaveState::CACHED_REF)) {
@@ -1863,12 +1870,12 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
                 fork_group_resources[group_id] = binding.resource;
             }
         }
-        if (ancestors_ready && fork_it->endpoint.pos <= registration.token_ids.size()) {
-            fork_keys.push_back(fork_it->endpoint.key);
-            fork_ends.push_back(fork_it->endpoint.pos);
+        if (ancestors_ready && fork->endpoint.pos <= registration.token_ids.size()) {
+            fork_keys.push_back(fork->endpoint.key);
+            fork_ends.push_back(fork->endpoint.pos);
             fork_segments.emplace_back(registration.token_ids.begin() + static_cast<std::ptrdiff_t>(previous_fork_end),
                                        registration.token_ids.begin()
-                                           + static_cast<std::ptrdiff_t>(fork_it->endpoint.pos));
+                                           + static_cast<std::ptrdiff_t>(fork->endpoint.pos));
             fork_resources.push_back(std::move(fork_group_resources));
             block_tree_cache_->insert(fork_keys,
                                       fork_resources,
@@ -1883,7 +1890,7 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
             block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id,
                                                          Tier::DEVICE,
                                                          "internal_fork_missing_ancestor_or_group",
-                                                         fork_it->endpoint.pos);
+                                                         fork->endpoint.pos);
         }
     }
 }

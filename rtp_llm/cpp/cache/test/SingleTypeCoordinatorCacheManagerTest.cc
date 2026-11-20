@@ -2,6 +2,9 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
+#include <fstream>
+#include <iostream>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -1348,6 +1351,137 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseSwaPinsPreserveUnregisteredWi
         EXPECT_EQ(matched.reuse_len, missing_window_slot ? 4u : 7u);
         allocator_->free(FreeInfo{query_resource, query_tokens});
         allocator_->free(FreeInfo{runtime, tokens});
+        allocator_.reset();
+    }
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, RegisteredPublicationKeepsFirstResourceAndPoint) {
+    const auto config = makeSimpleMhaCacheConfig(1, 12, 4, DataType::TYPE_FP16, 1, 1);
+    allocator_        = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+    ASSERT_TRUE(allocator_->init());
+    const auto cache  = allocator_->blockTreeCacheOwner();
+    const auto pool   = allocator_->groupBlockPools().front();
+    const auto blocks = pool->malloc(4);
+    ASSERT_TRUE(blocks.has_value());
+    pool->incRef(*blocks);
+
+    PrefixCacheRegistration registration;
+    registration.original_input_tokens = 8;
+    registration.token_ids.assign(8, 1);
+    registration.base_keys                = {4, 8};
+    registration.prepared                 = true;
+    registration.prepared_resume_endpoint = 4;
+    registration.content_completed        = true;
+    for (size_t index : {0u, 2u}) {
+        GroupSetResource resource;
+        resource.device_blocks = {(*blocks)[index]};
+        registration.cached_path_resources.push_back({0, 4, std::move(resource)});
+    }
+    for (size_t index : {1u, 3u}) {
+        PrefixCacheRegistrationPoint point;
+        point.endpoint                 = {1, 8, 8};
+        auto& binding                  = point.group_bindings.emplace_back();
+        binding.resource.device_blocks = {(*blocks)[index]};
+        binding.state                  = PrefixCacheSaveState::CONTENT_COMPLETE;
+        registration.points.push_back(std::move(point));
+    }
+
+    InsertInfo insert{createBatchKVCacheResource(1, config), nullptr, false, Tier::DEVICE};
+    insert.prefix_cache_registration = &registration;
+    size_t resident                  = 0;
+    allocator_->insertIntoCache(insert, resident);
+    const auto found = cache->tree()->findNode(registration.base_keys);
+    ASSERT_EQ(found.size(), 2u);
+    EXPECT_EQ(found[0]->group_set_resources[0].device_blocks, (BlockIndicesType{(*blocks)[0]}));
+    EXPECT_EQ(found[1]->group_set_resources[0].device_blocks, (BlockIndicesType{(*blocks)[1]}));
+    pool->decRef(*blocks);
+    EXPECT_FALSE(pool->isAllocated((*blocks)[2]));
+    EXPECT_FALSE(pool->isAllocated((*blocks)[3]));
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, RegisteredFullCheckpointsScale) {
+    const auto threadCpuUs = [] {
+        timespec time{};
+        EXPECT_EQ(::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time), 0);
+        return time.tv_sec * 1000000LL + time.tv_nsec / 1000;
+    };
+    const auto residentBytes = [] {
+        std::ifstream stats("/proc/self/statm");
+        long long     pages = 0;
+        stats >> pages >> pages;
+        EXPECT_TRUE(stats);
+        return pages * ::sysconf(_SC_PAGESIZE);
+    };
+    constexpr size_t unit = 4;
+    for (const size_t checkpoints : {256u, 1024u, 4096u}) {
+        SCOPED_TRACE(checkpoints);
+        auto config = makeSimpleMhaCacheConfig(1, 2 * checkpoints, unit, DataType::TYPE_FP16, 1, 1);
+        allocator_  = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
+        ASSERT_TRUE(allocator_->init());
+        const auto cache = allocator_->blockTreeCacheOwner();
+        const auto pool  = allocator_->groupBlockPools().front();
+        const auto seed  = pool->malloc(checkpoints - 1);
+        ASSERT_TRUE(seed.has_value());
+        pool->incRef(*seed);
+
+        PrefixCacheRegistration registration;
+        registration.original_input_tokens       = checkpoints * unit;
+        registration.token_ids                   = std::vector<int>(registration.original_input_tokens, 1);
+        registration.required_continuation_ready = true;
+        std::vector<size_t> ends;
+        for (size_t index = 0; index < checkpoints; ++index) {
+            const size_t end = (index + 1) * unit;
+            ends.push_back(end);
+            registration.base_keys.push_back(end);
+            registration.points.push_back({{index, static_cast<CacheKeyType>(end), end}, {{}}});
+        }
+        CacheKeysType seed_keys = registration.base_keys;
+        seed_keys.pop_back();
+        ends.pop_back();
+        std::vector<std::vector<int>>              segments(ends.size(), std::vector<int>(unit, 1));
+        std::vector<std::vector<GroupSetResource>> resources(ends.size(), std::vector<GroupSetResource>(1));
+        for (size_t index = 0; index < ends.size(); ++index) {
+            resources[index][0].device_blocks = {(*seed)[index]};
+        }
+        cache->tree()->insertNode(seed_keys, resources, false, false, &segments, &ends);
+        pool->decRef(*seed);
+        ASSERT_EQ(cache->tree()->size(), checkpoints - 1);
+        std::reverse(registration.points.begin(), registration.points.end());
+
+        auto       runtime       = createBatchKVCacheResource(1, config);
+        const auto rss_before    = residentBytes();
+        const auto prepare_start = threadCpuUs();
+        allocator_->prepareRegisteredSave(registration, *runtime, ends.back());
+        const auto prepare_us        = threadCpuUs() - prepare_start;
+        const auto prepare_rss_bytes = residentBytes() - rss_before;
+
+        ASSERT_EQ(registration.cached_source_pins.size(), checkpoints - 1);
+        ASSERT_EQ(registration.cached_path_resources.size(), checkpoints - 1);
+        for (size_t index = 1; index < checkpoints; ++index) {
+            const auto& binding = registration.points[index].group_bindings.front();
+            const auto  block   = (*seed)[checkpoints - index - 1];
+            ASSERT_EQ(binding.state, PrefixCacheSaveState::CACHED_REF);
+            ASSERT_EQ(binding.resource.device_blocks, (BlockIndicesType{block}));
+            ASSERT_EQ(pool->refCount(block), 2u);
+        }
+        auto& last = registration.points.front().group_bindings.front();
+        ASSERT_EQ(last.ownership, PrefixCacheSaveOwnership::OPTIONAL_REQUEST);
+        last.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+        InsertInfo insert{runtime, nullptr, false, Tier::DEVICE};
+        insert.prefix_cache_registration = &registration;
+        size_t     resident              = 0;
+        const auto publish_start         = threadCpuUs();
+        allocator_->insertIntoCache(insert, resident);
+        const auto publish_us = threadCpuUs() - publish_start;
+        const auto found      = cache->tree()->findNode(registration.base_keys);
+        ASSERT_EQ(found.size(), checkpoints);
+        EXPECT_EQ(found.back()->group_set_resources.front().device_blocks, last.resource.device_blocks);
+        allocator_->releaseRegisteredSave(registration);
+        for (const auto block : *seed) {
+            ASSERT_EQ(pool->refCount(block), 1u);
+        }
+        std::cout << "registered_full checkpoints=" << checkpoints << " prepare_cpu_us=" << prepare_us
+                  << " prepare_rss_delta_bytes=" << prepare_rss_bytes << " publish_cpu_us=" << publish_us << '\n';
         allocator_.reset();
     }
 }
