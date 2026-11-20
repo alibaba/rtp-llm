@@ -201,6 +201,8 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
     def test_native_request_readiness_audit_records_transitions_only(self):
         observer = SimpleNamespace(
             _native_request_state_audit_enabled=True,
+            _pp_capacity_unified=False,
+            _native_v6d_request_audit=lambda request: {},
             _native_request_states={},
             on_request_lifecycle_event=mock.Mock(),
             _native_cache_lookup_complete=self.function("_native_cache_lookup_complete"),
@@ -249,6 +251,8 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
                                   num_computed_tokens=0, num_cached_tokens=-1)
         observer = SimpleNamespace(
             _native_request_state_audit_enabled=True,
+            _pp_capacity_unified=False,
+            _native_v6d_request_audit=lambda request: {},
             _native_request_states={"removed": ("waiting", "WAITING", False)},
             _workload_contributions={},
             on_request_lifecycle_event=mock.Mock(),
