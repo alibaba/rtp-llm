@@ -10,6 +10,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     qsa_strict_validation_enabled,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    graph_decode_visible_lengths,
     host_input_mirror,
     prefill_mirror_facts,
     prefill_step_plan_hit,
@@ -111,7 +112,15 @@ def _prepare_paged_inputs(
         lengths_mirror = lengths_source
     cached = getattr(self, "_qsa_target_visible_lengths", None)
     self._qsa_target_visible_lengths = None
-    if graph_paged and self.is_target_verify and cached is not None:
+    if graph_paged and not self.is_target_verify:
+        if query_len != 1:
+            raise RuntimeError(
+                "QSA ordinary decode Graph requires one query per request"
+            )
+        kv_lens = graph_decode_visible_lengths(
+            self.attn_inputs, batch, qkv.device
+        ).view(batch, 1)
+    elif graph_paged and self.is_target_verify and cached is not None:
         owner_inputs, owner_tokens, kv_lens = cached
         if not (
             owner_inputs is self.attn_inputs

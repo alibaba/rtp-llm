@@ -1,4 +1,5 @@
 import unittest
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions_triton impor
     try_prepare_decode_positions,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+    build_base_rope,
     build_interleaved_mrope,
     cached_inv_freq,
 )
@@ -32,11 +34,17 @@ class QSAFusedDecodeTest(unittest.TestCase):
         )
         self.frequency = cached_inv_freq(self.config, "cuda")
 
-    def reference(self, seq, positions):
+    def reference(self, seq, positions, config=None):
+        config = self.config if config is None else config
         kwargs = dict(token_count=seq.numel(), dtype=torch.bfloat16, device=seq.device)
-        cc, cs = build_interleaved_mrope(positions, self.config, **kwargs)
-        block = positions.long().view(-1, 3) - seq.remainder(4)[:, None]
-        bc, bs = build_interleaved_mrope(block.flatten(), self.config, **kwargs)
+        if config.style == RopeStyle.Mrope:
+            builder = build_interleaved_mrope
+            block = positions.long().view(-1, 3) - seq.remainder(4)[:, None]
+        else:
+            builder = build_base_rope
+            block = (seq - seq.remainder(4))[:, None].expand(-1, config.index_factor)
+        cc, cs = builder(positions, config, **kwargs)
+        bc, bs = builder(block.flatten(), config, **kwargs)
         visible = seq + 1
         return cc, cs, bc, bs, visible, visible // 4
 
@@ -104,6 +112,58 @@ class QSAFusedDecodeTest(unittest.TestCase):
             )
         )
 
+    def test_draft_base_rope_keeps_transport_and_cache_positions_distinct(self):
+        for batch in (1, 2, 16, 32, 64):
+            for factor in (1, 3):
+                config = SimpleNamespace(
+                    style=RopeStyle.Base,
+                    index_factor=factor,
+                    dim=64,
+                    indexer_is_neox_style=True,
+                    base=10000000.0,
+                    scale=2.0,
+                )
+                frequency = cached_inv_freq(config, "cuda")
+                seq = torch.zeros(batch, dtype=torch.int32, device="cuda")
+                positions = torch.zeros(
+                    batch * factor, dtype=torch.int32, device="cuda"
+                )
+
+                def prepare():
+                    result = try_prepare_decode_positions(
+                        seq, positions, frequency, config
+                    )
+                    self.assertIsNotNone(result)
+                    return result
+
+                prepare()
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = prepare()
+                try:
+                    for start in (0, 60, 124, 2044, 7996, 9996, 32764):
+                        seq.copy_(torch.arange(batch, device="cuda") + start)
+                        positions.copy_(
+                            (seq[:, None] + 101).expand(-1, factor).flatten()
+                        )
+                        kwargs = dict(
+                            token_count=batch, dtype=torch.bfloat16, device=seq.device
+                        )
+                        current = build_base_rope(positions, config, **kwargs)
+                        block_positions = (
+                            (seq - seq.remainder(4))[:, None]
+                            .expand(-1, factor)
+                            .flatten()
+                        )
+                        block = build_base_rope(block_positions, config, **kwargs)
+                        graph.replay()
+                        self.assert_outputs(
+                            actual, (*current, *block, seq + 1, (seq + 1) // 4)
+                        )
+                finally:
+                    graph.reset()
+
     def test_combined_prepare_snapshot_writer_and_rollback_graph(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.decode_prepare_triton import (
             try_prepare_decode,
@@ -122,10 +182,19 @@ class QSAFusedDecodeTest(unittest.TestCase):
             TargetWriterFusionTest,
         )
 
-        for batch in (16, 32, 64):
-            args = TargetWriterFusionTest.case(self, [128] * batch, 1, strided=True)
+        for batch, page_size, (style, factor) in product(
+            (1, 2, 16, 32, 64),
+            (64, 128),
+            ((RopeStyle.Mrope, 3), (RopeStyle.Base, 1), (RopeStyle.Base, 3)),
+        ):
+            config = SimpleNamespace(**vars(self.config))
+            config.style, config.index_factor = style, factor
+            target_mrope = style == RopeStyle.Mrope
+            args = TargetWriterFusionTest.case(
+                self, [page_size] * batch, 1, strided=True, page_size=page_size
+            )
             seq, kv, kt, state, st = args[1], *args[5:]
-            pos = seq[:, None].expand(-1, 3).contiguous().flatten()
+            pos = seq[:, None].expand(-1, factor).contiguous().flatten()
             saved_kv, saved_state = kv.clone(), state.clone()
             projection = torch.randn(batch, 640, device="cuda", dtype=torch.bfloat16)
             query = projection[:, :512].view(batch, 4, 128)
@@ -136,11 +205,12 @@ class QSAFusedDecodeTest(unittest.TestCase):
                     seq,
                     pos,
                     self.frequency,
-                    self.config,
+                    config,
                     kv,
                     kt,
                     state,
                     st,
+                    target_mrope=target_mrope,
                     query=query,
                     query_gamma=query_gamma,
                 )
@@ -168,18 +238,24 @@ class QSAFusedDecodeTest(unittest.TestCase):
             try:
                 for generation in range(12):
                     seq.copy_(
-                        124 + (torch.arange(batch, device="cuda") + generation) % 12
+                        page_size
+                        - 4
+                        + (torch.arange(batch, device="cuda") + generation) % 12
                     )
                     pos.copy_(
                         (
-                            seq[:, None] + torch.tensor([101, 203, 307], device="cuda")
+                            seq[:, None]
+                            + torch.tensor(
+                                [101, 203, 307] if target_mrope else [101] * factor,
+                                device="cuda",
+                            )
                         ).flatten()
                     )
                     args[0].normal_()
                     query.normal_()
                     kv.copy_(saved_kv)
                     state.copy_(saved_state)
-                    expected_metadata = self.reference(seq, pos)
+                    expected_metadata = self.reference(seq, pos, config)
                     args[2:4] = expected_metadata[2:4]
                     expected_undo = write_decode_key_with_undo_(*args, norm_eps=1e-6)
                     after_kv, after_state = kv.clone(), state.clone()
@@ -217,7 +293,15 @@ class QSAFusedDecodeTest(unittest.TestCase):
                     self.assertTrue(torch.equal(state, saved_state))
                 self.assertIsNone(
                     try_prepare_decode(
-                        seq, pos, self.frequency, self.config, kv, kt[:, :0], state, st
+                        seq,
+                        pos,
+                        self.frequency,
+                        config,
+                        kv,
+                        kt[:, :0],
+                        state,
+                        st,
+                        target_mrope=target_mrope,
                     )
                 )
             finally:
@@ -232,7 +316,7 @@ class QSAFusedDecodeTest(unittest.TestCase):
             try_indexer_norm_rope,
         )
 
-        for batch in (16, 32, 64):
+        for batch in (1, 2, 16, 32, 64):
             qk = torch.randn(batch, 640, dtype=torch.bfloat16, device="cuda")
             q = qk[:, :512].view(batch, 4, 128)
             gain = torch.randn(128, dtype=torch.bfloat16, device="cuda") * 0.07

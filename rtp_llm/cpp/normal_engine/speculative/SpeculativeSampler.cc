@@ -13,7 +13,8 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
 
     if (top_k == 1) {
         output.token_ids = torch::argmax(logits, -1, true);
-        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
+        // Argmax is a point mass. Rejection sampling consumes the mapped token
+        // directly, without materializing or carrying a dense one-hot tensor.
     } else {
         auto draft_probs = torch::softmax(logits, -1);
         output.token_ids = std::get<1>(torch::topk(draft_probs, top_k, -1));
@@ -85,6 +86,18 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     output.all_probs                = std::move(all_probabilities);
     output.token_ids_are_point_mass = false;
     return output;
+}
+
+void SpeculativeSamplerOutput::enqueueHostTransferIfNeeded() {
+    if (accept_tokens_cpu.defined() && accept_len_cpu.defined()) {
+        return;
+    }
+    accept_tokens_cpu =
+        torch::empty_like(accept_tokens, accept_tokens.options().device(torch::kCPU).pinned_memory(true));
+    accept_len_cpu = torch::empty_like(accept_len, accept_len.options().device(torch::kCPU).pinned_memory(true));
+    accept_tokens_cpu.copy_(accept_tokens, /*non_blocking=*/true);
+    accept_len_cpu.copy_(accept_len, /*non_blocking=*/true);
+    transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
@@ -242,13 +255,9 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
 
     // use async sample here, we assume accept all tokens
     // so we need to reset -1 to 0 in output_token_ids_d
-    output_token_ids_d.index_put_({output_token_ids_d == -1}, 0);
+    output_token_ids_d.masked_fill_(output_token_ids_d == -1, 0);
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
-
-    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
-    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
-    sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
 void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,

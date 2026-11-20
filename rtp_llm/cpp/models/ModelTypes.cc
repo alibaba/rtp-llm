@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -61,11 +62,19 @@ torch::Tensor reorderCacheRows(const torch::Tensor& tensor, const std::vector<in
     RTP_LLM_CHECK_WITH_INFO(tensor.dim() == (block_table ? 3 : 1)
                                 && tensor.size(0) == static_cast<int64_t>(rows.size()),
                             "cache payload row count must match its group tags (groups)");
-    if (rows.size() <= 1) {
+    // rows is a permutation; an already sorted order needs no copy.
+    if (std::is_sorted(rows.begin(), rows.end())) {
         return tensor;
     }
-    auto result = tensor.index_select(0, torch::tensor(rows, torch::kInt64).to(tensor.device()));
-    return tensor.is_pinned() && !result.is_pinned() ? result.pin_memory() : result;
+    auto order = torch::empty({static_cast<int64_t>(rows.size())},
+                              torch::TensorOptions().dtype(torch::kInt64).pinned_memory(tensor.is_cuda()));
+    std::copy(rows.begin(), rows.end(), order.data_ptr<int64_t>());
+    // PyTorch records the pinned allocation on the copy stream before releasing
+    // order, so TP preparation need not wait for the preceding model work.
+    // Write directly into pinned storage instead of allocating a pageable
+    // result and copying it again before the rank-local H2D transfer.
+    auto result = torch::empty(tensor.sizes(), tensor.options().pinned_memory(tensor.is_pinned()));
+    return torch::index_select_out(result, tensor, 0, order.to(tensor.device(), /*non_blocking=*/true));
 }
 
 torch::Tensor reorderCacheCopyRows(const torch::Tensor& mapping, const std::vector<int64_t>& rows) {
@@ -223,7 +232,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
 
 torch::Tensor makeModelInputShapeHintsTensor(const GptModelInputs& inputs) {
     const auto shape_hints = getModelInputShapeHints(inputs);
-    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::kInt64).pin_memory();
+    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())},
+                               torch::TensorOptions(torch::kInt64).pinned_memory(true));
     std::copy(shape_hints.begin(), shape_hints.end(), tensor.data_ptr<int64_t>());
     return tensor;
 }
@@ -260,8 +270,20 @@ std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, in
     return {group_num, batch_size, max_blocks};
 }
 
-void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
+void tpSyncModelInputs(GptModelInputs&                                   inputs,
+                       const ParallelismConfig&                          parallelism_config,
+                       const std::function<void(GptModelInputs&, bool)>& reuse_local_inputs,
+                       bool                                              refresh_reused_cache) {
     if (parallelism_config.tp_size <= 1) {
+        if (reuse_local_inputs && !inputs.skip_run) {
+            auto physical = inputs.kv_cache_block_id;
+            auto kernel   = inputs.kv_cache_kernel_block_id;
+            reuse_local_inputs(inputs, !refresh_reused_cache);
+            if (refresh_reused_cache) {
+                inputs.kv_cache_block_id        = std::move(physical);
+                inputs.kv_cache_kernel_block_id = std::move(kernel);
+            }
+        }
         return;
     }
 
@@ -275,7 +297,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         local_rows[sorted_rows[i]] = static_cast<int64_t>(i);
     }
     torch::Tensor wire_blocks, wire_kernel_blocks, wire_group_types, wire_copy_mapping;
-    if (parallelism_config.tp_rank == 0 && !inputs.skip_run) {
+    if (parallelism_config.tp_rank == 0 && !inputs.skip_run && (!reuse_local_inputs || refresh_reused_cache)) {
         if (legacy_untagged_cache) {
             RTP_LLM_CHECK_WITH_INFO(
                 (!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 2)
@@ -287,11 +309,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         wire_blocks        = reorderCacheRows(inputs.kv_cache_block_id, sorted_rows, true);
         wire_kernel_blocks = reorderCacheRows(inputs.kv_cache_kernel_block_id, sorted_rows, true);
-        wire_group_types   = reorderCacheRows(inputs.kv_cache_group_types, sorted_rows, false);
-        wire_copy_mapping  = legacy_untagged_cache && inputs.kv_cache_update_mapping.defined()
-                                    && inputs.kv_cache_update_mapping.numel() == 0 ?
-                                 inputs.kv_cache_update_mapping :
-                                 reorderCacheCopyRows(inputs.kv_cache_update_mapping, local_rows);
     }
 
     // The UDS-backed CPU broadcaster (used by execBroadcastCpu below) is
@@ -302,11 +319,68 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // first sync stage: shape hints
     auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
     auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    if (parallelism_config.tp_rank == 0 && reuse_local_inputs && !inputs.skip_run) {
+        shape_hints_ptr[GptModelInputIndex::modelControlFlags] |= kControlReuseLocalInputs;
+        if (refresh_reused_cache) {
+            shape_hints_ptr[GptModelInputIndex::modelControlFlags] |= kControlRefreshReusedCache;
+        }
+    }
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
     // execBroadcastCpu's fallback path keeps the NCCL+cudaSyncAndCheck
     // contract for cross-node TP.
     execBroadcastCpu({{shape_hints_t}, 0});
+    if (shape_hints_ptr[GptModelInputIndex::modelControlFlags] & kControlReuseLocalInputs) {
+        RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(reuse_local_inputs),
+                                "TP input reuse requires a committed continuation on every rank");
+        auto       physical      = inputs.kv_cache_block_id;
+        auto       kernel        = inputs.kv_cache_kernel_block_id;
+        const bool refresh_cache = shape_hints_ptr[GptModelInputIndex::modelControlFlags] & kControlRefreshReusedCache;
+        reuse_local_inputs(inputs, !refresh_cache);
+        if (refresh_cache) {
+            RTP_LLM_PROFILE_SCOPE("model_inputs.refresh_reused_cache");
+            const auto groups         = shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
+            const auto batch          = shape_hints_ptr[GptModelInputIndex::inputLengths];
+            const auto physical_width = shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
+            const auto kernel_width   = shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch];
+            const auto devices        = shape_hints_ptr[GptModelInputIndex::tensorDeviceMap];
+            const bool device         = devices & kDeviceBitBlockId;
+            RTP_LLM_CHECK_WITH_INFO(!legacy_untagged_cache && groups == static_cast<int64_t>(sorted_rows.size())
+                                        && batch > 0 && physical_width > 0 && kernel_width > 0
+                                        && shape_hints_ptr[GptModelInputIndex::kvCacheBlockIdRank] == 3
+                                        && shape_hints_ptr[GptModelInputIndex::kvCacheKernelBlockIdRank] == 3
+                                        && device == static_cast<bool>(devices & kDeviceBitKernelBlockId)
+                                        && shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] == 0,
+                                    "cache-only continuation requires matching grouped tables without copy mappings");
+            if (parallelism_config.tp_rank != 0) {
+                auto options       = torch::TensorOptions(torch::kInt32);
+                options            = device ? options.device(torch::kCUDA) : options.pinned_memory(true);
+                wire_blocks        = torch::empty({groups, batch, physical_width}, options);
+                wire_kernel_blocks = torch::empty({groups, batch, kernel_width}, options);
+            }
+            if (device) {
+                execBroadcast({{wire_blocks, wire_kernel_blocks}, 0});
+            } else {
+                execBroadcastCpu({{wire_blocks, wire_kernel_blocks}, 0});
+            }
+            if (parallelism_config.tp_rank == 0) {
+                inputs.kv_cache_block_id        = std::move(physical);
+                inputs.kv_cache_kernel_block_id = std::move(kernel);
+            } else {
+                inputs.kv_cache_block_id        = reorderCacheRows(wire_blocks, local_rows, true);
+                inputs.kv_cache_kernel_block_id = reorderCacheRows(wire_kernel_blocks, local_rows, true);
+            }
+        }
+        return;
+    }
+
+    if (parallelism_config.tp_rank == 0 && !inputs.skip_run) {
+        wire_group_types  = reorderCacheRows(inputs.kv_cache_group_types, sorted_rows, false);
+        wire_copy_mapping = legacy_untagged_cache && inputs.kv_cache_update_mapping.defined()
+                                    && inputs.kv_cache_update_mapping.numel() == 0 ?
+                                inputs.kv_cache_update_mapping :
+                                reorderCacheCopyRows(inputs.kv_cache_update_mapping, local_rows);
+    }
 
     // multimodal features shape broadcast
     torch::Tensor mm_features_shape_t;

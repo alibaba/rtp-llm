@@ -312,6 +312,11 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
     def activate_draft_lm_head_graph(self, graph_batch: int) -> None:
         self._draft_head_graph.activate(graph_batch)
 
+    def supports_cuda_graph_draft_loop(self) -> bool:
+        # Ordinary MTP is deterministic; the loop may reuse its captured
+        # forward as a child without PyTorch generator replay bookkeeping.
+        return True
+
     def compute_fp8_lm_head(self, hidden):
         logits = self._draft_head_graph.take(hidden)
         return super().compute_fp8_lm_head(hidden) if logits is None else logits.float()

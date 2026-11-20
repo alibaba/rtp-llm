@@ -374,8 +374,8 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 
 }  // anonymous namespace
 
-NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config):
-    config_(config), device_input_enabled_(deviceInputEnabled()) {}
+NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config, bool device_input):
+    config_(config), device_input_enabled_(device_input || deviceInputEnabled()) {}
 
 GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamGroups& stream_groups) const {
     const size_t current_tokens_size      = stream_groups.modelExecuteTokenSize();
@@ -732,33 +732,47 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
 absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlockId(
     const StreamGroups& stream_groups, const std::vector<std::string>& group_tags, TensorHolder& host_holder) const {
+    return gatherKvCacheBlockId(stream_groups, group_tags, host_holder, /*kernel=*/true);
+}
+
+absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheBlockId(const StreamGroups& stream_groups,
+                                                                             const std::vector<std::string>& group_tags,
+                                                                             TensorHolder&     host_holder,
+                                                                             bool              kernel,
+                                                                             torch::DeviceType output_device) const {
+    RTP_LLM_CHECK_WITH_INFO(output_device == torch::kCPU || output_device == torch::kCUDA,
+                            "block gather supports CPU or CUDA output");
     RTP_LLM_CHECK_WITH_INFO(group_tags.size() == config_.kv_cache_group_nums
                                 && config_.kv_cache_group_tags.size() == config_.kv_cache_group_nums,
-                            "kernel gather tag count must match configured group count");
+                            "block gather tag count must match configured group count");
     std::unordered_set<std::string> requested_tags;
     for (const auto& tag : group_tags) {
         RTP_LLM_CHECK_WITH_INFO(!tag.empty() && requested_tags.insert(tag).second,
-                                "kernel gather tags must be non-empty and unique: tag=%s",
+                                "block gather tags must be non-empty and unique: tag=%s",
                                 tag.c_str());
     }
     for (const auto& tag : config_.kv_cache_group_tags) {
         RTP_LLM_CHECK_WITH_INFO(
-            requested_tags.erase(tag) == 1, "kernel gather tag set differs from configuration: tag=%s", tag.c_str());
+            requested_tags.erase(tag) == 1, "block gather tag set differs from configuration: tag=%s", tag.c_str());
     }
     const size_t total_batch_size = stream_groups.totalModelBatchSize();
-    const size_t kernel_width     = blockTableWidth(stream_groups, group_tags, true);
-    if (kernel_width == 0 || total_batch_size == 0) {
+    const size_t table_width      = blockTableWidth(stream_groups, group_tags, kernel);
+    if (table_width == 0 || total_batch_size == 0) {
         return torch::Tensor{};
     }
 
     static const auto pinned_i32  = torch::TensorOptions(torch::kInt32).pinned_memory(true);
     auto              host_tensor = torch::zeros(
-        {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)kernel_width}, pinned_i32);
+        {(int64_t)config_.kv_cache_group_nums, (int64_t)total_batch_size, (int64_t)table_width}, pinned_i32);
 
-    const size_t per_batch_stride = kernel_width;
+    const size_t per_batch_stride = table_width;
     int32_t*     dst_base         = host_tensor.data_ptr<int32_t>();
 
     auto fill_one_stream = [&](const GenerateStreamPtr& stream, int& batch_idx, bool decode) {
+        if (output_device == torch::kCPU) {
+            RTP_LLM_CHECK_WITH_INFO(!stream->hasPendingAsyncBookkeeping() && !stream->hasMtpCacheSnapshot(),
+                                    "CPU block gather requires committed host tables without device snapshots");
+        }
         if (decode && stream->hasMtpCacheSnapshot()) {
             ++batch_idx;
             return;
@@ -771,15 +785,16 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
         auto& kv_cache = *stream->kvCachePtr();
         RTP_LLM_CHECK_WITH_INFO(kv_cache.groupNums() == host_tensor.size(0) && batch_idx >= 0
                                     && static_cast<size_t>(batch_idx + current_batch_size) <= total_batch_size,
-                                "kernel block table group or batch exceeds destination");
+                                "cache block table group or batch exceeds destination");
         for (int i = 0; i < current_batch_size; ++i) {
             for (size_t row = 0; row < group_tags.size(); ++row) {
-                const auto& kernel_blocks = kv_cache.kernelBlocks(i, group_tags[row]);
-                RTP_LLM_CHECK_WITH_INFO(kernel_blocks.size() <= per_batch_stride,
-                                        "kernel block ids exceed destination row for tag=%s",
+                const auto& blocks =
+                    kernel ? kv_cache.kernelBlocks(i, group_tags[row]) : kv_cache.blocks(i, group_tags[row]);
+                RTP_LLM_CHECK_WITH_INFO(blocks.size() <= per_batch_stride,
+                                        "cache block ids exceed destination row for tag=%s",
                                         group_tags[row].c_str());
                 int32_t* dst = dst_base + (row * total_batch_size + static_cast<size_t>(batch_idx)) * per_batch_stride;
-                std::memcpy(dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+                std::memcpy(dst, blocks.data(), blocks.size() * sizeof(int32_t));
             }
             batch_idx += 1;
         }
@@ -793,19 +808,22 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
         fill_one_stream(stream, batch_idx, false);
     }
 
+    if (output_device == torch::kCPU) {
+        return host_tensor;
+    }
     auto device_tensor = publishInt32ToCuda(host_tensor, host_holder);
     batch_idx          = 0;
     for (const auto& stream : stream_groups.decodeStreams()) {
         const auto state = stream->getMtpAsyncDeviceState();
         if (GenerateStream::hasMtpCacheSnapshot(state)) {
-            const auto& source = state.next_kv_cache_kernel_block_id_gpu;
+            const auto& source = kernel ? state.next_kv_cache_kernel_block_id_gpu : state.next_kv_cache_block_id_gpu;
             RTP_LLM_CHECK_WITH_INFO(source.defined() && source.is_cuda() && source.scalar_type() == torch::kInt32
                                         && source.dim() == 3,
-                                    "MTP kernel snapshot must be a CUDA int32 [group,batch,blocks] tensor");
+                                    "MTP cache snapshot must be a CUDA int32 [group,batch,blocks] tensor");
             RTP_LLM_CHECK_WITH_INFO(source.size(0) == device_tensor.size(0),
-                                    "MTP kernel snapshot group count differs from gathered table");
+                                    "MTP cache snapshot group count differs from gathered table");
             RTP_LLM_CHECK_WITH_INFO(source.size(2) <= device_tensor.size(2),
-                                    "MTP kernel snapshot exceeds gathered table width");
+                                    "MTP cache snapshot exceeds gathered table width");
             for (size_t row = 0; row < group_tags.size(); ++row) {
                 const auto position =
                     std::find(config_.kv_cache_group_tags.begin(), config_.kv_cache_group_tags.end(), group_tags[row]);

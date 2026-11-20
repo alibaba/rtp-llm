@@ -86,23 +86,28 @@ public:
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
     GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
-    void                       releaseBuffers() override;
+    void                       releaseBuffers(std::optional<torch::Stream> consumer_stream = std::nullopt) override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                       discardPreparedAttentionInputs() noexcept override {
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+    }
     void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
     bool                       hasSpeculativeTargetCommitHooks() const override;
+    bool                       supportsDeviceSpeculativeHandoff() const override;
     std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
     std::string                finishSpeculativeTargetCommit(bool commit) override;
     std::string                finalizeSpeculativeTargetCommit() override;
     std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
 
 private:
+    torch::Tensor sampleDraftGraphTokens(const PyModelInputs& inputs, const PyModelOutputs& outputs);
     friend struct test::PyWrappedModelTestPeer;
 
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -184,6 +189,7 @@ private:
     bool supports_micro_batch_{false};
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
+    bool supports_device_speculative_handoff_{false};
     bool requires_exact_cuda_graph_batch_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
@@ -384,6 +390,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                         || py::hasattr(py_model_, "reduce_speculative_target_prepare_status"),
                                     "Python target status reducer capability requires its reduce hook");
         }
+        if (has_speculative_target_commit_hooks_
+            && (params.parallelism_config.tp_size == 1 || has_speculative_target_status_reducer_)
+            && py::hasattr(py_model_, "supports_device_speculative_handoff")) {
+            supports_device_speculative_handoff_ = py_model_.attr("supports_device_speculative_handoff")().cast<bool>();
+        }
         requires_exact_cuda_graph_batch_ |= has_speculative_target_commit_hooks_;
         if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
             RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "clear_speculative_target_graph_capture")
@@ -540,6 +551,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
+#if USING_CUDA && ((TORCH_VERSION_MAJOR > 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 8))
+        if (params.mtp_cache_config_index.has_value() && graph_params.role == CudaGraphRole::DECODE
+            && params.sp_config.gen_num_per_cycle > 1 && !check_nan_
+            && py::hasattr(py_instance, "supports_cuda_graph_draft_loop")
+            && py_instance.attr("supports_cuda_graph_draft_loop")().cast<bool>()) {
+            graph_runner->configureDraftLoop(params.sp_config.gen_num_per_cycle - 1,
+                                             [this](const PyModelInputs& inputs, const PyModelOutputs& outputs) {
+                                                 return sampleDraftGraphTokens(inputs, outputs);
+                                             });
+        }
+#endif
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,

@@ -43,7 +43,7 @@ struct NormalModelInputGathererConfig {
 
 class NormalModelInputGatherer {
 public:
-    explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
+    explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config, bool device_input = false);
 
     absl::StatusOr<GptModelInputs> gather(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
 
@@ -53,6 +53,12 @@ public:
     absl::StatusOr<torch::Tensor> gatherKvCacheKernelBlockId(const StreamGroups&             stream_groups,
                                                              const std::vector<std::string>& group_tags,
                                                              TensorHolder&                   host_holder) const;
+
+    absl::StatusOr<torch::Tensor> gatherKvCacheBlockId(const StreamGroups&             stream_groups,
+                                                       const std::vector<std::string>& group_tags,
+                                                       TensorHolder&                   host_holder,
+                                                       bool                            kernel,
+                                                       torch::DeviceType output_device = torch::kCUDA) const;
 
 private:
     GptModelInputs allocateModelInputBuffers(const StreamGroups& stream_groups) const;

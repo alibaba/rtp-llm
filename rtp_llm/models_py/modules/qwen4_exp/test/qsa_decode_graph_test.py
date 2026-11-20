@@ -64,6 +64,9 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.raw = torch.randn(1, 128, dtype=torch.bfloat16, device="cuda")
 
     def _context(self, graph, kv=None, state=None, *, exact=True, draft=False):
+        if graph:
+            self.device_lengths = self.lengths.cuda() + 1
+
         def inputs(kv_map=None, state_map=None):
             return SimpleNamespace(
                 is_prefill=False,
@@ -76,6 +79,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
                 input_lengths=self.input_lengths,
                 prefix_lengths=self.prefixes,
                 sequence_lengths=self.lengths,
+                sequence_lengths_plus_1_device=self.device_lengths if graph else None,
                 cu_seqlens_device=None,
                 cu_kv_seqlens_device=None,
                 combo_position_ids=self.positions,
@@ -150,6 +154,7 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
                     self.kv.copy_(original_kv)
                     self.state.copy_(original_state)
                     self.lengths.fill_(length)
+                    self.device_lengths.fill_(length + 1)
                     self.positions.fill_(length)
                     self.raw.normal_()
                     self.q.normal_()
@@ -207,7 +212,15 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
     def test_draft_graph_cached_frequency_preserves_selected_and_cache_bytes(self):
         self._check_draft_graph_replay(True)
 
-    def _check_draft_graph_replay(self, use_cached_frequency):
+    def test_draft_graph_raw_query_preserves_selected_and_cache_bytes(self):
+        if torch.version.hip is not None or torch.cuda.get_device_capability() != (
+            9,
+            0,
+        ):
+            self.skipTest("SM90 draft query fusion")
+        self._check_draft_graph_replay(True, raw_query=True)
+
+    def _check_draft_graph_replay(self, use_cached_frequency, *, raw_query=False):
         self.raw = torch.randn(1, 256, dtype=torch.bfloat16, device="cuda")[:, ::2]
         self.assertFalse(self.raw.is_contiguous())
         self.rope = SimpleNamespace(
@@ -224,11 +237,19 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             weights = torch.full((1, 4), 1.0 / 128**0.5, device="cuda")
             self.indexer.rope_inv_freq = lambda config: frequency
             self.indexer.score_weights = lambda rows, device: weights[:rows]
+        if raw_query:
+            self.indexer.q_norm_gamma = (
+                torch.randn(128, device="cuda") * 0.07
+            ).bfloat16()
         # Draft transport positions need not equal logical main-cache rows.
         self.positions = torch.tensor([13, 13, 13], dtype=torch.int32, device="cuda")
         context = self._context(True, draft=True)
         context.select_decode_tokens(
-            self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+            self.q,
+            self.raw,
+            indexer=self.indexer,
+            rope_config=self.rope,
+            raw_query=raw_query,
         )
         context.finalize_side_cache()
         initial_kv = self.kv.clone()
@@ -236,7 +257,11 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             selected = context.select_decode_tokens(
-                self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+                self.q,
+                self.raw,
+                indexer=self.indexer,
+                rope_config=self.rope,
+                raw_query=raw_query,
             )
         context.finalize_side_cache()
 
@@ -244,9 +269,13 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.state.copy_(initial_state)
         self.q.copy_(torch.randn_like(self.q.float()).bfloat16())
         self.raw.copy_(torch.randn_like(self.raw.float()).bfloat16())
-        self.lengths[0] = 8
+        self.device_lengths.fill_(9)
         self.positions.fill_(17)
         graph.replay()
+        torch.cuda.synchronize()
+        # CPU metadata stays at capture values until the eager reference. This
+        # catches a hidden H2D inside the captured indexer/side-cache writer.
+        self.lengths[0] = 8
 
         if use_cached_frequency:
             # The reference rebuilds frequencies and constants as before.
@@ -255,8 +284,17 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         eager_kv = initial_kv.clone()
         eager_state = initial_state.clone()
         eager = self._context(False, eager_kv, eager_state, draft=True)
+        reference_q = self.q
+        if raw_query:
+            from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+                exact_head_rms_norm,
+            )
+
+            reference_q = exact_head_rms_norm(
+                self.q, self.indexer.q_norm_gamma, self.indexer.norm_eps
+            )
         expected = eager.select_decode_tokens(
-            self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+            reference_q, self.raw, indexer=self.indexer, rope_config=self.rope
         )
         torch.testing.assert_close(selected, expected, rtol=0, atol=0)
         torch.testing.assert_close(self.kv, eager_kv, rtol=0, atol=0)
@@ -281,9 +319,11 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
         self.state.copy_(initial_state)
         self.q.copy_(torch.randn_like(self.q.float()).bfloat16())
         self.raw.copy_(torch.randn_like(self.raw.float()).bfloat16())
-        self.lengths[0] = 8
+        self.device_lengths.fill_(9)
         self.positions.fill_(8)
         graph.replay()
+        torch.cuda.synchronize()
+        self.lengths[0] = 8
 
         reference_kv = initial_kv.clone()
         reference_state = initial_state.clone()

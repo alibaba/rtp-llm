@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -41,6 +42,14 @@ public:
 
 class CudaGraphRunner: public GraphBase {
 public:
+    using DraftSampler = std::function<torch::Tensor(const PyModelInputs&, const PyModelOutputs&)>;
+    void configureDraftLoop(int steps, DraftSampler sampler) {
+        RTP_LLM_CHECK_WITH_INFO(steps > 0 && steps < max_seq_len_ && sampler && exact_batch_only_
+                                    && num_tokens_per_bs_ == 1 && !is_prefill_cuda_graph_mode_ && !is_target_verify_,
+                                "draft loop requires an exact single-token decode graph");
+        draft_decode_steps_ = steps;
+        draft_sampler_      = std::move(sampler);
+    }
     // Stateless capture-side width helpers. They borrow the current model
     // topology but never store page geometry in GraphParams or the runner.
     static int64_t
@@ -188,6 +197,9 @@ public:
     static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
 private:
+    void         captureDraftLoop(int bs);
+    int          draft_decode_steps_{0};
+    DraftSampler draft_sampler_;
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     void prepareModelInputs(const PyModelInputs& inputs);
@@ -237,8 +249,12 @@ private:
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
+    bool                    supportsDeviceAttentionPreparation(const py::object& impl) const;
+    bool usesDeviceAttentionPreparation(const PyModelInputs& inputs, const CudaGraphState& state) const;
+
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+
     bool                    prepare_model_inputs_enabled_{false};
     bool                    enable_cuda_graph_{false};
     bool                    exact_batch_only_{false};

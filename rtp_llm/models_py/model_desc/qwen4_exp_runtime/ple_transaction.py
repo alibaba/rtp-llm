@@ -35,9 +35,9 @@ class PLETransactionCoordinator:
 
     def close(self) -> None:
         if self.active_transaction is not None:
-            self._synchronize_ple_transaction(self.active_transaction)
+            self._drain_ple_transaction(self.active_transaction)
         for transaction in self.graph_registry.captured.values():
-            self._synchronize_ple_transaction(transaction)
+            self._drain_ple_transaction(transaction)
         self.active_transaction = None
         self.graph_registry.clear()
 
@@ -237,6 +237,11 @@ class PLETransactionCoordinator:
     @staticmethod
     def _synchronize_ple_transaction(transaction: _PLETargetTransaction) -> None:
         if transaction.prefixes.is_cuda:
+            torch.cuda.current_stream(transaction.prefixes.device).synchronize()
+
+    def _drain_ple_transaction(self, transaction: _PLETargetTransaction) -> None:
+        self._synchronize_ple_transaction(transaction)
+        if transaction.prefixes.is_cuda:
             torch.cuda.synchronize(transaction.prefixes.device)
 
     def clear_speculative_target_graph_capture(self) -> None:
@@ -246,7 +251,7 @@ class PLETransactionCoordinator:
             return
         if transaction.graph_key is not None or transaction.prepared_writes is not None:
             raise RuntimeError("cannot discard an active PLE target commit")
-        self._synchronize_ple_transaction(transaction)
+        self._drain_ple_transaction(transaction)
         self.active_transaction = None
 
     def save_speculative_target_graph_capture(self, graph_key: int) -> None:
@@ -441,10 +446,7 @@ class PLETransactionCoordinator:
         # streams (async bookkeeping) the way a device-wide sync does.
         if resolution is not None:
             resolution.verify()
-        if transaction.prefixes.is_cuda:
-            # CPU-tensor unit tests reach prepare too; host ops are already
-            # synchronous and current_stream() rejects a cpu device.
-            torch.cuda.current_stream(transaction.prefixes.device).synchronize()
+        self._synchronize_ple_transaction(transaction)
         transaction.prepared_writes = prepared_writes
 
     def _prepare_boundary_slots(
@@ -588,7 +590,7 @@ class PLETransactionCoordinator:
             # Also synchronize an uncommitted transaction: target staging and a
             # failed prepare may have queued work even though no pool write was
             # launched.  Do not clear its lifetime until that work is settled.
-            self._synchronize_ple_transaction(transaction)
+            self._drain_ple_transaction(transaction)
             self._release_ple_target_transaction(transaction)
             return
 
@@ -607,6 +609,8 @@ class PLETransactionCoordinator:
                 write.ctx_pool.index_copy_(0, slot.ctx_blocks, slot.ctx_values)
             write.state_pool.index_copy_(0, write.state_blocks, write.state_values)
             write.ctx_pool.index_copy_(0, write.ctx_blocks, write.ctx_values)
+        # Verify staging is a dependency of this stream. Draft extend
+        # runs on a different stream and does not read the target pools.
         self._synchronize_ple_transaction(transaction)
         transaction.tentative_committed = True
 

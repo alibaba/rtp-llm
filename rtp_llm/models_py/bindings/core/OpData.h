@@ -136,6 +136,7 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+    torch::Tensor draft_token_ids;
 };
 
 struct CopyParams {

@@ -203,6 +203,29 @@ public:
     }
 };
 
+class RecordingClientStream final: public PrefillGenerateContext::ClientStream {
+public:
+    bool Read(GenerateOutputsPB*) override {
+        return true;
+    }
+    bool NextMessageSize(uint32_t*) override {
+        return false;
+    }
+    bool Write(const GenerateRequestPB& request, grpc::WriteOptions) override {
+        writes.push_back(request);
+        return write_ok;
+    }
+    void WaitForInitialMetadata() override {}
+    bool WritesDone() override {
+        return true;
+    }
+    grpc::Status Finish() override {
+        return grpc::Status::OK;
+    }
+    bool                           write_ok = true;
+    std::vector<GenerateRequestPB> writes;
+};
+
 class PrefillRpcServerTest: public DeviceTestBase {
 protected:
     std::shared_ptr<GenerateInput> makeMultimodalInput() {
@@ -239,29 +262,6 @@ protected:
 };
 
 TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLocalFinish) {
-    class CompletionClient final: public PrefillGenerateContext::ClientStream {
-    public:
-        bool Read(GenerateOutputsPB*) override {
-            return true;
-        }
-        bool NextMessageSize(uint32_t*) override {
-            return false;
-        }
-        bool Write(const GenerateRequestPB& request, grpc::WriteOptions) override {
-            writes.push_back(request);
-            return write_ok;
-        }
-        void WaitForInitialMetadata() override {}
-        bool WritesDone() override {
-            return true;
-        }
-        grpc::Status Finish() override {
-            return grpc::Status::OK;
-        }
-        bool                           write_ok = true;
-        std::vector<GenerateRequestPB> writes;
-    };
-
     for (const std::string mode : {"complete", "legacy", "continue", "unfinished", "error", "write_failure"}) {
         SCOPED_TRACE(mode);
         GenerateInputPB request;
@@ -282,7 +282,7 @@ TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLoc
             stream->reportError(ErrorCode::CANCELLED, "cancelled before completion");
         }
         context->supports_prefill_completion = mode != "legacy";
-        auto client                          = std::make_shared<CompletionClient>();
+        auto client                          = std::make_shared<RecordingClientStream>();
         client->write_ok                     = mode != "write_failure";
         context->client_stream               = client;
         TestPrefillRpcServer server;
@@ -304,6 +304,47 @@ TEST_F(PrefillRpcServerTest, PrefillCompletionRequiresCapabilityAndSuccessfulLoc
         } else if (mode == "continue") {
             EXPECT_FALSE(context->finished);
         }
+        context->stream_.reset();
+    }
+}
+
+TEST_F(PrefillRpcServerTest, RemoteGeneratePreservesOptionalDraftProbabilities) {
+    for (const bool dense_probs : {false, true}) {
+        SCOPED_TRACE(dense_probs);
+        GenerateInputPB request;
+        request.set_request_id(42);
+        auto context  = makeContext(&request);
+        context->meta = std::make_shared<RpcServerRuntimeMeta>();
+        auto stream   = makeWaitingStream();
+        stream->setProposeToken({7, 9});
+        auto proposal           = std::make_shared<SpeculativeExecutorStreamOutput>();
+        proposal->hidden_states = torch::ones({1, 4}, torch::kFloat16);
+        if (dense_probs) {
+            proposal->all_probs = torch::tensor({{0.0f, 0.25f, 0.75f}});
+        }
+        stream->setSPOutputBuffer(proposal);
+        context->setStream(stream);
+        auto client            = std::make_shared<RecordingClientStream>();
+        context->client_stream = client;
+        TestPrefillRpcServer server;
+        server.setEngineForTest(/*is_mtp_eagle=*/true);
+        server.remoteGenerate(*context);
+
+        ASSERT_FALSE(context->hasError());
+        ASSERT_EQ(client->writes.size(), 1u);
+        const auto& wire = client->writes.front();
+        EXPECT_EQ(wire.stage(), RemoteStage::GENERATE);
+        ASSERT_EQ(wire.propose_token_ids_size(), 2);
+        EXPECT_EQ(wire.propose_token_ids(0), 7);
+        EXPECT_EQ(wire.propose_token_ids(1), 9);
+        auto restored = QueryConverter::transTensor(wire.propose_probs());
+        if (dense_probs) {
+            EXPECT_TRUE(torch::equal(restored, proposal->all_probs));
+        } else {
+            EXPECT_FALSE(wire.has_propose_probs());
+            EXPECT_EQ(restored.numel(), 0);
+        }
+        EXPECT_TRUE(torch::equal(QueryConverter::transTensor(wire.propose_hidden()), proposal->hidden_states));
         context->stream_.reset();
     }
 }

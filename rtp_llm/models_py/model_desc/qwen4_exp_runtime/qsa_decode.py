@@ -23,6 +23,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    graph_decode_visible_lengths,
     host_input_mirror,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
@@ -100,9 +101,16 @@ def select_decode_tokens(
         if lengths_host is not None
         else None
     )
-    sequence_lengths = sequence_lengths.to(
-        device=q.device, dtype=torch.int32, non_blocking=True
-    ).contiguous()
+    if graph_decode:
+        # Host lengths describe capture capacity. Replay updates the device
+        # length directly, including when no CPU mirror is refreshed.
+        sequence_lengths = (
+            graph_decode_visible_lengths(self.main_inputs, batch_size, q.device) - 1
+        )
+    else:
+        sequence_lengths = sequence_lengths.to(
+            device=q.device, dtype=torch.int32, non_blocking=True
+        ).contiguous()
     invalid_lengths = (
         bool(torch.any(sequence_lengths < 0).item())
         if host_max_compressed is None
@@ -186,7 +194,12 @@ def select_decode_tokens(
     get_frequency = getattr(indexer, "rope_inv_freq", None)
     frequency = get_frequency(rope_config) if callable(get_frequency) else None
     prepared = prepared_undo = rotated_q = None
-    if graph_decode and target_mrope and ratio == 4:
+    if (
+        graph_decode
+        and (self.is_mtp_draft or target_mrope)
+        and ratio == 4
+        and kv_tokens_per_block == int(self.indexer_state_cache.seq_size_per_block)
+    ):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.decode_prepare_triton import (
             try_prepare_decode,
         )
@@ -200,6 +213,7 @@ def select_decode_tokens(
             kv_table,
             state_pool,
             state_table,
+            target_mrope=target_mrope,
             query=q if raw_query else None,
             query_gamma=indexer.q_norm_gamma if raw_query else None,
             norm_eps=float(indexer.norm_eps),

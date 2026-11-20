@@ -71,10 +71,17 @@ cc_library(
 
 cc_library(
     name = "tensor_holder",
+    srcs = ["TensorHolder.cc"],
     hdrs = [
         "TensorHolder.h",
     ],
-    deps = torch_deps(),
+    deps = torch_deps() + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
     copts = copts(),
     visibility = ["//visibility:public"],
 )

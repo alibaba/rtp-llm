@@ -137,7 +137,8 @@ public:
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
                      int64_t                  position_id_len_factor,
-                     bool                     exact_batch_only) {
+                     bool                     exact_batch_only,
+                     int64_t                  draft_decode_steps) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -157,7 +158,13 @@ public:
         params.position_id_len_factor     = static_cast<int>(position_id_len_factor);
         params.kernel_block_table_width   = kernel_block_table_width;
 
-        runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
+        auto runner = std::make_unique<CudaGraphRunner>(params, std::move(py_instance));
+        if (draft_decode_steps > 0) {
+            runner->configureDraftLoop(draft_decode_steps, [](const auto&, const auto& outputs) {
+                return outputs.hidden_states.select(1, 0).to(torch::kInt32);
+            });
+        }
+        runner_ = CudaGraphRunner::initializeCapture(std::move(runner));
     }
 
     bool canRun(torch_ext::PyModelInputs& inputs) {
@@ -186,7 +193,11 @@ public:
         prepare_inputs.attention_inputs.prefix_lengths_device = prepare_inputs.attention_inputs.prefix_lengths.cuda();
         prepare_inputs.attention_inputs.combo_position_ids    = prepare_inputs.combo_position_ids;
         refreshTaggedAttentionInputs(prepare_inputs);
-        runner_->prepareAttentionInputs(prepare_inputs, state_, skip_forward_event_sync);
+        {
+            // Match the native engine/AsyncRunner entry, including host planners.
+            py::gil_scoped_release release;
+            runner_->prepareAttentionInputs(prepare_inputs, state_, skip_forward_event_sync);
+        }
         return true;
     }
 
@@ -204,12 +215,18 @@ public:
         // cannot assign them because the bindings intentionally expose them as
         // read-only, so reproduce that input-building step in the test wrapper.
         prepareDeviceMirrors(inputs);
+        py::gil_scoped_release release;
         return runner_->forward(inputs, state_);
+    }
+
+    torch::Tensor forwardDraft(torch_ext::PyModelInputs& inputs) {
+        return forward(inputs).draft_token_ids.clone();
     }
 
     void prepareAttentionInputs(torch_ext::PyModelInputs& inputs) {
         c10::InferenceMode inference_guard(true);
         prepareDeviceMirrors(inputs);
+        py::gil_scoped_release release;
         runner_->prepareAttentionInputs(inputs, state_);
     }
 
@@ -288,7 +305,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("is_target_verify")       = false,
              py::arg("num_tokens_per_bs")      = 1,
              py::arg("position_id_len_factor") = 0,
-             py::arg("exact_batch_only")       = false)
+             py::arg("exact_batch_only")       = false,
+             py::arg("draft_decode_steps")     = 0)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),
@@ -309,6 +327,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
         .def("make_input_ids_scalar", &CudaGraphTestRunner::makeInputIdsScalar)
         .def("prepare", &CudaGraphTestRunner::prepare, py::arg("inputs"), py::arg("skip_forward_event_sync") = false)
         .def("forward", &CudaGraphTestRunner::forward)
+        .def("forwardDraft", &CudaGraphTestRunner::forwardDraft)
         .def("prepareAttentionInputs", &CudaGraphTestRunner::prepareAttentionInputs)
         .def("updateBlockTables", &CudaGraphTestRunner::updateBlockTables)
         .def("getGenerationPrefillStatus", &CudaGraphTestRunner::getGenerationPrefillStatus)

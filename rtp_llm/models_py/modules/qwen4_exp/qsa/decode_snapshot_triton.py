@@ -27,19 +27,20 @@ def _snapshot_decode(
     STW,
     KB: tl.constexpr,
     SB: tl.constexpr,
+    ENTRIES: tl.constexpr,
 ):
     row = tl.program_id(0)
     d = tl.arange(0, 128)
     # Match the reference's int64 conversion before arithmetic, even for
     # malformed int32 positions inspected by standalone validation.
     pos = tl.load(POS + row).to(tl.int64)
-    sc = tl.minimum(tl.maximum(pos >> 7, 0), STW - 1)
-    kc = tl.minimum(tl.maximum(pos >> 7, 0), KTW - 1)
+    sc = tl.minimum(tl.maximum(pos // (ENTRIES * 4), 0), STW - 1)
+    kc = tl.minimum(tl.maximum(pos // (ENTRIES * 4), 0), KTW - 1)
     sid = tl.load(ST + row * STW + sc).to(tl.int64)
     kid = tl.load(KT + row * KTW + kc).to(tl.int64)
     ss = tl.minimum(tl.maximum(sid * 8 + (pos & 7), 0), SB * 8 - 1)
-    ks = tl.where(((pos + 1) & 3) == 0, kid * 32 + ((pos >> 2) & 31), 0)
-    ks = tl.minimum(tl.maximum(ks, 0), KB * 32 - 1)
+    ks = tl.where(((pos + 1) & 3) == 0, kid * ENTRIES + ((pos >> 2) & (ENTRIES - 1)), 0)
+    ks = tl.minimum(tl.maximum(ks, 0), KB * ENTRIES - 1)
     tl.store(SS + row, ss)
     tl.store(KS + row, ks)
     old_state = tl.load(STATE + ss * 128 + d)
@@ -64,7 +65,8 @@ def prepare_decode_snapshot(positions, kv, kt, state, st):
         and 1 <= positions.numel() <= 64
         and positions.dtype == torch.int32
         and kv.ndim == state.ndim == 3
-        and kv.shape[1:] == (32, 128)
+        and kv.shape[1] in (16, 32)
+        and kv.shape[2] == 128
         and state.shape[1:] == (8, 128)
         and kv.dtype == torch.bfloat16
         and state.dtype == torch.float32
@@ -113,6 +115,7 @@ def try_snapshot_decode(positions, kv, kt, state, st):
         st.shape[1],
         kv.shape[0],
         state.shape[0],
+        ENTRIES=kv.shape[1],
         num_warps=4,
     )
     return undo

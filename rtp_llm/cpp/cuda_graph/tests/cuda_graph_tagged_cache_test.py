@@ -1,6 +1,8 @@
 import copy
 import gc
+import json
 import os
+import tempfile
 import unittest
 import weakref
 from typing import Optional
@@ -128,6 +130,75 @@ class HostPartitionModel(TaggedSequenceLengthModel):
         cuda_graph_selection_mode: Optional[str] = None,
     ):
         return self.impls
+
+
+class DecodeLengthPrepare:
+    """Like decode RoPE, copy live positions into graph-owned CUDA storage."""
+
+    def __init__(self, inputs, device_capable):
+        self.device_capable = device_capable
+        self.positions = inputs.sequence_lengths.cuda().clone()
+        self.source_on_device = False
+        self.prepare_calls = 0
+
+    def supports_device_cuda_graph_inputs(self):
+        return self.device_capable
+
+    def prepare_cuda_graph(self, inputs):
+        self.prepare_calls += 1
+        self.source_on_device = inputs.sequence_lengths.is_cuda
+        self.positions.copy_(inputs.sequence_lengths, non_blocking=True)
+
+
+class DecodeLengthPrepareModel:
+    def __init__(self, device_capable=True):
+        self.device_capable = device_capable
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        self.impls = {
+            tag: DecodeLengthPrepare(attn, self.device_capable or tag == "full")
+            for tag, attn in inputs.attention_inputs.items()
+        }
+        return self.impls
+
+    def forward(self, inputs, fmha_impl=None):
+        signature = sum(impl.positions for impl in fmha_impl.values())
+        for attn in inputs.attention_inputs.values():
+            signature = signature + attn.kv_cache_kernel_block_id_device[:, 0]
+        return PyModelOutputs(
+            inputs.input_hiddens + signature.to(inputs.input_hiddens.dtype).unsqueeze(1)
+        )
+
+
+class DeviceOrderModel(DecodeLengthPrepareModel):
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
+        self.history = torch.zeros(
+            (2, inputs.input_ids.numel()), dtype=torch.bfloat16, device="cuda"
+        )
+        return impls
+
+    def forward(self, inputs, fmha_impl=None):
+        output = super().forward(inputs, fmha_impl)
+        # Separate rows make both replays observable after they finish, without
+        # depending on the lifetime of the runner's reusable output buffer.
+        self.history.index_copy_(
+            0, inputs.input_ids[:1].long(), output.hidden_states[:, 0].unsqueeze(0)
+        )
+        return output
+
+
+class DraftLoopModel(DecodeLengthPrepareModel):
+    """Make each proposal depend on the preceding token, hidden and geometry."""
+
+    def forward(self, inputs, fmha_impl=None):
+        signature = inputs.input_ids + inputs.combo_position_ids.reshape(-1, 3).sum(1)
+        signature = signature + sum(impl.positions for impl in fmha_impl.values())
+        for attn in inputs.attention_inputs.values():
+            signature = signature + attn.kv_cache_kernel_block_id_device[:, 0]
+        hidden = inputs.input_hiddens + signature.to(torch.bfloat16).unsqueeze(1)
+        # The recurrent features differ from LM-head features, as in HC MTP.
+        return PyModelOutputs(hidden, hidden + 1)
 
 
 class TaggedDecodePaddingModel:
@@ -564,6 +635,197 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+
+    @unittest.skipIf(
+        torch.version.hip is not None
+        or tuple(map(int, torch.__version__.split(".")[:2])) < (2, 8),
+        "child graph composition requires CUDA and PyTorch >= 2.8",
+    )
+    def test_complete_draft_loop_replays_live_tokens_hidden_and_positions(self):
+        for steps in (1, 2, 3):
+            with self.subTest(steps=steps):
+                model = DraftLoopModel()
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    model,
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [1, 2],
+                    GROUP_TAGS,
+                    position_id_len_factor=3,
+                    exact_batch_only=True,
+                    draft_decode_steps=steps,
+                )
+                for replay, batch in enumerate((2, 1, 2)):
+                    inputs = _build_decode_inputs(
+                        GROUP_TAGS,
+                        {"full": replay + 1, "aux": replay + 2},
+                        batch_size=batch,
+                    )
+                    inputs.input_ids.add_(replay)
+                    inputs.input_hiddens.fill_(replay + 1)
+                    lengths = (
+                        torch.arange(batch, dtype=torch.int32, device="cuda")
+                        + replay
+                        + 2
+                    )
+                    groups = inputs.attention_inputs
+                    for attn in groups.values():
+                        attn.sequence_lengths = lengths
+                        attn.sequence_lengths_plus_1_device = lengths + 1
+                    inputs.attention_inputs = groups
+                    positions = lengths[:, None] + torch.tensor(
+                        [0, 1, 3], device="cuda", dtype=torch.int32
+                    )
+                    inputs.combo_position_ids = positions.flatten()
+                    token = inputs.input_ids.clone()
+                    hidden = inputs.input_hiddens.clone()
+                    expected = []
+                    for step in range(steps):
+                        signature = (
+                            token
+                            + (positions + step).sum(1)
+                            + 2 * (lengths + step)
+                            + 2 * replay
+                            + 3
+                        )
+                        output = hidden + signature.to(torch.bfloat16).unsqueeze(1)
+                        token = output[:, 0].to(torch.int32)
+                        expected.append(token)
+                        hidden = output + 1
+                    self.assertTrue(runner.canRun(inputs))
+                    if replay % 2:
+                        self.assertTrue(runner.prepare(inputs))
+                    actual = runner.forwardDraft(inputs)
+                    torch.testing.assert_close(
+                        actual, torch.stack(expected, dim=1), rtol=0, atol=0
+                    )
+                    # Graph-owned mutations must not alter the request's tensors.
+                    torch.testing.assert_close(
+                        inputs.input_ids,
+                        torch.arange(batch, device="cuda", dtype=torch.int32) + replay,
+                    )
+                    torch.testing.assert_close(
+                        inputs.input_hiddens,
+                        torch.full_like(inputs.input_hiddens, replay + 1),
+                    )
+                    torch.testing.assert_close(
+                        inputs.combo_position_ids, positions.flatten()
+                    )
+
+    def test_device_decode_preparation_and_host_fallback(self):
+        for device_capable in (True, False):
+            with self.subTest(device_capable=device_capable):
+                model = DecodeLengthPrepareModel(device_capable)
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    model,
+                    HIDDEN_SIZE,
+                    TOKENS_PER_BLOCK,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [2],
+                    GROUP_TAGS,
+                    exact_batch_only=True,
+                )
+                captured_calls = {
+                    tag: impl.prepare_calls for tag, impl in model.impls.items()
+                }
+                # A host replay after a device replay must refresh the original
+                # host mirrors; callback views must never replace their storage.
+                for step, on_device in enumerate((True, True, False, True)):
+                    inputs = _build_decode_inputs(
+                        GROUP_TAGS, {"full": step + 1, "aux": step + 2}
+                    )
+                    positions = torch.tensor([step + 2, step + 4], dtype=torch.int32)
+                    positions = (
+                        positions.cuda() if on_device else positions.pin_memory()
+                    )
+                    groups = inputs.attention_inputs
+                    for attn in groups.values():
+                        attn.sequence_lengths = positions
+                        attn.sequence_lengths_plus_1_device = positions.cuda() + 1
+                    inputs.attention_inputs = groups
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU]
+                    ) as prof:
+                        self.assertTrue(runner.prepare(inputs))
+                    scopes = {event.key for event in prof.key_averages()}
+                    use_device = on_device and device_capable
+                    self.assertEqual(
+                        "cuda_graph.prepareAttentionInputs(host_mirror_copy)" in scopes,
+                        not use_device,
+                    )
+                    self.assertEqual(
+                        "cuda_graph.prepareAttentionInputs(wait_forward_event)"
+                        in scopes,
+                        not use_device,
+                    )
+                    self.assertEqual(
+                        "cuda_graph.prepareAttentionInputs(order_forward_event)"
+                        in scopes,
+                        use_device,
+                    )
+                    for tag, impl in model.impls.items():
+                        self.assertEqual(impl.source_on_device, device_capable)
+                        # Device planners execute inside the existing graph;
+                        # changing CUDA/host inputs must not call Python again.
+                        self.assertEqual(
+                            impl.prepare_calls,
+                            captured_calls[tag] + (0 if device_capable else step + 1),
+                        )
+                    output = runner.forward(inputs)
+                    expected = (2 * positions.cuda() + 2 * step + 3).to(torch.bfloat16)
+                    torch.testing.assert_close(
+                        output.hidden_states,
+                        expected.unsqueeze(1).expand(-1, HIDDEN_SIZE),
+                    )
+
+    def test_device_preparation_orders_cross_stream_replays(self):
+        model = DeviceOrderModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            GROUP_TAGS,
+            exact_batch_only=True,
+        )
+        for prepare_separately in (False, True):
+            batches = []
+            expected = []
+            for step in range(2):
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": step + 1, "aux": step + 2}
+                )
+                inputs.input_ids.fill_(step)
+                positions = torch.tensor(
+                    [step + 2, step + 4], dtype=torch.int32, device="cuda"
+                )
+                groups = inputs.attention_inputs
+                for attn in groups.values():
+                    attn.sequence_lengths = positions
+                    attn.sequence_lengths_plus_1_device = positions + 1
+                inputs.attention_inputs = groups
+                batches.append(inputs)
+                expected.append((2 * positions + 2 * step + 3).to(torch.bfloat16))
+            ready = torch.cuda.Event()
+            ready.record()
+            first, second = torch.cuda.Stream(), torch.cuda.Stream()
+            for stream, inputs in zip((first, second), batches):
+                with torch.cuda.stream(stream):
+                    stream.wait_event(ready)
+                    if stream == first:
+                        torch.cuda._sleep(20_000_000)
+                    self.assertTrue(runner.canRun(inputs))
+                    if prepare_separately:
+                        self.assertTrue(runner.prepare(inputs))
+                    runner.forward(inputs)
+            torch.cuda.synchronize()
+            torch.testing.assert_close(model.history, torch.stack(expected))
+
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
         model = DraftBlockTableModel()
@@ -675,6 +937,70 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     torch.cuda.synchronize()
                     expected = torch.full_like(output.hidden_states, bpk + 16)
                     torch.testing.assert_close(output.hidden_states, expected)
+
+    def test_device_block_table_mirrors_use_pinned_pitched_copy(self) -> None:
+        class HostTablePrepare:
+            def prepare_cuda_graph(self, inputs):
+                table = inputs.kv_cache_kernel_block_id
+                self.pinned = table.is_pinned()
+                self.snapshot = table.clone()
+
+        class HostTableModel(TaggedBlockTableModel):
+            def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+                self.impls = {tag: HostTablePrepare() for tag in GROUP_TAGS}
+                return self.impls
+
+        model = HostTableModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [2],
+            GROUP_TAGS,
+        )
+        # Exercise unequal pitches, nonzero storage offsets, a leaving request,
+        # and a source wider than the captured table. Host planners must see
+        # the completed live values with every unused row/column cleared.
+        for batch, width in ((2, 6), (2, 3), (1, 2), (2, 11), (2, 8)):
+            inputs = _build_decode_inputs(
+                GROUP_TAGS, {"full": 0, "aux": 0}, batch_size=batch
+            )
+            groups = inputs.attention_inputs
+            expected = {}
+            for index, tag in enumerate(GROUP_TAGS):
+                backing = (
+                    torch.arange(batch * (width + 2), dtype=torch.int32, device="cuda")
+                    + index * 100
+                )
+                # Keep a row stride larger than the copied width on device.
+                table = backing.reshape(batch, width + 2)[:, 1 : width + 1]
+                groups[tag].kv_cache_kernel_block_id = table
+                groups[tag].kv_cache_kernel_block_id_device = table
+                values = torch.zeros((2, KERNEL_BLOCK_TABLE_WIDTH), dtype=torch.int32)
+                count = min(width, KERNEL_BLOCK_TABLE_WIDTH)
+                values[:batch, :count] = table[:, :count].cpu()
+                expected[tag] = values
+            inputs.attention_inputs = groups
+            torch.cuda.synchronize()
+            with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]
+            ) as prof:
+                self.assertTrue(runner.prepare(inputs))
+            for tag, impl in model.impls.items():
+                self.assertTrue(impl.pinned)
+                torch.testing.assert_close(impl.snapshot, expected[tag], rtol=0, atol=0)
+            with tempfile.NamedTemporaryFile(suffix=".json") as trace:
+                prof.export_chrome_trace(trace.name)
+                with open(trace.name) as saved:
+                    events = json.load(saved)["traceEvents"]
+            copies = [event for event in events if event.get("cat") == "gpu_memcpy"]
+            self.assertTrue(copies)
+            self.assertFalse(any("Pageable" in event["name"] for event in copies))
 
     def test_exact_batch_metadata_reaches_initial_and_bucket_capture(self) -> None:
         runner = CudaGraphRunner()

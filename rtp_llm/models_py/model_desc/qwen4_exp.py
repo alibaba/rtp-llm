@@ -210,13 +210,8 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and hidden_states.is_cuda
             and torch.version.hip is None
             and hidden_states.dtype == torch.bfloat16
-            and (
-                torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
-                or (
-                    bool(qsa_runtime.main_inputs.is_target_verify)
-                    and torch.cuda.get_device_capability(hidden_states.device) == (9, 0)
-                )
-            )
+            and torch.cuda.get_device_capability(hidden_states.device)
+            in ((9, 0), (12, 0))
         )
 
         def _prefix_present(inputs) -> bool:
@@ -287,7 +282,6 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             not bool(qsa_runtime.main_inputs.is_prefill)
             and not bool(qsa_runtime.main_inputs.is_target_verify)
             and bool(qsa_runtime.main_inputs.is_cuda_graph)
-            and not bool(getattr(self, "is_mtp_draft", False))
             and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
             and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (4, 128)
             and hidden_states.ndim == 2
@@ -1405,6 +1399,11 @@ class Qwen4ExpModel(Qwen35Model):
 
     def has_speculative_target_status_reducer(self) -> bool:
         return self.__dict__.get("_cpu_target_status") is not None
+
+    def supports_device_speculative_handoff(self) -> bool:
+        # The draft reads verify outputs and owns separate cache pools. It
+        # never reads the target PLE state written by the commit worker.
+        return bool(self.ple_layers)
 
     def reduce_speculative_target_prepare_status(self, local_ok: bool) -> bool:
         status = self.__dict__.get("_cpu_target_status")

@@ -4,7 +4,6 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
@@ -19,15 +18,18 @@ from rtp_llm.ops import RopeStyle
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class DraftQsaMetadataTest(unittest.TestCase):
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 measured domain")
+        if torch.version.hip is not None or torch.cuda.get_device_capability() not in (
+            (9, 0),
+            (12, 0),
+        ):
+            self.skipTest("SM90 or SM120 required")
         torch.manual_seed(20261020)
 
     def test_live_metadata_raw_gains_padded_rows_and_two_graphs(self):
         frequency = 10000000.0 ** (
             -2.0 * torch.arange(32, device="cuda", dtype=torch.float32) / 64
         )
-        for batch in range(1, 9):
+        for batch in (*range(1, 9), 16):
             rows = batch * 4
             q = torch.randn(rows, 600, device="cuda", dtype=torch.bfloat16)[
                 :, :512

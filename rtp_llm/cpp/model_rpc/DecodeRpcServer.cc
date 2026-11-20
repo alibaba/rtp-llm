@@ -700,7 +700,6 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                     .next_seq_len_gpu             = std::move(next_seq_len),
                     .propose_tokens_gpu           = std::move(propose_tokens_gpu),
                     .last_hidden_states_gpu       = sp_output_buffer->hidden_states,
-                    .draft_all_probs_gpu          = sp_output_buffer->all_probs,
                     .previous_seq_len_upper_bound = generate_stream->seqLength(),
                     .next_seq_len_upper_bound     = generate_stream->seqLength(),
                 });

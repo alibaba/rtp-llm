@@ -611,8 +611,13 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer && !engine_->isDSpark()) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        // Argmax proposals carry only token IDs. An absent probability field
+        // decodes to an empty tensor; dense proposals retain their payload.
+        if (sp_output_buffer->all_probs.defined()) {
+            auto all_probs_cpu =
+                sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+            QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
+        }
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
@@ -621,7 +626,6 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
                                                                             sp_output_buffer->hidden_states;
         }
-        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 

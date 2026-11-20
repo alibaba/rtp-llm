@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <array>
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -177,6 +178,9 @@ enum GptModelInputControlFlag : uint32_t {
     kControlPdSeparation        = 1u << 7,
     kControlDecodeEntrance      = 1u << 8,
     kControlOpaqueKvCacheStore  = 1u << 9,
+    // Transport-only decision: every rank continues from its committed local state.
+    kControlReuseLocalInputs   = 1u << 10,
+    kControlRefreshReusedCache = 1u << 11,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -184,7 +188,13 @@ torch::Tensor           makeModelInputShapeHintsTensor(const GptModelInputs& inp
 std::array<int64_t, 2>  decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 std::vector<int64_t> decodeKvBlockTableShape(int64_t rank, int64_t group_num, int64_t batch_size, int64_t max_blocks);
 
-void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
+// Rank 0 selects reuse by supplying a callback. Peers may supply a candidate,
+// but invoke it only after the root-owned header confirms unchanged scheduling.
+// A normal/empty round still uses the same header and full synchronization path.
+void tpSyncModelInputs(GptModelInputs&                                                      inputs,
+                       const ParallelismConfig&                                             parallelism_config,
+                       const std::function<void(GptModelInputs&, bool reuse_cache_tables)>& reuse_local_inputs = {},
+                       bool refresh_reused_cache                                                               = false);
 
 struct MicroBatchInfo {
     size_t prefill_num;
@@ -205,8 +215,10 @@ class ModelBase {
 public:
     virtual ~ModelBase()                                                     = default;
     virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
-    virtual void                       releaseBuffers() {}
+    virtual void                       releaseBuffers(std::optional<torch::Stream> consumer_stream = std::nullopt) {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
+    // Cancel speculative preparation when scheduling selects a different batch.
+    virtual void                       discardPreparedAttentionInputs() noexcept {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {
         return std::nullopt;
     }
@@ -233,6 +245,14 @@ public:
     // commit and must be idempotent. Both finish paths report errors instead
     // of throwing so every TP rank can reach the same status rendezvous.
     virtual bool hasSpeculativeTargetCommitHooks() const {
+        return false;
+    }
+
+    // Dense extend consumes GPU acceptance state without compacting on CPU.
+    // Its attention geometry is independent of acceptance and its cache pools
+    // are separate from the target transaction. This permits preparation and
+    // commit to overlap model execution. TP agreement needs a host transport.
+    virtual bool supportsDeviceSpeculativeHandoff() const {
         return false;
     }
 

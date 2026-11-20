@@ -75,6 +75,7 @@ def try_draft_paged_attention(
     """
     if not (
         _enabled(qkv)
+        and torch.cuda.get_device_capability(qkv.device) == (12, 0)
         and (heads, kv_heads, head_dim, page_size) == (12, 1, 256, 128)
         and qkv.ndim == 2
         and qkv.shape[1] >= 3072

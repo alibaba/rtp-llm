@@ -47,8 +47,10 @@ class PLECommitMetadataTest(unittest.TestCase):
         return torch.tensor(values, device="cuda", dtype=torch.int32)
 
     def begin(self, transaction, accept_len):
-        with patch("torch.cuda.get_device_capability", return_value=(12, 0)):
-            return begin_accepted_pair_resolution(transaction, accept_len)
+        # Triton also reads this API to choose the compilation target. Mocking
+        # it to SM120 on an H20 produces a cubin the test GPU cannot execute.
+        self.assertIn(torch.cuda.get_device_capability(), ((9, 0), (12, 0)))
+        return begin_accepted_pair_resolution(transaction, accept_len)
 
     def test_valid_resolution_matches_reference(self):
         transaction, state_table, ctx_table, prefixes = self.fixture()
@@ -81,6 +83,33 @@ class PLECommitMetadataTest(unittest.TestCase):
         )
         torch.cuda.synchronize()
         self.assertEqual(int(dummy.sum().item()), 1024)
+
+    def test_sm90_uses_device_metadata_without_host_fallback(self):
+        if torch.cuda.get_device_capability() != (9, 0):
+            self.skipTest("requires an SM90 GPU")
+        transaction, _, _, _ = self.fixture(query=4, page_size=64)
+        resolution = begin_accepted_pair_resolution(
+            transaction, self.accept([1, 2, 3, 4])
+        )
+        self.assertIsNotNone(resolution)
+        resolution.verify()
+
+    def test_concurrent_commit_streams_have_independent_verdicts(self):
+        transaction, _, _, _ = self.fixture()
+        ready = torch.cuda.Event()
+        ready.record()
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        resolutions = []
+        for stream, lengths in zip(streams, ([1, 2, 3, 1], [1, 99, 1, 1])):
+            with torch.cuda.stream(stream):
+                stream.wait_event(ready)
+                resolutions.append(self.begin(transaction, self.accept(lengths)))
+        self.assertNotEqual(
+            resolutions[0].pinned.data_ptr(), resolutions[1].pinned.data_ptr()
+        )
+        resolutions[0].verify()
+        with self.assertRaisesRegex(RuntimeError, "accept_len must be in"):
+            resolutions[1].verify()
 
     def test_accept_range_rejected_with_clamped_payload(self):
         transaction, _, _, _ = self.fixture()

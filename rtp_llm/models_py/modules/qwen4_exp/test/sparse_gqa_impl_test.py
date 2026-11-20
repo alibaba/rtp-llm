@@ -220,6 +220,9 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         )
         if graph:
             attn_inputs.sequence_lengths = attn_inputs.sequence_lengths.pin_memory()
+            attn_inputs.sequence_lengths_plus_1_device = (
+                attn_inputs.sequence_lengths.cuda() + 1
+            )
             attn_inputs.is_cuda_graph = True
             attn_inputs.is_exact_cuda_graph_batch = True
             attn_inputs.is_s_padded = True
@@ -330,11 +333,14 @@ class SparseGqaImplForwardTest(unittest.TestCase):
 
         qkv.copy_(torch.randn_like(qkv.float()).bfloat16())
         selected.copy_(torch.tensor([[[0, 3, 5, -1]]], device=_DEV))
-        impl.attn_inputs.sequence_lengths[0] = 5
+        impl.attn_inputs.sequence_lengths_plus_1_device.fill_(6)
         impl.attn_inputs.kv_cache_kernel_block_id_device[0].copy_(
             torch.tensor([3, 2, 1], dtype=torch.int32, device=_DEV)
         )
         graph.replay()
+        torch.cuda.synchronize()
+        # Keep capture-time CPU lengths stale until the replay has finished.
+        impl.attn_inputs.sequence_lengths[0] = 5
 
         eager = self._decode_impl(batch=1)
         eager.attn_inputs.sequence_lengths = impl.attn_inputs.sequence_lengths

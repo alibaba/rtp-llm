@@ -3,7 +3,6 @@
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
 
 
@@ -24,15 +23,17 @@ def _snapshot_draft_window(
     STW,
     KB: tl.constexpr,
     SB: tl.constexpr,
+    ENTRIES: tl.constexpr,
     BQ: tl.constexpr,
 ):
+    page_shift: tl.constexpr = 6 if ENTRIES == 16 else 7
     request = tl.program_id(0)
     step = tl.arange(0, BQ)
     d = tl.arange(0, 128)
     prefix = tl.load(PREFIX + request)
     length = tl.load(LENGTH + request)
     positions = prefix + step
-    column = tl.minimum(tl.maximum(positions >> 7, 0), STW - 1)
+    column = tl.minimum(tl.maximum(positions >> page_shift, 0), STW - 1)
     state_id = tl.load(ST + request * STW + column, step < Q, other=0).to(tl.int64)
     slot = tl.minimum(tl.maximum(state_id * 8 + (positions & 7), 0), SB * 8 - 1)
     slot = tl.where(step < length, slot, 0)
@@ -46,12 +47,14 @@ def _snapshot_draft_window(
         step[:, None] < Q,
     )
     completion = prefix + 3 - (prefix & 3)
-    kv_column = tl.minimum(tl.maximum(completion >> 7, 0), KTW - 1)
+    kv_column = tl.minimum(tl.maximum(completion >> page_shift, 0), KTW - 1)
     kv_id = tl.load(KT + request * KTW + kv_column).to(tl.int64)
     kv_slot = tl.where(
-        completion < prefix + length, kv_id * 32 + ((completion >> 2) & 31), 0
+        completion < prefix + length,
+        kv_id * ENTRIES + ((completion >> 2) & (ENTRIES - 1)),
+        0,
     )
-    kv_slot = tl.minimum(tl.maximum(kv_slot, 0), KB * 32 - 1)
+    kv_slot = tl.minimum(tl.maximum(kv_slot, 0), KB * ENTRIES - 1)
     tl.store(KV_SLOTS + request, kv_slot)
     old_kv = tl.load(KV + kv_slot * 128 + d)
     tl.store(OLD_KV + request * 128 + d, old_kv)
@@ -76,9 +79,11 @@ def _write_draft_window(
     STW,
     KB: tl.constexpr,
     SB: tl.constexpr,
+    ENTRIES: tl.constexpr,
     EPS: tl.constexpr,
     BQ: tl.constexpr,
 ):
+    page_shift: tl.constexpr = 6 if ENTRIES == 16 else 7
     request = tl.program_id(0)
     d = tl.arange(0, 128)
     prefix = tl.load(PREFIX + request)
@@ -88,7 +93,7 @@ def _write_draft_window(
     if completion < prefix + length:
         group = tl.arange(0, 4)
         source_positions = completion - 3 + group
-        source_columns = source_positions >> 7
+        source_columns = source_positions >> page_shift
         source_ids = tl.load(
             ST + request * STW + source_columns,
             (source_positions >= 0) & (source_columns < STW),
@@ -131,15 +136,19 @@ def _write_draft_window(
             (left.to(tl.float32) + right.to(tl.float32)).to(tl.bfloat16),
             normalized,
         )
-        column = completion >> 7
+        column = completion >> page_shift
         kv_id = tl.load(
             KT + request * KTW + column, (completion >= 0) & (column < KTW), other=0
         )
         valid = (kv_id > 0) & (kv_id < KB)
-        tl.store(KV + (kv_id * 32 + ((completion >> 2) & 31)) * 128 + d, value, valid)
+        tl.store(
+            KV + (kv_id * ENTRIES + ((completion >> 2) & (ENTRIES - 1))) * 128 + d,
+            value,
+            valid,
+        )
     step = tl.arange(0, BQ)
     positions = prefix + step
-    columns = positions >> 7
+    columns = positions >> page_shift
     ids = tl.load(
         ST + request * STW + columns,
         (step < length) & (positions >= 0) & (columns < STW),
@@ -165,10 +174,11 @@ def try_write_draft_window(
     if not (
         raw.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(raw.device) == (12, 0)
-        and kv.shape[1:] == (32, 128)
-        and 1 <= raw.shape[0] <= 32
-        and 1 <= prefixes.numel() <= 8
+        and torch.cuda.get_device_capability(raw.device) in ((9, 0), (12, 0))
+        and kv.shape[1] in (16, 32)
+        and kv.shape[2] == 128
+        and 1 <= raw.shape[0] <= 128
+        and 1 <= prefixes.numel() <= 32
         and raw.stride(1) == 1
         and raw.stride(0) >= 128
     ):
@@ -184,6 +194,7 @@ def try_write_draft_window(
         STW=st.shape[1],
         KB=kv.shape[0],
         SB=state.shape[0],
+        ENTRIES=kv.shape[1],
         BQ=4,
         num_warps=4,
     )

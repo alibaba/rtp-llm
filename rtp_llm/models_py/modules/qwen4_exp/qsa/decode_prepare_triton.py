@@ -1,4 +1,4 @@
-"""Prepare main-model decode RoPE and undo rows in one read-only launch.
+"""Prepare decode RoPE, query norm and undo rows in one read-only launch.
 
 The following writer remains a separate launch so every request snapshots
 shared sentinel rows before any request can change them.
@@ -41,6 +41,9 @@ def _prepare_decode(
     STW,
     KB: tl.constexpr,
     SB: tl.constexpr,
+    ENTRIES: tl.constexpr,
+    FACTOR: tl.constexpr,
+    MROPE: tl.constexpr,
     INV_SCALE: tl.constexpr,
     H_SECTION: tl.constexpr,
     W_SECTION: tl.constexpr,
@@ -62,14 +65,14 @@ def _prepare_decode(
         VISIBLE,
         COMPRESSED,
         ROWS,
-        FACTOR=3,
+        FACTOR=FACTOR,
         INV_SCALE=INV_SCALE,
         BLOCK=1,
-        MROPE=True,
+        MROPE=MROPE,
         H_SECTION=H_SECTION,
         W_SECTION=W_SECTION,
     )
-    _snapshot_decode(SEQ, KV, KT, STATE, ST, SS, OS, KS, OK, KTW, STW, KB, SB)
+    _snapshot_decode(SEQ, KV, KT, STATE, ST, SS, OS, KS, OK, KTW, STW, KB, SB, ENTRIES)
     if FUSE_Q:
         # The four query heads consume this request's freshly written RoPE.
         tl.debug_barrier()
@@ -86,12 +89,13 @@ def try_prepare_decode(
     state,
     st,
     *,
+    target_mrope=True,
     query=None,
     query_gamma=None,
     norm_eps=1e-6,
 ):
     settings = _decode_positions_config(
-        sequence, positions, frequency, config, target_mrope=True
+        sequence, positions, frequency, config, target_mrope=target_mrope
     )
     if settings is None:
         return None
@@ -129,6 +133,9 @@ def try_prepare_decode(
         st.shape[1],
         kv.shape[0],
         state.shape[0],
+        ENTRIES=kv.shape[1],
+        FACTOR=int(config.index_factor),
+        MROPE=target_mrope,
         INV_SCALE=1.0 / scale,
         H_SECTION=sections[1],
         W_SECTION=sections[2],

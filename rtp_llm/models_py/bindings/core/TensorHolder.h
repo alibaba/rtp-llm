@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <queue>
 #include <vector>
 
@@ -26,6 +27,7 @@ struct TensorHolder {
     }
 
     void release() {
+        collectCompleted();
         // Move the current hold set into clear_tensors. Keep two released
         // rounds alive so tensors created for async H2D/D2H copies or CUDA
         // kernels are not freed until the third release point.
@@ -35,6 +37,16 @@ struct TensorHolder {
             clear_tensors.pop();
         }
     }
+
+    // Release against the last consumer stream instead of counting CPU
+    // iterations. The PyTorch allocators defer storage reuse until that
+    // stream completes, including raw fused copies from pinned host buffers.
+    void release(const torch::Stream& consumer_stream);
+
+private:
+    struct DeferredRelease;
+    std::queue<std::shared_ptr<DeferredRelease>> deferred_releases_;
+    void                                         collectCompleted();
 };
 
 }  // namespace rtp_llm

@@ -544,16 +544,30 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         }
     }
 
-    // fast path for topk = 1
-    // TODO: Support output_all_probs and cum_log_probs in this fast path.
+    // Top-1 defines a point mass. MTP requests the filtered distribution for
+    // rejection sampling, but does not need softmax or a second top-k pass.
+    // Original probabilities, log probabilities and truncated output retain
+    // the general sampler's probability semantics.
     auto top_k_ptr = params.top_k.data_ptr<int32_t>();
     if (std::all_of(top_k_ptr, top_k_ptr + batch_size, [&](auto t) { return t == 1; })
-        && !params.output_all_probs.has_value() && !params.cum_log_probs.has_value()) {
+        && !params.cum_log_probs.has_value() && !params.return_original_all_probs
+        && (!params.output_all_probs.has_value() || params.output_all_probs->size(1) == params.logits.size(1))) {
         torch::Tensor samples_t =
             transposed_tokens.slice(0, transposed_tokens.size(0) - 1, transposed_tokens.size(0)).squeeze(0);
         torch::Tensor probs_t         = params.logits;
         torch::Tensor selected_tokens = torch::argmax(probs_t, -1, /*keepdim=*/false);
         samples_t.copy_(selected_tokens, true);
+        if (params.output_all_probs.has_value()) {
+            params.output_all_probs->zero_().scatter_(1, selected_tokens.unsqueeze(1), 1.0);
+            // This request previously used flashinferSampleGreedy. Preserve its
+            // per-row Philox reservation without uploading unused RNG buffers.
+            RTP_LLM_CHECK_WITH_INFO(params.generator.size() >= static_cast<size_t>(batch_size),
+                                    "sampling generators must cover the batch");
+            for (int64_t i = 0; i < batch_size; ++i) {
+                auto generator = params.generator[i].defined() ? std::make_optional(params.generator[i]) : std::nullopt;
+                get_seed_and_offset(/*increment_size=*/32, generator);
+            }
+        }
 
         if (compact_output) {
             params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(samples_t, true);
