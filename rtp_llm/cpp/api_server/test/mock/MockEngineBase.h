@@ -19,6 +19,7 @@ public:
                 enqueueMultiple,
                 (const std::vector<std::shared_ptr<GenerateInput>>& inputs),
                 (override));
+    MOCK_METHOD0(startLoop, absl::Status());
     MOCK_METHOD0(stop, absl::Status());
     MOCK_METHOD2(preRun, absl::StatusOr<GenerateStreamPtr>(const std::shared_ptr<GenerateInput>&, preRunMode));
     MOCK_METHOD(KVCacheInfo, getCacheStatusInfo, (int64_t, bool), (override));

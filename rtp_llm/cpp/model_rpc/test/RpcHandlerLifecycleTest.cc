@@ -135,6 +135,10 @@ public:
         }
         // No background engine loop: the test explicitly advances the next tick.
     }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return scheduler_->stop();
     }

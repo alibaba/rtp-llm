@@ -115,7 +115,12 @@ sh_binary(
 sh_test(
     name = "update_cuda13_locks_test",
     srcs = ["update_cuda13_locks_test.sh"],
-    data = ["update_cuda13_locks.sh"],
+    data = [
+        "update_cuda13_locks.sh",
+        "requirements_base.txt",
+        "//arch_config:arch_select.bzl",
+        "//rtp_llm:BUILD",
+    ],
 )
 
 compile_pip_requirements(

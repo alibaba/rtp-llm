@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <memory>
 #include <tuple>
@@ -21,6 +23,8 @@
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "c10/core/DeviceGuard.h"
 
 using namespace std;
 namespace th = torch;
@@ -211,17 +215,58 @@ void RtpLLMOp::init(py::object model,
         }
     }
 
-    pybind11::gil_scoped_release release;
-    grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
-                                      this,
-                                      std::move(params),
-                                      std::move(propose_params),
-                                      std::move(token_processor),
-                                      std::move(mm_process_engine),
-                                      std::move(telemetry_config));
-    grpc_server_thread_.detach();
-    while (!is_server_ready_) {
-        sleep(1);  // wait 1s for server ready
+    // Two-phase startup for every deployment: build the model/KV/executor state
+    // here, then start the network listeners from startRPCServer().  Normal
+    // startup calls it immediately; the SCR template path calls it after the
+    // control-plane barrier releases.  One ordering, one set of failure paths.
+    init_params_ = std::make_unique<EngineInitParams>(std::move(params));
+    trace_config_ = std::move(telemetry_config);
+    prepareRPCService(*init_params_,
+                      std::move(mm_process_engine),
+                      std::move(propose_params),
+                      std::move(token_processor));
+    RTP_LLM_LOG_INFO("engine state prepared; RPC/HTTP listeners start from startRPCServer()");
+}
+
+void RtpLLMOp::startRPCServer() {
+    RTP_LLM_CHECK_WITH_INFO(!stop_requested_, "RPC server stopped during startup");
+    if (grpc_server_thread_.joinable()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(init_params_ != nullptr, "RPC init params are missing");
+    // Publish the thread before releasing the GIL so Python stop() can join it.
+    grpc_server_thread_ = std::thread([this]() {
+        try {
+            startRPCServerInternal(*init_params_);
+        } catch (const std::exception& e) {
+            setServerStartError(e.what());
+        } catch (...) {
+            setServerStartError("unknown exception while starting RPC server");
+        }
+    });
+    {
+        pybind11::gil_scoped_release release;
+        while (!is_server_ready_ && !stop_requested_) {
+            {
+                std::lock_guard<std::mutex> lock(server_state_mutex_);
+                if (!server_start_error_.empty()) {
+                    RTP_LLM_FAIL("%s", server_start_error_.c_str());
+                }
+            }
+            sleep(1);
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(!stop_requested_, "RPC server stopped during startup");
+}
+
+void RtpLLMOp::updateRuntimeEndpoints(py::object runtime_config) {
+    RTP_LLM_CHECK_WITH_INFO(!stop_requested_ && !grpc_server_thread_.joinable() && init_params_ != nullptr,
+                            "runtime endpoints can only be updated before RPC start");
+    auto config = runtime_config.cast<RuntimeConfig>();
+    init_params_->runtime_config.worker_addrs = config.worker_addrs;
+    init_params_->runtime_config.worker_grpc_addrs = config.worker_grpc_addrs;
+    if (model_rpc_service_) {
+        model_rpc_service_->updateRuntimeEndpoints(config);
     }
 }
 
@@ -366,55 +411,20 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
     }
 }
 
-void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
-                             std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                             py::object                                    token_processor,
-                             py::object                                    mm_process_engine,
-                             telemetry::TelemetryConfig                    trace_config) {
-    std::string server_address;
+void RtpLLMOp::prepareRPCService(const EngineInitParams&                       maga_init_params,
+                                 py::object                                    mm_process_engine,
+                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                 py::object                                    token_processor) {
     {
         pybind11::gil_scoped_acquire acquire;
         int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
         auto    role_type                      = maga_init_params.pd_sep_config.role_type;
-        // NOTE: ip/ip段可自定义为所需范围。
-        server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
-        // trace telemetry runtime: init once role/rank are known; only
-        // tp_rank==0 enables span production, and it is off unless explicitly
-        // enabled by env
-        {
-            std::string trace_role;
-            switch (role_type) {
-                case RoleType::PDFUSION:
-                    trace_role = "pdfusion";
-                    break;
-                case RoleType::PREFILL:
-                    trace_role = "prefill";
-                    break;
-                case RoleType::DECODE:
-                    trace_role = "decode";
-                    break;
-                case RoleType::VIT:
-                    trace_role = "vit";
-                    break;
-                case RoleType::FRONTEND:
-                    trace_role = "frontend";
-                    break;
-                default:
-                    trace_role = "unknown";
-                    break;
-            }
-            telemetry::TelemetryRuntime::init(trace_config,
-                                              trace_role,
-                                              maga_init_params.parallelism_config.tp_rank,
-                                              maga_init_params.parallelism_config.dp_rank,
-                                              maga_init_params.parallelism_config.world_rank);
-        }
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
             model_rpc_service_.reset(new RemoteRpcServiceImpl());
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
+        // Listeners always start in startRPCServerInternal(); init prepares the service.
         grpc::Status grpc_status =
             model_rpc_service_->init(maga_init_params, std::move(propose_params), mm_process_engine);
         if (!grpc_status.ok()) {
@@ -428,11 +438,39 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                              http_server_address,
                                              maga_init_params,
                                              token_processor));
-        if (model_rpc_port < 0) {
-            is_server_ready_ = true;
-            return;
-        }
     }
+}
+
+void RtpLLMOp::startRPCServerInternal(const EngineInitParams& maga_init_params) {
+#if USING_CUDA || USING_ROCM
+    // Startup runs on a new thread; bind its device before cache initialization.
+    // Use the PyTorch device registry so ROCm can use its CUDA-compatible device type.
+    const int device_id = static_cast<int>(getDeviceId());
+    const c10::DeviceGuard device_guard(c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(device_id)));
+    RTP_LLM_LOG_INFO("RPC startup bound to device_id=%d", device_id);
+#endif
+    int64_t model_rpc_port = -1;
+    {
+        pybind11::gil_scoped_acquire acquire;
+        model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+    }
+    // The exporter reads process identity and creates worker threads.
+    auto trace_role = roleTypeToString(maga_init_params.pd_sep_config.role_type);
+    std::transform(trace_role.begin(), trace_role.end(), trace_role.begin(), [](unsigned char c) {
+        return std::tolower(c);
+    });
+    telemetry::TelemetryRuntime::init(trace_config_,
+                                      trace_role,
+                                      maga_init_params.parallelism_config.tp_rank,
+                                      maga_init_params.parallelism_config.dp_rank,
+                                      maga_init_params.parallelism_config.world_rank);
+    // Start workers and transports even on ranks without a model RPC port.
+    model_rpc_service_->startServices();
+    if (model_rpc_port < 0) {
+        is_server_ready_ = true;
+        return;
+    }
+    const std::string server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
     grpc::ServerBuilder builder;
     // Set large message limits as C++-level defaults (overridable via server_config from grpc_group_args.py)
     builder.AddChannelArgument(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, 1024 * 1024 * 1024);
@@ -450,13 +488,31 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
     builder.RegisterService(model_rpc_service_.get());
 
-    grpc_server_ = builder.BuildAndStart();
-    RTP_LLM_CHECK_WITH_INFO(grpc_server_ != nullptr, "grpc server start failed at address " + server_address);
-
+    auto server = builder.BuildAndStart();
+    grpc::Server* grpc_server = server.get();
+    {
+        std::lock_guard<std::mutex> lock(server_state_mutex_);
+        grpc_server_ = std::move(server);
+    }
+    RTP_LLM_CHECK_WITH_INFO(grpc_server != nullptr,
+                            "grpc server start failed at address " + server_address);
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());
     is_server_ready_ = true;
-    grpc_server_->Wait();
+    // stop() may race with BuildAndStart.  Check the shutdown intent after
+    // publishing the server pointer so the joining thread cannot wait forever
+    // on a listener that the stopper observed as not-yet-created.
+    if (stop_requested_) {
+        grpc_server->Shutdown();
+    }
+    grpc_server->Wait();
     RTP_LLM_LOG_INFO("Server exit on %s", server_address.c_str());
+}
+
+void RtpLLMOp::setServerStartError(const std::string& error) {
+    {
+        std::lock_guard<std::mutex> lock(server_state_mutex_);
+        server_start_error_ = "RPC server start failed: " + error;
+    }
 }
 
 void RtpLLMOp::startHttpServer(py::object model_weights_loader,
@@ -482,10 +538,16 @@ void RtpLLMOp::stop() {
     setKmonServiceServing(false);
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
+        stop_requested_             = true;
         if (model_rpc_service_) {
             model_rpc_service_->beginShutdown();
         }
-        if (grpc_server_) {
+        grpc::Server* grpc_server = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(server_state_mutex_);
+            grpc_server = grpc_server_.get();
+        }
+        if (grpc_server) {
             auto                         begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             pybind11::gil_scoped_release release;
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
@@ -499,8 +561,20 @@ void RtpLLMOp::stop() {
                 }
             }
             RTP_LLM_LOG_INFO("Server shutdowning");
-            grpc_server_->Shutdown();
-            pybind11::gil_scoped_acquire acquire;
+            grpc_server->Shutdown();
+        }
+        // The listener thread may still be constructing the server or waiting
+        // in Server::Wait.  Join before releasing the service/params it uses;
+        // this avoids the detached-thread lifetime race during CRIU restore
+        // and shutdown.
+        if (grpc_server_thread_.joinable()) {
+            // Startup reads Python configuration under the GIL. Joining with
+            // the GIL held can deadlock even during ordinary startup.
+            pybind11::gil_scoped_release release;
+            grpc_server_thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(server_state_mutex_);
             grpc_server_.reset();
         }
         if (model_rpc_service_) {
@@ -513,6 +587,7 @@ void RtpLLMOp::stop() {
             http_server_->stop();
             http_server_.reset();
         }
+        init_params_.reset();
         is_server_shutdown_ = true;
         // bounded flush of remaining spans; never blocks process exit
         {
@@ -527,6 +602,15 @@ void RtpLLMOp::stop() {
 
 RtpLLMOp::~RtpLLMOp() {
     stop();
+}
+
+std::vector<torch::Tensor> RtpLLMOp::gpuCacheTensors() const {
+    RTP_LLM_CHECK_WITH_INFO(model_rpc_service_ != nullptr, "KV cache requested before engine initialization");
+    auto engine = model_rpc_service_->getEngine();
+    RTP_LLM_CHECK_WITH_INFO(engine != nullptr, "KV cache requested before engine initialization");
+    auto manager = engine->getCacheManager();
+    RTP_LLM_CHECK_WITH_INFO(manager != nullptr, "engine has no KV cache manager");
+    return manager->gpuCacheTensors();
 }
 
 void RtpLLMOp::pause() {
@@ -551,6 +635,9 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("token_processor"),
              py::arg("mm_process_engine"),
              py::arg("trace_config") = py::none())
+        .def("gpu_cache_tensors", &RtpLLMOp::gpuCacheTensors)
+        .def("start_rpc_server", &RtpLLMOp::startRPCServer)
+        .def("update_runtime_endpoints", &RtpLLMOp::updateRuntimeEndpoints)
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),

@@ -742,6 +742,7 @@ TEST_F(NormalEngineTest, testPdRolesIgnoreGenerationPrefillWithOrWithoutSpeculat
             params.sp_config.type               = speculative_type;
             auto         proposal = speculative_type == SP_TYPE_NONE ? nullptr : makeLocalProposalParams(params);
             NormalEngine engine(params, std::move(proposal));
+            ASSERT_TRUE(engine.startLoop().ok());
             if (speculative_type == SP_TYPE_NONE) {
                 ASSERT_NE(dynamic_cast<NormalExecutor*>(engine.executor_.get()), nullptr);
             } else {

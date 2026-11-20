@@ -39,7 +39,7 @@ public:
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
     absl::Status pp_step();
-    absl::Status startLoop();
+    absl::Status startLoop() override;
     int64_t      getLastScheduleTime() override;
     void         reportMetrics(RtpLLMEngineMetricsCollector collector) {
         if (metrics_reporter_) {

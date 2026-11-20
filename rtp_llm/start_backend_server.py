@@ -32,6 +32,17 @@ from rtp_llm.utils.concurrency_controller import (
 from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.utils.process_manager import ProcessManager
+from rtp_llm.utils.scr.template_utils import (
+    ScrParticipantManifest,
+)
+from rtp_llm.utils.scr.template_utils import (
+    arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
+)
+from rtp_llm.utils.scr.template_utils import (
+    is_scr_template_phase_active,
+    register_for_scr,
+)
+from rtp_llm.utils.signal_guard import ignore_sigpipe
 from rtp_llm.utils.util import copy_gemm_config
 
 setup_logging()
@@ -68,6 +79,105 @@ def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str =
         logging.warning(f"Failed to send status via pipe: {e}")
 
 
+def _register_scr_resources(backend_manager, py_env_configs):
+    """Install the optional Epsilon worker hooks after engine initialization.
+
+    This is deliberately rank-local.  The control plane owns the complete
+    dump/restore lifecycle; RTP-LLM only publishes optional KV-cache and
+    before-checkpoint registration hints to Epsilon.
+    """
+
+    if not is_scr_template_phase_active() or backend_manager is None:
+        return None
+
+    try:
+        engine = getattr(backend_manager, "engine", None)
+        local_rank = int(
+            getattr(py_env_configs.parallelism_config, "local_rank", 0)
+        )
+        registered = register_for_scr(
+            engine,
+            local_rank=local_rank,
+        )
+        if not registered:
+            logging.warning(
+                "sCR/Epsilon registration was not ready on local rank %s; "
+                "controller fallback remains available",
+                local_rank,
+            )
+        return engine
+    except Exception:
+        # SCR is optional and must never turn a normal model startup failure
+        # into a process-wide outage.
+        logging.exception("failed to initialize sCR worker integration")
+        return None
+
+
+def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None):
+    """Synchronously announce this CUDA rank's pre-service safe point."""
+
+    if not is_scr_template_phase_active() or backend_manager is None:
+        return None
+    try:
+        pc = py_env_configs.parallelism_config
+        # The launcher freezes the quorum before spawning, so a rank that
+        # reaches the barrier without a manifest has no slot to claim.
+        if scr_manifest is None:
+            raise RuntimeError(
+                "sCR phase is active but no participant manifest was provided"
+            )
+        rank_key = str(pc.world_rank)
+        worker_id = scr_manifest.worker_id("backend_rank", rank_key)
+        worker_num = scr_manifest.worker_num
+        logging.info(
+            "sCR rank arrival mapping resolved: local_rank=%s worker_id=%s "
+            "worker_num=%s phase=%s",
+            getattr(pc, "local_rank", 0),
+            worker_id,
+            worker_num,
+            os.environ.get("SCR_PHASE", ""),
+        )
+        result = arrive_scr_checkpoint_barrier(
+            worker_id=worker_id,
+            worker_num=worker_num,
+            fail_closed=True,
+        )
+        logging.info(
+            "sCR backend rank reached pre-service arrival worker_id=%d worker_num=%d result=%r",
+            worker_id,
+            worker_num,
+            result,
+        )
+        return result
+    except Exception:
+        # Once the external controller has selected a template phase, a
+        # participant that failed to arrive must not bind listeners and create
+        # an incomplete template. SCR-disabled/inactive startup never enters
+        # this branch and remains fail-open.
+        logging.exception("failed to start sCR snapshot-barrier arrival")
+        raise
+
+
+def _start_scr_manager_arrival(scr_manifest):
+    """Synchronously announce the manager's pre-service safe point."""
+
+    if scr_manifest is None or not is_scr_template_phase_active():
+        return None
+    worker_id = scr_manifest.worker_id("backend_manager", "0")
+    result = arrive_scr_checkpoint_barrier(
+        worker_id=worker_id,
+        worker_num=scr_manifest.worker_num,
+        fail_closed=True,
+    )
+    logging.info(
+        "sCR backend manager reached pre-service arrival worker_id=%d worker_num=%d result=%r",
+        worker_id,
+        scr_manifest.worker_num,
+        result,
+    )
+    return result
+
+
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
@@ -75,6 +185,7 @@ def local_rank_start(
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
     service_draining=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
@@ -121,12 +232,27 @@ def local_rank_start(
         backend_manager = BackendManager(
             py_env_configs, service_draining=service_draining
         )
+        # Phase 1: build the engine and KV cache.  Listeners stay closed.
         backend_manager.start()
         # Defer these handlers until model loading completes.
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
-        logging.info("Backend server initialized successfully, sending ready status")
+        ignore_sigpipe("after engine startup")
+        # The model and its KV-cache allocations now exist. Registration adds
+        # rank-local hints to the controller's whole-process snapshot. The
+        # required checkpoint rendezvous is the barrier below.
+        _register_scr_resources(backend_manager, py_env_configs)
 
+        # Every deployment passes the same startup barrier point.  It is a
+        # no-op unless the SCR controller selected a template phase, in which
+        # case this rank blocks here until the dump is complete.
+        _start_scr_rank_arrival(
+            backend_manager, py_env_configs, scr_manifest=scr_manifest
+        )
+        # Phase 2: start workers and transports, then bind listeners.
+        backend_manager.start_service()
+
+        logging.info("Backend server initialized successfully, sending ready status")
         _send_pipe_status(
             pipe_writer,
             "success",
@@ -197,12 +323,17 @@ def _create_rank_processes(
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
     service_draining=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     """Create and start rank processes. Each proc is appended before start() so a
     mid-loop abort still leaves every spawned object in the caller's list; teardown
     guards proc.pid to skip any that never started."""
     pc = py_env_configs.parallelism_config
-    local_world_size = _get_local_world_size(py_env_configs)
+    local_world_size = (
+        pc.local_world_size
+        if scr_manifest is not None
+        else _get_local_world_size(py_env_configs)
+    )
     cuda_device_list = _get_cuda_device_list()
     _validate_dp_configuration(py_env_configs)
 
@@ -221,6 +352,7 @@ def _create_rank_processes(
                 writer,
                 parent_pid,
                 service_draining,
+                scr_manifest,
             ),
             name=f"rank-{world_rank}",
         )
@@ -328,11 +460,14 @@ def multi_rank_start(
     pipe_writer=None,
     cleanup=None,
     service_draining=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     """Start multi-rank backend server with proper process management"""
     ctx = multiprocessing.get_context("spawn")
     processes, rank_pipe_readers = [], []
     try:
+        if scr_manifest is not None and py_env_configs.distribute_config.fake_gang_env:
+            raise ValueError("FAKE_GANG_ENV cannot participate in an SCR template")
         _create_rank_processes(
             global_controller,
             py_env_configs,
@@ -340,6 +475,7 @@ def multi_rank_start(
             processes,
             rank_pipe_readers,
             service_draining,
+            scr_manifest,
         )
         local_world_size = len(processes)
 
@@ -349,7 +485,9 @@ def multi_rank_start(
             _close_readers(rank_pipe_readers)
             return processes
 
-        # Wait for all ranks to report startup status
+        # Ranks report ready only after Epsilon releases the entire process
+        # tree. The manager must arrive while the ranks are still waiting.
+        _start_scr_manager_arrival(scr_manifest)
         _wait_for_ranks_startup(processes, rank_pipe_readers, local_world_size)
 
         manager = ProcessManager(
@@ -419,6 +557,7 @@ def start_backend_server(
     pipe_writer=None,
     expected_parent_pid: Optional[int] = None,
     service_draining=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     # The debug-load path runs inline; only a spawned manager has a parent guard.
     if expected_parent_pid is not None:
@@ -444,17 +583,26 @@ def start_backend_server(
     load_gpu_nic_affinity()
 
     pc = py_env_configs.parallelism_config
+    if scr_manifest is not None:
+        # Keep the launcher topology authoritative even with multiple visible GPUs.
+        os.environ["LOCAL_WORLD_SIZE"] = str(pc.local_world_size)
     if not torch.cuda.is_available():
+        if scr_manifest is not None and pc.local_world_size > 1:
+            raise RuntimeError(
+                "SCR backend manifest requires multiple local ranks, but CUDA is unavailable"
+            )
         return local_rank_start(
             global_controller,
             py_env_configs,
             pc.world_rank,
             pipe_writer,
             service_draining=service_draining,
+            scr_manifest=scr_manifest,
         )
 
     if (
-        pc.world_size % torch.cuda.device_count() != 0
+        scr_manifest is None
+        and pc.world_size % torch.cuda.device_count() != 0
         and pc.world_size > torch.cuda.device_count()
     ):
         raise Exception(
@@ -470,13 +618,19 @@ def start_backend_server(
             manager = start_from_config(py_env_configs.jit_config)
         except Exception:  # cold start; a signal instead unwinds to the finally
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
-        if torch.cuda.device_count() > 1 and pc.world_size > 1:
+        multi_rank = (
+            "backend_manager:0" in scr_manifest.participant_ids
+            if scr_manifest is not None
+            else torch.cuda.device_count() > 1 and pc.world_size > 1
+        )
+        if multi_rank:
             return multi_rank_start(
                 global_controller,
                 py_env_configs,
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
                 service_draining=service_draining,
+                scr_manifest=scr_manifest,
             )
         return local_rank_start(
             global_controller,
@@ -484,6 +638,7 @@ def start_backend_server(
             pc.world_rank,
             pipe_writer,
             service_draining=service_draining,
+            scr_manifest=scr_manifest,
         )
     finally:
         if manager:

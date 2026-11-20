@@ -128,6 +128,9 @@ def sm100_suites():
                     "data/model/qwen3_moe/passing_tasks.json",
                     "data/model/qwen3_moe/run_tau2_bench.py",
                 ],
+                # The final multi-turn task can still generate requests after
+                # the suite reaches the default 30-minute GPU watchdog budget.
+                test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "3600"},
             ),
         ],
     )

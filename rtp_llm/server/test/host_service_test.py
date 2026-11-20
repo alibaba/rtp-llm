@@ -18,10 +18,24 @@ def _json_response(payload: dict, status_code: int = 200):
 
 
 class TestMasterService(unittest.TestCase):
+
+    def test_construction_starts_each_master_discovery_instance(self):
+        vip = MagicMock(domain="master.vip")
+        with patch("rtp_llm.server.host_service.threading.Thread") as thread:
+            first, second = MasterService(vip), MasterService(vip)
+            self.addCleanup(first._probe_executor.shutdown)
+            self.addCleanup(second._probe_executor.shutdown)
+        self.assertEqual(
+            [call.kwargs["target"].__self__ for call in thread.call_args_list],
+            [first, second],
+        )
+        self.assertEqual(thread.return_value.start.call_count, 2)
+
     def _make_service(self, vip: MagicMock):
         with patch("rtp_llm.server.host_service.threading.Thread") as mock_thread_cls:
             mock_thread_cls.return_value.start = MagicMock()
             svc = MasterService(vip)
+        self.addCleanup(svc._probe_executor.shutdown)
         return svc, {}
 
     def _refresh(

@@ -13,7 +13,7 @@ class HippoHelper:
         # 获取主机 IP 地址
         container_ip = socket.gethostbyname(hostname)
         logging.info(f"get container_ip from socket:{container_ip}")
-    except Exception as e:
+    except Exception:
         container_ip = host_ip
         logging.info(
             f"get container_ip from socket failed, use host_ip:{host_ip} as container_ip"
@@ -22,6 +22,20 @@ class HippoHelper:
     app = os.environ.get("HIPPO_APP", "")
     group = os.environ.get("HIPPO_SERVICE_NAME", "")
     app_workdir = os.environ.get("HIPPO_APP_WORKDIR", "")
+
+    @staticmethod
+    def refresh_runtime_identity(pod_ip: str) -> Dict[str, str]:
+        """Refresh cached identity using the caller's current Pod IP."""
+        HippoHelper.host_ip = os.environ.get("HIPPO_SLAVE_IP", "")
+        HippoHelper.container_ip = pod_ip
+        HippoHelper.role = os.environ.get(
+            "HIPPO_ROLE_SHORT_NAME", os.environ.get("HIPPO_ROLE", "")
+        )
+        HippoHelper.app = os.environ.get("HIPPO_APP", "")
+        HippoHelper.group = os.environ.get("HIPPO_SERVICE_NAME", "")
+        HippoHelper.app_workdir = os.environ.get("HIPPO_APP_WORKDIR", "")
+        logging.info("refreshed container_ip:%s", HippoHelper.container_ip)
+        return HippoHelper.get_hippo_tags()
 
     @staticmethod
     def is_hippo_env() -> bool:

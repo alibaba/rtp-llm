@@ -1542,7 +1542,7 @@ class BackendTest(JitCacheTestBase):
             result = backend.start_backend_server(controller, configs, pipe_writer)
         self.assertEqual(result, "served")
         rank_start.assert_called_once_with(
-            controller, configs, 3, pipe_writer, service_draining=None
+            controller, configs, 3, pipe_writer, service_draining=None, scr_manifest=None
         )
         jit_start.assert_not_called()
 
@@ -1603,7 +1603,7 @@ class BackendTest(JitCacheTestBase):
         ), mock.patch.object(
             backend,
             "local_rank_start",
-            side_effect=lambda *_, **kwargs: events.append("rank") or "served",
+            side_effect=lambda *_, **_kwargs: events.append("rank") or "served",
         ), mock.patch.object(
             # A hard exit here would truncate the caller's own teardown.
             backend.os,
@@ -1626,6 +1626,9 @@ class BackendTest(JitCacheTestBase):
 
             def start(self):
                 assert backend.signal.SIGTERM not in handlers
+
+            def start_service(self):
+                assert backend.signal.SIGTERM in handlers
 
         backend_module = types.ModuleType("rtp_llm.server.backend_manager")
         backend_module.BackendManager = FakeBackendManager
@@ -1679,7 +1682,7 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers, service_draining=None):
+        def fake(_gc, _cfg, _ctx, processes, readers, *_args, **_kwargs):
             processes.append(proc)
             readers.append(mock.Mock())
 
@@ -1859,7 +1862,6 @@ class TipcTest(JitCacheTestBase):
         for name in ("CXX", "CC", "PYTORCH_NVCC"):
             with self.subTest(name=name):
                 self.assertNotEqual(base, build_args({name: "/toolchain/compiler"}))
-
 
 if __name__ == "__main__":
     unittest.main()

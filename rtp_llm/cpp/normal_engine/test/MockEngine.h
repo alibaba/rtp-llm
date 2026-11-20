@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -233,7 +234,9 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
             NormalExecutor::test_model_factory = nullptr;
         }
     } factory_reset_guard;
-    return make_shared<NormalEngine>(rtp_llm_params, nullptr);
+    auto engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
+    THROW_IF_STATUS_ERROR(engine->startLoop());
+    return engine;
 }
 
 }  // namespace rtp_llm

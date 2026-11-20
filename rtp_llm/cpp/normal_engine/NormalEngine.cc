@@ -319,7 +319,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    (void)startLoop();
     (void)construction_guard.release();
 }
 
@@ -852,8 +851,7 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
     const auto& cache_config = cache_manager->cacheConfig();
     RTP_LLM_LOG_INFO("cache manager initialized with config %s", cache_config.debugString().c_str());
 
-    // Publish the cache state only after allocation, BlockTree/backend setup,
-    // and callback registration have all completed successfully.
+    // Publish the allocations only after the selected preparation has succeeded.
     kv_cache_group_num             = cache_config.groupNums();
     resource_context.cache_manager = std::move(cache_manager);
     resource_context.role_type     = role_type;
@@ -1071,7 +1069,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                      kv_cache_group_num_,
                                      pd_sep_config.role_type,
                                      std::move(cache_manager),
-                                     [](KVCacheManager& manager) { return manager.init(); });
+                                     [](KVCacheManager& manager) { return manager.prepare(); });
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
@@ -1095,6 +1093,15 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
+    if (!executor_) {
+        return absl::FailedPreconditionError("cannot start engine loop without an executor");
+    }
+    if (loop_thread_) {
+        return absl::OkStatus();
+    }
+    if (!resource_context_.cache_manager->startServices()) {
+        return absl::InternalError("failed to start KV cache services");
+    }
     if (parallelism_config.tp_rank == 0) {
         THROW_IF_STATUS_ERROR(initSystemPrompt());
     }
@@ -1114,12 +1121,16 @@ absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_                    = false;
     const auto scheduler_status = scheduler_->stop();
-    // Ask rank 0 to stop at a step boundary. Receivers must finish all model
-    // collectives for inputs that rank 0 has already published before exiting.
-    CpuTpBroadcaster::instance().requestStop();
-    loop_thread_->join();
+    if (loop_thread_) {
+        // The live loop completes outstanding collectives before teardown.
+        CpuTpBroadcaster::instance().requestStop();
+        loop_thread_->join();
+        loop_thread_.reset();
+    }
     scheduler_->finalizeCancelledStreams();
-    // Join the async dispatch runner and release the dispatcher-owned worker pool.
+    // An aborted template has never scheduled a step or admitted an async
+    // output. PP finish would enter collectives that require serving peers.
+    // On startup failure the launcher tears down the rank processes together.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
     return scheduler_status;

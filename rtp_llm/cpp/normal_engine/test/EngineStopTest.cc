@@ -69,7 +69,9 @@ protected:
                 NormalExecutor::test_model_factory = nullptr;
             }
         } guard;
-        return std::make_shared<NormalEngine>(params, nullptr);
+        auto engine = std::make_shared<NormalEngine>(params, nullptr);
+        THROW_IF_STATUS_ERROR(engine->startLoop());
+        return engine;
     }
 };
 
