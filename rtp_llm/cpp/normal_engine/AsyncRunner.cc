@@ -23,6 +23,13 @@ AsyncRunner::~AsyncRunner() {
     if (thread_.joinable()) {
         thread_.join();
     }
+    try {
+        drainFailedTask();
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("failed to drain AsyncRunner stream during destruction: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("failed to drain AsyncRunner stream during destruction");
+    }
 }
 
 void AsyncRunner::launch(std::function<void()> fn) {
@@ -51,9 +58,25 @@ void AsyncRunner::rethrowPendingExceptionIfAny(std::unique_lock<std::mutex>& lk)
     if (!pending_exception_) {
         return;
     }
+    drainFailedTask();
     auto exception = std::exchange(pending_exception_, nullptr);
     lk.unlock();
     std::rethrow_exception(exception);
+}
+
+void AsyncRunner::drainFailedTask() {
+    if (!failed_task_) {
+        return;
+    }
+    // Success keeps the existing asynchronous stream dependency. Errors must
+    // finish device reads before the caller unwinds and releases host inputs.
+    if (completion_event_recorded_) {
+        event_.synchronize();
+    } else {
+        // Recording the completion event itself can fail after work was queued.
+        stream_.synchronize();
+    }
+    failed_task_.reset();
 }
 
 void AsyncRunner::workerLoop() {
@@ -70,25 +93,37 @@ void AsyncRunner::workerLoop() {
         }
 
         std::exception_ptr exception;
+        bool               completion_event_recorded = false;
         {
             at::ThreadLocalStateGuard tls_guard(task.tls_state);
             // Do not propagate Torch profiler callbacks into this worker: Kineto
             // callbacks are thread-affine and can crash when the main engine thread
             // starts/stops profiling while async bookkeeping still runs ATen ops.
             at::DisableRecordFunctionGuard record_function_guard;
-            cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(stream_));
+            cuda_graph::GraphStreamGuard   stream_guard(cuda_graph::toGraphStream(stream_));
             try {
                 task.fn();
-                event_.record(stream_);
             } catch (...) {
                 exception = std::current_exception();
+            }
+            try {
+                event_.record(stream_);
+                completion_event_recorded = true;
+            } catch (...) {
+                if (!exception) {
+                    exception = std::current_exception();
+                }
             }
         }
 
         {
             std::lock_guard<std::mutex> lk(mutex_);
-            pending_exception_ = exception;
-            task_done_         = true;
+            pending_exception_         = exception;
+            completion_event_recorded_ = completion_event_recorded;
+            if (exception) {
+                failed_task_ = std::move(task);
+            }
+            task_done_ = true;
         }
         cv_done_.notify_one();
     }
