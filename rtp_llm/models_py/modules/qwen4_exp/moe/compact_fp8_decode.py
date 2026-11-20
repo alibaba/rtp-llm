@@ -1,6 +1,7 @@
-"""Compact block-scaled MoE for replicated decode inputs on Hopper."""
+"""Compact block-scaled MoE for replicated inputs on Hopper."""
 
 from contextvars import ContextVar
+from typing import Literal
 
 import torch
 import triton
@@ -13,10 +14,10 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
 
 from .moe_align_triton import moe_align_decode, moe_align_large_decode
 
-# The model supplies the phase at capture time; Graph replay uses that path.
-h20_compact_moe_decode: ContextVar[bool] = ContextVar(
-    "h20_compact_moe_decode", default=False
-)
+# Capture records the dispatch selected for this forward. Replay keeps it.
+h20_compact_moe_phase: ContextVar[
+    Literal["eager", "decode", "target_verify"] | None
+] = ContextVar("h20_compact_moe_phase", default=None)
 
 _STABLE_ALIGNMENT_MAX_ROUTES = 2560
 _DENSE_EXPERT_ROWS = 128

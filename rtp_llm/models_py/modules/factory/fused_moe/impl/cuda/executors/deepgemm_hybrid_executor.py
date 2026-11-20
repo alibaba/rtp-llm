@@ -34,10 +34,13 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+    compact_fp8_decode,
+    h20_compact_moe_phase,
+)
 from rtp_llm.models_py.triton_kernels.common.activation import (
     MaskedSiluInputLayout,
     create_packed_scale_tensor,
-    prepare_masked_silu_fp8_launcher,
     silu_and_mul,
     silu_and_mul_masked_post_quant_packed_fwd,
     silu_mul_masked_fp8_post_quant_fwd,
@@ -197,6 +200,7 @@ def _empty_fp32_moe_scale(shape, device, *, mn_major=False):
 
 
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
+    _qwen4_sm90_mixed_graph: bool = False
     BLOCK_SIZE = 128
     EXPERT_ALIGNMENT = 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
@@ -313,12 +317,18 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             and _native_contiguous_silu_fp8 is not None
             and "H20" in torch.cuda.get_device_name(self.w13_weight.device)
         )
-        self._sm90_masked_prefill_silu = (
-            torch.cuda.get_device_capability(self.w13_weight.device) == (9, 0)
-            and (self.E, self.N) in ((512, 768), (256, 1280))
-            and self.K == 2560
-            and self.top_k == 10
-            and not is_deep_gemm_e8m0_used()
+        self._h20_compact_fp8 = (
+            os.environ.get("RTP_LLM_H20_COMPACT_FP8_MOE", "1") == "1"
+            and self._sm90_mn_major_scales
+            and config.tp_size == config.ep_size == 2
+            and getattr(config, "dp_size", 0) == 1
+            and getattr(getattr(config, "model_config", None), "_qwen4_full_fp8", False)
+            and not getattr(config.model_config, "_qwen4_full_fp8_nvfp4", False)
+            and "H20" in torch.cuda.get_device_name(self.w13_weight.device)
+            and self.w13_weight.dtype == self.w2_weight.dtype == torch.float8_e4m3fn
+            and self.w13_weight_scale_inv.dtype
+            == self.w2_weight_scale_inv.dtype
+            == torch.float32
         )
 
     def execute(
@@ -511,22 +521,68 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         ), "expert_tokens_meta is not initialized"
         assert payload.expert_tokens_meta.expert_num_tokens is not None
 
-        with configure_deep_gemm_num_sms(self.num_gemm_sms):
-            hidden_states_fp8 = payload.expert_x
-            hidden_states_scale = payload.expert_x_scale
-            topk_idx = payload.expert_topk_ids
-            topk_weights = payload.expert_topk_weights
-            num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
+        hidden_states_fp8 = payload.expert_x
+        hidden_states_scale = payload.expert_x_scale
+        topk_idx = payload.expert_topk_ids
+        topk_weights = payload.expert_topk_weights
+        num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
+        if self._h20_compact_fp8:
+            phase = h20_compact_moe_phase.get()
+            if _is_cuda_graph_warmup_or_capture():
+                use_compact = self._qwen4_sm90_mixed_graph and phase in (
+                    "decode",
+                    "target_verify",
+                )
+            else:
+                use_compact = payload.expert_ids_are_local and (
+                    not self.enable_cuda_graph or phase == "eager"
+                )
+            # Verify can pack several rows per request. Routed offsets are int32.
+            max_rows = 2048
+            if phase == "target_verify":
+                max_rows = (2**31 - 1) // (self.top_k * max(self.K, self.N))
+            if use_compact and hidden_states_fp8.ndim == 2:
+                rows = hidden_states_fp8.shape[0]
+            else:
+                rows = 0
+            if (
+                0 < rows <= max_rows
+                and hidden_states_fp8.shape[1] == self.K
+                and hidden_states_fp8.is_contiguous()
+                and hidden_states_fp8.dtype == torch.float8_e4m3fn
+                and hidden_states_scale.dtype == torch.float32
+                and hidden_states_scale.shape == (rows, self.K // self.BLOCK_SIZE)
+                and topk_idx.dtype in (torch.int32, torch.int64)
+                and topk_idx.shape == (rows, self.top_k)
+                and topk_weights.dtype == torch.float32
+                and topk_weights.shape == topk_idx.shape
+                and num_recv_tokens_per_expert.shape == (self.E,)
+                and num_recv_tokens_per_expert.device == hidden_states_fp8.device
+                and num_recv_tokens_per_expert.dtype == torch.int32
+                and num_recv_tokens_per_expert.is_contiguous()
+                and activation == "SiGLU"
+                and expert_map is None
+                and a2_scale is None
+                and not apply_router_weight_on_input
+                and not extra_expert_args
+            ):
+                output = compact_fp8_decode(
+                    hidden_states_fp8,
+                    hidden_states_scale,
+                    topk_idx,
+                    topk_weights,
+                    num_recv_tokens_per_expert,
+                    self.w13_weight_fp8,
+                    self.w2_weight_fp8,
+                )
+                if not self.enable_cuda_graph:
+                    dispose_tensor(hidden_states_fp8)
+                return CombineForwardPayload(fused_expert_output=output)
+
+        with configure_deep_gemm_num_sms(self.num_gemm_sms):
             token_num = hidden_states_fp8.shape[0]
-            parallel_prefill = (
-                self._sm90_masked_prefill_silu
-                and 4096 <= token_num < 8192
-                and not _is_cuda_graph_warmup_or_capture()
-            )
-            mn_major_scales = parallel_prefill or (
-                self._sm90_mn_major_scales and token_num in (16, 32, 64)
-            )
+            mn_major_scales = self._sm90_mn_major_scales and token_num in (16, 32, 64)
             num_experts = num_recv_tokens_per_expert.shape[0]
             max_token_num = token_num * self.top_k
             token_num_mean_per_expert = ceil_div(max_token_num, num_experts)
@@ -643,28 +699,16 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     device=hidden_states_fp8_device,
                     mn_major=mn_major_scales,
                 )
-                launch_activation = None
-                if parallel_prefill:
-                    launch_activation = prepare_masked_silu_fp8_launcher(
-                        hidden_states_fp8_device, self.num_experts_per_partition,
-                        alignment, self.N // 2, num_recv_tokens_per_expert,
-                    )
-                if launch_activation is not None:
-                    launch_activation(
-                        upgate_output, down_input, down_input_scale,
-                        num_recv_tokens_per_expert,
-                    )
-                else:
-                    silu_mul_masked_fp8_post_quant_fwd(
-                        input=upgate_output,
-                        output=down_input,
-                        output_scale=down_input_scale,
-                        quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
-                        masked_m=num_recv_tokens_per_expert,
-                        expected_m=expected_m,
-                        input_layout=MaskedSiluInputLayout.BATCH_TOKEN_ALIGNMENT,
-                        scale_ue8m0=is_deep_gemm_e8m0_used(),
-                    )
+                silu_mul_masked_fp8_post_quant_fwd(
+                    input=upgate_output,
+                    output=down_input,
+                    output_scale=down_input_scale,
+                    quant_group_size=self.DEEPGEMM_BLOCK_SHAPE[0],
+                    masked_m=num_recv_tokens_per_expert,
+                    expected_m=expected_m,
+                    input_layout=MaskedSiluInputLayout.BATCH_TOKEN_ALIGNMENT,
+                    scale_ue8m0=is_deep_gemm_e8m0_used(),
+                )
 
             # Free upgate_output
             dispose_tensor(upgate_output)
