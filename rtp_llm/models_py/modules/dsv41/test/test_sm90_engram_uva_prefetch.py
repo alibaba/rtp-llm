@@ -13,6 +13,18 @@ from rtp_llm.models_py.modules.dsv41.engram_prefetch import UvaEngramPrefetch
 from rtp_llm.models_py.modules.dsv41.test import test_sm90_engram as fixture_module
 
 
+def _masked_cpu_lookup_reference(table, scales, indices):
+    """Decode FP8/E8M0 rows while independently applying the UVA ID mask."""
+    indices = indices.to(device="cpu", dtype=torch.int64)
+    valid = (indices >= 0) & (indices < table.shape[0])
+    safe = indices.clamp(0, table.shape[0] - 1).flatten()
+    rows = table.view(torch.uint8).index_select(0, safe).view(table.dtype).float()
+    exponents = scales.view(torch.uint8).index_select(0, safe).float()
+    rows = rows * torch.exp2(exponents - 127).repeat_interleave(32, dim=1)
+    rows = rows.bfloat16().view(*indices.shape, table.shape[1])
+    return rows.masked_fill(~valid[..., None], 0)
+
+
 class Sm90EngramUvaPrefetchTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -106,11 +118,24 @@ class Sm90EngramUvaPrefetchTest(unittest.TestCase):
     @torch.inference_mode()
     def test_prefetch_matches_cpu_rows_and_explicit_out(self):
         cpu = HostEngramEmbedding(self.fixture.table, self.fixture.table_scales)
+        table_rows = self.fixture.table.shape[0]
+        self.assertEqual(table_rows, 4000)
         for count in (0, 1, 7):
-            ids = torch.randint(0, 4000, (count, 12), device=self.device)
+            ids = torch.randint(0, table_rows, (count, 12), device=self.device)
             if count:
-                ids[0, :3] = torch.tensor([-1, 4000, 4007], device=self.device)
-            expected = cpu(ids.cpu(), "cpu")
+                ids[0, :3] = torch.tensor(
+                    [-1, table_rows, table_rows + 7], device=self.device
+                )
+            host_ids = ids.cpu()
+            expected = _masked_cpu_lookup_reference(
+                self.fixture.table, self.fixture.table_scales, host_ids
+            )
+            # The production CPU API accepts table-domain IDs. Check those
+            # values independently, preserving its upper-bound error behavior.
+            valid = (host_ids >= 0) & (host_ids < table_rows)
+            safe_expected = cpu(host_ids.clamp(0, table_rows - 1), "cpu")
+            safe_expected.masked_fill_(~valid[..., None], 0)
+            torch.testing.assert_close(expected, safe_expected, rtol=0, atol=0)
             self.prefetch.begin(self._lookups(ids))
             try:
                 for layer_id in (0, 1):

@@ -227,7 +227,13 @@ class PrefillGlobalGateTest(unittest.TestCase):
 class PrefillGlobalCudaTest(unittest.TestCase):
     def test_mapped_compress_and_state_single_launch(self):
         shapes = ((1, 1, 0), (5, 1, 0), (97, 3, 17), (8192, 9, 17), (65536, 1, 0))
-        for (rows, batch, offset), entry_bytes in product(shapes, (288, 584)):
+        # The 584B adapter is Hopper-only; retain upstream SM100's 288B case.
+        entry_formats = (
+            (288, 584)
+            if tuple(torch.cuda.get_device_capability()) == (9, 0)
+            else (288,)
+        )
+        for (rows, batch, offset), entry_bytes in product(shapes, entry_formats):
             with self.subTest(
                 rows=rows, batch=batch, offset=offset, entry_bytes=entry_bytes
             ):

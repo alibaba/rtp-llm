@@ -307,10 +307,17 @@ class SM90IndexerMultiqueryTest(unittest.TestCase):
                     dense_score_two_queries(*changed)
         with self.assertRaises(ValueError):
             dense_score_two_queries(*args, block=256)
-        with self.assertRaises(ValueError):
-            dense_score_two_queries(
-                *args, out=torch.empty((3, 1031), device="cuda", dtype=torch.bfloat16)
-            )
+        invalid_outputs = (
+            torch.empty((3, 1031), device="cuda", dtype=torch.float16),
+            torch.empty((3, 1031), device="cuda", dtype=torch.int32),
+            torch.empty((3, 1030), device="cuda", dtype=torch.float32),
+            torch.empty((3, 1031), device="cpu", dtype=torch.float32),
+            torch.empty((3, 2062), device="cuda", dtype=torch.float32)[:, ::2],
+        )
+        for output in invalid_outputs:
+            with self.subTest(output_dtype=output.dtype, output_device=output.device):
+                with self.assertRaises(ValueError):
+                    dense_score_two_queries(*args, out=output)
         # Zero-stride metadata view needs no giant allocation; the indexing
         # bound must reject before contiguity or shape checks/any launch.
         huge_q = q.as_strided((2**21, 32, 64), (0, 64, 1))
@@ -324,6 +331,32 @@ class SM90IndexerMultiqueryTest(unittest.TestCase):
             q, qs, keys[:0], ks[:0], weights, starts, ends
         )
         self.assertEqual(empty_keys.shape, (3, 0))
+
+    def test_preallocated_bf16_output_preserves_original_rounding_boundary(self):
+        # BF16 storage is supported: scores already cross the original BF16
+        # boundary before storage. Cover both M1 fallback and two-query tiles.
+        for rows in (1, 3):
+            q, qs, keys, ks, weights, _, _ = _inputs(rows, 1031)
+            for phase in ("late", "all_masked"):
+                starts, ends = _bounds(rows, 1031, phase)
+                reference = torch.full(
+                    (rows, 1031), torch.nan, device="cuda", dtype=torch.float32
+                )
+                _old(q, qs, keys, ks, weights, starts, ends, reference)
+                expected_bits = reference.to(torch.bfloat16).view(torch.int16)
+                for block in (64, 128):
+                    with self.subTest(rows=rows, phase=phase, block=block):
+                        out = torch.full(
+                            (rows, 1031), torch.nan, device="cuda", dtype=torch.bfloat16
+                        )
+                        actual = dense_score_two_queries(
+                            q, qs, keys, ks, weights, starts, ends, block=block, out=out
+                        )
+                        self.assertIs(actual, out)
+                        self.assertFalse(torch.isnan(actual).any().item())
+                        torch.testing.assert_close(
+                            actual.view(torch.int16), expected_bits, rtol=0, atol=0
+                        )
 
     def test_poisoned_output_bounds_and_masked_scales(self):
         q, qs, keys, ks, weights, _, _ = _inputs(3, 1031)

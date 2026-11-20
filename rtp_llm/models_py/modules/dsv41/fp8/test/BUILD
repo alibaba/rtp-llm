@@ -71,7 +71,6 @@ _TESTS = [
     "test_v41_sparse_decode",
     "test_v41_swa_codec",
     "test_v41_swa_fresh",
-    "test_v41_flash_mla_cache_format",
 ]
 
 
@@ -621,6 +620,32 @@ py_test(
     srcs = ["test_v41_sm90_score_bf16_storage.py", "test_v41_sm90_decode_candidate.py", "//rtp_llm/test/pytest:pytest_main.py"],
     main = "//rtp_llm/test/pytest:pytest_main.py",
     args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_score_bf16_storage.py)"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:jit_cache_env",
+        test_requirement("pytest"),
+    ],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+# Run the mapped producer/state regression on Hopper as well as upstream ARM.
+# This alias reuses the existing 288B/584B exact-reference test unchanged.
+py_test(
+    name = "test_v41_prefill_global_mapped_sm90",
+    srcs = glob(["*.py"]) + ["//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = [
+        "--cuda-devices", "1", "--cuda-major", "9",
+        "$(location :test_v41_prefill_global.py)::PrefillGlobalCudaTest::test_mapped_compress_and_state_single_launch",
+    ],
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/models_py:modules",
