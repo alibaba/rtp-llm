@@ -25,7 +25,6 @@ using Cluster8 = impl::TopKCluster<8>;
 
 constexpr uint32_t kBlockSize = impl::TopKConfig::kBlockSize;
 constexpr uint32_t kOccupancy = impl::TopKConfig::kOccupancy;
-constexpr uint32_t kMaxTopK = impl::TopKConfig::kMaxTopK;
 constexpr uint32_t kReg1MaxSeqLen = Register1::kMaxSeqLen;
 constexpr uint32_t kReg2MaxSeqLen = Register2::kMaxSeqLen;
 constexpr uint32_t kReg4MaxSeqLen = Register4::kMaxSeqLen;
@@ -96,13 +95,6 @@ __device__ __forceinline__ void trivial(const TopKProblem& problem) {
     }
 }
 
-__device__ __forceinline__ void copy_output(
-    const TopKProblem& problem, int32_t* destination) {
-    for (uint32_t i = threadIdx.x; i < problem.topk; i += blockDim.x) {
-        destination[i] = problem.out[i];
-    }
-}
-
 template <int Level, bool kAlignedInput>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void main_kernel(const __grid_constant__ Params params) {
@@ -132,40 +124,29 @@ template <typename ClusterImpl, bool kAlignedInput>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void direct_cluster_kernel(const __grid_constant__ Params params) {
     auto problem = params.problem(blockIdx.x);
-    constexpr uint32_t cluster_size = ClusterImpl::kClusterSize;
-    const uint32_t worker_rank = blockIdx.x % cluster_size;
     if (problem.seq_len <= problem.topk) {
-        if (blockIdx.y == worker_rank) trivial(problem);
+        if (blockIdx.y == 0) trivial(problem);
         return;
     }
     __shared__ impl::MaxSmem<typename ClusterImpl::Smem> smem;
-    __shared__ int32_t indices[kMaxTopK];
-    auto* destination = problem.out;
     const auto cluster = cooperative_groups::this_cluster();
-    problem.out = cluster.map_shared_rank(indices, worker_rank);
+    // forward() writes disjoint final slots; an extra DSM output buffer is
+    // unnecessary and loses peer writes when copied back on SM90.
     ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
     cluster.sync();
-    if (blockIdx.y == worker_rank) copy_output(problem, destination);
 }
 
 template <typename ClusterImpl, bool kAlignedInput>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void persistent_cluster_kernel(const __grid_constant__ Params params) {
-    constexpr uint32_t cluster_size = ClusterImpl::kClusterSize;
     __shared__ impl::MaxSmem<typename ClusterImpl::Smem> smem;
-    __shared__ int32_t indices[kMaxTopK];
     const auto cluster = cooperative_groups::this_cluster();
-    const uint32_t worker_rank = blockIdx.x % cluster_size;
     for (uint32_t row = blockIdx.x; row < params.batch; row += kPersistentClusters) {
         auto problem = params.problem(row);
-        auto* destination = problem.out;
         if (problem.seq_len <= problem.topk) {
-            if (blockIdx.y == worker_rank) trivial(problem);
+            if (blockIdx.y == 0) trivial(problem);
         } else {
-            problem.out = cluster.map_shared_rank(indices, worker_rank);
             ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
-            cluster.sync();
-            if (blockIdx.y == worker_rank) copy_output(problem, destination);
         }
         cluster.sync();
     }

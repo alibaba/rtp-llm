@@ -80,7 +80,9 @@ template<uint32_t kBits>
 SGL_DEVICE uint32_t extract_coarse_bin(float x) {
     static_assert(0 < kBits && kBits < 15);
     const auto     hx   = cast<fp16_t>(x);
-    const uint16_t bits = *reinterpret_cast<const uint16_t*>(&hx);
+    // Collection uses numeric comparisons, where +0 and -0 are equal.
+    // Keep their coarse histogram bin identical to avoid over-emitting zeros.
+    const uint16_t bits = x == 0.0f ? 0u : *reinterpret_cast<const uint16_t*>(&hx);
     if ((bits & 0x7fffu) > 0x7c00u)
         return (1u << kBits) - 1u;
     const uint16_t key = (bits & 0x8000) ? ~bits : bits | 0x8000;
