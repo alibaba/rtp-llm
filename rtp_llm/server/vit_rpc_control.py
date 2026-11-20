@@ -9,7 +9,8 @@ from rtp_llm.telemetry.vit_rpc import VitServerTraceInterceptor
 
 
 class _VitExecutorInterceptor(grpc.ServerInterceptor):
-    def __init__(self, status_executor, inspection_executor):
+    def __init__(self, status_executor, inspection_executor, embedding_serializer):
+        self.embedding_serializer = embedding_serializer
         self.executors = {
             "/MultimodalRpcService/GetWorkerStatus": status_executor,
             "/MultimodalRpcService/GetGreenNetVerdict": inspection_executor,
@@ -17,8 +18,19 @@ class _VitExecutorInterceptor(grpc.ServerInterceptor):
 
     def intercept_service(self, continuation, details):
         handler = continuation(details)
+        if handler is None or handler.unary_unary is None:
+            return handler
+        if (
+            self.embedding_serializer is not None
+            and details.method == "/MultimodalRpcService/RemoteMultimodalEmbedding"
+        ):
+            return grpc.unary_unary_rpc_method_handler(
+                handler.unary_unary,
+                request_deserializer=handler.request_deserializer,
+                response_serializer=self.embedding_serializer,
+            )
         executor = self.executors.get(details.method)
-        if handler is None or handler.unary_unary is None or executor is None:
+        if executor is None:
             return handler
 
         def dispatch(request, context):
@@ -34,7 +46,7 @@ class _VitExecutorInterceptor(grpc.ServerInterceptor):
         )
 
 
-def create_vit_rpc_server(max_workers=200):
+def create_vit_rpc_server(max_workers=200, *, embedding_serializer=None):
     data_executor = futures.ThreadPoolExecutor(
         max_workers=max_workers, thread_name_prefix="vit-rpc"
     )
@@ -48,7 +60,9 @@ def create_vit_rpc_server(max_workers=200):
         server = grpc.server(
             data_executor,
             interceptors=[
-                _VitExecutorInterceptor(status_executor, inspection_executor),
+                _VitExecutorInterceptor(
+                    status_executor, inspection_executor, embedding_serializer
+                ),
                 VitServerTraceInterceptor(),
             ],
             options=[

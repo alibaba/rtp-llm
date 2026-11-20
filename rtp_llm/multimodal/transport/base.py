@@ -60,9 +60,6 @@ class MMTerminalBackend(MMTransportBackend):
 def report_output_metrics(result: MMOutputResult) -> None:
     tags = {"source": METRIC_SOURCE, "transport": result.transport}
     kmonitor.report(
-        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC, result.receipt.ByteSize(), tags
-    )
-    kmonitor.report(
         GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC,
         result.payload_embedding_bytes,
         tags,
@@ -80,6 +77,21 @@ def report_output_metrics(result: MMOutputResult) -> None:
         sum(result.receipt.split_size),
         tags,
     )
+
+
+def serialize_embedding_response(response: MultimodalOutputPB) -> bytes:
+    # With the upb protobuf runtime, ByteSize() encodes and copies the
+    # message too. Measure the bytes gRPC is already going to send.
+    payload = response.SerializeToString()
+    kmonitor.report(
+        GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC,
+        len(payload),
+        {
+            "source": METRIC_SOURCE,
+            "transport": "rdma" if response.output_rdma_slots else "bytes",
+        },
+    )
+    return payload
 
 
 class MMOutputTransport:

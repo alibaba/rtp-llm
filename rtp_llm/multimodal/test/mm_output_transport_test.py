@@ -23,6 +23,7 @@ from rtp_llm.multimodal.transport.base import (
     MMOutputTransport,
     MMTransportBackend,
     report_output_metrics,
+    serialize_embedding_response,
 )
 from rtp_llm.multimodal.transport.factory import create_mm_output_transport
 from rtp_llm.multimodal.transport.grpc.backend import (
@@ -302,15 +303,16 @@ class MMOutputTransportTest(TestCase):
         )
 
         report_output_metrics(result)
+        payload = serialize_embedding_response(result.receipt)
 
         samples = {call.args[0]: call.args[1] for call in report.call_args_list}
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC], 32)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 8)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 6)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 2)
+        self.assertEqual(payload, result.receipt.SerializeToString())
         self.assertEqual(
-            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC],
-            result.receipt.ByteSize(),
+            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], len(payload)
         )
 
     @patch("rtp_llm.multimodal.transport.base.kmonitor.report")
@@ -324,17 +326,17 @@ class MMOutputTransportTest(TestCase):
             result = backend.transfer(_rdma_request(), MMEmbeddingRes([_rows(2)]))
 
         report_output_metrics(result)
+        payload = serialize_embedding_response(result.receipt)
 
         samples = {call.args[0]: call.args[1] for call in report.call_args_list}
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC], 24)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 0)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 0)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 2)
+        self.assertEqual(payload, result.receipt.SerializeToString())
         self.assertEqual(
-            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC],
-            result.receipt.ByteSize(),
+            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], len(payload)
         )
-
 
 if __name__ == "__main__":
     main()

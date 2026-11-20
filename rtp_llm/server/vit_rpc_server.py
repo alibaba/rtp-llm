@@ -41,7 +41,10 @@ from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
 )
 from rtp_llm.multimodal.transport import create_mm_output_transport
-from rtp_llm.multimodal.transport.base import RDMA_CLAIM_HEADER
+from rtp_llm.multimodal.transport.base import (
+    RDMA_CLAIM_HEADER,
+    serialize_embedding_response,
+)
 from rtp_llm.server.mm_cache_metadata import (
     MM_CACHE_SNAPSHOT_MAX_BYTES,
     get_mm_cache_keys,
@@ -554,4 +557,4 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
 
 def create_rpc_server():
-    return create_vit_rpc_server()
+    return create_vit_rpc_server(embedding_serializer=serialize_embedding_response)

@@ -63,13 +63,21 @@ class BlockingWorker(MultimodalRpcServiceServicer):
 class VitRpcControlTest(unittest.TestCase):
     def setUp(self):
         self.worker = BlockingWorker()
-        self.server = create_vit_rpc_server(max_workers=1)
+        self.serialized_embeddings = []
+        self.server = create_vit_rpc_server(
+            max_workers=1, embedding_serializer=self._serialize_embedding
+        )
         add_MultimodalRpcServiceServicer_to_server(self.worker, self.server)
         port = self.server.add_insecure_port("127.0.0.1:0")
         self.assertGreater(port, 0)
         self.server.start()
         self.channel = grpc.insecure_channel(f"127.0.0.1:{port}")
         self.stub = MultimodalRpcServiceStub(self.channel)
+
+    def _serialize_embedding(self, response):
+        payload = response.SerializeToString()
+        self.serialized_embeddings.append(payload)
+        return payload
 
     def tearDown(self):
         self.worker.release.set()
@@ -109,8 +117,9 @@ class VitRpcControlTest(unittest.TestCase):
         self.assertFalse(work.done())
         self.assertFalse(self.worker.cache_entered.is_set())
         self.worker.release.set()
-        work.result(timeout=2)
+        response = work.result(timeout=2)
         cache.result(timeout=2)
+        self.assertEqual(self.serialized_embeddings, [response.SerializeToString()])
         self.assertTrue(self.worker.cache_thread.startswith("vit-rpc"))
 
     def test_waiting_for_inspection_leaves_data_and_status_threads_available(self):
