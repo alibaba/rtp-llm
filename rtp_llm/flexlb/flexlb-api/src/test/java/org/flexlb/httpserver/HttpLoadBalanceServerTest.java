@@ -65,7 +65,7 @@ class HttpLoadBalanceServerTest {
     @Test
     void masterInfoUsesCanonicalSchedulerQueueDepth() {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
-        ConfigService configService = mock(ConfigService.class);
+        ConfigService configService = mock(ConfigService.class, RETURNS_DEEP_STUBS);
         RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
@@ -99,7 +99,9 @@ class HttpLoadBalanceServerTest {
                 .jsonPath("$.real_master_host")
                 .isEqualTo("127.0.0.1:7001")
                 .jsonPath("$.ready")
-                .isEqualTo(true);
+                .isEqualTo(true)
+                .jsonPath("$.requires_generate_input")
+                .isEqualTo(false);
 
         verify(scheduler).getQueuedRequestCount();
     }

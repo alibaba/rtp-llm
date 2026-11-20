@@ -187,14 +187,16 @@ class _FakeMasterClient:
         cache_key_block_size,
         input,
         request_id,
-        input_pb=None,
+        input_pb_factory=None,
     ):
         self.calls.append(
             {
                 "block_cache_keys": block_cache_keys,
                 "input": input,
                 "request_id": request_id,
-                "input_pb": input_pb,
+                "input_pb": (
+                    input_pb_factory() if input_pb_factory is not None else None
+                ),
             }
         )
         return FlexlbResponse.ok(self.role_addrs, enqueued_by_master=True)

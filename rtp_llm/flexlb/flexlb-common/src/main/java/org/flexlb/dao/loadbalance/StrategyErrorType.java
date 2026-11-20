@@ -19,6 +19,7 @@ public enum StrategyErrorType {
     NO_FRONTEND_WORKER(8407, true),
     NO_ENCODER_WORKER(8408, true),
     INVALID_REQUEST(8406, false),
+    GENERATE_INPUT_REQUIRED(8409, false),
     VIT_ROUTE_STALE(8408, false),
 
     // queue error

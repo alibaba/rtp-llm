@@ -298,7 +298,7 @@ public final class BackendRpcTransport implements AutoCloseable {
                             scheduleResult(Status.fromThrowable(error), 0, null);
                             var code = Status.fromThrowable(error).getCode();
                             // Real Frontend retries transport failures once; never replay a reply or deadline.
-                            if (!received && !context.isCancelled() && code != Status.Code.DEADLINE_EXCEEDED
+                            if (!forceInput && !received && !context.isCancelled() && code != Status.Code.DEADLINE_EXCEEDED
                                     && attempt + 1 < routes.size())
                                 context.run(() -> schedule(attempt + 1));
                             else fail(error);

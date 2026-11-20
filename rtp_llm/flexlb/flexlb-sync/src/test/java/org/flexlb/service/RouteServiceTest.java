@@ -44,7 +44,7 @@ class RouteServiceTest {
     @Test
     void pdStillRequiresBatchPayload() {
         Response response = service.route(context(false)).join();
-        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        assertEquals(StrategyErrorType.GENERATE_INPUT_REQUIRED.getErrorCode(), response.getCode());
         verifyNoInteractions(scheduler, reporter);
     }
 
