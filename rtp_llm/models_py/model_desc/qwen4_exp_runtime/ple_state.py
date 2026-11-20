@@ -1,9 +1,12 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 
 from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+if TYPE_CHECKING:
+    from .ple_commit_workspace import PLECommitWorkspace
 
 
 @dataclass
@@ -65,3 +68,5 @@ class _PLETargetTransaction:
     commit_started: bool = False
     tentative_committed: bool = False
     graph_key: Optional[int] = None
+    prepare_workspace: Optional["PLECommitWorkspace"] = None
+    workspace_lease: Optional["PLECommitWorkspace"] = None

@@ -1,15 +1,18 @@
 import unittest
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit_prepare import CommitValueBuffers
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_cache_views import PLECacheViews
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_prepare import (
     prepare_commit_values,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_state import (
+    _PLETargetLayerStage,
     _PLETargetTransaction,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_transaction import (
@@ -100,6 +103,142 @@ class PLECommitPrepareTest(unittest.TestCase):
         self.assertTrue(torch.equal(stage.state_pool[state_blocks], expected[2]))
         self.assertTrue(torch.equal(stage.ctx_pool[ctx_blocks], expected[3]))
 
+    def test_workspace_refreshes_full_and_live_prefix_outputs(self):
+        stage, accepted, state_blocks, ctx_blocks = self.fixture(
+            8, 2, 10240, 2, 4, strided=True
+        )
+        workspace = CommitValueBuffers(stage.initial_state, stage.initial_context)
+        addresses, previous = None, {}
+        before = stage.state_pool.clone(), stage.ctx_pool.clone()
+        for batch, count in ((8, 1), (3, 4), (1, 2), (3, 3), (8, 4)):
+            with self.subTest(batch=batch, accepted=count):
+                stage.initial_state.normal_()
+                stage.candidate_state_inputs.normal_()
+                stage.initial_context.add_(1)
+                stage.candidate_ids.add_(1)
+                accepted.fill_(count)
+                live = SimpleNamespace(**vars(stage))
+                for name in (
+                    "initial_state",
+                    "candidate_state_inputs",
+                    "initial_context",
+                    "candidate_ids",
+                ):
+                    setattr(live, name, getattr(stage, name)[:batch])
+                args = live, accepted[:batch], state_blocks[:batch], ctx_blocks[:batch]
+                actual = prepare_commit_values(*args, workspace=workspace)
+                expected = PLETransactionCoordinator._prepare_ple_values_reference(
+                    *args
+                )
+                for a, b in zip(actual, expected):
+                    torch.testing.assert_close(a, b, rtol=0, atol=0)
+                    self.assertTrue(a.is_contiguous())
+                self.assertIs(
+                    actual, workspace.get(live.initial_state, live.initial_context)
+                )
+                if batch in previous:
+                    self.assertIs(actual, previous[batch])
+                previous[batch] = actual
+                pointers = tuple(value.data_ptr() for value in actual)
+                if addresses is None:
+                    addresses = pointers
+                self.assertEqual(pointers, addresses)
+                self.assertEqual(len(set(pointers)), 4)
+        torch.testing.assert_close(stage.state_pool, before[0], rtol=0, atol=0)
+        torch.testing.assert_close(stage.ctx_pool, before[1], rtol=0, atol=0)
+
+    def test_workspaces_keep_independent_undo_until_release(self):
+        args = self.fixture(4, 2, 2560, 2, 4)
+        stage, accepted, state_blocks, ctx_blocks = args
+        before = stage.state_pool.clone(), stage.ctx_pool.clone()
+        final = CommitValueBuffers(stage.initial_state, stage.initial_context)
+        boundary = CommitValueBuffers(stage.initial_state, stage.initial_context)
+        selected = prepare_commit_values(*args, workspace=final)
+        saved = tuple(value.clone() for value in selected)
+        accepted.fill_(1)
+        stage.candidate_state_inputs.add_(1)
+        staged_boundary = prepare_commit_values(*args, workspace=boundary)
+        self.assertEqual(
+            len({value.data_ptr() for value in selected + staged_boundary}), 8
+        )
+        for actual, expected in zip(selected, saved):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        stage.state_pool.index_copy_(0, state_blocks, selected[0])
+        stage.ctx_pool.index_copy_(0, ctx_blocks, selected[1])
+        for actual, expected in zip(selected[2:], saved[2:]):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        stage.state_pool.index_copy_(0, state_blocks, selected[2])
+        stage.ctx_pool.index_copy_(0, ctx_blocks, selected[3])
+        torch.testing.assert_close(stage.state_pool, before[0], rtol=0, atol=0)
+        torch.testing.assert_close(stage.ctx_pool, before[1], rtol=0, atol=0)
+
+    def test_workspace_mismatch_falls_back_to_fresh_outputs(self):
+        args = self.fixture(3, 2, 127, 2, 4)
+        stage = args[0]
+        initial, context = stage.initial_state, stage.initial_context
+        layouts = (
+            (initial[:1], context[:1]),
+            (initial[:, :1], context),
+            (initial[:, :, :17], context),
+            (initial, context[:, :1]),
+            (initial.float(), context),
+            (initial, context.int()),
+            (initial.cpu(), context.cpu()),
+        )
+        expected = PLETransactionCoordinator._prepare_ple_values_reference(*args)
+        before = stage.state_pool.clone(), stage.ctx_pool.clone()
+        for workspace_initial, workspace_context in layouts:
+            workspace = CommitValueBuffers(workspace_initial, workspace_context)
+            self.assertIsNone(workspace.get(initial, context))
+            owned = workspace.get(workspace_initial, workspace_context)
+            actual = prepare_commit_values(*args, workspace=workspace)
+            self.assertFalse(
+                {value.data_ptr() for value in actual}.intersection(
+                    value.data_ptr() for value in owned
+                )
+            )
+            for a, b in zip(actual, expected):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+        # A caller cannot supply pool-backed output tensors as a workspace.
+        actual = prepare_commit_values(
+            *args, workspace=(stage.state_pool, stage.ctx_pool)
+        )
+        for a, b in zip(actual, expected):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        torch.testing.assert_close(stage.state_pool, before[0], rtol=0, atol=0)
+        torch.testing.assert_close(stage.ctx_pool, before[1], rtol=0, atol=0)
+
+    def test_unsupported_layout_does_not_use_workspace(self):
+        args = self.fixture(33, 2, 17, 2, 4)
+        workspace = CommitValueBuffers(args[0].initial_state, args[0].initial_context)
+        with patch.object(
+            workspace, "get", side_effect=AssertionError("ineligible prepare")
+        ):
+            self.assertIsNone(prepare_commit_values(*args, workspace=workspace))
+
+    def test_workspace_graph_replay_refreshes_values_and_undo(self):
+        args = self.fixture(7, 2, 2560, 2, 4, strided=True)
+        stage = args[0]
+        workspace = CommitValueBuffers(stage.initial_state, stage.initial_context)
+        for _ in range(3):
+            prepare_commit_values(*args, workspace=workspace)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = prepare_commit_values(*args, workspace=workspace)
+        addresses = tuple(value.data_ptr() for value in actual)
+        for accepted in (1, 4, 2):
+            args[1].fill_(accepted)
+            stage.candidate_state_inputs.normal_()
+            stage.candidate_ids.add_(1)
+            stage.state_pool.normal_()
+            stage.ctx_pool.add_(1)
+            graph.replay()
+            expected = PLETransactionCoordinator._prepare_ple_values_reference(*args)
+            for a, b in zip(actual, expected):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+            self.assertEqual(addresses, tuple(value.data_ptr() for value in actual))
+
     def test_graph_replay_reads_updated_accept_and_source(self):
         args = self.fixture(7, 2, 2560, 3, 4, strided=True)
         for _ in range(3):
@@ -143,6 +282,257 @@ class PLECommitPrepareTest(unittest.TestCase):
             batch, 4, stage.prefixes, frozenset({1}), {1: stage}
         )
         return coordinator, stage, accepted, state_blocks, ctx_blocks
+
+    def captured_fixture(self, batch=7):
+        owner, stage, accepted, sb, cb = self.transaction_fixture(batch)
+        stage = _PLETargetLayerStage(**vars(stage))
+        transaction = owner.active_transaction
+        transaction.stages[stage.layer_idx] = stage
+        owner.save_speculative_target_graph_capture(batch)
+        return owner, transaction, stage, accepted, sb, cb
+
+    @unittest.skipUnless(
+        torch.cuda.get_device_capability() == (12, 0), "workspace requires SM120"
+    )
+    def test_captured_workspace_live_rows_buckets_and_retirement(self):
+        owner, first, _, _, _, _ = self.captured_fixture()
+        _, second, _, _, _, _ = self.captured_fixture(3)
+        owner.captured_transactions[3] = second
+        pointers = {}
+        for key, batch in ((7, 7), (7, 1), (3, 3), (7, 5), (3, 1), (7, 7)):
+            with self.subTest(bucket=key, live_batch=batch):
+                owner.activate_speculative_target_graph_replay(key)
+                transaction = owner.active_transaction
+                stage = transaction.stages[1]
+                stage.candidate_state_inputs.normal_()
+                stage.candidate_ids.add_(1)
+                stage.state_pool.normal_()
+                stage.ctx_pool.add_(1)
+                before = stage.state_pool.clone(), stage.ctx_pool.clone()
+                accepted = torch.arange(batch, device="cuda", dtype=torch.int32) % 4 + 1
+                owner.prepare_speculative_target_commit(accepted)
+                workspace = transaction.prepare_workspace
+                self.assertIs(transaction.workspace_lease, workspace)
+                self.assertTrue(workspace.busy)
+                write = transaction.prepared_writes[0]
+                outputs = (
+                    write.state_values,
+                    write.ctx_values,
+                    write.original_state,
+                    write.original_context,
+                )
+                addresses = tuple(value.data_ptr() for value in outputs)
+                if key in pointers:
+                    self.assertEqual(addresses, pointers[key])
+                pointers[key] = addresses
+                live = replace(
+                    stage,
+                    prefixes=stage.prefixes[:batch],
+                    state_inputs=SimpleNamespace(
+                        kv_cache_block_id_device=stage.state_inputs.kv_cache_block_id_device[
+                            :batch
+                        ]
+                    ),
+                    ctx_inputs=SimpleNamespace(
+                        kv_cache_block_id_device=stage.ctx_inputs.kv_cache_block_id_device[
+                            :batch
+                        ]
+                    ),
+                    initial_state=stage.initial_state[:batch],
+                    initial_context=stage.initial_context[:batch],
+                    candidate_state_inputs=stage.candidate_state_inputs[:batch],
+                    candidate_ids=stage.candidate_ids[:batch],
+                )
+                expected = self._prepare_reference_and_pools(
+                    live, accepted.long(), write, before
+                )
+                owner.finish_speculative_target_commit(True)
+                torch.testing.assert_close(
+                    stage.state_pool, expected[0], rtol=0, atol=0
+                )
+                torch.testing.assert_close(stage.ctx_pool, expected[1], rtol=0, atol=0)
+                owner.finalize_speculative_target_commit()
+                self.assertIsNone(transaction.workspace_lease)
+                self.assertTrue(
+                    workspace.busy, "local finalize precedes rank consensus"
+                )
+                with self.assertRaises(RuntimeError):
+                    owner.activate_speculative_target_graph_replay(99)
+                self.assertTrue(workspace.busy)
+        self.assertFalse(first.prepare_workspace is second.prepare_workspace)
+        self.assertFalse(set(pointers[3]).intersection(pointers[7]))
+
+    def _prepare_reference_and_pools(self, stage, accepted, write, before):
+        # These fixtures start at token 127: one accepted token completes the
+        # first page, while later tokens select the next final page.
+        self.assertTrue(torch.all(stage.prefixes == 127))
+        expected = before[0].clone(), before[1].clone()
+        pointers = []
+        for slot, count in (
+            *((slot, torch.ones_like(accepted)) for slot in write.boundary_slots),
+            (write, accepted),
+        ):
+            pages = (stage.prefixes + count - 1) // stage.page_size
+            rows = torch.arange(accepted.numel(), device=accepted.device)
+            sb = stage.state_inputs.kv_cache_block_id_device[rows, pages].long()
+            cb = stage.ctx_inputs.kv_cache_block_id_device[rows, pages].long()
+            torch.testing.assert_close(slot.state_blocks, sb, rtol=0, atol=0)
+            torch.testing.assert_close(slot.ctx_blocks, cb, rtol=0, atol=0)
+            actual = (
+                slot.state_values,
+                slot.ctx_values,
+                slot.original_state,
+                slot.original_context,
+            )
+            reference = PLETransactionCoordinator._prepare_ple_values_reference(
+                stage, count, sb, cb
+            )
+            for a, b in zip(actual, reference):
+                torch.testing.assert_close(a, b, rtol=0, atol=0)
+            pointers.extend(value.data_ptr() for value in actual)
+            expected[0].index_copy_(0, sb, reference[0])
+            expected[1].index_copy_(0, cb, reference[1])
+        self.assertEqual(len(pointers), len(set(pointers)))
+        return expected
+
+    @unittest.skipUnless(
+        torch.cuda.get_device_capability() == (12, 0), "workspace requires SM120"
+    )
+    def test_workspace_dp_compaction_and_empty_batch(self):
+        for mask in ((False,) * 7, (True, False, True, False, False, True, False)):
+            owner, transaction, stage, accepted, _, _ = self.captured_fixture()
+            stage.live_rows = torch.tensor(mask)
+            before = stage.state_pool.clone(), stage.ctx_pool.clone()
+            owner.activate_speculative_target_graph_replay(7)
+            owner.prepare_speculative_target_commit(accepted.int())
+            if not any(mask):
+                self.assertEqual(transaction.prepared_writes, [])
+                self.assertIsNone(transaction.prepare_workspace)
+            else:
+                rows = stage.live_rows.nonzero().reshape(-1).cuda()
+                live = replace(
+                    stage,
+                    prefixes=stage.prefixes.index_select(0, rows),
+                    state_inputs=SimpleNamespace(
+                        kv_cache_block_id_device=stage.state_inputs.kv_cache_block_id_device.index_select(
+                            0, rows
+                        )
+                    ),
+                    ctx_inputs=SimpleNamespace(
+                        kv_cache_block_id_device=stage.ctx_inputs.kv_cache_block_id_device.index_select(
+                            0, rows
+                        )
+                    ),
+                    initial_state=stage.initial_state.index_select(0, rows),
+                    initial_context=stage.initial_context.index_select(0, rows),
+                    candidate_state_inputs=stage.candidate_state_inputs.index_select(
+                        0, rows
+                    ),
+                    candidate_ids=stage.candidate_ids.index_select(0, rows),
+                )
+                expected = self._prepare_reference_and_pools(
+                    live,
+                    accepted.index_select(0, rows),
+                    transaction.prepared_writes[0],
+                    before,
+                )
+                owner.finish_speculative_target_commit(True)
+                torch.testing.assert_close(
+                    stage.state_pool, expected[0], rtol=0, atol=0
+                )
+                torch.testing.assert_close(stage.ctx_pool, expected[1], rtol=0, atol=0)
+            owner.finish_speculative_target_commit(False)
+            torch.testing.assert_close(stage.state_pool, before[0], rtol=0, atol=0)
+            torch.testing.assert_close(stage.ctx_pool, before[1], rtol=0, atol=0)
+
+    @unittest.skipUnless(
+        torch.cuda.get_device_capability() == (12, 0), "workspace requires SM120"
+    )
+    def test_busy_workspace_falls_back_without_overwriting_held_undo(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.ple_commit_workspace import (
+            PLECommitWorkspace,
+        )
+
+        owner, transaction, stage, accepted, _, _ = self.captured_fixture()
+        workspace = transaction.prepare_workspace = PLECommitWorkspace(transaction)
+        workspace.busy = True
+        held = workspace.values(stage, "final").get(
+            stage.initial_state, stage.initial_context
+        )
+        for value in held:
+            value.fill_(17)
+        owner.activate_speculative_target_graph_replay(7)
+        owner.prepare_speculative_target_commit(accepted.int())
+        self.assertIsNone(transaction.workspace_lease)
+        write = transaction.prepared_writes[0]
+        self.assertFalse(
+            {
+                write.state_values.data_ptr(),
+                write.ctx_values.data_ptr(),
+                write.original_state.data_ptr(),
+                write.original_context.data_ptr(),
+            }.intersection(value.data_ptr() for value in held)
+        )
+        owner.finish_speculative_target_commit(False)
+        self.assertTrue(workspace.busy)
+        for value in held:
+            self.assertTrue(torch.all(value == 17))
+        self.assertEqual(owner._retired_workspaces, [])
+
+    @unittest.skipUnless(
+        torch.cuda.get_device_capability() == (12, 0), "workspace requires SM120"
+    )
+    def test_failed_prepare_rollback_commit_and_finalize_keep_lease(self):
+        owner, transaction, stage, accepted, _, _ = self.captured_fixture()
+        before = stage.state_pool.clone(), stage.ctx_pool.clone()
+        owner.activate_speculative_target_graph_replay(7)
+        invalid = accepted.int()
+        invalid[0] = 0
+        with self.assertRaises(RuntimeError):
+            owner.prepare_speculative_target_commit(invalid)
+        workspace = transaction.prepare_workspace
+        self.assertTrue(workspace.busy)
+        self.assertIs(transaction.workspace_lease, workspace)
+        with patch.object(
+            owner,
+            "_synchronize_ple_transaction",
+            side_effect=RuntimeError("rollback completion"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rollback completion"):
+                owner.finish_speculative_target_commit(False)
+        self.assertIs(owner.active_transaction, transaction)
+        self.assertIs(transaction.workspace_lease, workspace)
+        owner.finish_speculative_target_commit(False)
+        owner.finish_speculative_target_commit(False)
+        self.assertTrue(workspace.busy)
+        owner.activate_speculative_target_graph_replay(7)
+        self.assertFalse(workspace.busy)
+        owner.prepare_speculative_target_commit(accepted.int())
+        with patch.object(
+            owner,
+            "_synchronize_ple_transaction",
+            side_effect=RuntimeError("commit completion"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "commit completion"):
+                owner.finish_speculative_target_commit(True)
+        self.assertTrue(transaction.commit_started)
+        self.assertTrue(workspace.busy)
+        owner.finish_speculative_target_commit(False)
+        torch.testing.assert_close(stage.state_pool, before[0], rtol=0, atol=0)
+        torch.testing.assert_close(stage.ctx_pool, before[1], rtol=0, atol=0)
+        owner.activate_speculative_target_graph_replay(7)
+        owner.prepare_speculative_target_commit(accepted.int())
+        owner.finish_speculative_target_commit(True)
+        with patch.object(
+            owner, "fault_hook", side_effect=RuntimeError("peer finalize")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "peer finalize"):
+                owner.finalize_speculative_target_commit()
+        self.assertTrue(workspace.busy)
+        with self.assertRaises(RuntimeError):
+            owner.activate_speculative_target_graph_replay(7)
+        owner.finalize_speculative_target_commit()
+        self.assertTrue(workspace.busy)
 
     @unittest.skipUnless(
         torch.cuda.get_device_capability() == (12, 0), "fused metadata requires SM120"
