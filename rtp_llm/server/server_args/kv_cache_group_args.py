@@ -462,6 +462,18 @@ def init_kv_cache_group_args(parser, kv_cache_config):
             "要求 Q >= worker_count。配额不能跨 loop 借用。"
         ),
     )
+    for tier, default in (("device", "lru"), ("memory", "lru"), ("disk", "fifo")):
+        name = f"{tier}_eviction_policy"
+        kv_cache_group.add_argument(
+            f"--{name}",
+            env_name=name.upper(),
+            bind_to=(kv_cache_config, name),
+            type=str.lower,
+            choices=["lru", "lfu", "fifo"],
+            default=default,
+            help=f"BlockTreeCache {tier} 淘汰策略：lru、lfu 或 fifo。",
+        )
+
     for tier, low, high in (
         ("device", 0.82, 0.90),
         ("memory", 0.90, 0.94),
