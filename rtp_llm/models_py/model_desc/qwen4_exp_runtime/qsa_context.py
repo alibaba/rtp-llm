@@ -88,19 +88,22 @@ class Qwen4ExpQSARuntimeContext:
             cache[key] = (tensor, tensor.tolist())
         return cache[key][1]
 
-    def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
+    def require_idle_side_cache(self) -> None:
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+
+    def _write_indexer_cache_transactional(self, *args, **kwargs) -> dict:
+        self.require_idle_side_cache()
+        return self._write_indexer_cache_with_undo(*args, **kwargs)
+
+    def _write_indexer_cache_with_undo(self, *args, **kwargs) -> dict:
         result = write_indexer_cache(
             *args,
             **kwargs,
             capture_undo=True,
             is_s_padded=bool(self.main_inputs.is_s_padded),
         )
-        undo = result.pop("undo", None)
-        if not isinstance(undo, IndexerCacheUndo):
-            raise RuntimeError("qwen4_exp QSA writer did not return an undo record")
-        object.__setattr__(self, "_side_cache_undo", undo)
+        object.__setattr__(self, "_side_cache_undo", result.pop("undo"))
         return result
 
     def rollback_side_cache(self) -> None:

@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 from unittest import TestCase, main, skipUnless
 from unittest.mock import patch
 
@@ -861,10 +862,7 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
     def test_target_prefix_writer_preserves_cache_and_selection_after_page_changes(
         self,
     ):
-        from rtp_llm.models_py.model_desc.qwen4_exp_runtime import (
-            qsa_context,
-            qsa_prefill,
-        )
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_context
 
         self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
         self.indexer.k_norm_gamma = torch.rand(128, device="cuda")
@@ -903,16 +901,23 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                 q, raw, indexer=indexer, rope_config=rope
             )
 
-        for case in ("distinct", "remapped", "aliased"):
+        for case in ("distinct", "remapped", "kv_alias", "state_alias"):
             with self.subTest(case=case):
                 if case == "remapped":
                     kv_table[1, 1] = 4
                     state_table[0, 0] = 13
-                elif case == "aliased":
+                elif case == "kv_alias":
                     kv_table[1, 2] = kv_table[0, 0]
+                elif case == "state_alias":
+                    kv_table[1, 2] = 3
                     state_table[1, 2] = state_table[0, 0]
+                geometry = context._draft_incremental_prefill_geometry
                 with patch.object(
-                    qsa_prefill, "_try_write_aligned_prefix_cache", return_value=False
+                    type(context),
+                    "_draft_incremental_prefill_geometry",
+                    side_effect=lambda **kwargs: replace(
+                        geometry(**kwargs), aligned_write=None
+                    ),
                 ):
                     expected = select()
                 expected_kv, expected_state = kv.clone(), state.clone()
@@ -923,7 +928,9 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                     wraps=qsa_context.write_indexer_cache,
                 ) as general_writer:
                     actual = select()
-                self.assertEqual(general_writer.call_count, int(case == "aliased"))
+                self.assertEqual(
+                    general_writer.call_count, int(case in ("kv_alias", "state_alias"))
+                )
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
                 torch.testing.assert_close(kv, expected_kv, rtol=0, atol=0)
                 torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
@@ -962,6 +969,38 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
         context.rollback_side_cache()
         torch.testing.assert_close(kv, before_kv, rtol=0, atol=0)
         torch.testing.assert_close(state, before_state, rtol=0, atol=0)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for stream-local layouts")
+    def test_short_target_suffix_layout_is_reused_on_its_own_stream(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+            build_aligned_prefill_write_layout,
+        )
+
+        device = torch.device("cuda", torch.cuda.current_device())
+
+        def build():
+            return build_aligned_prefill_write_layout(
+                [1, 3],
+                [128, 256],
+                page_size=128,
+                ratio=4,
+                ring_entries=8,
+                device=device,
+            )
+
+        layout = build()
+        self.assertIs(layout, build())
+        stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(stream):
+            other = build()
+            self.assertIs(other, build())
+            self.assertIsNot(layout, other)
+            self.assertEqual(other.state_pages.tolist(), [[0, 1], [1, 2]])
+            self.assertEqual(
+                other.state_writes.tolist(), [[0, 1, 1, 1], [0, 0, 1, 2], [0, 1, 2, 3]]
+            )
+            self.assertEqual(tuple(other.kv_pages.shape), (2, 0))
+            self.assertEqual(tuple(other.kv_writes.shape), (3, 0))
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
     def test_mtp_draft_prefix_reuse_accepts_local_cu_kv_coordinates(self):
@@ -1105,6 +1144,15 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             context.write_prefill_indexer_cache(
                 raw_keys, indexer=self.indexer, rope_config=self.rope_config
             )
+        undo = context._side_cache_undo
+        with self.assertRaisesRegex(RuntimeError, "already active"):
+            context.select_prefix_reuse_prefill_tokens(
+                raw_keys[:, None, :],
+                raw_keys,
+                indexer=self.indexer,
+                rope_config=self.rope_config,
+            )
+        self.assertIs(context._side_cache_undo, undo)
         context.rollback_side_cache()
 
     def test_actual_finalize_keeps_writes_and_allows_the_next_transaction(self):

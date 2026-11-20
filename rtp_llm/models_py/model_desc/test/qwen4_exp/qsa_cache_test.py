@@ -509,6 +509,38 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
     def test_prefix_reuse_rope_across_layers_cuda(self):
         self.check_prefix_reuse_rope_across_layers(torch.device("cuda:0"), 6144, 2048)
 
+    def test_prefix_prefill_reads_rope_coverage_and_page_aliases_together(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_geometry import (
+            _verify_prefill_pages,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+
+        positions = SimpleNamespace(
+            geometry=SimpleNamespace(groups_all_current=None),
+            groups_in_current_chunk=Mock(return_value=torch.tensor(False)),
+        )
+        checks = DeviceChecks()
+        checks.add(torch.tensor(True), "invalid state page")
+        with self.assertRaisesRegex(RuntimeError, "invalid state page"):
+            _verify_prefill_pages(checks, torch.tensor(False), positions)
+        self.assertIsNone(positions.geometry.groups_all_current)
+
+        checks = DeviceChecks()
+        checks.add(torch.tensor(False), "invalid state page")
+        with patch.object(checks, "verify", wraps=checks.verify) as verify:
+            self.assertTrue(
+                _verify_prefill_pages(checks, torch.tensor(True), positions)
+            )
+            verify.assert_called_once()
+        self.assertIs(positions.geometry.groups_all_current, False)
+
+        # The next layer keeps the coverage decision but resolves its own pages.
+        positions.groups_in_current_chunk.reset_mock()
+        self.assertFalse(
+            _verify_prefill_pages(DeviceChecks(), torch.tensor(False), positions)
+        )
+        positions.groups_in_current_chunk.assert_not_called()
+
     def test_prefill_checks_share_success_without_sharing_layer_pools(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 
