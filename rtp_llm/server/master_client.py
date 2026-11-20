@@ -5,7 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import grpc
 import grpc.aio
@@ -338,14 +338,31 @@ class MasterClient:
                 exc_info=True,
             )
 
+    @staticmethod
+    def _rejected_without_generate_input(response) -> bool:
+        return (
+            (
+                response.code == ExceptionType.MASTER_GENERATE_INPUT_REQUIRED
+                or (
+                    response.code == ExceptionType.MASTER_INVALID_REQUEST
+                    and response.error_message
+                    == "missing serialized generate_input for batch dispatch"
+                )
+            )
+            and not response.success
+            and not response.enqueued_by_master
+            and not response.server_status
+            and not response.HasField("lifecycle")
+        )
+
     async def get_backend_role_addrs(
         self,
         block_cache_keys: list[int],
         cache_key_block_size: int,
         input: GenerateInput,
         request_id: int,
-        input_pb: Optional["GenerateInputPB"] = None,
         *,
+        input_pb_factory: Optional[Callable[[], "GenerateInputPB"]] = None,
         cache_affinity_keys: Optional[List[str]] = None,
         selected_vit: Optional[Dict[str, Any]] = None,
         seq_len: Optional[int] = None,
@@ -412,12 +429,55 @@ class MasterClient:
                     setattr(request_pb.selected_vit, name, value)
         if vit_only:
             timeout_s = min(timeout_s, 0.5) if timeout_s is not None else 0.5
-        if input_pb is not None and not vit_only:
-            request_pb.generate_input = input_pb.SerializeToString()
+        request_with_input = None
 
-        response = await self._send_schedule_request(
-            master_addr, request_pb, timeout_s, request_id
-        )
+        def with_generate_input():
+            nonlocal request_with_input
+            if request_with_input is None:
+                request_with_input = FlexlbScheduleRequestPB()
+                request_with_input.CopyFrom(request_pb)
+                request_with_input.generate_input = (
+                    input_pb_factory().SerializeToString()
+                )
+            return request_with_input
+
+        async def send_to(addr):
+            if vit_only or input_pb_factory is None:
+                return await self._send_schedule_request(
+                    addr, request_pb, timeout_s, request_id
+                )
+            can_omit = getattr(self.host_service, "can_omit_generate_input", None)
+            if can_omit is None or can_omit(addr) is not True:
+                return await self._send_schedule_request(
+                    addr, with_generate_input(), timeout_s, request_id
+                )
+            started_at = time.monotonic()
+            response = await self._send_schedule_request(
+                addr, request_pb, timeout_s, request_id
+            )
+            if response is None or not self._rejected_without_generate_input(response):
+                return response
+            full_request = with_generate_input()
+            remaining_s = (
+                None
+                if timeout_s is None
+                else timeout_s - (time.monotonic() - started_at)
+            )
+            if remaining_s is not None and remaining_s <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.DEADLINE_EXCEEDED, "FlexLB schedule deadline exceeded"
+                )
+            response = await self._send_schedule_request(
+                addr, full_request, remaining_s, request_id
+            )
+            if response is None:
+                raise FtRuntimeException(
+                    ExceptionType.RPC_FINISH_FAILED,
+                    "FlexLB schedule transport failed after resending GenerateInput",
+                )
+            return response
+
+        response = await send_to(master_addr)
 
         if response is None and slave_addr:
             route_logger.info(
@@ -425,9 +485,7 @@ class MasterClient:
                 slave_addr,
                 request_id,
             )
-            response = await self._send_schedule_request(
-                slave_addr, request_pb, timeout_s, request_id
-            )
+            response = await send_to(slave_addr)
 
         if response is None:
             return FlexlbResponse.connection_failed_response()

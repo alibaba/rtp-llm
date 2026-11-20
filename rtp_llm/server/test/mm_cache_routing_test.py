@@ -440,7 +440,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("selected_vit", route_calls[1].kwargs)
             self.assertNotIn("seq_len", route_calls[1].kwargs)
             self.assertEqual(
-                list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
+                list(route_calls[1].kwargs["input_pb_factory"]().token_ids), [1, 99, 2]
             )
             self.assertIsNone(self.request.mm_token_expansion)
             await self.visitor._expand_pd_multimodal_tokens(self.request)
@@ -602,7 +602,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         model_keys = get_block_cache_keys(expanded_model_tokens, 2)
         self.assertEqual(len(hints), 2)
         self.assertEqual(hints, model_keys[:2])
-        self.assertEqual(list(route["input_pb"].token_ids), original)
+        self.assertEqual(list(route["input_pb_factory"]().token_ids), original)
         self.assertEqual(self.request.token_ids.tolist(), original)
         self.assertIsNone(self.request.mm_token_expansion)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
