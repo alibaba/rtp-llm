@@ -136,10 +136,6 @@ class RemoteKVCMServer:
             if self.pace_fixture is not None:
                 try:
                     self.pace_fixture.configure(self)
-                    if self.check_fault_requested():
-                        self._fault_trigger = self.check_fault_injection()
-                        if not self._fault_trigger:
-                            raise RuntimeError("PACE smoke fault injection was not installed")
                     return True
                 except Exception:
                     self.stop_server()
@@ -171,7 +167,6 @@ class RemoteKVCMServer:
                 )
             logging.info(f"addStorage and createInstanceGroup success")
 
-            self._fault_trigger = self.check_fault_injection()
             return True
 
         self.stop_server()
@@ -259,7 +254,7 @@ class RemoteKVCMServer:
         self._server_process = None
         self._fault_trigger = False
 
-    def check_fault_injection(self):
+    def inject_fault(self):
         fault_map = {
             "TEST_MATCH_FAILURE": "GetCacheLocation",
             "TEST_START_WRITE_FAILURE": "StartWriteCache",
@@ -275,10 +270,10 @@ class RemoteKVCMServer:
         config_json = {
             "api_name": api_name,
             "fault_type": "INTERNAL_ERROR",
-            "fault_trigger_strategy": "ONCE",
-            "trigger_at_call": 2,  # 第2次调用时触发
+            "fault_trigger_strategy": "ALWAYS",
         }
 
+        self._fault_trigger = True
         if self.api(
             "injectFault", "", self._http_port + 3000, config_json
         ):
@@ -289,7 +284,10 @@ class RemoteKVCMServer:
             return False
 
     def clearFaults(self):
-        return self.api("clearFaults", "", self._http_port + 3000)
+        if not self.api("clearFaults", "", self._http_port + 3000, {}):
+            return False
+        self._fault_trigger = False
+        return True
 
     def check_fault_requested(self):
         return any(str_to_bool(self._kvcm_config.get(key, "false")) for key in (

@@ -723,8 +723,9 @@ public:
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
             }
         });
-        const auto                             trace_id = nextTraceId("match", match_trace_sequence_);
-        auto query_type                                 = static_cast<kv_cache_manager::QueryType>(default_query_type_);
+        const auto trace_id =
+            request.request_id ? std::to_string(*request.request_id) : nextTraceId("match", match_trace_sequence_);
+        auto query_type = static_cast<kv_cache_manager::QueryType>(default_query_type_);
         if (has_swa_) {
             // Fetch FULL and SWA locations, then apply each group's
             // model-defined reuse window locally.
@@ -1082,14 +1083,15 @@ public:
         std::vector<std::string>               location_spec_group_names;
         RTP_LLM_CHECK_WITH_INFO(group_policy_->getNeedWriteGroups(request, valid_keys_size, location_spec_group_names),
                                 "KVCM write group selection failed");
-        const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
+        const std::string trace_id      = nextTraceId("write", write_trace_sequence_);
+        const auto        meta_trace_id = request.request_id ? std::to_string(*request.request_id) : trace_id;
         (void)remainingTimeout(request, "before StartWrite");
         auto [success, allocation] = [&] {
             const auto                             stage_start = Clock::now();
             block_tree_cache_detail::ScopeRollback timer(
                 [&] { collector.remote_get_write_location_time_us = elapsedTimeUs(stage_start); });
             return client_wrapper_->getWriteLocation("",
-                                                     trace_id,
+                                                     meta_trace_id,
                                                      keys,
                                                      /*tokens=*/{},
                                                      location_spec_group_names,
@@ -1320,7 +1322,9 @@ public:
     bool finishSession(const StorageRequest& request, WritePublication& write,
                        const kv_cache_manager::BlockMask& mask,
                        const kv_cache_manager::Locations& locations, bool unused_close) {
-        const auto trace = nextTraceId(unused_close ? "close_write" : "finish_write", finish_write_trace_sequence_);
+        const auto trace = request.request_id ?
+                               std::to_string(*request.request_id) :
+                               nextTraceId(unused_close ? "close_write" : "finish_write", finish_write_trace_sequence_);
         RTP_LLM_CHECK_WITH_INFO(write.start_acknowledged && !write.finish_attempted,
                                 "KVCM metadata action already settled");
         // Anchor before the call, including exceptions. A cleanup may retry

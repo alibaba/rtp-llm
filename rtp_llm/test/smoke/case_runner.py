@@ -731,6 +731,16 @@ class CaseRunner(object):
         task_endpoint = task_info.endpoint
         task_states.total_count = len(qr_array)
         comparer_cls = None
+        fault_server = self.remote_kvcm_server
+        fault_requested = (
+            fault_server is not None and fault_server.check_fault_requested()
+        )
+        if fault_requested and (
+            self.concurrency_test or self.parallel_qr > 1 or len(qr_array) < 2
+        ):
+            raise ValueError(
+                "KVCM fault injection requires at least two sequential queries"
+            )
 
         # Pre-populate per-query metadata, request_endpoint, comparer_cls so the
         # dispatch worker only does the heavy I/O. We resolve comparer_cls here
@@ -803,9 +813,16 @@ class CaseRunner(object):
                     results[res[0]] = res
         else:
             for item in prepared:
-                results[item[0]] = _run_one(item)
-                if self.sleep_time_qr > 0:
-                    time.sleep(self.sleep_time_qr)
+                inject_fault = fault_requested and item[0] == 1
+                if inject_fault and not fault_server.inject_fault():
+                    raise RuntimeError("Failed to inject the KVCM smoke fault")
+                try:
+                    results[item[0]] = _run_one(item)
+                    if self.sleep_time_qr > 0:
+                        time.sleep(self.sleep_time_qr)
+                finally:
+                    if inject_fault and not fault_server.clearFaults():
+                        raise RuntimeError("Failed to clear the KVCM smoke fault")
                 if self.kill_remote and self.remote_kvcm_server is not None:
                     self.remote_kvcm_server.stop_server()
                     logging.info("manually stop remote_kvcm_server")
