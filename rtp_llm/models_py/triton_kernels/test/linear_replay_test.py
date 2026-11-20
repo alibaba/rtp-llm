@@ -6,11 +6,8 @@ from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
-from torch._subclasses.fake_tensor import FakeTensorMode
 
 from rtp_llm.models_py.triton_kernels import linear_replay as replay_module
-from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
-from rtp_llm.models_py.triton_kernels.kda import fused_recurrent_kda
 from rtp_llm.models_py.triton_kernels.linear_replay import (
     LinearReplay,
     finalize_linear_replay,
@@ -18,8 +15,46 @@ from rtp_llm.models_py.triton_kernels.linear_replay import (
 )
 
 
+def make_replay_cache(group_id, k_shape, g_shape, u_shape, channels, *, device):
+    """Allocate zeroed replay records and their metadata for a test cache."""
+    slots, steps = k_shape[:2]
+
+    def zeros(shape, dtype=torch.float32):
+        return torch.zeros(shape, dtype=dtype, device=device)
+
+    return SimpleNamespace(
+        group_id=group_id,
+        k=zeros(k_shape),
+        g=zeros(g_shape),
+        u=zeros(u_shape),
+        conv_inputs=zeros((slots, steps, channels), torch.bfloat16),
+        slot_generations=zeros((slots,), torch.int64),
+        log_epochs=zeros((slots,), torch.int64),
+        valid_counts=zeros((slots,), torch.int32),
+        error_flags=zeros((slots,), torch.int32),
+    )
+
+
+def capture_replay_graph(call):
+    """Warm up on a side stream and return the captured and warmup outputs."""
+    current = torch.cuda.current_stream()
+    stream = torch.cuda.Stream()
+    stream.wait_stream(current)
+    with torch.cuda.stream(stream):
+        eager_output = call()
+    current.wait_stream(stream)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        graph_output = call()
+    current.wait_stream(stream)
+    return graph, graph_output, eager_output
+
+
 class LinearReplayInputContractTest(unittest.TestCase):
     def test_pitched_group_views_and_explicit_group_id_without_gpu(self):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
         with FakeTensorMode():
 
             def empty(shape, dtype=torch.float32):
@@ -131,16 +166,13 @@ class LinearReplayTest(unittest.TestCase):
         def zeros(shape, dtype=torch.float32):
             return torch.zeros(shape, dtype=dtype, device="cuda")
 
-        cache = SimpleNamespace(
-            group_id=1,
-            k=zeros((slots, steps, heads, key_dim)),
-            u=zeros((slots, steps, value_heads, value_dim)),
-            g=zeros((slots, steps, value_heads, gate_dim)),
-            conv_inputs=zeros((slots, steps, channels), torch.bfloat16),
-            slot_generations=zeros((slots,), torch.int64),
-            log_epochs=zeros((slots,), torch.int64),
-            valid_counts=zeros((slots,), torch.int32),
-            error_flags=zeros((slots,), torch.int32),
+        cache = make_replay_cache(
+            1,
+            (slots, steps, heads, key_dim),
+            (slots, steps, value_heads, gate_dim),
+            (slots, steps, value_heads, value_dim),
+            channels,
+            device="cuda",
         )
         inputs = SimpleNamespace(
             slot_ids=torch.tensor([4, 1, 3, 2, -1], device="cuda", dtype=torch.int32),
@@ -372,15 +404,7 @@ class LinearReplayTest(unittest.TestCase):
                     # Warmup/capture must not consume the first real window.
                     slots = inputs.slot_ids.clone()
                     inputs.slot_ids.fill_(-1)
-                    stream = torch.cuda.Stream()
-                    stream.wait_stream(torch.cuda.current_stream())
-                    with torch.cuda.stream(stream):
-                        run_replay()
-                    torch.cuda.current_stream().wait_stream(stream)
-                    graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph, stream=stream):
-                        graph_output = run_replay()
-                    torch.cuda.current_stream().wait_stream(stream)
+                    graph, graph_output, _ = capture_replay_graph(run_replay)
                     inputs.slot_ids.copy_(slots)
                 graph.replay()
                 actual = graph_output
@@ -407,6 +431,9 @@ class LinearReplayTest(unittest.TestCase):
         self._run_rounds(True, 4, 4, 128, 128)
 
     def test_kda_verify_matches_production_decode_operators(self):
+        from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
+        from rtp_llm.models_py.triton_kernels.kda import fused_recurrent_kda
+
         # The synthetic reference above must also agree with the operators
         # K3 actually calls, including their physical recurrent-state layout.
         (
@@ -582,14 +609,7 @@ class LinearReplayTest(unittest.TestCase):
                 vector_gate=False,
             )
 
-        stream = torch.cuda.Stream()
-        stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(stream):
-            expected = run()
-        torch.cuda.current_stream().wait_stream(stream)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            output = run()
+        graph, output, expected = capture_replay_graph(run)
         for _ in range(2):
             graph.replay()
             torch.testing.assert_close(output, expected, rtol=0, atol=0)

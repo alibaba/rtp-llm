@@ -12,6 +12,8 @@
 #include <sstream>
 #include <unordered_set>
 
+#include <c10/util/accumulate.h>
+
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -626,9 +628,13 @@ void KVCacheManager::initLinearReplayPool() {
     }
     const auto& plan = config_.linear_replay;
     RTP_LLM_CHECK(plan.slotCount() > 0 && plan.maxSteps() > 0);
-    const auto layout = coordinator_manager_->getModuleLayout(0);
-    const auto    slots  = plan.slotCount();
-    torch::Device log_device(torch::kCUDA);
+    const auto     layout        = coordinator_manager_->getModuleLayout(0);
+    const auto     slots         = plan.slotCount();
+    const auto     gate_shape    = c10::IntArrayRef(plan.g_shape.data(), plan.g_shape.size());
+    const auto     conv_shape    = c10::IntArrayRef(plan.conv_input_shape.data(), plan.conv_input_shape.size());
+    const auto     conv_dtype    = dataTypeToTorchType(plan.conv_dtype);
+    const auto     gate_elements = c10::multiply_integers(gate_shape);
+    torch::Device  log_device(torch::kCUDA);
     for (const int group_id : config_.linear_replay.group_ids) {
         const auto& group = config_.groups().at(static_cast<size_t>(group_id));
         auto& layers = linear_replay_by_tag_[group.tag];
@@ -645,10 +651,18 @@ void KVCacheManager::initLinearReplayPool() {
             torch_ext::LinearReplayLayerCache replay;
             replay.k = torch::empty(c10::IntArrayRef(plan.k_shape.data(), plan.k_shape.size()), f32);
             replay.u = torch::empty(c10::IntArrayRef(plan.u_shape.data(), plan.u_shape.size()), f32);
-            replay.g = torch::empty(c10::IntArrayRef(plan.g_shape.data(), plan.g_shape.size()), f32);
-            replay.conv_inputs =
-                torch::empty(c10::IntArrayRef(plan.conv_input_shape.data(), plan.conv_input_shape.size()),
-                             f32.dtype(dataTypeToTorchType(plan.conv_dtype)));
+            if (conv_dtype == torch::kBFloat16 && gate_elements % 4 == 0) {
+                // Keep both views 16-byte aligned. Triton uses disjoint logs,
+                // while native KDA uses the entire buffer for its convolution window.
+                const auto conv_offset = 2 * gate_elements;  // FP32 G measured in BF16 elements.
+                const auto conv_elements = c10::multiply_integers(conv_shape);
+                auto logs = torch::empty({conv_offset + conv_elements}, f32.dtype(conv_dtype));
+                replay.g = logs.narrow(0, 0, conv_offset).view(torch::kFloat32).view(gate_shape);
+                replay.conv_inputs = logs.narrow(0, conv_offset, conv_elements).view(conv_shape);
+            } else {
+                replay.g = torch::empty(gate_shape, f32);
+                replay.conv_inputs = torch::empty(conv_shape, f32.dtype(conv_dtype));
+            }
             layers[static_cast<size_t>(layer_id)] = std::move(replay);
         }
     }

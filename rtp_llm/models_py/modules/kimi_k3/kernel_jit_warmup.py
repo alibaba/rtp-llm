@@ -43,7 +43,7 @@ def _inactive_replay_inputs(
 
 @torch.inference_mode()
 def _warmup_replay(model, init_resource) -> None:
-    """Compile every reachable verify width against the actual replay pool.
+    """Warm the target verify route selected for each replay pool.
 
     Inactive rows write only scratch output. The production state, logs and
     shared headers are never changed by this compile preparation.
@@ -64,6 +64,7 @@ def _warmup_replay(model, init_resource) -> None:
             if replay_cache is None:
                 continue
             decoder = attention.decode
+            native_verify = attention._native_target_verify
             kv = cache.kv_cache_base.reshape(cache.kv_cache_base.shape[0], -1)
             state = decoder._get_ssm_states(kv)
             conv = decoder._get_conv_states(kv)
@@ -75,7 +76,8 @@ def _warmup_replay(model, init_resource) -> None:
                 tuple(conv.shape), tuple(conv.stride()), str(conv.dtype),
                 tuple(replay_cache.k.shape), tuple(replay_cache.u.shape),
                 tuple(replay_cache.g.shape), decoder.conv_weights.stride(),
-                decoder.gate_lower_bound, str(device),
+                str(decoder.conv_weights.dtype), decoder.gate_lower_bound, str(device),
+                native_verify is not None, native_verify.eps if native_verify is not None else None,
                 attention.fa_width,
                 str(attention.input.weight.dtype), tuple(attention.input.weight.shape),
                 str(attention.f_b.weight.dtype), tuple(attention.f_b.weight.shape),
@@ -86,9 +88,17 @@ def _warmup_replay(model, init_resource) -> None:
             if max_steps > replay_cache.k.shape[1]:
                 raise ValueError("K3 verify width exceeds the bound replay log capacity")
             start = time.perf_counter()
+            use_native = native_verify is not None and native_verify.bind(cache)
+            if use_native:
+                # Native verify uses the fixed width of the bound replay log.
+                cases = [(1, native_verify.steps), (2, native_verify.steps)]
+                if (native_verify.heads, native_verify.steps) == (48, 4):
+                    # Batch 64 selects the distinct double-page kernel.
+                    cases.append((64, native_verify.steps))
+            else:
+                cases = [(1, steps) for steps in range(1, max_steps + 1)] + [(2, 1)]
             # Metadata group rows can be aligned or unaligned to 16 bytes.
             # Prepare both classes so pool deduplication never depends on the group id.
-            cases = [(1, steps) for steps in range(1, max_steps + 1)] + [(2, 1)]
             for unaligned, (batch, steps) in (
                 (unaligned, case) for unaligned in (False, True) for case in cases
             ):
@@ -103,6 +113,9 @@ def _warmup_replay(model, init_resource) -> None:
                 )
                 fused = attention.input(hidden)
                 fused = fused[..., : 4 * attention.width + attention.fa_width + attention.heads]
+                if use_native:
+                    native_verify(fused, cache, SimpleNamespace(linear_replay=inputs))
+                    continue
                 qkv, _, fa, beta = fused.split(
                     (3 * attention.width, attention.width, attention.fa_width, attention.heads),
                     dim=-1,
@@ -118,9 +131,10 @@ def _warmup_replay(model, init_resource) -> None:
                 finalize_linear_replay(replay_cache, inputs, steps)
             torch.cuda.synchronize(device)
             logging.info(
-                "K3 LINEAR replay JIT prepared: layer=%d group=%d steps=1..%d "
+                "K3 LINEAR replay JIT prepared: layer=%d group=%d route=%s cases=%s "
                 "slots=%d blocks=%d capacity=%d state_stride=%d cost=%.3fs",
-                layer.index, cache.group_id, max_steps, replay_cache.k.shape[0],
+                layer.index, cache.group_id, "KdaFusedWS" if use_native else "Triton",
+                cases, replay_cache.k.shape[0],
                 state.shape[0], replay_cache.k.shape[1], state.stride(0),
                 time.perf_counter() - start,
             )

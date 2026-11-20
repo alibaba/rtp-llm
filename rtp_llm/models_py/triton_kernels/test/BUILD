@@ -17,3 +17,17 @@ py_test(
     tags = ["H20_CU13"],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "native_kda_replay_test",
+    srcs = ["linear_replay_test.py", "native_kda_replay_test.py"],
+    args = ["--graph"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:native_kda_replay",
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["SM103_CU13", "manual"],
+)

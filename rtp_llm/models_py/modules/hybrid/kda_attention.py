@@ -61,6 +61,7 @@ class KdaAttention(nn.Module):
             output_projection,
         )
         self.norm, self.prefill, self.decode = norm, prefill, decode
+        self._native_target_verify = None
         self._fp8_output_norm = fp8_output_norm
         self._ag_local_fp8_overlap = ag_local_fp8_overlap
         self._nvfp4_ag_mode = nvfp4_ag_mode
@@ -198,69 +199,86 @@ class KdaAttention(nn.Module):
                 with profile_scope("RTP::attention.kda.zigzag_to_natural"):
                     fused = layout.gather_natural(fused)
                     attention_inputs = layout.natural_attention(attention_inputs)
-        qkv, gate, fa, beta = fused.split(
-            [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
-        )
-        kernel = (
-            self.prefill
-            if attention_inputs.is_prefill and not metadata.is_target_verify
-            else self.decode
-        )
-        with profile_scope("RTP::attention.kda.forget_proj"):
-            project_forget = (
-                self._project_prefill_forget
-                if kernel is self.prefill and not fa.is_contiguous()
-                else self._project_forget
+        native_verify = self._native_target_verify
+        output = None
+        if (
+            native_verify is not None
+            and metadata.is_target_verify
+            and attention_inputs.linear_replay is not None
+            and fused.shape[0]
+        ):
+            with profile_scope("RTP::attention.kda.native_target_verify"):
+                output = native_verify(fused, cache, attention_inputs)
+        if output is None:
+            qkv, gate, fa, beta = fused.split(
+                [3 * self.width, self.width, self.fa_width, self.heads], dim=-1
             )
-            forget = project_forget(fa)
-        with profile_scope("RTP::attention.kda.core"):
-            output = kernel(
-                qkv,
-                forget,
-                beta,
-                attention_inputs,
-                cache,
-                metadata,
+            kernel = (
+                self.prefill
+                if attention_inputs.is_prefill and not metadata.is_target_verify
+                else self.decode
             )
-        valid_mask = attention_inputs.valid_token_mask
-        if layout is not None and layout.natural_all_valid:
-            valid_mask = None
-        fused_mask = (
-            valid_mask if self._fp8_output_norm and metadata.is_target_verify else None
-        )
-        if valid_mask is not None and fused_mask is None:
-            # Paged KDA skips null-block rows, leaving their output unspecified.
-            output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
-            gate = torch.where(valid_mask[:, None], gate, 0)
-        with profile_scope("RTP::attention.kda.output_norm_quant"):
-            if self._fp8_output_norm:
-                from rtp_llm.models_py.triton_kernels.common.activation import (
-                    rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
+            with profile_scope("RTP::attention.kda.forget_proj"):
+                project_forget = (
+                    self._project_prefill_forget
+                    if kernel is self.prefill and not fa.is_contiguous()
+                    else self._project_forget
                 )
+                forget = project_forget(fa)
+            with profile_scope("RTP::attention.kda.core"):
+                output = kernel(
+                    qkv,
+                    forget,
+                    beta,
+                    attention_inputs,
+                    cache,
+                    metadata,
+                )
+            valid_mask = attention_inputs.valid_token_mask
+            if layout is not None and layout.natural_all_valid:
+                valid_mask = None
+            fused_mask = (
+                valid_mask if self._fp8_output_norm and metadata.is_target_verify else None
+            )
+            if valid_mask is not None and fused_mask is None:
+                # Paged KDA skips null-block rows, leaving their output unspecified.
+                output = torch.where(valid_mask[:, None], output.reshape(-1, self.width), 0)
+                gate = torch.where(valid_mask[:, None], gate, 0)
+            with profile_scope("RTP::attention.kda.output_norm_quant"):
+                if self._fp8_output_norm:
+                    from rtp_llm.models_py.triton_kernels.common.activation import (
+                        rmsnorm_sigmoid_gate_per_token_group_quant_fp8,
+                    )
 
-                values, scales = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
-                    output.reshape(-1, self.heads, self.dim),
-                    gate.reshape(-1, self.heads, self.dim),
-                    self.norm.weight,
-                    self.norm.eps,
-                    valid_rows=fused_mask,
-                )
-            else:
-                scatter_layout = None if outer_layout is not None and outer_layout.all_valid else layout
-                output = self.norm(
-                    output.reshape(-1, self.heads, self.dim),
-                    gate.reshape(-1, self.heads, self.dim),
-                    row_indices=(
-                        scatter_layout.rankmajor_to_natural if scatter_layout is not None else None
-                    ),
-                    out=(
-                        scatter_layout.reserve(
-                            "output", scatter_layout.physical_rows, self.width, output.dtype
-                        ).view(-1, self.heads, self.dim)
-                        if scatter_layout is not None
-                        else None
-                    ),
-                )
+                    values, scales = rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
+                        output.reshape(-1, self.heads, self.dim),
+                        gate.reshape(-1, self.heads, self.dim),
+                        self.norm.weight,
+                        self.norm.eps,
+                        valid_rows=fused_mask,
+                    )
+                else:
+                    scatter_layout = None if outer_layout is not None and outer_layout.all_valid else layout
+                    output = self.norm(
+                        output.reshape(-1, self.heads, self.dim),
+                        gate.reshape(-1, self.heads, self.dim),
+                        row_indices=(
+                            scatter_layout.rankmajor_to_natural if scatter_layout is not None else None
+                        ),
+                        out=(
+                            scatter_layout.reserve(
+                                "output", scatter_layout.physical_rows, self.width, output.dtype
+                            ).view(-1, self.heads, self.dim)
+                            if scatter_layout is not None
+                            else None
+                        ),
+                    )
+        else:
+            valid_mask = attention_inputs.valid_token_mask
+            if valid_mask is not None and (layout is None or not layout.natural_all_valid):
+                output = torch.where(valid_mask[:, None], output, 0)
+            if layout is not None and not (outer_layout is not None and outer_layout.all_valid):
+                output, _ = layout.scatter_rankmajor(output)
         if (layout is not None and self._fp8_output_norm
                 and not (outer_layout is not None and outer_layout.all_valid)):
             with profile_scope("RTP::attention.kda.natural_to_zigzag"):

@@ -116,6 +116,28 @@ class KimiK3KDA(KdaAttention):
             nvfp4_ag_mode=nvfp4_ag_mode,
         )
 
+        if (
+            isinstance(forget_projection, CudaF16Linear)
+            and torch.version.cuda is not None
+            and int(torch.version.cuda.split(".", 1)[0]) >= 13
+            and forget_projection.bias is None
+            and forget_projection.weight.is_cuda
+            and forget_projection.weight.dtype == torch.bfloat16
+            and fa_width == self.dim == 128
+            and not fp8_output
+            and forget_projection.weight.shape == (self.width, 128)
+            and decode.gate_lower_bound is not None
+            and decode.gate_lower_bound < 0
+            and decode.linear_conv_kernel_dim == 4
+            and decode.conv_weights.dtype in (torch.bfloat16, torch.float32)
+            and torch.cuda.get_device_capability(forget_projection.weight.device)[0] == 10
+        ):
+            from rtp_llm.models_py.triton_kernels.k3_native_verify import K3NativeVerify
+
+            self._native_target_verify = K3NativeVerify(
+                decode, forget_projection.weight, self.norm
+            )
+
 
 @lru_cache(None)
 def _mla_aux_stream(device):

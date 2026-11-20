@@ -104,6 +104,22 @@ static CacheConfig makeLinearReplayLifetimeConfig(int block_num) {
     return config;
 }
 
+TEST_F(KVCacheManagerTest, LinearReplayLogsShareDisjointStorage) {
+    auto config = makeLinearReplayLifetimeConfig(2);
+    config.linear_replay = LinearReplayPlan::create({0}, 2, 4, {1, 2}, {1, 2}, true, DataType::TYPE_BF16, 1);
+    KVCacheManager manager(config);
+    ASSERT_TRUE(manager.init());
+    const auto& replay = manager.linearReplayByTag().at("linear").at(0).value();
+
+    EXPECT_EQ(replay.g.scalar_type(), torch::kFloat32);
+    EXPECT_EQ(replay.conv_inputs.scalar_type(), torch::kBFloat16);
+    EXPECT_TRUE(replay.g.is_contiguous());
+    EXPECT_TRUE(replay.conv_inputs.is_contiguous());
+    EXPECT_EQ(replay.conv_inputs.storage().data(), replay.g.storage().data());
+    EXPECT_EQ(replay.conv_inputs.data_ptr(), static_cast<const uint8_t*>(replay.g.data_ptr()) + replay.g.nbytes());
+    EXPECT_EQ(replay.g.storage().nbytes(), replay.g.nbytes() + replay.conv_inputs.nbytes());
+}
+
 TEST_F(KVCacheManagerTest, LinearReplayOwnLifetimeHoldsDoNotRequireCopyOnWrite) {
     auto           config = makeLinearReplayLifetimeConfig(2);
     KVCacheManager manager(config);

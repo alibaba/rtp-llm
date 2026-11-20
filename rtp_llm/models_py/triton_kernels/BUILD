@@ -96,3 +96,16 @@ py_library(
     ],
     visibility = ["//visibility:public"]
 )
+
+# Fused native target verify using RTP K-major checkpoints.
+py_library(
+    name = "native_kda_replay",
+    srcs = ["k3_native_verify.py"] + glob(["_kda_ws/*.py"]),
+    deps = [
+        ":triton_kernels",
+        "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py:utils",
+    ],
+    visibility = ["//visibility:public"],
+)
