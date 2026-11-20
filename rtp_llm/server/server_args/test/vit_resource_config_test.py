@@ -60,6 +60,8 @@ class VitResourceConfigTest(unittest.TestCase):
                     "namespace": "model@revision/processor@revision",
                     "gdr_enable": False,
                     "gdr_num": 4,
+                    "gdr_arena_bytes": 6 * 1024**3,
+                    "gdr_min_block_bytes": 1024**2,
                     "audit": True,
                     "read_timeout_ms": 1000,
                     "metadata_workers": 48,
@@ -80,12 +82,16 @@ class VitResourceConfigTest(unittest.TestCase):
         self.assertTrue(config.mm_remote_cache_audit)
         self.assertFalse(config.mm_remote_cache_gdr_enable)
         self.assertEqual(config.mm_remote_cache_gdr_num, 4)
+        self.assertEqual(config.mm_remote_cache_gdr_arena_bytes, 6 * 1024**3)
+        self.assertEqual(config.mm_remote_cache_gdr_min_block_bytes, 1024**2)
         self.assertEqual(config.mm_remote_cache_read_timeout_ms, 1000)
         self.assertEqual(config.mm_remote_cache_max_pending, 256)
         self.assertEqual(config.mm_remote_cache_metadata_workers, 48)
         self.assertEqual(config.mm_remote_cache_read_transfer_workers, 4)
         self.assertEqual(config.mm_remote_cache_write_transfer_workers, 6)
         defaults, _ = self.parse()
+        self.assertIsNone(defaults.mm_remote_cache_gdr_arena_bytes)
+        self.assertIsNone(defaults.mm_remote_cache_gdr_min_block_bytes)
         self.assertEqual(defaults.mm_remote_cache_max_pending, 128)
         self.assertEqual(defaults.mm_remote_cache_metadata_workers, 32)
         self.assertIsNone(defaults.mm_remote_cache_read_transfer_workers)

@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import uuid
+from bisect import bisect_left
 from contextlib import ExitStack, contextmanager, nullcontext
 
 import torch
@@ -149,7 +150,7 @@ class RegisteredObjectTransport:
     _quarantine_lock = threading.RLock()
     _quarantined_transports = []
 
-    def __init__(self, owner, buffer, device, observe_stage):
+    def __init__(self, owner, buffer, device, observe_stage, *, lazy_stream=False):
         self._owner = owner
         self._buffer = buffer
         self._capacity = buffer.numel()
@@ -165,7 +166,7 @@ class RegisteredObjectTransport:
                 self._capacity, dtype=torch.uint8, device="cpu", pin_memory=True
             )
         )
-        self._stream = torch.cuda.Stream(device=device)
+        self._stream = None if lazy_stream else torch.cuda.Stream(device=device)
 
     @property
     def _client(self):
@@ -176,7 +177,7 @@ class RegisteredObjectTransport:
         return self._poisoned
 
     def _check_available(self):
-        if self._owner._closed or self._poisoned:
+        if self._owner._closed or self._poisoned or self._buffer is None:
             raise RegisteredTransportUnavailableError(
                 "registered transport unavailable; restart worker after GDR failure",
                 quarantined=self._poisoned,
@@ -288,6 +289,8 @@ class RegisteredObjectTransport:
             with self._stage(operation, "cuda_gate_wait"):
                 stack.enter_context(cuda_graph_gate.operation())
             stack.enter_context(torch.cuda.device(self._device))
+            if self._stream is None:
+                self._stream = torch.cuda.Stream(device=self._device)
             stack.enter_context(torch.cuda.stream(self._stream))
             yield
 
@@ -458,7 +461,11 @@ class RegisteredTransportPool:
         observe_stage=None,
         quarantine_ttl_seconds=300,
         observe_hold=None,
+        observe_lease=None,
+        observe_arena=None,
         direct_payload=False,
+        arena_bytes=None,
+        min_block_bytes=None,
     ):
         if type(slots) is not int or slots <= 0:
             raise ValueError("slots must be a positive integer")
@@ -467,12 +474,18 @@ class RegisteredTransportPool:
         self.direct_payload = direct_payload
         self._quarantine_ttl_seconds = quarantine_ttl_seconds
         self._observe_hold = observe_hold
+        self._observe_lease = observe_lease
+        self._observe_arena = observe_arena
         self._gc_stop = threading.Event()
         self._condition = threading.Condition()
         self._accepting = True
         self._closed = False
         self._in_use = {}  # slot -> whether the lease is for a write
         self._pending_gc_success = []
+        self._arena_bytes = arena_bytes
+        self._min_block_bytes = min_block_bytes
+        self._free_ranges = None
+        self._idle_streams = []
         self._create_slots(factory, slots, max_object_bytes, device, observe_stage)
         self.instance_id = self._client.instance_id
         self.instance_group = self._client.instance_group
@@ -491,6 +504,46 @@ class RegisteredTransportPool:
         # Dtype views in the direct codec need aligned slot addresses even
         # when the configured maximum object size is not a multiple of 64.
         stride = (capacity + 63) // 64 * 64 if self.direct_payload else capacity
+        capacity_bytes = slots * stride
+        if self._arena_bytes is not None or self._min_block_bytes is not None:
+            block = (
+                self._min_block_bytes
+                if self._min_block_bytes is not None
+                else 1024**2
+            )
+            if (
+                not self.direct_payload
+                or type(block) is not int
+                or block < 64
+                or block % 64
+            ):
+                raise ValueError(
+                    "sized GDR requires direct payload and a 64-byte aligned block"
+                )
+            self._min_block_bytes = block
+            self._device = device
+            self._observe_stage = observe_stage
+            self._max_object_bytes = capacity
+            max_extent = self._round_up(capacity)
+            # When only a granularity is set, keep the old registration budget.
+            capacity_bytes = (
+                self._arena_bytes
+                if self._arena_bytes is not None
+                else capacity_bytes // block * block
+            )
+            if (
+                type(capacity_bytes) is not int
+                or capacity_bytes < max_extent
+                or capacity_bytes % block
+            ):
+                raise ValueError(
+                    "GDR arena must be block-aligned and fit the largest object"
+                )
+            self._free_ranges = [(self._GUARD_BYTES, capacity_bytes)]
+            # Leave a contiguous range for a maximum-sized read when the arena
+            # has capacity for at least one maximum-sized read and write.
+            reserve = max_extent if capacity_bytes >= 2 * max_extent else 0
+            self._write_end = self._GUARD_BYTES + capacity_bytes - reserve
         with cuda_graph_gate.operation(), RegisteredObjectTransport._quarantine_lock:
             held = RegisteredObjectTransport._quarantined_transports
             if held:
@@ -504,7 +557,7 @@ class RegisteredTransportPool:
                 self._allocator = torch.cuda.MemPool()
                 with torch.cuda.use_mem_pool(self._allocator):
                     self._arena = torch.empty(
-                        self._GUARD_BYTES + slots * stride,
+                        self._GUARD_BYTES + capacity_bytes,
                         dtype=torch.uint8,
                         device=device,
                     )
@@ -518,7 +571,7 @@ class RegisteredTransportPool:
                         device,
                         observe_stage,
                     )
-                    for i in range(slots)
+                    for i in range(slots if self._free_ranges is None else 0)
                 ]
                 try:
                     # Register the allocation root exactly once. IO passes only
@@ -530,6 +583,13 @@ class RegisteredTransportPool:
                     raise
 
     def _quarantine_registration(self, error, stage):
+        if self._free_ranges is not None:
+            # Registration failure can affect the entire MR, including free space.
+            self._slots.append(
+                RegisteredObjectTransport(
+                    self, self._arena, self._device, self._observe_stage, lazy_stream=True
+                )
+            )
         for slot in self._slots:
             slot._quarantine(error, stage=stage)
 
@@ -551,8 +611,30 @@ class RegisteredTransportPool:
             logging.error("MM_EMB_GDR_GC_METRIC_ERROR %s", _safe_error_context(error))
 
     def _gc_loop(self):
-        while not self._gc_stop.wait(min(10, self._quarantine_ttl_seconds)):
-            self._gc_tick()
+        gc_interval = min(10, self._quarantine_ttl_seconds)
+        elapsed = 0
+        while not self._gc_stop.wait(1):
+            if self._observe_arena is not None:
+                self._report_arena()
+            elapsed += 1
+            if elapsed == gc_interval:
+                self._gc_tick()
+                elapsed = 0
+
+    def _report_arena(self):
+        with self._condition:
+            if self._arena is None:
+                return
+            total = self._arena.numel() - self._GUARD_BYTES
+            if self._free_ranges is not None:
+                sizes = [size for _, size in self._free_ranges]
+            else:
+                sizes = [
+                    slot._capacity
+                    for slot in self._slots
+                    if slot not in self._in_use and not slot.quarantined
+                ]
+        self._observe_arena(total, sum(sizes), max(sizes, default=0))
 
     def _gc_tick(self):
         with self._condition:
@@ -578,11 +660,14 @@ class RegisteredTransportPool:
 
     @property
     def quarantined(self):
-        return any(slot.device_failed is True for slot in self._slots) or all(
-            slot.quarantined for slot in self._slots
+        return any(slot.device_failed is True for slot in self._slots) or (
+            not self._free_ranges and all(slot.quarantined for slot in self._slots)
         )
 
     def object_size(self, key, **kwargs):
+        if self._free_ranges is not None:
+            client = self._client
+            return None if client is None else client.object_size(key, **kwargs)
         for slot in self._slots:
             if not slot.quarantined:
                 return slot.object_size(key, **kwargs)
@@ -594,31 +679,94 @@ class RegisteredTransportPool:
             return None
         return client.get_object_meta(key, **kwargs)
 
-    def acquire(self, *, for_write=False, timeout=0):
-        """Lease an available slot, optionally waiting up to timeout seconds."""
+    def _round_up(self, nbytes):
+        block = self._min_block_bytes
+        return (nbytes + block - 1) // block * block
+
+    def _take_range(self, nbytes, for_write):
+        capacity = self._round_up(nbytes)
+        for index, (offset, free_bytes) in enumerate(self._free_ranges):
+            end = offset + capacity
+            if capacity > free_bytes or (for_write and end > self._write_end):
+                continue
+            slot = RegisteredObjectTransport(
+                self,
+                self._arena.narrow(0, offset, capacity),
+                self._device,
+                self._observe_stage,
+                lazy_stream=True,
+            )
+            if self._idle_streams:
+                slot._stream = self._idle_streams.pop()
+            self._slots.append(slot)
+            if capacity == free_bytes:
+                self._free_ranges.pop(index)
+            else:
+                self._free_ranges[index] = (end, free_bytes - capacity)
+            return slot
+        return None
+
+    def _return_range(self, slot):
+        offset, capacity = slot._buffer.storage_offset(), slot._capacity
+        ranges = self._free_ranges
+        index = bisect_left(ranges, (offset,))
+        if index > 0:
+            start, size = ranges[index - 1]
+            if start + size == offset:
+                index -= 1
+                ranges.pop(index)
+                offset, capacity = start, size + capacity
+        if index < len(ranges):
+            start, size = ranges[index]
+            if offset + capacity == start:
+                ranges.pop(index)
+                capacity += size
+        ranges.insert(index, (offset, capacity))
+        self._slots.remove(slot)
+        if slot._stream is not None:
+            self._idle_streams.append(slot._stream)
+        slot._buffer = slot._stream = None
+
+    def acquire(self, *, nbytes=None, for_write=False, timeout=0):
+        """Lease a transfer buffer, optionally waiting up to timeout seconds."""
+        sized = self._free_ranges is not None
+        if sized and (
+            type(nbytes) is not int or not 0 < nbytes <= self._max_object_bytes
+        ):
+            raise ValueError("invalid GDR object size")
         deadline = time.monotonic() + timeout
         with self._condition:
             while self._accepting and not self.quarantined:
-                healthy = [slot for slot in self._slots if not slot.quarantined]
-                # A multi-slot pool reserves one healthy slot for read leases.
-                writable = len(healthy)
-                if for_write and len(self._slots) > 1:
-                    if len(healthy) <= 1:
-                        return None
-                    writable -= 1 + sum(
-                        self._in_use.get(slot, False) for slot in healthy
-                    )
-                if writable > 0:
-                    for slot in healthy:
-                        if slot not in self._in_use:
-                            self._in_use[slot] = for_write
-                            return slot
+                if sized:
+                    slot = self._take_range(nbytes, for_write)
+                    if slot is not None:
+                        return self._lease(slot, for_write)
+                else:
+                    healthy = [slot for slot in self._slots if not slot.quarantined]
+                    # A multi-slot pool reserves one healthy slot for read leases.
+                    writable = len(healthy)
+                    if for_write and len(self._slots) > 1:
+                        if len(healthy) <= 1:
+                            return None
+                        writable -= 1 + sum(
+                            self._in_use.get(slot, False) for slot in healthy
+                        )
+                    if writable > 0:
+                        for slot in healthy:
+                            if slot not in self._in_use:
+                                return self._lease(slot, for_write)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 if not self._condition.wait(remaining):
                     break
         return None
+
+    def _lease(self, slot, for_write):
+        self._in_use[slot] = for_write
+        if self._observe_lease is not None:
+            self._observe_lease(for_write, 1, slot._capacity)
+        return slot
 
     def stop_acquiring(self):
         with self._condition:
@@ -627,7 +775,11 @@ class RegisteredTransportPool:
 
     def release(self, slot):
         with self._condition:
-            self._in_use.pop(slot)
+            for_write = self._in_use.pop(slot)
+            if self._observe_lease is not None:
+                self._observe_lease(for_write, -1, -slot._capacity)
+            if self._free_ranges is not None and not slot.quarantined:
+                self._return_range(slot)
             self._condition.notify_all()
 
     def close(self):
@@ -661,6 +813,7 @@ class RegisteredTransportPool:
                 slot._buffer = None
                 slot._host_staging = None
                 slot._stream = None
+            self._idle_streams.clear()
             self._arena = None
             self._allocator = None
         self._gc_stop.set()

@@ -117,6 +117,8 @@ _EMBEDDING_CACHE_FIELDS = {
         "namespace": ("mm_remote_cache_namespace", str, None),
         "gdr_enable": ("mm_remote_cache_gdr_enable", bool, None),
         "gdr_num": ("mm_remote_cache_gdr_num", int, 1),
+        "gdr_arena_bytes": ("mm_remote_cache_gdr_arena_bytes", int, 1),
+        "gdr_min_block_bytes": ("mm_remote_cache_gdr_min_block_bytes", int, 64),
         "metadata_workers": ("mm_remote_cache_metadata_workers", int, 1),
         "read_transfer_workers": ("mm_remote_cache_read_transfer_workers", int, 1),
         "write_transfer_workers": ("mm_remote_cache_write_transfer_workers", int, 1),

@@ -187,18 +187,27 @@ class RegisteredObjectTransportTest(unittest.TestCase):
                 pass
 
         pool = RegisteredTransportPool(
-            Client, max_object_bytes=4109, device="cuda:0", slots=2, direct_payload=True
+            Client,
+            max_object_bytes=4109,
+            device="cuda:0",
+            direct_payload=True,
+            arena_bytes=16384,
+            min_block_bytes=64,
         )
-        first = pool.acquire()
-        second = pool.acquire()
+        gpu = torch.arange(42, dtype=torch.float16, device="cuda").reshape(6, 7).t()
+        host = torch.tensor([7, 8, 9], dtype=torch.int32)
+        value = (gpu, host, {"alias": gpu, "empty": gpu[:0]})
+        plan = plan_object(value, checksum=False)
+        first = pool.acquire(nbytes=plan.nbytes, for_write=True)
+        second = pool.acquire(nbytes=plan.nbytes)
         try:
             self.assertIsNone(first._host_staging)
             self.assertIsNone(second._host_staging)
             self.assertEqual(second._buffer.data_ptr() % 64, 0)
-            gpu = torch.arange(42, dtype=torch.float16, device="cuda").reshape(6, 7).t()
-            host = torch.tensor([7, 8, 9], dtype=torch.int32)
-            value = (gpu, host, {"alias": gpu, "empty": gpu[:0]})
-            plan = plan_object(value, checksum=False)
+            self.assertEqual(
+                second._buffer.data_ptr() - first._buffer.data_ptr(),
+                ((plan.nbytes + 63) // 64) * 64,
+            )
             payload = first.pack(plan)
             self.assertEqual(payload.data_ptr(), first._buffer.data_ptr())
             first.save_one("test", payload)
@@ -250,7 +259,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.stream.start()
         self.addCleanup(self.stream.stop)
 
-    def pool(self, slots=1, factory=None, ttl=300, direct_payload=False):
+    def pool(self, slots=1, factory=None, ttl=300, direct_payload=False, **kwargs):
         allocate = torch.empty
         with patch("torch.cuda.MemPool"), patch(
             "torch.cuda.use_mem_pool", return_value=nullcontext()
@@ -260,12 +269,13 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         ):
             pool = RegisteredTransportPool(
                 factory or Mock(),
-                max_object_bytes=16,
+                max_object_bytes=kwargs.pop("max_object_bytes", 16),
                 device="cuda:0",
                 slots=slots,
                 observe_hold=Mock(),
                 quarantine_ttl_seconds=ttl,
                 direct_payload=direct_payload,
+                **kwargs,
             )
         self.addCleanup(pool._gc_stop.set)
         self.addCleanup(pool.close)
@@ -319,6 +329,115 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         pool.close()
         pool.close()
         client.close.assert_called_once()
+
+    def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=256,
+            arena_bytes=512,
+            min_block_bytes=64,
+        )
+        first = pool.acquire(nbytes=65, for_write=True)
+        middle = pool.acquire(nbytes=19, for_write=True)
+        last = pool.acquire(nbytes=31, for_write=True)
+        reader = pool.acquire(nbytes=256)
+        try:
+            self.assertIsNone(pool.acquire(nbytes=1))
+            self.assertIsNone(pool.acquire(nbytes=1, for_write=True))
+            self.assertEqual(
+                [s._capacity for s in (first, middle, last, reader)],
+                [128, 64, 64, 256],
+            )
+            self.assertEqual(
+                [
+                    s._buffer.storage_offset() - pool._GUARD_BYTES
+                    for s in (first, middle, last, reader)
+                ],
+                [0, 128, 192, 256],
+            )
+        finally:
+            pool.release(last)
+            pool.release(middle)
+            pool.release(first)
+        try:
+            merged = pool.acquire(nbytes=256, for_write=True)
+            self.assertIsNotNone(merged)
+            pool.release(merged)
+        finally:
+            pool.release(reader)
+        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 512)])
+        with self.assertRaises(ValueError):
+            pool.acquire(nbytes=257)
+
+    def test_sized_leases_concurrently_wait_and_never_overlap(self):
+        factory = Mock()
+        pool = self.pool(
+            factory=factory,
+            slots=1,
+            direct_payload=True,
+            max_object_bytes=256,
+            arena_bytes=512,
+            min_block_bytes=64,
+        )
+        worker_gate = threading.Barrier(4)
+        ranges = []
+
+        def lease(size, for_write):
+            slot = pool.acquire(nbytes=size, for_write=for_write, timeout=1)
+            self.assertIsNotNone(slot)
+            try:
+                start = slot._buffer.storage_offset()
+                ranges.append((start, start + slot._capacity))
+                worker_gate.wait(timeout=2)
+            finally:
+                pool.release(slot)
+
+        with ThreadPoolExecutor(4) as executor:
+            jobs = [
+                executor.submit(lease, size, for_write)
+                for size, for_write in ((128, True), (64, True), (64, False), (128, False))
+            ]
+            for job in jobs:
+                job.result(timeout=4)
+        ranges.sort()
+        for (_, end), (start, _) in zip(ranges, ranges[1:]):
+            self.assertLessEqual(end, start)
+        factory.assert_called_once_with(gpu_tensors=(pool._arena,))
+        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 512)])
+
+    def test_sized_quarantine_keeps_only_the_unsafe_range_unavailable(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        slot = pool.acquire(nbytes=33)
+        start = slot._buffer.storage_offset()
+        client = pool._client
+        client.load_from_meta.side_effect = TimeoutError("read deadline")
+        client.buffer_safe_after_failure.return_value = False
+        with self.assertLogs(level="ERROR"), self.assertRaises(TimeoutError):
+            slot.load_object_from_meta(
+                SimpleNamespace(size_bytes=33), consumer_stream=None
+            )
+        pool.release(slot)
+        slot._quarantine_started -= 1000
+        pool._gc_tick()
+        self.assertTrue(slot.quarantined)
+        safe = pool.acquire(nbytes=100)
+        try:
+            self.assertGreaterEqual(safe._buffer.storage_offset(), start + 64)
+            client.buffer_safe_after_failure.return_value = True
+            with self.assertRaises(TimeoutError):
+                safe.load_object_from_meta(
+                    SimpleNamespace(size_bytes=100), consumer_stream=None
+                )
+        finally:
+            pool.release(safe)
+        self.assertEqual(pool._free_ranges, [(start + 64, 192)])
+        pool.close()
+        client.close.assert_not_called()
 
     def test_observes_contention_and_copies_without_extra_cuda_sync(self):
         transport = self.transport()

@@ -2,7 +2,7 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Iterable, Optional, Union
 
-from .emb_interval_metrics import EmbLatencyMetric, EmbOutcomeMetric
+from .emb_interval_metrics import EmbInflightMetric, EmbLatencyMetric, EmbOutcomeMetric
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
@@ -165,6 +165,15 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_inflight_tasks"
+    )
+    VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_inflight_bytes"
+    )
+    VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_arena_bytes"
+    )
     VIT_REMOTE_EMB_BUFFER_HOLD_BYTES_METRIC = (
         "py_rtp_vit_remote_embedding_cache_buffer_hold_bytes"
     )
@@ -358,6 +367,13 @@ class MetricReporter(object):
 
             for metric in GaugeMetrics if gauge_metrics is None else gauge_metrics:
                 if metric in (
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC,
+                ):
+                    backend = self._kmon.register_custom_metric(
+                        EmbInflightMetric(metric.value, tags or {})
+                    )
+                elif metric in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,

@@ -240,11 +240,19 @@ class MMRemoteEmbeddingCache:
                     max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
                     device=device,
                     slots=gdr_slots,
+                    arena_bytes=getattr(
+                        vit_config, "mm_remote_cache_gdr_arena_bytes", None
+                    ),
+                    min_block_bytes=getattr(
+                        vit_config, "mm_remote_cache_gdr_min_block_bytes", None
+                    ),
                     observe_stage=cls._observe_stage,
                     quarantine_ttl_seconds=getattr(
                         vit_config, "mm_remote_cache_quarantine_ttl_seconds", 300
                     ),
                     observe_hold=cls._observe_buffer_hold,
+                    observe_lease=cls._observe_gdr_lease,
+                    observe_arena=cls._observe_gdr_arena,
                     direct_payload=True,
                 )
             return raw_factory()
@@ -429,6 +437,42 @@ class MMRemoteEmbeddingCache:
             )
 
     @classmethod
+    def _add_inflight(cls, stage, delta):
+        cls._report_metric(
+            GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC, delta, {"stage": stage}
+        )
+
+    @classmethod
+    @contextmanager
+    def _observe_inflight(cls, stage):
+        cls._add_inflight(stage, 1)
+        try:
+            yield
+        finally:
+            cls._add_inflight(stage, -1)
+
+    @classmethod
+    def _observe_gdr_lease(cls, for_write, delta, nbytes):
+        stage = "write_gdr_lease" if for_write else "read_gdr_lease"
+        cls._add_inflight(stage, delta)
+        cls._report_metric(
+            GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC, nbytes, {"stage": stage}
+        )
+
+    @classmethod
+    def _observe_gdr_arena(cls, total, free, largest_free):
+        for stage, nbytes in (
+            ("total", total),
+            ("free", free),
+            ("largest_free", largest_free),
+        ):
+            cls._report_metric(
+                GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC,
+                nbytes,
+                {"stage": stage},
+            )
+
+    @classmethod
     def _create_client(cls, factory, transport):
         """Count actual constructor calls, including startup failures."""
         # GDR registration precedes VitEndpointServer, which normally registers
@@ -487,7 +531,9 @@ class MMRemoteEmbeddingCache:
     def _lookup_object_meta(self, client, key, trace_id, timeout_ms, deadline):
         outcome = "error"
         try:
-            with self._observe_stage("read", "metadata"):
+            with self._observe_inflight("metadata"), self._observe_stage(
+                "read", "metadata"
+            ):
                 try:
                     meta = client.get_object_meta(
                         key, trace_id=trace_id, timeout_ms=timeout_ms
@@ -880,7 +926,10 @@ class MMRemoteEmbeddingCache:
             tensors=plan.header["tensors"],
         )
 
+        self._add_inflight("write_pending", 1)
+
         def done(_):
+            self._add_inflight("write_pending", -1)
             with self._lock:
                 self._pending_writes.discard(key)
             self._release(cost)
@@ -946,7 +995,10 @@ class MMRemoteEmbeddingCache:
                 # storage; pack is the first operation that needs that storage.
                 failure_stage = "client_acquire"
                 if self._gdr_pool is not None:
-                    slot = self._gdr_pool.acquire(for_write=True, timeout=remaining)
+                    with self._observe_inflight("write_gdr_wait"):
+                        slot = self._gdr_pool.acquire(
+                            nbytes=plan.nbytes, for_write=True, timeout=remaining
+                        )
                     if slot is None:
                         outcome = "skipped"
                         if not self._skip_quarantined("write"):
@@ -1038,10 +1090,14 @@ class MMRemoteEmbeddingCache:
                 if client is not None:
                     self._release_client(client)
 
+        def active_write():
+            with self._observe_inflight("write_worker"):
+                write()
+
         queued_at = time.perf_counter()
         queue_deadline = time.monotonic() + self.write_timeout_ms / 1000
         try:
-            future = self._write_executor.submit(write)
+            future = self._write_executor.submit(active_write)
         except RuntimeError:
             self._report_skip("write", "executor_closed")
             done(None)
@@ -1143,7 +1199,8 @@ class MMRemoteEmbeddingCache:
                         self._GDR_READ_SLOT_WAIT_SECONDS,
                         max(0.0, (deadline - time.monotonic()) / 2),
                     )
-                    slot = self._gdr_pool.acquire(timeout=slot_wait)
+                    with self._observe_inflight("read_gdr_wait"):
+                        slot = self._gdr_pool.acquire(nbytes=size, timeout=slot_wait)
                     if slot is None:
                         timing["outcome"] = "skipped"
                         self._report_skip(
@@ -1202,16 +1259,21 @@ class MMRemoteEmbeddingCache:
                     # thread; its task/byte budget remains held until done.
                     self._release_client(client)
 
+        def release_transfer():
+            self._add_inflight("read_transfer", -1)
+            self._transfer_slots.release()
+
         def transfer(meta):
             try:
-                return read(meta)
+                with self._observe_inflight("read_worker"):
+                    return read(meta)
             finally:
-                self._transfer_slots.release()
+                release_transfer()
 
         def release_cancelled_transfer(task):
             # A cancelled queued task never enters transfer().
             if task.cancelled():
-                self._transfer_slots.release()
+                release_transfer()
 
         try:
             # The existing ViT request worker calls the native SDK, which
@@ -1280,10 +1342,11 @@ class MMRemoteEmbeddingCache:
                 return None
             timing["stage"] = "transfer_queue"
             transfer_queued_at = time.perf_counter()
+            self._add_inflight("read_transfer", 1)
             try:
                 future = self._transfer_executor.submit(transfer, meta)
             except BaseException:
-                self._transfer_slots.release()
+                release_transfer()
                 raise
             future.add_done_callback(release_cancelled_transfer)
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))

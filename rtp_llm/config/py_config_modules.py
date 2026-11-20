@@ -367,6 +367,8 @@ class VitConfig:
         # None retains legacy env compatibility when JSON omits these switches.
         self.mm_remote_cache_gdr_enable: Optional[bool] = None
         self.mm_remote_cache_gdr_num: int = 1
+        self.mm_remote_cache_gdr_arena_bytes: Optional[int] = None
+        self.mm_remote_cache_gdr_min_block_bytes: Optional[int] = None
         self.mm_remote_cache_metadata_workers: int = 32
         self.mm_remote_cache_read_transfer_workers: Optional[int] = None
         self.mm_remote_cache_write_transfer_workers: Optional[int] = None
@@ -500,6 +502,8 @@ class VitConfig:
             f"mm_remote_cache_max_object_bytes: {self.mm_remote_cache_max_object_bytes}\n"
             f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
             f"mm_remote_cache_gdr_num: {self.mm_remote_cache_gdr_num}\n"
+            f"mm_remote_cache_gdr_arena_bytes: {self.mm_remote_cache_gdr_arena_bytes}\n"
+            f"mm_remote_cache_gdr_min_block_bytes: {self.mm_remote_cache_gdr_min_block_bytes}\n"
             f"mm_remote_cache_metadata_workers: {self.mm_remote_cache_metadata_workers}\n"
             f"mm_remote_cache_read_transfer_workers: {self.mm_remote_cache_read_transfer_workers}\n"
             f"mm_remote_cache_write_transfer_workers: {self.mm_remote_cache_write_transfer_workers}\n"

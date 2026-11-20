@@ -101,6 +101,38 @@ class EmbOutcomeMetric(MetricBase):
         ]
 
 
+class EmbInflightMetric(MetricBase):
+    """Record an in-process balance and its high-water mark per flush."""
+
+    def __init__(self, name, tags):
+        super().__init__(name, tags)
+        self._lock = Lock()
+        self._current = defaultdict(int)
+        self._peak = defaultdict(int)
+
+    def report(self, value, tags):
+        stage = tags["stage"]
+        with self._lock:
+            current = self._current[stage] + value
+            self._current[stage] = current
+            if current > self._peak[stage]:
+                self._peak[stage] = current
+
+    def fetch_reported_data(self):
+        with self._lock:
+            samples = [
+                (stage, current, self._peak[stage])
+                for stage, current in self._current.items()
+            ]
+            self._peak.update(self._current)
+        points = []
+        for stage, current, peak in samples:
+            tags = dict(self.tags, stage=stage)
+            points.append(MetricDataPoint(current, tags))
+            points.append(MetricDataPoint(peak, tags, self.name + "_peak"))
+        return points
+
+
 class _Latency:
     __slots__ = ("count", "total", "maximum", "buckets")
 

@@ -83,6 +83,24 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats().get("read_error", 0), 0)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
+    def test_inflight_report_preserves_spike_and_carries_unfinished_work(self):
+        from rtp_llm.metrics.emb_interval_metrics import EmbInflightMetric
+
+        name = GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC.value
+        metric = EmbInflightMetric(name, {})
+        metric.report(1, {"stage": "read_worker"})
+        metric.report(1, {"stage": "read_worker"})
+        metric.report(-1, {"stage": "read_worker"})
+
+        def values():
+            return [point.value for point in metric.fetch_reported_data()]
+
+        self.assertEqual(values(), [1, 2])
+        self.assertEqual(values(), [1, 1])
+        metric.report(-1, {"stage": "read_worker"})
+        self.assertEqual(values(), [0, 1])
+        self.assertEqual(values(), [0, 0])
+
     def test_quarantine_gc_metric_totals_and_retained_bytes(self):
         for event in ("gc_success", "gc_error"):
             with patch(
@@ -425,6 +443,22 @@ class RemoteCacheTest(unittest.TestCase):
             ),
             slots,
         )
+
+    def test_gdr_read_and_write_lease_the_serialized_size(self):
+        remote, (slot,) = self.slot_cache(1)
+        value = (torch.arange(10), None)
+        with patch.object(
+            remote._gdr_pool, "acquire", wraps=remote._gdr_pool.acquire
+        ) as acquire:
+            remote.submit_result("key", value)
+            self.assertTrue(slot.saved.wait(2))
+            remote._write_executor.shutdown(wait=True)
+            size = slot.objects["key"].numel()
+            torch.testing.assert_close(remote.load("key")[0], value[0])
+        write, read = (call.kwargs for call in acquire.call_args_list)
+        self.assertEqual(write["nbytes"], size)
+        self.assertTrue(write["for_write"])
+        self.assertEqual(read["nbytes"], size)
 
     def test_registered_metadata_does_not_take_client_replacement_lock(self):
         remote, (slot,) = self.slot_cache(1)
@@ -3289,6 +3323,8 @@ class GdrStartupLifetimeTest(unittest.TestCase):
         vit.mm_remote_cache_namespace = "immutable-model-revision"
         vit.mm_remote_cache_gdr_enable = True
         vit.mm_remote_cache_gdr_num = 4
+        vit.mm_remote_cache_gdr_arena_bytes = 64 * 1024**2
+        vit.mm_remote_cache_gdr_min_block_bytes = 1024**2
         with tempfile.TemporaryDirectory() as directory, patch(
             "rtp_llm.multimodal.kvcm.registered_transport.RegisteredTransportPool",
             return_value=pool,
@@ -3310,7 +3346,10 @@ class GdrStartupLifetimeTest(unittest.TestCase):
                     )
                     try:
                         constructor.assert_called_once()
-                        self.assertEqual(constructor.call_args.kwargs["slots"], 4)
+                        kwargs = constructor.call_args.kwargs
+                        self.assertEqual(kwargs["slots"], 4)
+                        self.assertEqual(kwargs["arena_bytes"], 64 * 1024**2)
+                        self.assertEqual(kwargs["min_block_bytes"], 1024**2)
                         self.assertEqual(
                             cache._transfer_executor._max_workers, read_workers or 4
                         )
