@@ -40,7 +40,6 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
@@ -2248,7 +2247,7 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                        parallelism_config,
                        sp_config,
                        std::move(broadcast_manager),
-                       remoteCacheGdrEnabled(),
+                       /*gdr_enabled=*/true,
                        std::move(metrics_reporter),
                        std::move(client_wrapper)) {}
 

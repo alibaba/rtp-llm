@@ -24,7 +24,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "autil/TimeUtility.h"
@@ -76,7 +75,7 @@ void releaseHostMemoryCache() {
 bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig&      pd_sep_config,
                                          const CacheStoreConfig& cache_store_config,
                                          const KVCacheConfig&    kv_cache_config) {
-    const bool remote_cache_gdr = kv_cache_config.enable_remote_cache && remoteCacheGdrEnabled();
+    const bool remote_cache_gdr = kv_cache_config.enable_remote_cache;
     // Raw device allocation is required by PD cache-store RDMA and by the
     // KVCM RemoteCache GDR backend. Keep the PyTorch allocator for deployments
     // where neither registered-memory path is active.
