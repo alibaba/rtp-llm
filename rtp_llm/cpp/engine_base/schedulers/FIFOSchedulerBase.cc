@@ -193,6 +193,11 @@ absl::Status FIFOSchedulerBase::enqueue(const GenerateStreamPtr& stream) {
     {
         std::lock_guard<std::mutex> lock(lock_);
         waiting_streams_.emplace_back(stream);
+        if (prefill_chunk_size_ > 0) {
+            RTP_LLM_LOG_INFO("[CHUNK-ADMISSION-PROBE] enqueue id=%ld input=%d waiting=%zu running=%zu loading=%zu",
+                             stream->streamId(), static_cast<int>(stream->inputLength()), waiting_streams_.size(),
+                             running_streams_.size(), loading_cache_streams_.size());
+        }
         schedule_trigger_ = true;
     }
     cond_.notify_all();
@@ -291,6 +296,9 @@ std::list<GenerateStreamPtr> FIFOSchedulerBase::selectPrefillPrefix(std::list<Ge
             continue;
         }
 
+        RTP_LLM_LOG_INFO("[CHUNK-ADMISSION-PROBE] select id=%ld input=%d reuse=%ld remaining=%ld grant=%ld active=%zu selected=%zu",
+                         stream->streamId(), static_cast<int>(stream->inputLength()), reuse, remaining, grant,
+                         active_streams.size(), selected.size());
         stream->setChunkSize(static_cast<int>(grant));
         selected.push_back(stream);
         budget_left -= grant * rows;
@@ -425,6 +433,11 @@ size_t FIFOSchedulerBase::countInitedKVCacheStreams() const {
 }
 
 void FIFOSchedulerBase::addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
+    if (prefill_chunk_size_ > 0) {
+        RTP_LLM_LOG_INFO("[CHUNK-ADMISSION-PROBE] state id=%ld input=%d state=%d waiting=%zu running=%zu loading=%zu new=%zu",
+                         stream->streamId(), static_cast<int>(stream->inputLength()), static_cast<int>(new_state),
+                         waiting_streams_.size(), running_streams_.size(), loading_cache_streams_.size(), new_streams_.size());
+    }
     switch (new_state) {
         case StreamState::WAITING:
             waiting_streams_.push_back(stream);
