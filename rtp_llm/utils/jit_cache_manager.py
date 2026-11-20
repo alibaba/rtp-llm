@@ -1,5 +1,4 @@
 import importlib.metadata
-import importlib.util
 import logging
 import os
 import platform
@@ -145,6 +144,30 @@ def _distribution_version(name: str) -> str:
     return importlib.metadata.version(name)
 
 
+def _component_scope_parts(item: Component, scopes: dict[str, str]) -> tuple[str, ...]:
+    parts = tuple(
+        _distribution_version(part[1:]) if part.startswith("@") else scopes[part]
+        for part in item.scopes
+    )
+    if item.name in ("flashinfer", "tilelang", "cute_dsl"):
+        # Generated host code can link TVM FFI even when its own cache is an
+        # explicit opt-out. Keep FFI optional for consumers that do not use it.
+        try:
+            ffi = _distribution_version("apache-tvm-ffi")
+        except importlib.metadata.PackageNotFoundError:
+            ffi = "absent"
+        parts += (f"ffi-{ffi}",)
+    if item.name == "flashinfer":
+        # FMHA ninja rules include headers supplied by flashinfer-cubin. Keep
+        # snapshots generated before that provider had a stable path isolated.
+        try:
+            cubin = _distribution_version("flashinfer-cubin")
+        except importlib.metadata.PackageNotFoundError:
+            cubin = "absent"
+        parts += (f"cubin-{cubin}",)
+    return parts
+
+
 def resolve_scope(
     local_root: Path, cache_env_config: CacheEnvConfig | None = None
 ) -> Scope | None:
@@ -177,11 +200,8 @@ def resolve_scope(
             or item.env_name in cache_env_config.explicit_envs
         ):
             continue
-        with suppress(importlib.metadata.PackageNotFoundError):
-            parts = tuple(
-                _distribution_version(p[1:]) if p.startswith("@") else scopes[p]
-                for p in item.scopes
-            )
+        try:
+            parts = _component_scope_parts(item, scopes)
             if (
                 item.name == "triton"
                 and backend == CUDA
@@ -216,6 +236,8 @@ def resolve_scope(
                     (suffixes, tuple(sorted(events))) for suffixes, events in item.rules
                 )
                 keys.append(repr((item.name, rules, item.empty_files)))
+        except importlib.metadata.PackageNotFoundError:
+            pass
     if not selected:
         logging.warning("JIT_CACHE_FAIL_OPEN: no managed components")
         return None
@@ -299,7 +321,8 @@ class JitCacheManager(FileSystemEventHandler):
         self._dirty, self._stop = Event(), Event()
 
     def on_any_event(self, event) -> None:
-        if event.is_directory or self._stop.is_set():
+        # Entry validation opens metadata and emits its own read-only events.
+        if event.is_directory or event.event_type not in CREATED or self._stop.is_set():
             return
         if event.event_type in READ_EVENT_TYPES:
             return

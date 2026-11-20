@@ -1,3 +1,4 @@
+import sys
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -42,6 +43,16 @@ CHUNK_MODULE = "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunke
 
 
 class MegaMoeLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        if "deep_gemm" in sys.modules:
+            self.addCleanup(
+                sys.modules.__setitem__, "deep_gemm", sys.modules["deep_gemm"]
+            )
+        else:
+            self.addCleanup(sys.modules.pop, "deep_gemm", None)
+        # Preserve runtime modules loaded lazily during each test.
+        sys.modules["deep_gemm"] = SimpleNamespace(get_block_m_for_mega_moe_fp8=Mock())
+
     def test_routed_arena_is_cached_per_collective_group(self):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe import buffer
 
@@ -59,7 +70,9 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         )
         with patch.dict(buffer._MEGA_BUF_CACHE, {}, clear=True):
             with patch(
-                "deep_gemm.get_symm_buffer_for_mega_moe", return_value=arena
+                "deep_gemm.get_symm_buffer_for_mega_moe",
+                return_value=arena,
+                create=True,
             ) as allocate:
                 generic = buffer._get_or_create_mega_buf(**params)
                 cached = buffer._get_or_create_mega_buf(**params)
@@ -107,6 +120,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
             local_expert_start=0,
             local_expert_end=4,
             activation_clamp=5.0,
+            activation_type="swiglu",
             fast_math=False,
             swiglu_limit=5.0,
             route_scale=1.0,
@@ -126,6 +140,8 @@ class MegaMoeLifecycleTest(unittest.TestCase):
         nn.Module.__init__(model)
         FusedMoeExpertExecutor.__init__(model, cfg, FusedMoEQuantConfig(), {})
         model.cfg = cfg
+        model.activation = cfg.activation_type
+        model._activation_kwargs = {}
         model._is_decode_role = False
         model._num_shared_experts = 0
         model._mega_group = object()
@@ -312,13 +328,14 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                 with patch(
                     CHUNK_MODULE + ".synchronize_moe_chunk_tokens",
                     return_value=7,
-                ), patch.object(
+                ) as synchronize, patch.object(
                     model, "forward", side_effect=lambda x, *args: x + 1
                 ) as forward:
                     result = self.fused_moe(model)(
                         hidden, torch.ones(3, 2), torch.zeros(3, 2, dtype=torch.int64)
                     )
                 torch.testing.assert_close(result, hidden + 1)
+                synchronize.assert_called_once_with(hidden.size(0), hidden.device)
                 self.assertEqual(
                     [call.args[0].size(0) for call in forward.call_args_list],
                     [2, 1, 0, 0],
@@ -370,6 +387,7 @@ class MegaMoeLifecycleTest(unittest.TestCase):
                     with patch(
                         "deep_gemm.transform_weights_for_mega_moe",
                         return_value=((w1, sf), (w2, sf)),
+                        create=True,
                     ) as fp4_transform:
                         with patch(
                             "deep_gemm.transform_weights_for_mega_moe_fp8",

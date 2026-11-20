@@ -36,6 +36,10 @@ public:
     virtual absl::StatusOr<ScheduleOutput> scheduleConservative(int /*propose_step*/) {
         return schedule();
     }
+    /** Wake the engine loop without reclaiming resources used by its current step. */
+    virtual absl::Status requestStop() {
+        return stop();
+    }
     virtual absl::Status stop()             = 0;
 
     // Complete requests cancelled by stop() after the executor has drained.

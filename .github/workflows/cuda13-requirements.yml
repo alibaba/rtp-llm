@@ -1,0 +1,19 @@
+name: CUDA13 dependency sources
+
+on:
+  pull_request:
+    paths:
+      - 'deps/requirements_*'
+      - '.github/workflows/cuda13-requirements.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -B deps/requirements_sources_test.py

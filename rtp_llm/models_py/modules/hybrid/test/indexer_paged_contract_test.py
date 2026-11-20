@@ -218,6 +218,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         module = Indexer.__new__(Indexer)
         nn.Module.__init__(module)
         attention = SparseMlaImpl.__new__(SparseMlaImpl)
+        attention._apply_rope = True
         for enabled in (False, True):
             module._fuse_kernels_enabled = enabled
             self.assertEqual(module._prefill_cp_fused_quant_enabled(), enabled)
@@ -227,6 +228,8 @@ class IndexerPagedContractTest(unittest.TestCase):
     def make_indexer(self, *, fuse=True, cp=False):
         module = Indexer.__new__(Indexer)
         nn.Module.__init__(module)
+        module.dsa_config = None
+        module.rope_head_dim = 64
         module.parallelism_config = SimpleNamespace(
             prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp)
         )
@@ -415,7 +418,16 @@ class IndexerPagedContractTest(unittest.TestCase):
         with (
             patch.object(indexer_op, "is_sm10x", return_value=True),
             patch.object(
-                indexer_op, "deep_gemm", SimpleNamespace(fp8_paged_mqa_logits=kernel)
+                indexer_op,
+                "deep_gemm",
+                SimpleNamespace(
+                    fp8_paged_mqa_logits=kernel,
+                    get_paged_mqa_logits_metadata=Mock(
+                        side_effect=AssertionError(
+                            "precomputed schedule must be reused"
+                        )
+                    ),
+                ),
             ),
             patch.object(
                 indexer_op, "_get_topk_workspace", return_value=torch.empty(0)
@@ -468,7 +480,16 @@ class IndexerPagedContractTest(unittest.TestCase):
         with (
             patch.object(indexer_op, "is_sm10x", return_value=True),
             patch.object(
-                indexer_op, "deep_gemm", SimpleNamespace(fp8_paged_mqa_logits=kernel)
+                indexer_op,
+                "deep_gemm",
+                SimpleNamespace(
+                    fp8_paged_mqa_logits=kernel,
+                    get_paged_mqa_logits_metadata=Mock(
+                        side_effect=AssertionError(
+                            "precomputed schedule must be reused"
+                        )
+                    ),
+                ),
             ),
             patch.object(
                 indexer_op, "_get_topk_workspace", return_value=torch.empty(0)

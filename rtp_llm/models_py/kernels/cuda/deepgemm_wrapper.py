@@ -10,9 +10,13 @@ from rtp_llm.utils.module_util import has_module, resolve_symbol
 
 __all__ = [
     "fp8_gemm_nt",
+    "fp8_gemm_nt_skip_head_mid",
+    "has_fp8_gemm_nt_skip_head_mid",
     "m_grouped_fp8_gemm_nt_contiguous",
     "m_grouped_fp8_gemm_nt_masked",
     "bf16_gemm_nt",
+    "bf16_gemm_nt_skip_head_mid",
+    "has_bf16_gemm_nt_skip_head_mid",
     "m_grouped_bf16_gemm_nt_contiguous",
     "m_grouped_bf16_gemm_nt_masked",
     "fp8_fp4_gemm_nt",
@@ -86,6 +90,26 @@ _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
     return has_module("deep_gemm")
+
+
+@functools.cache
+def has_fp8_gemm_nt_skip_head_mid() -> bool:
+    """Whether this DeepGEMM build can leave a per-head output gap."""
+    if not has_deep_gemm():
+        return False
+    import deep_gemm
+
+    return callable(getattr(deep_gemm, "fp8_gemm_nt_skip_head_mid", None))
+
+
+@functools.cache
+def has_bf16_gemm_nt_skip_head_mid() -> bool:
+    """Whether this DeepGEMM build supports packed BF16 projection output."""
+    if not has_deep_gemm():
+        return False
+    import deep_gemm
+
+    return callable(getattr(deep_gemm, "bf16_gemm_nt_skip_head_mid", None))
 
 
 @functools.cache
@@ -483,6 +507,27 @@ def fp8_gemm_nt(
     )
 
 
+def fp8_gemm_nt_skip_head_mid(
+    a: Tuple[torch.Tensor, torch.Tensor],
+    b: Tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    head_splits: Tuple[int, int, int],
+    *,
+    disable_ue8m0_cast: Optional[bool] = None,
+) -> None:
+    """Run the optional FP8 GEMM while preserving each head's middle gap."""
+    if not has_fp8_gemm_nt_skip_head_mid():
+        raise RuntimeError("This DeepGEMM build lacks fp8_gemm_nt_skip_head_mid")
+    import deep_gemm
+
+    deep_gemm.fp8_gemm_nt_skip_head_mid(
+        a, b, output, head_splits, compiled_dims="nk",
+        disable_ue8m0_cast=(
+            disable_ue8m0_cast if disable_ue8m0_cast is not None else True
+        ),
+    )
+
+
 def m_grouped_fp8_gemm_nt_contiguous(
     a: Tuple[torch.Tensor, torch.Tensor],
     b: Tuple[torch.Tensor, torch.Tensor],
@@ -611,6 +656,22 @@ def bf16_gemm_nt(
     if _bf16_gemm_nt_impl is None:
         return _missing_deep_gemm()
     _bf16_gemm_nt_impl(a, b, output, c, compiled_dims)
+
+
+def bf16_gemm_nt_skip_head_mid(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    output: torch.Tensor,
+    head_splits: Tuple[int, int, int],
+) -> None:
+    """Run the optional BF16 GEMM while preserving each head's middle gap."""
+    if not has_bf16_gemm_nt_skip_head_mid():
+        raise RuntimeError("This DeepGEMM build lacks bf16_gemm_nt_skip_head_mid")
+    import deep_gemm
+
+    deep_gemm.bf16_gemm_nt_skip_head_mid(
+        a, b, output, head_splits, compiled_dims="nk"
+    )
 
 
 def m_grouped_bf16_gemm_nt_contiguous(

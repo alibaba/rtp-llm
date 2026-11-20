@@ -134,15 +134,18 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->is_streaming              = config_proto->is_streaming();
     generate_config->frontend_metric_streaming = config_proto->frontend_metric_streaming();
     TRANS_OPTIONAL(aux_info);
-    generate_config->timeout_ms           = config_proto->timeout_ms();
-    generate_config->sp_edit              = config_proto->sp_edit();
-    generate_config->force_disable_sp_run = config_proto->force_disable_sp_run();
-    generate_config->force_sp_accept      = config_proto->force_sp_accept();
-    generate_config->return_cum_log_probs = config_proto->return_cum_log_probs();
-    if (config_proto->return_all_probs_mode() != 0) {
-        // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
-        // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
-        int mode = config_proto->return_all_probs_mode() - 1;
+    generate_config->timeout_ms               = config_proto->timeout_ms();
+    generate_config->sp_edit                  = config_proto->sp_edit();
+    generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept          = config_proto->force_sp_accept();
+    generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    const int wire_probs_mode                 = config_proto->speculative_return_all_probs_mode() != 0 ?
+                                                    config_proto->speculative_return_all_probs_mode() :
+                                                    config_proto->return_all_probs_mode();
+    if (wire_probs_mode != 0) {
+        // Explicit mode (offset 1). Clamp invalid values to NONE so malformed
+        // clients cannot synthesize an undefined ReturnAllProbsMode.
+        int mode = wire_probs_mode - 1;
         if (mode < static_cast<int>(ReturnAllProbsMode::NONE)
             || mode > static_cast<int>(ReturnAllProbsMode::ORIGINAL)) {
             mode = static_cast<int>(ReturnAllProbsMode::NONE);
@@ -320,7 +323,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             }
             mm_inputs.emplace_back(
                 mm_input->multimodal_url(),
-                torch::empty(1),
+                torch::empty({0}),
                 mm_input->multimodal_type(),
                 mm_preprocess_config->width(),
                 mm_preprocess_config->height(),

@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -362,17 +363,17 @@ class WorkerBatcherSchedulingTest {
             decision.setMaxCollectionWaitMs(windowMs);
         }
         PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        DeliveryStrategy delivery = mock(DeliveryStrategy.class);
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         when(endpoint.reserveRouteOwnership(
                         org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
                 .thenAnswer(
-                        ignored ->
-                                new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
-                                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus
-                                                .ACQUIRED,
-                                        mock(
-                                                org.flexlb.balance.endpoint.PrefillState
-                                                        .RouteReservation.class)));
-        DeliveryStrategy delivery = mock(DeliveryStrategy.class);
+                        invocation ->
+                                ReflectionTestUtils.invokeMethod(
+                                        runtime.ownedState(),
+                                        "reserveRoute",
+                                        invocation.getArgument(0),
+                                        invocation.getArgument(1)));
         List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
         when(delivery.prepare(
                         org.mockito.ArgumentMatchers.anyList(),
@@ -383,6 +384,16 @@ class WorkerBatcherSchedulingTest {
                             List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
                             var transaction = mock(DeliveryStrategy.Transaction.class);
                             when(transaction.items()).thenReturn(members);
+                            when(transaction.commitUnderLock())
+                                    .thenAnswer(
+                                            ignored -> {
+                                                for (ScheduledRequest member : members) {
+                                                    assertTrue(
+                                                            runtime.removeQueued(
+                                                                    member, "test commit"));
+                                                }
+                                                return null;
+                                            });
                             org.mockito.Mockito.doAnswer(
                                             ignored -> {
                                                 for (ScheduledRequest member : members) {
@@ -398,7 +409,6 @@ class WorkerBatcherSchedulingTest {
                                             org.mockito.ArgumentMatchers.any());
                             return transaction;
                         });
-        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
         List<ScheduledRequest> requests = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             ScheduledRequest request =

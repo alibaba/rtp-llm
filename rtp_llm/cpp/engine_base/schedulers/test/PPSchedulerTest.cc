@@ -1331,8 +1331,8 @@ TEST_F(PPSchedulerTest, WaitingChunkIsGrantedAfterCacheReuseFinalizes) {
             return result;
         }));
 
-    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 1);
-    auto stream    = createStream(std::vector<int>(9, 1), true, false, 8, {}, RoleType::PDFUSION, 1);
+    auto scheduler = createScheduler(100, RoleType::PDFUSION, SP_TYPE_NONE, false, 2);
+    auto stream    = createStream(std::vector<int>(9, 1), true, false, 8, {}, RoleType::PDFUSION, 2);
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
 
     auto output = scheduler->schedule();
