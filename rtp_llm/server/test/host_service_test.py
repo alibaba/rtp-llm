@@ -18,6 +18,31 @@ def _json_response(payload: dict, status_code: int = 200):
 
 
 class TestMasterService(unittest.TestCase):
+    @patch("rtp_llm.server.host_service.kmonitor.report")
+    @patch("requests.post")
+    def test_generate_input_omission_requires_fresh_explicit_capability(
+        self, mock_post, _mock_kmonitor
+    ):
+        vip = MagicMock()
+        vip.get_hosts.return_value = [Host("10.0.0.1", "8000")]
+        svc, health = self._make_service(vip)
+        addr = "10.0.0.1:8000"
+        mock_post.return_value = _json_response({"requires_generate_input": False})
+        with patch("rtp_llm.server.host_service.time.monotonic", return_value=10):
+            self._refresh(svc, health)
+            self.assertTrue(svc.can_omit_generate_input(addr))
+            self.assertFalse(svc.can_omit_generate_input("10.0.0.2:8000"))
+        with patch("rtp_llm.server.host_service.time.monotonic", return_value=12):
+            self.assertFalse(svc.can_omit_generate_input(addr))
+        for payload in (
+            {},
+            {"requires_generate_input": "false"},
+            {"requires_generate_input": False, "ready": False},
+        ):
+            mock_post.return_value = _json_response(payload)
+            self._refresh(svc, health)
+            self.assertFalse(svc.can_omit_generate_input(addr))
+
     def _make_service(self, vip: MagicMock):
         with patch("rtp_llm.server.host_service.threading.Thread") as mock_thread_cls:
             mock_thread_cls.return_value.start = MagicMock()
