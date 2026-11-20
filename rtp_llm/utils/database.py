@@ -342,6 +342,7 @@ class CkptDatabase(BaseDatabase):
                 hf_weights_files=hf_weights_files,
                 use_tqdm_on_load=use_tqdm_on_load,
                 device=device,
+                set_numa=False,
                 bbuf_size_kb=1024 * 1024 * 2,
                 use_shm=not use_nogds,
                 nogds=use_nogds,
