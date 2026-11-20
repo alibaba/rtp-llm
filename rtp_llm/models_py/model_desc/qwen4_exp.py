@@ -71,6 +71,9 @@ from rtp_llm.models_py.modules.qwen4_exp._profiler import (
     make_layer_forward_range,
     record_function_range,
 )
+from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+    h20_compact_moe_decode,
+)
 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
     Qwen4ExpNGramEmbedding,
@@ -1528,6 +1531,20 @@ class Qwen4ExpModel(Qwen35Model):
             target_reduce.active = any(
                 bool(getattr(a, "is_target_verify", False)) for a in groups
             )
+        compact_moe_scope = None
+        config = getattr(self, "config", None)
+        if getattr(config, "_qwen4_full_fp8", False):
+            groups = get_attention_inputs_value(inputs)
+            groups = groups.values() if isinstance(groups, Mapping) else (groups,)
+            compact_moe_scope = h20_compact_moe_decode.set(
+                not getattr(config, "is_mtp", False)
+                and all(
+                    group.is_cuda_graph
+                    and not group.is_prefill
+                    and not group.is_target_verify
+                    for group in groups
+                )
+            )
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
@@ -1537,6 +1554,8 @@ class Qwen4ExpModel(Qwen35Model):
         finally:
             if target_reduce is not None:
                 target_reduce.active = False
+            if compact_moe_scope is not None:
+                h20_compact_moe_decode.reset(compact_moe_scope)
             for ple in self.ple_layers.values():
                 embedding = getattr(ple, "ple_embedding", None)
                 finish = getattr(embedding, "finish_prefetch", None)
