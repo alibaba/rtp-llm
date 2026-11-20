@@ -8,10 +8,99 @@
 #include <type_traits>
 #include <utility>
 
+#ifdef RTP_BTC_RANK_STANDALONE
+#include <condition_variable>
+#include <deque>
+#include <thread>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/external/StandaloneDiagnostics.h"
+#else
 #include "autil/ThreadPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#endif
 
 namespace rtp_llm {
+namespace {
+
+#ifdef RTP_BTC_RANK_STANDALONE
+// A bounded, drain-on-close queue for the standalone rank package. The same
+// DiskIOExecutor state below owns admission, batching and completion.
+class DiskThreadPool {
+public:
+    enum Error { ERROR_NONE, FULL };
+    enum Stop { STOP_AFTER_QUEUE_EMPTY };
+
+    DiskThreadPool(size_t threads, size_t capacity): threads_(threads), capacity_(capacity) {}
+    ~DiskThreadPool() {
+        stop(STOP_AFTER_QUEUE_EMPTY);
+    }
+
+    bool start(const char* name) {
+        workers_.reserve(threads_);
+        for (size_t i = 0; i < threads_; ++i) {
+            workers_.emplace_back([this, name] {
+                (void)pthread_setname_np(pthread_self(), name);
+                run();
+            });
+        }
+        return true;
+    }
+
+    size_t getThreadNum() const {
+        return threads_;
+    }
+
+    Error pushTask(std::function<void()> task, bool, bool) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_ || queue_.size() == capacity_)
+                return FULL;
+            queue_.push_back(std::move(task));
+        }
+        cv_.notify_one();
+        return ERROR_NONE;
+    }
+
+    void stop(Stop) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        cv_.notify_all();
+        for (auto& worker : workers_)
+            worker.join();
+        workers_.clear();
+    }
+
+private:
+    void run() {
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
+                if (queue_.empty())
+                    return;
+                task = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            task();
+        }
+    }
+
+    size_t threads_;
+    size_t capacity_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::deque<std::function<void()>> queue_;
+    std::vector<std::thread> workers_;
+    bool stopping_{false};
+};
+#else
+using DiskThreadPool = autil::ThreadPool;
+#endif
+
+}  // namespace
 
 bool DiskIOExecutorConfig::setQueueSizesFromBatchCapacity(size_t read_batches,
                                                           size_t write_batches,
@@ -46,8 +135,8 @@ struct DiskIOExecutor::State {
             return;
         if (!config.valid())
             throw std::invalid_argument("invalid disk executor configuration");
-        auto reads  = std::make_unique<autil::ThreadPool>(config.read_thread_count, config.read_queue_size);
-        auto writes = std::make_unique<autil::ThreadPool>(config.write_thread_count, config.write_queue_size);
+        auto reads  = std::make_unique<DiskThreadPool>(config.read_thread_count, config.read_queue_size);
+        auto writes = std::make_unique<DiskThreadPool>(config.write_thread_count, config.write_queue_size);
         if (!reads->start("btc_disk_read") || !writes->start("btc_disk_write"))
             throw std::runtime_error("failed to start async disk executor");
         read_pool  = std::move(reads);
@@ -159,7 +248,7 @@ struct DiskIOExecutor::State {
         for (size_t i = 0; i < task_count; ++i) {
             try {
                 const auto error = pool->pushTask([batch, &io] { batch->run(io); }, false, false);
-                if (error != autil::ThreadPool::ERROR_NONE) {
+                if (error != DiskThreadPool::ERROR_NONE) {
                     RTP_LLM_LOG_DEBUG("async disk enqueue rejected: error=%d, accepted=%zu", int(error), accepted);
                     break;
                 }
@@ -177,8 +266,8 @@ struct DiskIOExecutor::State {
 
     const DiskIOExecutorConfig         config;
     std::mutex                         admission_mutex;
-    std::unique_ptr<autil::ThreadPool> read_pool;
-    std::unique_ptr<autil::ThreadPool> write_pool;
+    std::unique_ptr<DiskThreadPool> read_pool;
+    std::unique_ptr<DiskThreadPool> write_pool;
     bool                               stopped{false};
 };
 
@@ -206,8 +295,8 @@ DiskBlockIOStatus DiskIOExecutor::asyncWrite(DiskBlockIO& io, std::vector<DiskWr
 
 void DiskIOExecutor::stop() {
     auto&                              state = *state_;
-    std::unique_ptr<autil::ThreadPool> reads;
-    std::unique_ptr<autil::ThreadPool> writes;
+    std::unique_ptr<DiskThreadPool> reads;
+    std::unique_ptr<DiskThreadPool> writes;
     {
         std::lock_guard<std::mutex> admission_lock(state.admission_mutex);
         state.stopped = true;
@@ -216,9 +305,9 @@ void DiskIOExecutor::stop() {
     }
     // Close admission in both directions before draining.
     if (reads)
-        reads->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
+        reads->stop(DiskThreadPool::STOP_AFTER_QUEUE_EMPTY);
     if (writes)
-        writes->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
+        writes->stop(DiskThreadPool::STOP_AFTER_QUEUE_EMPTY);
 }
 
 }  // namespace rtp_llm

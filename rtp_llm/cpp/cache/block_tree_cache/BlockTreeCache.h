@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ExternalBlockTreeMatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -153,6 +154,12 @@ public:
                                const std::function<bool(size_t)>& valid_prefix           = {},
                                bool                               enable_storage_backend = true,
                                std::optional<int64_t>             request_id             = {});
+    // Uses one native tree walk with explicit per-endpoint coverage from the external
+    // scheduler. The caller retains selected slots before changing external allocations.
+    ExternalBlockTreeMatchResult match(const CacheKeysType&                       cache_keys,
+                                       const std::vector<ExternalMatchEndpoint>& endpoints,
+                                       ExternalMatchMode                         mode,
+                                       const ExternalJoinLookup&                 lookup_join = {});
     void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources,
                                 Tier                                              target_tier);

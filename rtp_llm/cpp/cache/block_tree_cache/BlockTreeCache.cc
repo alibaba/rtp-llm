@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
@@ -112,12 +113,16 @@ BlockTreeCache::~BlockTreeCache() {
     }
     RTP_LLM_LOG_INFO("load tickets closed, draining cache tasks...");
     task_pool_->stopAdmission();
-    transfer_dispatcher_->cancelPendingStagingTransfers();
+    if (transfer_dispatcher_) {
+        transfer_dispatcher_->cancelPendingStagingTransfers();
+    }
     task_pool_->waitForIdle();
     // Task-body idleness does not imply asynchronous RPC/transfer completion.
     // Keep dispatcher and cache state alive until transfer callbacks return,
     // then drain the settlement tasks those callbacks submitted.
-    transfer_dispatcher_->shutdown();
+    if (transfer_dispatcher_) {
+        transfer_dispatcher_->shutdown();
+    }
     task_pool_->waitForIdle();
     transfer_dispatcher_.reset();
     task_pool_.reset();
@@ -169,6 +174,79 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
         result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend, request_id);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics);
+    return result;
+}
+
+ExternalBlockTreeMatchResult BlockTreeCache::match(
+    const CacheKeysType&                       cache_keys,
+    const std::vector<ExternalMatchEndpoint>& endpoints,
+    ExternalMatchMode,
+    const ExternalJoinLookup&                  lookup_join) {
+    CacheLockGuard               lock(mutex_, *metrics_reporter_, "external_match");
+    ExternalBlockTreeMatchResult result;
+    const size_t                 groups = tree_->externalGroupCount();
+    if (groups == 0) {
+        throw std::logic_error("external match requires an external BlockTree");
+    }
+    const auto path = tree_->findNode(cache_keys);
+    for (auto endpoint = endpoints.rbegin(); endpoint != endpoints.rend(); ++endpoint) {
+        if (endpoint->needs.empty()) {
+            continue;
+        }
+        std::vector<ExternalMatchBinding> bindings;
+        bindings.reserve(endpoint->needs.size());
+        bool device_only = true;
+        for (const auto& need : endpoint->needs) {
+            if (need.group >= groups) {
+                throw std::invalid_argument("external match refers to an unknown group");
+            }
+            if (need.row >= path.size()) {
+                break;
+            }
+            const auto& node     = *path[need.row];
+            const auto& resource = node.group_set_resources[need.group];
+            const bool ready     = resource.hasCompleteDeviceValue()
+                               && resource.transfer_state == GroupSetTransferState::IDLE;
+            if (!ready && lookup_join) {
+                const auto joined = lookup_join(node, need.group);
+                if (joined) {
+                    bindings.push_back({need.group,
+                                        need.row,
+                                        Tier::DEVICE,
+                                        joined->slot,
+                                        ExternalBindingKind::JOIN,
+                                        joined->generation,
+                                        joined->operation});
+                    device_only = false;
+                    continue;
+                }
+            }
+            if (!resource.isMatchUsable() || resource.transfer_state != GroupSetTransferState::IDLE) {
+                break;
+            }
+            const auto tier = resource.getTopTier();
+            const auto slot = tier == Tier::DEVICE ? resource.device_blocks.front() :
+                              tier == Tier::HOST   ? resource.host_block :
+                                                     resource.disk_block;
+            bindings.push_back(
+                {need.group, need.row, tier, slot, ready ? ExternalBindingKind::READY : ExternalBindingKind::LOAD});
+            device_only = device_only && ready;
+        }
+        if (bindings.size() != endpoint->needs.size()) {
+            continue;
+        }
+        if (result.total_tokens == 0) {
+            result.total_tokens = endpoint->tokens;
+            result.bindings = bindings;
+        }
+        if (device_only) {
+            result.device_tokens = endpoint->tokens;
+            result.device_bindings = std::move(bindings);
+            break;
+        }
+    }
+    RTP_LLM_LOG_DEBUG("external BlockTreeCache::match nodes=%zu D=%zu L=%zu",
+                      path.size(), result.device_tokens, result.total_tokens);
     return result;
 }
 

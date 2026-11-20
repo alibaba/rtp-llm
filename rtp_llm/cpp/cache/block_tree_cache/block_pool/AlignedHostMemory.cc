@@ -1,5 +1,47 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 
+#ifdef RTP_BTC_RANK_STANDALONE
+
+#include <cuda_runtime_api.h>
+
+#include <limits>
+#include <stdexcept>
+
+namespace rtp_llm {
+
+AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name) {
+    if (!usable_bytes || !alignment || alignment - 1 > std::numeric_limits<size_t>::max() - usable_bytes)
+        throw std::invalid_argument(allocation_name + ": invalid pinned backing size or alignment");
+    void* allocation = nullptr;
+    backing_bytes_ = usable_bytes + alignment - 1;
+    const auto status = cudaHostAlloc(&allocation, backing_bytes_, cudaHostAllocPortable);
+    if (status != cudaSuccess)
+        throw std::runtime_error(allocation_name + ": " + cudaGetErrorString(status));
+    pinned_allocation_ = std::shared_ptr<void>(allocation, [](void* ptr) { (void)cudaFreeHost(ptr); });
+    const auto address = reinterpret_cast<uintptr_t>(allocation);
+    const auto remainder = address % alignment;
+    data_ = reinterpret_cast<uint8_t*>(remainder ? address + alignment - remainder : address);
+    registered_ = true;
+}
+
+AlignedHostMemory::~AlignedHostMemory() = default;
+
+uint8_t* AlignedHostMemory::data() const {
+    return data_;
+}
+
+bool AlignedHostMemory::isRegistered() const {
+    return registered_;
+}
+
+size_t AlignedHostMemory::backingBytes() const {
+    return backing_bytes_;
+}
+
+}  // namespace rtp_llm
+
+#else
+
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -200,3 +242,5 @@ size_t AlignedHostMemory::backingBytes() const {
 }
 
 }  // namespace rtp_llm
+
+#endif  // RTP_BTC_RANK_STANDALONE

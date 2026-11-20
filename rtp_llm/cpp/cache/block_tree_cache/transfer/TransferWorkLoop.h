@@ -17,14 +17,42 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+
+#ifndef RTP_BTC_RANK_STANDALONE
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#endif
 
 namespace rtp_llm {
 
+enum class BlockIOStatus;
+class DiskBlockPool;
 class DiskIOExecutor;
+
+#ifdef RTP_BTC_RANK_STANDALONE
+// External ranks publish their stage telemetry through BorrowedBuffers.
+class WorkLoopStageTimer {
+public:
+    explicit operator bool() const noexcept {
+        return false;
+    }
+    int64_t startSteadyUs() const noexcept {
+        return -1;
+    }
+    const AsyncProfileSpan& trace() const noexcept {
+        return trace_;
+    }
+    void finishAtSteady(int64_t, bool) noexcept {}
+    void finish(bool) noexcept {}
+
+private:
+    AsyncProfileSpan trace_;
+};
+#else
+using WorkLoopStageTimer = TransferStageTimer;
+#endif
 
 // One operation owner. Disk workers fill their Entry's result and publish its
 // completion queue under mutex_; CRC stage callbacks run in this owner's stack.
@@ -34,6 +62,26 @@ class TransferWorkLoop {
 public:
     using BeforeCompleteCallback = std::function<void(const TransferResult&)>;
 
+    // A worker can borrow engine-owned KV pages and use a raw, non-CRC layout.
+    // The owner thread submits and polls DMA. The caller keeps all borrowed
+    // addresses and the pool live until the returned context completes.
+    struct BorrowedBuffers {
+        DiskBlockPool*                                   disk_pool{nullptr};
+        size_t                                           row_bytes{0};
+        std::vector<HostBufferView>                     hosts;
+        std::function<void(const std::vector<HostBufferView>&)> submit_cuda;
+        std::function<std::optional<TransferResult>()> poll_cuda;
+        std::function<void(Tier, Tier, const char*, bool)> observe_stage;
+    };
+
+#ifdef RTP_BTC_RANK_STANDALONE
+    TransferWorkLoop(DiskIOExecutor*                       disk_io_executor,
+                     TransferOperation                     operation,
+                     size_t                                batch_limit,
+                     size_t                                queue_capacity,
+                     std::shared_ptr<HostStagingBlockPool> staging,
+                     int64_t                               world_rank);
+#else
     TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
                      std::unique_ptr<CrcCopyExecutor>               crc,
                      DiskIOExecutor*                                disk_io_executor,
@@ -45,6 +93,7 @@ public:
                      int64_t                                        world_rank       = 0,
                      size_t                                         worker_index     = 0,
                      std::shared_ptr<HostStagingBlockPool>          swa_staging      = nullptr);
+#endif
     ~TransferWorkLoop();
     TransferWorkLoop(const TransferWorkLoop&)            = delete;
     TransferWorkLoop& operator=(const TransferWorkLoop&) = delete;
@@ -57,7 +106,10 @@ public:
     // arguments intact. Other failures are terminal. Without it, full admission
     // returns a completed failure and records one rejected observation.
     std::shared_ptr<TransferAsyncContext>
-    execute(TransferTask&& task, BeforeCompleteCallback&& before_complete = {}, bool* retryable = nullptr);
+    execute(TransferTask&& task,
+            BeforeCompleteCallback&& before_complete = {},
+            bool* retryable = nullptr,
+            std::optional<BorrowedBuffers> borrowed = std::nullopt);
     // Fixed limit supplied by PerRank for both operation owners.
     size_t batchLimit() const noexcept {
         return batch_limit_;
@@ -100,12 +152,16 @@ private:
     // operation is pending, its callback exclusively writes result; the owner
     // consumes its mutex-published completion before accessing it. Each Entry is one batch.
     struct Entry {
-        Entry(TransferTask task, BeforeCompleteCallback before_complete);
+        Entry(TransferTask task,
+              BeforeCompleteCallback before_complete,
+              std::optional<BorrowedBuffers> borrowed = std::nullopt);
         TransferTask                               task;
         std::shared_ptr<TransferBatchAsyncContext> context;
         // Latest step status and one result per descriptor in this batch.
         TransferResult                              result;
         BeforeCompleteCallback                      before_complete;
+        std::optional<BorrowedBuffers>               borrowed;
+        bool                                        borrowed_stage_active{false};
         Step                                        step{Step::DISK_READ};  // Set by the initial plan.
         std::vector<HostBufferView>                 hosts;
         HostStagingBlockPool::HostStagingBlockBatch staging;
@@ -117,8 +173,10 @@ private:
         bool                                        initial_plan{true}, step_started{false};
         // Queue observation ends at initial plan. Its storage is then reused
         // for the terminal CRC lifecycle, which ends after Entry destruction.
-        TransferStageTimer      task_timer, queue_or_finalize_timer, batch_timer, staging_timer, step_timer;
+        WorkLoopStageTimer task_timer, queue_or_finalize_timer, batch_timer, staging_timer, step_timer;
+#ifndef RTP_BTC_RANK_STANDALONE
         CrcCopyExecutor::Timing crc_timing;
+#endif
     };
     struct StagingResource {
         std::array<std::shared_ptr<HostStagingBlockPool>, 2> pools;  // FULL/default, SWA.
@@ -133,6 +191,8 @@ private:
     size_t             stagingIndex(const Entry& entry) const;
     void               tryStep(Entry& entry);
     void               submitCrc(Entry& entry);
+    void               observeBorrowedStage(Entry& entry, const char* phase, bool success);
+    void               pollBorrowedCuda();
     void               submitDisk(Entry& entry);
     void               publishDisk(Entry& entry, BlockIOStatus status) noexcept;
     void               pollOnce();
@@ -145,10 +205,12 @@ private:
     void               waitForResource(Entry& entry, Queue& waiting);
     void               removeWaiter(Entry& entry);
     void               expireResourceWaiters();
+#ifndef RTP_BTC_RANK_STANDALONE
     const GroupSetPtr& group(const Entry& entry) const;
+#endif
     static bool        isCrc(Step step);
     // An explicit start_us backfills the interval for both observers.
-    TransferStageTimer timer(const TransferTask&     task,
+    WorkLoopStageTimer timer(const TransferTask&     task,
                              const char*             stage,
                              size_t                  begin,
                              size_t                  end,
@@ -164,7 +226,9 @@ private:
         try {
             return std::forward<Action>(action)();
         } catch (const std::bad_alloc&) {
+#ifndef RTP_BTC_RANK_STANDALONE
             Logger::getEngineLogger().flush();
+#endif
             std::abort();
         }
     }
@@ -183,12 +247,16 @@ private:
     // All resources below outlive the owner thread's join.
     // ==================== Fixed configuration/handles: no WorkLoop lock ====================
     // Initialized before start(); CRC is exclusive to this owner until join.
+#ifndef RTP_BTC_RANK_STANDALONE
     std::vector<GroupSetPtr>                       groups_;
     std::unique_ptr<CrcCopyExecutor>               crc_;
+#endif
     DiskIOExecutor* const                          disk_io_executor_;  // Owned by the engine through shutdown/join.
     TransferOperation                              operation_;
     size_t                                         batch_limit_, capacity_;
+#ifndef RTP_BTC_RANK_STANDALONE
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
+#endif
     int64_t                                        world_rank_;
     std::string                                    thread_name_;
 
@@ -198,7 +266,7 @@ private:
     StagingResource                staging_;
     std::map<int, Queue>           crc_waiting_;
     Entries                        entries_;
-    Queue                          ready_, completed_;
+    Queue                          ready_, completed_, borrowed_cuda_pending_;
     WaitDeadlines                  wait_deadlines_;
     bool                           has_crc_pending_{false};
 

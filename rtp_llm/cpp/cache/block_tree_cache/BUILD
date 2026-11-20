@@ -56,6 +56,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_info",
+        "//rtp_llm/cpp/cache:block_index",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:memory_layout_strategy",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
@@ -196,6 +197,7 @@ cc_library(
         ":disk_block_io",
         ":disk_io_executor",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:block_index",
         "//rtp_llm/cpp/cache:cache_group_type",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:single_type_cache_manager",
@@ -256,6 +258,7 @@ cc_library(
     ],
     hdrs = [
         "BlockTreeCache.h",
+        "ExternalBlockTreeMatch.h",
         "diagnostic/FullPrefixInvariantScanner.h",
         "BlockTreeCacheFactory.h",
         "evict/EvictionTaskRunner.h",
@@ -314,6 +317,27 @@ cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+cc_binary(
+    name = "libbtc_tree.so",
+    srcs = [
+        "external/ExternalBlockTreeDriver.cc",
+        "external/ExternalDiskBindings.inc",
+        "external/ExternalDiskProtocol.h",
+        "external/ExternalDiskTransactions.inc",
+        "external/ExternalHostOps.inc",
+        "external/ExternalHostTypes.inc",
+    ],
+    copts = copts(),
+    linkshared = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":block_tree_cache",
+        ":block_tree_task_pool",
+        ":device_block_pool",
+        ":transfer_common",
+    ],
 )
 
 cc_test(

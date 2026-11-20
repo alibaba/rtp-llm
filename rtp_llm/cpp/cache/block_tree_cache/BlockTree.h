@@ -57,10 +57,20 @@ struct BlockTreeNodeRangeResult {
 
 class BlockTree {
 public:
+    struct ExternalGroups {
+        size_t count;
+    };
+
     explicit BlockTree(std::vector<GroupSetPtr> group_sets);
+    explicit BlockTree(ExternalGroups groups);
     ~BlockTree();
 
     std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
+    // Scheduler-owned slot pools use the same tree with externally retained resources.
+    std::vector<TreeNode*> ensureExternalPath(const CacheKeysType& cache_keys);
+    size_t externalGroupCount() const {
+        return external_group_count_;
+    }
 
     bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
 
@@ -72,7 +82,7 @@ public:
     void      referenceNodeForNonOwnerTransfer(TreeNode* node);
     bool      isRemovable(TreeNode* node) const;
     void      removePendingNodes(const std::unordered_map<TreeNode*, size_t>& nodes);
-    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
+    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node, CacheKeysType* removed_keys = nullptr);
 
     TreeNode* root() const {
         return root_.get();
@@ -125,6 +135,7 @@ private:
     void      releaseNode(TreeNode* node);
 
     std::vector<GroupSetPtr>              group_sets_;
+    size_t                               external_group_count_{0};
     ReusableGroupLocations                reusable_group_locations_;
     std::unique_ptr<TreeNode>             root_;
     std::deque<std::unique_ptr<TreeNode>> node_pool_;

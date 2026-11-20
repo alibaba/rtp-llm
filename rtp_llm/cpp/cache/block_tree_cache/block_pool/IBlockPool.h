@@ -13,8 +13,12 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockIndex.h"
+
+#ifndef RTP_BTC_STANDALONE
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#endif
 
 namespace rtp_llm {
 
@@ -182,11 +186,12 @@ protected:
 
     template<typename ConfigT>
     const ConfigT& configAs(BlockPoolType expected_type) const {
-        RTP_LLM_CHECK(config_->pool_type == expected_type);
+        checkPoolType(expected_type);
         return static_cast<const ConfigT&>(*config_);
     }
 
 private:
+    void          checkPoolType(BlockPoolType expected_type) const;
     bool          validBlockNoLock(BlockIdxType block) const;
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);

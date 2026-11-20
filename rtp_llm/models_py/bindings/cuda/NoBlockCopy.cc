@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/CopyTileKernel.h"
+#include "rtp_llm/models_py/bindings/cuda/DeviceHostCopySubmit.h"
 #include "rtp_llm/models_py/bindings/cuda/SplitKvCacheCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 
@@ -318,11 +319,10 @@ static void execNoBlockCopyImpl(const MultiCopyParams& params, const DeviceHostC
     try {
         for (size_t i = 0; i < params.multi_src.size(); ++i) {
             submitted = true;
-            check_cuda_value(copyCudaResult("generic_submit", cudaMemcpyAsync(params.multi_dst[i].data_ptr(),
-                                                                               params.multi_src[i].data_ptr(),
-                                                                               params.multi_src[i].nbytes(),
-                                                                               cudaMemcpyDefault,
-                                                                               stream)));
+            check_cuda_value(copyCudaResult("generic_submit", submitCudaDeviceHostTile(params.multi_dst[i].data_ptr(),
+                                                                                        params.multi_src[i].data_ptr(),
+                                                                                        params.multi_src[i].nbytes(),
+                                                                                        stream)));
         }
         check_cuda_value(cudaStreamSynchronize(stream));
         check_cuda_error();
@@ -359,46 +359,18 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&    
         return BatchedMemoryCopyStatus::EXECUTION_FAILED;
     }
 
-#if CUDART_VERSION >= 12080
-    constexpr int min_batch_driver_version = CUDART_VERSION >= 13000 ? 13000 : 12080;
-    const int     driver_version           = getCudaVersion();
-    if (driver_version < min_batch_driver_version) {
-        static std::once_flag driver_warning_once;
-        std::call_once(driver_warning_once, [driver_version, min_batch_driver_version] {
+    const auto support = cudaDeviceHostBatchSupport();
+    if (!support.available) {
+        static std::once_flag batch_warning_once;
+        std::call_once(batch_warning_once, [support] {
             RTP_LLM_LOG_WARNING(
-                "execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d requires driver API version "
-                ">=%d for its cudaMemcpyBatchAsync ABI, installed driver API version=%d; falling back to generic "
-                "copy",
+                "execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, driver version=%d, "
+                "runtime version=%d, query status=%s; falling back to generic copy",
                 CUDART_VERSION,
-                min_batch_driver_version,
-                driver_version);
+                support.driver_version,
+                support.runtime_version,
+                cudaGetErrorString(support.query_error));
         });
-        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
-    }
-
-    int        runtime_version       = 0;
-    const auto runtime_version_error = cudaRuntimeGetVersion(&runtime_version);
-    if (runtime_version_error != cudaSuccess) {
-        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, failed to query "
-                            "runtime version (%s); cannot prove cudaMemcpyBatchAsync ABI compatibility",
-                            CUDART_VERSION,
-                            cudaGetErrorString(runtime_version_error));
-        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
-    }
-    if (runtime_version < 12080) {
-        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d, runtime version=%d "
-                            "predates cudaMemcpyBatchAsync; falling back to generic copy",
-                            CUDART_VERSION,
-                            runtime_version);
-        return BatchedMemoryCopyStatus::NOT_SUPPORTED;
-    }
-    const bool compiled_with_cuda13_batch_abi = CUDART_VERSION >= 13000;
-    const bool runtime_uses_cuda13_batch_abi  = runtime_version >= 13000;
-    if (compiled_with_cuda13_batch_abi != runtime_uses_cuda13_batch_abi) {
-        RTP_LLM_LOG_WARNING("execBatchedMemoryCopy unavailable: compile-time CUDART_VERSION=%d and runtime version=%d "
-                            "use incompatible cudaMemcpyBatchAsync signatures; falling back to generic copy",
-                            CUDART_VERSION,
-                            runtime_version);
         return BatchedMemoryCopyStatus::NOT_SUPPORTED;
     }
 
@@ -429,27 +401,12 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&    
                       static_cast<void*>(stream),
                       dsts.size());
 
-    cudaMemcpyAttributes attr{};
-    attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
-    size_t attr_idx     = 0;
     bool buffer_safe = true;
     try {
-#if CUDART_VERSION >= 13000
         buffer_safe = false;
-        auto submit_error =
-            cudaMemcpyBatchAsync(dsts.data(), srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, stream);
-#else
-        std::vector<void*> mutable_srcs;
-        mutable_srcs.reserve(srcs.size());
-        for (auto* src : srcs) {
-            mutable_srcs.push_back(const_cast<void*>(src));
-        }
-        size_t     fail_idx     = 0;
-        buffer_safe = false;
-        auto submit_error = cudaMemcpyBatchAsync(
-            dsts.data(), mutable_srcs.data(), sizes.data(), dsts.size(), &attr, &attr_idx, 1, &fail_idx, stream);
-#endif
-        submit_error = copyCudaResult("batch_submit", submit_error);
+        const auto submit_error = copyCudaResult("batch_submit",
+                                                 submitCudaDeviceHostBatch(
+                                                     dsts.data(), srcs.data(), sizes.data(), dsts.size(), stream));
         if (submit_error != cudaSuccess) {
             RTP_LLM_LOG_WARNING("execBatchedMemoryCopy failed phase=submit device=%d stream=%p tiles=%zu error_code=%d "
                                 "error=%s",
@@ -494,10 +451,6 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams&    
         }
         throw;
     }
-#else
-    RTP_LLM_LOG_DEBUG("execBatchedMemoryCopy unavailable: CUDART_VERSION=%d", CUDART_VERSION);
-    return BatchedMemoryCopyStatus::NOT_SUPPORTED;
-#endif
 }
 
 bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopyScratch* scratch) {

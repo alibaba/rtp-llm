@@ -9,6 +9,12 @@
 #include <random>
 #include <sstream>
 
+#ifdef RTP_BTC_STANDALONE
+#include "rtp_llm/cpp/cache/block_tree_cache/external/StandaloneDiagnostics.h"
+#else
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#endif
+
 namespace rtp_llm {
 namespace {
 
@@ -57,6 +63,10 @@ IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): confi
 void IBlockPool::setCapacityChangeCallback(std::function<void()> callback) {
     std::lock_guard<std::mutex> lock(mutex_);
     capacity_change_callback_ = std::move(callback);
+}
+
+void IBlockPool::checkPoolType(BlockPoolType expected_type) const {
+    RTP_LLM_CHECK(config_->pool_type == expected_type);
 }
 
 const std::string& IBlockPool::poolName() const {

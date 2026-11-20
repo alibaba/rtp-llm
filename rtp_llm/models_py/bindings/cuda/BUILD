@@ -107,10 +107,48 @@ cc_library(
 )
 
 cc_library(
+    name = "device_host_copy_submit",
+    srcs = ["DeviceHostCopySubmit.cc"],
+    hdrs = ["DeviceHostCopySubmit.h"],
+    copts = copts(),
+    deps = [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_binary(
+    name = "libbtc_transfer.so",
+    srcs = ["BtcTransferBinding.cc"],
+    copts = copts(),
+    linkshared = True,
+    visibility = ["//visibility:public"],
+    deps = [":device_host_copy_submit"],
+)
+
+cc_binary(
+    name = "libbtc_rank_transfer.so",
+    srcs = [
+        "BtcRankTransferBinding.cc",
+        "BtcTransferBinding.cc",
+    ],
+    copts = copts(),
+    linkshared = True,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_host_copy_submit",
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_work_loop",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_library(
     name = "no_block_copy",
     srcs = ["NoBlockCopy.cc"],
     copts = copts(),
     deps = [
+        ":device_host_copy_submit",
         "//rtp_llm/models_py/bindings:no_block_copy_hdr",
         "//rtp_llm/models_py/bindings/common/kernels:copy_tile_kernel",
         "//rtp_llm/cpp/utils:core_utils",
@@ -142,6 +180,9 @@ cc_library(
     srcs = glob([
         "*.cc",
     ], exclude = [
+        "BtcRankTransferBinding.cc",
+        "BtcTransferBinding.cc",
+        "DeviceHostCopySubmit.cc",
         "Bf16GemmOp.cc",
         "RegisterCudaOps.cc",
         "SplitKvCacheCopy.cc",
