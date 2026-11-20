@@ -109,8 +109,7 @@ def _split_reco_config(**overrides):
 
 def _online_env(**overrides):
     values = {
-        "RECO_ENABLE_VIPSERVER": "1",
-        "RECO_VIPSERVER_DOMAIN": "kvcm-na130-m3-bailian-grpc-2.vipserver",
+        "RECO_SERVER_ADDRESS": "kvcm-na130-m3-bailian-grpc-2.vipserver",
         "RECO_INSTANCE_GROUP": "pace_group_m3",
         "RECO_PUT_TIMEOUT_MS": "100000",
         "RECO_GET_TIMEOUT_MS": "100000",
@@ -651,6 +650,33 @@ class RtpKvMetaSplitConfigTest(unittest.TestCase):
             _kv_meta_model_deployment(user_data=""),
         )
 
+    def test_environment_resolves_kvcm_address_forms(self):
+        cases = (
+            (
+                {"RECO_VIPSERVER_DOMAIN": "legacy.example", "RECO_ENABLE_VIPSERVER": "1"},
+                "",
+            ),
+            ({"RECO_SERVER_ADDRESS": "vipserver://kvcm.example"}, "kvcm.example"),
+            (
+                {"RECO_SERVER_ADDRESS": "kvcm.example.vipserver"},
+                "kvcm.example.vipserver",
+            ),
+        )
+        for environ, expected_domain in cases:
+            with self.subTest(environ=environ):
+                def resolve(domain):
+                    self.assertEqual(domain, expected_domain)
+                    return [SimpleNamespace(ip="10.0.0.9", port=19001)]
+
+                derived = RtpKvMetaObjectClientConfig.from_env(
+                    environ={"RECO_SERVER_ADDRESS": "127.0.0.1:19001", **environ},
+                    vipserver_resolver=resolve,
+                )
+                expected_address = (
+                    "10.0.0.9:19001" if expected_domain else "127.0.0.1:19001"
+                )
+                self.assertEqual(derived.addresses, (expected_address,))
+
     def test_parsed_kv_cache_config_uses_salt_and_is_not_mutated(self):
         source = _split_reco_config(reco_instance_id_salt="stable-deployment")
         before = copy.deepcopy(source.__dict__)
@@ -687,7 +713,7 @@ class RtpKvMetaSplitConfigTest(unittest.TestCase):
         derived = RtpKvMetaObjectClientConfig.from_env(
             environ={
                 "RECO_CLIENT_CONFIG": _serialized(),
-                "RECO_ENABLE_VIPSERVER": "not-a-bool",
+                "RECO_SERVER_ADDRESS": 7,
                 "RECO_META_CHANNEL_CALL_TIMEOUT": "not-an-int",
                 "RECO_INSTANCE_GROUP": 7,
             }
@@ -754,9 +780,7 @@ class RtpKvMetaSplitConfigTest(unittest.TestCase):
 
     def test_environment_values_are_typed_and_bounded(self):
         cases = (
-            ({"RECO_ENABLE_VIPSERVER": "maybe"}, "boolean"),
-            ({"RECO_ENABLE_VIPSERVER": "t"}, "boolean"),
-            ({"RECO_ENABLE_VIPSERVER": "f"}, "boolean"),
+            ({"RECO_SERVER_ADDRESS": 7}, "must be a string"),
             ({"RECO_META_CHANNEL_CALL_TIMEOUT": "not-int"}, "integer"),
             ({"RECO_STORAGE_QUEUE_SIZE": "63"}, "at least 64"),
             ({"RECO_PUT_TIMEOUT_MS": "0"}, "valid range"),

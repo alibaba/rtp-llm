@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -8,17 +9,60 @@
 #include <utility>
 #include <vector>
 
+#include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsRecord.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+class FullPrefixScannerTest: public ::testing::Test {
+protected:
+    static void runScan(FullPrefixInvariantScanner& scanner) {
+        scanner.runScan();
+    }
+    static void runBatch(FullPrefixInvariantScanner& scanner) {
+        scanner.runBatch();
+    }
+    static size_t nodesScanned(const FullPrefixInvariantScanner& scanner) {
+        return scanner.cycle_nodes_scanned_;
+    }
+    static size_t cursor(const FullPrefixInvariantScanner& scanner) {
+        return scanner.cursor_;
+    }
+    static uint64_t cyclesCompleted(const FullPrefixInvariantScanner& scanner) {
+        return scanner.cycles_completed_;
+    }
+    static bool tryLockCacheUntil(FullPrefixInvariantScanner& scanner, std::chrono::steady_clock::time_point deadline) {
+        auto lock = scanner.tryLockCacheUntil(deadline);
+        return lock.owns_lock();
+    }
+
+    template<typename Function>
+    static auto runWhileCacheMutexHeld(std::mutex& cache_mutex, Function function) {
+        std::unique_lock<std::mutex> lock(cache_mutex);
+        auto                         task = std::async(std::launch::async, [function = std::move(function)]() mutable {
+            const auto begin = std::chrono::steady_clock::now();
+            function();
+            return std::chrono::steady_clock::now() - begin;
+        });
+        const bool                   completed = task.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+        // Release before joining so a blocking-lock regression fails without
+        // hanging the test. The scanner must run on a different thread to the owner.
+        lock.unlock();
+        return std::make_pair(completed, task.get());
+    }
+};
+
 namespace {
 
 using block_tree_cache_test::makeStructuralDevicePool;
@@ -97,7 +141,9 @@ public:
             keys.push_back(next_key_++);
             seed[i].resize(group_set_count_);
             for (size_t group_set_id = 0; group_set_id < group_set_count_; ++group_set_id) {
-                seed[i][group_set_id].device_blocks = {next_block_++};
+                // insertNode takes a cache reference per node, so large synthetic
+                // trees can share one allocated structural block without payloads.
+                seed[i][group_set_id].device_blocks = {1};
             }
         }
         BlockTreeInsertResult result = tree_.insertNode(keys, seed, /*collect_path=*/false, /*is_resident=*/false);
@@ -134,7 +180,6 @@ private:
     size_t                                                           group_set_count_;
     BlockTree                                                        tree_;
     CacheKeyType                                                     next_key_{100};
-    BlockIdxType                                                     next_block_{1};
     std::vector<std::pair<TreeNode*, std::vector<GroupSetResource>>> pristine_;
 };
 
@@ -248,7 +293,7 @@ TEST(FullPrefixDetectorTest, InvalidResourceReportsReasonInsteadOfPathViolation)
 // 4. Background thread: detects, logs, stops, leaves the data plane intact
 // ---------------------------------------------------------------------------
 
-TEST(FullPrefixScannerTest, BackgroundScanLogsViolationWithoutAffectingTreeOperations) {
+TEST_F(FullPrefixScannerTest, BackgroundScanLogsViolationWithoutAffectingTreeOperations) {
     test::TestLogCapture log_capture("full_prefix_scan");
 
     SyntheticTree          tree(makeFullGroupSet());
@@ -284,6 +329,280 @@ TEST(FullPrefixScannerTest, BackgroundScanLogsViolationWithoutAffectingTreeOpera
     EXPECT_EQ(tree.tree().size(), size_after_insert);
     EXPECT_EQ(nodes[2]->group_set_resources[0].device_blocks, pristine_resource.device_blocks);
     EXPECT_EQ(nodes[2]->group_set_resources[0].transfer_state, pristine_resource.transfer_state);
+}
+
+TEST_F(FullPrefixScannerTest, ReportsViolationsBeforeCycleCompletionAndBeyondLogCap) {
+    block_tree_cache_test::ScopedServingMetrics serving_metrics;
+    test::TestLogCapture log_capture("full_prefix_scan_metrics");
+    SyntheticTree        tree(makeMixedGroupSets());
+    const auto           nodes =
+        tree.addPath(std::vector<std::vector<GroupSetResource>>(129, {deviceRes(), deviceRes(), deviceRes()}));
+    const kmonitor::MetricsTags   common_tags("dp_rank", "7");
+    auto                          metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", common_tags);
+    BlockTreeCacheMetricsReporter reporter(metrics_reporter, /*enable_stage_metrics=*/false);
+    std::mutex                    cache_mutex;
+    FullPrefixInvariantScanner    scanner(tree.tree(), cache_mutex, /*interval_ms=*/1, &reporter);
+    auto*                         metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheInvariantMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    ASSERT_NE(metrics->violation_qps_metric, nullptr);
+    EXPECT_EQ(metrics->violation_qps_metric->GetMetricType(), kmonitor::QPS);
+
+    const auto expect_qps = [&](size_t group_set_id, const char* reason, const char* status, double expected) {
+        auto tags = common_tags;
+        tags.AddTag("group_set_id", std::to_string(group_set_id));
+        tags.AddTag("type", "invalid_resource");
+        tags.AddTag("reason", reason);
+        tags.AddTag("status", status);
+        const auto serving_tags = kmonTagsWithServiceStatus(&tags);
+        auto* series = metrics->violation_qps_metric->DeclareMetric(&serving_tags);
+        ASSERT_NE(series, nullptr);
+        kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+        series->Snapshot(&record, 1000);
+        EXPECT_TRUE(metrics->violation_qps_metric->UndeclareMetric(series));
+        ASSERT_EQ(record.Values().size(), 1u);
+        EXPECT_NE(record.Values().front()->Name().find("rtp_llm_kv_cache_invariant_violation_qps"), std::string::npos);
+        EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), expected);
+    };
+
+    // Healthy batches do not contribute violations.
+    runBatch(scanner);
+    runBatch(scanner);
+    ASSERT_EQ(cyclesCompleted(scanner), 1u);
+    expect_qps(0, "multi_tier", "stable", 0);
+    expect_qps(1, "multi_tier", "transient", 0);
+    expect_qps(2, "partial_device", "stable", 0);
+
+    for (size_t i = 0; i < 128; ++i) {
+        nodes[i]->group_set_resources[0].host_block = 7;
+        if (i < 11) {
+            nodes[i]->group_set_resources[1].host_block     = 7;
+            nodes[i]->group_set_resources[1].transfer_state = GroupSetTransferState::LOADING;
+        }
+    }
+    nodes[0]->group_set_resources[2].device_blocks.push_back(NULL_BLOCK_IDX);
+
+    runBatch(scanner);
+    EXPECT_EQ(nodesScanned(scanner), 128u);
+    EXPECT_EQ(cyclesCompleted(scanner), 1u);
+    expect_qps(0, "multi_tier", "stable", 128);
+    expect_qps(1, "multi_tier", "transient", 11);
+    expect_qps(2, "partial_device", "stable", 1);
+    EXPECT_NE(log_capture.content().find("event=block_tree_resource_violation"), std::string::npos);
+
+    runBatch(scanner);
+    EXPECT_EQ(cyclesCompleted(scanner), 2u);
+    expect_qps(0, "multi_tier", "stable", 0);
+    expect_qps(1, "multi_tier", "transient", 0);
+    expect_qps(2, "partial_device", "stable", 0);
+    const auto logs = log_capture.content();
+    EXPECT_NE(logs.find("violations=140 stable=129 transient=11"), std::string::npos);
+    EXPECT_NE(logs.find("details_logged=10 details_suppressed=130"), std::string::npos);
+    EXPECT_EQ(metrics_reporter->getTags().FindTag("dp_rank"), "7");
+    for (const char* tag : {"group_set_id", "type", "reason", "status"}) {
+        EXPECT_TRUE(metrics_reporter->getTags().FindTag(tag).empty());
+    }
+
+    BlockTreeCacheMetricsReporter disabled(nullptr);
+    disabled.reportInvariantViolation(0, "invalid_resource", "multi_tier", true);
+}
+
+TEST_F(FullPrefixScannerTest, EachBatchVisitsAtMost128Nodes) {
+    SyntheticTree tree(makeFullGroupSet());
+    tree.addSingleGroupPath(std::vector<GroupSetResource>(256, deviceRes()));
+    std::mutex                 cache_mutex;
+    FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+
+    runBatch(scanner);
+    EXPECT_EQ(nodesScanned(scanner), 128u);
+    EXPECT_EQ(cyclesCompleted(scanner), 0u);
+    runBatch(scanner);
+    EXPECT_EQ(cyclesCompleted(scanner), 1u);
+}
+
+TEST_F(FullPrefixScannerTest, CacheLockTimeoutSkipsBatchWithoutAdvancingCursor) {
+    SyntheticTree tree(makeFullGroupSet());
+    tree.addSingleGroupPath(std::vector<GroupSetResource>(512, deviceRes()));
+    std::mutex                 cache_mutex;
+    FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+
+    runBatch(scanner);
+    ASSERT_EQ(cursor(scanner), 128u);
+    const auto [completed, elapsed] = runWhileCacheMutexHeld(cache_mutex, [&] { runBatch(scanner); });
+    EXPECT_TRUE(completed);
+    EXPECT_GE(elapsed, std::chrono::milliseconds(10));
+    EXPECT_EQ(cursor(scanner), 128u);
+    EXPECT_EQ(nodesScanned(scanner), 128u);
+    EXPECT_EQ(cyclesCompleted(scanner), 0u);
+
+    runBatch(scanner);
+    EXPECT_EQ(cursor(scanner), 256u);
+    EXPECT_EQ(nodesScanned(scanner), 256u);
+}
+
+TEST_F(FullPrefixScannerTest, CacheLockTimeoutSkipsWindowWithoutAdvancingCursor) {
+    SyntheticTree tree(makeFullGroupSet());
+    tree.addSingleGroupPath(std::vector<GroupSetResource>(256, deviceRes()));
+    std::mutex                 cache_mutex;
+    FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+
+    runBatch(scanner);
+    ASSERT_EQ(cursor(scanner), 128u);
+    const auto [completed, elapsed] = runWhileCacheMutexHeld(cache_mutex, [&] { runScan(scanner); });
+    EXPECT_TRUE(completed);
+    EXPECT_GE(elapsed, std::chrono::milliseconds(10));
+    EXPECT_EQ(cursor(scanner), 128u);
+    EXPECT_EQ(nodesScanned(scanner), 128u);
+    EXPECT_EQ(cyclesCompleted(scanner), 0u);
+
+    runScan(scanner);
+    EXPECT_EQ(cyclesCompleted(scanner), 1u);
+    EXPECT_EQ(cursor(scanner), 0u);
+}
+
+TEST_F(FullPrefixScannerTest, CacheLockReleasedBeforeDeadlineIsAcquired) {
+    SyntheticTree                tree(makeFullGroupSet());
+    std::mutex                   cache_mutex;
+    FullPrefixInvariantScanner   scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+    std::unique_lock<std::mutex> business_lock(cache_mutex);
+    std::promise<void>           entered;
+    auto                         entered_future = entered.get_future();
+    auto                         task           = std::async(std::launch::async, [&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        entered.set_value();
+        return tryLockCacheUntil(scanner, deadline);
+    });
+
+    entered_future.wait();
+    const auto while_locked = task.wait_for(std::chrono::milliseconds(20));
+    business_lock.unlock();
+    EXPECT_EQ(while_locked, std::future_status::timeout);
+    EXPECT_TRUE(task.get());
+}
+
+TEST_F(FullPrefixScannerTest, CacheLockWaitTimesOutWhileBusinessMutexRemainsHeld) {
+    SyntheticTree                tree(makeFullGroupSet());
+    std::mutex                   cache_mutex;
+    FullPrefixInvariantScanner   scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+    std::unique_lock<std::mutex> business_lock(cache_mutex);
+    auto                         task = std::async(std::launch::async, [&] {
+        const auto begin    = std::chrono::steady_clock::now();
+        const bool acquired = tryLockCacheUntil(scanner, begin + std::chrono::milliseconds(50));
+        return std::make_pair(acquired, std::chrono::steady_clock::now() - begin);
+    });
+
+    const auto while_locked = task.wait_for(std::chrono::seconds(1));
+    business_lock.unlock();  // Also makes a blocking-lock regression safe to join.
+    const auto result = task.get();
+    EXPECT_EQ(while_locked, std::future_status::ready);
+    EXPECT_FALSE(result.first);
+    EXPECT_GE(result.second, std::chrono::milliseconds(50));
+}
+
+TEST_F(FullPrefixScannerTest, StopInterruptsCacheLockWait) {
+    SyntheticTree                tree(makeFullGroupSet());
+    std::mutex                   cache_mutex;
+    FullPrefixInvariantScanner   scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+    std::unique_lock<std::mutex> business_lock(cache_mutex);
+    std::promise<void>           entered;
+    auto                         entered_future = entered.get_future();
+    auto                         task           = std::async(std::launch::async, [&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        entered.set_value();
+        return tryLockCacheUntil(scanner, deadline);
+    });
+
+    entered_future.wait();
+    const auto before_stop = task.wait_for(std::chrono::milliseconds(20));
+    scanner.stop();
+    const auto after_stop = task.wait_for(std::chrono::seconds(1));
+    business_lock.unlock();
+    EXPECT_EQ(before_stop, std::future_status::timeout);
+    EXPECT_EQ(after_stop, std::future_status::ready);
+    EXPECT_FALSE(task.get());
+}
+
+TEST_F(FullPrefixScannerTest, FivePercentQuotaIsRoundedUpAndSpreadAcrossInterval) {
+    SyntheticTree tree(makeFullGroupSet());
+    // ceil(5121 * 5%) = 257: three whole batches, due at 0, 10 and 20 ms.
+    tree.addSingleGroupPath(std::vector<GroupSetResource>(5121, deviceRes()));
+    std::mutex                 cache_mutex;
+    FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/30);
+
+    const auto begin = std::chrono::steady_clock::now();
+    runScan(scanner);
+    EXPECT_GE(std::chrono::steady_clock::now() - begin, std::chrono::milliseconds(20));
+    EXPECT_EQ(nodesScanned(scanner), 384u);
+    EXPECT_EQ(cyclesCompleted(scanner), 0u);
+}
+
+TEST_F(FullPrefixScannerTest, SmallTreesGetOneBatchAndContinueFromPreviousCursor) {
+    for (size_t size : {0u, 17u, 128u, 129u}) {
+        SCOPED_TRACE(size);
+        SyntheticTree tree(makeFullGroupSet());
+        tree.addSingleGroupPath(std::vector<GroupSetResource>(size, deviceRes()));
+        std::mutex                 cache_mutex;
+        FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+
+        runScan(scanner);
+        if (size <= 128) {
+            EXPECT_EQ(cyclesCompleted(scanner), 1u);
+            EXPECT_EQ(nodesScanned(scanner), 0u);
+        } else {
+            EXPECT_EQ(cyclesCompleted(scanner), 0u);
+            EXPECT_EQ(nodesScanned(scanner), 128u);
+            runScan(scanner);
+            EXPECT_EQ(cyclesCompleted(scanner), 1u);
+        }
+    }
+}
+
+TEST_F(FullPrefixScannerTest, WindowQuotaTracksTreeGrowth) {
+    SyntheticTree tree(makeFullGroupSet());
+    tree.addSingleGroupPath(std::vector<GroupSetResource>(2560, deviceRes()));
+    std::mutex                 cache_mutex;
+    FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+
+    runScan(scanner);
+    EXPECT_EQ(nodesScanned(scanner), 128u);
+    tree.addSingleGroupPath(std::vector<GroupSetResource>(2561, deviceRes()));
+    runScan(scanner);
+    EXPECT_EQ(nodesScanned(scanner), 512u);
+}
+
+TEST_F(FullPrefixScannerTest, WindowContinuesIntoNextCycleAfterShortFinalBatch) {
+    SyntheticTree tree(makeFullGroupSet());
+    tree.addSingleGroupPath(std::vector<GroupSetResource>(5121, deviceRes()));
+    std::mutex                 cache_mutex;
+    FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/1);
+
+    for (size_t window = 0; window < 13; ++window) {
+        runScan(scanner);
+    }
+    EXPECT_EQ(nodesScanned(scanner), 4992u);
+    EXPECT_EQ(cyclesCompleted(scanner), 0u);
+    runScan(scanner);  // 128 nodes, one final node, then 128 in the next cycle.
+    EXPECT_EQ(cyclesCompleted(scanner), 1u);
+    EXPECT_EQ(nodesScanned(scanner), 128u);
+}
+
+TEST_F(FullPrefixScannerTest, StopInterruptsWaitBetweenBatches) {
+    test::TestLogCapture log_capture("full_prefix_scan_stop");
+    SyntheticTree        tree(makeFullGroupSet());
+    auto                 resources = std::vector<GroupSetResource>(5121, deviceRes());
+    resources[0].host_block        = 7;
+    tree.addSingleGroupPath(resources);
+    std::mutex                 cache_mutex;
+    FullPrefixInvariantScanner scanner(tree.tree(), cache_mutex, /*interval_ms=*/60000);
+    ASSERT_TRUE(scanner.start());
+    ASSERT_TRUE(waitFor([&] {
+        return log_capture.content().find("event=block_tree_resource_violation") != std::string::npos;
+    })) << log_capture.content();
+
+    const auto begin = std::chrono::steady_clock::now();
+    scanner.stop();
+    EXPECT_LT(std::chrono::steady_clock::now() - begin, std::chrono::seconds(5));
+    EXPECT_EQ(nodesScanned(scanner), 128u);
+    EXPECT_EQ(cyclesCompleted(scanner), 0u);
 }
 
 }  // namespace

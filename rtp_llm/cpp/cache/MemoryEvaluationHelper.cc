@@ -84,15 +84,35 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                                                     const ModelConfig&                               model_config,
                                                     const ParallelismConfig&                         parallelism_config,
                                                     const std::optional<WarmUpResult>&               warm_up_result,
-                                                    const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
-    size_t runtime_required_bytes       = 0;
-
+                                                    const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                                    size_t transfer_memory_bytes) {
     if (kv_cache_config.kv_cache_mem_mb > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache memory size %ld MiB",
                          kv_cache_config.kv_cache_mem_mb);
         return kv_cache_config.kv_cache_mem_mb * 1024 * 1024;
     }
+
+    const auto remaining_bytes =
+        availableCacheMemory(runtime_config, model_config, parallelism_config, warm_up_result, sp_config);
+    RTP_LLM_CHECK_WITH_INFO(remaining_bytes > transfer_memory_bytes,
+                            "available memory after runtime reservation %zu MiB cannot hold CRC transfer workspace "
+                            "%zu MiB and KV cache",
+                            remaining_bytes / 1024 / 1024,
+                            transfer_memory_bytes / 1024 / 1024);
+    const auto kv_cache_mem_size = remaining_bytes - transfer_memory_bytes;
+    RTP_LLM_LOG_INFO("CRC transfer workspace reserves %zu MiB, leaving %zu MiB for KV cache",
+                     transfer_memory_bytes / 1024 / 1024,
+                     kv_cache_mem_size / 1024 / 1024);
+    return kv_cache_mem_size;
+}
+
+size_t MemoryEvaluationHelper::availableCacheMemory(const RuntimeConfig&                             runtime_config,
+                                                    const ModelConfig&                               model_config,
+                                                    const ParallelismConfig&                         parallelism_config,
+                                                    const std::optional<WarmUpResult>&               warm_up_result,
+                                                    const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    size_t device_reserved_memory_bytes = getGpuExecStatus().device_memory_status.available_bytes;
+    size_t runtime_required_bytes       = 0;
 
     size_t env_runtime_required_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
         runtime_config, parallelism_config, model_config, sp_config);
@@ -133,9 +153,7 @@ size_t MemoryEvaluationHelper::getKVCacheMemorySize(const RuntimeConfig&        
                             device_reserved_memory_bytes / 1024 / 1024,
                             runtime_required_bytes / 1024 / 1024);
 
-    const auto kv_cache_mem_size = device_reserved_memory_bytes - runtime_required_bytes;
-    RTP_LLM_LOG_INFO("cache config final decided kv cache memory size %ld MiB", kv_cache_mem_size / 1024 / 1024);
-    return kv_cache_mem_size;
+    return device_reserved_memory_bytes - runtime_required_bytes;
 }
 
 }  // namespace rtp_llm

@@ -5,10 +5,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <thread>
 #include <functional>
@@ -33,8 +36,17 @@ using ::testing::_;
 using ::testing::Invoke;
 using ::testing::Return;
 
+// Independently executed manual READ requests need independent execution identities.
+// WRITE and metadata deliberately keep their existing trace semantics.
+[[maybe_unused]] void identifyReadRequest(RemoteOperationRequestPB& request) {
+    if (request.op() == REMOTE_OPERATION_READ) {
+        static std::atomic<uint64_t> sequence{1};
+        request.set_trace_id("test-read-" + std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)));
+    }
+}
+
 // Test-only observation of backend-owned I/O completion; not a write mode or
-// a BlockTree task-pool workflow barrier. The fixtures submit no concurrent I/O.
+// a BlockTree task-pool workflow barrier.
 [[maybe_unused]] bool waitForBackendOperationsForTest(StorageBackend& backend) {
     std::unique_lock<std::mutex> lock(backend.lifecycle_mutex_);
     return backend.lifecycle_cv_.wait_for(lock, std::chrono::seconds(5), [&] { return backend.in_flight_ == 0; });
@@ -44,10 +56,14 @@ struct KVCMBroadcastState {
     std::mutex                            mutex;
     std::vector<RemoteOperationRequestPB> requests;
     bool                                  fail{false};
+    grpc::StatusCode                      failure_code{grpc::StatusCode::UNAVAILABLE};
     grpc::StatusCode                      grpc_code{grpc::StatusCode::OK};
     RemoteTransferStatusPB                transfer_status{REMOTE_TRANSFER_STATUS_SUCCESS};
     bool                                  omit_response{false};
-    std::function<void()>                 worker_action;
+    // A completed fixture worker explicitly supplies proof. Unknown/legacy
+    // cases opt out rather than deriving safety from the application status.
+    bool                  payload_buffer_safe{true};
+    std::function<void()> worker_action;
 };
 
 class KVCMBroadcastRpcService final: public RpcService::Service {
@@ -72,13 +88,14 @@ public:
             return grpc::Status(state_->grpc_code, "injected KVCM status");
         }
         if (state_->fail) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "injected KVCM broadcast failure");
+            return grpc::Status(state_->failure_code, "injected KVCM broadcast failure");
         }
         if (state_->omit_response) {
             return grpc::Status::OK;
         }
         auto* remote_response = response->mutable_remote_response();
         remote_response->set_transfer_status(state_->transfer_status);
+        remote_response->set_payload_buffer_safe(state_->payload_buffer_safe);
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
             for (int index = 0; index < remote_request.uris_size(); ++index) {
                 remote_response->add_actual_uris("actual_rank_" + std::to_string(rank_) + "_" + std::to_string(index));
@@ -136,6 +153,8 @@ public:
                                          const kv_cache_manager::UriStrVec&                          uris,
                                          kv_cache_manager::BlockBuffers&                             buffers,
                                          const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+                if (load_status)
+                    return *load_status;
                 return loadKvCachesForTag(tag, uris, buffers, trace) ? kv_cache_manager::ER_OK :
                                                                        kv_cache_manager::ER_SDKREAD_ERROR;
             }));
@@ -144,10 +163,65 @@ public:
                                          const kv_cache_manager::UriStrVec&                          uris,
                                          const kv_cache_manager::BlockBuffers&                       buffers,
                                          const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+                if (save_status)
+                    return std::make_pair(*save_status, kv_cache_manager::UriStrVec{});
                 auto result = saveKvCachesForTag(tag, uris, buffers, trace);
                 return std::make_pair(result.first ? kv_cache_manager::ER_OK : kv_cache_manager::ER_SDKWRITE_ERROR,
                                       std::move(result.second));
             }));
+        ON_CALL(*this, abortWrite(_, _, _))
+            .WillByDefault(Invoke([this](const std::string& id, const std::string& trace, const std::string& session) {
+                return finishWrite(id, trace, session, kv_cache_manager::BlockMaskOffset{0}, {});
+            }));
+    }
+
+    std::optional<kv_cache_manager::ClientErrorCode> load_status;
+    std::optional<kv_cache_manager::ClientErrorCode> save_status;
+
+    kv_cache_manager::ClientErrorCode
+    loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 kv_cache_manager::BlockBuffers&                             buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+                                 TransferCompletion*                                         completion,
+                                 std::optional<std::chrono::steady_clock::time_point>        deadline) override {
+        if (completion)
+            *completion = TransferCompletion::NOT_SUBMITTED;
+        if (deadline && std::chrono::steady_clock::now() >= *deadline)
+            return kv_cache_manager::ER_SDK_TIMEOUT;
+        if (completion)
+            *completion = TransferCompletion::UNKNOWN;
+        const auto code = loadKvCachesForTagWithStatus(tag, uris, buffers, trace);
+        if (completion) {
+            // Explicit SDK codes model attempted I/O. A failed legacy boolean
+            // mock supplies no evidence that an SDK call was submitted.
+            *completion = code == kv_cache_manager::ER_OK ? TransferCompletion::PAYLOAD_COMPLETE :
+                          load_status                     ? sdkResultCompletion(code) :
+                                                            TransferCompletion::NOT_SUBMITTED;
+        }
+        return code;
+    }
+
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
+    saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 const kv_cache_manager::BlockBuffers&                       buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
+                                 TransferCompletion*                                         completion,
+                                 std::optional<std::chrono::steady_clock::time_point>        deadline) override {
+        if (completion)
+            *completion = TransferCompletion::NOT_SUBMITTED;
+        if (deadline && std::chrono::steady_clock::now() >= *deadline)
+            return {kv_cache_manager::ER_SDK_TIMEOUT, {}};
+        if (completion)
+            *completion = TransferCompletion::UNKNOWN;
+        auto result = saveKvCachesForTagWithStatus(tag, uris, buffers, trace);
+        if (completion) {
+            *completion = result.first == kv_cache_manager::ER_OK ? TransferCompletion::PAYLOAD_COMPLETE :
+                          save_status                             ? sdkResultCompletion(result.first) :
+                                                                    TransferCompletion::NOT_SUBMITTED;
+        }
+        return result;
     }
 
     MOCK_METHOD(bool,
@@ -174,7 +248,35 @@ public:
                  const std::vector<int64_t>&,
                  const std::vector<int64_t>&,
                  const std::vector<std::string>&,
-                 int64_t),
+                 int64_t,
+                 int32_t),
+                (override));
+    MOCK_METHOD(bool,
+                removeCache,
+                (const std::string&,
+                 const std::string&,
+                 const std::vector<int64_t>&,
+                 const std::vector<int64_t>&,
+                 const kv_cache_manager::BlockMask&),
+                (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::HostCacheState>),
+                getHostCacheState,
+                (const std::string&,
+                 const std::string&,
+                 kv_cache_manager::QueryType,
+                 const std::vector<int64_t>&,
+                 const std::vector<std::string>&,
+                 int32_t),
+                (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::BackendLocations>),
+                getCacheLocationsByBackend,
+                (const std::string&,
+                 const std::string&,
+                 const std::vector<int64_t>&,
+                 const std::vector<int64_t>&,
+                 const kv_cache_manager::BlockMask&,
+                 const std::vector<std::string>&,
+                 kv_cache_manager::StorageType),
                 (override));
     MOCK_METHOD(bool,
                 finishWrite,
@@ -184,6 +286,7 @@ public:
                  const kv_cache_manager::BlockMask&,
                  const kv_cache_manager::Locations&),
                 (override));
+    MOCK_METHOD(bool, abortWrite, (const std::string&, const std::string&, const std::string&), (override));
     MOCK_METHOD(bool,
                 loadKvCachesForTag,
                 (const std::string&,
@@ -220,10 +323,10 @@ struct BackendEnvironment {
     StorageBackend::PoolsByTag pools_by_tag;
     BlockIdxType               block_id{NULL_BLOCK_IDX};
 
-    BackendEnvironment()                              = default;
-    BackendEnvironment(BackendEnvironment&&) noexcept = default;
-    BackendEnvironment& operator=(BackendEnvironment&&) = delete;
-    BackendEnvironment(const BackendEnvironment&)       = delete;
+    BackendEnvironment()                                     = default;
+    BackendEnvironment(BackendEnvironment&&) noexcept        = default;
+    BackendEnvironment& operator=(BackendEnvironment&&)      = delete;
+    BackendEnvironment(const BackendEnvironment&)            = delete;
     BackendEnvironment& operator=(const BackendEnvironment&) = delete;
     ~BackendEnvironment() {
         for (const auto& [tag, pool] : pools_by_tag) {
@@ -239,10 +342,10 @@ struct BackendHandle {
 
     BackendHandle() = default;
     explicit BackendHandle(std::unique_ptr<KVCMStorageBackend> value): backend(std::move(value)) {}
-    BackendHandle(BackendHandle&&) noexcept = default;
+    BackendHandle(BackendHandle&&) noexcept            = default;
     BackendHandle& operator=(BackendHandle&&) noexcept = default;
     BackendHandle(const BackendHandle&)                = delete;
-    BackendHandle& operator=(const BackendHandle&) = delete;
+    BackendHandle& operator=(const BackendHandle&)     = delete;
     ~BackendHandle() {
         if (backend) {
             backend->shutdown();
@@ -395,15 +498,14 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
     return result;
 }
 
-[[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                 environment,
-                                           const ParallelismConfig&                  parallelism_config,
-                                           const std::shared_ptr<MockClientWrapper>& client_wrapper,
-                                           std::shared_ptr<BroadcastManager>         broadcast_manager   = nullptr,
-                                           int                                       transfer_timeout_ms = 1000) {
-    KVCacheConfig kv_cache_config;
+[[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                  environment,
+                                           const ParallelismConfig&                   parallelism_config,
+                                           const std::shared_ptr<MockClientWrapper>&  client_wrapper,
+                                           std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
+                                           std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr,
+                                           bool                                       gdr_enabled       = false,
+                                           KVCacheConfig                              kv_cache_config   = {}) {
     kv_cache_config.kvcm_server_address = "unused-test-address";
-    kv_cache_config.kvcm_get_broadcast_timeout = transfer_timeout_ms;
-    kv_cache_config.kvcm_put_broadcast_timeout = transfer_timeout_ms;
     RuntimeConfig runtime_config;
     runtime_config.model_name = "kvcm_test_model";
     return BackendHandle(std::make_unique<KVCMStorageBackend>(environment.cache_config,
@@ -412,7 +514,22 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
                                                               parallelism_config,
                                                               SpeculativeExecutionConfig{},
                                                               std::move(broadcast_manager),
+                                                              gdr_enabled,
+                                                              std::move(metrics_reporter),
                                                               client_wrapper));
+}
+
+[[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                 environment,
+                                           const ParallelismConfig&                  parallelism_config,
+                                           const std::shared_ptr<MockClientWrapper>& client_wrapper,
+                                           std::shared_ptr<BroadcastManager>         broadcast_manager,
+                                           int                                       transfer_timeout_ms) {
+    KVCacheConfig config;
+    config.kvcm_get_broadcast_timeout = transfer_timeout_ms;
+    config.kvcm_put_broadcast_timeout = transfer_timeout_ms;
+    config.kvcm_task_timeout_ms       = transfer_timeout_ms;
+    return makeBackend(
+        environment, parallelism_config, client_wrapper, std::move(broadcast_manager), nullptr, false, config);
 }
 
 [[maybe_unused]] StorageRequest makeStorageRequest(const BackendEnvironment& environment,
@@ -474,6 +591,16 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
         [promise](size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success) {
             promise->set_value({matched_blocks_num, std::move(match_meta), success});
         });
+    return await(future);
+}
+
+[[maybe_unused]] ErrorInfo
+readResult(KVCMStorageBackend& backend, StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta) {
+    auto promise = std::make_shared<std::promise<ErrorInfo>>();
+    auto future  = promise->get_future();
+    backend.read(std::move(request), std::move(match_meta), [promise](ErrorInfo error) {
+        promise->set_value(std::move(error));
+    });
     return await(future);
 }
 

@@ -26,8 +26,7 @@ enum class BlockPoolType {
 enum class BlockTreeRefType : uint8_t {
     CACHE = 0,
     LOAD,
-    EVICTION,
-    STORE,
+    EVICT,
     FROZEN,
     COUNT,
 };
@@ -46,6 +45,18 @@ struct BlockPoolConfigBase {
 // DeviceBlockPool adds request-like outer ownership through the protected Tree edge hooks.
 class IBlockPool {
 public:
+    struct TreeReferenceStats {
+        size_t                                     total_blocks;
+        size_t                                     free_blocks;
+        size_t                                     cache_only_blocks;
+        size_t                                     active_blocks;
+        std::array<size_t, kBlockTreeRefTypeCount> ref_blocks;
+
+        size_t blocksWithRef(BlockTreeRefType type) const {
+            return ref_blocks[static_cast<size_t>(type)];
+        }
+    };
+
     virtual ~IBlockPool() = default;
 
     void setCapacityChangeCallback(std::function<void()> callback);
@@ -63,9 +74,21 @@ public:
     void     decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type);
     uint32_t treeRefCount(BlockIdxType block) const;
 
-    // Keep one permanent tree reference per physical block for this pool's lifetime.
+    // True when releasing one CACHE reference would immediately free the block.
+    // Checks tree and external ownership together under the pool mutex.
+    bool canReclaimCacheBlock(BlockIdxType block) const;
+
+    // Add one FROZEN reference; the caller decides when to release its hold.
     void freezeBlock(BlockIdxType block) noexcept;
     bool isFrozen(BlockIdxType block) const;
+
+    // Prepare, but do not acquire or release, one FROZEN reference per block.
+    // Call while ordinary references protect these allocations, before frozen
+    // holds are acquired. Invoke the returned closure exactly once after the
+    // caller acquires its frozen holds, and this pool must outlive the closure.
+    // Preparation may allocate; release cannot allocate and isolates capacity
+    // notification failures so a completed decrement is never retried.
+    std::function<void()> prepareFrozenReferenceRelease(BlockIdList blocks);
 
     // Number of distinct blocks carrying at least one tree reference of this type.
     size_t referencedBlocksNum(BlockTreeRefType ref_type) const;
@@ -126,8 +149,12 @@ protected:
     // Helpers for derived-pool transactions; the caller holds mutex_.
     std::optional<BlockIdList> mallocNoLock(size_t n);
     size_t                     availableFreeBlocksNoLock() const;
+    TreeReferenceStats         treeReferenceStatsNoLock() const;
     void                       reserveReleasedBlocksNoLock(size_t additional) {
         released_blocks_.reserve(released_blocks_.size() + additional);
+    }
+    void reserveAllReleasedBlocksNoLock() {
+        released_blocks_.reserve(totalBlocksNumNoLock());
     }
     std::function<void()> capacityChangeCallbackNoLock() const {
         return capacity_change_callback_;
@@ -156,6 +183,7 @@ private:
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
     void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
+    void          releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept;
 
     size_t       totalBlocksNumNoLock() const;
     void         refillAscendingFreeBlocksNoLock();

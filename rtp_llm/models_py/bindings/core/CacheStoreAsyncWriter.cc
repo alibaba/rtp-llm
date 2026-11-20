@@ -407,24 +407,26 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
         std::lock_guard<std::mutex> lock(state_mutex_);
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
                                 "CacheStoreAsyncWriter::write() called when not RUNNING. Call init() first.");
-        auto completion_state     = active_store_completion_state_;
-        if (cache_store) register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
-                                        const std::vector<int64_t>& cache_keys,
-                                        const std::vector<int32_t>& block_ids,
-                                        const std::string&          tag) {
-            std::shared_ptr<KVCacheResource> publication_lease;
-            if (cache_manager->initialized() && cache_manager->isAllocatorOwner()) {
-                KVCacheResource lease_resource;
-                lease_resource.initGroups(cache_config->topologyPtr());
-                lease_resource.setCacheKeys(cache_keys);
-                lease_resource.mutableBlockIds(tag).assign(block_ids);
-                publication_lease = cache_manager->incrKVCacheRef(lease_resource, cache_keys, /*is_connector=*/true);
-                RTP_LLM_CHECK_WITH_INFO(
-                    publication_lease != nullptr, "failed to retain %zu cache-store block(s)", block_ids.size());
-            }
-            // Every rank publishes its KV data, but only the allocator owner can pin blocks.
-            return makeStoreCompletionCallback(completion_state, std::move(publication_lease));
-        };
+        auto completion_state = active_store_completion_state_;
+        if (cache_store)
+            register_store_completion = [completion_state, cache_manager = cache_manager_, cache_config](
+                                            const std::vector<int64_t>& cache_keys,
+                                            const std::vector<int32_t>& block_ids,
+                                            const std::string&          tag) {
+                std::shared_ptr<KVCacheResource> publication_lease;
+                if (cache_manager->initialized() && cache_manager->isAllocatorOwner()) {
+                    KVCacheResource lease_resource;
+                    lease_resource.initGroups(cache_config->topologyPtr());
+                    lease_resource.setCacheKeys(cache_keys);
+                    lease_resource.mutableBlockIds(tag).assign(block_ids);
+                    publication_lease =
+                        cache_manager->incrKVCacheRef(lease_resource, cache_keys, /*is_connector=*/true);
+                    RTP_LLM_CHECK_WITH_INFO(
+                        publication_lease != nullptr, "failed to retain %zu cache-store block(s)", block_ids.size());
+                }
+                // Every rank publishes its KV data, but only the allocator owner can pin blocks.
+                return makeStoreCompletionCallback(completion_state, std::move(publication_lease));
+            };
     }
     // Create the event on the main thread to avoid event-record contention in worker threads.
     auto event = runtimeCreateEvent();

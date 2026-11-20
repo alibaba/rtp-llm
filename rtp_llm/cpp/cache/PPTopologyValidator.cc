@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <unordered_map>
@@ -125,6 +127,9 @@ std::string validateGroupSetStructure(size_t                            stage_in
 
 std::string validateTierSizing(const StageCacheSnapshot& stage, const BlockTreeCacheSizing& expected) {
     const auto& sizing = stage.block_tree;
+    if (!std::isfinite(sizing.host_swa_block_ratio) || sizing.host_swa_block_ratio <= 0.0) {
+        return "HOST SWA block ratio must be finite and positive";
+    }
     if ((sizing.host_budget_bytes > 0) != (expected.host_budget_bytes > 0)
         || (sizing.disk_budget_bytes > 0) != (expected.disk_budget_bytes > 0)) {
         return "HOST/DISK cache enablement differs across PP stages";
@@ -175,9 +180,22 @@ BlockTreeCacheBlockNums computeStageTierBlockNums(const StageCacheSnapshot&     
         device_blocks.push_back(group->logical_block_num);
         strides.push_back(group_set.pool_stride);
     }
-    const auto              host = sizing.host_budget_bytes > 0 ?
-                                       computeTierBlockCounts(sizing.host_budget_bytes, device_blocks, strides) :
-                                       std::vector<size_t>{};
+    std::vector<size_t> host;
+    if (sizing.host_budget_bytes > 0) {
+        const bool custom_host_ratio = sizing.host_swa_block_ratio != 1.0
+                                       && std::find(types.begin(), types.end(), CacheGroupType::FULL) != types.end()
+                                       && std::find(types.begin(), types.end(), CacheGroupType::SWA) != types.end();
+        if (custom_host_ratio) {
+            host = computeHostUsableBlockCounts(sizing.host_budget_bytes, strides, types, sizing.host_swa_block_ratio);
+            for (auto& count : host) {
+                RTP_LLM_CHECK_WITH_INFO(count > 0,
+                                        "HOST budget cannot hold a usable block per group set at the configured ratio");
+                ++count;  // PP agreements carry physical counts, including each pool's reserved block zero.
+            }
+        } else {
+            host = computeTierBlockCounts(sizing.host_budget_bytes, device_blocks, strides);
+        }
+    }
     const auto              disk = sizing.disk_budget_bytes > 0 ?
                                        computeTierBlockCounts(sizing.disk_budget_bytes, device_blocks, strides) :
                                        std::vector<size_t>{};
@@ -283,6 +301,8 @@ std::vector<T> parseNums(const std::string& field, size_t expected_size) {
 }  // namespace
 
 std::string StageCacheSnapshot::serialize() const {
+    RTP_LLM_CHECK_WITH_INFO(std::isfinite(block_tree.host_swa_block_ratio) && block_tree.host_swa_block_ratio > 0.0,
+                            "PP snapshot HOST SWA block ratio must be finite and positive");
     std::ostringstream oss;
     oss << joinGroupStrings(
         groups, [](const auto& group) -> const std::string& { return group.tag; }, "tag")
@@ -304,13 +324,14 @@ std::string StageCacheSnapshot::serialize() const {
                "group-set first tag")
         << kFieldSep
         << joinGroupNums(block_tree.group_sets, [](const auto& group_set) { return group_set.pool_stride; })
-        << kFieldSep << block_tree.host_budget_bytes << kFieldSep << block_tree.disk_budget_bytes;
+        << kFieldSep << block_tree.host_budget_bytes << kFieldSep << block_tree.disk_budget_bytes << kFieldSep
+        << std::setprecision(std::numeric_limits<double>::max_digits10) << block_tree.host_swa_block_ratio;
     return oss.str();
 }
 
 StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     const auto fields = splitFields(payload, kFieldSep);
-    RTP_LLM_CHECK_WITH_INFO(fields.size() == 13, "PP snapshot payload is malformed (field count)");
+    RTP_LLM_CHECK_WITH_INFO(fields.size() == 14, "PP snapshot payload is malformed (field count)");
     auto group_tags = splitFields(fields[0], kTagSep);
     if (fields[0].empty()) {
         group_tags.clear();
@@ -357,6 +378,11 @@ StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     }
     snapshot.block_tree.host_budget_bytes = std::stoull(fields[11]);
     snapshot.block_tree.disk_budget_bytes = std::stoull(fields[12]);
+    size_t ratio_chars                       = 0;
+    snapshot.block_tree.host_swa_block_ratio = std::stod(fields[13], &ratio_chars);
+    RTP_LLM_CHECK_WITH_INFO(ratio_chars == fields[13].size() && std::isfinite(snapshot.block_tree.host_swa_block_ratio)
+                                && snapshot.block_tree.host_swa_block_ratio > 0.0,
+                            "PP snapshot HOST SWA block ratio must be finite and positive");
     return snapshot;
 }
 

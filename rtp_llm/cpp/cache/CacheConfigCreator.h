@@ -14,6 +14,8 @@
 
 namespace rtp_llm {
 
+struct BlockTreeCrcWorkspacePlan;
+
 struct KVCacheBlockBudget {
     size_t explicit_pool_reserve_bytes = 0;
     size_t paged_block_bytes           = 0;
@@ -50,7 +52,8 @@ public:
                                          const KVCacheConfig&                             kv_cache_config,
                                          const ParallelismConfig&                         parallelism_config,
                                          const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
-                                         const std::optional<SpeculativeExecutionConfig>& sp_config = std::nullopt);
+                                         const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt,
+                                         BlockTreeCrcWorkspacePlan*                       crc_plan       = nullptr);
     static uint32_t synchronizeBlockNum(uint32_t local_block_num, const ParallelismConfig& parallelism_config);
     static uint32_t selectConfirmedBlockNum(const int* candidates, size_t count);
 

@@ -395,57 +395,103 @@ TEST_F(MtpComputeTest, SharedHiddenOverridePreservesViewsAndFallbacks) {
     }
 }
 
-TEST_F(MtpComputeTest, PrefillShiftsTokensAndPositions) {
+TEST_F(MtpComputeTest, PrefillShiftsTokensAndPositionsWithoutMutatingSourceInputs) {
     const auto host_options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     for (const auto& options : {host_options, host_options.pinned_memory(true), host_options.device(torch::kCUDA)}) {
-        const auto device           = options.device();
-        const bool device_input     = device.is_cuda();
-        const auto position_options = host_options.pinned_memory(device_input || options.pinned_memory());
-        SCOPED_TRACE(::testing::Message() << "device=" << device << " pinned=" << options.pinned_memory());
-        GptModelInputs draft_input;
-        draft_input.combo_tokens       = torch::tensor({11, 21, 22}, options);
-        draft_input.input_lengths      = torch::tensor({1, 2}, options);
-        draft_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12, 11, 12, 13}, position_options);
-        const auto   tokens_alias      = draft_input.combo_tokens;
-        const auto   lengths_alias     = draft_input.input_lengths;
-        const auto   positions_alias   = draft_input.combo_position_ids;
-        auto         sampled_tokens    = torch::tensor({{-1, 12}, {-1, 23}}, torch::kInt32).to(device);
-        auto         next_positions    = torch::tensor({6, 7, 8, 12, 13, 14}, position_options);
-        auto         hidden_states     = torch::arange(6, torch::kFloat32).reshape({3, 2}).cuda();
-        TensorHolder holder;
+        for (bool positions_on_device : {false, true}) {
+            const auto position_options = positions_on_device ? host_options.device(torch::kCUDA) :
+                                                               host_options.pinned_memory(options.pinned_memory());
+            SCOPED_TRACE(::testing::Message() << "device=" << options.device()
+                                             << " pinned=" << options.pinned_memory()
+                                             << " positions_on_device=" << positions_on_device);
+            GptModelInputs draft_input;
+            draft_input.combo_tokens       = torch::tensor({11, 21, 22}, options);
+            draft_input.input_lengths      = torch::tensor({1, 2}, options);
+            draft_input.prefix_lengths     = torch::tensor({0, 16}, options);
+            draft_input.combo_position_ids = torch::tensor({5, 6, 7, 10, 11, 12, 11, 12, 13}, position_options);
+            const auto tokens_alias        = draft_input.combo_tokens;
+            const auto positions_alias     = draft_input.combo_position_ids;
+            const auto sampled_tokens      = torch::tensor({{-1, 12}, {-1, 23}}, torch::kInt32).cuda();
+            const auto next_positions      = torch::tensor({6, 7, 8, 12, 13, 14}, position_options);
+            const auto hidden_states       = torch::arange(6, torch::kFloat32).reshape({3, 2}).cuda();
+            TensorHolder holder;
 
-        mtp::prepareDraftPrefillAfterTargetPrefill(
-            draft_input, hidden_states, sampled_tokens, next_positions, 3, holder);
+            mtp::prepareDraftPrefillAfterTargetPrefill(
+                draft_input, hidden_states, sampled_tokens, next_positions, 3, holder);
 
-        EXPECT_EQ(toVec<int32_t>(draft_input.combo_tokens), (std::vector<int32_t>{12, 22, 23}));
-        EXPECT_EQ(toVec<int32_t>(draft_input.input_lengths), (std::vector<int32_t>{1, 2}));
-        EXPECT_EQ(toVec<int32_t>(draft_input.combo_position_ids),
-                  (std::vector<int32_t>{6, 7, 8, 11, 12, 13, 12, 13, 14}));
-        EXPECT_TRUE(draft_input.combo_tokens.is_cuda());
-        EXPECT_TRUE(draft_input.input_lengths.is_cuda());
-        EXPECT_TRUE(draft_input.combo_position_ids.device().is_cpu());
-        EXPECT_EQ(draft_input.combo_position_ids.data_ptr(), positions_alias.data_ptr());
-        EXPECT_EQ(draft_input.combo_position_ids.is_pinned(), position_options.pinned_memory());
-        EXPECT_EQ(draft_input.last_hidden_states.data_ptr(), hidden_states.data_ptr());
-        if (device_input) {
+            EXPECT_EQ(toVec<int32_t>(draft_input.combo_tokens), (std::vector<int32_t>{12, 22, 23}));
+            EXPECT_EQ(toVec<int32_t>(draft_input.combo_position_ids),
+                      (std::vector<int32_t>{6, 7, 8, 11, 12, 13, 12, 13, 14}));
+            EXPECT_TRUE(draft_input.combo_tokens.is_cuda());
+            EXPECT_EQ(draft_input.combo_position_ids.is_cuda(), options.device().is_cuda() || positions_on_device);
+            if (draft_input.combo_position_ids.is_cpu()) {
+                EXPECT_TRUE(draft_input.combo_position_ids.is_pinned());
+            }
+            EXPECT_EQ(draft_input.input_lengths.is_cuda(), options.device().is_cuda());
+            EXPECT_EQ(draft_input.prefix_lengths.is_cuda(), options.device().is_cuda());
+            EXPECT_EQ(toVec<int32_t>(draft_input.input_lengths), (std::vector<int32_t>{1, 2}));
+            EXPECT_EQ(toVec<int32_t>(draft_input.prefix_lengths), (std::vector<int32_t>{0, 16}));
+            EXPECT_EQ(draft_input.last_hidden_states.data_ptr(), hidden_states.data_ptr());
             EXPECT_EQ(toVec<int32_t>(tokens_alias), (std::vector<int32_t>{11, 21, 22}));
-            EXPECT_NE(draft_input.combo_tokens.data_ptr(), tokens_alias.data_ptr());
-            EXPECT_NE(draft_input.input_lengths.data_ptr(), lengths_alias.data_ptr());
-            const auto holds_pinned_source = [&](const std::vector<int32_t>& values) {
-                for (const auto& source : holder.tensors) {
-                    if (source.device().is_cpu() && source.is_pinned() && toVec<int32_t>(source) == values) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-            EXPECT_TRUE(holds_pinned_source({1, 2}));
-            EXPECT_TRUE(holds_pinned_source({12, 22, 23}));
-        } else {
-            EXPECT_EQ(toVec<int32_t>(tokens_alias), (std::vector<int32_t>{12, 22, 23}));
+            EXPECT_EQ(toVec<int32_t>(positions_alias), (std::vector<int32_t>{5, 6, 7, 10, 11, 12, 11, 12, 13}));
+            EXPECT_EQ(toVec<int32_t>(sampled_tokens), (std::vector<int32_t>{-1, 12, -1, 23}));
         }
     }
 }
+
+#if USING_CUDA
+TEST_F(MtpComputeTest, PrefillSubmitsBeforeSampledTokensAreReady) {
+    const auto producer = cuda_graph::graphGetStreamFromPool(false);
+    const auto consumer = cuda_graph::graphGetStreamFromPool(false);
+    ASSERT_NE(producer, consumer);
+    GptModelInputs source;
+    source.combo_tokens   = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32).cuda();
+    source.input_lengths  = torch::tensor({3, 2}, torch::kInt32);
+    source.prefix_lengths = torch::tensor({0, 8}, torch::kInt32);
+    auto       sampled     = torch::zeros({2, 1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    const auto next_tokens = torch::tensor({{13}, {22}}, torch::kInt32).cuda();
+    const auto hidden      = torch::arange(10, torch::kFloat32).reshape({5, 2}).cuda();
+    auto       ready       = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    ready->record(producer);
+    GptModelInputs draft_input;
+    TensorHolder   holder;
+    auto prepare = [&] {
+        cuda_graph::GraphStreamGuard guard(cuda_graph::toGraphStream(consumer));
+        draft_input = source;
+        ready->block(consumer);
+        mtp::prepareDraftPrefillAfterTargetPrefill(draft_input, hidden, sampled, {}, 1, holder);
+    };
+    /** Warm allocation and indexing before measuring a dependency on pending sampling. */
+    cuda_graph::graphDeviceSynchronize();
+    for (int i = 0; i < 2; ++i) {
+        prepare();
+        consumer.synchronize();
+        holder.tensors.clear();
+    }
+
+    CudaStreamGate gate(producer);
+    ASSERT_TRUE(gate.waitUntilEntered());
+    {
+        cuda_graph::GraphStreamGuard guard(cuda_graph::toGraphStream(producer));
+        sampled.copy_(next_tokens);
+        ready->record(producer);
+    }
+    std::promise<void> started;
+    auto               completed = std::async(std::launch::async, [&] {
+        started.set_value();
+        prepare();
+    });
+    started.get_future().wait();
+    EXPECT_EQ(completed.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+    gate.release();
+    completed.get();
+    consumer.synchronize();
+    EXPECT_FALSE(gate.timedOut());
+    EXPECT_EQ(toVec<int32_t>(draft_input.combo_tokens), (std::vector<int32_t>{11, 12, 13, 21, 22}));
+    EXPECT_TRUE(draft_input.input_lengths.device().is_cpu());
+    EXPECT_TRUE(draft_input.prefix_lengths.device().is_cpu());
+}
+#endif
 
 TEST_F(MtpComputeTest, PrefillAlignsMultimodalFieldsWithShiftedTokens) {
     for (bool device_input : {false, true}) {
@@ -795,18 +841,14 @@ TEST_F(MtpComputeTest, SharedAdvanceReusesHiddenStates) {
         auto         original_positions = input.combo_position_ids;
         auto         hidden_buffer      = torch::ones({2, 2}, torch::TensorOptions().device(torch::kCUDA));
         auto         draft_tokens       = torch::tensor({3, 4}, torch::kInt32).reshape({2, 1}).cuda();
-        TensorHolder holder;
-
-        mtp::advanceDraftInput(input, hidden_buffer, draft_tokens, 1, holder);
+        mtp::advanceDraftInput(input, hidden_buffer, draft_tokens);
 
         EXPECT_EQ(toVec<int32_t>(input.combo_tokens), (std::vector<int32_t>{3, 4}));
         EXPECT_EQ(toVec<int32_t>(input.sequence_lengths), (std::vector<int32_t>{9, 11}));
         EXPECT_EQ(toVec<int32_t>(input.combo_position_ids), (std::vector<int32_t>{8, 10}));
-        EXPECT_TRUE(input.sequence_lengths.is_cuda());
-        EXPECT_EQ(input.combo_position_ids.is_cuda(), device_input);
-        if (!device_input) {
-            EXPECT_TRUE(input.combo_position_ids.is_pinned());
-        }
+        EXPECT_EQ(input.sequence_lengths.device(), original_lengths.device());
+        EXPECT_EQ(input.combo_position_ids.device(), original_positions.device());
+        EXPECT_EQ(input.combo_position_ids.is_pinned(), !device_input);
         EXPECT_EQ(input.last_hidden_states.data_ptr(), hidden_buffer.data_ptr());
         EXPECT_TRUE(torch::equal(input.last_hidden_states, torch::ones_like(hidden_buffer)));
         EXPECT_EQ(toVec<int32_t>(original_lengths), (std::vector<int32_t>{8, 10}));

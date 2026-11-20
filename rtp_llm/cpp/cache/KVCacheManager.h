@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -31,6 +32,9 @@ class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 class P2PConnector;
 class Meta;
+class KVCacheEventReporter;
+class FrozenTaskRecovery;
+class TransferCompletionCleanup;
 
 class KVCacheManager {
 public:
@@ -75,7 +79,7 @@ public:
     // miss a release racing with that attempt.
     uint64_t allocationGeneration() const;
     bool     waitForAllocationChange(uint64_t observed_generation, int64_t timeout_ms, int64_t minimum_wait_ms = 0);
-    void cancelP2PLoad(const std::shared_ptr<AsyncContext>& context);
+    void     cancelP2PLoad(const std::shared_ptr<AsyncContext>& context);
 
     int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
@@ -139,10 +143,9 @@ public:
 
     // 异步连接器操作
     // async load cache from connector to gpu, for all rank
-    std::shared_ptr<AsyncContext>
-    asyncLoadCache(const KVCacheResource& kv_cache_resource,
-                   const std::shared_ptr<Meta>& meta,
-                   size_t tree_covered_block_num);
+    std::shared_ptr<AsyncContext> asyncLoadCache(const KVCacheResource&       kv_cache_resource,
+                                                 const std::shared_ptr<Meta>& meta,
+                                                 size_t                       tree_covered_block_num);
 
     // for every single rank
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
@@ -154,17 +157,17 @@ public:
                     P2PConnectorStartLoadResponsePB&      response,
                     std::function<bool()>                 is_cancelled = nullptr);
 
-    bool hasActiveConnectors() const;
-    bool hasP2PConnector() const;
+    bool               hasActiveConnectors() const;
+    bool               hasP2PConnector() const;
     const std::string& p2pPipelineLayout() const {
         return p2p_pipeline_layout_;
     }
-    int64_t           prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error);
-    void              cancelPrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
-    void              expirePrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
-    void              publishPrefillPayload(const std::string&                           unique_key,
-                                             int64_t                                      deadline_ms,
-                                             PrefillResultStore::SideChannelData&& data);
+    int64_t prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error);
+    void    cancelPrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
+    void    expirePrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
+    void    publishPrefillPayload(const std::string&                    unique_key,
+                                  int64_t                               deadline_ms,
+                                  PrefillResultStore::SideChannelData&& data);
     void
     failP2PPublication(int64_t request_id, const std::string& unique_key, int64_t deadline_ms, const ErrorInfo& error);
     void finishP2PPublication(const torch::Tensor& final_prefill,
@@ -172,16 +175,27 @@ public:
                               const torch::Tensor& request_ids,
                               const torch::Tensor& deadlines,
                               int64_t              clock_offset_ms);
-    bool              writeP2PLayer(size_t                               model_id,
-                                    int                                  local_layer_id,
-                                    const std::string&                   tag,
-                                    const std::vector<int64_t>&          cache_keys,
-                                    const std::vector<int32_t>&          block_ids,
-                                    int64_t                              request_id,
-                                    const std::shared_ptr<torch::Event>& event,
-                                    int64_t                              deadline_ms,
-                                    int64_t                              deadline_clock_offset_ms,
-                                    int                                  chunk_id = 0);
+    bool writeP2PLayer(size_t                               model_id,
+                       int                                  local_layer_id,
+                       const std::string&                   tag,
+                       const std::vector<int64_t>&          cache_keys,
+                       const std::vector<int32_t>&          block_ids,
+                       int64_t                              request_id,
+                       const std::shared_ptr<torch::Event>& event,
+                       int64_t                              deadline_ms,
+                       int64_t                              deadline_clock_offset_ms,
+                       int                                  chunk_id = 0);
+    // One observation of the original execution; does not release frozen references.
+    TransferCompletionQueryResult queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
+                                                          int                              timeout_ms) const;
+
+    TransferCompletionForgetResult forgetTransferCompletion(const TransferCompletionTarget&            target,
+                                                            const std::vector<TransferExecutionTrace>& traces,
+                                                            int timeout_ms) const;
+
+    // Snapshot both existing owners; taking a snapshot does not transfer custody.
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
+
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }
@@ -198,11 +212,17 @@ public:
     }
 
 private:
-    std::function<void()> allocationChangeCallback() const;
-    void                  reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
-    bool initP2PConnector();
+    std::function<void()>             allocationChangeCallback() const;
+    void                              reportMetricsLoop();
+    void                              missingCleanupLoop();
+    void                              stopMissingCleanup();
+    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    bool                              initP2PConnector();
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
+    TransferTaskRegistry::State       localTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    bool                               startFrozenTaskRecovery();
+    void                               stopFrozenTaskRecovery() noexcept;
 
     // 成员变量
     CacheConfig                config_;
@@ -219,9 +239,8 @@ private:
     const bool                         warmup_;
     const BlockTreeCacheLayoutConstPtr block_tree_layout_;
     KVCacheEventPublisherPtr           cache_event_publisher_;
-    bool                               hasTailSparseReuseGroup() const;
-    void                               initCacheEventPublisher();
-    void                               stopCacheEventPublisher();
+    void initCacheEventPublisher(std::shared_ptr<KVCacheEventReporter> reporter = nullptr);
+    void stopCacheEventPublisher();
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
     std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
@@ -229,12 +248,20 @@ private:
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;
 
+    std::mutex              missing_cleanup_mutex_;
+    std::condition_variable missing_cleanup_cv_;
+    bool                    missing_cleanup_stopped_{false};
+    std::thread             missing_cleanup_thread_;
+
     BlockTreeCachePtr                           block_tree_cache_;
+    std::shared_ptr<BroadcastManager>           transfer_broadcast_manager_;
+    std::unique_ptr<FrozenTaskRecovery>         frozen_task_recovery_;
+    std::shared_ptr<TransferCompletionCleanup>  completion_cleanup_;
     std::shared_ptr<KVCacheAllocationWaitState> allocation_wait_state_;
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
-    std::shared_ptr<P2PConnector> p2p_connector_;
+    std::shared_ptr<P2PConnector>      p2p_connector_;
     std::string                        p2p_pipeline_layout_;
 
     mutable std::mutex          cache_store_mutex_;

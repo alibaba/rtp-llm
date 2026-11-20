@@ -37,7 +37,7 @@ Tree 和 Transfer binary 均通过 `--model-profile` 加载完整 model profile�
 
 ## 先裸跑目标 workload
 
-下面以 `full_context`、单方向 H2D、CUDA batch strategy 为例。`--min-measured-seconds=5` 足以采到稳定重复事件，同时控制报告大小：
+下面以 `full_context`、单方向 H2D、WorkLoop CRC copy 为例。`--min-measured-seconds=5` 足以采到稳定重复事件，同时控制报告大小：
 
 ```bash
 "$BINARY" transfer \
@@ -52,15 +52,13 @@ Tree 和 Transfer binary 均通过 `--model-profile` 加载完整 model profile�
   --transfer-operation-count 4096 \
   --transfer-concurrency 8 \
   --transfer-descriptor-batch-size 8 \
-  --copy-strategy batch \
   --min-measured-seconds 5
 ```
 
 采集前确认 `result.json` 中状态为 completed、失败操作数为 0，并保存 resolved configuration。切换 workload 时只修改需要比较的维度：
 
 - GroupSet：`full_context` 或 `swa`。
-- 方向：`d2h`、`h2d`、`d2disk`、`disk2d`、`h2disk`、`disk2h`。
-- Device/Host strategy：`batch` 或 `staged-sm`。
+- 方向：`d2h`、`h2d`、`h2disk`、`disk2d`。
 - Disk case 还需要设置 `--disk-path`、`--disk-io-mode` 和 `--disk-access-pattern`。
 
 ## 采集普通 CUDA timeline
@@ -91,7 +89,6 @@ nsys profile \
     --transfer-operation-count 4096 \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
-    --copy-strategy batch \
     --min-measured-seconds 5
 ```
 
@@ -162,7 +159,6 @@ nsys profile \
     --transfer-operation-count 4096 \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
-    --copy-strategy batch \
     --min-measured-seconds 5
 ```
 
@@ -197,7 +193,6 @@ sudo "$NSYS_BIN" profile \
     --transfer-operation-count 4096 \
     --transfer-concurrency 8 \
     --transfer-descriptor-batch-size 8 \
-    --copy-strategy batch \
     --min-measured-seconds 5
 
 sudo chown "$(id -u):$(id -g)" "$METRICS_PREFIX.nsys-rep"
@@ -278,3 +273,8 @@ nsys export \
 | 本机 nsys-ui 打不开远端 report | 安装与 collector 相同或更高版本的 Nsight Systems UI |
 
 更多 CLI 和指标定义见 [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)。
+
+### WorkLoop 的采集范围
+
+Tree 和 Transfer 使用 CRC＋WorkLoop。采集前检查 `resolved_config.transfer_implementation`。
+独立的 `models_py/bindings/cuda/test` benchmark 测量 CUDA 拷贝原语，可用于比较 CRC 与 staged 拷贝开销。

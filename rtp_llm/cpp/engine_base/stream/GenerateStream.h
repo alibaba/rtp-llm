@@ -1,6 +1,8 @@
 #pragma once
 #include "rtp_llm/cpp/engine_base/stream/FrontendMetricsStep.h"
 
+#include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
+
 #include "absl/status/statusor.h"
 #include "autil/TimeUtility.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -202,8 +204,8 @@ public:
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
     void updateWithoutLock(const StreamUpdateInfo& update_info,
                            bool                    update_processor = true,
-                           RecordedTokenTiming*    timings = nullptr,
-                           size_t                  timing_count = 0);
+                           RecordedTokenTiming*    timings          = nullptr,
+                           size_t                  timing_count     = 0);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -220,7 +222,7 @@ public:
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     // Observe Engine release and Connector lease completion during cancellation.
-    bool                 hasPendingLocalCleanup() const;
+    bool hasPendingLocalCleanup() const;
     // Callbacks may run on the Engine or transport thread and should only enqueue work.
     void                 onLocalCleanupProgress(std::function<void()> callback);
     int                  nextNeedBlockNums(int reserve_step) const;
@@ -269,34 +271,34 @@ public:
     int    seqLength() const;
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
-    void    setSeqLength(int seq_length);
-    int     seqSizePerBlock() const;
-    int     contextLength() const;
-    int     prefixLength() const;
-    int     reuseLength() const;
-    int     initialReuseLength() const;
-    size_t  maxTokenNum() const;
-    size_t  nextStepSeqLengthLimit() const;
+    void   setSeqLength(int seq_length);
+    int    seqSizePerBlock() const;
+    int    contextLength() const;
+    int    prefixLength() const;
+    int    reuseLength() const;
+    int    initialReuseLength() const;
+    size_t maxTokenNum() const;
+    size_t nextStepSeqLengthLimit() const;
     // Prefill produces the first output token. Only a later token needs Decode KV.
     bool needsDecodeAfterPrefill() const {
         return maxTokenNum() > static_cast<size_t>(inputLength()) + 1;
     }
 
-    void    setReuseLength(int reuse_length);
-    void    setLocalReuseLength(int length);
-    void    setDeviceReuseLength(int length);
-    void    setRemoteReuseLength(int length);
-    int     localReuseLength() const;
-    int     deviceReuseLength() const;
-    int     remoteReuseLength() const;
-    void    setHostReuseLength(int length);
-    int     hostReuseLength() const;
-    void    setDiskReuseLength(int length);
-    int     diskReuseLength() const;
-    void    setInitialReuseLength(int initial_reuse_length);
-    void    incLastOutputPos();
-    void    setPrefillReuseLength(
-           int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools);
+    void setReuseLength(int reuse_length);
+    void setLocalReuseLength(int length);
+    void setDeviceReuseLength(int length);
+    void setRemoteReuseLength(int length);
+    int  localReuseLength() const;
+    int  deviceReuseLength() const;
+    int  remoteReuseLength() const;
+    void setHostReuseLength(int length);
+    int  hostReuseLength() const;
+    void setDiskReuseLength(int length);
+    int  diskReuseLength() const;
+    void setInitialReuseLength(int initial_reuse_length);
+    void incLastOutputPos();
+    void setPrefillReuseLength(
+        int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk, bool independent_pools);
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
     int64_t prefillRemoteReuseLen() const;
@@ -387,7 +389,13 @@ public:
     void    recordCanRunTime();
     void    recordLoadingCacheStartTime();
     void    recordLoadingCacheDoneTime();
+    void    recordKvReadyTime(int64_t time_us);
     void    recordRunningTime();
+    void    recordPrefillPreviousReleaseTime(int64_t time_us);
+    void    recordPrefillDispatchTime(int64_t time_us);
+    void    recordPrefillForwardTime(int64_t time_us);
+    void    startCacheExposedWait(int64_t time_us);
+    void    endCacheExposedWait(int64_t time_us);
 
     // 统一的事件上报接口，替代原先所有 reportXX 方法。
     // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
@@ -428,12 +436,12 @@ public:
     void reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
         reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
     }
-    bool         hasEvent(StreamEvents::EventType event) const;
-    void         clearCanRun();
-    virtual bool hasError() const;
-    ErrorInfo    statusInfo();
+    bool                 hasEvent(StreamEvents::EventType event) const;
+    void                 clearCanRun();
+    virtual bool         hasError() const;
+    ErrorInfo            statusInfo();
     FirstError::Snapshot firstError();
-    std::string  stopReason();
+    std::string          stopReason();
 
     void   setReserveStep(size_t reserve_step);
     size_t reserveStep() const {
@@ -959,23 +967,32 @@ public:
 
 public:
     struct TimeInfo {
-        int64_t begin_time_us           = 0;
-        int64_t wait_time_us            = 0;  // legacy metric/metadata field
-        bool    running_started         = false;
-        int64_t running_started_time_us = 0;
-        bool    first_token_committed   = false;
-        int64_t first_token_time_us     = 0;
-        int64_t first_token_rt_us       = 0;
-        bool    generation_done         = false;
-        int64_t generation_done_time_us = 0;
+        int64_t begin_time_us               = 0;
+        int64_t wait_time_us                = 0;  // legacy metric/metadata field
+        bool    running_started             = false;
+        int64_t running_started_time_us     = 0;
+        bool    first_token_committed       = false;
+        int64_t first_token_time_us         = 0;
+        int64_t first_token_rt_us           = 0;
+        bool    generation_done             = false;
+        int64_t generation_done_time_us     = 0;
+        int64_t scheduler_enqueue_time_us   = 0;
+        int64_t can_run_time_us             = 0;
+        int64_t kv_ready_time_us            = 0;
+        int64_t prefill_previous_release_us = 0;
+        int64_t prefill_dispatch_time_us    = 0;
+        int64_t prefill_forward_time_us     = 0;
+        int64_t cache_exposed_wait_us       = 0;
         int64_t initial_kv_allocation_rt_us = 0;
         int64_t loading_cache_start_time_us = 0;
-        int64_t loading_cache_done_time_us = 0;
-        bool loading_cache_succeeded = false;
+        int64_t loading_cache_done_time_us  = 0;
+        bool    loading_cache_succeeded     = false;
     };
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
-    int64_t p2pHandoffReadyTimeUs() const { return p2p_handoff_ready_time_us_.load(); }
+    int64_t  p2pHandoffReadyTimeUs() const {
+        return p2p_handoff_ready_time_us_.load();
+    }
 
 protected:
     // moveToNext() runs under mutex_, while the async MTP worker needs the
@@ -997,8 +1014,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
@@ -1035,20 +1052,27 @@ protected:
     size_t                                output_vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_                = 0;
-    bool                                  metrics_reported_            = false;
-    int64_t                               scheduler_enqueue_time_us_   = 0;
-    int64_t                               can_run_time_us_             = 0;
-    int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_  = 0;
-    bool                                  loading_cache_succeeded_     = false;
-    int64_t                               first_running_time_us_       = 0;
-    int64_t                               loading_cache_latency_us_    = 0;
-    int64_t                               load_done_to_running_us_     = 0;
-    bool                                  running_started_             = false;
-    int64_t                               running_started_time_us_     = 0;
-    bool                                  generation_done_             = false;
-    int64_t                               generation_done_time_us_     = 0;
+    int64_t                               wait_time_us_                      = 0;
+    bool                                  metrics_reported_                  = false;
+    int64_t                               scheduler_enqueue_time_us_         = 0;
+    int64_t                               can_run_time_us_                   = 0;
+    int64_t                               kv_ready_time_us_                  = 0;
+    int64_t                               prefill_previous_release_us_       = 0;
+    bool                                  prefill_previous_release_recorded_ = false;
+    int64_t                               loading_cache_start_time_us_       = 0;
+    int64_t                               loading_cache_done_time_us_        = 0;
+    int64_t                               first_running_time_us_             = 0;
+    int64_t                               prefill_dispatch_time_us_          = 0;
+    int64_t                               prefill_forward_time_us_           = 0;
+    int64_t                               cache_exposed_wait_start_us_       = 0;
+    int64_t                               cache_exposed_wait_us_             = 0;
+    int64_t                               loading_cache_latency_us_          = 0;
+    int64_t                               load_done_to_running_us_           = 0;
+    bool                                  running_started_                   = false;
+    int64_t                               running_started_time_us_           = 0;
+    bool                                  generation_done_                   = false;
+    int64_t                               generation_done_time_us_           = 0;
+    bool                                  loading_cache_succeeded_           = false;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     // Prefill-to-decode transition is committed by the output/bookkeeping
     // worker and observed by the scheduler thread. Keep this flag atomic; the
@@ -1073,11 +1097,11 @@ protected:
     bool warmup_chunk_window_ = false;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     bool    prefill_independent_block_pools_ = false;
-    int64_t prefill_total_reuse_len_  = 0;
-    int64_t prefill_local_reuse_len_  = 0;
-    int64_t prefill_remote_reuse_len_ = 0;
-    int64_t prefill_memory_reuse_len_ = 0;
-    int64_t prefill_disk_reuse_len_   = 0;
+    int64_t prefill_total_reuse_len_         = 0;
+    int64_t prefill_local_reuse_len_         = 0;
+    int64_t prefill_remote_reuse_len_        = 0;
+    int64_t prefill_memory_reuse_len_        = 0;
+    int64_t prefill_disk_reuse_len_          = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;
@@ -1154,14 +1178,18 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
+    void                             endCacheExposedWaitWithoutLock(int64_t time_us);
     bool                             is_fake_stream_ = false;
     std::shared_ptr<RecordedRequest> recorded_request_;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)
     int prefill_tp_size_ = -1;
     // Effective Prefill KV-cache CP size; independent from TP size.
-    int prefill_cp_size_ = -1;
+    int         prefill_cp_size_ = -1;
     std::string prefill_pipeline_layout_;
+
+private:
+    AsyncProfileRequest request_profile_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

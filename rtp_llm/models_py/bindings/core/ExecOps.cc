@@ -204,12 +204,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         return;
     }
 
-    // Wait for the CUDA event before reading pinned-host metadata.
-    // The event was recorded on the main stream AFTER both the async D2H
-    // copies (metadata) and KV cache writes were enqueued, so blocking
-    // here guarantees all pinned buffers are populated.
-    if (pre_created_event) {
-        pre_created_event->synchronize();
+    /** Host metadata needs only its D2H copies; CacheStore separately gates publication on the KV event. */
+    if (param.metadata_ready_event) {
+        param.metadata_ready_event->synchronize();
     }
 
     RTP_LLM_CHECK_WITH_INFO(

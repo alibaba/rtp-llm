@@ -60,17 +60,6 @@ TEST(BenchmarkCliTest, ReportsErrorsBeforeRunningGpuCode) {
     }
 }
 
-TEST(BenchmarkCliTest, DispatchesCapabilitiesWithoutLoadingAProfile) {
-    const auto result = invoke({"capabilities", "--cuda-device=2"});
-    EXPECT_EQ(result.code, 0);
-    EXPECT_TRUE(result.ran);
-    EXPECT_TRUE(result.error.empty());
-    EXPECT_EQ(result.output.find("Loaded profile:"), std::string::npos);
-    const auto invalid = invoke({"capabilities", "--unknown=1"});
-    EXPECT_EQ(invalid.code, 1);
-    EXPECT_FALSE(invalid.ran);
-}
-
 TEST(BenchmarkCliTest, DispatchesMixedCommonAndTreeOptions) {
     const char* runfiles  = std::getenv("TEST_SRCDIR");
     const char* workspace = std::getenv("TEST_WORKSPACE");
@@ -84,5 +73,40 @@ TEST(BenchmarkCliTest, DispatchesMixedCommonAndTreeOptions) {
     EXPECT_TRUE(result.ran);
     EXPECT_TRUE(result.error.empty());
 }
+TEST(BenchmarkCliTest, RejectsInsufficientQueueForOwnersBeforeLoadingProfile) {
+    const auto result = invoke({"transfer", "--transfer-worker-count=3", "--transfer-queue-max-size=2"});
+    EXPECT_EQ(result.code, 1);
+    EXPECT_FALSE(result.ran);
+    EXPECT_NE(result.error.find("Q must be >= worker count"), std::string::npos);
+}
+
+TEST(BenchmarkCliTest, RemovedTransferOptionsAreRejected) {
+    TransferOptions defaults;
+    EXPECT_EQ(defaults.btc_crc_slot_count, 8u);
+    for (const auto& argument : {"--copy-strategy=batch", "--btc-transfer-engine-async=false", "--enable-crc=false"}) {
+        const auto result = invoke({"transfer", argument});
+        EXPECT_EQ(result.code, 1);
+        EXPECT_FALSE(result.ran);
+        EXPECT_NE(result.error.find(std::string("Unknown argument: ") + argument), std::string::npos);
+    }
+    for (const auto& argument : {"--transfer-worker-count=0", "--btc-crc-slot-count=0"}) {
+        const auto result = invoke({"transfer", argument});
+        EXPECT_EQ(result.code, 1);
+        EXPECT_FALSE(result.ran);
+        EXPECT_NE(result.error.find("worker and CRC slot counts must be positive"), std::string::npos);
+    }
+    const char* runfiles  = std::getenv("TEST_SRCDIR");
+    const char* workspace = std::getenv("TEST_WORKSPACE");
+    ASSERT_NE(runfiles, nullptr);
+    ASSERT_NE(workspace, nullptr);
+    const std::string profile =
+        std::string(runfiles) + "/" + workspace
+        + "/rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles/deepseek_v4_pro_fp8_tp1_cp1.json";
+    const auto result =
+        invoke({"transfer", "--model-profile=" + profile, "--btc-crc-slot-count=3", "--transfer-worker-count=2"});
+    EXPECT_EQ(result.code, 0) << result.error;
+    EXPECT_TRUE(result.ran);
+}
+
 }  // namespace
 }  // namespace rtp_llm::benchmark

@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
+#include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
@@ -71,16 +72,20 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
-    // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
-    // raw device allocation backing out of direct KVCacheManager users and non-RDMA
-    // paths so PyTorch allocator behavior is unchanged elsewhere.
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig&      pd_sep_config,
+                                         const CacheStoreConfig& cache_store_config,
+                                         const KVCacheConfig&    kv_cache_config) {
+    const bool remote_cache_gdr = kv_cache_config.enable_remote_cache;
+    // Raw device allocation is required by PD cache-store RDMA and by the
+    // KVCM RemoteCache GDR backend. Keep the PyTorch allocator for deployments
+    // where neither registered-memory path is active.
     const bool pd_role = pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE;
     const bool has_cache_store_server = pd_sep_config.cache_store_listen_port > 0
                                         || pd_sep_config.cache_store_rdma_listen_port > 0
                                         || pd_sep_config.remote_rpc_server_port > 0;
-    return pd_role && pd_sep_config.cache_store_rdma_mode
-           && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    const bool cache_store_rdma = pd_role && pd_sep_config.cache_store_rdma_mode
+                                  && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    return cache_store_rdma || remote_cache_gdr;
 }
 
 // Must keep the same parsing semantics as NormalExecutor::useDeviceInput()
@@ -1036,7 +1041,8 @@ absl::StatusOr<bool> NormalEngine::runAttentionAccuracyCheck(const EngineInitPar
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     normalizeSystemPromptCacheConfig();
-    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const bool use_device_malloc_block_pool =
+        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
     const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
                                                   &propose_params_->getEngineInitParams().model_config_ :
                                                   nullptr;
@@ -1044,8 +1050,14 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
-    const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
-        config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+    const auto local_block_num     = CacheConfigCreator::computeLocalBlockNum(config,
+                                                                          model_config_,
+                                                                          runtime_config,
+                                                                          kv_cache_config,
+                                                                          parallelism_config,
+                                                                          warm_up_result,
+                                                                          sp_config,
+                                                                          &block_tree_layout->crc_workspaces);
     const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
     if (parallelism_config.pp_size > 1) {
         PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
@@ -1118,11 +1130,16 @@ absl::Status NormalEngine::stop() {
     // collectives for inputs that rank 0 has already published before exiting.
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
+    loop_thread_.reset();
     scheduler_->finalizeCancelledStreams();
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
+    const auto finalize_status = scheduler_->finalizeStop();
+    if (!finalize_status.ok()) {
+        RTP_LLM_LOG_ERROR("scheduler stop finalization failed: %s", finalize_status.ToString().c_str());
+    }
     resource_context_.cache_manager->stopMetricsReporter();
-    return scheduler_status;
+    return scheduler_status.ok() ? finalize_status : scheduler_status;
 }
 
 void NormalEngine::loop() {
@@ -1317,6 +1334,16 @@ absl::Status NormalEngine::step() try {
         }
     }
 
+    if (telemetry::TelemetryRuntime::isActive()) {
+        const auto dispatch_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        for (const auto& stream : streams) {
+            if (stream->isContextStream()) {
+                stream->recordPrefillDispatchTime(dispatch_time_us);
+                stream->recordPrefillPreviousReleaseTime(previous_execution_release_us_);
+            }
+        }
+    }
+
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     const bool   report_metrics     = isKmonMetricReportingEnabled();
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -1340,6 +1367,10 @@ absl::Status NormalEngine::step() try {
         // after TP input synchronization has rejected idle steps.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         status = executor_->process(schedule_output, tps_schedule_time_us);
+    }
+
+    if (!streams.empty()) {
+        previous_execution_release_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     }
 
     // report step metrics

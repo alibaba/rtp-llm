@@ -80,7 +80,8 @@ std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& re
                                                          int                  top_k,
                                                          int                  start,
                                                          int                  end,
-                                                         bool                 return_target_logprob) {
+                                                         bool                 return_target_logprob,
+                                                         bool                 blocking) {
     const int token_size = static_cast<int>(request_logits.size(0));
     const int start_pos  = std::clamp(start >= 0 ? start : 0, 0, token_size);
     const int end_pos    = std::clamp(end >= 0 ? end : token_size, start_pos, token_size);
@@ -108,16 +109,16 @@ std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& re
         const int logprob_len = label_end - label_start;
         if (logprob_len > 0) {
             auto labels = request_tokens.narrow(0, label_start, logprob_len)
-                              .to(sliced_logits.device(), torch::kLong)
+                              .to(sliced_logits.device(), torch::kLong, /*non_blocking=*/!blocking)
                               .unsqueeze(1);
             auto target_raw = sliced_logits.narrow(0, 0, logprob_len).gather(1, labels).squeeze(1);
             target_logprobs =
-                (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).to(torch::kCPU).contiguous();
+                (target_raw - log_sum_exp.narrow(0, 0, logprob_len).squeeze(1)).to(torch::kCPU, !blocking).contiguous();
         }
     }
 
-    return PromptLogitsOutput{topk_logprobs.to(torch::kCPU).contiguous(),
-                              topk_indices.to(torch::kCPU, torch::kInt32).contiguous(),
+    return PromptLogitsOutput{topk_logprobs.to(torch::kCPU, !blocking).contiguous(),
+                              topk_indices.to(torch::kCPU, torch::kInt32, !blocking).contiguous(),
                               std::move(target_logprobs),
                               start_pos,
                               end_pos};

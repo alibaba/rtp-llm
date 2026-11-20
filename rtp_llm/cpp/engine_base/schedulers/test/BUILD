@@ -76,3 +76,13 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "batch_decode_scheduler_stop_test",
+    srcs = ["BatchDecodeSchedulerStopTest.cc"],
+    copts = copts() + ["-fno-access-control"],
+    deps = async_cache_test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

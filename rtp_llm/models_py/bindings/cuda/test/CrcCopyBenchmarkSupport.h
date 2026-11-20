@@ -38,8 +38,8 @@ size_t        maximumLayoutTiles();
 size_t        maximumLayoutPayload();
 const char*   mainStagedSourceCommit();
 
-// Owns the actual production DeviceHostCopyPlan values without exposing their
-// transitive framework/Torch dependencies to the CUDA translation unit.
+// Keeps the copy tiles and their physical layout metadata behind a Torch-free
+// interface for the CUDA translation unit.
 class FrameworkCopyPlan {
 public:
     FrameworkCopyPlan(const std::vector<CrcCopyItem>& items, const Layout& layout);
@@ -62,9 +62,9 @@ public:
     FrameworkCopies(const FrameworkCopies&)            = delete;
     FrameworkCopies& operator=(const FrameworkCopies&) = delete;
 
-    void copyBatch(const FrameworkCopyPlan& plan, bool store);
-    void copyStaged(const FrameworkCopyPlan& plan, bool store);
-    void copyMainStaged(const FrameworkCopyPlan& plan, bool store);
+    void copyBatch(const FrameworkCopyPlan& plan, bool evict);
+    void copyStaged(const FrameworkCopyPlan& plan, bool evict);
+    void copyMainStaged(const FrameworkCopyPlan& plan, bool evict);
 
     // Production's thread-local stream is private. The experimental 3D path
     // uses a separate stream from the same nondefault Torch stream pool.

@@ -381,8 +381,6 @@ def _create_kvmeta_instance_group(admin_url: str, base_group_name: str) -> None:
 def _reco_environment(endpoint: str, instance_group: str) -> dict:
     return {
         "RECO_CLIENT_CONFIG": "",
-        "RECO_ENABLE_VIPSERVER": "0",
-        "RECO_VIPSERVER_DOMAIN": "",
         "RECO_SERVER_ADDRESS": endpoint,
         "RECO_INSTANCE_GROUP": instance_group,
         "RECO_INSTANCE_ID_SALT": "",

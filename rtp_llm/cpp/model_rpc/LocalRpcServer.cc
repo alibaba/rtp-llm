@@ -23,6 +23,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
@@ -356,12 +357,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
     // Decode replays the Prefill token into its queue even for non-streaming
     // requests. Collect these internal blocks into one RPC output while retaining
     // optional first-token tensors; streaming and other roles keep block semantics.
-    const bool pd_decode             = stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE;
-    const bool collect_pd_output     = pd_decode && !stream->isStreaming();
-    const bool measure_token_output = pd_decode && stream->isStreaming() && metrics_reporter_;
-    int64_t    first_token_write_us = 0;
-    bool       second_token_reported = false;
-    const auto& config = *stream->generateConfig();
+    const bool  pd_decode             = stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE;
+    const bool  collect_pd_output     = pd_decode && !stream->isStreaming();
+    const bool  measure_token_output  = pd_decode && stream->isStreaming() && metrics_reporter_;
+    int64_t     first_token_write_us  = 0;
+    bool        second_token_reported = false;
+    const auto& config                = *stream->generateConfig();
     BatchStreamOutputCollector complete_output(config.aux_info ? config.logits_index : std::nullopt);
     while (true) {
         auto remote_error = check_remote ? check_remote() : FirstError::Snapshot{};
@@ -391,7 +392,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             }
             return serializeErrorMsg(request_key, stream->generateInput()->request_info, result.status());
         }
-        auto output = result.value();
+        auto       output          = result.value();
         const bool terminal_output = !output.generate_outputs.empty()
                                      && std::all_of(output.generate_outputs.begin(),
                                                     output.generate_outputs.end(),
@@ -446,7 +447,7 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
                 second_token_reported = true;
                 P2PConnectorMetricsCollector collector;
                 collector.decode_first_to_second_token_output_us = write_time_us - first_token_write_us;
-                const auto handoff_ready_us = stream->p2pHandoffReadyTimeUs();
+                const auto handoff_ready_us                      = stream->p2pHandoffReadyTimeUs();
                 if (handoff_ready_us > 0) {
                     collector.decode_handoff_ready_to_second_token_output_us = write_time_us - handoff_ready_us;
                 }
@@ -486,17 +487,15 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::pollBatchStreamOutput(
-    grpc::ServerContext* context,
-    const std::vector<GenerateStreamPtr>& streams,
-    BatchGenerateOutputsPB* response,
-    const std::function<void(int64_t, const ErrorInfo&)>& fail_item) {
+grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*                                  context,
+                                                   const std::vector<GenerateStreamPtr>&                 streams,
+                                                   BatchGenerateOutputsPB*                               response,
+                                                   const std::function<void(int64_t, const ErrorInfo&)>& fail_item) {
     std::vector<BatchStreamOutputCollector> collectors;
     collectors.reserve(streams.size());
     for (const auto& stream : streams) {
-        collectors.emplace_back(stream && stream->generateConfig()->aux_info
-                                    ? stream->generateConfig()->logits_index
-                                    : std::nullopt);
+        collectors.emplace_back(stream && stream->generateConfig()->aux_info ? stream->generateConfig()->logits_index :
+                                                                               std::nullopt);
     }
     std::vector<bool> settled(streams.size(), false);
     while (true) {
@@ -504,7 +503,7 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(
             return grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "BatchGenerateCall cancelled"});
         }
         bool all_finished = true;
-        bool progress = false;
+        bool progress     = false;
         for (size_t i = 0; i < streams.size(); ++i) {
             auto stream = streams[i];
             if (!stream || settled[i])
@@ -528,10 +527,10 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(
                 }
                 if (output.ok()) {
                     const auto& rows = output.value().generate_outputs;
-                    terminal_output = !rows.empty() && std::all_of(rows.begin(), rows.end(), [](const auto& row) {
+                    terminal_output  = !rows.empty() && std::all_of(rows.begin(), rows.end(), [](const auto& row) {
                         return row.finished;
                     });
-                    auto status = collectors[i].add(std::move(output.value()));
+                    auto status      = collectors[i].add(std::move(output.value()));
                     if (!status.ok()) {
                         fail(status);
                         continue;
@@ -545,8 +544,8 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(
                     fail({ErrorCode::EXECUTION_EXCEPTION, "batch item completed without terminal output"});
                     continue;
                 }
-                auto output = collectors[i].finish();
-                auto* pb = response->mutable_results(static_cast<int>(i))->mutable_final_output();
+                auto  output = collectors[i].finish();
+                auto* pb     = response->mutable_results(static_cast<int>(i))->mutable_final_output();
                 QueryConverter::transResponse(pb,
                                               &output,
                                               stream->generateConfig()->aux_info,
@@ -567,14 +566,13 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(
     }
 }
 
-
 ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                                              input_pb,
                                        std::shared_ptr<GenerateInput>&                                     output,
                                        const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
                                        grpc::ServerContext* server_context) {
     output.reset();
     try {
-        output = QueryConverter::transQuery(&input_pb);
+        output                 = QueryConverter::transQuery(&input_pb);
         const auto& model_type = maga_init_params_.model_config_.model_type;
         if ((model_type == "qwen4_exp" || model_type == "qwen4_exp_mtp") && output->v41_inputs) {
             return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
@@ -636,10 +634,10 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     return generateLocalStream(context, request, writer, nullptr);
 }
 
-grpc::Status LocalRpcServer::generateLocalStream(grpc::ServerContext*    context,
-                                                const GenerateInputPB* request,
-                                                WriterInterface*       writer,
-                                                PDCancelRegistry*      cancel_registry) try {
+grpc::Status LocalRpcServer::generateLocalStream(grpc::ServerContext*   context,
+                                                 const GenerateInputPB* request,
+                                                 WriterInterface*       writer,
+                                                 PDCancelRegistry*      cancel_registry) try {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
@@ -650,7 +648,7 @@ grpc::Status LocalRpcServer::generateLocalStream(grpc::ServerContext*    context
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     PDCancelRegistry::Handle                   cancel_handle;
     std::optional<PDCancelRegistry::CallGuard> cancel_guard;
-    auto generate_context =
+    auto                                       generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     generate_context.onflight_requests    = &onflight_requests_;
     const int         uncaught_exceptions = std::uncaught_exceptions();
@@ -683,7 +681,7 @@ grpc::Status LocalRpcServer::generateLocalStream(grpc::ServerContext*    context
         }
         cancel_guard.emplace(*cancel_registry, cancel_handle);
     }
-    std::shared_ptr<GenerateInput>     input;
+    std::shared_ptr<GenerateInput> input;
     {
         auto mm_res = prepareInput(*request,
                                    input,
@@ -1073,6 +1071,24 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     auto kv_info = engine_->getCacheStatusInfo(-1, false);
     response->set_available_kv_cache(kv_info.available_kv_cache);
     response->set_total_kv_cache(kv_info.total_kv_cache);
+    auto       group_mode    = KV_CACHE_GROUP_MODE_UNSPECIFIED;
+    const auto cache_manager = engine_->getCacheManager();
+    if (cache_manager && cache_manager->cacheConfig().groupNums() > 0) {
+        for (const auto& group : cache_manager->cacheConfig().topology().groups()) {
+            // Match the HBM publisher's eligibility, including its exact tag exclusions.
+            if (!cacheGroupPublishesEvents(group.policy)
+                || group.policy.memory_placement != CacheMemoryPlacement::DEVICE || group.tag == "csa_state"
+                || group.tag == "swa_kv") {
+                continue;
+            }
+            if (group.policy.group_type == CacheGroupType::LINEAR) {
+                group_mode = KV_CACHE_GROUP_MODE_WITH_MAMBA;
+                break;
+            }
+            group_mode = KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY;
+        }
+    }
+    response->set_kv_cache_group_mode(group_mode);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
     return grpc::Status::OK;
 }
@@ -1519,7 +1535,8 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
             return grpc::Status(status_code, message);
         }
         const auto& p2p_request = request->p2p_request();
-        ErrorInfo error(status_code == grpc::StatusCode::CANCELLED ? ErrorCode::CANCELLED :
+        ErrorInfo   error(status_code == grpc::StatusCode::CANCELLED ?
+                            ErrorCode::CANCELLED :
                             ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                         message);
         if (response->has_p2p_response() && response->p2p_response().error_code() != ErrorCodePB::NONE_ERROR) {
@@ -1533,10 +1550,14 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
             + " type=" + std::to_string(p2p_request.type()) + ": " + error.ToString();
         RTP_LLM_LOG_WARNING("P2P ExecuteFunction rejected, request_id=%ld unique_key=%s type=%d peer=%s "
                             "grpc_code=%d error_code=%d error_name=%s error=%s",
-                            p2p_request.request_id(), p2p_request.unique_key().c_str(),
-                            static_cast<int>(p2p_request.type()), context->peer().c_str(),
-                            static_cast<int>(status_code), static_cast<int>(error.code()),
-                            ErrorCodeToString(error.code()).c_str(), detail.c_str());
+                            p2p_request.request_id(),
+                            p2p_request.unique_key().c_str(),
+                            static_cast<int>(p2p_request.type()),
+                            context->peer().c_str(),
+                            static_cast<int>(status_code),
+                            static_cast<int>(error.code()),
+                            ErrorCodeToString(error.code()).c_str(),
+                            detail.c_str());
         ErrorDetailsPB details;
         details.set_error_code(static_cast<int>(error.code()));
         details.set_error_message(detail);
@@ -1559,6 +1580,24 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     if (!cache_manager) {
         RTP_LLM_LOG_WARNING("execute function failed, cache manager is null");
         return failure_status(grpc::StatusCode::INTERNAL, "cache manager is null");
+    }
+    FunctionRequestPB bounded_request;
+    if (request->has_remote_request()
+        && (request->remote_request().op() == REMOTE_OPERATION_READ
+            || request->remote_request().op() == REMOTE_OPERATION_WRITE)) {
+        if (request->remote_request().timeout_ms() <= 0) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must be positive");
+        }
+        const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      context->deadline() - std::chrono::system_clock::now())
+                                      .count();
+        if (remaining_ms <= 0) {
+            return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "remote task expired before execution");
+        }
+        bounded_request.CopyFrom(*request);
+        bounded_request.mutable_remote_request()->set_timeout_ms(
+            std::min<int64_t>(request->remote_request().timeout_ms(), remaining_ms));
+        request = &bounded_request;
     }
     if (!cache_manager->executeFunction(*request, *response)) {
         std::string request_case;

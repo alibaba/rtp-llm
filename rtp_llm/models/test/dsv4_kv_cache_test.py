@@ -1,13 +1,9 @@
-import json
 import os
-import tempfile
-from pathlib import Path
 from unittest import TestCase, main
 from unittest.mock import patch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v4 import DeepSeekV4
 from rtp_llm.models.dsv4_kv_cache import (
@@ -29,7 +25,6 @@ from rtp_llm.models.dsv4_kv_cache import (
     build_dsv4_kv_cache_spec_descs,
 )
 from rtp_llm.ops import (
-    CacheMemoryPlacement,
     CpBlockSliceMode,
     CpPrefillSliceLayout,
     DataType,
@@ -49,14 +44,13 @@ FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK = 64
 
 
 class Dsv4KvCacheSpecTest(TestCase):
-    def _build(self, fp8_kv=True, fixed_pool_use_host_memory=False):
+    def _build(self, fp8_kv=True):
         return build_dsv4_kv_cache_spec_descs(
             layer_num=len(LAYER_COMPRESS_RATIOS),
             layer_compress_ratios=LAYER_COMPRESS_RATIOS,
             fp8_kv=fp8_kv,
             head_dim=HEAD_DIM,
             indexer_head_dim=INDEXER_HEAD_DIM,
-            fixed_pool_use_host_memory=fixed_pool_use_host_memory,
         )
 
     def _by_tag(self, layer_descs):
@@ -244,39 +238,12 @@ class Dsv4KvCacheSpecTest(TestCase):
         for desc in self._by_tag(self._build()).values():
             self.assertIsNone(desc.memory, desc.tag)
 
-    def test_host_pinned_fixed_pools_leave_paged_budget(self):
-        by_tag = self._by_tag(self._build(fixed_pool_use_host_memory=True))
-        for tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG):
-            desc = by_tag[tag]
-            self.assertIsNotNone(desc.memory, tag)
-            self.assertEqual(
-                desc.memory.placement, CacheMemoryPlacement.HOST_PINNED, tag
-            )
-            self.assertIsNotNone(desc.capacity, tag)
-            self.assertFalse(desc.capacity.charge_to_paged_budget, tag)
-        # hca_state keeps its explicit sizing while leaving the HBM budget.
-        self.assertEqual(
-            by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
-            DSV4_HCA_STATE_POOL_BLOCKS,
-        )
-        # Compressed pools stay on device.
-        for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
-            self.assertIsNone(by_tag[tag].memory, tag)
-            self.assertIsNone(by_tag[tag].capacity, tag)
-
     def test_explicit_pool_blocks_helper(self):
         layer_descs = self._build()
         apply_dsv4_explicit_pool_blocks(layer_descs, SWA_KV_TAG, 512)
         swa = self._by_tag(layer_descs)[SWA_KV_TAG]
         self.assertEqual(swa.capacity.explicit_block_num, 512)
         self.assertTrue(swa.capacity.charge_to_paged_budget)
-
-    def test_explicit_pool_blocks_helper_keeps_host_pool_off_budget(self):
-        layer_descs = self._build(fixed_pool_use_host_memory=True)
-        apply_dsv4_explicit_pool_blocks(layer_descs, SWA_KV_TAG, 512)
-        swa = self._by_tag(layer_descs)[SWA_KV_TAG]
-        self.assertEqual(swa.capacity.explicit_block_num, 512)
-        self.assertFalse(swa.capacity.charge_to_paged_budget)
 
     def test_rejects_zero_layers(self):
         with self.assertRaises(ValueError):
@@ -290,82 +257,6 @@ class Dsv4KvCacheSpecTest(TestCase):
 
 
 class Dsv4PostBuildModelConfigTest(TestCase):
-
-    def test_fixed_pool_memory_cli_and_env_reach_model_factory(self):
-        for env_value, cli_value, expected in (
-            (None, "1", True),
-            ("0", "1", True),
-            ("1", "0", False),
-            ("1", None, True),
-            (None, None, False),
-        ):
-            with (
-                self.subTest(env=env_value, cli=cli_value),
-                tempfile.TemporaryDirectory() as ckpt,
-            ):
-                Path(ckpt, "config.json").write_text(
-                    json.dumps({"torch_dtype": "bfloat16"})
-                )
-                env = (
-                    {}
-                    if env_value is None
-                    else {"DSV4_FIXED_POOL_USE_MEMORY": env_value}
-                )
-                argv = [
-                    "--model_type",
-                    "deepseek_v4",
-                    "--checkpoint_path",
-                    ckpt,
-                    "--act_type",
-                    "BF16",
-                ]
-                if cli_value is not None:
-                    argv += ["--dsv4_fixed_pool_use_memory", cli_value]
-                with patch.dict(os.environ, env, clear=True):
-                    configs = setup_args(argv)
-                    architecture = self._model_config()
-                    architecture.attn_config.head_num = 1
-                    architecture.hidden_size = HEAD_DIM
-                    with patch.object(
-                        DeepSeekV4, "_create_config", return_value=architecture
-                    ):
-                        config = ModelFactory.create_model_config(
-                            model_args=configs.model_args,
-                            lora_config=configs.lora_config,
-                            kv_cache_config=configs.kv_cache_config,
-                            profiling_debug_logging_config=configs.profiling_debug_logging_config,
-                        )
-                self.assertEqual(config.dsv4_fixed_pool_use_memory, expected)
-                by_tag = {
-                    desc.tag: desc
-                    for layer in config.kv_cache_spec_descs
-                    for desc in layer
-                }
-                for tag in (
-                    INDEXER_STATE_TAG,
-                    CSA_STATE_TAG,
-                    HCA_STATE_TAG,
-                    SWA_KV_TAG,
-                ):
-                    if expected:
-                        self.assertEqual(
-                            by_tag[tag].memory.placement,
-                            CacheMemoryPlacement.HOST_PINNED,
-                        )
-                        self.assertFalse(by_tag[tag].capacity.charge_to_paged_budget)
-                    else:
-                        self.assertIsNone(by_tag[tag].memory)
-                for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
-                    self.assertIsNone(by_tag[tag].memory)
-
-    def test_direct_post_build_preserves_environment_setting(self):
-        with patch.dict(os.environ, {"DSV4_FIXED_POOL_USE_MEMORY": "1"}):
-            config = self._model_config()
-            DeepSeekV4._post_build_model_config(config)
-        swa = next(
-            desc for desc in config.kv_cache_spec_descs[0] if desc.tag == SWA_KV_TAG
-        )
-        self.assertEqual(swa.memory.placement, CacheMemoryPlacement.HOST_PINNED)
 
     def _model_config(self, tokens_per_block=FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK):
         config = ModelConfig()
@@ -478,36 +369,6 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         for tag in DSV4_FIXED_POOL_TAGS:
             if tag != HCA_STATE_TAG:
                 self.assertEqual(by_tag[tag].capacity.explicit_block_num, 777)
-
-    def test_post_build_cli_host_memory_reaches_final_descriptors(self):
-        with patch.dict(
-            os.environ, {"DSV4_FIXED_POOL_USE_MEMORY": "false"}, clear=True
-        ):
-            kv_cache_config = self._parse_kv_cache_cli(
-                ["--dsv4_fixed_pool_use_memory", "true"]
-            )
-            config = self._model_config()
-            DeepSeekV4._apply_kv_cache_config(config, kv_cache_config)
-
-        by_tag = self._by_tag(config.kv_cache_spec_descs)
-        for tag in DSV4_FIXED_POOL_TAGS:
-            self.assertEqual(
-                by_tag[tag].memory.placement, CacheMemoryPlacement.HOST_PINNED
-            )
-            self.assertFalse(by_tag[tag].capacity.charge_to_paged_budget)
-
-    def test_legacy_post_build_reads_host_memory_environment(self):
-        config = self._model_config()
-        with patch.dict(
-            os.environ, {"DSV4_FIXED_POOL_USE_MEMORY": "true"}, clear=False
-        ):
-            DeepSeekV4._post_build_model_config(config)
-
-        by_tag = self._by_tag(config.kv_cache_spec_descs)
-        for tag in DSV4_FIXED_POOL_TAGS:
-            self.assertEqual(
-                by_tag[tag].memory.placement, CacheMemoryPlacement.HOST_PINNED
-            )
 
     def test_post_build_fixed_pool_blocks_env_pins_all_fixed_pools(self):
         config = self._model_config()

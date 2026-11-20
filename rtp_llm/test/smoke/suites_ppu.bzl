@@ -1,3 +1,4 @@
+load("//rtp_llm/test/smoke:cache_tier_args.bzl", "HOST_REUSE_AFTER_DEMOTION_ARGS")
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
 def ppu_suites():
@@ -57,7 +58,7 @@ def ppu_suites():
                 name="memory_cache_reuse_ppu",
                 task_info="data/model/qwen25/q_r_reuse_memory.json",
                 sleep_time_qr=10,
-                smoke_args="--reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --warm_up 0",
+                smoke_args=("--reuse_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --warm_up 0" + HOST_REUSE_AFTER_DEMOTION_ARGS),
                 gpu_type=["PPU-ZW810E"],
             ),
             smoke_test(
@@ -151,8 +152,8 @@ def ppu_suites():
                 task_info="data/model/qwen25/q_r_prefill_and_decode_reuse_memory.json",
                 sleep_time_qr=10,
                 smoke_args= {
-                    "prefill": "--warm_up 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type PREFILL --reserver_runtime_mem_mb 4002",
-                    "decode": "--warm_up 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type DECODE --reserver_runtime_mem_mb 4002"
+                    "prefill": ("--warm_up 1 --reuse_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type PREFILL --reserver_runtime_mem_mb 4002" + HOST_REUSE_AFTER_DEMOTION_ARGS),
+                    "decode": ("--warm_up 1 --reuse_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type DECODE --reserver_runtime_mem_mb 4002" + HOST_REUSE_AFTER_DEMOTION_ARGS)
                 },
                 gpu_type=["PPU-ZW810E"],
             ),
@@ -171,7 +172,7 @@ def ppu_suites():
                 task_info="data/model/qwen25/q_r_prefill_reuse_memory.json",
                 sleep_time_qr=10,
                 smoke_args= {
-                    "prefill": "--warm_up 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type PREFILL --reserver_runtime_mem_mb 4002",
+                    "prefill": ("--warm_up 1 --reuse_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type PREFILL --reserver_runtime_mem_mb 4002" + HOST_REUSE_AFTER_DEMOTION_ARGS),
                     "decode": "--warm_up 1 --reuse_cache 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type DECODE --reserver_runtime_mem_mb 4002"
                 },
                 gpu_type=["PPU-ZW810E"],
@@ -192,7 +193,7 @@ def ppu_suites():
                 sleep_time_qr=10,
                 smoke_args= {
                     "prefill": "--warm_up 1 --reuse_cache 0 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type PREFILL --reserver_runtime_mem_mb 4002",
-                    "decode": "--warm_up 1 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type DECODE --reserver_runtime_mem_mb 4002"
+                    "decode": ("--warm_up 1 --reuse_cache 1 --memory_cache_size_mb 1024 --seq_size_per_block 8 --act_type FP16 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --role_type DECODE --reserver_runtime_mem_mb 4002" + HOST_REUSE_AFTER_DEMOTION_ARGS)
                 },
                 gpu_type=["PPU-ZW810E"],
             ),

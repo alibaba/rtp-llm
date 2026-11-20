@@ -630,7 +630,10 @@ def configure_kv_cache_event_host_ip_port(py_env_configs: PyEnvConfigs) -> None:
     kv_cache_config = py_env_configs.kv_cache_config
     parallelism_config = py_env_configs.parallelism_config
     if (
-        kv_cache_config.kv_cache_event_publisher_type != "kvcm"
+        (
+            kv_cache_config.kv_cache_event_publisher_type != "kvcm"
+            and not kv_cache_config.enable_remote_cache
+        )
         or parallelism_config.tp_rank != 0
     ):
         return
@@ -643,7 +646,7 @@ def configure_kv_cache_event_host_ip_port(py_env_configs: PyEnvConfigs) -> None:
             f"{server_ip}:{server_config.server_port}"
         )
         logging.info(
-            "KV_CACHE_EVENT_HOST_IP_PORT was empty; derived per-rank endpoint "
+            "Derived per-rank KVCM host endpoint "
             "%s from start_port=%s rank_id=%s worker_info_port_num=%s",
             kv_cache_config.kv_cache_event_host_ip_port,
             server_config.start_port,
@@ -653,7 +656,7 @@ def configure_kv_cache_event_host_ip_port(py_env_configs: PyEnvConfigs) -> None:
 
     if parallelism_config.dp_size > 1:
         logging.warning(
-            "dp_size=%s requires a distinct KV_CACHE_EVENT_HOST_IP_PORT for every DP replica; "
+            "dp_size=%s requires a distinct KVCM host endpoint for every DP replica; "
             "using %s value %s for dp_rank=%s. Sharing this value lets KVCM snapshots "
             "overwrite another replica's host state.",
             parallelism_config.dp_size,

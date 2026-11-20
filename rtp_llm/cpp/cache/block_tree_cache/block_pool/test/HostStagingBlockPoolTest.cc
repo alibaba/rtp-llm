@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 #include <future>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -13,6 +14,11 @@
 
 namespace rtp_llm {
 namespace {
+
+TEST(HostStagingBlockPoolTest, RejectsBackingSizeMultiplicationOverflow) {
+    const size_t stride = std::numeric_limits<size_t>::max() / 4 + 1 + 4096;
+    EXPECT_THROW(HostStagingBlockPool(4, stride), std::overflow_error);
+}
 
 TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     HostStagingBlockPool pool(1, 65);

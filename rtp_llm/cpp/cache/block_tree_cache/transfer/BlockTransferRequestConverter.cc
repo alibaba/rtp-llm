@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 
 #include <algorithm>
+#include <exception>
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -8,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -78,14 +80,6 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
         request_direction = MemoryOperationRequestPB::H2DISK;
         return true;
     }
-    if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::HOST) {
-        request_direction = MemoryOperationRequestPB::DISK2H;
-        return true;
-    }
-    if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
-        request_direction = MemoryOperationRequestPB::D2DISK;
-        return true;
-    }
     if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
         request_direction = MemoryOperationRequestPB::DISK2D;
         return true;
@@ -126,11 +120,16 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
         return false;
     }
     request.set_timeout_ms(remaining->count());
-    const auto&                             descriptors = task.descriptors();
+    request.set_transfer_trace_id(task.traceId());
+    request.set_transfer_workflow_id(task.workflowId());
+    request.set_transfer_parent_id(task.parentTraceId());
+    request.set_has_transfer_request_id(task.requestId().has_value());
+    request.set_transfer_request_id(task.requestId().value_or(0));
+    const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {
         return false;
     }
-    const TransferDescriptor&               first       = descriptors.front();
+    const TransferDescriptor&               first = descriptors.front();
     MemoryOperationRequestPB::CopyDirection request_direction;
     if (!directionFor(first, request_direction)) {
         return false;
@@ -144,30 +143,30 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
             return false;
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];
-        CopyItem        item;
-        for (const auto& tag : group_set.groupTags()) {
-            item.add_group_tags(tag);
+        const auto&     group_tags = group_set.groupTags();
+        const bool      has_device = descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE;
+        if (has_device && descriptor.blocksAt(Tier::DEVICE).size() != group_tags.size()) {
+            return false;
+        }
+        auto* item = request.add_copy_items();
+        for (const auto& tag : group_tags) {
+            item->add_group_tags(tag);
         }
 
         if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
-            item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
+            item->set_mem_block(descriptor.singleBlockAt(Tier::HOST));
         }
         if (descriptor.source_tier == Tier::DISK || descriptor.target_tier == Tier::DISK) {
-            item.set_disk_block(descriptor.singleBlockAt(Tier::DISK));
+            item->set_disk_block(descriptor.singleBlockAt(Tier::DISK));
         }
-        if (descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE) {
-            const auto& blocks     = descriptor.blocksAt(Tier::DEVICE);
-            const auto& group_tags = group_set.groupTags();
-            if (blocks.size() != group_tags.size()) {
-                return false;
-            }
+        if (has_device) {
+            const auto& blocks = descriptor.blocksAt(Tier::DEVICE);
             for (size_t i = 0; i < blocks.size(); ++i) {
-                auto* group_block = item.add_group_blocks();
+                auto* group_block = item->add_group_blocks();
                 group_block->set_tag(group_tags[i]);
                 group_block->set_block_id(blocks[i]);
             }
         }
-        request.add_copy_items()->CopyFrom(item);
     }
     return true;
 }
@@ -175,14 +174,44 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
 bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&  request,
                                                    std::vector<TransferDescriptor>& descriptors,
                                                    const std::vector<GroupSetPtr>&  group_sets,
-                                                   bool                             allow_absent_group_sets) {
+                                                   bool                             allow_absent_group_sets,
+                                                   std::vector<size_t>*             wire_item_indices) {
+    // This boundary is shared by the real RPC service and native smoke workers.
+    // group_set links in-process ranks to worker_init and dispatcher_init logs.
+    const auto log_decode = [&](const char* event, const char* result) noexcept {
+        try {
+            RTP_LLM_LOG_INFO("transfer_lifecycle event=%s trace=%lu request=%ld group_set=%p timeout_ms=%ld "
+                             "items=%d result=%s",
+                             event,
+                             request.transfer_trace_id(),
+                             request.transfer_request_id(),
+                             group_sets.empty() ? nullptr : static_cast<const void*>(group_sets.front().get()),
+                             request.timeout_ms(),
+                             request.copy_items_size(),
+                             result);
+        } catch (...) {}
+    };
+    bool      decoded_ok         = false;
+    const int initial_exceptions = std::uncaught_exceptions();
+    log_decode("decode_enter", "received");
+    block_tree_cache_detail::ScopeRollback log_decode_exit([&] {
+        log_decode("decode_exit",
+                   decoded_ok                                      ? "accepted" :
+                   std::uncaught_exceptions() > initial_exceptions ? "exception" :
+                                                                     "rejected");
+    });
     if (request.copy_items_size() == 0) {
         return false;
     }
 
     std::vector<TransferDescriptor> decoded;
+    std::vector<size_t>             decoded_item_indices;
     decoded.reserve(static_cast<size_t>(request.copy_items_size()));
-    for (const CopyItem& item : request.copy_items()) {
+    if (wire_item_indices) {
+        decoded_item_indices.reserve(static_cast<size_t>(request.copy_items_size()));
+    }
+    for (int item_index = 0; item_index < request.copy_items_size(); ++item_index) {
+        const CopyItem&          item          = request.copy_items(item_index);
         const GroupSet*          group_set_ptr = nullptr;
         const GroupSetResolution resolution    = resolveGroupSet(item, group_sets, group_set_ptr);
         if (resolution == GroupSetResolution::INVALID) {
@@ -227,24 +256,6 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 descriptor =
                     TransferDescriptor::hostToDisk(group_set.groupSetId(), item.mem_block(), item.disk_block());
                 break;
-            case MemoryOperationRequestPB::DISK2H:
-                if (!group_set.hostPool() || !group_set.hostPool()->validBlock(item.mem_block())
-                    || !group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())) {
-                    return false;
-                }
-                descriptor =
-                    TransferDescriptor::diskToHost(group_set.groupSetId(), item.disk_block(), item.mem_block());
-                break;
-            case MemoryOperationRequestPB::D2DISK: {
-                std::vector<BlockIdxType> device_blocks;
-                if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
-                    || !decodeDeviceBlocks(item, group_set, device_blocks)) {
-                    return false;
-                }
-                descriptor = TransferDescriptor::deviceToDisk(
-                    group_set.groupSetId(), std::move(device_blocks), item.disk_block());
-                break;
-            }
             case MemoryOperationRequestPB::DISK2D: {
                 std::vector<BlockIdxType> device_blocks;
                 if (!group_set.diskPool() || !group_set.diskPool()->validBlock(item.disk_block())
@@ -259,9 +270,19 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 return false;
         }
         decoded.push_back(std::move(descriptor));
+        if (wire_item_indices) {
+            decoded_item_indices.push_back(static_cast<size_t>(item_index));
+        }
+    }
+    if (wire_item_indices) {
+        wire_item_indices->reserve(wire_item_indices->size() + decoded_item_indices.size());
     }
     descriptors.insert(
         descriptors.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
+    if (wire_item_indices) {
+        wire_item_indices->insert(wire_item_indices->end(), decoded_item_indices.begin(), decoded_item_indices.end());
+    }
+    decoded_ok = true;
     return true;
 }
 
@@ -275,8 +296,6 @@ MemoryOperationResponsePB::Code BlockTransferRequestConverter::encodeCode(CacheC
             return MemoryOperationResponsePB::INVALID_REQUEST;
         case CacheCopyError::IO_FAILED:
             return MemoryOperationResponsePB::IO_FAILED;
-        case CacheCopyError::CRC_COMPUTE_FAILED:
-            return MemoryOperationResponsePB::CRC_COMPUTE_FAILED;
         case CacheCopyError::CRC_MISMATCH:
             return MemoryOperationResponsePB::CRC_MISMATCH;
         default:
@@ -294,8 +313,6 @@ CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponse
             return CacheCopyError::INVALID_REQUEST;
         case MemoryOperationResponsePB::IO_FAILED:
             return CacheCopyError::IO_FAILED;
-        case MemoryOperationResponsePB::CRC_COMPUTE_FAILED:
-            return CacheCopyError::CRC_COMPUTE_FAILED;
         case MemoryOperationResponsePB::CRC_MISMATCH:
             return CacheCopyError::CRC_MISMATCH;
         default:
@@ -306,6 +323,7 @@ CacheCopyError BlockTransferRequestConverter::decodeCode(MemoryOperationResponse
 void BlockTransferRequestConverter::encodeTransferResult(MemoryOperationResponsePB& response,
                                                          const TransferResult&      result) {
     response.set_code(encodeCode(result.copy_error));
+    response.set_buffer_safe(result.buffer_safe);
     response.mutable_error_info()->set_error_code(static_cast<int64_t>(result.status.code()));
     response.mutable_error_info()->set_error_message(result.status.ToString());
     response.clear_block_errors();
@@ -327,7 +345,8 @@ TransferResult BlockTransferRequestConverter::decodeTransferResult(const MemoryO
         result.expandBlockErrors(block_count);
         return result;
     }
-    result.copy_error = decodeCode(response.code());
+    result.buffer_safe = response.buffer_safe();
+    result.copy_error  = decodeCode(response.code());
     for (int index = 0; index < response.block_errors_size(); ++index) {
         const auto block_error = decodeCode(response.block_errors(index));
         result.block_errors.push_back(block_error);
