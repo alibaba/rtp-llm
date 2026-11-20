@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -901,6 +902,12 @@ Scenario makeScenario(const std::string& name) {
     if (name == "cp_actual_lengths_rank1") {
         return makeContextParallelScenario(/*tp_rank=*/1);
     }
+    if (name == "cp_checkpoint_event_native_thread") {
+        auto scenario = makeContextParallelScenario(0);
+        scenario.inputs.cache_save_positions = pinnedLongTensor({4}, {1, 1});
+        scenario.inputs.cache_save_block_ids = pinnedTensor({-1, 1}, {2, 1, 1});
+        return scenario;
+    }
     if (name == "mtp_sub_config") {
         return makeMtpScenario();
     }
@@ -1305,7 +1312,12 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                 forward_inputs.request_id = scenario.inputs.request_id.clone().pin_memory();
                 forward_inputs.request_id.add_(static_cast<int64_t>(i) * 1000);
             }
-            output = model.forward(forward_inputs);
+            if (scenario_name == "cp_checkpoint_event_native_thread") {
+                py::gil_scoped_release release;
+                output = std::async(std::launch::async, [&] { return model.forward(forward_inputs); }).get();
+            } else {
+                output = model.forward(forward_inputs);
+            }
             if (!(skip_first_deferred_error_take && i == 0)) {
                 if (auto capture_error = model.takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
                     if (!ignore_deferred_errors) {

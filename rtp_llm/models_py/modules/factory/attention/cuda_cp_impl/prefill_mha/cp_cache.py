@@ -132,18 +132,18 @@ class CPPagedCacheGeometry:
         ]
 
 
-def save_full_checkpoints(cache, inputs, configs, parallelism):
-    """Save completed FULL endpoints after this layer's runtime KV writes.
+def _plan_full_checkpoint_copies(cache, inputs, configs, parallelism):
+    """Resolve checkpoint copies to plain (target_page, source_page, count) rows.
 
-    Coordinator bindings are physical base-block IDs. Cache-owned references
-    and empty sparse slots have negative IDs and are never writable targets.
-    The runtime still contains every FULL KV token, so a checkpoint copies only
-    its owner's base block up to P, excluding any tokens after P.
+    Returns an empty list when the batch has no selected save points. All host
+    reads (kernel block table, save positions/destinations) happen here on the
+    calling stream so the returned rows stay stream-agnostic device pointers
+    into the pre-allocated physical pool.
     """
     positions = inputs.cache_save_positions
     blocks = inputs.cache_save_block_ids
     if positions is None or blocks is None or not positions.numel():
-        return
+        return []
     base = int(configs.tokens_per_block)
     kernel = int(configs.kernel_tokens_per_block)
     pages = base // kernel
@@ -158,7 +158,7 @@ def save_full_checkpoints(cache, inputs, configs, parallelism):
         if cp_info is not None
         else inputs.input_lengths
     ).tolist()
-    physical = cache.kv_cache_base
+    copies: list[tuple[int, int, int]] = []
     for batch, (prefix, suffix) in enumerate(zip(prefixes, suffixes)):
         for endpoint, destination in zip(
             positions[batch].tolist(), blocks[batch].tolist()
@@ -177,4 +177,36 @@ def save_full_checkpoints(cache, inputs, configs, parallelism):
                 target = destination * pages + offset
                 count = min(kernel, valid - offset * kernel)
                 if source != target:
-                    physical[target, :, :, :count].copy_(physical[source, :, :, :count])
+                    copies.append((target, source, count))
+    return copies
+
+
+def _apply_full_checkpoint_copies(cache, copies):
+    physical = cache.kv_cache_base
+    for target, source, count in copies:
+        physical[target, :, :, :count].copy_(physical[source, :, :, :count])
+
+
+def save_full_checkpoints(cache, inputs, configs, parallelism, save_stream=None):
+    """Save completed FULL endpoints after this layer's runtime KV writes.
+
+    Coordinator bindings are physical base-block IDs. Cache-owned references
+    and empty sparse slots have negative IDs and are never writable targets.
+    The runtime still contains every FULL KV token, so a checkpoint copies only
+    its owner's base block up to P, excluding any tokens after P.
+
+    With save_stream set, the device-side copies execute on that stream; host
+    planning still runs on the calling stream. The caller must already have
+    recorded the current-stream completion event on save_stream so the copies
+    observe this layer's committed runtime KV. Without save_stream, the
+    copies remain ordered on the calling stream. The caller must record its
+    terminal save event even if submission raises after enqueuing a copy.
+    """
+    copies = _plan_full_checkpoint_copies(cache, inputs, configs, parallelism)
+    if not copies:
+        return
+    if save_stream is not None:
+        with torch.cuda.stream(save_stream):
+            _apply_full_checkpoint_copies(cache, copies)
+    else:
+        _apply_full_checkpoint_copies(cache, copies)

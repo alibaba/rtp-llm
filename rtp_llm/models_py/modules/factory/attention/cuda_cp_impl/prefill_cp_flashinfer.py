@@ -1,4 +1,5 @@
 import logging
+import threading
 from typing import Optional
 
 import torch
@@ -41,6 +42,20 @@ impl_map = {
     CPRotateMethod.ALLTOALL: PCPAll2AllAttnOp,
     CPRotateMethod.ALL_GATHER_WITH_OVERLAP: PCPAllGatherOverlapAttnOp,
 }
+
+
+class _CheckpointSaveState(threading.local):
+    def __init__(self):
+        self.streams: dict[int, torch.cuda.Stream] = {}
+        self.pending_events: dict[int, torch.cuda.Event] = {}
+
+
+_checkpoint_save_state = _CheckpointSaveState()
+
+
+def take_pending_checkpoint_save_event(device_index: int) -> torch.cuda.Event | None:
+    """Pop the issuing thread's terminal save event for this device, or None."""
+    return _checkpoint_save_state.pending_events.pop(device_index, None)
 
 
 def select_prefill_cp_impl(
@@ -199,6 +214,10 @@ class CPFlashInferImpl(FMHAImplBase):
         # Store input info
         self.attn_inputs = attn_inputs
 
+        save_positions = attn_inputs.cache_save_positions
+        has_save_points = save_positions is not None and save_positions.numel() > 0
+        self.has_async_save = attn_inputs.is_prefill and has_save_points
+
         # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
@@ -237,9 +256,34 @@ class CPFlashInferImpl(FMHAImplBase):
         if self.cache_geometry is not None:
             self.cache_geometry.commit_suffix(attention_cache, kv_cache)
 
-        save_full_checkpoints(
-            kv_cache, self.attn_inputs, self.attn_configs, self.parallelism_config
-        )
+        if self.has_async_save:
+            device_index = torch.cuda.current_device()
+            save_stream = _checkpoint_save_state.streams.get(device_index)
+            if save_stream is None:
+                save_stream = torch.cuda.Stream(device=device_index)
+                _checkpoint_save_state.streams[device_index] = save_stream
+            # A shared stream orders every layer's saves before the terminal
+            # event without serializing the next layer's independent compute.
+            layer_done = torch.cuda.Event()
+            layer_done.record()
+            save_stream.wait_event(layer_done)
+            save_event = torch.cuda.Event()
+            try:
+                save_full_checkpoints(
+                    kv_cache,
+                    self.attn_inputs,
+                    self.attn_configs,
+                    self.parallelism_config,
+                    save_stream=save_stream,
+                )
+            finally:
+                # A later copy can fail after earlier copies were enqueued.
+                save_event.record(save_stream)
+                _checkpoint_save_state.pending_events[device_index] = save_event
+        else:
+            save_full_checkpoints(
+                kv_cache, self.attn_inputs, self.attn_configs, self.parallelism_config
+            )
 
         # Delay write to cache store until local kv cache finishes writing
         common.apply_write_cache_store(

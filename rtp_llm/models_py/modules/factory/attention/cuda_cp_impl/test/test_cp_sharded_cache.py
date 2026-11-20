@@ -302,6 +302,64 @@ class CPShardedCacheTest(unittest.TestCase):
             port = sock.getsockname()[1]
         mp.spawn(_worker, args=(port,), nprocs=2, join=True)
 
+    def test_save_full_checkpoints_on_side_stream_observes_only_committed_kv(self):
+        """Forward-window gate invariant for the checkpoint save stream.
+
+        save_full_checkpoints(save_stream=...) must observe the current
+        stream's committed runtime KV only (never partial writes of the same
+        layer), and once the terminal save event completes the saved blocks
+        must hold the committed bytes. This mirrors the engine contract:
+        PyWrappedModel::forward returns only after this event, and the owner
+        publishes only after that return.
+        """
+        if not torch.cuda.is_available():
+            self.skipTest("requires CUDA")
+        device = torch.device("cuda", torch.cuda.current_device())
+        base, kernel, kv_heads, dim = 4, 4, 2, 32
+        cfg, parallel = make_configs(4, kv_heads, dim, base, 1, 0)
+        cfg.kernel_tokens_per_block = kernel
+        parallel.prefill_cp_config.kv_cache_sharded = False
+        ppb = base // kernel
+        # sequence_lengths=[4] (full lengths), cp_chunk_lengths=[4] (single
+        # rank owns everything at cp_size=1), prefix=0.
+        inputs = build_cp_attn_inputs([4], [4], 1, kernel, [0], device)
+        # One runtime block holds the four suffix tokens; a private block is
+        # the save destination. Negative slots prove no spurious writes.
+        table = torch.tensor([[0, 1]], dtype=torch.int32)
+        inputs.kv_cache_kernel_block_id = table
+        inputs.cache_save_positions = torch.tensor([[4]], dtype=torch.int64)
+        inputs.cache_save_block_ids = torch.tensor([[1]], dtype=torch.int32)
+        storage = torch.zeros(3 * ppb, 2, kv_heads, kernel, dim, device=device)
+        cache = LayerKVCache(storage, kernel, 0, "full")
+
+        # Commit this "layer's" runtime KV on the current stream. storage[0]
+        # is one kernel page: [2 (K/V), kv_heads, kernel, dim].
+        runtime_payload = torch.randn(2, kv_heads, kernel, dim, device=device)
+        storage[0] = runtime_payload
+
+        save_stream = torch.cuda.Stream()
+        save_event = torch.cuda.Event()
+        layer_done = torch.cuda.Event()
+        layer_done.record()
+        save_stream.wait_event(layer_done)
+        save_full_checkpoints(cache, inputs, cfg, parallel, save_stream=save_stream)
+        save_event.record(save_stream)
+
+        # The next layer owns distinct runtime storage; it must not overwrite
+        # the source being read by the outstanding checkpoint copy.
+        next_layer_payload = torch.randn(2, kv_heads, kernel, dim, device=device)
+        storage[2 * ppb] = next_layer_payload
+
+        # The completion event is the publication gate: once it fires, the
+        # committed bytes are in place independently of the next layer's write.
+        save_event.synchronize()
+        torch.testing.assert_close(
+            storage[ppb].float(), runtime_payload.float(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            storage[2 * ppb].float(), next_layer_payload.float(), rtol=0, atol=0
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

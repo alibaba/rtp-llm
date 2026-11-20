@@ -1134,6 +1134,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
+#if USING_CUDA
+            if (device_props_.enable_prefill_cp && has_sparse_saves) {
+                // Native pybind callers can lose Python thread-local data when this GIL scope exits.
+                auto checkpoint_event =
+                    py::module_::import("rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer")
+                        .attr("take_pending_checkpoint_save_event")(c10::cuda::current_device());
+                if (!checkpoint_event.is_none()) {
+                    checkpoint_event.attr("wait")();
+                }
+            }
+#endif
         }
 
         cache_store_write_cycle.finish();

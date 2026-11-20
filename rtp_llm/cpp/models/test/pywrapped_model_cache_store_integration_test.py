@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 import weakref
@@ -1695,6 +1696,43 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     [32, 64],
                 )
                 self.assertEqual(model.seen_kernel_tables["draft"], [[1, 2]])
+
+    @_skip_rocm_context_parallel
+    def test_native_forward_joins_checkpoint_event_in_issuing_python_scope(self):
+        module_name = (
+            "rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_cp_flashinfer"
+        )
+        checkpoint_module = types.ModuleType(module_name)
+        issued = threading.local()
+        launcher_id = threading.get_ident()
+        ready = torch.cuda.Event()
+        payload = torch.zeros(1, device="cuda")
+
+        def take_pending_event(device_index):
+            self.assertEqual(device_index, payload.device.index)
+            return getattr(issued, "event", None)
+
+        checkpoint_module.take_pending_checkpoint_save_event = take_pending_event
+
+        class CheckpointModel(CacheStoreForwardModel):
+            def forward(model, inputs, fmha_impl=None):
+                self.assertNotEqual(threading.get_ident(), launcher_id)
+                output = super().forward(inputs, fmha_impl)
+                copy_stream = torch.cuda.Stream()
+                copy_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(copy_stream):
+                    payload.fill_(7)
+                    ready.record()
+                issued.event = ready
+                return output
+
+        with patch.dict(sys.modules, {module_name: checkpoint_module}), patch.object(
+            ready, "wait", wraps=ready.wait
+        ) as wait:
+            run_scenario(CheckpointModel(), "cp_checkpoint_event_native_thread")
+            wait.assert_called_once_with()
+        self.assertTrue(ready.query())
+        torch.testing.assert_close(payload, torch.full_like(payload, 7))
 
     @_skip_rocm_context_parallel
     def test_context_parallel_publishes_original_lengths_to_every_tag(self) -> None:
