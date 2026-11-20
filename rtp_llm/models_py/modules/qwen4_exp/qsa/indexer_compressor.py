@@ -17,9 +17,12 @@ where entries were written, so the caller can set up the actual pool views throu
 ``PoolBackedModule.set_pool_context`` and call these functions with the real tensors.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Literal, Optional
 
+import numpy as np
 import torch
 
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
@@ -166,6 +169,113 @@ class AlignedPrefillWriteLayout:
     kv_writes: torch.Tensor
 
 
+@dataclass(frozen=True)
+class AlignedPrefillWritePlan:
+    layout: AlignedPrefillWriteLayout
+    state_blocks: torch.Tensor
+    kv_blocks: torch.Tensor
+
+
+def _packed_indices(
+    counts: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    starts = counts.cumsum() - counts
+    requests = np.repeat(np.arange(counts.size, dtype=np.int64), counts)
+    rows = np.arange(requests.size, dtype=np.int64) - starts[requests]
+    return requests, rows, starts
+
+
+def _build_aligned_prefill_write_layout(
+    lengths: Sequence[int],
+    prefixes: Sequence[int],
+    *,
+    page_size: int,
+    ratio: int,
+    ring_entries: int,
+    device: torch.device,
+) -> AlignedPrefillWriteLayout:
+    """Build fixed-size write indices from a validated, page-aligned partition."""
+    length_array = np.asarray(lengths, dtype=np.int64)
+    prefix_pages = np.asarray(prefixes, dtype=np.int64) // page_size
+    packed_starts = length_array.cumsum() - length_array
+    full_pages, tail = np.divmod(length_array, page_size)
+    kv_entries = page_size // ratio
+    groups = length_array // ratio
+    state_requests, state_columns, state_page_starts = _packed_indices(
+        full_pages + (tail > 0)
+    )
+    kv_requests, kv_columns, kv_page_starts = _packed_indices(
+        (groups + kv_entries - 1) // kv_entries
+    )
+    requests, rows, _ = _packed_indices(
+        full_pages * ring_entries + np.minimum(tail, ring_entries)
+    )
+    pages, offsets = np.divmod(rows, ring_entries)
+    page_start = pages * page_size
+    page_length = np.minimum(length_array[requests] - page_start, page_size)
+    # Keep the final writes to the ring of each full or partial page.
+    rows = np.maximum(page_length - ring_entries, 0) + offsets
+    state_writes = (
+        state_page_starts[requests] + pages,
+        rows % ring_entries,
+        packed_starts[requests] + page_start + rows,
+    )
+    requests, group, _ = _packed_indices(groups)
+    pages, offsets = np.divmod(group, kv_entries)
+    kv_writes = (
+        kv_page_starts[requests] + pages,
+        offsets,
+        packed_starts[requests] + (group + 1) * ratio - 1,
+    )
+    parts = (
+        (state_requests, prefix_pages[state_requests] + state_columns),
+        (kv_requests, prefix_pages[kv_requests] + kv_columns),
+        state_writes,
+        kv_writes,
+    )
+    sizes = [len(part) * part[0].size for part in parts]
+    packed = torch.empty(
+        sum(sizes), dtype=torch.long, device="cpu", pin_memory=device.type == "cuda"
+    )
+    host = packed.numpy()
+    start = 0
+    for part in parts:
+        for field in part:
+            end = start + field.size
+            host[start:end] = field
+            start = end
+    state_pages, kv_pages, state_writes, kv_writes = packed.to(
+        device=device, non_blocking=True
+    ).split(sizes)
+    return AlignedPrefillWriteLayout(
+        state_pages.reshape(2, -1),
+        kv_pages.reshape(2, -1),
+        state_writes.reshape(3, -1),
+        kv_writes.reshape(3, -1),
+    )
+
+
+@lru_cache(maxsize=16)
+def _cached_aligned_prefill_write_layout(
+    lengths: tuple[int, ...],
+    prefixes: tuple[int, ...],
+    page_size: int,
+    ratio: int,
+    ring_entries: int,
+    stream: torch.cuda.Stream,
+) -> AlignedPrefillWriteLayout:
+    # Allocate, fill and consume the immutable index tensors on the same stream.
+    with torch.cuda.stream(stream):
+        return _build_aligned_prefill_write_layout(
+            lengths,
+            prefixes,
+            page_size=page_size,
+            ratio=ratio,
+            ring_entries=ring_entries,
+            device=stream.device,
+        )
+
+
 def build_aligned_prefill_write_layout(
     lengths: list[int],
     prefixes: list[int],
@@ -175,92 +285,58 @@ def build_aligned_prefill_write_layout(
     ring_entries: int,
     device: torch.device,
 ) -> AlignedPrefillWriteLayout:
-    """Build fixed-size write indices from a validated, page-aligned partition."""
-    state_pages, kv_pages, state_writes, kv_writes = [], [], [], []
-    packed_start = 0
-    for request, (prefix, length) in enumerate(zip(prefixes, lengths)):
-        for start in range(0, length, page_size):
-            page_length = min(page_size, length - start)
-            page_column = (prefix + start) // page_size
-            packed_page_start = packed_start + start
-            state_page = len(state_pages) // 2
-            state_pages.extend((request, page_column))
-            # These are the final writes to the ring, including a partial page.
-            for row in range(max(0, page_length - ring_entries), page_length):
-                state_writes.extend(
-                    (state_page, row % ring_entries, packed_page_start + row)
-                )
-            if page_length >= ratio:
-                kv_page = len(kv_pages) // 2
-                kv_pages.extend((request, page_column))
-                for row in range(ratio - 1, page_length, ratio):
-                    kv_writes.extend((kv_page, row // ratio, packed_page_start + row))
-        packed_start += length
-
-    parts = (state_pages, kv_pages, state_writes, kv_writes)
-    packed = torch.tensor(
-        [entry for part in parts for entry in part],
-        dtype=torch.long,
-        device="cpu",
-        pin_memory=True,
-    ).to(device=device, non_blocking=True)
-    state_pages, kv_pages, state_writes, kv_writes = packed.split(
-        [len(part) for part in parts]
-    )
-    return AlignedPrefillWriteLayout(
-        state_pages.reshape(-1, 2).T,
-        kv_pages.reshape(-1, 2).T,
-        state_writes.reshape(-1, 3).T,
-        kv_writes.reshape(-1, 3).T,
+    # Bound the cache to 4 MiB of indices. Layouts contain logical coordinates
+    # only, so page remapping never invalidates an entry.
+    entries = 0
+    kv_entries = page_size // ratio
+    for length in lengths:
+        pages, tail = divmod(length, page_size)
+        groups = length // ratio
+        entries += 2 * (pages + (tail > 0) + (groups + kv_entries - 1) // kv_entries)
+        entries += 3 * (pages * ring_entries + min(tail, ring_entries) + groups)
+    if device.type == "cuda" and entries * 8 <= 256 * 1024:
+        return _cached_aligned_prefill_write_layout(
+            tuple(lengths),
+            tuple(prefixes),
+            page_size,
+            ratio,
+            ring_entries,
+            torch.cuda.current_stream(device),
+        )
+    return _build_aligned_prefill_write_layout(
+        lengths,
+        prefixes,
+        page_size=page_size,
+        ratio=ratio,
+        ring_entries=ring_entries,
+        device=device,
     )
 
 
-def try_write_aligned_prefill_cache(
+def write_aligned_prefill_cache(
     raw_keys: torch.Tensor,
     rope_cos: torch.Tensor,
     rope_sin: torch.Tensor,
     k_norm_gamma: torch.Tensor,
     kv_pool: torch.Tensor,
-    kv_table: torch.Tensor,
     state_pool: torch.Tensor,
-    state_table: torch.Tensor,
-    layout: AlignedPrefillWriteLayout,
+    plan: AlignedPrefillWritePlan,
     *,
     ratio: int,
     norm_eps: float,
 ) -> IndexerCacheUndo | None:
-    """Use the validated partition and current layer's page tables.
-
-    The plan validates coverage of the logical pages. A bad or aliased
-    physical page sends the whole transaction to the general writer.
-    """
-    state_blocks = state_table[tuple(layout.state_pages.unbind(0))]
-    kv_blocks = kv_table[tuple(layout.kv_pages.unbind(0))]
-
-    def invalid_or_aliased(blocks, pool_size):
-        # Sort only the touched pages. The state/KV write rows are never sorted.
-        ordered = blocks.sort().values
-        return ((blocks <= 0) | (blocks >= pool_size)).any() | (
-            ordered[1:] == ordered[:-1]
-        ).any()
-
-    if bool(
-        (
-            invalid_or_aliased(state_blocks, state_pool.shape[0])
-            | invalid_or_aliased(kv_blocks, kv_pool.shape[0])
-        ).item()
-    ):
-        return None
-
+    """Write the unique slots established by this layer's preflight."""
+    layout = plan.layout
     state_pages, state_offsets, state_rows = layout.state_writes.unbind(0)
     state_slots = (
-        state_blocks.to(torch.long).index_select(0, state_pages) * state_pool.shape[1]
+        plan.state_blocks.to(torch.long).index_select(0, state_pages)
+        * state_pool.shape[1]
         + state_offsets
     )
     state_values = raw_keys.index_select(0, state_rows).float()
     kv_pages, kv_offsets, group_ends = layout.kv_writes.unbind(0)
     kv_slots = (
-        kv_blocks.to(torch.long).index_select(0, kv_pages) * kv_pool.shape[1]
+        plan.kv_blocks.to(torch.long).index_select(0, kv_pages) * kv_pool.shape[1]
         + kv_offsets
     )
     kv_values = raw_keys.new_empty((0, raw_keys.shape[1]), dtype=torch.bfloat16)

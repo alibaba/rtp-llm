@@ -15,10 +15,25 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+    AlignedPrefillWritePlan,
+    build_aligned_prefill_write_layout,
+)
 
-from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
+from .qsa_cache_views import (
+    _block_table,
+    _typed_2d_pool,
+    _validate_required_blocks,
+    _validate_state_blocks,
+    _validate_state_pairs,
+)
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 from .step_metadata import cached_query_geometry, cached_step_value, tensor_signature
+
+
+def _has_aliased_pages(blocks: torch.Tensor) -> torch.Tensor:
+    ordered = blocks.sort().values
+    return (ordered[1:] == ordered[:-1]).any()
 
 
 def _draft_incremental_prefill_geometry(
@@ -282,29 +297,79 @@ def _draft_incremental_prefill_geometry(
     # A completed group may read committed raw keys preceding the new rows.
     # Validate that source tail and every destination absolute state page.
     state_table_width = int(state_table.shape[1])
-    state_pairs = []
-    for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
-        first_needed = prefix - (prefix % ratio)
-        logical_blocks = {
-            position // state_tokens_per_block
-            for position in range(first_needed, prefix + length)
-        }
-        for logical_block in logical_blocks:
-            if logical_block < 0 or logical_block >= state_table_width:
-                raise RuntimeError(
-                    "QSA cache 'indexer_state' block table does not cover the "
-                    "draft incremental tail"
-                )
-            state_pairs.append((request_idx, logical_block))
-    from .qsa_cache_views import _validate_state_pairs
+    state_page_ranges = [
+        range(
+            (prefix - prefix % ratio) // state_tokens_per_block,
+            (end - 1) // state_tokens_per_block + 1,
+        )
+        for prefix, end in zip(host_prefixes, host_visible_ends)
+    ]
+    if any(
+        pages.start < 0 or pages.stop > state_table_width for pages in state_page_ranges
+    ):
+        raise RuntimeError(
+            "QSA cache 'indexer_state' block table does not cover the "
+            "draft incremental tail"
+        )
 
-    _validate_state_pairs(
-        state_table,
-        state_pairs,
-        int(state_pool.shape[0]),
-        "draft incremental tail",
-        checks=checks,
-    )
+    aligned_write = None
+    aliased = None
+    ring_entries = int(state_pool.shape[1])
+    if (
+        not draft
+        and not draft_prefix_reuse
+        and device.type == "cuda"
+        and not self.main_inputs.is_s_padded
+        and state_tokens_per_block == kv_tokens_per_block
+        and kv_tokens_per_block % ring_entries == 0
+        # Check logical coverage on the host before using advanced indexing.
+        # The device preflight still checks all visible KV pages.
+        and all(
+            end // ratio <= int(kv_table.shape[1]) * kv_entries_per_block
+            for end in host_visible_ends
+        )
+    ):
+        layout = cached_step_value(
+            self,
+            (
+                "aligned_prefill_write_layout",
+                tuple(lengths),
+                tuple(host_prefixes),
+                kv_tokens_per_block,
+                ratio,
+                ring_entries,
+                device,
+                torch.cuda.current_stream(device),
+            ),
+            lambda: build_aligned_prefill_write_layout(
+                lengths,
+                host_prefixes,
+                page_size=kv_tokens_per_block,
+                ratio=ratio,
+                ring_entries=ring_entries,
+                device=device,
+            ),
+        )
+        state_blocks = state_table[tuple(layout.state_pages.unbind(0))]
+        kv_blocks = kv_table[tuple(layout.kv_pages.unbind(0))]
+        _validate_state_blocks(
+            state_blocks, int(state_pool.shape[0]), "draft incremental tail", checks
+        )
+        aliased = _has_aliased_pages(state_blocks) | _has_aliased_pages(kv_blocks)
+        # Only the logical layout is cached. Resolve physical pages per layer.
+        aligned_write = AlignedPrefillWritePlan(layout, state_blocks, kv_blocks)
+    else:
+        _validate_state_pairs(
+            state_table,
+            [
+                (request, column)
+                for request, pages in enumerate(state_page_ranges)
+                for column in pages
+            ],
+            int(state_pool.shape[0]),
+            "draft incremental tail",
+            checks=checks,
+        )
 
     position_state = self.positions(ratio, checks)
     if position_state is not None:
@@ -319,7 +384,11 @@ def _draft_incremental_prefill_geometry(
             device=device,
         )
 
-    checks.verify()
+    # Invalid pages still fail preflight. Aliases only select the general writer.
+    if aliased is None:
+        checks.verify()
+    elif checks.verify(payload=aliased)[0]:
+        aligned_write = None
     return IncrementalPrefillPlan(
         **{
             "lengths": lengths,
@@ -328,7 +397,6 @@ def _draft_incremental_prefill_geometry(
             "head_num": head_num,
             "ratio": ratio,
             "token_budget": token_budget,
-            "host_prefixes": host_prefixes,
             "prefixes": prefixes,
             "cu_seqlens": expected_cu,
             "current_cos": current_cos,
@@ -348,6 +416,7 @@ def _draft_incremental_prefill_geometry(
             "state_table": state_table,
             "rope_cos": rope_cos,
             "rope_sin": rope_sin,
+            "aligned_write": aligned_write,
         }
     )
 
@@ -626,8 +695,6 @@ def _target_verify_geometry(
             if not graph_target:
                 state_pairs.append((request_idx, logical_block))
     if not graph_target:
-        from .qsa_cache_views import _validate_state_pairs
-
         _validate_state_pairs(
             state_table,
             state_pairs,

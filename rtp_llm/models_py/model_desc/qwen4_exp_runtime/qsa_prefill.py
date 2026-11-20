@@ -19,14 +19,12 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     is_qsa_rope_style,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
-    build_aligned_prefill_write_layout,
-    try_write_aligned_prefill_cache,
+    write_aligned_prefill_cache,
 )
 
 from .qsa_cache_views import _block_table, _same_tensor_metadata, _typed_2d_pool
 from .qsa_plans import IncrementalPrefillPlan
 from .qsa_selection import select_qsa_paged_tokens
-from .step_metadata import cached_step_value
 
 
 def write_prefill_indexer_cache(
@@ -548,54 +546,24 @@ def _try_write_aligned_prefix_cache(
     self, raw_keys: torch.Tensor, plan: IncrementalPrefillPlan, indexer: Any
 ) -> bool:
     """Publish the side-cache transaction for an eager, page-aligned prefill."""
-    page_size = plan.kv_tokens_per_block
-    ring_entries = int(plan.state_pool.shape[1])
-    if (
-        self.main_inputs.is_s_padded
-        or plan.state_tokens_per_block != page_size
-        or page_size % ring_entries
-    ):
+    if plan.aligned_write is None:
         return False
     if self._side_cache_undo is not None:
         raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
 
-    # The preflight verified the packed CU, prefix alignment, and both tables'
-    # logical coverage. Only the layout is shared across layers.
-    layout = cached_step_value(
-        self,
-        (
-            "aligned_prefill_write_layout",
-            tuple(plan.lengths),
-            tuple(plan.host_prefixes),
-            page_size,
-            plan.ratio,
-            ring_entries,
-            raw_keys.device,
-        ),
-        lambda: build_aligned_prefill_write_layout(
-            plan.lengths,
-            plan.host_prefixes,
-            page_size=page_size,
-            ratio=plan.ratio,
-            ring_entries=ring_entries,
-            device=raw_keys.device,
-        ),
-    )
-    undo = try_write_aligned_prefill_cache(
+    undo = write_aligned_prefill_cache(
         raw_keys,
         plan.rope_cos,
         plan.rope_sin,
         indexer.k_norm_gamma,
         plan.kv_pool,
-        plan.kv_table,
         plan.state_pool,
-        plan.state_table,
-        layout,
+        plan.aligned_write,
         ratio=plan.ratio,
         norm_eps=float(indexer.norm_eps),
     )
     if undo is None:
-        return False
+        raise RuntimeError("qwen4_exp QSA writer did not return an undo record")
     object.__setattr__(self, "_side_cache_undo", undo)
     return True
 

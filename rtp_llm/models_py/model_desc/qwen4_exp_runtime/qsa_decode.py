@@ -333,6 +333,7 @@ def select_decode_tokens(
             kv_tokens_per_block=kv_tokens_per_block,
             state_tokens_per_block=int(self.indexer_state_cache.seq_size_per_block),
             norm_eps=float(indexer.norm_eps),
+            collect_stats=False,
             rope_is_token_aligned=True,
         )
 
