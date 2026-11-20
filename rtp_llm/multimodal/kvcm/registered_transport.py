@@ -828,7 +828,7 @@ class RegisteredTransportPool:
                 held_ns += time.perf_counter_ns() - held_since
             self._condition.release()
         if sample:
-            self._observe_lock_hold(for_write, "gdr_acquire_lock_hold", held_ns)
+            self._observe_lock_hold(for_write, "acquire", held_ns)
         if slot is None:
             self._report_acquire_failure(for_write, failure)
             return None
@@ -866,7 +866,7 @@ class RegisteredTransportPool:
             self._condition.notify_all()
             held_ns = time.perf_counter_ns() - held_since if sample else 0
         if sample:
-            self._observe_lock_hold(for_write, "gdr_release_lock_hold", held_ns)
+            self._observe_lock_hold(for_write, "release", held_ns)
         if self._observe_lease is not None:
             self._observe_lease(for_write, -1, -slot._capacity)
 

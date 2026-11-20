@@ -118,6 +118,9 @@ class AccMetrics(Enum):
         "py_rtp_vit_remote_embedding_cache_operation_qps"
     )
     VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
+    VIT_REMOTE_EMB_GDR_ACQUIRE_FAILURE_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_acquire_failure_qps"
+    )
     VIT_REMOTE_EMB_WRITE_IN_PROGRESS_QPS_METRIC = (
         "py_rtp_vit_remote_embedding_cache_write_in_progress_qps"
     )
@@ -230,6 +233,9 @@ class GaugeMetrics(Enum):
     VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
 
     VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
+    VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_lock_hold_ms"
+    )
     # Enqueue to worker start; canceled-before-start work has no observation.
     VIT_REMOTE_EMB_QUEUE_WAIT_METRIC = "py_rtp_vit_remote_embedding_cache_queue_wait_ms"
     # Logical object bytes for completed SDK calls and bytes / SDK wall time.
@@ -375,6 +381,7 @@ class MetricReporter(object):
                     )
                 elif metric in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC,

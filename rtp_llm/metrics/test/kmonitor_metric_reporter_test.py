@@ -51,9 +51,12 @@ class MetricReporterTest(unittest.TestCase):
                 if metric
                 not in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC,
                 )
             ],
         )
@@ -114,6 +117,37 @@ class MetricReporterTest(unittest.TestCase):
                 points = reporter._matic_map[metric.value].fetch_reported_data()
                 self.assertEqual(len(points), 1)
                 self.assertEqual(points[0].value, 1.0)
+
+    def test_gdr_diagnostics_emit_failure_rate_and_sampled_lock_latency(self):
+        reporter, _ = self.make_reporter()
+        failure = AccMetrics.VIT_REMOTE_EMB_GDR_ACQUIRE_FAILURE_QPS_METRIC
+        lock_hold = GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC
+        failure_tags = {"operation": "read", "reason": "lock_timeout"}
+        hold_tags = {"operation": "write", "phase": "release"}
+        with mock.patch(
+            "rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric.time"
+        ) as clock:
+            clock.time.return_value = 100.0
+            reporter.init()
+            reporter.report(failure, 1, failure_tags)
+            reporter.report(failure, 1, failure_tags)
+            clock.time.return_value = 102.0
+            failures = reporter._matic_map[failure.value].fetch_reported_data()
+        self.assertEqual([(p.value, p.tags) for p in failures], [(1, failure_tags)])
+
+        reporter.report(lock_hold, 0.015625, hold_tags)
+        reporter.report(lock_hold, 0.03125, hold_tags)
+        samples = reporter._matic_map[lock_hold.value].fetch_reported_data()
+        self.assertEqual(
+            {p.metric_name or lock_hold.value: p.value for p in samples},
+            {
+                lock_hold.value: 0.0234375,
+                lock_hold.value + "_count": 2,
+                lock_hold.value + "_sum": 0.046875,
+                lock_hold.value + "_max": 0.03125,
+            },
+        )
+        self.assertTrue(all(p.tags == hold_tags for p in samples))
 
     def test_emb_stage_distribution_and_qps_use_same_samples(self):
         rt = GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC.value

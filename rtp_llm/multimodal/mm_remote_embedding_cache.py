@@ -464,25 +464,17 @@ class MMRemoteEmbeddingCache:
     @classmethod
     def _observe_gdr_acquire_failure(cls, for_write, reason):
         cls._report_metric(
-            AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC,
+            AccMetrics.VIT_REMOTE_EMB_GDR_ACQUIRE_FAILURE_QPS_METRIC,
             1,
-            {
-                "operation": "write" if for_write else "read",
-                "stage": "gdr_acquire_" + reason,
-                "status": "skipped",
-            },
+            {"operation": "write" if for_write else "read", "reason": reason},
         )
 
     @classmethod
-    def _observe_gdr_lock_hold(cls, for_write, stage, duration_ns):
+    def _observe_gdr_lock_hold(cls, for_write, phase, duration_ns):
         cls._report_metric(
-            GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+            GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
             duration_ns / 1_000_000,
-            {
-                "operation": "write" if for_write else "read",
-                "stage": stage,
-                "status": "success",
-            },
+            {"operation": "write" if for_write else "read", "phase": phase},
         )
 
     @classmethod

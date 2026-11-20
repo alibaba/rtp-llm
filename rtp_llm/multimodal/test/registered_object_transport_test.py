@@ -403,7 +403,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 pool.release(slot)
         self.assertEqual(
             samples,
-            [(False, "gdr_acquire_lock_hold", 13), (True, "gdr_release_lock_hold", 8)],
+            [(False, "acquire", 13), (True, "release", 8)],
         )
 
     def test_sized_lease_materializes_views_outside_the_allocator_lock(self):

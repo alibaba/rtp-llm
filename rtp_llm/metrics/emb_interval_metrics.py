@@ -46,6 +46,7 @@ BUCKET_LABELS = tuple(map(str, BOUNDS_MS)) + ("+Inf",)
 PREFIX = "py_rtp_vit_remote_embedding_cache_"
 STAGE_RT = PREFIX + "stage_rt_ms"
 QUEUE_RT = PREFIX + "queue_wait_ms"
+GDR_LOCK_HOLD_RT = PREFIX + "gdr_lock_hold_ms"
 OPERATION_QPS = PREFIX + "operation_qps"
 
 
@@ -156,11 +157,15 @@ class EmbLatencyMetric(MetricBase):
         super().__init__(name, tags)
         self._is_stage = name == STAGE_RT
         self._is_queue = name == QUEUE_RT
-        self._tag_names = (
-            ("operation", "stage", "status")
-            if self._is_stage
-            else ("operation",) if self._is_queue else ("status",)
-        )
+        self._is_gdr_lock_hold = name == GDR_LOCK_HOLD_RT
+        if self._is_stage:
+            self._tag_names = ("operation", "stage", "status")
+        elif self._is_queue:
+            self._tag_names = ("operation",)
+        elif self._is_gdr_lock_hold:
+            self._tag_names = ("operation", "phase")
+        else:
+            self._tag_names = ("status",)
         self._lock = Lock()
         self._samples = {}
         self._stage_keys = set()
@@ -173,6 +178,8 @@ class EmbLatencyMetric(MetricBase):
             key = tags["operation"], tags["stage"], tags["status"]
         elif self._is_queue:
             key = (tags["operation"],)
+        elif self._is_gdr_lock_hold:
+            key = tags["operation"], tags["phase"]
         else:
             key = (tags["status"],)
         with self._lock:
