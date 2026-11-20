@@ -16,6 +16,31 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
 
 
 class DraftPrefillGraphTest(unittest.TestCase):
+    def test_replay_rejects_forged_metadata_lease_before_delegate(self):
+        from rtp_llm.ops.compute_ops import GraphReplayMetadataLease
+
+        for spoof_class in (False, True):
+            with self.subTest(spoof_class=spoof_class):
+                hook, groups, delegate = self._replay()
+                forged = Mock(spec=GraphReplayMetadataLease) if spoof_class else Mock()
+                forged.matches.return_value = True
+                forged.consume.return_value = True
+                rejected = False
+                try:
+                    hook.prepare_cuda_graph(groups, metadata_lease=forged)
+                except RuntimeError as error:
+                    self.assertRegex(str(error), "stale metadata lease")
+                    rejected = True
+                self.assertTrue(
+                    rejected,
+                    f"forged lease entered delegate: matches={forged.matches.call_count}, "
+                    f"consume={forged.consume.call_count}, "
+                    f"delegate={delegate.prepare_cuda_graph.call_count}",
+                )
+                delegate.prepare_cuda_graph.assert_not_called()
+                forged.matches.assert_not_called()
+                forged.consume.assert_not_called()
+
     def test_fixed_capacity_mapping_handles_padding_and_changed_lengths(self):
         for lengths, prefixes in (([1, 4, 0], [7, 127, 0]), ([3, 2, 1], [125, 5, 9])):
             cu = [0]

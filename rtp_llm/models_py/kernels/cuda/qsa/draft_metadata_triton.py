@@ -199,3 +199,189 @@ def replay_invalid(
         num_warps=4,
     )
     return invalid
+
+
+@tr.jit
+def _replay_invalid_from_sources(
+    source_lengths,
+    source_prefixes,
+    lengths,
+    prefixes,
+    table,
+    transported,
+    cu,
+    invalid,
+    BATCH: tl.constexpr,
+    COLUMNS: tl.constexpr,
+    POOL_SIZE: tl.constexpr,
+    PAGE_SHIFT: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    FACTOR: tl.constexpr,
+    REQUEST_BLOCK: tl.constexpr,
+    TOKEN_BLOCK: tl.constexpr,
+):
+    request = tl.arange(0, REQUEST_BLOCK)
+    request_mask = request < BATCH
+    # Source arithmetic must widen before both the scan and prefix + length.
+    source_length = tl.load(source_lengths + request, request_mask, other=0).to(
+        tl.int64
+    )
+    source_prefix = tl.load(source_prefixes + request, request_mask, other=0).to(
+        tl.int64
+    )
+    end = tl.cumsum(source_length, 0)
+    begin = end - source_length
+    total = tl.sum(source_length, 0)
+    active = request_mask & (source_length > 0)
+    zeros = tl.cumsum((request_mask & (source_length == 0)).to(tl.int32), 0)
+    captured_length = tl.load(lengths + request, request_mask, other=0).to(tl.int64)
+    captured_prefix = tl.load(prefixes + request, request_mask, other=0).to(tl.int64)
+    captured_cu = tl.load(cu + request, request_mask, other=0).to(tl.int64)
+    bad_request = (
+        (request_mask & ((source_length < 0) | (source_length > CAPACITY // BATCH)))
+        | (active & (source_prefix <= 0))
+        | (active & (zeros > 0))
+        | (active & (source_prefix + source_length - 1 > 2147483647))
+        | (request_mask & (captured_length != source_length))
+        | (active & (captured_prefix != source_prefix))
+        | (request_mask & (captured_cu != begin))
+    )
+
+    first = ((source_prefix >> 2) << 2) >> PAGE_SHIFT
+    last = (source_prefix + source_length - 1) >> PAGE_SHIFT
+    bad_request = bad_request | (
+        active & ((first < 0) | (first >= COLUMNS) | (last < 0) | (last >= COLUMNS))
+    )
+    # For 1 <= length <= lanes <= 4, last_token - aligned_start <= 6.
+    # A page holds >= 1 token, so the inclusive interval has <= 7 columns.
+    # Invalid lengths already reject; restricting their loads keeps work bounded.
+    column = first[:, None] + tl.arange(0, 8)[None, :]
+    visible = (
+        active[:, None]
+        & (source_length[:, None] <= CAPACITY // BATCH)
+        & (column >= 0)
+        & (column < COLUMNS)
+        & (column <= last[:, None])
+    )
+    safe_column = tl.minimum(tl.maximum(column, 0), COLUMNS - 1)
+    safe_request = tl.minimum(request, BATCH - 1).to(tl.int64)
+    physical = tl.load(
+        table + safe_request[:, None] * COLUMNS + safe_column,
+        visible,
+        other=0,
+    )
+    bad_page = visible & ((physical <= 0) | (physical >= POOL_SIZE))
+    bad_request = bad_request | (tl.sum(bad_page.to(tl.int32), 1) != 0)
+
+    token = tl.arange(0, TOKEN_BLOCK)
+    # Only the independent source partition determines the packed token owner.
+    owner = tl.sum(
+        ((token[:, None].to(tl.int64) >= end[None, :]) & request_mask[None, :]).to(
+            tl.int32
+        ),
+        1,
+    )
+    owner = tl.minimum(tl.maximum(owner, 0), BATCH - 1)
+    token_prefix = tl.load(source_prefixes + owner).to(tl.int64)
+    token_begin = tl.gather(begin, owner, 0)
+    wanted_position = token_prefix + token.to(tl.int64) - token_begin
+    AXIS_BLOCK: tl.constexpr = 1 if FACTOR == 1 else 4
+    axis = tl.arange(0, AXIS_BLOCK)
+    position_mask = (token[:, None] < CAPACITY) & (axis[None, :] < FACTOR)
+    actual_position = tl.load(
+        transported + token[:, None] * FACTOR + axis[None, :],
+        position_mask,
+        other=0,
+    ).to(tl.int64)
+    bad_position = (
+        position_mask
+        & (token[:, None] < total)
+        & (actual_position != wanted_position[:, None])
+    )
+    captured_total = tl.load(cu + BATCH).to(tl.int64)
+    tl.store(
+        invalid,
+        (
+            (tl.sum(bad_request.to(tl.int32), 0) != 0)
+            | (tl.sum(tl.sum(bad_position.to(tl.int32), 1), 0) != 0)
+            | (total < 0)
+            | (total > CAPACITY)
+            | (captured_total != total)
+        ),
+    )
+
+
+def replay_invalid_from_sources(
+    source_lengths,
+    source_prefixes,
+    lengths,
+    prefixes,
+    table,
+    transported,
+    cu,
+    *,
+    pool_size,
+    page_size,
+    token_capacity,
+    position_factor,
+):
+    """Validate independent source snapshots in one launch without a host read.
+
+    Admission owns snapshot independence, producer fences and replay lifetime.
+    Unsupported tensor metadata or page geometry falls back via ``None``.
+    """
+    tensors = (
+        source_lengths,
+        source_prefixes,
+        lengths,
+        prefixes,
+        table,
+        transported,
+        cu,
+    )
+    if not is_supported(*tensors) or any(t.dtype != torch.int32 for t in tensors):
+        return None
+    batch = source_lengths.numel()
+    if (
+        source_lengths.ndim != 1
+        or not 1 <= batch <= 32
+        or any(t.shape != (batch,) for t in (source_prefixes, lengths, prefixes))
+        or cu.shape != (batch + 1,)
+        or not isinstance(token_capacity, int)
+        or not 0 < token_capacity <= 128
+        or token_capacity % batch
+        or not 1 <= token_capacity // batch <= 4
+        or not isinstance(position_factor, int)
+        or position_factor not in (1, 3)
+        or transported.numel() != token_capacity * position_factor
+        or table.ndim != 2
+        or table.shape[0] != batch
+        or table.shape[1] <= 0
+        or not isinstance(pool_size, int)
+        or pool_size <= 0
+        or not isinstance(page_size, int)
+        or not 0 < page_size <= 1 << 30
+        or page_size & (page_size - 1)
+    ):
+        return None
+    invalid = torch.empty((), device=source_lengths.device, dtype=torch.bool)
+    _replay_invalid_from_sources[(1,)](
+        source_lengths,
+        source_prefixes,
+        lengths,
+        prefixes,
+        table,
+        transported,
+        cu,
+        invalid,
+        batch,
+        table.shape[1],
+        min(pool_size, 1 << 31),
+        page_size.bit_length() - 1,
+        token_capacity,
+        position_factor,
+        tr.next_power_of_2(batch),
+        tr.next_power_of_2(token_capacity),
+        num_warps=4,
+    )
+    return invalid

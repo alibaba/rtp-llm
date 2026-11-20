@@ -1,16 +1,20 @@
 """Exercise native draft graph layouts independently of hidden-state width."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.cpp.cuda_graph.tests import cuda_graph_tagged_cache_test as fixtures
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_STATE_TAG
 from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph import (
+    DraftPrefillGraphReplay,
     draft_graph_rows,
 )
-from rtp_llm.ops.compute_ops import PyModelOutputs
+from rtp_llm.ops.compute_ops import GraphReplayMetadataLease, PyModelOutputs
 
 
 class PackedDraftCapacityModel:
@@ -49,6 +53,27 @@ class DraftCapacityModel(PackedDraftCapacityModel):
         return PyModelOutputs(
             outputs.hidden_states + positions.to(outputs.hidden_states.dtype)[:, None]
         )
+
+
+class MetadataLeaseDraftModel(DraftCapacityModel):
+    def __init__(self):
+        super().__init__()
+        self.delegate = Mock()
+        self.replays = []
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        replay = DraftPrefillGraphReplay(
+            {"full": self.delegate},
+            [("full", 128, 128, False), (INDEXER_STATE_TAG, 128, 128, False)],
+            1,
+            inputs.input_ids.numel(),
+            SimpleNamespace(
+                get_seq_size_per_block=lambda tag: 128,
+                get_kernel_seq_size_per_block=lambda tag: 128,
+            ),
+        )
+        self.replays.append(replay)
+        return replay
 
 
 class MtpGraphCapacityTest(unittest.TestCase):
@@ -155,6 +180,293 @@ class MtpGraphCapacityTest(unittest.TestCase):
                     CudaGraphRunner().init_mtp_draft_prefill(
                         DraftCapacityModel(), 8, 4, lanes, 4
                     )
+
+
+class SourceKernelMtpGraphCapacityTest(unittest.TestCase):
+    def setUp(self):
+        from rtp_llm.models_py.kernels.cuda.qsa import draft_metadata_triton
+
+        original = draft_metadata_triton.replay_invalid_from_sources
+
+        def require_kernel(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.assertIsNotNone(result, "source kernel must run, not fall back")
+            return result
+
+        required = patch.object(
+            draft_metadata_triton, "replay_invalid_from_sources", require_kernel
+        )
+        required.start()
+        self.addCleanup(required.stop)
+
+    def test_source_kernel_uses_independent_reusable_snapshots_without_item(
+        self,
+    ):
+        from rtp_llm.models_py.kernels.cuda.qsa import draft_metadata_triton
+
+        runner, model = self._metadata_lease_runner()
+        snapshots, leases, gpu_items, uploads = [], [], [], []
+        original = draft_metadata_triton.replay_invalid_from_sources
+        native_matches = GraphReplayMetadataLease.matches
+        item, copy = torch.Tensor.item, torch.Tensor.copy_
+
+        def inspect_source(
+            lengths,
+            prefixes,
+            captured_lengths,
+            captured_prefixes,
+            table,
+            transported,
+            cu,
+            **kwargs,
+        ):
+            self.assertNotEqual(lengths.data_ptr(), captured_lengths.data_ptr())
+            self.assertNotEqual(prefixes.data_ptr(), captured_prefixes.data_ptr())
+            snapshots.append((lengths.numel(), lengths.data_ptr(), prefixes.data_ptr()))
+            return original(
+                lengths,
+                prefixes,
+                captured_lengths,
+                captured_prefixes,
+                table,
+                transported,
+                cu,
+                **kwargs,
+            )
+
+        def observe(lease, groups):
+            leases.append(lease)
+            return native_matches(lease, groups)
+
+        def checked_item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                gpu_items.append(1)
+            return item(tensor, *args, **kwargs)
+
+        def checked_copy(tensor, source, *args, **kwargs):
+            if tensor.is_cuda and not source.is_cuda and source.is_pinned():
+                uploads.append(1)
+            return copy(tensor, source, *args, **kwargs)
+
+        for lengths in ([4] * 8, [1], [4, 1, 3], [1, 1], [4] * 8):
+            inputs = self._metadata_lease_inputs(lengths)
+            with (
+                patch.object(
+                    draft_metadata_triton, "replay_invalid_from_sources", inspect_source
+                ),
+                patch.object(GraphReplayMetadataLease, "matches", observe),
+                patch.object(torch.Tensor, "item", checked_item),
+                patch.object(torch.Tensor, "copy_", checked_copy),
+            ):
+                self.assertTrue(runner.prepare(inputs))
+            self.assertIs(leases[-1].device_validation_invalid, False)
+            self._assert_metadata_lease_output(runner, inputs)
+        self.assertTrue(snapshots)
+        for capacity in {row[0] for row in snapshots}:
+            self.assertEqual(
+                len({row[1:] for row in snapshots if row[0] == capacity}), 1
+            )
+        self.assertEqual(gpu_items, [])
+        self.assertEqual(uploads, [])
+
+    def test_source_kernel_interrupted_enqueue_recovers_on_other_stream(self):
+        from rtp_llm.models_py.kernels.cuda.qsa import draft_metadata_triton
+
+        runner, model = self._metadata_lease_runner()
+        inputs = self._metadata_lease_inputs([2, 1])
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        original = draft_metadata_triton.replay_invalid_from_sources
+
+        def interrupted(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("injected early verdict interruption")
+
+        before = model.delegate.prepare_cuda_graph.call_count
+        with (
+            torch.cuda.stream(stream),
+            patch.object(
+                draft_metadata_triton, "replay_invalid_from_sources", interrupted
+            ),
+        ):
+            # Delay the earlier fills/copies too. Waiting only at attention
+            # preparation is too late if forward first overwrites token data.
+            torch.cuda._sleep(200_000_000)
+            with self.assertRaisesRegex(RuntimeError, "early verdict interruption"):
+                runner.prepare(inputs)
+        self.assertEqual(model.delegate.prepare_cuda_graph.call_count, before)
+        # Deliberately no caller wait on the interrupted stream. The runner's
+        # failure fence must protect both snapshots and shared capture storage.
+        fresh = self._metadata_lease_inputs([1, 3], prefix=11)
+        self._assert_metadata_lease_output(runner, fresh)
+
+    def test_source_kernel_retains_original_source_until_failure_fence(self):
+        import gc
+
+        from rtp_llm.models_py.kernels.cuda.qsa import draft_metadata_triton
+
+        runner, _ = self._metadata_lease_runner()
+        inputs = self._metadata_lease_inputs([2, 1])
+        source = inputs.attention_inputs["full"].input_lengths
+        source_lifetime = torch._C._WeakTensorRef(source)
+        del source
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            # Keep the already-enqueued source D2D readers pending when the
+            # CPU exception unwinds and the caller drops its whole input.
+            torch.cuda._sleep(20_000_000)
+            with patch.object(
+                draft_metadata_triton,
+                "replay_invalid_from_sources",
+                side_effect=RuntimeError("injected before verdict return"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "before verdict return"):
+                    runner.prepare(inputs)
+        del inputs
+        gc.collect()
+        retained_before_fence = not source_lifetime.expired()
+        # Drain before reporting a failing control so no borrowed source read
+        # outlives the test, even on the deliberately unfixed implementation.
+        stream.synchronize()
+        self.assertTrue(
+            retained_before_fence,
+            "producer TensorImpl released before failed-prepare fence",
+        )
+        self._assert_metadata_lease_output(
+            runner, self._metadata_lease_inputs([1, 3], prefix=11)
+        )
+        gc.collect()
+        self.assertTrue(
+            source_lifetime.expired(),
+            "retired producer source retained after safe slot reuse",
+        )
+
+    def _metadata_lease_runner(self):
+        torch.cuda.set_device(0)
+        model = MetadataLeaseDraftModel()
+        runner = CudaGraphRunner()
+        runner.init_mtp_draft_prefill(model, 8, 4, 4, 4, ["full", INDEXER_STATE_TAG])
+        return runner, model
+
+    def _metadata_lease_inputs(self, lengths, *, prefix=7, device_first=True):
+        inputs = fixtures._build_prefill_inputs(
+            ["full", INDEXER_STATE_TAG],
+            {"full": 1, INDEXER_STATE_TAG: 3},
+            lengths,
+        )
+        source_lengths = torch.tensor(lengths, dtype=torch.int32)
+        source_prefixes = torch.full_like(source_lengths, prefix)
+        if device_first:
+            source_lengths = source_lengths.cuda()
+            source_prefixes = source_prefixes.cuda()
+        else:
+            source_lengths = source_lengths.pin_memory()
+            source_prefixes = source_prefixes.pin_memory()
+        cu_kv = [0]
+        for length in lengths:
+            cu_kv.append(cu_kv[-1] + prefix + length)
+        groups = inputs.attention_inputs
+        for group in groups.values():
+            group.input_lengths = source_lengths
+            group.prefix_lengths = source_prefixes
+            group.cu_kv_seqlens_device = torch.tensor(
+                cu_kv, device="cuda", dtype=torch.int32
+            )
+            group.context_total_kv_length = cu_kv[-1]
+        inputs.attention_inputs = groups
+        rows = sum(lengths)
+        inputs.input_hiddens = (
+            torch.arange(rows * 16, device="cuda")
+            .remainder(11)
+            .reshape(rows, 16)
+            .to(torch.bfloat16)
+        )
+        inputs.combo_position_ids = torch.tensor(
+            [prefix + i for length in lengths for i in range(length)],
+            device="cuda",
+            dtype=torch.int32,
+        )
+        return inputs
+
+    def _assert_metadata_lease_output(self, runner, inputs):
+        self.assertTrue(runner.canRun(inputs))
+        actual = runner.forward(inputs).hidden_states.clone()
+        torch.cuda.synchronize()
+        rows = inputs.input_ids.numel()
+        expected = inputs.input_hiddens.reshape(rows, 4, 4).sum(1)
+        expected += (inputs.input_ids + inputs.combo_position_ids).to(expected.dtype)[
+            :, None
+        ]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_source_kernel_rejects_corrupt_transport_before_delegate(self):
+        from rtp_llm.models_py.kernels.cuda.qsa import draft_metadata_triton
+
+        runner, model = self._metadata_lease_runner()
+        original = draft_metadata_triton.replay_invalid_from_sources
+        for defect in ("position", "cu", "state"):
+            with self.subTest(defect=defect):
+
+                def corrupt(*args, **kwargs):
+                    # Inject after Base-RoPE canonicalization, into the actual
+                    # captured buffers that the independent kernel validates.
+                    if defect == "position":
+                        args[5].data[0] += 1
+                    elif defect == "cu":
+                        args[6].data[1] += 1
+                    else:
+                        args[4].data[0, 0] = 0
+                    return original(*args, **kwargs)
+
+                before = model.delegate.prepare_cuda_graph.call_count
+                with patch.object(
+                    draft_metadata_triton, "replay_invalid_from_sources", corrupt
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "raw-state pages"):
+                        runner.prepare(self._metadata_lease_inputs([2, 1]))
+                self.assertEqual(model.delegate.prepare_cuda_graph.call_count, before)
+                self._assert_metadata_lease_output(
+                    runner, self._metadata_lease_inputs([3, 1], prefix=11)
+                )
+
+    def test_native_device_verdict_host_sources_keep_reference_path(self):
+        runner, model = self._metadata_lease_runner()
+        gpu_items = []
+        item = torch.Tensor.item
+
+        def checked_item(tensor, *args, **kwargs):
+            if tensor.is_cuda:
+                gpu_items.append(1)
+            return item(tensor, *args, **kwargs)
+
+        inputs = self._metadata_lease_inputs([3, 1], device_first=False)
+        with patch.object(torch.Tensor, "item", checked_item):
+            self.assertTrue(runner.prepare(inputs))
+        self.assertEqual(gpu_items, [1])
+        self._assert_metadata_lease_output(runner, inputs)
+
+    def test_native_device_verdict_readonly_result_does_not_extend_lease_lifetime(self):
+        runner, model = self._metadata_lease_runner()
+        observed = []
+        native_matches = GraphReplayMetadataLease.matches
+
+        def observe(lease, groups):
+            observed.append((lease, groups))
+            return native_matches(lease, groups)
+
+        with patch.object(GraphReplayMetadataLease, "matches", observe):
+            self.assertTrue(runner.prepare(self._metadata_lease_inputs([2, 1])))
+        lease, groups = observed[-1]
+        self.assertIs(lease.device_validation_invalid, False)
+        with self.assertRaises(AttributeError):
+            lease.device_validation_invalid = False
+        self.assertFalse(lease.matches(groups))
+        self.assertFalse(lease.consume(groups))
+        before = model.delegate.prepare_cuda_graph.call_count
+        with self.assertRaisesRegex(RuntimeError, "stale metadata lease"):
+            model.replays[-1].prepare_cuda_graph(groups, metadata_lease=lease)
+        self.assertEqual(model.delegate.prepare_cuda_graph.call_count, before)
 
 
 if __name__ == "__main__":

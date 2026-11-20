@@ -188,6 +188,13 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
         .def("__copy__", [](const PyAttentionInputs& self) { return PyAttentionInputs(self); });
 
+    // No Python constructor or mutators: only a live native GraphRunner can
+    // issue a reservation. The source tensors remain subject to validation.
+    pybind11::class_<GraphReplayMetadataLease, std::shared_ptr<GraphReplayMetadataLease>>(m, "GraphReplayMetadataLease")
+        .def_property_readonly("device_validation_invalid", &GraphReplayMetadataLease::deviceValidationInvalid)
+        .def("matches", &GraphReplayMetadataLease::matches)
+        .def("consume", &GraphReplayMetadataLease::consume);
+
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
         .def(pybind11::init<>())
         .def(pybind11::init<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, float>(),
