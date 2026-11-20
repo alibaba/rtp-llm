@@ -1,0 +1,10 @@
+# Resolution overrides for the XPU lock, applied by update_xpu_lock.sh the same
+# way requirements_cuda13_overrides.txt is for the cuda13 locks.
+# Per-entry reasons below.
+# torch 2.13 requires setuptools>=77.0.3, while the base set pins 60.5.0.
+# setuptools 82 removes pkg_resources, which grpcio-tools and cpm_kernels import.
+setuptools>=77.0.3,<82
+# xgrammar requires PyPI triton on x86. PyPI triton and triton-xpu (required by
+# torch+xpu) both install the `triton` package, so it would overwrite the XPU
+# build. The marker never matches, which drops the requirement.
+triton ; sys_platform == "never"
