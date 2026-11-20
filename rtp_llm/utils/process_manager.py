@@ -31,6 +31,10 @@ DEFAULT_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS = 60.0
 DEFAULT_BACKEND_POST_FRONTEND_DRAIN_SECONDS = 120.0
 
 
+class StartupFailure(RuntimeError):
+    """A startup status that cannot recover through another readiness check."""
+
+
 class ProcessManager:
     """Process manager for managing and monitoring processes"""
 
@@ -838,6 +842,7 @@ class ProcessManager:
             process_name: Name identifier for the process
             check_ready_fn: Custom function to check if service is ready.
                           Should return True when ready, False otherwise.
+                          Raise StartupFailure for a terminal startup error.
             retry_interval_seconds: Interval between health checks
         """
         self.health_check_processes.extend(processes)
@@ -889,6 +894,14 @@ class ProcessManager:
                         self.health_check_status[process_name]["checked"] = True
                     logging.info(f"{process_name} is ready")
                     return
+            except StartupFailure as e:
+                logging.error("%s startup failed: %s", process_name, e)
+                if not self.shutdown_requested:
+                    self.request_failure_shutdown()
+                with self.health_check_lock:
+                    self.health_check_status[process_name]["ready"] = False
+                    self.health_check_status[process_name]["checked"] = True
+                return
             except Exception as e:
                 # WARNING not DEBUG: a raising check is the only symptom while the parent waits.
                 logging.warning(f"{process_name} health check exception: {str(e)}")

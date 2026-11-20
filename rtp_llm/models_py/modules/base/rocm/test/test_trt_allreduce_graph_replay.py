@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 
+import faulthandler
 import os
 import socket
 import unittest
@@ -13,6 +14,7 @@ REPLAY_ROUNDS = 60
 
 
 def _setup(rank, world_size, port):
+    faulthandler.dump_traceback_later(150)
     os.environ.update(
         MASTER_ADDR="localhost",
         MASTER_PORT=str(port),
@@ -39,6 +41,8 @@ def _teardown():
         dist.destroy_process_group()
     except Exception:
         pass
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 def _free_port():

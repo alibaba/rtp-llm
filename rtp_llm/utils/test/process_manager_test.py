@@ -15,6 +15,7 @@ from rtp_llm.utils.process_manager import (
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
     ProcessManager,
+    StartupFailure,
 )
 
 
@@ -902,6 +903,47 @@ class TestProcessManagerHealthCheck(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(self.manager.health_check_status["flaky_service"]["ready"])
         self.assertGreater(call_count[0], 1)  # Should have been called more than once
+
+    def test_terminal_startup_failure_stops_other_pending_health_checks(self):
+        for shutdown_requested in (False, True):
+            with self.subTest(shutdown_requested=shutdown_requested):
+                self.manager = ProcessManager(shutdown_timeout=50, monitor_interval=1)
+                stop = multiprocessing.Event()
+                process = multiprocessing.Process(target=stop.wait)
+                process.start()
+                self.manager.add_process(process)
+
+                def pending() -> bool:
+                    return False
+
+                def failed() -> bool:
+                    if shutdown_requested:
+                        self.manager.shutdown_requested = True
+                    raise StartupFailure("startup pipe reported failure")
+
+                self.manager.register_health_check([process], "pending", pending, 0.001)
+                self.manager.register_health_check([process], "failed", failed, 0.001)
+                try:
+                    self.assertFalse(self.manager.run_health_checks(timeout=1))
+                    self.assertEqual(
+                        self.manager.failure_detected, not shutdown_requested
+                    )
+                    self.assertTrue(process.is_alive())
+                    self.assertTrue(
+                        all(
+                            not thread.is_alive()
+                            for thread in self.manager.health_check_threads
+                        )
+                    )
+                finally:
+                    self.manager.shutdown_requested = True
+                    for thread in self.manager.health_check_threads:
+                        thread.join(timeout=1)
+                    stop.set()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+                        process.join(timeout=1)
 
     def test_custom_check_ready_function(self):
         """Test health check with custom check_ready_fn"""

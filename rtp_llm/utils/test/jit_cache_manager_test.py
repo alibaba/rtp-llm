@@ -1,8 +1,11 @@
 import contextlib
 import json
 import logging
+import multiprocessing
 import os
+import resource
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -23,6 +26,14 @@ from rtp_llm.utils import jit_cache_env as cache_env
 from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
 from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
+
+
+def _exit_rank_without_status(writer, release, exit_signal):
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    release.wait()
+    if exit_signal is not None:
+        os.kill(os.getpid(), exit_signal)
+    writer.close()
 
 
 def _fake_probes(hip=None, arch="sm_90", pkg="1_0", toolkit="nvcc-test"):
@@ -1689,7 +1700,7 @@ class BackendTest(JitCacheTestBase):
         configs = self.make_configs(remote="/r")
         configs.distribute_config.fake_gang_env = False
         proc = mock.Mock()
-        proc.name, proc.pid = "rank-0", 123
+        proc.name, proc.pid, proc.exitcode = "rank-0", 123, None
         proc.is_alive.side_effect = [True, False, False]  # dies after terminate
         status = mock.Mock()
 
@@ -1718,9 +1729,10 @@ class BackendTest(JitCacheTestBase):
         configs.parallelism_config.world_rank = 0
         configs.parallelism_config.dp_size = 1
         first = mock.Mock()
-        first.name, first.pid = "rank-0", 123
+        first.name, first.pid, first.exitcode = "rank-0", 123, None
         first.is_alive.side_effect = [True, False, False]
         second = mock.Mock()
+        second.pid, second.exitcode = None, None
         second.start.side_effect = RuntimeError("spawn failed")
         second.is_alive.return_value = False
         ctx = mock.Mock()
@@ -1758,7 +1770,7 @@ class BackendTest(JitCacheTestBase):
         configs = self.make_configs(remote="/r")
         configs.distribute_config.fake_gang_env = False
         proc = mock.Mock()
-        proc.name, proc.pid = "rank-0", 123
+        proc.name, proc.pid, proc.exitcode = "rank-0", 123, None
         proc.is_alive.return_value = True
         cleanup = mock.Mock()
 
@@ -1778,6 +1790,99 @@ class BackendTest(JitCacheTestBase):
         cleanup.assert_called_once_with()
         proc.terminate.assert_called_once_with()
         proc.kill.assert_called_once_with()
+
+
+class RankStartupDiagnosticsTest(unittest.TestCase):
+    def test_rank_pipe_eof_preserves_real_exit_status(self):
+        ctx = multiprocessing.get_context("fork")
+        for exit_signal in (None, signal.SIGKILL, signal.SIGBUS):
+            with self.subTest(signal=exit_signal):
+                reader, writer = ctx.Pipe(duplex=False)
+                release = ctx.Event()
+                proc = ctx.Process(
+                    target=_exit_rank_without_status,
+                    args=(writer, release, exit_signal),
+                )
+                proc.start()
+                writer.close()
+                poll = reader.poll
+
+                def release_on_poll(timeout):
+                    release.set()
+                    return poll(5)
+
+                try:
+                    with mock.patch.object(reader, "poll", side_effect=release_on_poll):
+                        with self.assertRaises(Exception) as failure:
+                            backend._wait_for_ranks_startup([proc], [reader], 1)
+                    expected_exitcode = -exit_signal if exit_signal is not None else 0
+                    self.assertIn(f"pid={proc.pid}", str(failure.exception))
+                    self.assertIn(
+                        f"exitcode={expected_exitcode}", str(failure.exception)
+                    )
+                    expected_signal = (
+                        int(exit_signal) if exit_signal is not None else None
+                    )
+                    self.assertIn(f"signal={expected_signal}", str(failure.exception))
+                    self.assertEqual(proc.exitcode, expected_exitcode)
+                finally:
+                    release.set()
+                    proc.join(timeout=5)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join(timeout=5)
+                    reader.close()
+                    proc.close()
+
+    def test_cleanup_distinguishes_failed_rank_from_terminated_sibling(self):
+        ctx = multiprocessing.get_context("fork")
+        release = ctx.Event()
+        processes, readers = [], []
+        for exit_signal in (signal.SIGKILL, None):
+            reader, writer = ctx.Pipe(duplex=False)
+            proc = ctx.Process(
+                target=_exit_rank_without_status,
+                args=(writer, release if exit_signal else ctx.Event(), exit_signal),
+            )
+            proc.start()
+            writer.close()
+            processes.append(proc)
+            readers.append(reader)
+        configs = types.SimpleNamespace(
+            distribute_config=types.SimpleNamespace(fake_gang_env=False)
+        )
+
+        def provide_processes(_controller, _configs, _ctx, procs, pipes):
+            procs.extend(processes)
+            pipes.extend(readers)
+
+        try:
+            release.set()
+            processes[0].join(timeout=5)
+            self.assertEqual(processes[0].exitcode, -signal.SIGKILL)
+            with mock.patch.object(
+                backend, "_create_rank_processes", side_effect=provide_processes
+            ), self.assertLogs(level="ERROR") as captured:
+                with self.assertRaises(Exception):
+                    backend.multi_rank_start(None, configs)
+            self.assertEqual(processes[1].exitcode, -signal.SIGTERM)
+            output = "\n".join(captured.output)
+            self.assertIn(
+                f"pid={processes[0].pid} exitcode=-9 signal=9 manager_signal=None",
+                output,
+            )
+            self.assertIn(
+                f"pid={processes[1].pid} exitcode=-15 signal=15 manager_signal=15",
+                output,
+            )
+        finally:
+            for proc in processes:
+                if proc.is_alive():
+                    proc.kill()
+                proc.join(timeout=5)
+                proc.close()
+            for reader in readers:
+                reader.close()
 
 
 class TipcTest(JitCacheTestBase):

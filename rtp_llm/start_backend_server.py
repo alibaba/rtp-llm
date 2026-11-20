@@ -237,6 +237,12 @@ def _close_readers(readers: List[Connection]) -> None:
             reader.close()
 
 
+def _rank_exit_status(proc: BaseProcess) -> str:
+    exitcode = proc.exitcode
+    exit_signal = -exitcode if exitcode is not None and exitcode < 0 else None
+    return f"pid={proc.pid} exitcode={exitcode} signal={exit_signal}"
+
+
 def _wait_for_ranks_startup(
     processes: List[BaseProcess],
     rank_pipe_readers: List[Connection],
@@ -293,9 +299,11 @@ def _wait_for_ranks_startup(
                         continue
                     data = reader.recv()
                 except EOFError:
-                    # Pipe closed unexpectedly (process died)
+                    # EOF can precede the process sentinel becoming ready.
+                    processes[i].join(timeout=1)
                     error_msg = (
-                        f"Rank {i}: Pipe closed unexpectedly (process may have died)"
+                        f"Rank {i}: Pipe closed unexpectedly "
+                        f"({_rank_exit_status(processes[i])})"
                     )
                     logging.error(error_msg)
                     raise Exception(error_msg)
@@ -380,19 +388,32 @@ def multi_rank_start(
 
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
-        for proc in processes:
+        manager_signals = {}
+        for rank, proc in enumerate(processes):
+            logging.error(
+                "Rank %s before startup cleanup: %s", rank, _rank_exit_status(proc)
+            )
+        for rank, proc in enumerate(processes):
             if proc.pid is not None and proc.is_alive():
+                manager_signals[rank] = int(signal.SIGTERM)
                 proc.terminate()
 
         # timeout join + kill to avoid terminate failed
-        for proc in processes:
+        for rank, proc in enumerate(processes):
             if proc.pid is None:
                 continue
             proc.join(timeout=5)
             if proc.is_alive():
                 logging.warning(f"Force killing process {proc.name} (pid={proc.pid})")
+                manager_signals[rank] = int(signal.SIGKILL)
                 proc.kill()
                 proc.join(timeout=2)
+            logging.error(
+                "Rank %s after startup cleanup: %s manager_signal=%s",
+                rank,
+                _rank_exit_status(proc),
+                manager_signals.get(rank),
+            )
 
         alive_procs = [p for p in processes if p.pid is not None and p.is_alive()]
         if alive_procs:

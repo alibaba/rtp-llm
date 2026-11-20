@@ -1,9 +1,11 @@
 """CPU-only checks for V4.1 history, checkpoint format, and gate semantics."""
 
+import fcntl
 import importlib.util
 import json
 import math
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,6 +39,79 @@ class EngramTest(unittest.TestCase):
     def setUp(self):
         self.layout = engram.EngramLayout(_config())
         self.hash = engram.NgramHashState(self.layout, token_map=list(range(32)))
+
+    def test_prune_skips_locked_table_until_attachment_finishes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            table = root / f"rtp_llm_engram_{os.getuid()}_locked"
+            table.write_bytes(b"shared table")
+            os.utime(table, (0, 0))
+            lock_path = root / (table.name + ".lock")
+            with patch.object(
+                engram,
+                "Path",
+                side_effect=lambda value: (
+                    root if value in ("/dev/shm", "/tmp") else Path(value)
+                ),
+            ):
+                with lock_path.open("a+b") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    engram._prune_expired_engram_tables()
+                    self.assertTrue(table.exists(), "prune removed a locked table")
+                engram._prune_expired_engram_tables()
+                self.assertFalse(table.exists())
+
+    def test_prune_retains_live_lease_and_removes_unleased_expired_table(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leased = root / f"rtp_llm_engram_{os.getuid()}_leased"
+            expired = root / f"rtp_llm_engram_{os.getuid()}_expired"
+            for table in (leased, expired):
+                table.write_bytes(b"shared table")
+                os.utime(table, (0, 0))
+            lease = root / (leased.name + f".lease.{os.getpid()}.test")
+            lease.touch()
+            with patch.object(
+                engram,
+                "Path",
+                side_effect=lambda value: (
+                    root if value in ("/dev/shm", "/tmp") else Path(value)
+                ),
+            ):
+                engram._prune_expired_engram_tables()
+            self.assertEqual(leased.read_bytes(), b"shared table")
+            self.assertFalse(expired.exists())
+
+    def test_staging_logs_completed_copy_before_cuda_registration(self):
+        class StopBeforeCuda(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            weights = torch.arange(64, dtype=torch.uint8).reshape(2, 32)
+            scales = torch.tensor([[11], [12]], dtype=torch.uint8)
+            expected = weights.numpy().tobytes() + scales.numpy().tobytes()
+
+            def staging_path(value):
+                return root if value in ("/dev/shm", "/tmp") else Path(value)
+
+            with patch.object(engram, "Path", side_effect=staging_path), patch.object(
+                engram.torch, "frombuffer", side_effect=StopBeforeCuda
+            ), self.assertLogs(engram.logger, level="INFO") as captured:
+                with self.assertRaises(StopBeforeCuda):
+                    engram._PinnedSharedTable(
+                        weights, scales, "copy-diagnostic", "cuda:0"
+                    )
+            tables = [path for path in root.iterdir() if "." not in path.name]
+            self.assertEqual(len(tables), 1)
+            self.assertEqual(tables[0].read_bytes(), expected)
+            copies = [
+                tuple(map(int, match.groups()))
+                for line in captured.output
+                if (match := re.search(r"copied_bytes=(\d+) total_bytes=(\d+)", line))
+            ]
+            self.assertEqual(copies, [(len(expected), len(expected))])
+            self.assertFalse(list(root.glob("*.partial.*")))
 
     def test_hash_matches_scalar_reference_with_boundary_and_dead_tokens(self):
         windows = torch.tensor([[7, 6, 5, 4], [4, 3, -1, -1], [8, 7, 6, 5]])
