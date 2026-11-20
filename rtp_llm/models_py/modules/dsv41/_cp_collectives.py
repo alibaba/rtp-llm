@@ -1,4 +1,4 @@
-"""Single-node communication for the eager DeepSeek V4.1 CP4 prefill loop."""
+"""Symmetric collectives for eager DeepSeek V4.1 CP prefill."""
 
 import logging
 import socket
@@ -18,6 +18,7 @@ from rtp_llm.models_py.distributed.collective_torch import Group, _get_group
 # and consumer can share this window in place. Larger batches use bounded tiles.
 _WORKSPACE_BYTES = 144 * 1024 * 1024
 _PROJECTED_BYTES = 80 * 1024 * 1024
+SUPPORTED_CP_SIZES = (2, 4, 8)
 _active = ContextVar("dsv41_cp_collectives", default=None)
 
 
@@ -63,22 +64,109 @@ class _Workspace(_Window):
         super().__init__(device, buffer, handle)
         self.group = group
         self.rank = group.rank()
+        self.size = group.size()
         self.peers = [
-            handle.get_buffer(i, buffer.shape, torch.uint8) for i in range(group.size())
+            handle.get_buffer(i, buffer.shape, torch.uint8) for i in range(self.size)
         ]
         self.peer_addresses = tuple(peer.data_ptr() for peer in self.peers)
+        # Rotate the batch by rank so the early copies target different peers.
+        self.gather_remote_peers = tuple(
+            (self.rank + step) % self.size for step in range(1, self.size)
+        )
+        self.gather_all_peers = (*self.gather_remote_peers, self.rank)
         self.runtime = runtime
         self.copy_attributes = [copy_attr]
         self.projected = projected
 
 
-def _allocate_window(sm, group, device, size):
+def _fabric_domain(sm, device, uuid):
+    """NVLink cluster and partition of the physical GPU, independent of its local index."""
+    import ctypes
+
+    try:
+        import pynvml
+    except ImportError:
+        return None
+    try:
+        if sm.get_backend(device) != "CUDA":
+            return None
+        pynvml.nvmlInit()
+        try:
+            gpu = pynvml.nvmlDeviceGetHandleByUUID("GPU-" + uuid)
+            info = pynvml.c_nvmlGpuFabricInfoV_t()
+            pynvml.nvmlDeviceGetGpuFabricInfoV(gpu, ctypes.byref(info))
+            # Some pynvml versions expose the binary UUID as a C string.
+            # Embedded zero bytes are part of the identity.
+            cluster = ctypes.string_at(
+                ctypes.addressof(info) + type(info).clusterUuid.offset,
+                pynvml.NVML_GPU_FABRIC_UUID_LEN,
+            )
+            if (
+                info.state == pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
+                and info.status == pynvml.NVML_SUCCESS
+                and any(cluster)
+            ):
+                return cluster, info.cliqueId
+        finally:
+            pynvml.nvmlShutdown()
+    except (AttributeError, RuntimeError, TypeError, ValueError, pynvml.NVMLError):
+        pass
+    return None
+
+
+def _export_fabric_buffer(driver, buffer, handle_type):
+    status, allocation = driver.cuMemRetainAllocationHandle(buffer.data_ptr())
+    if int(status):
+        return None
+    try:
+        status, handle = driver.cuMemExportToShareableHandle(allocation, handle_type, 0)
+        return None if int(status) else handle.data
+    finally:
+        driver.cuMemRelease(allocation)
+
+
+def _can_import_fabric_peers(group, buffer):
+    # IMEX domains can isolate GPUs in the same physical NVLink partition.
+    # Check the actual allocator handle before entering PyTorch rendezvous.
+    try:
+        from cuda.bindings import driver
+
+        handle_type = driver.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+        payload = _export_fabric_buffer(driver, buffer, handle_type)
+    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError):
+        payload = None
+    exported = _all(group, payload)
+    if None in exported:
+        return False
+    accessible = True
+    for rank, payload in enumerate(exported):
+        if rank == group.rank():
+            continue
+        try:
+            handle = driver.CUmemFabricHandle()
+            handle.data = payload
+            status, imported = driver.cuMemImportFromShareableHandle(
+                handle.getPtr(), handle_type
+            )
+            if not int(status):
+                driver.cuMemRelease(imported)
+                continue
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            pass
+        accessible = False
+        break
+    return all(_all(group, accessible))
+
+
+def _allocate_window(sm, group, device, size, *, check_fabric=False):
     try:
         buffer = sm.empty((size,), dtype=torch.uint8, device=device)
     except RuntimeError as exc:
         logging.warning("V4.1 CP symmetric workspace allocation failed: %s", exc)
         buffer = None
     if not all(_all(group, buffer is not None)):
+        return None, None
+    if check_fabric and not _can_import_fabric_peers(group, buffer):
         return None, None
     handle = sm.rendezvous(buffer, group=group.group_name)
     if not all(_all(group, handle is not None and bool(handle.multicast_ptr))):
@@ -106,7 +194,6 @@ def _initialize(group, device, *, cp_rank):
             runtime.cudaMemcpyFlags.cudaMemcpyFlagPreferOverlapWithCompute
         )
         props = torch.cuda.get_device_properties(device)
-        # Restrict enrollment to the tested single-node multicast topology.
         local = str(props.uuid)
         peers = {
             str(torch.cuda.get_device_properties(i).uuid)
@@ -126,25 +213,32 @@ def _initialize(group, device, *, cp_rank):
         ready, local, peers = False, "", set()
     info = _all(group, (socket.gethostname(), local, peers, ready))
     ids = {uuid for _, uuid, _, _ in info}
-    if (
-        len({host for host, _, _, _ in info}) != 1
-        or len(ids) != 4
-        or not all(ok and ids <= reachable for _, _, reachable, ok in info)
-    ):
+    if len(ids) != group.size() or not all(ok for _, _, _, ok in info):
         return None
-    buffer, handle = _allocate_window(sm, group, device, _WORKSPACE_BYTES)
+    cross_host = len({host for host, _, _, _ in info}) > 1
+    if cross_host:
+        domains = _all(group, _fabric_domain(sm, device, local))
+        if domains[0] is None or any(domain != domains[0] for domain in domains):
+            return None
+    elif not all(ids <= reachable for _, _, reachable, _ in info):
+        return None
+    buffer, handle = _allocate_window(
+        sm, group, device, _WORKSPACE_BYTES, check_fabric=cross_host
+    )
     if buffer is None:
         return None
     # This gather overlaps the SWA collectives in the general window. A
     # distinct rendezvous supplies independent cross-rank signal pads.
-    projected, projected_handle = _allocate_window(sm, group, device, _PROJECTED_BYTES)
+    projected, projected_handle = _allocate_window(
+        sm, group, device, _PROJECTED_BYTES, check_fabric=cross_host
+    )
     window = (
         _Window(device, projected, projected_handle) if projected is not None else None
     )
     return _Workspace(group, device, buffer, handle, window, runtime, copy_attr)
 
 
-def initialize_prefill_cp_collectives(owner, device, *, cp_rank):
+def initialize_prefill_cp_collectives(owner, device, *, cp_size, cp_rank):
     """Register once on the model that survives the temporary warmup executor."""
     if hasattr(owner, "_dsv41_cp_collectives"):
         return
@@ -152,15 +246,19 @@ def initialize_prefill_cp_collectives(owner, device, *, cp_rank):
     if device.type == "cuda" and torch.version.hip is None and dist.is_initialized():
         with torch.cuda.device(device):
             group = _get_group(Group.TP)
-            if group.size() == 4:
+            if (
+                cp_size in SUPPORTED_CP_SIZES
+                and group.size() == dist.get_world_size() == cp_size
+            ):
                 device = torch.device("cuda", torch.cuda.current_device())
                 workspace = _initialize(group, device, cp_rank=cp_rank)
                 if workspace is not None:
                     _warm_workspaces[group] = workspace
                     logging.info(
-                        "V4.1 CP symmetric workspace registered on %s (CP rank %d, main=%d bytes, projected=%d bytes)",
+                        "V4.1 CP symmetric workspace registered on %s (CP rank %d/%d, main=%d bytes, projected=%d bytes)",
                         device,
                         cp_rank,
+                        cp_size,
                         workspace.buffer.nbytes,
                         workspace.projected.buffer.nbytes if workspace.projected else 0,
                     )
@@ -170,7 +268,9 @@ def initialize_prefill_cp_collectives(owner, device, *, cp_rank):
 @contextmanager
 def prefill_cp_collectives(model, device, eager):
     workspace = getattr(model, "_dsv41_cp_collectives", None) if eager else None
-    if workspace is not None and (device != workspace.device or model._cp_size != 4):
+    if workspace is not None and (
+        device != workspace.device or model._cp_size != workspace.size
+    ):
         workspace = None
     token = _active.set(workspace)
     try:
@@ -199,12 +299,12 @@ def _can_gather(ws, local):
 def _direct_output(ws, local, offset):
     """Gather into a view that is valid until the caller releases the window."""
     size = local.nbytes
-    if size % 16 or 4 * size > ws.buffer.numel() - offset:
+    if size % 16 or ws.size * size > ws.buffer.numel() - offset:
         return None
-    shape = (4 * local.shape[0], *local.shape[1:])
-    out = ws.buffer.narrow(0, offset, 4 * size).view(local.dtype).view(shape)
+    shape = (ws.size * local.shape[0], *local.shape[1:])
+    out = ws.buffer.narrow(0, offset, ws.size * size).view(local.dtype).view(shape)
     # Common model producers supply aligned contiguous shards. A local view at
-    # an odd byte offset still enters the same collective on all four ranks.
+    # an odd byte offset still enters the same collective on all ranks.
     if local.data_ptr() % 16:
         local = local.clone(memory_format=torch.contiguous_format)
     torch.ops.symm_mem.multimem_all_gather_out(local, ws.group.group_name, out=out)
@@ -218,7 +318,7 @@ def borrowed_all_gather(local, group):
     if (
         _can_gather(ws, local)
         and local.nbytes % 16 == 0
-        and 4 * local.nbytes <= _WORKSPACE_BYTES
+        and ws.size * local.nbytes <= ws.buffer.nbytes
     ):
         with ws.use():
             yield _direct_output(ws, local, 0)
@@ -251,7 +351,7 @@ def projected_gather_buffer(reference, group, *, numel, dtype):
         and ws.projected is not None
         and reference.device == ws.device
         and 0 < size <= _PROJECTED_BYTES
-        and size % 64 == 0
+        and size % (16 * ws.size) == 0
     ):
         with ws.projected.use():
             yield ws.projected.buffer[:size].view(dtype)
@@ -273,11 +373,12 @@ class _CommitSession:
 
 
 @contextmanager
-def reuse_prefill_cp_collectives(device):
+def reuse_prefill_cp_collectives(device, *, cp_size):
     """Borrow the target's workspace for one eager, single-stream draft commit."""
     ws = _warm_workspaces.get(_get_group(Group.TP)) if _warm_workspaces else None
     if (
         ws is None
+        or ws.size != cp_size
         or device.index not in (None, ws.device.index)
         or torch.cuda.is_current_stream_capturing()
     ):
@@ -301,7 +402,7 @@ def try_commit_all_gather(local, *, retain=False):
     ws, offset = session.workspace, session.retained_bytes
     if local.device != ws.device or local.nbytes == 0:
         return None
-    size = 4 * local.nbytes
+    size = ws.size * local.nbytes
     # Keep at least half the window available to gather arbitrarily large KV
     # in tiles. A metadata array exceeding this budget gets independent output.
     if not retain or offset + size <= _WORKSPACE_BYTES // 2:
@@ -310,17 +411,17 @@ def try_commit_all_gather(local, *, retain=False):
             if retain:
                 session.retained_bytes += size
             return gathered
-    gathered = local.new_empty((4 * local.shape[0], *local.shape[1:]))
+    gathered = local.new_empty((ws.size * local.shape[0], *local.shape[1:]))
     _gather_into(ws, gathered, local, ws.buffer[offset:])
     return gathered
 
 
 def _gather_into(ws, out, local, window):
     size = local.nbytes
-    if size % 16 == 0 and 4 * size <= window.nbytes:
+    if size % 16 == 0 and ws.size * size <= window.nbytes:
         if local.data_ptr() % 16:
             local = local.clone(memory_format=torch.contiguous_format)
-        scratch = window[: 4 * size].view(out.dtype).view_as(out)
+        scratch = window[: ws.size * size].view(out.dtype).view_as(out)
         torch.ops.symm_mem.multimem_all_gather_out(
             local, ws.group.group_name, out=scratch
         )
@@ -341,9 +442,14 @@ def _gather_into(ws, out, local, window):
     )
     output = out.data_ptr()
     source = local.data_ptr()
-    peers = [i for i in range(4) if i != ws.rank or source != output + i * size]
+    peers = (
+        ws.gather_remote_peers
+        if source == output + ws.rank * size
+        else ws.gather_all_peers
+    )
     # Draft commit may have reserved the beginning of each window for metadata.
-    sources = [ws.peer_addresses[i] + window.storage_offset() for i in peers]
+    window_offset = window.storage_offset()
+    sources = [ws.peer_addresses[i] + window_offset for i in peers]
     stage = window.data_ptr()
     for start in range(0, size, window.nbytes):
         count = min(window.nbytes, size - start)
@@ -391,7 +497,7 @@ def try_all_gather(local, group):
     ws = _workspace(group)
     if not _can_gather(ws, local):
         return None
-    out = local.new_empty((4 * local.shape[0], *local.shape[1:]))
+    out = local.new_empty((ws.size * local.shape[0], *local.shape[1:]))
     _gather(ws, out, local)
     return out
 

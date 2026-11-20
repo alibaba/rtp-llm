@@ -832,7 +832,7 @@ def try_gather(
             numel=cp * plan.max_local_rows * _BYTES,
             dtype=torch.uint8,
         )
-        if cp == 4 and plan.direct_receive_aligned
+        if cp > 1 and plan.direct_receive_aligned
         else nullcontext()
     )
     with scope as receive:

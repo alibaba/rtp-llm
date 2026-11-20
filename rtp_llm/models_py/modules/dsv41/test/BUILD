@@ -27,14 +27,23 @@ py_test(
     for name in ["test_cache_specs", "test_cache_tags"]
 ]
 
-cuda13_sm100_py_test(
-    name = "test_v41_cp_collectives",
-    srcs = ["test_v41_cp_collectives.py"],
-    gpu_count = 4,
-    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
-    tags = ["dsv41_cuda13"],
-    legacy_create_init = 0,
-)
+[
+    cuda13_sm100_py_test(
+        name = name,
+        srcs = ["test_v41_cp_collectives.py"],
+        main = "test_v41_cp_collectives.py",
+        gpu_count = gpu_count,
+        deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+        env = {"DSV41_CP_TEST_WORLD_SIZE": str(gpu_count)},
+        tags = ["dsv41_cuda13"],
+        legacy_create_init = 0,
+    )
+    for name, gpu_count in [
+        ("test_v41_cp_collectives_cp2", 2),
+        ("test_v41_cp_collectives", 4),
+        ("test_v41_cp_collectives_cp8", 8),
+    ]
+]
 
 cuda13_sm100_py_test(
     name = "test_engram_scale_shards",

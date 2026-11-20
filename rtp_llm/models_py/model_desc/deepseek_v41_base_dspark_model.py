@@ -40,6 +40,7 @@ from rtp_llm.models_py.model_desc.deepseek_v41_base_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv41 import _profiler
 from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    SUPPORTED_CP_SIZES,
     reuse_prefill_cp_collectives,
     try_commit_all_gather,
 )
@@ -1151,7 +1152,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         if (
             device.type == "cuda"
             and self._dspark_commit_cp_enabled
-            and self.tp_size == 4
+            and self.tp_size in SUPPORTED_CP_SIZES
         ):
             attn = as_tagged_attention_inputs(inputs.attention_inputs)
             cp_info = getattr(attn, "context_parallel_info", None)
@@ -1163,7 +1164,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 and padding_mask is not None
                 and padding_mask.numel() > 0
             ):
-                with reuse_prefill_cp_collectives(device):
+                with reuse_prefill_cp_collectives(device, cp_size=self.tp_size):
                     return self.run_commit_step(inputs, device)
         return self.run_commit_step(inputs, device)
 
