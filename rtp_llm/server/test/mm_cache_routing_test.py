@@ -1,4 +1,5 @@
 import asyncio
+import os
 import struct
 import unittest
 from concurrent import futures
@@ -77,6 +78,19 @@ def hash_response(keys, hashes):
 
 
 class MMCacheRoutingTest(unittest.TestCase):
+    def test_vit_probe_id_excludes_parent_and_fits_signed_int64(self):
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.secrets.randbelow",
+            side_effect=[122, (1 << 63) - 2],
+        ) as random_id:
+            probe_id = BackendRPCServerVisitor._vit_probe_request_id(123)
+        self.assertEqual(random_id.call_count, 2)
+        wire = FlexlbScheduleRequestPB(request_id=probe_id)
+        self.assertEqual(
+            FlexlbScheduleRequestPB.FromString(wire.SerializeToString()).request_id,
+            (1 << 63) - 1,
+        )
+
     def test_affinity_keys_preserve_legacy_wire_encoding(self):
         # Fields 16 (media_keys="image") and 18 (vit_route_only=true).
         legacy_wire = b"\x82\x01\x05image\x90\x01\x01"
@@ -434,6 +448,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             status,
         )
 
+    @patch.dict(os.environ, {"DSV4_MOE_STRATEGY": "mega_sm90_se"})
     async def test_vit_preselection_still_routes_pd_and_sends_expanded_length(self):
         visitor, request, vit, prefill, status = (
             self.visitor,
@@ -442,10 +457,25 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             self.prefill,
             self.status,
         )
+        request.headers = {"x-request-id": "upstream-image-request"}
         await visitor.get_master_route_addrs(request)
         calls = visitor.master_client.get_backend_role_addrs.call_args_list
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[0].kwargs["vit_only"])
+        probe_id = calls[0].kwargs["request_id"]
+        # Exercise the real wire type: a string suffix passes mocked routing
+        # but fails before the first schedule RPC can be sent.
+        wire_probe = FlexlbScheduleRequestPB(request_id=probe_id, vit_route_only=True)
+        self.assertEqual(
+            FlexlbScheduleRequestPB.FromString(
+                wire_probe.SerializeToString()
+            ).request_id,
+            probe_id,
+        )
+        self.assertGreater(probe_id, 0)
+        self.assertNotEqual(probe_id, request.request_id)
+        self.assertEqual(calls[1].kwargs["request_id"], 123)
+        self.assertEqual(request.request_id, 123)
         self.assertEqual(calls[1].kwargs["seq_len"], 4)
         self.assertEqual(calls[1].kwargs["selected_vit"], status)
         self.assertEqual(request.generate_config.role_addrs, [prefill, vit])
@@ -458,6 +488,8 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             get_block_cache_keys([1, -10, 11, 2], 2),
         )
         wire = GenerateInputPB.FromString(route["input_pb"].SerializeToString())
+        self.assertEqual(wire.request_id, 123)
+        self.assertEqual(wire.request_info.request_id, "upstream-image-request")
         self.assertEqual(list(wire.token_ids), [1, 99, 2])
         self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
         self.assertEqual(
@@ -465,7 +497,18 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             request.mm_inputs[0].url,
         )
 
+    @patch.dict(
+        os.environ,
+        {"DSV4_MOE_STRATEGY": "mega_moe", "RTP_LLM_SM90_VIT_PROBE_ID": "0"},
+    )
     async def test_hash_concurrency_limit_reselects_vit_before_routing_pd(self):
+        await self._assert_hash_concurrency_reselection(separate_ids=False)
+
+    @patch.dict(os.environ, {"DSV4_MOE_STRATEGY": "mega_sm90_se"})
+    async def test_sm90_hash_concurrency_reselection_uses_independent_probe_ids(self):
+        await self._assert_hash_concurrency_reselection(separate_ids=True)
+
+    async def _assert_hash_concurrency_reselection(self, *, separate_ids):
         keys = multimodal_cache_keys(self.request)
         client = self.visitor.master_client
         workers = [
@@ -490,8 +533,17 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(selections), 3)
         for call in selections:
             self.assertTrue(call.kwargs["vit_only"])
-            self.assertEqual(call.kwargs["request_id"], self.request.request_id)
+            if separate_ids:
+                self.assertNotEqual(call.kwargs["request_id"], self.request.request_id)
+                wire = FlexlbScheduleRequestPB(request_id=call.kwargs["request_id"])
+                self.assertGreater(wire.request_id, 0)
+            else:
+                self.assertEqual(call.kwargs["request_id"], self.request.request_id)
             self.assertEqual(call.kwargs["cache_affinity_keys"], keys)
+        if separate_ids:
+            self.assertEqual(len({call.kwargs["request_id"] for call in selections}), 3)
+        self.assertEqual(self.request.request_id, 123)
+        self.assertEqual(pd.kwargs["request_id"], self.request.request_id)
         self.assertEqual(pd.kwargs["selected_vit"], statuses[-1])
         self.assertEqual(pd.kwargs["seq_len"], 5)
 
@@ -523,6 +575,20 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                         for call in client.get_backend_role_addrs.await_args_list
                     )
                 )
+
+    @patch.dict(
+        os.environ,
+        {"DSV4_MOE_STRATEGY": "mega_moe", "RTP_LLM_SM90_VIT_PROBE_ID": "0"},
+    )
+    async def test_non_sm90_vit_probe_keeps_upstream_request_id(self):
+        with patch.object(
+            BackendRPCServerVisitor, "_vit_probe_request_id"
+        ) as separate_id:
+            await self.visitor.get_master_route_addrs(self.request)
+        separate_id.assert_not_called()
+        calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([call.kwargs["request_id"] for call in calls], [123, 123])
 
     async def test_v41_route_keys_match_backend_canonical_tokens_and_identity(self):
         from rtp_llm.server.cache_key_routing import get_block_cache_keys
@@ -856,6 +922,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
         self.assertEqual(len(self.request.mm_inputs), 1)
 
+    @patch.dict(os.environ, {"DSV4_MOE_STRATEGY": "mega_sm90_se"})
     async def test_stale_vit_reselection_acquires_new_hashes_before_prefill(self):
         self.visitor.cache_key_seed = 12345
         self.visitor.mm_model_config.semantic_mm_token_id = 129264
@@ -880,6 +947,22 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.visitor.get_master_route_addrs(self.request))
         retry = self.visitor.master_client.get_backend_role_addrs.call_args_list[2]
         self.assertTrue(retry.kwargs["vit_only"])
+        calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
+        probe_ids = [calls[index].kwargs["request_id"] for index in (0, 2)]
+        for probe_id in probe_ids:
+            wire_probe = FlexlbScheduleRequestPB(request_id=probe_id)
+            self.assertEqual(
+                FlexlbScheduleRequestPB.FromString(
+                    wire_probe.SerializeToString()
+                ).request_id,
+                probe_id,
+            )
+            self.assertNotEqual(probe_id, self.request.request_id)
+        self.assertNotEqual(probe_ids[0], probe_ids[1])
+        self.assertEqual(
+            [calls[index].kwargs["request_id"] for index in (1, 3)], [123, 123]
+        )
+        self.assertEqual(self.request.request_id, 123)
         self.assertNotIn("seq_len", retry.kwargs)
         last = self.visitor.master_client.get_backend_role_addrs.call_args.kwargs
         self.assertEqual(last["selected_vit"], new_status)
