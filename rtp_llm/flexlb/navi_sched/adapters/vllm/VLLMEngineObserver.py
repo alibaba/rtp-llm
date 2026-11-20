@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Callable
 from concurrent.futures import CancelledError, Future
 from contextlib import nullcontext
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from types import SimpleNamespace
 from typing import Any
@@ -821,6 +821,21 @@ class _PrefillWorkloadSliceAggregate:
 
 
 @dataclass(frozen=True)
+class _NativePrefillQueueEntry:
+    queue: str
+    queue_index: int
+    request_id: str
+    phase: str
+    workload: _PrefillWorkloadSlice
+    worker_receive_reported: bool | None
+    worker_receive_failed: bool | None
+    load_inflight: bool | None
+    load_started_mono_ns: int | None
+    lookup_future_done: bool | None
+    lookup_arrived_mono_ns: int | None
+
+
+@dataclass(frozen=True)
 class _ObservedWorkload:
     batch_count: int = 0
     request_count: int = 0
@@ -867,6 +882,9 @@ class _ObservedWorkload:
         default=(), compare=False, repr=False
     )
     native_prefill_phases: tuple[tuple[str, _PrefillWorkloadSlice], ...] = field(
+        default=(), compare=False, repr=False
+    )
+    native_prefill_queue_entries: tuple[_NativePrefillQueueEntry, ...] = field(
         default=(), compare=False, repr=False
     )
     native_prefill_phase_observed_time_ns: int = field(
@@ -3919,6 +3937,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 native_handoff_batch_ids=native_handoff_batch_ids,
                 prior_cache_forecasts=tuple(prior_cache_forecasts),
                 native_prefill_phases=base.native_prefill_phases,
+                native_prefill_queue_entries=base.native_prefill_queue_entries,
                 native_prefill_phase_observed_time_ns=(
                     base.native_prefill_phase_observed_time_ns
                 ),
@@ -4298,7 +4317,8 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         return "waiting_cache_state_unknown"
 
     def _partition_prefill_workload(
-        self, scheduler, *, prior_cache_forecasts=None, native_prefill_phases=None
+        self, scheduler, *, prior_cache_forecasts=None, native_prefill_phases=None,
+        native_prefill_queue_entries=None,
     ):
         try:
             running = tuple(scheduler.running)
@@ -4316,6 +4336,12 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         scheduler_waiting = _PrefillWorkloadSliceAggregate()
         running_capacity_slot_count = 0
         seen_request_ids = set()
+        queue_positions = {}
+        if native_prefill_queue_entries is not None:
+            for queue_name in ("running", "skipped_waiting", "waiting"):
+                for index, request in enumerate(getattr(scheduler, queue_name, ()) or ()):
+                    request_id = str(getattr(request, "request_id", request))
+                    queue_positions.setdefault(request_id, (queue_name, index))
 
         def append(request_or_id, running_now=False):
             nonlocal running_capacity_slot_count
@@ -4354,6 +4380,38 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                     phase_workload = _PrefillWorkloadSliceAggregate()
                     native_prefill_phases[phase] = phase_workload
                 phase_workload.apply(contribution)
+                if native_prefill_queue_entries is not None:
+                    part = _PrefillWorkloadSliceAggregate()
+                    part.apply(contribution)
+                    part = part.snapshot()
+                    if part.request_count:
+                        request = scheduler.requests.get(request_id)
+                        state = (
+                            self._native_v6d_request_audit(request)
+                            if request is not None else {}
+                        )
+                        queue_name, index = queue_positions.get(
+                            request_id, ("not_queued", -1)
+                        )
+                        received = getattr(scheduler, "finished_recving_kv_req_ids", None)
+                        failed = getattr(scheduler, "failed_recving_kv_req_ids", None)
+                        native_prefill_queue_entries.append(_NativePrefillQueueEntry(
+                            queue=queue_name,
+                            queue_index=index,
+                            request_id=request_id,
+                            phase=phase,
+                            workload=part,
+                            worker_receive_reported=(
+                                request_id in received if received is not None else None
+                            ),
+                            worker_receive_failed=(
+                                request_id in failed if failed is not None else None
+                            ),
+                            load_inflight=state.get("native_v6d_load_inflight"),
+                            load_started_mono_ns=state.get("native_v6d_load_started_mono_ns"),
+                            lookup_future_done=state.get("native_v6d_match_future_done"),
+                            lookup_arrived_mono_ns=state.get("native_v6d_match_arrived_mono_ns"),
+                        ))
             if contribution is not None:
                 if running_now:
                     scheduler_running.apply(contribution)
@@ -4463,6 +4521,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             if self._pp_capacity_unified and self._native_request_state_audit_enabled
             else None
         )
+        native_prefill_queue_entries = [] if native_prefill_phases is not None else None
         (
             max_running_request_count,
             running_capacity_slot_count,
@@ -4476,6 +4535,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 prior_cache_forecasts if self._pp_capacity_unified else None
             ),
             native_prefill_phases=native_prefill_phases,
+            native_prefill_queue_entries=native_prefill_queue_entries,
         )
         workload = self._workload_aggregate.snapshot(
             running_request_count,
@@ -4501,6 +4561,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 (phase, aggregate.snapshot())
                 for phase, aggregate in sorted((native_prefill_phases or {}).items())
             ),
+            native_prefill_queue_entries=tuple(native_prefill_queue_entries or ()),
             native_prefill_phase_observed_time_ns=(
                 time.perf_counter_ns() if native_prefill_phases is not None else 0
             ),
@@ -4798,6 +4859,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 "observed_perf_ns": workload.native_prefill_phase_observed_time_ns,
                 "reason": reason,
                 "phases": phases,
+                "queue_entries": [asdict(entry) for entry in workload.native_prefill_queue_entries],
                 "reported_prefill": reported,
                 # Prepared batches can be included in the report before Native
                 # registers their requests; keep those contributions explicit.
