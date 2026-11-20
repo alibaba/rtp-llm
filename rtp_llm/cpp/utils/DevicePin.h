@@ -4,6 +4,11 @@
 #include <string>
 #include <utility>
 
+#if USING_ASCEND
+#include <acl/acl.h>
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#endif
+
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
@@ -71,6 +76,13 @@ inline void setCurrentThreadDeviceContext(int device_id) {
         throw std::runtime_error("hipSetDevice(" + std::to_string(device_id) + ") failed: " + hipGetErrorString(err));
     }
     c10::hip::set_device(device_id);
+#elif USING_ASCEND
+    // torch_npu: set the thread-local device so current_device() returns the
+    // correct index on the engine loop thread (which does not inherit the
+    // main thread's set_device binding).
+    aclError err = aclrtSetDevice(device_id);
+    RTP_LLM_CHECK_WITH_INFO(err == ACL_SUCCESS, "aclrtSetDevice(%d) failed: %d", device_id, err);
+    c10::DeviceGuard guard(c10::Device(c10::DeviceType::PrivateUse1, device_id));
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
 #endif
@@ -85,6 +97,9 @@ inline void setCurrentThreadDefaultStream(int device_id) {
     at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream(device_id));
 #elif USING_ROCM
     c10::hip::setCurrentHIPStream(c10::hip::getDefaultHIPStream(device_id));
+#elif USING_ASCEND
+    // NPU default stream is per-device and managed by torch_npu runtime;
+    // the DeviceGuard in setCurrentThreadDeviceContext handles stream binding.
 #else
     // CPU-only builds intentionally no-op; production cache-store builds pin to a GPU backend.
 #endif
@@ -105,6 +120,10 @@ inline int getCurrentThreadDeviceContext() {
         throw std::runtime_error(std::string("hipGetDevice failed: ") + hipGetErrorString(err));
     }
     return device_id;
+#elif USING_ASCEND
+        int32_t dev = -1;
+    (void)aclrtGetDevice(&dev);
+    return dev;
 #else
     return -1;
 #endif

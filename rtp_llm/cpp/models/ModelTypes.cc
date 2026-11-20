@@ -413,8 +413,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (atype != rtp_llm::AllocationType::DEVICE) {
             try {
                 tensor = tensor.pin_memory();
-            } catch (const std::exception&) {
-                // keep unpinned tensor
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("pin_memory failed for tp_sync buffer (shape hint %lld): %s; "
+                                    "using unpinned memory — fused host copies on CUDA/ROCm require pinned buffers",
+                                    static_cast<long long>(tensor.numel()), e.what());
+                // keep unpinned tensor (HCCL path moves buffers to device in Python
+                // callbacks, where pinning is an optimization, not a requirement)
             }
         }
         return tensor;
