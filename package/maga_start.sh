@@ -18,7 +18,7 @@ DEFAULT_PY_RTP_LOG_KEEP_COUNT=300;
 START_PORT=${START_PORT:-${DEFAULT_START_PORT}};
 PY_RTP_LOG_KEEP_COUNT=${PY_RTP_LOG_KEEP_COUNT:-${DEFAULT_PY_RTP_LOG_KEEP_COUNT}};
 
-export LOG_DIR="$HIPPO_PROC_WORKDIR"/logs;
+export LOG_DIR="${LOG_DIR:-$HIPPO_PROC_WORKDIR/logs}";
 mkdir -p "$LOG_DIR";
 ls $LOG_DIR | grep -Ev '[0-9]{4}_[0-9]{2}_[0-9]{2}__' | \
 xargs -I {} bash -c 'mv ${LOG_DIR}/{} ${LOG_DIR}/`date -r ${LOG_DIR}/{} +"%Y_%m_%d__%H_%M_%S__"`{}';
