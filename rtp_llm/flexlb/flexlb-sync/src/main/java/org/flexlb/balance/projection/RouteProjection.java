@@ -411,7 +411,15 @@ public final class RouteProjection {
     /**
      * Queue and committed work captured under one ownership lock.
      */
-    public record Inputs(QueueSnapshot queue, WorkSnapshot work, long ownershipVersion) {
+    public record Inputs(
+            QueueSnapshot queue,
+            WorkSnapshot work,
+            long ownershipVersion,
+            QueuePrefixCache prefixCache) {
+
+        public Inputs(QueueSnapshot queue, WorkSnapshot work, long ownershipVersion) {
+            this(queue, work, ownershipVersion, new QueuePrefixCache());
+        }
 
         public Inputs(QueueSnapshot queue, WorkSnapshot work) {
             this(queue, work, 0L);
@@ -465,7 +473,8 @@ public final class RouteProjection {
                             inputs.work(),
                             evaluator,
                             deliveryProjection,
-                            planningAtMs);
+                            planningAtMs,
+                            inputs.prefixCache());
             return applyAdmissionPolicy(inputs.queue(), candidate);
         }
     }
