@@ -237,6 +237,48 @@ class SharedExpertOverlapTest(unittest.TestCase):
                 self.assertIs(layer(x), sentinel)
             self.assertEqual(fallback.call_count, len(inputs))
 
+    def test_tp_fp8_packed_shared_overlap_preserves_branch_rounding_and_replay(self):
+        layer = make_layer()
+        layer._shared_stream = None
+        layer._ep_shared_stream = _shared_stream_for_device(torch.cuda.current_device())
+        layer._ep_shared_input_ready = torch.cuda.Event()
+        layer._ep_shared_output_ready = torch.cuda.Event()
+        layer._ep_shared_max_tokens = 128
+        layer._tp_shared_pack_reduce = True
+        layer.fused_moe = SimpleNamespace(
+            __call__=lambda x, *a, **kw: x * 0.35,
+        )
+        with patch.object(
+            GenericMoeLayer,
+            "_forward_routed",
+            side_effect=lambda x, skip_tp_allreduce=False: (
+                x * 0.35 if skip_tp_allreduce else (x * 0.35) * 2.0
+            ),
+        ):
+            comm = SimpleNamespace(
+                should_use=lambda t: t.shape[0] <= 256,
+                all_reduce=lambda t: t * 2.0,
+            )
+            layer._tp_shared_packed_comm = comm
+            for rows in (1, 4, 32, 128):
+                x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+                for _ in range(2):
+                    layer(x)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = layer(x)
+                x.normal_()
+                graph.replay()
+                routed_ref = (x * 0.35) * 2.0
+                shared_local = layer._gate_shared_expert_output(
+                    x, layer.shared_expert(x, skip_allreduce=True)
+                )
+                expected = routed_ref + shared_local * 2.0
+                self.assertTrue(
+                    torch.equal(captured.view(torch.uint8), expected.view(torch.uint8))
+                )
+                graph.reset()
+
 
 if __name__ == "__main__":
     unittest.main()

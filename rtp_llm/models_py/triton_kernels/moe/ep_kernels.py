@@ -473,6 +473,103 @@ def _fwd_kernel_ep_gather(
         )
 
 
+@triton.jit
+def _fwd_kernel_ep_gather_global_routes(
+    total_token_num,
+    total_input_tokens,
+    input_tensor,
+    input_tensor_stride0,
+    input_tensor_stride1,
+    recv_topk_ids,
+    recv_topk_ids_stride0,
+    recv_topk_ids_stride1,
+    recv_topk_weight,
+    recv_topk_weight_stride0,
+    recv_topk_weight_stride1,
+    GLOBAL_START: tl.constexpr,
+    NUM_LOCAL: tl.constexpr,
+    output_tensor,
+    output_tensor_stride0,
+    output_tensor_stride1,
+    topk_num: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    cur_block = tl.program_id(0).to(tl.int64)
+    start_cur_token_int32 = tl.program_id(1)
+    grid_num = tl.num_programs(1)
+    for cur_token_int32 in range(start_cur_token_int32, total_token_num, grid_num):
+        cur_token = cur_token_int32.to(tl.int64)
+        off_d = tl.arange(0, BLOCK_D)
+        accumulator = tl.zeros([BLOCK_D], dtype=tl.float32)
+        for topk_index_int32 in range(0, topk_num):
+            topk_index = topk_index_int32.to(tl.int64)
+            expert_id = tl.load(
+                recv_topk_ids
+                + cur_token * recv_topk_ids_stride0
+                + topk_index * recv_topk_ids_stride1
+            )
+            if (expert_id >= GLOBAL_START) & (expert_id < GLOBAL_START + NUM_LOCAL):
+                source_token_index = cur_token * topk_num + topk_index
+                if source_token_index >= 0 and source_token_index < total_input_tokens:
+                    acc_weight = tl.load(
+                        recv_topk_weight
+                        + cur_token * recv_topk_weight_stride0
+                        + topk_index * recv_topk_weight_stride1
+                    )
+                    tmp = tl.load(
+                        input_tensor
+                        + source_token_index * input_tensor_stride0
+                        + cur_block * BLOCK_D
+                        + off_d
+                    )
+                    accumulator += tmp.to(tl.float32) * acc_weight
+        tl.store(
+            output_tensor
+            + cur_token * output_tensor_stride0
+            + cur_block * BLOCK_D
+            + off_d,
+            accumulator.to(output_tensor.dtype.element_ty),
+        )
+
+
+@torch.no_grad()
+def ep_gather_global_routes(
+    input_tensor: torch.Tensor,
+    global_ids: torch.Tensor,
+    weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    expert_start: int,
+    num_local: int,
+):
+    """Route-major identity gather with explicit global expert ownership."""
+    BLOCK_D = 512
+    num_tokens = output_tensor.shape[0]
+    hidden_size = input_tensor.shape[1]
+    assert hidden_size % BLOCK_D == 0
+    grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
+    _fwd_kernel_ep_gather_global_routes[grid](
+        num_tokens,
+        input_tensor.shape[0],
+        input_tensor,
+        input_tensor.stride(0),
+        input_tensor.stride(1),
+        global_ids,
+        global_ids.stride(0),
+        global_ids.stride(1),
+        weights,
+        weights.stride(0),
+        weights.stride(1),
+        expert_start,
+        num_local,
+        output_tensor,
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        topk_num=global_ids.shape[1],
+        num_warps=2,
+        BLOCK_D=BLOCK_D,
+    )
+
+
 @torch.no_grad()
 def ep_gather(
     input_tensor: torch.Tensor,

@@ -3,9 +3,15 @@ import unittest
 import torch
 import triton.language as tl
 
+from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+    compact_fp8_decode,
+)
 from rtp_llm.models_py.modules.qwen4_exp.moe.moe_align_triton import (
     moe_align_decode,
     sm120_decode_gemm_configs,
+)
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    recompute_topk_ids_sum_expert_count,
 )
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     get_default_config,
@@ -166,6 +172,153 @@ class MoeAlignTritonTest(unittest.TestCase):
             ids = torch.zeros(batch, 10, device="cuda", dtype=torch.int32)
             with self.assertRaises(ValueError):
                 moe_align_decode(ids, 16, experts)
+
+    def test_global_start_and_int64_routes_match_local_reference(self):
+        torch.manual_seed(20261120)
+        experts = 256
+        for batch in (1, 4, 8, 9, 32):
+            for global_start in (0, 256):
+                for dtype in (torch.int32, torch.int64):
+                    with self.subTest(
+                        batch=batch, global_start=global_start, dtype=dtype
+                    ):
+                        local_only = torch.randint(
+                            global_start,
+                            global_start + experts,
+                            (batch, 10),
+                            device="cuda",
+                            dtype=dtype,
+                        )
+                        actual_local = moe_align_decode(
+                            local_only, 16, experts, global_start=global_start
+                        )
+                        expected_local = moe_align_block_size_torch(
+                            (local_only - global_start).to(torch.int32), 16, experts
+                        )
+                        for a, e in zip(actual_local, expected_local):
+                            torch.testing.assert_close(a, e, atol=0, rtol=0)
+
+                        mixed = torch.randint(
+                            -1, 512, (batch, 10), device="cuda", dtype=dtype
+                        )
+                        local, _ = recompute_topk_ids_sum_expert_count(
+                            mixed, global_start, experts
+                        )
+                        actual_mixed = moe_align_decode(
+                            mixed, 16, experts, global_start=global_start
+                        )
+                        expected_mixed = moe_align_decode(
+                            local.to(torch.int32), 16, experts, global_start=0
+                        )
+                        for a, e in zip(actual_mixed, expected_mixed):
+                            torch.testing.assert_close(a, e, atol=0, rtol=0)
+                        # Verify active blocks match Torch reference when remote routes map to bin `experts`.
+                        binned = torch.where(local >= 0, local, experts).to(torch.int32)
+                        ref_sorted, ref_experts, _ = moe_align_block_size_torch(
+                            binned, 16, experts + 1
+                        )
+                        n_padded = int(actual_mixed[2].item())
+                        torch.testing.assert_close(
+                            actual_mixed[0][:n_padded],
+                            ref_sorted[:n_padded],
+                            atol=0,
+                            rtol=0,
+                        )
+                        torch.testing.assert_close(
+                            actual_mixed[1][: n_padded // 16],
+                            ref_experts[: n_padded // 16],
+                            atol=0,
+                            rtol=0,
+                        )
+
+    def test_compact_fp8_decode_global_start_matches_local_ids(self):
+        if torch.cuda.get_device_capability()[0] < 9:
+            self.skipTest("FP8 compact decode requires SM90+")
+        torch.manual_seed(20261121)
+        experts, hidden, inter = 256, 2560, 640
+        up_w = (
+            torch.randn((experts, 2 * inter, hidden), device="cuda") * 0.05
+        ).to(torch.float8_e4m3fn)
+        up_s = torch.rand(
+            (experts, (2 * inter) // 128, hidden // 128),
+            device="cuda",
+            dtype=torch.float32,
+        ) * 0.02
+        down_w = (
+            torch.randn((experts, hidden, inter), device="cuda") * 0.05
+        ).to(torch.float8_e4m3fn)
+        down_s = torch.rand(
+            (experts, hidden // 128, inter // 128),
+            device="cuda",
+            dtype=torch.float32,
+        ) * 0.02
+        for rows in (1, 4, 8, 16, 64):
+            x = torch.randn((rows, hidden), device="cuda").to(torch.float8_e4m3fn)
+            x_scale = (
+                torch.rand((rows, hidden // 128), device="cuda", dtype=torch.float32)
+                * 0.05
+            )
+            ids = torch.randint(-1, 512, (rows, 10), device="cuda", dtype=torch.int64)
+            weights = torch.softmax(
+                torch.randn((rows, 10), device="cuda", dtype=torch.float32), dim=-1
+            )
+            for global_start in (0, 256):
+                local_ids, counts = recompute_topk_ids_sum_expert_count(
+                    ids, global_start, experts
+                )
+                expected = compact_fp8_decode(
+                    x,
+                    x_scale,
+                    local_ids,
+                    weights,
+                    counts,
+                    (up_w, up_s),
+                    (down_w, down_s),
+                )
+                actual = compact_fp8_decode(
+                    x,
+                    x_scale,
+                    ids,
+                    weights,
+                    None,
+                    (up_w, up_s),
+                    (down_w, down_s),
+                    global_start=global_start,
+                )
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                if rows in (4, 16):
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = compact_fp8_decode(
+                            x,
+                            x_scale,
+                            ids,
+                            weights,
+                            None,
+                            (up_w, up_s),
+                            (down_w, down_s),
+                            global_start=global_start,
+                        )
+                    ids.copy_(
+                        torch.randint(
+                            -1, 512, (rows, 10), device="cuda", dtype=torch.int64
+                        )
+                    )
+                    graph.replay()
+                    local_ids, counts = recompute_topk_ids_sum_expert_count(
+                        ids, global_start, experts
+                    )
+                    expected = compact_fp8_decode(
+                        x,
+                        x_scale,
+                        local_ids,
+                        weights,
+                        counts,
+                        (up_w, up_s),
+                        (down_w, down_s),
+                    )
+                    torch.testing.assert_close(captured, expected, atol=0, rtol=0)
+                    graph.reset()
 
     def test_prefill_route_sum_matches_torch(self):
         if torch.cuda.get_device_capability() != (9, 0):
