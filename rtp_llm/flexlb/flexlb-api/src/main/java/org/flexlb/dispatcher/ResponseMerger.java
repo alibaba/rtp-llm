@@ -63,6 +63,7 @@ public final class ResponseMerger {
                 // the sub-body — which is dead after merge, so no isolation is lost and the
                 // largest object on the merge path is never serialized+reparsed.
                 envelope = new JSONObject(s.body());
+                spec.getResponseArrayAliases().forEach(envelope::remove);
                 envelope.put(spec.getResponseArrayField(), new JSONArray());
             }
         }
@@ -80,7 +81,7 @@ public final class ResponseMerger {
         int succeededChunks = 0;
         for (SubBatchResult s : ordered) {
             if (wellFormed(s, spec)) {
-                JSONArray sourceArr = s.body().getJSONArray(spec.getResponseArrayField());
+                JSONArray sourceArr = spec.readResponseArray(s.body());
                 merged.addAll(sourceArr);
                 succeededChunks++;
             } else {
@@ -159,7 +160,7 @@ public final class ResponseMerger {
         if (!s.success() || s.body() == null) {
             return false;
         }
-        JSONArray arr = s.body().getJSONArray(spec.getResponseArrayField());
+        JSONArray arr = spec.readResponseArray(s.body());
         return arr != null && arr.size() == s.chunkSize();
     }
 

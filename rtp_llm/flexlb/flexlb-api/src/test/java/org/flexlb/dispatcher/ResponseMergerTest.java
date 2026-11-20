@@ -17,6 +17,57 @@ class ResponseMergerTest {
     private static final BatchEndpointSpec OPENAI_BATCH =
             BatchEndpointSpec.BY_PATH.get("/v1/batch/chat/completions");
 
+    private static final BatchEndpointSpec SYSTEM_ONE = BatchEndpointSpec.BY_PATH.get("/v1/systemone");
+
+    @Test
+    void systemOneMergesMixedResponseFieldsInRequestOrderWithoutMutatingChunks() {
+        JSONObject legacy = JSONObject.parseObject("{\"results\":[{\"answers\":{\"q\":1}}],\"model\":\"nexus\"}");
+        JSONObject canonical = JSONObject.parseObject("{\"responses\":[{\"answers\":{\"q\":2}}]}");
+        ResponseMerger.MergedResponse merged = ResponseMerger.merge(List.of(
+                SubBatchResult.ok(canonical, 1, 1), SubBatchResult.ok(legacy, 1, 0)), SYSTEM_ONE);
+
+        assertFalse(merged.hasFailures());
+        assertEquals(2, merged.succeededChunks());
+        assertEquals("nexus", merged.body().getString("model"));
+        assertEquals(1, merged.body().getJSONArray("responses").getJSONObject(0).getJSONObject("answers").getIntValue("q"));
+        assertEquals(2, merged.body().getJSONArray("responses").getJSONObject(1).getJSONObject("answers").getIntValue("q"));
+        assertFalse(merged.body().containsKey("results"));
+        assertTrue(legacy.containsKey("results"));
+        assertFalse(legacy.containsKey("responses"));
+    }
+
+    @Test
+    void systemOnePrefersCanonicalResponsesWhenBothFieldsExist() {
+        JSONObject body = JSONObject.parseObject("{\"responses\":[\"canonical\"],\"results\":[\"legacy\"]}");
+        ResponseMerger.MergedResponse merged = ResponseMerger.merge(
+                List.of(SubBatchResult.ok(body, 1, 0)), SYSTEM_ONE);
+        assertEquals("canonical", merged.body().getJSONArray("responses").getString(0));
+        assertFalse(merged.body().containsKey("results"));
+    }
+
+    @Test
+    void systemOneRejectsMalformedArraysAndDoesNotMaskBrokenCanonicalResponses() {
+        for (String json : List.of(
+                "{\"results\":{}}", "{\"results\":null}", "{\"results\":[]}",
+                "{\"results\":[1,2]}", "{\"response\":[1]}",
+                "{\"responses\":null,\"results\":[1]}",
+                "{\"responses\":{},\"results\":[1]}",
+                "{\"responses\":[],\"results\":[1]}")) {
+            ResponseMerger.MergedResponse merged = ResponseMerger.merge(
+                    List.of(SubBatchResult.ok(JSONObject.parseObject(json), 1, 0)), SYSTEM_ONE);
+            assertTrue(merged.allFailed(), json);
+            assertEquals(List.of("malformed_sub_batch"), merged.failedReasons(), json);
+        }
+    }
+
+    @Test
+    void systemOneAliasesDoNotApplyToOtherEndpoints() {
+        JSONObject body = JSONObject.parseObject("{\"results\":[{}]}");
+        assertFalse(ResponseMerger.wellFormed(SubBatchResult.ok(body, 1, 0), OPENAI_BATCH));
+        assertTrue(ResponseMerger.wellFormed(SubBatchResult.ok(body, 1, 0),
+                BatchEndpointSpec.BY_PATH.get("/v1/reranker")));
+    }
+
     @Test
     void happyPathStitchesAllChunks() {
         SubBatchResult s0 = SubBatchResult.ok(envelopeBatchInfer("r0", "r1"), 2, 0);

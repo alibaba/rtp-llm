@@ -38,6 +38,9 @@ public class BatchEndpointSpec {
     String path;
     String requestArrayField;
     String responseArrayField;
+    /** Accepted upstream aliases; merged responses always use responseArrayField. */
+    @Builder.Default
+    List<String> responseArrayAliases = List.of();
     FailedItemFactory failedItemFactory;
     /** May be null when an endpoint has no cross-chunk aggregation. */
     PostMerger postMerger;
@@ -111,6 +114,21 @@ public class BatchEndpointSpec {
     /** Returns a caller-facing validation error, or {@code null} when fanout may proceed. */
     public String validateForFanout(JSONObject body) {
         return requestValidator == null ? null : requestValidator.validate(body);
+    }
+
+    /** The canonical field takes precedence, including when its value is malformed. */
+    public JSONArray readResponseArray(JSONObject body) {
+        String field = responseArrayField;
+        if (!body.containsKey(field)) {
+            for (String alias : responseArrayAliases) {
+                if (body.containsKey(alias)) {
+                    field = alias;
+                    break;
+                }
+            }
+        }
+        Object value = body.get(field);
+        return value instanceof JSONArray array ? array : null;
     }
 
     /** Applies an endpoint-specific semantic rewrite to the already-sliced chunk bodies. */
@@ -238,6 +256,7 @@ public class BatchEndpointSpec {
             BatchEndpointSpec.builder()
                     .path("/v1/systemone")
                     .requestArrayField("requests").responseArrayField("responses")
+                    .responseArrayAliases(List.of("results"))
                     .failedItemFactory(FailedItemFactory.NULL)
                     .requestValidator(SystemOneBatch::validate)
                     .fanoutWriteNulls(true)

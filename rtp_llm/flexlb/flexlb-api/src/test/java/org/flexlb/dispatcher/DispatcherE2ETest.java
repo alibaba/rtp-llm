@@ -11,6 +11,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -126,9 +128,10 @@ class DispatcherE2ETest {
         }
     }
 
-    @Test
-    void systemOneSplitsIndependentStatesAndPreservesAnswersAndNulls() throws Exception {
-        fe1.enqueue(jsonResponse(200, "{\"responses\":["
+    @ParameterizedTest
+    @ValueSource(strings = {"responses", "results"})
+    void systemOneSplitsIndependentStatesAndPreservesAnswersAndNulls(String responseField) throws Exception {
+        fe1.enqueue(jsonResponse(200, "{\"" + responseField + "\":["
                 + "{\"answers\":{\"q\":{\"noul\":0.1}},\"latency_ms\":7},"
                 + "{\"answers\":{\"q\":{\"noul\":0.2}},\"latency_ms\":8}]}"));
         fe2.enqueue(jsonResponse(200, "{\"responses\":["
@@ -143,6 +146,7 @@ class DispatcherE2ETest {
                 .expectStatus().isOk().expectBody(JsonNode.class).returnResult().getResponseBody();
         assertNotNull(response);
         assertEquals(3, response.get("responses").size());
+        assertFalse(response.has("results"));
         for (int i = 0; i < 3; i++) {
             assertEquals((i + 1) / 10.0, response.at("/responses/" + i + "/answers/q/noul").asDouble());
             assertEquals(7 + i, response.at("/responses/" + i + "/latency_ms").asInt());
