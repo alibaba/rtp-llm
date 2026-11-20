@@ -1,5 +1,6 @@
 import gc
 import json
+import os
 import struct
 import unittest
 import weakref
@@ -227,6 +228,28 @@ class TensorObjectTest(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             unpack_object(data)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    @unittest.skipUnless(os.environ.get("MM_EMB_NATIVE_PACK") == "1", "native pack required")
+    def test_native_pack_retains_headers_until_their_cuda_stream_completes(self):
+        payload = torch.arange(256, dtype=torch.int32, device="cuda")
+        plans = [
+            plan_object({"key": str(index) * 15, "payload": payload}, checksum=False)
+            for index in range(64)
+        ]
+        expected = [pack_object(plan) for plan in plans]
+        streams = [torch.cuda.Stream() for _ in range(4)]
+        results = []
+        for index, plan in enumerate(plans):
+            stream = streams[index % len(streams)]
+            with torch.cuda.stream(stream):
+                output = torch.empty(plan.nbytes, dtype=torch.uint8, device="cuda")
+                results.append(pack_object(plan, out=output))
+        for stream in streams:
+            stream.synchronize()
+        for index, (actual, reference) in enumerate(zip(results, expected)):
+            with self.subTest(index=index):
+                self.assertTrue(torch.equal(actual.cpu(), reference))
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_cuda_roundtrip_and_offloaded_device_tree(self):

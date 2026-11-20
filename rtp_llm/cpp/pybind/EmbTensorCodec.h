@@ -7,6 +7,7 @@
 #include <torch/csrc/utils/pybind.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -38,10 +39,17 @@ inline void packEmbTensorSlices(const at::Tensor& output,
     }
     TORCH_CHECK(end == size, "invalid EMB packed object size");
 
-    if (!prefix.empty()) {
+    if (output.is_cuda() && payloadOffset > 0) {
+        auto header = at::empty({payloadOffset}, at::TensorOptions().dtype(at::kByte).pinned_memory(true));
+        auto* bytes = header.data_ptr<uint8_t>();
+        std::memcpy(bytes, prefix.data(), prefix.size());
+        std::memset(bytes + prefix.size(), 0, payloadOffset - prefix.size());
+        // The CUDA copy kernel records the source's pinned allocation on the
+        // copy stream. The caller waits for the stream before handing off to PACE.
+        output.narrow(0, 0, payloadOffset).copy_(header, /*non_blocking=*/true);
+    } else if (!prefix.empty()) {
         const auto length = static_cast<int64_t>(prefix.size());
         auto header = at::from_blob(prefix.data(), {length}, at::TensorOptions().dtype(at::kByte));
-        // The header points to a local string. Complete its copy before returning.
         output.narrow(0, 0, length).copy_(header);
         output.narrow(0, length, payloadOffset - length).zero_();
     } else {
