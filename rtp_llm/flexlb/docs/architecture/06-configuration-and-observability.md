@@ -444,6 +444,10 @@ Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
 - `/rtp_llm/schedule`、master notification 和 queue snapshot 等路由入口。
 - gRPC 调度入口及 follower-to-master forwarding。
 
+`POST /rtp_llm/master/info` 通过 `requires_generate_input` 公布本节点的派发模式是否需要
+`GenerateInput`。Frontend 可以按目标地址的最新明确能力省略请求体。BATCH Master 在入队前
+以 `8409` 拒绝缺少输入的生成请求，Frontend 可在本次调度的剩余时限内向同一地址补发一次。
+
 Spring profile 与日志、监控 provider 的具体默认值见
 `flexlb-api/src/main/resources/application.yml`。
 

@@ -101,6 +101,24 @@ class BackendRpcTransportTest {
         }
     }
 
+    @Test void staleNonBatchHeartbeatResendsGenerateInputToTheSameMaster() throws Exception {
+        try (var h = new Harness();
+             var frontend = new BackendRpcTransport(event -> {}, 1000, 0L, 1,
+                 () -> List.of(new MasterRoutes.Target(h.endpoint().get("rpc"), false)))) {
+            h.route = response -> h.schedules.get() == 1
+                ? FlexlbScheduleResponsePB.newBuilder().setCode(8409).build()
+                : response;
+            var result = h.result(frontend.send(request(1), input(1), Duration.ofSeconds(2), List.of()));
+            assertEquals(BackendRpcTransport.Outcome.success, result.outcome());
+            assertEquals(2, h.schedules.get());
+            var omitted = h.scheduleInputs.remove();
+            var resent = h.scheduleInputs.remove();
+            assertTrue(omitted.getGenerateInput().isEmpty());
+            assertEquals(input(1).toByteString(), resent.getGenerateInput());
+            assertEquals(omitted.getRequestId(), resent.getRequestId());
+        }
+    }
+
     @Test void successFlagWithFailureCodeCannotPass() throws Exception {
         try (var h = new Harness()) {
             h.route = r -> r.toBuilder().setCode(500).build();

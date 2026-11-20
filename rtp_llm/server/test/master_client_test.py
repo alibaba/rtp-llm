@@ -1,5 +1,8 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, call, patch
+
+import grpc
 
 from rtp_llm.config.exceptions import (
     AdmissionRejectReason,
@@ -127,6 +130,49 @@ class _FakeInputPB:
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_payload_is_lazy_and_retried_once_after_batch_rejection(
+        self,
+    ):
+        client = _CaptureMasterClient()
+        client.host_service.can_omit_generate_input = lambda addr: addr == "master:1234"
+        build_input = Mock(return_value=_FakeInputPB())
+        success = FlexlbScheduleResponsePB(success=True, code=200)
+        reject = FlexlbScheduleResponsePB(code=8409)
+        send = AsyncMock(side_effect=[reject, success])
+        client._send_schedule_request = send
+        args = dict(
+            block_cache_keys=[1],
+            cache_key_block_size=128,
+            input=_FakeInput(),
+            request_id=99,
+            input_pb_factory=build_input,
+        )
+        self.assertTrue((await client.get_backend_role_addrs(**args)).is_ok)
+        self.assertEqual(send.await_count, 2)
+        first, retry = (call.args for call in send.await_args_list)
+        self.assertEqual(first[0], retry[0])
+        self.assertEqual(first[1].request_id, retry[1].request_id)
+        self.assertEqual(first[1].generate_input, b"")
+        self.assertEqual(retry[1].generate_input, b"serialized-input")
+        self.assertLess(retry[2], first[2])
+        build_input.assert_called_once()
+
+        for response in (
+            success,
+            FlexlbScheduleResponsePB(code=8409, enqueued_by_master=True),
+            FlexlbScheduleResponsePB(code=8409, lifecycle={"request_id": 99}),
+        ):
+            send.reset_mock(side_effect=True)
+            send.return_value = response
+            build_input.reset_mock()
+            if response.success:
+                await client.get_backend_role_addrs(**args)
+            else:
+                with self.assertRaises(FtRuntimeException):
+                    await client.get_backend_role_addrs(**args)
+            self.assertEqual(send.await_count, 1)
+            build_input.assert_not_called()
+
     def test_python_reason_enum_matches_schedule_wire_values(self):
         self.assertEqual(
             int(AdmissionRejectReason.UNSPECIFIED),
@@ -145,6 +191,55 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             RESOURCE_EXHAUSTED,
         )
 
+    async def test_transport_failure_after_resend_does_not_try_slave(self):
+        client = MasterClient(
+            host_service=_FakeHostServiceWithSlave(), master_config=_FakeMasterConfig()
+        )
+        client.host_service.can_omit_generate_input = lambda addr: addr == "master:1234"
+        schedule = AsyncMock(
+            side_effect=[
+                FlexlbScheduleResponsePB(
+                    code=ExceptionType.MASTER_GENERATE_INPUT_REQUIRED
+                ),
+                grpc.aio.AioRpcError(
+                    grpc.StatusCode.UNAVAILABLE,
+                    grpc.aio.Metadata(),
+                    grpc.aio.Metadata(),
+                ),
+            ]
+        )
+        with patch(
+            "rtp_llm.server.master_client.FlexlbServiceStub",
+            return_value=SimpleNamespace(Schedule=schedule),
+        ), patch.object(client, "_get_channel") as channel, patch.object(
+            client, "_close_channel", new_callable=AsyncMock
+        ):
+            with self.assertRaises(FtRuntimeException) as raised:
+                await client.get_backend_role_addrs(
+                    block_cache_keys=[1],
+                    cache_key_block_size=128,
+                    input=_FakeInput(),
+                    request_id=99,
+                    input_pb_factory=_FakeInputPB,
+                )
+
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.RPC_FINISH_FAILED
+        )
+        self.assertEqual(
+            raised.exception.message,
+            "FlexLB schedule transport failed after resending GenerateInput",
+        )
+        self.assertEqual(schedule.await_count, 2)
+        master_target = client._get_grpc_target("master:1234")
+        self.assertEqual(
+            channel.call_args_list, [call(master_target), call(master_target)]
+        )
+        initial, resent = (attempt.args[0] for attempt in schedule.await_args_list)
+        self.assertEqual(initial.request_id, resent.request_id)
+        self.assertEqual(initial.generate_input, b"")
+        self.assertEqual(resent.generate_input, b"serialized-input")
+
     async def test_schedule_payload_contains_batch_fields_and_pb(self):
         client = _CaptureMasterClient()
 
@@ -153,7 +248,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(),
             request_id=99,
-            input_pb=_FakeInputPB(),
+            input_pb_factory=_FakeInputPB,
         )
 
         self.assertTrue(response.is_ok)
@@ -184,7 +279,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(headers={"x-dashscope-inner-qos-level": "70"}),
             request_id=101,
-            input_pb=_FakeInputPB(),
+            input_pb_factory=_FakeInputPB,
         )
 
         self.assertEqual(client.calls[0]["request_pb"].priority, 70)
@@ -197,7 +292,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(headers={}),
             request_id=102,
-            input_pb=_FakeInputPB(),
+            input_pb_factory=_FakeInputPB,
         )
 
         self.assertEqual(client.calls[0]["request_pb"].priority, 50)
@@ -210,7 +305,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
             cache_key_block_size=1024,
             input=_FakeInput(headers={"x-dashscope-inner-qos-level": "high"}),
             request_id=103,
-            input_pb=_FakeInputPB(),
+            input_pb_factory=_FakeInputPB,
         )
 
         self.assertTrue(response.is_ok)
@@ -225,7 +320,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 cache_key_block_size=1024,
                 input=_FakeInput(),
                 request_id=100,
-                input_pb=_FakeInputPB(),
+                input_pb_factory=_FakeInputPB,
             )
 
         self.assertEqual(
@@ -261,7 +356,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                         cache_key_block_size=1024,
                         input=_FakeInput(),
                         request_id=104,
-                        input_pb=_FakeInputPB(),
+                        input_pb_factory=_FakeInputPB,
                     )
 
                 self.assertEqual(exception_type, raised.exception.exception_type)
@@ -287,7 +382,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 cache_key_block_size=1024,
                 input=_FakeInput(),
                 request_id=105,
-                input_pb=_FakeInputPB(),
+                input_pb_factory=_FakeInputPB,
             )
 
         self.assertEqual(
@@ -307,7 +402,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 cache_key_block_size=1024,
                 input=_FakeInput(),
                 request_id=106,
-                input_pb=_FakeInputPB(),
+                input_pb_factory=_FakeInputPB,
             )
 
         self.assertEqual(
