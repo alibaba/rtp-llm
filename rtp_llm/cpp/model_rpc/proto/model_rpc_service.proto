@@ -943,6 +943,8 @@ message P2PConnectorBroadcastTpResponsePB {
     string error_message = 2;
     // Populated when request type == QUERY_LEASE_STATUS
     LeaseStatusResponsePB lease_status = 3;
+    // Worker wall-clock timestamp for successful READ with transfer tasks.
+    int64 kv_complete_time_us = 4;
 }
 
 message LeaseStatusResponsePB {
@@ -1009,6 +1011,7 @@ message SideChannelPayloadPB {
     int64 frontend_context_token_num_with_cache = 16;
     int64 frontend_context_execute_time_us = 17;
     int64 frontend_context_execute_time_with_cache_us = 18;
+    int64 first_token_time_us = 19;
 }
 
 message P2PConnectorStartLoadResponsePB {

@@ -105,11 +105,6 @@ torch::Tensor buildFirstTokenUpdateTokens(GenerateStream* stream, int32_t first_
     return tokens;
 }
 
-const P2PSideChannelPayload* p2pSideChannel(const std::shared_ptr<AsyncContext>& context) {
-    auto p2p = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context);
-    return p2p ? p2p->sideChannelPayload() : nullptr;
-}
-
 bool p2pLoadSafeToRelease(const std::shared_ptr<AsyncContext>& context) {
     if (!context || !context->done()) {
         return context == nullptr;
@@ -799,12 +794,17 @@ bool StreamCacheResource::loadCacheDone() {
             return false;
         }
         if (p2p_load_context_->success()) {
-            if (const auto* payload = p2pSideChannel(p2p_load_context_)) {
-                try {
-                    applyP2PSideChannel(*payload, stream_);
-                } catch (const std::exception& error) {
-                    stream_->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
-                                                     std::string("invalid P2P side-channel payload: ") + error.what());
+            if (const auto p2p = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(p2p_load_context_)) {
+                if (const auto* payload = p2p->sideChannelPayload()) {
+                    try {
+                        applyP2PSideChannel(*payload, stream_);
+                        if (!stream_->hasErrorWithoutLock()) {
+                            stream_->p2p_handoff_ready_time_us_.store(p2p->handoffReadyTimeUs());
+                        }
+                    } catch (const std::exception& error) {
+                        stream_->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                                         std::string("invalid P2P side-channel payload: ") + error.what());
+                    }
                 }
             }
             if (stream_->generateInput()->request_deadline_is_handoff_only && !stream_->hasErrorWithoutLock()) {

@@ -74,6 +74,28 @@ TEST_F(TransferTaskTest, StartTransfer_AfterNotifyDone_ReturnsFalse) {
 
 // ==================== notifyDone() 正常路径 ====================
 
+TEST_F(TransferTaskTest, PhysicalCompletionWaitsForLastInflightWrite) {
+    auto task = makeTask();
+    ASSERT_TRUE(task.startTransfer());
+    ASSERT_TRUE(task.startTransfer());
+
+    task.notifyDone(true);
+    EXPECT_EQ(task.physicalCompletionTimeUs(), 0);
+
+    const auto before_completion = currentTimeUs();
+    task.notifyDone(true);
+    ASSERT_TRUE(task.success());
+    EXPECT_GE(task.physicalCompletionTimeUs(), before_completion);
+    EXPECT_LE(task.physicalCompletionTimeUs(), currentTimeUs());
+}
+
+TEST_F(TransferTaskTest, FailedReceiveDoesNotPublishPhysicalCompletionTime) {
+    auto task = makeTask();
+    task.cancel();
+    ASSERT_TRUE(task.done());
+    EXPECT_EQ(task.physicalCompletionTimeUs(), 0);
+}
+
 TEST_F(TransferTaskTest, UpperLayerCanCompleteReceptionInOneBatch) {
     const std::vector<int64_t> expected{101, 102};
     TransferTask task({}, currentTimeMs() + 5000, [&](const auto& keys) { return keys == expected; });

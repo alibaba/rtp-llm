@@ -24,6 +24,7 @@ public:
         uint64_t                             rng_offset                           = 0;
         bool                                 has_first_token                      = false;
         int64_t                              first_token_id   = 0;
+        int64_t                              first_token_time_us = 0;
         int32_t                              total_reuse_len  = 0;
         int32_t                              local_reuse_len  = 0;
         int32_t                              remote_reuse_len = 0;

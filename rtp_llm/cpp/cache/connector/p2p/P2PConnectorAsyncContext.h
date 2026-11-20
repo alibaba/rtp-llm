@@ -148,6 +148,11 @@ public:
         return &server_call_result_->side_channel_payload;
     }
 
+    int64_t handoffReadyTimeUs() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return handoff_ready_time_us_;
+    }
+
     ErrorInfo errorInfo() const override;
 
     size_t matchedBlockCount() const {
@@ -217,6 +222,7 @@ private:
     std::condition_variable done_cv_;
     bool                    done_{false};
     bool                    success_{false};
+    int64_t                 handoff_ready_time_us_{0};
     ErrorCode               error_code_;
     std::string             error_message_;
     std::atomic<int64_t>                         lease_hold_start_us_{0};  // steady clock

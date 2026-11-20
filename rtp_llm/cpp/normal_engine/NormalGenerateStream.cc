@@ -571,6 +571,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             if (!tokens.empty()) {
                 side_data.has_first_token = true;
                 side_data.first_token_id  = tokens.back();
+                side_data.first_token_time_us = complete_token_ids_->firstTokenTimeUs();
             }
             side_data.generation_prefill_cuda_graph_status =
                 static_cast<uint32_t>(generation_prefill_cuda_graph_status_);

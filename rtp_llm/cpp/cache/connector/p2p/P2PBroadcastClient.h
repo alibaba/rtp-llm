@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include <memory>
+#include <optional>
 #include <atomic>
 #include <string>
 #include <vector>
@@ -49,6 +50,7 @@ public:
             return completed;
         }
         bool success() const;
+        std::optional<int64_t> kvPhysicalCompletionTimeUs() const;
         void checkDone();
         void setDoneCallback(std::function<void()> callback) {
             if (tp_broadcast_result_) {

@@ -975,6 +975,7 @@ public:
     };
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
+    int64_t p2pHandoffReadyTimeUs() const { return p2p_handoff_ready_time_us_.load(); }
 
 protected:
     // moveToNext() runs under mutex_, while the async MTP worker needs the
@@ -1019,6 +1020,7 @@ protected:
     std::atomic<size_t>                   pp_inflight_{0};
     std::vector<StreamState>              sub_generate_status_;
     std::atomic<bool>                     p2p_handoff_completed_{false};
+    std::atomic<int64_t>                  p2p_handoff_ready_time_us_{0};
     std::vector<int64_t>                  sub_generate_output_lengths_;
     int64_t                               frontend_context_token_num_                  = 0;
     int64_t                               frontend_context_token_num_with_cache_       = 0;

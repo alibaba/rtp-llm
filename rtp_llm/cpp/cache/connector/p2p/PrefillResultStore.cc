@@ -129,6 +129,7 @@ grpc::Status PrefillResultStore::fillStartLoadResponsePayload(const SideChannelD
         payload->set_has_first_generate_token(data.has_first_token);
         if (data.has_first_token) {
             payload->set_first_generate_token_id(data.first_token_id);
+            payload->set_first_token_time_us(data.first_token_time_us);
         }
         payload->set_generation_prefill_cuda_graph_status(data.generation_prefill_cuda_graph_status);
         payload->set_frontend_context_token_num(data.frontend_context_token_num);

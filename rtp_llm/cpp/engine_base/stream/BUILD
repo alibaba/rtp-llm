@@ -60,6 +60,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p:metrics",
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:env_util",

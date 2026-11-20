@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/telemetry/PhaseSpanSynthesizer.h"
 
 using namespace std;
@@ -355,8 +356,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
     // Decode replays the Prefill token into its queue even for non-streaming
     // requests. Collect these internal blocks into one RPC output while retaining
     // optional first-token tensors; streaming and other roles keep block semantics.
-    const bool collect_pd_output =
-        stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE && !stream->isStreaming();
+    const bool pd_decode             = stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE;
+    const bool collect_pd_output     = pd_decode && !stream->isStreaming();
+    const bool measure_token_output = pd_decode && stream->isStreaming() && metrics_reporter_;
+    int64_t    first_token_write_us = 0;
+    bool       second_token_reported = false;
     const auto& config = *stream->generateConfig();
     BatchStreamOutputCollector complete_output(config.aux_info ? config.logits_index : std::nullopt);
     while (true) {
@@ -418,11 +422,36 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
             return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
         }
+        int64_t output_len = 0;
+        if (measure_token_output && !second_token_reported && !output.frontend_metric_only) {
+            for (const auto& item : output.generate_outputs) {
+                if (item.output_ids.defined() && item.output_ids.numel() > 0) {
+                    output_len = std::max<int64_t>(output_len, item.aux_info.output_len);
+                }
+            }
+        }
+        // Measure the start of the write carrying the token, and only report accepted writes.
+        const auto write_time_us = output_len > 0 ? currentTimeUs() : 0;
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             // WriterInterface uses false to signal that its downstream consumer has closed or cancelled.
             return grpc::Status(grpc::StatusCode::CANCELLED, "request output consumer closed");
+        }
+        if (write_time_us > 0) {
+            if (first_token_write_us == 0) {
+                first_token_write_us = write_time_us;
+            }
+            if (output_len >= 2) {
+                second_token_reported = true;
+                P2PConnectorMetricsCollector collector;
+                collector.decode_first_to_second_token_output_us = write_time_us - first_token_write_us;
+                const auto handoff_ready_us = stream->p2pHandoffReadyTimeUs();
+                if (handoff_ready_us > 0) {
+                    collector.decode_handoff_ready_to_second_token_output_us = write_time_us - handoff_ready_us;
+                }
+                metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, &collector);
+            }
         }
         if (!output.frontend_metric_only && stream->hasEvent(StreamEvents::PrefillHandoffReady)) {
             if (stream->queryPdSep() && stream->resourceContext().role_type == RoleType::PREFILL) {
