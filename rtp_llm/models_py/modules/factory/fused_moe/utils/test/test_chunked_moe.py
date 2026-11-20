@@ -17,6 +17,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     DEFAULT_MOE_CHUNK_TOKENS,
     ChunkedFp8Fp4MoeLayer,
     cp_padded_tokens_per_rank_bound,
+    moe_decode_forward,
+    planned_moe_tokens,
     resolve_moe_max_tokens_per_rank,
     run_moe_chunks,
     synchronized_moe_chunk_plan,
@@ -457,6 +459,72 @@ class ChunkedMoeTest(unittest.TestCase):
         all_reduce.assert_called_once()
         self.assertEqual(first._moe.token_chunks, [3, 0])
         self.assertEqual(second._moe.token_chunks, [3, 0])
+
+    def test_world_executor_reuses_stack_plan_on_empty_rank(self):
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "sm120_fused_moe"
+        executor = layer.fused_moe.fused_experts
+        executor.requires_synchronized_chunk_schedule = True
+        x = torch.empty(0, 4)
+        world = object()
+        with (
+            mock.patch.object(torch.distributed, "group", SimpleNamespace(WORLD=world)),
+            mock.patch("torch.distributed.is_initialized", return_value=True),
+            mock.patch(
+                "torch.distributed.all_reduce",
+                side_effect=lambda count, **_: count.fill_(9),
+            ) as reduce,
+        ):
+            with synchronized_moe_chunk_plan([SimpleNamespace(ffn=layer)], 0, x.device):
+                self.assertEqual(planned_moe_tokens(), 9)
+                self.assertEqual(layer(x).shape, x.shape)
+            self.assertIsNone(planned_moe_tokens())
+            self.assertEqual(layer._moe.token_chunks, [0, 0, 0])
+            self.assertEqual(reduce.call_count, 1)
+            self.assertIs(reduce.call_args.kwargs["group"], world)
+            self.assertEqual(
+                reduce.call_args.kwargs["op"], torch.distributed.ReduceOp.MAX
+            )
+
+            # Equal CP slices do not exchange a chunk plan.
+            reduce.reset_mock()
+            executor.requires_synchronized_chunk_schedule = False
+            with synchronized_moe_chunk_plan([layer], 0, x.device):
+                self.assertIsNone(planned_moe_tokens())
+                layer(x)
+            reduce.assert_not_called()
+            self.assertEqual(layer._moe.token_chunks, [0, 0, 0, 0])
+
+    def test_single_round_executor_uses_chunk_policy_in_forward(self):
+        layer = _fake_layer(capacity=4)
+        layer.strategy_name = "sm120_a2a_decode"
+        layer.fused_moe.fused_experts.single_round_dispatch = True
+        layer._moe.capacity = 9  # The transport has its own round capacity.
+        x = torch.ones(9, 4)
+        torch.testing.assert_close(layer(x), x * 3)
+        self.assertEqual(layer._moe.token_chunks, [9])
+
+        with synchronized_moe_chunk_plan([layer], 9, x.device, is_decode_forward=True):
+            self.assertTrue(moe_decode_forward())
+            with self.assertRaisesRegex(ValueError, "decode.*max_tokens_per_rank"):
+                layer(x)
+        self.assertFalse(moe_decode_forward())
+        self.assertEqual(layer._moe.token_chunks, [9])
+
+    def test_mega_fp8_stack_plan_does_not_add_standalone_collectives(self):
+        layer = _fake_layer()
+        layer.strategy_name = "mega_moe_fp8"
+        x = torch.ones(3, 4)
+        with (
+            mock.patch("torch.distributed.is_initialized", return_value=True),
+            mock.patch("torch.distributed.all_reduce") as reduce,
+        ):
+            layer(x)
+            reduce.assert_not_called()
+            with synchronized_moe_chunk_plan([layer], 3, x.device):
+                self.assertEqual(planned_moe_tokens(), 3)
+                layer(x)
+            self.assertEqual(reduce.call_count, 1)
 
     def test_mixed_non_mega_layer_ignores_synchronized_token_count(self):
         mega = _fake_layer()

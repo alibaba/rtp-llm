@@ -155,3 +155,49 @@ cc_test(
         ("async", "1"),
     ]
 ]
+
+cc_test(
+    name = "dsv4_dp_prefill_policy_test",
+    srcs = ["Dsv4DpPrefillPolicyTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/normal_engine:dsv4_dp_prefill_policy",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+# SM120 decode admission/fan-out coverage; sibling of engine_test.
+# The source includes EngineTest.cc to reuse its file-local fixture.
+cc_library(
+    name = "engine_sm120_admission_includes",
+    # The sibling textually includes EngineTest.cc to reuse its file-local
+    # fixture; declare it as an include-only direct compile input so it is not
+    # compiled a second time (the original stays compiled only under
+    # engine_test).
+    textual_hdrs = [
+        "EngineTest.cc",
+    ],
+)
+
+cc_test(
+    name = "engine_sm120_admission_test",
+    srcs = [
+        "NormalEngineSm120AdmissionTest.cc",
+    ],
+    args = [
+        "--gtest_filter=NormalEngineTest.testSm120*:NormalEngineTest.testMtpFusedStepPadsMissingPhases",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        ":engine_sm120_admission_includes",
+        ":mock_engine",
+        "//rtp_llm/cpp/cache",
+        "//rtp_llm/cpp/engine_base/schedulers",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = device_test_envs(),
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)

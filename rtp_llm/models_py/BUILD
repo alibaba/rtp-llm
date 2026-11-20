@@ -182,6 +182,40 @@ cc_binary(
     visibility = ["//visibility:public"],
 )
 
+# Source-level policy tests deliberately do not import GPU modules.
+filegroup(
+    name = "prefill_policy_source_data",
+    srcs = [
+        "modules/dsv4/dsv4_kernel_jit_warmup.py",
+        "modules/dsv4/fp8/attention.py",
+        "modules/dsv4/utils.py",
+        "modules/dsv4/fp8/attention_backend.py",
+        "modules/dsv4/fp8/backend_selection.py",
+        "modules/dsv4/fp8/sm120_attention_backend.py",
+        "modules/dsv4/fp8/sm120_projection.py",
+        "utils/arch.py",
+        "//rtp_llm:device_type_source",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "prefill_optimization_source_data",
+    srcs = glob([
+        "modules/dsv4/**/*.py",
+        "modules/dsv4/*.py",
+        # Prenorm tests load the kernel dispatch source directly.
+        "3rdparty/tile_kernels/modeling/mhc/**/*.py",
+        # Include the shared backend resolver and wrapper for CPU tests.
+        "utils/arch.py",
+        "kernels/cuda/deepgemm_wrapper.py",
+        "kernels/cuda/sm120_fp8_blockwise.py",
+        # dsv4/_profiler.py wraps the shared model profiler.
+        "utils/profiler.py",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
@@ -204,6 +238,7 @@ py_library(
         ":kernels",
         ":tile_kernels_mhc",
         "//rtp_llm:warmup",
+        "//rtp_llm/models_py/triton_kernels:sm120_ep",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
@@ -344,7 +379,14 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + triton_deps(["triton"]),
+    ] + triton_deps(["triton"]) + select({
+        "@//:using_cuda13_x86": [
+            "//rtp_llm/models_py/kernels/cuda/sm120/graph_moe",
+            "//rtp_llm/models_py/kernels/cuda/sm120/grouped_decode",
+            "//rtp_llm/models_py/kernels/cuda/sm120/sparse",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//rtp_llm/models_py:__subpackages__"],
 )
 
@@ -435,4 +477,10 @@ filegroup(
 exports_files(
     ["model_desc/cp_mtp_hidden_handoff.py"],
     visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
+)
+
+filegroup(
+    name = "dspark_model_source",
+    srcs = ["model_desc/deepseek_v4_dspark_model.py"],
+    visibility = ["//visibility:public"],
 )

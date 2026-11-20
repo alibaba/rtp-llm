@@ -74,6 +74,7 @@ class PpuMtpHiddenTest(unittest.TestCase):
                         embed=torch.nn.Embedding.from_pretrained(weight[:, :local_dim]),
                     )
                     v4._embed = types.MethodType(V4Transformer._embed, v4)
+                    v4._embed_target = types.MethodType(V4Transformer._embed_target, v4)
                     model = object.__new__(model_type)
                     torch.nn.Module.__init__(model)
                     values = dict(

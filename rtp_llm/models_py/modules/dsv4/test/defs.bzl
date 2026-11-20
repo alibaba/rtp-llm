@@ -18,6 +18,33 @@ def dsv4_py_test(name, deps, src = None, gpu_count = 1, tags = [], args = [], **
         **kwargs
     )
 
+def dsv4_sm120_py_test(name, deps, src = None, extra_srcs = [], gpu_count = 1, tags = [], args = [], env = {}, **kwargs):
+    """Run the shared CUDA13 build on the SM120 pool."""
+    source = src or name + ".py"
+    # SM120 lanes need the --cuda-major/--cuda-minor gate; that launcher
+    # lives in the sibling pytest_main_sm120.py so pytest_main.py stays
+    # unmodified.
+    runner = "//rtp_llm/test/pytest:pytest_main_sm120.py"
+    main_runner = "//rtp_llm/test/pytest:pytest_main.py"
+    test_env = dict(env)
+    test_env["GPU_COUNT"] = str(gpu_count)
+    native.py_test(
+        name = name,
+        srcs = [source, runner, main_runner] + extra_srcs,
+        main = runner,
+        args = ["--cuda-devices", str(gpu_count), "--cuda-major", "12", "--cuda-minor", "0", "$(location :" + source + ")"] + args,
+        deps = deps + ["//rtp_llm:jit_cache_env", test_requirement("pytest")],
+        env = test_env,
+        tags = ["dsv4_cuda13", "RTX_5000_PRO_CU13"] + tags,
+        exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": str(gpu_count)},
+        target_compatible_with = select({
+            "@//:using_cuda13_x86": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        legacy_create_init = 0,
+        **kwargs
+    )
+
 def dsv4_sm100_py_test(name, deps, src = None, extra_srcs = [], gpu_count = 1, tags = [], args = [], **kwargs):
     """Keep the shared ARM/x86 target names with the strict pytest runner."""
     source = src or name + ".py"

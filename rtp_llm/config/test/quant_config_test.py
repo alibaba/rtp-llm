@@ -3,7 +3,11 @@ import os
 import tempfile
 import unittest
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 
 
 class QuantConfigTest(unittest.TestCase):
@@ -14,6 +18,24 @@ class QuantConfigTest(unittest.TestCase):
             ) as writer:
                 json.dump(config_json, writer)
             return QuantizationConfig.load_from_ckpt(checkpoint_path)
+
+    def test_sm120_preference_is_optional_and_round_trips(self):
+        checkpoint = self._load_config(
+            {
+                "quantization_config": {
+                    "quant_method": "fp8",
+                    "weight_block_size": [128, 128],
+                }
+            }
+        )
+        self.assertIsInstance(checkpoint, Fp8BlockWiseQuantConfig)
+        self.assertFalse(checkpoint.prefer_sm120_blockwise)
+
+        restored = QuantizationConfig.from_config(
+            {"method": "FP8_PER_BLOCK", "prefer_sm120_blockwise": True}
+        )
+        self.assertTrue(restored.prefer_sm120_blockwise)
+        self.assertFalse(Fp8BlockWiseQuantConfig().prefer_sm120_blockwise)
 
     @staticmethod
     def _grouped_modelopt_config():

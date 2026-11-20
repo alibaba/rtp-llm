@@ -634,9 +634,7 @@ def make_compressed_k_pool_reader(
             cp_ctx.cp_rank,
         )
         has_actual = actual_local > 0
-        local_lens = torch.full(
-            (1,), total_local, dtype=torch.int32, device=device
-        )
+        local_lens = torch.full((1,), total_local, dtype=torch.int32, device=device)
         local_actual_lens = torch.full(
             (1,), actual_local, dtype=torch.int32, device=device
         )
@@ -679,9 +677,7 @@ def make_compressed_k_pool_reader(
             total_local_kv=total_local,
             owner_block_size=owner_bs,
             seq_lens_total=(
-                int(total_kv_len)
-                if total_kv_len is not None
-                else int(restore.numel())
+                int(total_kv_len) if total_kv_len is not None else int(restore.numel())
             ),
             local_seq_lens_padded=local_lens,
             local_seq_lens_actual=local_actual_lens,

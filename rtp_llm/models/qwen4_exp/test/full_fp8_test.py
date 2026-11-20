@@ -8,7 +8,7 @@ from unittest import mock
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.config.quant_config import ModelOptFp4Config
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, ModelOptFp4Config
 from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX, Fp8StorageWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.model_loader.tensor_source import TensorSource
@@ -508,19 +508,48 @@ class QwenAttentionFp8RuntimeTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location(
             cuda.__name__ + ".registration_probe", Path(cuda.__file__)
         )
-        module = importlib.util.module_from_spec(spec)
-        module.__package__ = cuda.__name__
-        with (
-            mock.patch.object(builtins, "__import__", import_without_fp4),
-            mock.patch.object(LinearFactory, "register") as register,
-            mock.patch("rtp_llm.models_py.utils.arch.is_cuda", return_value=True),
-            mock.patch("rtp_llm.models_py.utils.arch.get_sm", return_value=(12, 0)),
-        ):
-            spec.loader.exec_module(module)
-        names = [args[0].__name__ for args, _ in register.call_args_list]
-        self.assertEqual(
-            names, ["CudaF16Linear", "CudaFp8PerTensorLinear", "CudaFp8GEMMLinear"]
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda import (
+            fp8_vllm_blockwise_sm120_linear as blockwise,
         )
+
+        for blockwise_available in (False, True):
+            with self.subTest(blockwise_available=blockwise_available):
+                module = importlib.util.module_from_spec(spec)
+                module.__package__ = cuda.__name__
+                with (
+                    mock.patch.object(builtins, "__import__", import_without_fp4),
+                    mock.patch.object(LinearFactory, "register") as register,
+                    mock.patch(
+                        "rtp_llm.models_py.utils.arch.is_cuda", return_value=True
+                    ),
+                    mock.patch(
+                        "rtp_llm.models_py.utils.arch.get_sm", return_value=(12, 0)
+                    ),
+                    mock.patch.object(
+                        blockwise,
+                        "sm120_blockwise_fp8_available",
+                        return_value=blockwise_available,
+                    ),
+                ):
+                    spec.loader.exec_module(module)
+                strategies = [args[0] for args, _ in register.call_args_list]
+                names = [strategy.__name__ for strategy in strategies]
+                expected = ["CudaF16Linear"]
+                if blockwise_available:
+                    expected.append("CudaFp8VllmBlockwiseLinear")
+                expected.extend(("CudaFp8PerTensorLinear", "CudaFp8GEMMLinear"))
+                self.assertEqual(names, expected)
+
+                config = Fp8BlockWiseQuantConfig()
+                self.assertFalse(config.prefer_sm120_blockwise)
+                weight = torch.zeros((128, 128), dtype=torch.float8_e4m3fn)
+                scales = torch.ones((1, 1), dtype=torch.float32)
+                selected = [
+                    strategy.__name__
+                    for strategy in strategies
+                    if strategy.can_handle(config, weight, scales)
+                ]
+                self.assertEqual(selected, ["CudaFp8GEMMLinear"])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import zstandard as zstd
 
 from rtp_llm.utils.jit_cache_deep_gemm import (
+    DEEPJIT_COMPONENTS,
     SNAPSHOT_MANIFEST,
     validate_deepjit_snapshot,
 )
@@ -37,12 +38,15 @@ def file_sig(path: Path) -> tuple[int, int, int, int]:
 def pack_zstd_tar(archive: Path, files: dict[str, Path]) -> None:
     try:
         before = {name: file_sig(path) for name, path in files.items()}
-        with zstd.open(
-            archive, "wb", cctx=zstd.ZstdCompressor(write_checksum=True)
-        ) as body, tarfile.open(fileobj=body, mode="w|", dereference=True) as tar:
+        with (
+            zstd.open(
+                archive, "wb", cctx=zstd.ZstdCompressor(write_checksum=True)
+            ) as body,
+            tarfile.open(fileobj=body, mode="w|", dereference=True) as tar,
+        ):
             deepjit_hashes = {}
             for name, path in sorted(files.items()):
-                if name.startswith("deep_gemm/"):
+                if name.split("/", 1)[0] in DEEPJIT_COMPONENTS:
                     payload = path.read_bytes()
                     deepjit_hashes[name] = hashlib.sha256(payload).hexdigest()
                     info = tar.gettarinfo(str(path), arcname=name)

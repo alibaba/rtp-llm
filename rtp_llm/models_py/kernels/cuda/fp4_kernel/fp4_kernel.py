@@ -9,8 +9,10 @@ logger = logging.getLogger(__name__)
 
 _NVFP4_READY = False
 _NVFP4_IMPORT_ERROR = None
+cutlass_scaled_fp4_mm = None
+scaled_fp4_quant = None
 
-if is_cuda() and get_sm()[0] >= 10:
+if is_cuda() and torch.cuda.is_available() and get_sm()[0] >= 10:
     try:
         from rtp_kernel.nvfp4 import cutlass_scaled_fp4_mm, scaled_fp4_quant
 
@@ -44,6 +46,11 @@ def _require_nvfp4() -> None:
     raise RuntimeError(
         "rtp_kernel.nvfp4 is only available on CUDA devices with sm >= 10"
     )
+
+
+def is_legacy_cutlass_fp4_available() -> bool:
+    """Whether the CUTLASS FP4 provider used by sgl_cutlass is available."""
+    return _NVFP4_READY and callable(cutlass_scaled_fp4_mm)
 
 
 def cutlass_scaled_fp4_mm_wrapper(

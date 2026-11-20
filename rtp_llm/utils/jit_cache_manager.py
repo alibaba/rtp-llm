@@ -23,13 +23,16 @@ from watchdog.observers import Observer
 
 from rtp_llm.utils import jit_cache_store as store
 from rtp_llm.utils.jit_cache_deep_gemm import (
+    DEEPJIT_COMPONENTS,
     deep_gemm_build_scope,
     deepjit_entry_files,
     deepjit_snapshot_files,
 )
 from rtp_llm.utils.jit_cache_env import (
+    SM120_GROUPED_CACHE_ENV,
     CacheEnvConfig,
     configure_cache_env,
+    native_source_fingerprint,
     read_cache_env,
 )
 
@@ -118,6 +121,7 @@ CREATED = CLOSED | {"created"}
 COMPONENTS = (
     Component("flashinfer", "FLASHINFER_WORKSPACE_BASE", (rule(CREATED, ".cu", ".inc", ".h"), rule(CLOSED, *NINJA)), ("torch", "@flashinfer-python"), CUDA),
     Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin", "meta.json", ".committed"),), ("accelerator", "@deep_gemm"), CUDA, empty_files=(".committed",)),
+    Component("sm120_grouped", SM120_GROUPED_CACHE_ENV, (rule(CREATED, "kernel.cu", "kernel.cubin", "meta.json", ".committed"),), ("accelerator", "@deep_gemm"), CUDA, empty_files=(".committed",)),
     Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR", (rule(CREATED, "nvcc_kernel.cubin"),), ("accelerator", "@flashinfer-python"), CUDA),
     Component("tilelang", "TILELANG_CACHE_DIR", (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),), ("torch", "@tilelang"), CUDA),
     # rtp_kernel is the only producer here whose outputs are not self-keyed (TIPC content-hashes its subdir).
@@ -196,6 +200,16 @@ def resolve_scope(
                 spec = importlib.util.find_spec("flashinfer_cubin")
                 origin = spec.origin if spec is not None else "online-cubins"
                 parts += (sha256(str(origin).encode()).hexdigest()[:16],)
+            if item.name == "sm120_grouped":
+                package = (
+                    Path(__file__).absolute().parents[1]
+                    / "models_py/kernels/cuda/sm120/grouped_decode"
+                )
+                if not (
+                    package / "rtp_dg120_grouped.so"
+                ).is_file() or not accelerator.endswith("-sm_120"):
+                    continue
+                parts += (native_source_fingerprint(package),)
             if item.name == "deep_gemm":
                 try:
                     identity = deep_gemm_build_scope(torch_scope)
@@ -310,7 +324,7 @@ class JitCacheManager(FileSystemEventHandler):
                     rel = path.relative_to(item.local_dir).as_posix()
                     if not item.should_sync(rel, event.event_type, path.stat().st_size):
                         return
-                    if item.name == "deep_gemm":
+                    if item.name in DEEPJIT_COMPONENTS:
                         if not rel.startswith("cache/"):
                             return
                         entry = item.local_dir / "cache" / rel.split("/")[1]
@@ -392,8 +406,10 @@ class JitCacheManager(FileSystemEventHandler):
     def _snapshot_files(self) -> dict[str, Path]:
         files = {}
         for item in self.scope.components:
-            if item.name == "deep_gemm":
-                files.update(deepjit_snapshot_files(self.scope.root))
+            if item.name in DEEPJIT_COMPONENTS:
+                files.update(
+                    deepjit_snapshot_files(self.scope.root, component_name=item.name)
+                )
                 continue
             for path in item.local_dir.rglob("*"):
                 with suppress(OSError):
