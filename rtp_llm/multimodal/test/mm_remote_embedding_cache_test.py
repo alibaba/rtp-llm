@@ -62,7 +62,7 @@ class RemoteCacheTest(unittest.TestCase):
         store.quarantined = False
         remote = self.remote(store, gdr_enabled=True)
         self.assertIsNone(remote.load("old"))
-        self.assertTrue(remote._key_prefix.startswith("mm-v4:"))
+        self.assertTrue(remote._key_prefix.startswith("mm-v5:"))
         remote.submit_result("new", (torch.ones(3), None))
         self.assertTrue(store.saved.wait(2))
         encoded = unpack_object(store.objects["new"])
@@ -740,6 +740,51 @@ class RemoteCacheTest(unittest.TestCase):
         remote.close()
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_direct_gdr_caller_timeout_keeps_slot_until_worker_finishes(self):
+        remote, (slot,) = self.slot_cache(1)
+        remote._direct_payload = True
+        value = torch.arange(8)
+        slot.objects["hit"] = pack_object(
+            plan_object(
+                {
+                    "cache_key": "hit",
+                    "version": 1,
+                    "result": (value, None),
+                    "greennet": None,
+                },
+                checksum=False,
+            )
+        )
+
+        def load_object(meta, *, consumer_stream, expected_key, trace_id):
+            target = torch.empty(meta.size_bytes, dtype=torch.uint8)
+            slot.load_from_meta(meta, target, trace_id=trace_id)
+            return unpack_object(target, expected_key=expected_key)
+
+        slot.read_gate.clear()
+        with patch.object(
+            slot, "load_object_from_meta", create=True, side_effect=load_object
+        ), patch("torch.cuda.current_stream", return_value=object()):
+            try:
+                with concurrent.futures.ThreadPoolExecutor(1) as caller:
+                    pending = caller.submit(remote.load, "hit", timeout_ms=200)
+                    self.assertTrue(slot.read_started.wait(1))
+                    self.assertIsNone(pending.result(timeout=1))
+                self.assertEqual(remote.stats()["inflight_tasks"], 1)
+                self.assertIsNone(remote._gdr_pool.acquire())
+            finally:
+                slot.read_gate.set()
+            with remote._gdr_pool._condition:
+                self.assertTrue(
+                    remote._gdr_pool._condition.wait_for(
+                        lambda: not remote._gdr_pool._in_use, timeout=3
+                    )
+                )
+            torch.testing.assert_close(remote.load("hit")[0], value)
+        remote.close()
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertFalse(remote._gdr_pool._in_use)
 
     def test_late_gdr_read_wakes_bounded_writes_and_busy_reads_only_preflight(self):
         remote, (slot,) = self.slot_cache(1, max_pending=3)

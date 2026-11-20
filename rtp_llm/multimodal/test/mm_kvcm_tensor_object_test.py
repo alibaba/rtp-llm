@@ -48,6 +48,25 @@ class TensorObjectTest(unittest.TestCase):
             seen, [("read", "decode_header", "success"), ("read", "checksum", "error")]
         )
 
+    def test_new_format_has_no_full_payload_hash_and_validates_ranges(self):
+        value = torch.arange(12, dtype=torch.int32).reshape(3, 4).t()
+        with patch(
+            "rtp_llm.multimodal.kvcm.tensor_object.hashlib.sha256",
+            side_effect=AssertionError("new codec must not hash the payload"),
+        ):
+            plan = plan_object(
+                {"cache_key": "key", "result": (value, value)}, checksum=False
+            )
+            packed = pack_object(plan)
+            restored = unpack_object(packed, expected_key="key")["result"]
+            with self.assertRaisesRegex(ValueError, "key mismatch"):
+                unpack_object(packed, expected_key="other-key")
+            self.assertEqual(bytes(packed[:8]), b"RTPMM002")
+            self.assertIs(restored[0], restored[1])
+            torch.testing.assert_close(restored[0], value)
+            with self.assertRaisesRegex(ValueError, "range"):
+                unpack_object(packed[:-1])
+
     def test_pack_into_reused_buffer_matches_zero_initialized_wire_bytes(self):
         value = (
             torch.arange(7, dtype=torch.uint8),

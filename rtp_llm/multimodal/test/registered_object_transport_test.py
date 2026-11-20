@@ -18,6 +18,8 @@ from rtp_llm.multimodal.kvcm.registered_transport import (
     _enable_sync_memops,
 )
 
+from rtp_llm.multimodal.kvcm.tensor_object import plan_object
+
 
 class CudaRdmaSyncMemopsTest(unittest.TestCase):
     def test_enables_and_checks_the_owned_allocation(self):
@@ -163,6 +165,63 @@ class RegisteredObjectTransportTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             transport.load_from_meta(object(), target)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_direct_mixed_object_does_not_alias_a_recycled_slot(self):
+        storage = {}
+
+        class Client:
+            instance_id = instance_group = "test"
+
+            def __init__(self, gpu_tensors):
+                (self.arena,) = gpu_tensors
+
+            def save_one(self, key, data, **kwargs):
+                storage[key] = data.clone()
+                torch.cuda.current_stream().synchronize()
+
+            def load_from_meta(self, meta, target, **kwargs):
+                target.copy_(storage[meta.key])
+                torch.cuda.current_stream().synchronize()
+
+            def close(self):
+                pass
+
+        pool = RegisteredTransportPool(
+            Client, max_object_bytes=4109, device="cuda:0", slots=2, direct_payload=True
+        )
+        first = pool.acquire()
+        second = pool.acquire()
+        try:
+            self.assertIsNone(first._host_staging)
+            self.assertIsNone(second._host_staging)
+            self.assertEqual(second._buffer.data_ptr() % 64, 0)
+            gpu = torch.arange(42, dtype=torch.float16, device="cuda").reshape(6, 7).t()
+            host = torch.tensor([7, 8, 9], dtype=torch.int32)
+            value = (gpu, host, {"alias": gpu, "empty": gpu[:0]})
+            plan = plan_object(value, checksum=False)
+            payload = first.pack(plan)
+            self.assertEqual(payload.data_ptr(), first._buffer.data_ptr())
+            first.save_one("test", payload)
+            meta = SimpleNamespace(key="test", size_bytes=plan.nbytes)
+            restored = second.load_object_from_meta(
+                meta, consumer_stream=torch.cuda.current_stream()
+            )
+            second._buffer.fill_(0xA6)
+            torch.cuda.current_stream().synchronize()
+            self.assertIs(restored[0], restored[2]["alias"])
+            self.assertEqual(restored[2]["empty"].device.type, "cuda")
+            self.assertEqual(restored[1].device.type, "cpu")
+            torch.testing.assert_close(restored[0], gpu)
+            torch.testing.assert_close(restored[1], host)
+            self.assertNotEqual(
+                restored[0].untyped_storage().data_ptr(),
+                second._buffer.untyped_storage().data_ptr(),
+            )
+        finally:
+            pool.release(second)
+            pool.release(first)
+            pool.close()
+
 
 class RegisteredTransportFailureTest(unittest.TestCase):
     """Exercise failure ownership without claiming actual CUDA/RDMA coverage."""
@@ -191,7 +250,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.stream.start()
         self.addCleanup(self.stream.stop)
 
-    def pool(self, slots=1, factory=None, ttl=300):
+    def pool(self, slots=1, factory=None, ttl=300, direct_payload=False):
         allocate = torch.empty
         with patch("torch.cuda.MemPool"), patch(
             "torch.cuda.use_mem_pool", return_value=nullcontext()
@@ -206,6 +265,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 slots=slots,
                 observe_hold=Mock(),
                 quarantine_ttl_seconds=ttl,
+                direct_payload=direct_payload,
             )
         self.addCleanup(pool._gc_stop.set)
         self.addCleanup(pool.close)
@@ -320,6 +380,24 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertIn(
             "gc_success", [call.args[1] for call in pool._observe_hold.call_args_list]
         )
+
+    def test_direct_slot_only_reuses_native_confirmed_quiescent_io(self):
+        pool = self.pool(direct_payload=True)
+        slot = pool.acquire()
+        slot._client.buffer_safe_after_failure.return_value = True
+        slot._client.load_from_meta.side_effect = TimeoutError("safe SDK failure")
+        meta = SimpleNamespace(size_bytes=16)
+        with self.assertRaises(TimeoutError):
+            slot.load_object_from_meta(meta, consumer_stream=None)
+        self.assertFalse(slot.quarantined)
+        slot._client.buffer_safe_after_failure.return_value = False
+        with self.assertLogs(level="ERROR"), self.assertRaises(TimeoutError):
+            slot.load_object_from_meta(meta, consumer_stream=None)
+        pool.release(slot)
+        slot._quarantine_started -= 3600
+        pool._gc_tick()
+        self.assertTrue(slot.quarantined)
+        self.assertIsNone(pool.acquire())
 
     def test_gc_does_not_recycle_cuda_failures_or_contended_slots(self):
         pool = self.pool()

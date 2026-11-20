@@ -1,8 +1,4 @@
-"""Bounded registered CUDA transport for the existing CPU object codec.
-
-The wire payload uses PACE GDR. Serialization and SHA256 validation still run
-on CPU; this is not a claim that the tensor-tree codec is GPU-only.
-"""
+"""Registered CUDA slots with shared MR ownership and isolated failures."""
 
 import ctypes
 import json
@@ -162,8 +158,12 @@ class RegisteredObjectTransport:
         self._lock = threading.Lock()
         self._poisoned = False
         self.device_failed = False
-        self._host_staging = torch.empty(
-            self._capacity, dtype=torch.uint8, device="cpu", pin_memory=True
+        self._host_staging = (
+            None
+            if owner.direct_payload
+            else torch.empty(
+                self._capacity, dtype=torch.uint8, device="cpu", pin_memory=True
+            )
         )
         self._stream = torch.cuda.Stream(device=device)
 
@@ -224,8 +224,11 @@ class RegisteredObjectTransport:
         if not self._lock.acquire(blocking=False):
             return False
         try:
+            # A checksum-free object cannot tolerate unknown DMA overwriting
+            # a reused address. Native BufferSafe is checked at failure time.
             if (
                 not self._poisoned
+                or self._owner.direct_payload
                 or self.device_failed
                 or self._quarantine_stage != "sdk_transfer"
                 or time.monotonic() - self._quarantine_started < ttl_seconds
@@ -297,6 +300,14 @@ class RegisteredObjectTransport:
         from .tensor_object import pack_object
 
         try:
+            if self._owner.direct_payload:
+                with self._serialized("write"):
+                    packed = pack_object(
+                        plan, out=self._buffer, observe_stage=self._observe_stage
+                    )
+                    with self._stage("write", "pack_ready_wait"):
+                        self._stream.record_event().synchronize()
+                    return packed
             return pack_object(
                 plan, out=self._host_staging, observe_stage=self._observe_stage
             )
@@ -306,30 +317,42 @@ class RegisteredObjectTransport:
 
     def save_one(self, key, buffer, **kwargs):
         with self._serialized("write"):
-            transfer = self._view(buffer)
+            direct = self._owner.direct_payload
+            if direct:
+                if (
+                    buffer.device != self._buffer.device
+                    or buffer.dtype != torch.uint8
+                    or buffer.ndim != 1
+                    or not buffer.is_contiguous()
+                    or not 0 < buffer.numel() <= self._capacity
+                    or buffer.data_ptr() != self._buffer.data_ptr()
+                ):
+                    raise ValueError("invalid registered object buffer")
+                transfer = buffer
+            else:
+                transfer = self._view(buffer)
             failure_stage = "host_copy"
             try:
-                host = self._host_staging[: buffer.numel()]
-                with self._stage("write", "host_copy"):
-                    if host.data_ptr() != buffer.data_ptr():
-                        # These are contiguous CPU byte buffers. Use a single
-                        # native copy so parallel slots do not each fan out to
-                        # the PyTorch CPU intra-op workers.
-                        ctypes.memmove(
-                            host.data_ptr(), buffer.data_ptr(), buffer.numel()
-                        )
-                failure_stage = "gpu_copy"
-                stream = self._stream
-                with self._stage("write", "h2d_staging"):
-                    transfer.copy_(host, non_blocking=True)
-                    stream.synchronize()
-                # Includes the native client's metadata transaction, not just IO.
+                if not direct:
+                    host = self._host_staging[: buffer.numel()]
+                    with self._stage("write", "host_copy"):
+                        if host.data_ptr() != buffer.data_ptr():
+                            # Avoid dispatching a CPU thread team for a byte copy.
+                            ctypes.memmove(
+                                host.data_ptr(), buffer.data_ptr(), buffer.numel()
+                            )
+                    failure_stage = "gpu_copy"
+                    with self._stage("write", "h2d_staging"):
+                        transfer.copy_(host, non_blocking=True)
+                        self._stream.synchronize()
+                # Exact-object native IO returns after completion on success.
                 failure_stage = "sdk_transfer"
                 with self._stage("write", "native_save"):
                     self._client.save_one(key, transfer, **kwargs)
-                failure_stage = "gpu_ready_wait"
-                with self._stage("write", "gpu_ready_wait"):
-                    stream.synchronize()
+                if not direct:
+                    failure_stage = "gpu_ready_wait"
+                    with self._stage("write", "gpu_ready_wait"):
+                        self._stream.synchronize()
             except Exception as error:
                 self._handle_failure(
                     error,
@@ -346,6 +369,47 @@ class RegisteredObjectTransport:
 
     def load_from_meta(self, meta, buffer, **kwargs):
         return self._load("load_from_meta", meta, buffer, **kwargs)
+
+    def load_object_from_meta(
+        self, meta, *, consumer_stream, expected_key=None, trace_id=None
+    ):
+        from .tensor_object import unpack_object
+
+        size = meta.size_bytes
+        if not 0 < size <= self._capacity:
+            raise ValueError("invalid registered object size")
+        with self._serialized("read"):
+            transfer = self._buffer[:size]
+            failure_stage = "sdk_transfer"
+            try:
+                with self._stage("read", "native_load"):
+                    self._client.load_from_meta(meta, transfer, trace_id=trace_id)
+                failure_stage = "restore"
+                value = unpack_object(
+                    transfer,
+                    cuda_device=self._device,
+                    max_bytes=self._capacity,
+                    observe_stage=self._observe_stage,
+                    consumer_stream=consumer_stream,
+                    expected_key=expected_key,
+                )
+                with self._stage("read", "restore_ready_wait"):
+                    self._stream.record_event().synchronize()
+                return value
+            except Exception as error:
+                # Layout validation completes before any payload copy. Header
+                # copies to CPU are synchronous and cannot still use the slot.
+                if failure_stage == "sdk_transfer" or not isinstance(
+                    error, ValueError
+                ):
+                    self._handle_failure(
+                        error,
+                        operation="read",
+                        stage=failure_stage,
+                        trace_id=trace_id,
+                        nbytes=size,
+                    )
+                raise
 
     def _load(self, method, value, buffer, *, key=None, **kwargs):
         with self._serialized("read"):
@@ -394,11 +458,13 @@ class RegisteredTransportPool:
         observe_stage=None,
         quarantine_ttl_seconds=300,
         observe_hold=None,
+        direct_payload=False,
     ):
         if type(slots) is not int or slots <= 0:
             raise ValueError("slots must be a positive integer")
         if type(quarantine_ttl_seconds) is not int or quarantine_ttl_seconds <= 0:
             raise ValueError("quarantine_ttl_seconds must be a positive integer")
+        self.direct_payload = direct_payload
         self._quarantine_ttl_seconds = quarantine_ttl_seconds
         self._observe_hold = observe_hold
         self._gc_stop = threading.Event()
@@ -422,6 +488,9 @@ class RegisteredTransportPool:
         if device.type != "cuda":
             raise ValueError("GDR transport requires a CUDA device")
 
+        # Dtype views in the direct codec need aligned slot addresses even
+        # when the configured maximum object size is not a multiple of 64.
+        stride = (capacity + 63) // 64 * 64 if self.direct_payload else capacity
         with cuda_graph_gate.operation(), RegisteredObjectTransport._quarantine_lock:
             held = RegisteredObjectTransport._quarantined_transports
             if held:
@@ -435,7 +504,7 @@ class RegisteredTransportPool:
                 self._allocator = torch.cuda.MemPool()
                 with torch.cuda.use_mem_pool(self._allocator):
                     self._arena = torch.empty(
-                        self._GUARD_BYTES + slots * capacity,
+                        self._GUARD_BYTES + slots * stride,
                         dtype=torch.uint8,
                         device=device,
                     )
@@ -444,7 +513,7 @@ class RegisteredTransportPool:
                     RegisteredObjectTransport(
                         self,
                         self._arena.narrow(
-                            0, self._GUARD_BYTES + i * capacity, capacity
+                            0, self._GUARD_BYTES + i * stride, capacity
                         ),
                         device,
                         observe_stage,

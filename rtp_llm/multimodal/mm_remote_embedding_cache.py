@@ -110,6 +110,7 @@ class MMRemoteEmbeddingCache:
             )
         self._client = client
         self._gdr_pool = gdr_pool
+        self._direct_payload = getattr(gdr_pool, "direct_payload", False) is True
         self._fixed_gdr_client = (
             client if client is gdr_pool and client_factory is None else None
         )
@@ -126,9 +127,9 @@ class MMRemoteEmbeddingCache:
         scope = json.dumps(
             [namespace, self._model_identity], sort_keys=True, separators=(",", ":")
         ).encode()
-        # v4 binds the exact object key into checksummed codec metadata. Older
-        # payloads cannot be mistaken for a new read after timed arena reuse.
-        self._key_prefix = "mm-v4:" + hashlib.sha256(scope).hexdigest() + ":"
+        # V5 uses the checksum-free codec. During a rolling update V4
+        # workers keep their own keys, so neither version reads the old layout.
+        self._key_prefix = "mm-v5:" + hashlib.sha256(scope).hexdigest() + ":"
         self.request_scoped_inspection = request_scoped_inspection
         if gdr_enabled is None:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
@@ -244,6 +245,7 @@ class MMRemoteEmbeddingCache:
                         vit_config, "mm_remote_cache_quarantine_ttl_seconds", 300
                     ),
                     observe_hold=cls._observe_buffer_hold,
+                    direct_payload=True,
                 )
             return raw_factory()
 
@@ -850,12 +852,13 @@ class MMRemoteEmbeddingCache:
                     "cache_key": key,
                 },
                 max_bytes=self.max_object_bytes,
+                checksum=False,
             )
         except (ValueError, TypeError, RecursionError):
             self._count("encode_skip")
             self._report_skip("write", "unsupported_payload")
             return
-        cost = 3 * plan.nbytes
+        cost = plan.nbytes * (1 if self._direct_payload else 3)
         with self._lock:
             duplicate = key in self._pending_writes
             if not duplicate:
@@ -1129,13 +1132,6 @@ class MMRemoteEmbeddingCache:
                 client = self._get_client()
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
-                # unpack_object can return CPU views. Keep the result independent
-                # of the pinned slot, even when the caller times out during IO.
-                buffer = torch.empty(size, dtype=torch.uint8)
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(
-                        "remote embedding buffer preparation deadline expired"
-                    )
                 if self._gdr_pool is not None:
                     timing["stage"] = "client_acquire"
                     slot_wait = min(
@@ -1165,7 +1161,22 @@ class MMRemoteEmbeddingCache:
                 api_started = time.perf_counter()
                 try:
                     with self._observe_stage("read", "transfer", size):
-                        source.load_from_meta(meta, buffer, trace_id=trace_id)
+                        if self._direct_payload:
+                            buffer = slot.load_object_from_meta(
+                                meta,
+                                consumer_stream=consumer_stream,
+                                expected_key=key,
+                                trace_id=trace_id,
+                            )
+                        else:
+                            # CPU views may outlive the transfer. Give them
+                            # independent memory in the staging path as before.
+                            buffer = torch.empty(size, dtype=torch.uint8)
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError(
+                                    "remote embedding buffer preparation deadline expired"
+                                )
+                            source.load_from_meta(meta, buffer, trace_id=trace_id)
                 except Exception as error:
                     if _is_read_miss(error):
                         timing["outcome"] = "miss"
@@ -1234,14 +1245,15 @@ class MMRemoteEmbeddingCache:
 
             size = meta.size_bytes
             timing["nbytes"] = size
+            reservation = size * (1 if self._direct_payload else 3)
             with self._lock:
                 if self._closed:
                     skip_reason = "executor_closed"
-                elif self._bytes + 3 * size > self.max_inflight_bytes:
+                elif self._bytes + reservation > self.max_inflight_bytes:
                     skip_reason = "payload_budget"
                 else:
                     skip_reason = None
-                    cost = 3 * size
+                    cost = reservation
                     self._tasks += 1
                     self._bytes += cost
             if skip_reason is not None:
@@ -1250,6 +1262,12 @@ class MMRemoteEmbeddingCache:
                 self._report_skip("read", skip_reason)
                 return None
 
+            consumer_stream = None
+            if self._direct_payload:
+                # Restore on the leased slot stream, but keep the independent
+                # allocations protected while the request stream consumes them.
+                with cuda_graph_gate.operation():
+                    consumer_stream = torch.cuda.current_stream(self.cuda_device)
             if not self._transfer_slots.acquire(blocking=False):
                 self._count("admission_skip")
                 outcome = "admission_skip"
@@ -1272,11 +1290,16 @@ class MMRemoteEmbeddingCache:
                 return None
             with self._observe_stage("read", "restore"):
                 timing["stage"] = "restore"
-                value = unpack_object(
-                    buffer,
-                    max_bytes=self.max_object_bytes,
-                    cuda_device=self.cuda_device,
-                    observe_stage=self._observe_stage,
+                value = (
+                    buffer
+                    if self._direct_payload
+                    else unpack_object(
+                        buffer,
+                        max_bytes=self.max_object_bytes,
+                        cuda_device=self.cuda_device,
+                        observe_stage=self._observe_stage,
+                        expected_key=key,
+                    )
                 )
                 value, approval = self._decode_value(
                     value, key, require_key=self._transport_mode == "gdr"
@@ -1290,12 +1313,12 @@ class MMRemoteEmbeddingCache:
                     entry.set_greennet_verdict(approval)
             self._count("hit")
             outcome = "hit"
-            payload_nbytes = buffer.numel()
+            payload_nbytes = size
             self.record(
                 "load_hit",
                 key=key,
                 trace_id=trace_id,
-                nbytes=buffer.numel(),
+                nbytes=size,
             )
             return value
         except _TIMEOUT_ERRORS as error:
