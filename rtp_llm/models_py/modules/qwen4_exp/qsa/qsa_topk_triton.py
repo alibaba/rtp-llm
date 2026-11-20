@@ -153,6 +153,7 @@ def try_select_qsa_tokens(
     scores_are_masked=False,
     finite_only=True,
     packed_count=False,
+    compressed_lengths=None,
 ):
     if not (
         scores.is_cuda
@@ -194,7 +195,15 @@ def try_select_qsa_tokens(
                 num_warps=4,
             )
             scores = staged
-        complete = torch.div(lengths, 4, rounding_mode="floor")
+        complete = compressed_lengths
+        if not (
+            isinstance(complete, torch.Tensor)
+            and complete.dtype == torch.int32
+            and complete.device == scores.device
+            and complete.numel() == rows
+            and complete.is_contiguous()
+        ):
+            complete = torch.div(lengths, 4, rounding_mode="floor")
         blocks = torch.empty((rows, 512), device=scores.device, dtype=torch.int32)
         workspace = torch.empty(0, device=scores.device, dtype=torch.uint8)
         rtp_llm_ops.topk_v3(scores, complete, blocks, workspace, 512, columns)

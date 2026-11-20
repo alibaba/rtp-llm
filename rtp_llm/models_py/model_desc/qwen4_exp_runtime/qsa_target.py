@@ -223,4 +223,5 @@ def select_target_verify_tokens(
         token_budget=token_budget,
         validate_lengths=False,
         scores_are_masked=True,
+        compressed_lengths=compressed_lengths,
     )
