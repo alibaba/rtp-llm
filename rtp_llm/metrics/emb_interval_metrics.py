@@ -134,6 +134,46 @@ class EmbInflightMetric(MetricBase):
         return points
 
 
+class EmbSampleMetric(MetricBase):
+    """Aggregate remote EMB gauges without queuing one point per request."""
+
+    def __init__(self, name, tags, *, arena=False):
+        super().__init__(name, tags)
+        self._tag_name = "stage" if arena else "operation"
+        self._arena = arena
+        self._lock = Lock()
+        self._samples = {}
+
+    def report(self, value, tags):
+        key = tags[self._tag_name]
+        with self._lock:
+            if self._arena:
+                previous = self._samples.get(key, value)
+                # Capacity is reported as a maximum. Keep the lowest observed
+                # free values so brief fragmentation remains visible.
+                self._samples[key] = (
+                    max(previous, value) if key == "total" else min(previous, value)
+                )
+            else:
+                sample = self._samples.get(key)
+                if sample is None:
+                    self._samples[key] = [value, 1]
+                else:
+                    sample[0] += value
+                    sample[1] += 1
+
+    def fetch_reported_data(self):
+        with self._lock:
+            samples, self._samples = self._samples, {}
+        return [
+            MetricDataPoint(
+                sample if self._arena else sample[0] / sample[1],
+                dict(self.tags, **{self._tag_name: key}),
+            )
+            for key, sample in samples.items()
+        ]
+
+
 class _Latency:
     __slots__ = ("count", "total", "maximum", "buckets")
 

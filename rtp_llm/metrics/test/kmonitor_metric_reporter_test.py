@@ -55,6 +55,11 @@ class MetricReporterTest(unittest.TestCase):
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC,
                 )
@@ -148,6 +153,42 @@ class MetricReporterTest(unittest.TestCase):
             },
         )
         self.assertTrue(all(p.tags == hold_tags for p in samples))
+
+    def test_remote_gauges_keep_interval_means_and_arena_watermarks(self):
+        reporter, _ = self.make_reporter()
+        reporter.init(tags={"worker": "a"})
+        size = GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC
+        arena = GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC
+        for operation, values in (("read", (8, 12, 40)), ("write", (4, 8))):
+            for value in values:
+                reporter.report(size, value, {"operation": operation})
+        for stage, values in (
+            ("total", (96, 128, 96)),
+            ("free", (100, 15, 80)),
+            ("largest_free", (72, 7, 64)),
+        ):
+            for value in values:
+                reporter.report(arena, value, {"stage": stage})
+
+        sizes = reporter._matic_map[size.value]
+        self.assertEqual(
+            [(point.tags, point.value) for point in sizes.fetch_reported_data()],
+            [
+                ({"worker": "a", "operation": "read"}, 20),
+                ({"worker": "a", "operation": "write"}, 6),
+            ],
+        )
+        self.assertEqual(sizes.fetch_reported_data(), [])
+        capacity = reporter._matic_map[arena.value]
+        self.assertEqual(
+            {
+                point.tags["stage"]: point.value
+                for point in capacity.fetch_reported_data()
+            },
+            {"total": 128, "free": 15, "largest_free": 7},
+        )
+        reporter.report(arena, 80, {"stage": "free"})
+        self.assertEqual([point.value for point in capacity.fetch_reported_data()], [80])
 
     def test_emb_stage_distribution_and_qps_use_same_samples(self):
         rt = GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC.value

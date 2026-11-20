@@ -2,7 +2,12 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Iterable, Optional, Union
 
-from .emb_interval_metrics import EmbInflightMetric, EmbLatencyMetric, EmbOutcomeMetric
+from .emb_interval_metrics import (
+    EmbInflightMetric,
+    EmbLatencyMetric,
+    EmbOutcomeMetric,
+    EmbSampleMetric,
+)
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
@@ -388,6 +393,22 @@ class MetricReporter(object):
                 ):
                     backend = self._kmon.register_custom_metric(
                         EmbLatencyMetric(metric.value, tags or {})
+                    )
+                elif metric in (
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC,
+                ):
+                    backend = self._kmon.register_custom_metric(
+                        EmbSampleMetric(
+                            metric.value,
+                            tags or {},
+                            arena=(
+                                metric is GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC
+                            ),
+                        )
                     )
                 else:
                     backend = self._kmon.register_gauge_metric(metric.value, tags or {})
