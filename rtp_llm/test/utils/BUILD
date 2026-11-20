@@ -53,6 +53,13 @@ py_library(
 )
 
 py_test(
+    name = "nvidia_wheel_path_test",
+    srcs = ["nvidia_wheel_path_test.py"],
+    deps = [":jit_sys_path_setup"],
+    env = {"GPU_COUNT": "0"},
+)
+
+py_test(
     name = "port_util_test",
     srcs = ["port_util_test.py"],
     deps = [

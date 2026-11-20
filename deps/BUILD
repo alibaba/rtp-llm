@@ -79,6 +79,18 @@ sh_binary(
     tags = ["manual"],
 )
 
+sh_binary(
+    name = "requirements_torch_gpu_cuda13_sm90.update",
+    srcs = ["update_cuda13_locks.sh"],
+    args = ["sm90-x86"],
+    data = [
+        "requirements_base.txt",
+        "requirements_cuda13_sm90_overrides.txt",
+        "requirements_torch_gpu_cuda13_sm90.txt",
+    ],
+    tags = ["manual"],
+)
+
 compile_pip_requirements(
     name = "requirements_cuda12_arm",
     src = "requirements_cuda12_arm.txt",
