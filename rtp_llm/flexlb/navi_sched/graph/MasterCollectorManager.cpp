@@ -304,18 +304,18 @@ bool MasterCollectorManager::closeRoute(const std::string &routeId, bool markOff
         collector = it->second;
         _collectors.erase(it);
     }
+    std::string nodeId;
+    const auto bound =
+        _masterStateR->getAgentCollectorNodeId(collector.collectorId, nodeId);
+    if (bound && markOffline && collector.automatic) {
+        _masterStateR->stopAgentCollector(nodeId, collector.collectorId);
+    }
     abortAndWait(collector.userResult, collector.closure);
     if (_visRecorder) {
         _visRecorder->save();
     }
-    std::string nodeId;
-    auto bound = _masterStateR->getAgentCollectorNodeId(collector.collectorId, nodeId);
-    if (bound) {
-        if (markOffline && collector.automatic) {
-            _masterStateR->stopAgentCollector(nodeId, collector.collectorId);
-        } else {
-            _masterStateR->closeAgentCollector(nodeId, collector.collectorId);
-        }
+    if (bound && (!markOffline || !collector.automatic)) {
+        _masterStateR->closeAgentCollector(nodeId, collector.collectorId);
     }
     _masterStateR->unbindAgentCollector(collector.collectorId);
     return true;
@@ -469,6 +469,7 @@ void MasterCollectorManager::syncRoutes(
     struct RouteToClose {
         std::string routeId;
         std::string agentId;
+        std::string collectorId;
         bool markOffline = false;
         bool resetInstance = false;
     };
@@ -482,11 +483,11 @@ void MasterCollectorManager::syncRoutes(
             auto routeIt = routeMetas.find(collector.first);
             if (routeMetas.end() == routeIt) {
                 routesToClose.emplace_back(
-                    RouteToClose{collector.first, collector.second.agentId, true, false});
+                    RouteToClose{collector.first, collector.second.agentId, collector.second.collectorId, true, false});
             } else if (!routeIt->second.empty() &&
                        collector.second.agentMeta != routeIt->second) {
                 routesToClose.emplace_back(
-                    RouteToClose{collector.first, collector.second.agentId, true, true});
+                    RouteToClose{collector.first, collector.second.agentId, collector.second.collectorId, true, true});
             } else if (collector.second.closure &&
                        collector.second.closure->isCompleted() &&
                        !collector.second.closure->agentStopped() &&
@@ -507,12 +508,20 @@ void MasterCollectorManager::syncRoutes(
                               collector.second.agentId.c_str());
                 }
                 routesToClose.emplace_back(RouteToClose{
-                    collector.first, collector.second.agentId, false, false});
+                    collector.first, collector.second.agentId, collector.second.collectorId, false, false});
             }
         }
     }
+    // Exclude every removed endpoint before waiting for any report graph to exit.
     for (const auto &route : routesToClose) {
-        closeRoute(route.routeId, route.markOffline);
+        std::string nodeId;
+        if (route.markOffline &&
+            _masterStateR->getAgentCollectorNodeId(route.collectorId, nodeId)) {
+            _masterStateR->stopAgentCollector(nodeId, route.collectorId);
+        }
+    }
+    for (const auto &route : routesToClose) {
+        closeRoute(route.routeId, false);
         if (route.resetInstance) {
             _masterStateR->resetAgentInstance(route.agentId);
         }
