@@ -444,6 +444,26 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 256)])
         self.assertFalse(pool._in_use)
 
+    def test_sized_release_destroys_its_view_outside_the_allocator_lock(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        destroyed_under_lock = []
+
+        class View:
+            def __del__(self):
+                destroyed_under_lock.append(pool._condition._is_owned())
+
+        slot = pool.acquire(nbytes=64)
+        slot._buffer = View()
+        pool.release(slot)
+        self.assertIsNone(slot._buffer)
+        self.assertEqual(destroyed_under_lock, [False])
+        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 256)])
+
     def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
         pool = self.pool(
             direct_payload=True,

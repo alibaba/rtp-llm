@@ -858,13 +858,18 @@ class RegisteredTransportPool:
         sample = (
             self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
         )
+        retired_view = None
         with self._condition:
             held_since = time.perf_counter_ns() if sample else 0
             for_write = self._in_use.pop(slot)
             if self._free_ranges is not None and not slot.quarantined:
+                # Keep the view alive until the extent and stream have been
+                # returned so PyTorch teardown runs outside the arena lock.
+                retired_view = slot._buffer
                 self._return_range(slot)
             self._condition.notify_all()
             held_ns = time.perf_counter_ns() - held_since if sample else 0
+        del retired_view
         if sample:
             self._observe_lock_hold(for_write, "release", held_ns)
         if self._observe_lease is not None:
