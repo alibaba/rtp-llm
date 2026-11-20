@@ -334,7 +334,7 @@ class SharedForwardState:
 
         policy = self.runtime.policy
         return (
-            (_local_prefill_business_phase(self)
+            (_local_prefill_business_phase(self, require_single_request=False)
              or (self._cp_rows_phase() and self._cp_full_rows_valid()))
             and policy.mode == "compact" and policy.keep_tokens == 140 and policy.window == 128
             and policy.max_rollback_tokens == 0 and not policy.encoder_replay
@@ -562,11 +562,11 @@ class SharedForwardState:
             if current is None or current[0] != self._cross_mhc_compact_stamp[0]:
                 self._cross_mhc_invalid = True
                 return None
-            if rows != 140:
+            if rows != 140 * len(self.lengths) or rows != cp.chunk_length:
                 return None
             return ((host, True, current[0]),
                     (*self._cross_mhc_initial[1], *full_owners, *self._cross_mhc_compact_stamp[1]))
-        if rows != self.lengths[0]:
+        if rows != sum(self.lengths):
             return None
         if cp is None:
             # L19 creates a CED plan without changing the full-row layout.
@@ -904,24 +904,28 @@ class SharedForwardState:
             and not self.local_prefill_sg_align
             and ((context is None and not self.compacted and self.context is None)
                  or (isinstance(context, CPContext) and self.compacted and self.context is context))
-            and len(self.lengths) == len(self.query_prefixes) == 1
-            and self.lengths[0] > 0
+            and bool(self.lengths) and len(self.lengths) == len(self.query_prefixes)
+            and all(length > 0 for length in self.lengths)
+            and (len(self.lengths) == 1 or self.attn.cu_seqlens.device.type == "cpu")
             and self._local_row_cache_key(context) is not None
         )
 
     def _remember_indexer_lookup_rows(self, rows):
-        # Only the original B1 repeat_interleave construction certifies that
-        # every request id is zero. An all-live mask alone cannot prove this.
+        # Stamp only the original repeat_interleave construction. A batched
+        # owner additionally proves the exact lengths from its native host CU.
         if (not self._indexer_lookup_phase() or self._indexer_lookup_invalid
                 or self._indexer_lookup_stamp is not None):
             return
-        count = self.lengths[0]
+        count = sum(self.lengths)
+        batch = len(self.lengths)
         if (any(not is_plain_tensor(value) for value in rows)
-                or tuple(value.shape for value in rows) != ((count,), (count,), (2,), (count,))
+                or tuple(value.shape for value in rows) != ((count,), (count,), (batch + 1,), (count,))
                 or rows[1].is_inference() or rows[1].dtype != torch.int64
                 or not rows[1].is_contiguous() or self.inputs.input_ids.numel() != count):
             return
         sources = self.inputs.input_ids, self.attn.cu_seqlens
+        if batch > 1 and not self._local_host_cu_matches_lengths():
+            return
         self._indexer_lookup_stamp = SimpleNamespace(
             rows=rows, row_keys=tuple(_row_tensor_key(value) for value in rows),
             lengths=self.lengths, prefixes=self.query_prefixes,
@@ -929,6 +933,10 @@ class SharedForwardState:
             sources=sources, source_keys=tuple(_row_tensor_key(value) for value in sources),
             cache_key=self._local_row_cache_key(None)[0],
         )
+
+    def _local_host_cu_matches_lengths(self):
+        cu = self.attn.cu_seqlens
+        return cu.device.type == "cpu" and tuple(cu.tolist()) == (0, *accumulate(self.lengths))
 
     def _indexer_lookup_original_valid(self):
         stamp = self._indexer_lookup_stamp
@@ -949,11 +957,11 @@ class SharedForwardState:
         return True
 
     def _remember_indexer_lookup_compact_plan(self, context, proof):
-        # Only the actual bounded-plan construction may certify B1 request ids.
+        # Only the actual bounded-plan construction may certify compact request ids.
         # Activation and later row-cache misses must not mint a new plan birth.
         if (self._indexer_lookup_compact_birth is not None
                 or not self._indexer_lookup_phase() or not self._indexer_lookup_original_valid()
-                or proof is None or context.chunk_lengths_per_req != (min(self.lengths[0], 140),)
+                or proof is None or context.chunk_lengths_per_req != tuple(min(n, 140) for n in self.lengths)
                 or any(not is_plain_tensor(value) or value.is_inference() for value in proof[1])):
             return
         self._indexer_lookup_compact_birth = self.plan, context, proof[0], proof[1]
@@ -973,16 +981,12 @@ class SharedForwardState:
         return True
 
     def local_indexer_lookup_slices(self, context, rows, query_rows):
-        """Describe legacy B1 lookup indices without enabling slice dispatch.
-
-        The caller still constructs an arange tensor and uses the original
-        advanced-indexing copies, score tiles, precision and TopK path.
-        """
+        """Describe authenticated request ranges for the original score/TopK path."""
         if not self._indexer_lookup_phase(context) or not self._indexer_lookup_original_valid():
             return None
         if context is None:
             stamp = self._indexer_lookup_stamp
-            owners, keys, count = stamp.rows, stamp.row_keys, stamp.lengths[0]
+            owners, keys, lengths = stamp.rows, stamp.row_keys, stamp.lengths
         else:
             if not self._indexer_lookup_compact_valid(context):
                 return None
@@ -990,9 +994,9 @@ class SharedForwardState:
             if stamp is None or stamp[0] is not context:
                 return None
             _, owners, keys = stamp
-            count = context.chunk_length
+            lengths = context.chunk_lengths_per_req
         cached = self._local_prefill_rows.get(id(context))
-        if (type(query_rows) is not int or query_rows != count
+        if (type(query_rows) is not int or query_rows != sum(lengths)
                 or not isinstance(rows, tuple) or len(rows) != 4
                 or any(value is not owner for value, owner in zip(rows, owners))
                 or any(not is_plain_tensor(value) for value in rows)
@@ -1000,7 +1004,8 @@ class SharedForwardState:
                 or cached is None or cached[1] is not owners):
             self._indexer_lookup_invalid = True
             return None
-        return (slice(0, query_rows),)
+        boundaries = tuple(accumulate(lengths, initial=0))
+        return tuple(slice(start, stop) for start, stop in zip(boundaries, boundaries[1:]))
 
     def _local_metadata_snapshot(self, context, rows):
         # Callers authenticate the original read-only consumer/builder chain.
@@ -1024,7 +1029,7 @@ class SharedForwardState:
                 or any(value is not owner for value, owner in zip(rows, cached[1]))
                 or full_cached is None
                 or full_cached[1] is not full.rows
-                or len(self.lengths) != 1 or len(self.query_prefixes) != 1):
+                or len(self.lengths) != len(self.query_prefixes)):
             return None
         sources = rows + (self.inputs.input_ids, self.attn.cu_seqlens)
         identity_sources = rows
@@ -1035,7 +1040,7 @@ class SharedForwardState:
         geometry = (self.lengths, self.query_prefixes, self.plan_reason, policy.mode,
                     getattr(policy, "keep_tokens", None), getattr(policy, "encoder_replay", False),
                     getattr(policy, "max_rollback_tokens", 0))
-        count = self.lengths[0]
+        count = sum(self.lengths)
         if context is None:
             if self.compacted or self.context is not None or cached[1] is not full.rows:
                 return None
@@ -1071,7 +1076,7 @@ class SharedForwardState:
         # identity instead of traversing the 140-row transport every hit.
         owners += geometry
         geometry = tuple((tuple, id(value)) if type(value) is tuple else value for value in geometry)
-        if (tuple(value.shape for value in rows) != ((count,), (count,), (2,), (count,))
+        if (tuple(value.shape for value in rows) != ((count,), (count,), (len(self.lengths) + 1,), (count,))
                 or tuple(value.dtype for value in rows) != (torch.int64, torch.int64, torch.int32, torch.bool)
                 or any(value.device != rows[0].device for value in rows)):
             return None
@@ -1437,7 +1442,7 @@ class SharedForwardState:
         return True
 
     def _compact_host_geometry(self):
-        """Return the exact B1 compact row geometry only while its birth holds.
+        """Return the exact compact row geometry only while its birth holds.
 
         This describes values produced by the original arange/identity and
         bounded-layout constructors. It does not infer values from tensor
@@ -1455,7 +1460,7 @@ class SharedForwardState:
                 or getattr(self.plan, "original_context", None) is not self.original_context):
             return None
         original, full_rows = self.original_context, self._indexer_lookup_stamp.rows
-        count = self.lengths[0]
+        count = sum(self.lengths)
         owners = original.global_positions, original.req_id_per_token, original.local_is_real
         if (any(not is_plain_tensor(value) or value.is_inference() for value in (*full_rows, *owners))
                 or any(value is not owner for value, owner in zip(owners, original_birth[2]))
@@ -1472,9 +1477,14 @@ class SharedForwardState:
                 or any(not is_plain_tensor(value) or value.is_inference() for value in current[1])):
             return None
         selected = self.plan.exchange.candidate_rows_host
-        # _local_compact_rows_key authenticated exactly this suffix, including
-        # identity receive order and every selected row's original index.
-        return tuple(self.query_prefixes[0] + row for row in selected), len(selected), count - 1 in selected
+        # The certified transport lists each request's retained suffix in
+        # request order. Convert physical rows back to per-request positions.
+        positions = tuple(
+            position for prefix, length in zip(self.query_prefixes, self.lengths)
+            for position in range(prefix + max(length - 140, 0), prefix + length)
+        )
+        covered = all(end - 1 in selected for end in accumulate(self.lengths))
+        return positions, len(selected), covered
 
     def _compact_host_evidence(self):
         stamp = self._compact_validation_output
@@ -1639,11 +1649,14 @@ class SharedForwardState:
         if self.prefill:
             cu = self.attn.cu_seqlens.to(device=device, dtype=torch.int64)
             # Preserve the original operation/allocation, but retain a version
-            # counter when its B1 all-zero result will authorize host lookup.
+            # counter when its request IDs will authorize host lookup.
             lookup = self._indexer_lookup_phase()
             if lookup:
+                size = sum(self.lengths) if len(self.lengths) > 1 and self._local_host_cu_matches_lengths() else None
                 with torch.inference_mode(False), torch.no_grad():
-                    requests = torch.repeat_interleave(torch.arange(len(self.lengths), device=device), cu[1:] - cu[:-1])
+                    requests = torch.repeat_interleave(
+                        torch.arange(len(self.lengths), device=device), cu[1:] - cu[:-1], output_size=size,
+                    )
                     positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
             else:
                 requests = torch.repeat_interleave(torch.arange(len(self.lengths), device=device), cu[1:] - cu[:-1])
@@ -1765,8 +1778,8 @@ class SharedForwardState:
             )
         )
 
-    def local_l20_query_slice(self, rows):
-        """Prove a B1 suffix against the plan's creation-stamped transport.
+    def local_l20_query_rows(self, rows, *, allow_batch=False):
+        """Prove the retained rows against the plan's creation-stamped transport.
 
         This only changes query consumers. Full L20 KV producers and the
         existing compact-state callback retain their original row epoch.
@@ -1774,8 +1787,8 @@ class SharedForwardState:
         proof = self._l20_query_projection_proof
         if (
             not self._l20_query_projection_enabled() or proof is None
-            or self.compacted or len(self.lengths) != 1 or self.lengths != (rows,)
-            or rows <= 140 or self.runtime.policy.window != 128
+            or self.compacted or rows != sum(self.lengths)
+            or rows <= 140 * len(self.lengths) or self.runtime.policy.window != 128
             or proof[0] is not self.plan or proof[1] is not self.plan.context
         ):
             return None
@@ -1787,7 +1800,15 @@ class SharedForwardState:
             # by prepare_plan. Unknown inference-only transport cannot prove
             # that the retained row order has not been mutated.
             return None
-        return slice(rows - 140, rows)
+        if len(self.lengths) == 1:
+            return slice(rows - 140, rows)
+        exchange = self.plan.exchange
+        if (allow_batch and exchange.receive_is_identity
+                and self.plan.context.chunk_lengths_per_req == (140,) * len(self.lengths)
+                and min(self.lengths) >= 140
+                and not any(torch.is_inference(value) for value in current[1])):
+            return exchange.send_indices
+        return None
 
     def use_local_compact_rows(self, context):
         return self._validated_local_compact_rows_key(context) is not None
@@ -1991,7 +2012,7 @@ class SharedForwardState:
         return key, owners, tensors
 
     def prepare_local_plan_at_entry(self):
-        """Prepare the same B1/CP1 metadata before any layer work is queued.
+        """Prepare local CP1 metadata before any layer work is queued.
 
         Do not propagate the compact context: L0--L20 still see the original
         full rows, and the existing publication/compact callback owns L20.
@@ -2006,10 +2027,16 @@ class SharedForwardState:
             or (policy.mode, policy.keep_tokens, policy.window,
                 policy.max_rollback_tokens, policy.encoder_replay) != ("compact", 140, 128, 0, False)
             or self.context is not None or self.original_context is not None
-            or len(self.lengths) != 1 or self.lengths[0] <= 140
-            or self.inputs.input_ids.numel() != self.lengths[0]
+            or not self.lengths or min(self.lengths) < 140 or max(self.lengths) <= 140
+            or self.inputs.input_ids.numel() != sum(self.lengths)
         ):
             return
+        if len(self.lengths) > 1:
+            if not self._indexer_lookup_phase() or not self._local_host_cu_matches_lengths():
+                return
+            self.rows()
+            if not self._indexer_lookup_original_valid():
+                return
         self.prepare_plan()
         # Retain source owners as well as their keys. L19 may reuse only this
         # exact creation result, including an unchanged admission rejection.

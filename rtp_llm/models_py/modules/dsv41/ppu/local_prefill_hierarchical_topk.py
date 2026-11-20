@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.topk import (
 
 
 K = 512
+MAX_ROWS = 4096
 KEY_TILE = 256
 GATHER_TILE = 512
 
@@ -77,13 +78,17 @@ def _remap_block_candidate_slots(Chosen, Blocks, Ends, Out, WIDTH):
     tl.store(Out + row * 512 + slot, tl.where(valid, position, -1).to(tl.int32))
 
 
+def supports_width(width):
+    return 32768 <= width <= 131072 and width % 8 == 0
+
+
 def is_supported(scores, ends, out=None):
     """Metadata-only admission, without reading scores or GPU length values."""
     if not (
         not torch.is_grad_enabled() and _raw(scores) and _raw(ends)
         and scores.dtype == torch.bfloat16 and scores.ndim == 2
-        and 1 <= scores.shape[0] <= 4096 and 32768 <= scores.shape[1] <= 131072
-        and scores.shape[1] % 8 == 0 and scores.stride(1) == 1
+        and 1 <= scores.shape[0] <= MAX_ROWS and supports_width(scores.shape[1])
+        and scores.stride(1) == 1
         and scores.stride(0) >= scores.shape[1] and scores.stride(0) % 8 == 0
         and scores.data_ptr() % 16 == 0
         and ends.device == scores.device and ends.dtype == torch.int32

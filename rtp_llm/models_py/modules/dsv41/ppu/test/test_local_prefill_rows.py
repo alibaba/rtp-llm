@@ -56,7 +56,7 @@ def public_ced_cpu_scope(state):
             patch.object(ced.collective_torch, "_get_group", return_value=None),
             patch.object(ced, "_supported_model", return_value=True),
             patch.object(ced, "as_attention_inputs_by_tag", return_value={
-                str(tag): NS(kv_cache_block_id=torch.ones((1, 1), dtype=torch.int32)),
+                str(tag): NS(kv_cache_block_id=torch.ones((len(state.lengths), 1), dtype=torch.int32)),
             }),
             patch.object(_kv_cache_utils, "pool_entry_count", return_value=140),
         ):
@@ -965,8 +965,41 @@ class LocalPrefillRowsCPU(_LocalRowsCases, unittest.TestCase):
             self.assertTrue(rows[1].is_inference())
             self.assertIsNone(state.local_indexer_lookup_slices(None, rows, 4))
         with torch.no_grad(), patch.dict(os.environ, LOOKUP_ENV):
-            state = state_for("cpu", prefixes=(17, 20), lengths=(2, 2))
+            state = state_for("cpu", prefixes=(17, 20), lengths=(2, 2), cu=torch.tensor([0, 1, 4]))
             self.assertIsNone(state.local_indexer_lookup_slices(None, state.rows(), 4))
+
+    def test_batched_indexer_lookup_matches_request_ids_and_checks_host_cu(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import _indexer_lookup_rows
+
+        with torch.no_grad(), patch.dict(os.environ, LOOKUP_ENV):
+            state = state_for("cpu", prefixes=(17, 20, 31, 90), lengths=(4, 2, 6, 5))
+            rows = state.rows()
+            lookup = state.local_indexer_lookup_slices(None, rows, 17)
+            self.assertEqual(lookup, (slice(0, 4), slice(4, 6), slice(6, 12), slice(12, 17)))
+            for rank in range(4):
+                self.assertTrue(torch.equal(_indexer_lookup_rows(rows[1], rank, lookup),
+                                            _indexer_lookup_rows(rows[1], rank, None)))
+            state.attn.cu_seqlens.add_(0)
+            self.assertIsNone(state.local_indexer_lookup_slices(None, rows, 17))
+
+    @torch.inference_mode()
+    def test_batched_compact_output_proof_keeps_every_requests_tail(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
+
+        with patch.dict(os.environ, {**LOOKUP_ENV, "RTP_V41_PPU_LOCAL_PREFILL_COMPACT_ROWS": "1"}):
+            state = state_for("cpu", prefixes=(101, 4097), lengths=(272, 512))
+            state.runtime.policy = SharedPrefillPolicy(mode="compact")
+            state.v4._propagate_cp_ctx = lambda context: None
+            with public_ced_cpu_scope(state):
+                state.prepare_plan()
+            state._activate_compact(torch.empty((280, 1)))
+            positions = (*range(233, 373), *range(4469, 4609))
+            self.assertEqual(state._compact_host_evidence(), (positions, 280, True))
+            rows = state.rows(state.context)
+            self.assertEqual(state.local_indexer_lookup_slices(state.context, rows, 280),
+                             (slice(0, 140), slice(140, 280)))
+            state.plan.exchange.send_indices.add_(0)
+            self.assertIsNone(state._compact_host_evidence())
 
     def test_all_live_mask_birth_is_versioned_inside_inference_mode(self):
         with torch.inference_mode(), patch.dict(os.environ, {ENV: "1"}):
@@ -1125,7 +1158,7 @@ class LocalPrefillRowsCPU(_LocalRowsCases, unittest.TestCase):
                 self.assertIsNotNone(plan)
                 self.assertIsNone(state.context, "early preparation must not activate compact rows")
                 self.assertEqual(state.executed_layers, [])
-                self.assertEqual(state.local_l20_query_slice(4096), slice(3956, 4096))
+                self.assertEqual(state.local_l20_query_rows(4096), slice(3956, 4096))
                 # The ordinary CP1 executor propagates None before layers.
                 state.bind_context(None)
                 state.prepare_local_plan_at_entry()
@@ -1139,6 +1172,28 @@ class LocalPrefillRowsCPU(_LocalRowsCases, unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "metadata changed"):
                     state.prepare_plan()
                 self.assertEqual(build.call_count, 1, "changed metadata must not be recertified")
+
+    @torch.no_grad()
+    def test_batched_entry_plan_reuses_real_request_metadata_until_l19(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import prefill_runtime as module
+        from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
+
+        with patch.dict(os.environ, {**LOOKUP_ENV, "RTP_V41_PPU_LOCAL_PREFILL_COMPACT_ROWS": "1"}):
+            state = state_for("cpu", prefixes=(126976, 126976), lengths=(4096, 4096))
+            state.runtime.policy = SharedPrefillPolicy(mode="compact")
+            state.runtime.model._prefill_cp_size = 1
+            state.runtime.model.parallelism_config = NS(tp_size=1)
+            with public_ced_cpu_scope(state), patch.object(
+                module, "bounded_plan", wraps=module.bounded_plan,
+            ) as build:
+                state.prepare_local_plan_at_entry()
+                plan = state.plan
+                self.assertIsNotNone(plan)
+                self.assertIsNone(state.context)
+                self.assertEqual(plan.context.chunk_lengths_per_req, (140, 140))
+                state.before_block(NS(layer_id=19), None, None, None, None)
+                self.assertIs(state.plan, plan)
+                build.assert_called_once()
 
     @torch.no_grad()
     def test_entry_plan_preserves_other_phase_and_layout_entrypoints(self):

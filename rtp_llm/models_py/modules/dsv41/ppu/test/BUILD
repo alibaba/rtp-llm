@@ -225,6 +225,7 @@ py_test(
             "test_local_prefill_workspace.py",
             "test_local_prefill_rows.py",
             "test_local_prefill_metadata.py",
+            "test_local_prefill_batched_indexer.py",
             "test_local_prefill_fused.py",
             "test_local_prefill_mhc.py",
             "test_local_prefill_aiu_mhc.py",

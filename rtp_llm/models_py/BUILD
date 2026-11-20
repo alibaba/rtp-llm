@@ -111,6 +111,7 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/prefill_runtime.py",
     "modules/dsv41/ppu/row_metadata.py",
     "modules/dsv41/ppu/local_prefill_attention_provider.py",
+    "modules/dsv41/ppu/local_prefill_indexer.py",
     "modules/dsv41/ppu/local_prefill_hierarchical_topk.py",
     "modules/dsv41/ppu/topk.py",
     "modules/dsv41/ppu/local_prefill_sg_ops.py",

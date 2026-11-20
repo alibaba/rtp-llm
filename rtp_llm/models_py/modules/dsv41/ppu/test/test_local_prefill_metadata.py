@@ -16,6 +16,8 @@ import torch
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rows import (
     LOOKUP_ENV,
     compact_lookup_state,
+    public_ced_cpu_scope,
+    state_for,
 )
 
 
@@ -35,6 +37,37 @@ def local_metadata_cpu_stream():
 
 class LocalPrefillMetadataCPU(unittest.TestCase):
     device = "cpu"
+
+    @torch.inference_mode()
+    def test_batched_metadata_uses_the_current_proven_row_epoch(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.prefill import build_step_context
+        from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
+
+        with patch.dict(os.environ, {**LOOKUP_ENV, "RTP_V41_PPU_LOCAL_PREFILL_COMPACT_ROWS": "1"}):
+            state = state_for(self.device, prefixes=(81, 192), lengths=(512, 640))
+            state.runtime.current = state
+            state.runtime.policy = SharedPrefillPolicy(mode="compact")
+            state.v4._propagate_cp_ctx = lambda context: None
+            with public_ced_cpu_scope(state):
+                state.prepare_plan()
+            old_step = None
+            for context, count in ((None, 1152), (state.plan.context, 280)):
+                if context is not None:
+                    state._activate_compact(torch.empty((count, 1)))
+                rows = state.rows(context)
+                with local_metadata_cpu_stream():
+                    current = state.local_prefill_step_context(context, rows, builder=build_step_context)
+                    positions = state.local_prefill_positions32(context, rows)
+                    self.assertIsNotNone(current)
+                    self.assertIsNot(current, old_step)
+                    self.assertEqual(positions.shape, (count,))
+                    self.assertTrue(torch.equal(positions, rows[0].int()))
+                    self.assertIs(current, state.local_prefill_step_context(context, rows, builder=build_step_context))
+                    self.assertIs(positions, state.local_prefill_positions32(context, rows))
+                old_step = current
+            rows[1].add_(0)
+            with local_metadata_cpu_stream():
+                self.assertIsNone(state.local_prefill_step_context(context, rows, builder=build_step_context))
 
     @torch.inference_mode()
     def test_local_metadata_defaults_activate_real_full_and_compact_rows(self):

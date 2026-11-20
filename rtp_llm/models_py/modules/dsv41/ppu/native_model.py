@@ -34,6 +34,7 @@ def record_reference_prefill(state):
             "cp_shared_global": getattr(getattr(state, "cache", None), "_cp_shared_global_stats", None) or {},
             "cp_shared_indexer": getattr(getattr(state, "cache", None), "_cp_shared_indexer_stats", None) or {},
             "cp_paged_indexer_calls": list(state.shared.get("cp_paged_indexer_calls", ())),
+            "local_batched_indexer_calls": list(state.shared.get("local_batched_indexer_calls", ())),
             "cp_indexer_layout_calls": list(state.shared.get("cp_indexer_layout_calls", ())),
             "cp_indexer_layout": getattr(getattr(state, "cache", None), "_cp_indexer_layout_stats", None) or {},
             "cp_local_swa_pack": state.shared.get("cp_local_swa_pack", {}),

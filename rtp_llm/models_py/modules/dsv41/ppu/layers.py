@@ -108,7 +108,7 @@ def cp8_yoco_fast_prefill_enabled(state):
 LOCAL_PREFILL_AIU_PRENORM_ENV = "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM"
 
 
-def _local_prefill_business_phase(state):
+def _local_prefill_business_phase(state, *, require_single_request=True):
     """Metadata-only qualification shared by local Prefill consumers."""
     if (not getattr(state, "prefill", False) or getattr(state, "idle", True)
             or torch.is_grad_enabled()
@@ -116,7 +116,7 @@ def _local_prefill_business_phase(state):
                 "is_graph", "is_graph_commit", "verify", "proposal",
             ))
             or getattr(getattr(state, "attn", None), "is_cuda_graph", False)
-            or len(getattr(state, "lengths", ())) != 1):
+            or (require_single_request and len(getattr(state, "lengths", ())) != 1)):
         return False
     from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
     from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import optimized_diagnostics_enabled
@@ -537,13 +537,18 @@ class PPUAttentionProjections(nn.Module):
         The optional pairs are local to this invocation. Graph capture records
         their producers before every consumer; replay recomputes their values.
         """
-        if query_rows is not None and not (
+        suffix = (
             isinstance(query_rows, slice) and query_rows.step in (None, 1)
             and type(query_rows.start) is int and type(query_rows.stop) is int
             and 0 <= query_rows.start < query_rows.stop == x.shape[0]
-            and x.ndim == 2
-        ):
-            raise ValueError("query projection requires an admitted contiguous row suffix")
+        )
+        indexed_rows = (
+            isinstance(query_rows, torch.Tensor) and query_rows.dtype == torch.int64
+            and query_rows.device == x.device and query_rows.ndim == 1
+            and 0 < query_rows.numel() <= x.shape[0]
+        )
+        if query_rows is not None and (x.ndim != 2 or not (suffix or indexed_rows)):
+            raise ValueError("query projection requires admitted retained rows")
         from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
             DENSE_PROJECTIONS,
         )

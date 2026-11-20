@@ -44,6 +44,7 @@ if [[ "$v41_role" == local-prefill-workspace-contracts || "$v41_role" == local-p
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_workspace \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rows \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_metadata \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_batched_indexer \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_mhc \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_aiu_mhc \

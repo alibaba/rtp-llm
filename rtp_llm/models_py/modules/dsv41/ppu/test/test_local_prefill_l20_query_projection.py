@@ -55,12 +55,12 @@ class L20QueryProjectionContracts(unittest.TestCase):
         with patch.dict(os.environ, {ENV: "1", DENSE_PROJECTIONS: "0"}):
             state = _state()
             _stamp(state)
-            self.assertEqual(state.local_l20_query_slice(4096), slice(3956, 4096))
+            self.assertEqual(state.local_l20_query_rows(4096), slice(3956, 4096))
             for tensor_name in ("send_indices", "receive_positions"):
                 state = _state()
                 _stamp(state)
                 getattr(state.plan.exchange, tensor_name).add_(0)
-                self.assertIsNone(state.local_l20_query_slice(4096), tensor_name)
+                self.assertIsNone(state.local_l20_query_rows(4096), tensor_name)
             for change in ("plan", "host", "ragged", "rows", "compacted", "sg", "off", "cp"):
                 state = _state()
                 _stamp(state)
@@ -77,14 +77,14 @@ class L20QueryProjectionContracts(unittest.TestCase):
                 elif change == "cp":
                     state.plan.context.cp_size = 8
                 with patch.dict(os.environ, {ENV: "0" if change == "off" else "1"}):
-                    self.assertIsNone(state.local_l20_query_slice(4095 if change == "rows" else 4096), change)
+                    self.assertIsNone(state.local_l20_query_rows(4095 if change == "rows" else 4096), change)
 
     @torch.no_grad()
     def test_global_fusion_uses_versioned_suffix_without_sg_align(self):
         with patch.dict(os.environ, {ENV: "0", DENSE_PROJECTIONS: "1"}):
             state = _state()
             _stamp(state, sg_align=False)
-            self.assertEqual(state.local_l20_query_slice(4096), slice(3956, 4096))
+            self.assertEqual(state.local_l20_query_rows(4096), slice(3956, 4096))
             for change in ("send_write", "send_replace", "mask_write", "positions_write",
                            "plan", "host", "graph", "verify", "proposal", "attn_verify",
                            "decode", "compacted", "cp", "off"):
@@ -114,11 +114,11 @@ class L20QueryProjectionContracts(unittest.TestCase):
                     elif change == "cp":
                         state.plan.context.cp_size = 8
                     with patch.dict(os.environ, {DENSE_PROJECTIONS: "0" if change == "off" else "1"}):
-                        self.assertIsNone(state.local_l20_query_slice(4096))
+                        self.assertIsNone(state.local_l20_query_rows(4096))
             with torch.inference_mode():
                 state = _state()
                 _stamp(state, sg_align=False)
-                self.assertIsNone(state.local_l20_query_slice(4096), "unknown versionless transport")
+                self.assertIsNone(state.local_l20_query_rows(4096), "unknown versionless transport")
 
     @torch.inference_mode()
     def test_prepare_plan_certifies_global_fusion_transport_at_birth(self):
@@ -133,10 +133,34 @@ class L20QueryProjectionContracts(unittest.TestCase):
                 # Exercise CEDPlan.create's real inference decorator and the
                 # HOST_METADATA single-layout branch, which reuses its views.
                 state.prepare_plan()
-            self.assertEqual(state.local_l20_query_slice(4096), slice(3956, 4096))
+            self.assertEqual(state.local_l20_query_rows(4096), slice(3956, 4096))
             self.assertFalse(state.plan.exchange.send_indices.is_inference())
             state.plan.exchange.send_indices.add_(0)
-            self.assertIsNone(state.local_l20_query_slice(4096))
+            self.assertIsNone(state.local_l20_query_rows(4096))
+
+    @torch.no_grad()
+    def test_batched_plan_selects_each_request_tail_and_detects_mutation(self):
+        with patch.dict(os.environ, {
+            DENSE_PROJECTIONS: "1", "RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "1",
+        }):
+            for count in (2, 4):
+                with self.subTest(count=count), torch.inference_mode():
+                    state = _state(rows=4096 * count)
+                    state.lengths = (4096,) * count
+                    state.query_prefixes *= count
+                    state.attn.cu_seqlens = torch.arange(count + 1, dtype=torch.int32) * 4096
+                    state.plan = state.original_context = None
+                    with public_ced_cpu_scope(state):
+                        state.prepare_plan()
+                    rows = 4096 * count
+                    self.assertIsNone(state.local_l20_query_rows(rows))
+                    retained = state.local_l20_query_rows(rows, allow_batch=True)
+                    self.assertIs(retained, state.plan.exchange.send_indices)
+                    expected = [row for end in range(4096, rows + 1, 4096) for row in range(end - 140, end)]
+                    self.assertEqual(retained.tolist(), expected)
+                    self.assertEqual(state.plan.context.chunk_length, 140 * count)
+                    retained.add_(0)
+                    self.assertIsNone(state.local_l20_query_rows(rows, allow_batch=True))
 
     @torch.no_grad()
     def test_mega_projector_and_indexer_share_retained_quantization_full_kv(self):

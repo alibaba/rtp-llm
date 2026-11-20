@@ -933,15 +933,22 @@ class SharedPPUAttention(PPUAttentionProjections):
     def _project_indexer(self, x, qr, positions, shared, *, quantized_input=None,
                          weight_input=None, weight_rows=None):
         g = self.geometry
-        if weight_input is not None and not (
+        suffix = (
             isinstance(weight_rows, slice) and weight_rows.step in (None, 1)
             and type(weight_rows.start) is int and type(weight_rows.stop) is int
+            and weight_input is not None
             and 0 <= weight_rows.start < weight_rows.stop == weight_input.shape[0]
             and weight_rows.stop - weight_rows.start == x.shape[0]
-            and weight_input.shape[1:] == x.shape[1:]
+        )
+        indexed_rows = (
+            isinstance(weight_rows, torch.Tensor) and weight_rows.dtype == torch.int64
+            and weight_rows.device == x.device and weight_rows.shape == (x.shape[0],)
+        )
+        if weight_input is not None and not (
+            (suffix or indexed_rows) and weight_input.shape[1:] == x.shape[1:]
             and weight_input.dtype == x.dtype and weight_input.device == x.device
         ):
-            raise ValueError("Indexer weight projection requires the original full-row suffix")
+            raise ValueError("Indexer weight projection requires the original input and retained rows")
         index_q = (
             self.index_wq(qr) if quantized_input is None
             else self.project_indexer_query(qr, quantized_input=quantized_input)
@@ -980,6 +987,7 @@ class SharedPPUAttention(PPUAttentionProjections):
         reference_perf = prefill and os.environ.get("RTP_V41_REFERENCE_PERF_DIR")
         ratio = g.ratio(source)
         counts = [n // ratio for n in cache.lengths]
+        local_ranges = lookup_slices if lookup_slices is not None and len(lookup_slices) > 1 else None
         sg_align = sg_align and _local_sg_indexer_counts_supported(counts)
         dense_fp4 = (
             prefill
@@ -1052,6 +1060,30 @@ class SharedPPUAttention(PPUAttentionProjections):
                 if indexer_inputs is None else indexer_inputs
             )
             weights_bf16 = weights.to(torch.bfloat16) if tile_prep else None
+            if (lookup_slices is not None and cp_indexer_rows is None and not sg_align
+                    and ((dense_fp4 and (publish or candidates is None))
+                         or (sparse_enabled and min(counts) > block * candidate_k))):
+                from rtp_llm.models_py.modules.dsv41.ppu import local_prefill_indexer
+
+                groups = local_prefill_indexer.prepare(
+                    cache, context.positions, lookup_slices, counts, g.index_n_heads,
+                    sparse_width=0 if dense_fp4 else block * candidate_k,
+                )
+                if groups is not None:
+                    calls = local_prefill_indexer.run(
+                        groups, index_q, weights, context, cache, shared, out, source=source, ratio=ratio,
+                        candidates=candidates, block=block, candidate_k=candidate_k, dense=dense_fp4,
+                        publish=publish, local_token_topk=local_token_topk,
+                        store_dense_topk=_store_dense_topk, sparse_plan=_prefill_sparse_plan,
+                    )
+                    kind = "dense" if dense_fp4 else "sparse"
+                    if reference_perf:
+                        shared.setdefault(f"reference_{kind}_fp4", set()).add(self.layer_id)
+                    shared.setdefault("topk", {})[self.layer_id] = out
+                    shared.setdefault("local_batched_indexer_calls", []).extend(
+                        (self.layer_id, kind, rows, width) for rows, width in calls
+                    )
+                    return out
             # Paged K addressing permits one contiguous query tile to span
             # requests. Avoid eight separate512/18-row score launches when
             # the existing score budget admits1024/144 rows together.
@@ -1113,12 +1145,14 @@ class SharedPPUAttention(PPUAttentionProjections):
                 return out
             dense_tiles = []
             dense_start = 0
+            # Native host CU and row birth certify the same owner ranges for CP1.
+            row_ranges = request_slices if request_slices is not None else local_ranges
             for rid, count in enumerate(counts):
-                if request_slices is None:
+                if row_ranges is None:
                     rows = _indexer_lookup_rows(context.request_ids, rid, lookup_slices)
                     row_count = rows.numel()
                 else:
-                    rows = request_slices[rid]
+                    rows = row_ranges[rid]
                     row_count = rows.stop - rows.start
                 if not row_count or not count:
                     continue
@@ -1163,7 +1197,7 @@ class SharedPPUAttention(PPUAttentionProjections):
                 )
                 for chunk_index, start in enumerate(range(0, row_count, chunk_rows)):
                     stop = min(start + chunk_rows, row_count)
-                    chunk = rows[start:stop] if request_slices is None else slice(
+                    chunk = rows[start:stop] if row_ranges is None else slice(
                         rows.start + start, rows.start + stop,
                     )
                     q = _quantized_indexer_query(index_q[chunk])
@@ -1250,8 +1284,10 @@ class SharedPPUAttention(PPUAttentionProjections):
                         del logits
                         continue
                     dense_tile_prep = tile_prep and dense_fp4
-                    direct_positions = (dense_tile_prep or cp_indexer_rows is not None
-                                        or (dense_fp4 and (yoco_small_ops or sg_align)))
+                    direct_positions = (
+                        dense_tile_prep or cp_indexer_rows is not None
+                        or (dense_fp4 and (yoco_small_ops or sg_align or local_ranges is not None))
+                    )
                     sub = None if direct_positions else build_step_context(
                         positions, context.request_ids[chunk], context.request_offsets
                     )
@@ -1454,7 +1490,7 @@ class SharedPPUAttention(PPUAttentionProjections):
             state, cp, x, g, diagnostic=diagnostic, packed_plan=plan, parallel=parallel,
         )
         query_rows = (
-            state.local_l20_query_slice(x.shape[0])
+            state.local_l20_query_rows(x.shape[0], allow_batch=mega is not None)
             if dense_projections and self.layer_id == 20 and compact_after_producer is not None
             and self.is_kv_source and self.is_index_source
             # MegaAttention performs query RoPE after the existing compact
@@ -1725,7 +1761,10 @@ class SharedPPUAttention(PPUAttentionProjections):
                 q = exchange.compact(q)
                 x = exchange.compact(x)
             else:
-                if state.local_l20_query_slice(x.shape[0]) != query_rows:
+                current_rows = state.local_l20_query_rows(x.shape[0], allow_batch=mega is not None)
+                if current_rows is not query_rows and (
+                    not isinstance(query_rows, slice) or current_rows != query_rows
+                ):
                     raise RuntimeError("L20 query transport changed after projection admission")
                 producer_x, x = x, x[query_rows]
                 index_q, weights = self._project_indexer(
@@ -1777,8 +1816,8 @@ class SharedPPUAttention(PPUAttentionProjections):
             )
         lookup_slices = None
         lookup_provider = getattr(state, "local_indexer_lookup_slices", None)
-        if (self.compress_ratio and request_slices is None and diagnostic is None and plan is None
-                and self.is_index_source and callable(lookup_provider) and len(cache.lengths) == 1):
+        if (self.compress_ratio and not use_cp_workspace and diagnostic is None and plan is None
+                and self.is_index_source and callable(lookup_provider)):
             lookup_slices = lookup_provider(
                 cp, (positions, requests, cu, valid), x.shape[0],
             )

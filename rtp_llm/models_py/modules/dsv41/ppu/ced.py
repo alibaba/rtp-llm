@@ -52,13 +52,13 @@ def bounded_plan(v4, context, attn_inputs, kv_cache, policy):
     padding is not counted as retained rows and no global is patched.
     """
     # Keep admission and actual inverse-map validation in the public planner.
-    # B1/CP1 can directly build the final layout instead of allocating an
-    # unconsumed public128 transport before the identical final140 transport.
-    single_layout = (
+    # CP1 with complete retained tails can build the final layout directly.
+    local_layout = (
         optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
         and context.cp_size == 1 and policy.keep_tokens == 140
-        and len(context.input_lengths_global_host) == 1
-        and context.input_lengths_global_host[0] > policy.keep_tokens
+        and bool(context.input_lengths_global_host)
+        and all(n >= policy.keep_tokens for n in context.input_lengths_global_host)
+        and any(n > policy.keep_tokens for n in context.input_lengths_global_host)
     )
     cp8_layout = (
         context.cp_size == 8 and context.kv_cache_sharded and policy.keep_tokens == 140
@@ -66,13 +66,13 @@ def bounded_plan(v4, context, attn_inputs, kv_cache, policy):
     options = {
         "bounded_replay_keep_tokens": policy.keep_tokens,
         "versioned_metadata": True,
-    } if single_layout or cp8_layout else {}
+    } if local_layout or cp8_layout else {}
     admitted = CEDPlan.create(
         v4, context, attn_inputs, kv_cache, bounded_replay=True, **options
     )
     if admitted is None:
         return None, "public_admission_or_no_compaction"
-    if single_layout:
+    if local_layout:
         exchange = _LocalRowExchange(**{**vars(admitted.exchange), "group": None})
         return replace(admitted, exchange=exchange), "compact140"
     if cp8_layout:
