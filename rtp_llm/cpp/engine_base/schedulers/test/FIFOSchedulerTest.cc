@@ -100,10 +100,10 @@ protected:
     std::shared_ptr<LoadAsyncContext> setupPendingCacheLoad(const std::shared_ptr<KVCacheManager>& cache_manager) {
         auto coordinator = std::make_shared<LoadContextCoordinator>(
             [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-        auto context = coordinator->create({}, {}, /*matched_blocks=*/0);
+        auto context = coordinator->create({}, {}, {}, 0);
         // Hold readiness publication without introducing prefix hits into mode/token-admission tests.
         context->setSettlementReadyCallback([](const std::shared_ptr<LoadAsyncContext>&) {});
-        EXPECT_TRUE(coordinator->registerContext(context));
+        EXPECT_NE(context, nullptr);
 
         const auto real_allocator = cache_manager->coordinator_manager_;
         auto       allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager->config_);

@@ -20,6 +20,9 @@
 namespace rtp_llm {
 
 class LoadContextCoordinator;
+class LoadOperation;
+class BlockTree;
+class BlockTreeCacheMetricsReporter;
 
 struct LoadMatchResult {
     // Keep bool-returning callbacks source-compatible. A callback failure that
@@ -47,11 +50,16 @@ public:
 
     LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                      std::vector<bool>                              joined_load,
+                     std::vector<std::shared_ptr<LoadOperation>>    load_operations,
                      size_t                                         local_matched_blocks,
+                     size_t                                         matched_device_blocks,
+                     size_t                                         matched_device_host_blocks,
+                     std::function<bool(size_t)>                    valid_prefix,
                      uint64_t                                       context_id,
                      const std::shared_ptr<LoadContextCoordinator>& coordinator,
-                     std::shared_ptr<StorageBackend>                storage_backend = nullptr,
-                     StorageRequest                                 storage_request = {});
+                     std::shared_ptr<StorageBackend>                storage_backend  = nullptr,
+                     StorageRequest                                 storage_request  = {},
+                     const BlockTreeCacheMetricsReporter*           metrics_reporter = nullptr);
     ~LoadAsyncContext() override;
 
     bool                   empty() const;
@@ -62,25 +70,25 @@ public:
     uint64_t workflowId() const {
         return backend_task_.traceId();
     }
-    void traceDependency(uint64_t owner_workflow) const noexcept {
-        AsyncProfileSession::taskLink(workflowId(), workflowId(), 0, request_id_.value_or(-1), "load", owner_workflow);
-    }
     size_t localMatchedBlocks() const;
     size_t matchedBlocks() const;
     size_t matchedBlocks(Tier tier) const;
     size_t matchedBlocks(Tier tier, size_t prefix) const;
-    void   setLocalMatchLengths(size_t device_blocks, size_t device_host_blocks);
     size_t deviceReadyBlocks() const;
     bool   hostTransfersSucceeded() const;
     bool   needBackendMatch() const;
 
-    void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
-        valid_prefix_ = std::move(valid_prefix);
+    void                       setMatchCallback(MatchCallback callback);
+    void                       setSettlementReadyCallback(SettlementReadyCallback callback);
+    void                       startBackendMatch();
+    void                       setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
+    bool                       createLoadOperations(BlockTree& tree);
+    const std::vector<size_t>& newLoadIndices() const {
+        return new_load_indices_;
     }
-    void setMatchCallback(MatchCallback callback);
-    void setSettlementReadyCallback(SettlementReadyCallback callback);
-    void startBackendMatch();
-    void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
+    const std::vector<std::shared_ptr<LoadOperation>>& loadOperations() const {
+        return load_operations_;
+    }
     void setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block);
 
     const std::vector<TransferDescriptor>&              loadDescs() const;
@@ -90,11 +98,9 @@ public:
     bool commit();
 
     bool abortPending();
-    void startJoinWait(int64_t start_time_us);
-    bool
-    completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us, Tier source_tier = Tier::NONE);
     bool completeTransfers(size_t count, bool success, Tier source_tier = Tier::NONE);
-    void cancelUnsubmittedTransfers();
+    // Called by the commit callback after releasing the cache mutex.
+    void cancelUnsubmittedTransfers() noexcept;
     bool aggregateSuccess() const;
     bool localTransfersSucceeded() const;
     bool localLoadSucceeded() const;
@@ -117,7 +123,8 @@ public:
 
 private:
     void markAborted();
-    void rebuildMatchedBlocksByTier();
+    void      subscribeToJoinedLoads(const BlockTreeCacheMetricsReporter* metrics_reporter);
+    void      unsubscribeFromJoinedLoads();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
     void onBackendRead(ErrorInfo error);
     void failBeforeCommit();
@@ -127,23 +134,25 @@ private:
     ErrorInfo completionErrorLocked() const;
     void      notifyCompletion();
 
-    std::shared_ptr<LoadContextCoordinator> coordinator_;
-    const uint64_t                          context_id_;
-    std::vector<TransferDescriptor>         load_descs_;
-    std::vector<bool>                       joined_load_;
-    const size_t                            local_matched_blocks_{0};
-    size_t                                  matched_blocks_{0};
-    size_t                                  backend_matched_blocks_{0};
-    std::array<size_t, 3>                   matched_blocks_by_tier_{};
-    std::unordered_map<size_t, Tier>        reuse_tier_by_path_;
-    size_t                                  matched_device_host_blocks_{0};
-    size_t                                  device_ready_blocks_{0};
+    std::shared_ptr<LoadContextCoordinator>     coordinator_;
+    const uint64_t                              context_id_;
+    std::vector<TransferDescriptor>             load_descs_;
+    std::vector<bool>                           joined_load_;
+    std::vector<size_t>                         new_load_indices_;
+    std::vector<std::shared_ptr<LoadOperation>> load_operations_;
+    const size_t                                local_matched_blocks_{0};
+    size_t                                      matched_blocks_{0};
+    size_t                                      backend_matched_blocks_{0};
+    std::array<size_t, 3>                       matched_blocks_by_tier_{};
+    std::unordered_map<size_t, Tier>            reuse_tier_by_path_;
+    const size_t                                matched_device_host_blocks_{0};
+    size_t                                      device_ready_blocks_{0};
 
     std::shared_ptr<StorageBackend> storage_backend_;
     const std::optional<int64_t>    request_id_;
     StorageRequest                  storage_request_;
     const TransferTask              backend_task_;
-    std::function<bool(size_t)>     valid_prefix_;
+    const std::function<bool(size_t)> valid_prefix_;
     MatchCallback                   match_callback_;
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
@@ -162,7 +171,6 @@ private:
     std::condition_variable                               cv_;
     size_t                                                remaining_transfer_count_{0};
     std::atomic<size_t>                                   remaining_join_count_{0};
-    int64_t                                               join_start_time_us_{0};
     bool                                                  has_local_failure_{false};
     bool                                                  has_host_failure_{false};
     bool                                                  local_load_succeeded_{false};
@@ -184,14 +192,18 @@ public:
 
     LoadContextCoordinator(CommitCallback                             commit_callback,
                            AbortCallback                              abort_callback,
-                           std::function<bool(std::function<void()>)> defer_cleanup = {});
+                           std::function<bool(std::function<void()>)> defer_cleanup    = {},
+                           const BlockTreeCacheMetricsReporter*       metrics_reporter = nullptr);
 
-    std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
-                                             std::vector<bool>               joined_load,
-                                             size_t                          matched_blocks,
-                                             std::shared_ptr<StorageBackend> storage_backend = nullptr,
-                                             StorageRequest                  storage_request = {});
-    bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
+    std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor>             load_descs,
+                                             std::vector<bool>                           joined_load,
+                                             std::vector<std::shared_ptr<LoadOperation>> load_operations,
+                                             size_t                                      local_matched_blocks,
+                                             size_t                                      matched_device_blocks      = 0,
+                                             size_t                                      matched_device_host_blocks = 0,
+                                             std::function<bool(size_t)>                 valid_prefix    = {},
+                                             std::shared_ptr<StorageBackend>             storage_backend = nullptr,
+                                             StorageRequest                              storage_request = {}) noexcept;
     bool                              commit(uint64_t context_id);
     bool                              abort(LoadAsyncContext& context) noexcept;
     void                              shutdown();
@@ -213,6 +225,7 @@ private:
     CommitCallback                             commit_callback_;
     AbortCallback                              abort_callback_;
     std::function<bool(std::function<void()>)> defer_cleanup_;
+    const BlockTreeCacheMetricsReporter*       metrics_reporter_;
     std::function<void()>                      shutdown_wait_observer_for_test_;
 };
 

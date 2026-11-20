@@ -101,8 +101,11 @@ private:
     std::function<void()> observer_;
 };
 
-std::shared_ptr<LoadAsyncContext>
-makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_tiers, bool commit = true) {
+std::shared_ptr<LoadAsyncContext> makeAllocatorLoadContext(size_t                   local_matched_blocks,
+                                                           const std::vector<Tier>& source_tiers,
+                                                           bool                     commit                     = true,
+                                                           size_t                   matched_device_blocks      = 0,
+                                                           size_t                   matched_device_host_blocks = 0) {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     std::vector<TransferDescriptor> descriptors;
@@ -116,9 +119,13 @@ makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_
                                  BlockIndicesType{1},
                                  /*initial_owner=*/false);
     }
-    auto context =
-        coordinator->create(std::move(descriptors), std::vector<bool>(source_tiers.size(), false), matched_blocks);
-    EXPECT_TRUE(coordinator->registerContext(context));
+    auto context = coordinator->create(std::move(descriptors),
+                                       std::vector<bool>(source_tiers.size(), false),
+                                       {},
+                                       local_matched_blocks,
+                                       matched_device_blocks,
+                                       matched_device_host_blocks);
+    EXPECT_NE(context, nullptr);
     if (commit) {
         EXPECT_TRUE(context->commit());
     }
@@ -361,6 +368,7 @@ protected:
         if (block_matches) {
             backend->blockMatches();
         }
+        cache_manager_->stopFrozenTaskRecovery();
         cache_manager_->coordinator_manager_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
         auto cache = createBlockTreeCache(cache_manager_->cacheConfig(),
@@ -371,6 +379,7 @@ protected:
         EXPECT_NE(cache, nullptr);
         cache_manager_->block_tree_cache_ = cache;
         cache_manager_->coordinator_manager_->attachBlockTreeCache(cache);
+        EXPECT_TRUE(cache_manager_->startFrozenTaskRecovery());
 
         if (seed_host) {
             auto& resource = stream_->streamCacheResource();
@@ -404,7 +413,7 @@ protected:
                         {resource.batch_kv_cache_resource_->cacheKeys(0).front()}, resources, false, seed_resident)
                     .accepted_resource_count
                 == 1);
-            group->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
+            group->unreferenceBlocks(Tier::HOST, {block}, BlockTreeRefType::CACHE);
         }
 
         auto& resource                                                 = stream_->streamCacheResource();
@@ -505,6 +514,7 @@ protected:
                                                          RuntimeConfig{}, speculation, pd);
         ASSERT_TRUE(cache_manager_->init());
         backend_ = std::make_shared<StreamReadStorageBackend>();
+        cache_manager_->stopFrozenTaskRecovery();
         cache_manager_->coordinator_manager_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
         settings.enable_remote_cache = true;
@@ -512,6 +522,7 @@ protected:
         ASSERT_NE(cache, nullptr);
         cache_manager_->block_tree_cache_ = cache;
         cache_manager_->coordinator_manager_->attachBlockTreeCache(cache);
+        EXPECT_TRUE(cache_manager_->startFrozenTaskRecovery());
 
         ResourceContext context;
         context.cache_manager = cache_manager_;
@@ -1353,7 +1364,7 @@ TEST_F(StreamCacheResourceTest, AllocatorReuseRejectsInvalidCountsBeforePublishi
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
     for (const size_t total : {size_t{0}, static_cast<size_t>(std::numeric_limits<int>::max())}) {
-        auto context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::DEVICE});
+        auto context = makeAllocatorLoadContext(1, {Tier::DEVICE});
         ASSERT_TRUE(context->success());
         context->matched_blocks_         = total;
         resource.allocator_load_context_ = context;
@@ -1398,7 +1409,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadLatencySegmentsCoverMatchToReady) {
     EXPECT_FALSE(resource.cache_reuse_metrics_.report_match_to_ready_latency);
     EXPECT_EQ(resource.cache_reuse_metrics_.load_wait_latency_us, 0);
     EXPECT_EQ(resource.cache_reuse_metrics_.match_to_ready_latency_us, 0);
-    resource.allocator_load_context_ = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::DEVICE});
+    resource.allocator_load_context_ = makeAllocatorLoadContext(1, {Tier::DEVICE});
     ASSERT_TRUE(resource.loadCacheDone());
 
     const RtpLLMCacheReuseMetricsCollector& metrics = resource.cache_reuse_metrics_;
@@ -1494,7 +1505,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     resource.load_wait_begin_time_us_                 = currentTimeUs();
     resource.malloc_begin_time_us_                    = resource.load_wait_begin_time_us_;
 
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
+    auto load_context = makeAllocatorLoadContext(1, {Tier::HOST});
     stream_->recordLoadingCacheStartTime();
     const auto exposed_start_us = currentTimeUs();
     stream_->startCacheExposedWait(exposed_start_us);
@@ -2024,7 +2035,7 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_CompletedAllocatorLoad_ClearsC
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
-    resource.allocator_load_context_ = makeAllocatorLoadContext(/*matched_blocks=*/0, {});
+    resource.allocator_load_context_ = makeAllocatorLoadContext(0, {});
     EXPECT_TRUE(resource.asyncLoadCache());
     EXPECT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
@@ -2035,7 +2046,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadContextGatesReadinessUntilDone)
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
-    auto load_context                = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
+    auto load_context                = makeAllocatorLoadContext(1, {Tier::HOST});
     resource.allocator_load_context_ = load_context;
 
     EXPECT_TRUE(resource.asyncLoadCache());
@@ -2061,8 +2072,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
 
-    auto load_context =
-        makeAllocatorLoadContext(/*matched_blocks=*/3, {Tier::DEVICE, Tier::HOST, Tier::DISK}, /*commit=*/false);
+    auto load_context = makeAllocatorLoadContext(3, {Tier::DEVICE, Tier::HOST, Tier::DISK}, /*commit=*/false);
     auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
@@ -2114,7 +2124,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUn
     auto& resource = stream_->streamCacheResource();
 
     cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/2);
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false);
+    auto load_context               = makeAllocatorLoadContext(2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false);
     auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
@@ -2142,7 +2152,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadPendingPublishesZeroDeviceReady
     stream_->setHostReuseLength(2);
     stream_->setDiskReuseLength(2);
 
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST}, /*commit=*/false);
+    auto load_context = makeAllocatorLoadContext(1, {Tier::HOST}, /*commit=*/false);
     auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
@@ -2239,8 +2249,7 @@ TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureKeepsJointPrefixAndDetache
     stream_->setReuseLength(2);
     stream_->setInitialReuseLength(2);
     stream_->setLocalReuseLength(2);
-    auto context = makeAllocatorLoadContext(4, {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST}, false);
-    context->setLocalMatchLengths(1, 2);
+    auto context = makeAllocatorLoadContext(4, {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST}, false, 1, 2);
     ASSERT_TRUE(context->commit());
     ASSERT_TRUE(context->completeTransfers(2, true, Tier::HOST));
     EXPECT_FALSE(context->done());
@@ -2285,8 +2294,7 @@ TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureUsesJointPrefixWithCpReuse
             } // Disk-first / host-success also retains the original no-reporter control.
             const std::vector<Tier> tiers{Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST};
             stream_->setReuseLength(unit);
-            auto context = makeAllocatorLoadContext(4, tiers, false);
-            context->setLocalMatchLengths(1, 2);
+            auto context = makeAllocatorLoadContext(4, tiers, false, 1, 2);
             ASSERT_TRUE(context->commit());
             const auto complete_host = [&] { ASSERT_TRUE(context->completeTransfers(2, host_success, Tier::HOST)); };
             const auto complete_disk = [&] { ASSERT_TRUE(context->completeTransfers(1, false, Tier::DISK)); };
@@ -2380,8 +2388,8 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
         },
         [counts](LoadAsyncContext&) { ++counts->aborts; });
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
-    auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
-    ASSERT_TRUE(coordinator->registerContext(context));
+    auto           context = coordinator->create({}, {}, {}, 0, 0, 0, {}, backend, std::move(request));
+    ASSERT_NE(context, nullptr);
     context->setMatchCallback(
         [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
 
@@ -2440,8 +2448,8 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{"default", NULL_BLOCK_IDX}}}};
-    auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
-    ASSERT_TRUE(coordinator->registerContext(context));
+    auto           context = coordinator->create({}, {}, {}, 0, 0, 0, {}, backend, std::move(request));
+    ASSERT_NE(context, nullptr);
     context->setMatchCallback(
         [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED}; });
 
@@ -2467,8 +2475,8 @@ TEST_F(StreamCacheResourceTest, testPrefillCoordinatorCommitFailureTerminates) {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return false; }, [](LoadAsyncContext&) {});
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}), {{{"default", NULL_BLOCK_IDX}}}};
-    auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
-    ASSERT_TRUE(coordinator->registerContext(context));
+    auto           context = coordinator->create({}, {}, {}, 0, 0, 0, {}, backend, std::move(request));
+    ASSERT_NE(context, nullptr);
     context->setMatchCallback([](LoadAsyncContext& current, size_t) { return current.commit(); });
 
     resource.allocator_load_context_ = context;
@@ -2578,8 +2586,8 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializati
     auto  coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
-    auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
-    ASSERT_TRUE(coordinator->registerContext(context));
+    auto           context = coordinator->create({}, {}, {}, 0, 0, 0, {}, backend, std::move(request));
+    ASSERT_NE(context, nullptr);
     context->setMatchCallback(
         [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
     resource.allocator_load_context_ = context;

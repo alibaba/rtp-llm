@@ -3,12 +3,15 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace rtp_llm {
+
+class LoadOperation;
 
 // Sorting metadata for a candidate node. A single copy per GroupSetResource follows the
 // data to its current serving tier (steady-state single-tier-service invariant).
@@ -60,6 +63,8 @@ struct GroupSetResource {
     CandidateMeta candidate_meta;
     uint64_t      eviction_access_seq{0};
     uint64_t      generation{0};
+    // Current-generation load, published only while LOADING; requests retain their own handles.
+    std::shared_ptr<LoadOperation> load_operation;
 
     bool hasTier(Tier tier) const {
         switch (tier) {

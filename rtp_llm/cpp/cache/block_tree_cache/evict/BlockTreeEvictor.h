@@ -170,8 +170,6 @@ private:
     void   finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier);
     Tier   watermarkTargetTier(Tier source_tier) const;
     size_t watermarkLogicalBatchLimit(const GroupSet& group_set, Tier source_tier, Tier target_tier) const;
-    void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
-    void   completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task, ErrorInfo error) noexcept;
     BatchEvictResult batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
     void             runDropTask(TransferDescriptor    eviction_desc,
@@ -187,7 +185,7 @@ private:
                                                      EvictionDropTask&                          task,
                                                      std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
     void                            restoreSource(DescriptorView eviction_descs);
-    void                            releaseTargetBlocks(DescriptorView descs);
+    void                            unreferenceTargetBlocks(DescriptorView descs);
     void                            completeDrop(const TransferDescriptor& desc);
     void                            completeEvict(DescriptorView descs);
     void                            settleEviction(DescriptorView descs);

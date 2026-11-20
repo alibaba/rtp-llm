@@ -52,7 +52,7 @@ public:
         auto coordinator = std::make_shared<LoadContextCoordinator>(
             [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
         auto context = std::shared_ptr<CountingReadyContext>(new CountingReadyContext(coordinator));
-        EXPECT_TRUE(coordinator->registerContext(context));
+        coordinator->pending_contexts_.emplace(context->contextId(), context);
         return context;
     }
 
@@ -66,7 +66,7 @@ public:
 
 private:
     explicit CountingReadyContext(const std::shared_ptr<LoadContextCoordinator>& coordinator):
-        LoadAsyncContext({}, {}, /*matched_blocks=*/0, /*context_id=*/1, coordinator) {}
+        LoadAsyncContext({}, {}, {}, 0, 0, 0, {}, /*context_id=*/1, coordinator) {}
 
     size_t wait_calls_{0};
 };

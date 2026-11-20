@@ -175,9 +175,9 @@ std::shared_ptr<LoadAsyncContext> makePendingShutdownLoad() {
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     std::vector<TransferDescriptor> descriptors{
         TransferDescriptor{nullptr, 0, 0, Tier::HOST, Tier::DEVICE, BlockIndicesType{1}, /*initial_owner=*/false}};
-    auto context = coordinator->create(std::move(descriptors), {false}, 1);
-    if (!coordinator->registerContext(context)) {
-        throw std::runtime_error("cannot register controlled pending load");
+    auto context = coordinator->create(std::move(descriptors), {false}, {}, 1);
+    if (!context) {
+        throw std::runtime_error("cannot create controlled pending load");
     }
     return context;
 }

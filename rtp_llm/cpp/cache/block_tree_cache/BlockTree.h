@@ -121,7 +121,7 @@ private:
 
     bool      canReleaseNode(TreeNode* node) const;
     void      removeNode(TreeNode* node);
-    TreeNode* createNode(CacheKeyType key, TreeNode* parent);
+    TreeNode* createNode(CacheKeyType key, TreeNode* parent, const std::vector<GroupSetResource>& resources);
     void      releaseNode(TreeNode* node);
 
     std::vector<GroupSetPtr>              group_sets_;

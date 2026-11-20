@@ -44,9 +44,9 @@ std::shared_ptr<LoadAsyncContext> makeControlledAllocatorContext() {
                                                                    Tier::DEVICE,
                                                                    BlockIndicesType{1},
                                                                    /*initial_owner=*/false}};
-    auto context = coordinator->create(std::move(descriptors), {false}, /*matched_blocks=*/1);
-    if (!coordinator->registerContext(context)) {
-        throw std::runtime_error("failed to register controlled allocator context");
+    auto                            context = coordinator->create(std::move(descriptors), {false}, {}, 1);
+    if (!context) {
+        throw std::runtime_error("failed to create controlled allocator context");
     }
     return context;
 }

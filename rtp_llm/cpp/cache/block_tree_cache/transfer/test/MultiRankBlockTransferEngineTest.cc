@@ -453,14 +453,15 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
     const std::vector<GroupSetPtr> coordinator_groups{groups.front()};
     auto                           multi = std::make_shared<MultiRankBlockTransferEngine>(coordinator_groups, manager);
     BlockTransferDispatcher        dispatcher(engines.front(), multi);
-    EvictionTaskRunner             runner(coordinator_groups, &dispatcher);
     BlockTreeCacheMetricsReporter  reporter(nullptr);
+    BlockTreeTaskPool              task_pool(1, 8, "MultiRankEvictionRunner");
+    EvictionTaskRunner             runner(coordinator_groups, &dispatcher, &task_pool, reporter);
     auto task = std::make_shared<EvictionTransferTask>(TransferTask(descriptors, std::chrono::seconds(10)));
-    std::promise<ErrorInfo> done;
-    auto                    future = done.get_future();
-    runner.runTransfer(task, reporter, [&](ErrorInfo result) { done.set_value(std::move(result)); });
+    std::promise<bool> done;
+    auto               future = done.get_future();
+    runner.run(task, [&](bool success) { done.set_value(success); });
     ASSERT_EQ(future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
-    ASSERT_TRUE(future.get().ok());
+    ASSERT_TRUE(future.get());
     dispatcher.waitForTransfers();
     size_t total_write_bytes = 0;
     for (size_t rank = 0; rank < groups.size(); ++rank) {
@@ -477,8 +478,8 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
             ASSERT_EQ(disk->read(target, buffer, disk->strideBytes()), BlockIOStatus::OK);
             EXPECT_TRUE(std::all_of(
                 buffer, buffer + payloads[rank], [rank, index](uint8_t byte) { return byte == 40 + rank + index; }));
-            group->releaseBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
-            group->releaseBlocks(Tier::DISK, {target}, BlockTreeRefType::EVICT);
+            group->unreferenceBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
+            group->unreferenceBlocks(Tier::DISK, {target}, BlockTreeRefType::EVICT);
         }
     }
     EXPECT_GT(total_write_bytes, groups.front()->diskPool()->writeBytes());
