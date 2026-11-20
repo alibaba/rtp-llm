@@ -264,7 +264,8 @@ void P2PWorkerDecodeRead::reportReadMetrics(P2PConnectorMetricsCollector&       
 ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
                                          const std::string&        unique_key,
                                          int64_t                   deadline_ms,
-                                         const P2PWorkerRoutePlan& worker_plan) {
+                                         const P2PWorkerRoutePlan& worker_plan,
+                                         int64_t* physical_completion_time_us) {
     RTP_LLM_LOG_DEBUG("read start, request_id: %ld, unique_key: %s, deadline_ms: %ld, routes: %zu, plan_digest: %llu",
                       request_id,
                       unique_key.c_str(),
@@ -416,6 +417,18 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
         return ErrorInfo(recv_result.error_code, recv_result.error_msg);
     }
 
+    if (physical_completion_time_us && !task_group->tasks.empty()) {
+        int64_t latest = 0;
+        for (const auto& task : task_group->tasks) {
+            const auto completed = task->physicalCompletionTimeUs();
+            if (completed <= 0) {
+                latest = 0;
+                break;
+            }
+            latest = std::max(latest, completed);
+        }
+        *physical_completion_time_us = latest;
+    }
     RTP_LLM_LOG_DEBUG("read end, request_id: %ld, unique_key: %s, success: true", request_id, unique_key.c_str());
     return ErrorInfo::OkStatus();
 }

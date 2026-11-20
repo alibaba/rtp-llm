@@ -132,6 +132,16 @@ public:
         return responses;
     }
 
+    template<typename Visitor>
+    void visitCompletedWorkers(const Visitor& visitor) const {
+        if (!done()) {
+            return;
+        }
+        for (const auto& worker : worker_contexts_) {
+            visitor(*worker);
+        }
+    }
+
     void finishRank(size_t rank, bool cq_event_ok) {
         std::vector<DoneCallback> callbacks;
         DoneCallback progress;

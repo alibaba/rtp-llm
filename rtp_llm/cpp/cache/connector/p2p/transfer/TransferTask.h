@@ -30,6 +30,10 @@ public:
     // IKVCacheRecvTask interface
     bool              done() const override;
     bool              success() const override;
+    int64_t physicalCompletionTimeUs() const override {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        return done_ && error_code_ == TransferErrorCode::OK ? last_physical_callback_time_us_ : 0;
+    }
     void              cancel() override;
     TransferErrorCode errorCode() const override;
     std::string       errorMessage() const override;
@@ -78,6 +82,7 @@ private:
     int64_t         deadline_ms_;
     int64_t         start_time_us_      = 0;
     int64_t         total_cost_time_us_ = 0;
+    int64_t         last_physical_callback_time_us_ = 0;
 
     mutable std::shared_mutex mutex_;
     bool                      done_             = false;

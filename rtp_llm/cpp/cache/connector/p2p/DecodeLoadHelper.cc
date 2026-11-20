@@ -393,6 +393,7 @@ void DecodeLoadHelper::Result::parseSideChannelPayload(P2PSideChannelPayload& si
 }
 
 void DecodeLoadHelper::Result::complete(bool ok) {
+    const auto receive_time = currentTimeUs();
     if (done()) {
         return;
     }
@@ -444,6 +445,11 @@ void DecodeLoadHelper::Result::complete(bool ok) {
                     "observer_role=DECODE peer="
                     + server_addr + " request_id=" + std::to_string(request_id) + " key=" + unique_key + "]";
             } else {
+                first_token_timing_.received_us = receive_time;
+                const auto produced_us = response.payload().first_token_time_us();
+                if (produced_us > 0) {
+                    first_token_timing_.produced_us = produced_us;
+                }
                 side_channel_payload = std::move(parsed_payload);
                 success_             = true;
                 error_code           = ErrorCode::NONE_ERROR;

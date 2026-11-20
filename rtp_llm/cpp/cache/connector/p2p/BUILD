@@ -60,6 +60,10 @@ cc_library(
     hdrs = [
         "P2PConnectorMetrics.h",
     ],
+    visibility = [
+        "//rtp_llm/cpp/engine_base/stream:__pkg__",
+        "//rtp_llm/cpp/model_rpc:__pkg__",
+    ],
     deps = [
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:time_util",

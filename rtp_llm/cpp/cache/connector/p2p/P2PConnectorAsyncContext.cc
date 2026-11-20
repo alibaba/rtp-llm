@@ -329,6 +329,19 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (done_)
             return;
+        if (success) {
+            const auto first_token = server_call_result_->firstTokenTiming();
+            const auto kv_complete = no_transfer_ ? std::nullopt : tp_sync_result_->kvPhysicalCompletionTimeUs();
+            if (first_token.received_us > 0 && (kv_complete || no_transfer_)) {
+                handoff_ready_time_us_ = std::max(first_token.received_us, kv_complete.value_or(0));
+            }
+            if (collector_ && first_token.produced_us) {
+                collector_->prefill_first_token_to_decode_receive_us = first_token.received_us - *first_token.produced_us;
+                if (kv_complete) {
+                    collector_->prefill_first_token_to_decode_kv_complete_us = *kv_complete - *first_token.produced_us;
+                }
+            }
+        }
         done_       = true;
         success_    = success;
         error_code_ = error_code;

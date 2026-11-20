@@ -47,6 +47,28 @@ PD handoff 的 token IDs、span 和特征哈希是跨角色缓存身份契约。
 CP 方法是角色相关配置：Prefill 使用实际通信方法（`ALL_GATHER`、`ALL_GATHER_WITH_OVERLAP` 或 `ALLTOALL`），Decode 使用 `PREFILL_CP` 表示上游开启 CP。分片开关须配套，fixed/SWA Decode 还需明确 `prefill_cp_size`。将未启用实际 CP 的 Prefill 与期望 CP 分片的 Decode 配对属于配置错误，应拒绝，不能通过放宽布局校验兼容。
 
 
+## PD handoff 时间指标
+
+Decode 每条成功 handoff 按事件时间上报以下微秒差值。
+
+| KMonitor 指标 | 计算口径 |
+| --- | --- |
+| `rtp_llm_p2p_connector_prefill_first_token_to_decode_receive_us` | Decode 收到 StartLoad 首 token 响应 − Prefill 提交首 token |
+| `rtp_llm_p2p_connector_prefill_first_token_to_decode_kv_complete_us` | Decode 全部目标 KV 物理传输完成 − Prefill 提交首 token |
+
+首 token 接收时间取 Decode gRPC Finish 事件开始处理时。KV 完成时间取参与传输的所有 Decode worker 中最后一次成功物理完成的时间，包括 RDMA staging 路径上的 H2D。三个事件使用微秒墙钟，直接相减，假设 Prefill 和各 Decode worker 的时钟已同步。跨机时钟偏差会直接进入差值。没有实际 KV 传输或任一有任务的 worker 缺少时间戳时，只上报可计算的首 token 差值。
+
+Decode Stream 首次进入 RUNNING 时上报 `rtp_llm_p2p_connector_decode_handoff_ready_to_running_us`，即状态转换时间减去交接就绪时间。它包括 Decode 观察交接结果、应用首 token、等待调度及进入 RUNNING 前的 KV block 预留。RUNNING 是框架状态边界，GPU forward 在后续执行阶段开始。
+
+流式 Decode 另外在 gRPC 写入第二个 token 时上报两个指标。取包含 token 的成功写入开始时间，每个请求仅上报一次。两个 token 同帧输出时，输出间隔为 0。
+
+| KMonitor 指标 | 计算口径 |
+| --- | --- |
+| `rtp_llm_p2p_connector_decode_handoff_ready_to_second_token_output_us` | Decode 输出第二个 token − max(Decode 收到首 token, Decode 全部 KV 物理完成) |
+| `rtp_llm_p2p_connector_decode_first_to_second_token_output_us` | Decode 输出第二个 token − Decode 输出首 token |
+
+全命中无传输时，交接就绪取 Decode 收到首 token 的时间。实际传输缺少完成时间戳时，只上报输出间隔。
+
 ## 配置默认值
 
 默认使用 TCP。启用 `CACHE_STORE_RDMA_MODE` 后才使用 RDMA；各参数也可通过同名小写 CLI 选项覆盖。

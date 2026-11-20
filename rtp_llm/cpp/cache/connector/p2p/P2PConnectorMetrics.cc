@@ -11,6 +11,16 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
                                   "rtp_llm_p2p_connector_decode_scheduler_retained_context_count");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_scheduler_oldest_kv_hold_ms_metric,
                                   "rtp_llm_p2p_connector_decode_scheduler_oldest_kv_hold_ms");
+    REGISTER_GAUGE_MUTABLE_METRIC(prefill_first_token_to_decode_receive_us_metric,
+                                  "rtp_llm_p2p_connector_prefill_first_token_to_decode_receive_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(prefill_first_token_to_decode_kv_complete_us_metric,
+                                  "rtp_llm_p2p_connector_prefill_first_token_to_decode_kv_complete_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_handoff_ready_to_second_token_output_us_metric,
+                                  "rtp_llm_p2p_connector_decode_handoff_ready_to_second_token_output_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_handoff_ready_to_running_us_metric,
+                                  "rtp_llm_p2p_connector_decode_handoff_ready_to_running_us");
+    REGISTER_GAUGE_MUTABLE_METRIC(decode_first_to_second_token_output_us_metric,
+                                  "rtp_llm_p2p_connector_decode_first_to_second_token_output_us");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_schedule_server_call_cost_time_us_metric,
                                   "rtp_llm_p2p_connector_decode_schedule_server_call_cost_time_us");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_schedule_tp_sync_cost_time_us_metric,
@@ -134,6 +144,18 @@ bool P2PConnectorMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnectorMetricsCollector* collector) {
+    if (collector->decode_handoff_ready_to_running_us != P2PConnectorMetricsCollector::kMissingHandoffDelta) {
+        RTP_REPORT_MUTABLE_METRIC(decode_handoff_ready_to_running_us_metric,
+                                  collector->decode_handoff_ready_to_running_us);
+    }
+    if (collector->decode_handoff_ready_to_second_token_output_us != P2PConnectorMetricsCollector::kMissingHandoffDelta) {
+        RTP_REPORT_MUTABLE_METRIC(decode_handoff_ready_to_second_token_output_us_metric,
+                                  collector->decode_handoff_ready_to_second_token_output_us);
+    }
+    if (collector->decode_first_to_second_token_output_us != P2PConnectorMetricsCollector::kMissingHandoffDelta) {
+        RTP_REPORT_MUTABLE_METRIC(decode_first_to_second_token_output_us_metric,
+                                  collector->decode_first_to_second_token_output_us);
+    }
     if (collector->decode_scheduler_retained_kv_bytes >= 0) {
         RTP_REPORT_MUTABLE_METRIC(decode_scheduler_retained_kv_bytes_metric, collector->decode_scheduler_retained_kv_bytes);
         RTP_REPORT_MUTABLE_METRIC(decode_scheduler_retained_kv_percent_metric, collector->decode_scheduler_retained_kv_percent);
@@ -144,6 +166,14 @@ void P2PConnectorMetrics::report(const kmonitor::MetricsTags* tags, P2PConnector
     // decode schedule：请求级采样，total 由上报方保证已写入，作为本场景的触发字段。
     const auto decode_schedule_total_us = collector->decode_schedule_total_cost_time_us.load();
     if (decode_schedule_total_us >= 0) {
+        if (const auto delta = collector->prefill_first_token_to_decode_receive_us.load();
+            delta != P2PConnectorMetricsCollector::kMissingHandoffDelta) {
+            RTP_REPORT_MUTABLE_METRIC(prefill_first_token_to_decode_receive_us_metric, delta);
+        }
+        if (const auto delta = collector->prefill_first_token_to_decode_kv_complete_us.load();
+            delta != P2PConnectorMetricsCollector::kMissingHandoffDelta) {
+            RTP_REPORT_MUTABLE_METRIC(prefill_first_token_to_decode_kv_complete_us_metric, delta);
+        }
         if (collector->decode_schedule_server_call_cost_time_us >= 0) {
             RTP_REPORT_MUTABLE_METRIC(decode_schedule_server_call_cost_time_us_metric,
                                   collector->decode_schedule_server_call_cost_time_us.load());

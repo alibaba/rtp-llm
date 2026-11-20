@@ -10,6 +10,7 @@
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -1098,6 +1099,7 @@ StreamState GenerateStream::moveToNext() {
 
     StreamState state;
     bool        should_report_metric = false;
+    std::optional<int64_t> handoff_to_running_us;
     {
         std::lock_guard<std::mutex> lock(*mutex_);
         checkTimeoutWithoutLock();
@@ -1123,6 +1125,10 @@ StreamState GenerateStream::moveToNext() {
             if (old_status != StreamState::RUNNING && new_status == StreamState::RUNNING && !running_started_) {
                 running_started_         = true;
                 running_started_time_us_ = transition_time_us;
+                const auto handoff_ready_us = p2pHandoffReadyTimeUs();
+                if (handoff_ready_us > 0) {
+                    handoff_to_running_us = transition_time_us - handoff_ready_us;
+                }
             }
         }
         should_report_metric = old_status != StreamState::FINISHED && new_status == StreamState::FINISHED;
@@ -1130,6 +1136,11 @@ StreamState GenerateStream::moveToNext() {
         if (new_status != old_status) {
             consumer_cv_->notify_all();
         }
+    }
+    if (handoff_to_running_us && metrics_reporter_) {
+        P2PConnectorMetricsCollector collector;
+        collector.decode_handoff_ready_to_running_us = *handoff_to_running_us;
+        metrics_reporter_->report<P2PConnectorMetrics, P2PConnectorMetricsCollector>(nullptr, &collector);
     }
     // Report terminal stream metrics outside the stream mutex; the reporter
     // may take its own locks and must not nest under mutex_.

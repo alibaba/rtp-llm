@@ -11,6 +11,27 @@
 
 namespace rtp_llm {
 
+std::optional<int64_t> P2PBroadcastClient::Result::kvPhysicalCompletionTimeUs() const {
+    if (!tp_broadcast_result_ || !tp_broadcast_result_->done() || !tp_broadcast_result_->success()) {
+        return std::nullopt;
+    }
+    std::optional<int64_t> latest;
+    bool missing_sample = false;
+    tp_broadcast_result_->visitCompletedWorkers([&](const auto& worker) {
+        const auto& request = worker.request.p2p_request();
+        if (request.type() != P2PConnectorBroadcastType::READ || request.routes().empty()) {
+            return;
+        }
+        const auto completion = worker.response.p2p_response().kv_complete_time_us();
+        if (completion <= 0) {
+            missing_sample = true;
+        } else if (!latest || completion > *latest) {
+            latest = completion;
+        }
+    });
+    return missing_sample ? std::nullopt : latest;
+}
+
 P2PBroadcastClient::P2PBroadcastClient(const std::vector<std::string>& worker_addrs,
                                        int64_t                         cancel_broadcast_timeout_ms):
     worker_addrs_(worker_addrs), cancel_broadcast_timeout_ms_(cancel_broadcast_timeout_ms) {}

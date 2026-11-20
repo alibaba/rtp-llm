@@ -73,6 +73,15 @@ public:
         void    complete(bool ok);
         void    setDoneCallback(std::function<void()> callback);
         void    cancel();
+        struct FirstTokenTiming {
+            int64_t received_us = 0;
+            std::optional<int64_t> produced_us;
+        };
+        FirstTokenTiming firstTokenTiming() const {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            return first_token_timing_;
+        }
+
         int64_t totalCostTimeUs() const {
             std::lock_guard<std::mutex> lock(state_mutex_);
             return total_cost_time_us;
@@ -98,6 +107,7 @@ public:
         int64_t                                                                           request_id{0};
         int64_t                                                                           start_time_us{0};
         int64_t                                                                           total_cost_time_us{0};
+        FirstTokenTiming                                                                  first_token_timing_;
         ErrorCode   error_code = ErrorCode::NONE_ERROR;
         std::string error_message;
 

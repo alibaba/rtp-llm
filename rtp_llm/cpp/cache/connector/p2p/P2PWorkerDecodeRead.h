@@ -37,7 +37,8 @@ public:
     ErrorInfo read(int64_t                   request_id,
                    const std::string&        unique_key,
                    int64_t                   deadline_ms,
-                   const P2PWorkerRoutePlan& worker_plan);
+                   const P2PWorkerRoutePlan& worker_plan,
+                   int64_t* physical_completion_time_us = nullptr);
 
     bool cancelRead(const std::string& unique_key, int64_t request_deadline_ms = 0);
 
