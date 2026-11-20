@@ -47,9 +47,9 @@ class CudaGraphRunner: public GraphBase {
 public:
     using DraftSampler = std::function<torch::Tensor(const PyModelInputs&, const PyModelOutputs&)>;
     void configureDraftLoop(int steps, DraftSampler sampler) {
-        RTP_LLM_CHECK_WITH_INFO(steps > 0 && steps < max_seq_len_ && sampler && exact_batch_only_
-                                    && num_tokens_per_bs_ == 1 && !is_prefill_cuda_graph_mode_ && !is_target_verify_,
-                                "draft loop requires an exact single-token decode graph");
+        RTP_LLM_CHECK_WITH_INFO(steps > 0 && steps < max_seq_len_ && sampler && num_tokens_per_bs_ == 1
+                                    && !is_prefill_cuda_graph_mode_ && !is_target_verify_,
+                                "draft loop requires a single-token decode graph");
         draft_decode_steps_ = steps;
         draft_sampler_      = std::move(sampler);
     }

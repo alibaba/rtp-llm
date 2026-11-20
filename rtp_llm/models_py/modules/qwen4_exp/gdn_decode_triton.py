@@ -59,7 +59,9 @@ def _packed_decode(
         return
 
     # A page boundary may require separate source and destination state pages.
-    source_page = tl.load(block_map + row * map_stride + (length - 2) // PAGE_SIZE)
+    source_page = tl.load(
+        block_map + row * map_stride + tl.maximum(length - 2, 0) // PAGE_SIZE
+    )
     if source_page <= 0:
         for step in range(SEQ):
             output_ptr = (

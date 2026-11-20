@@ -322,8 +322,7 @@ py::object CudaGraphRunner::prepareFmhaImpl(const PyModelInputs& inputs, bool is
 }
 
 bool CudaGraphRunner::supportsDeviceAttentionPreparation(const py::object& impl) const {
-    if (role_ != CudaGraphRole::DECODE || !exact_batch_only_ || !impl
-        || impl.is_none()) {
+    if (role_ != CudaGraphRole::DECODE || !impl || impl.is_none()) {
         return false;
     }
     auto supports = [](py::handle backend) {
@@ -344,7 +343,7 @@ bool CudaGraphRunner::usesDeviceAttentionPreparation(const PyModelInputs& inputs
     const auto graph_idx = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     const auto& lengths  = inputs.attention_inputs.sequence_lengths;
     return graph_instances_.at(graph_idx).mem_hold_.device_attention_preparation_
-           && state.current_batch_size == state.current_real_graph_bs && lengths.defined() && lengths.is_cuda()
+           && state.current_batch_size <= state.current_real_graph_bs && lengths.defined() && lengths.is_cuda()
            && lengths.numel() == state.current_batch_size;
 }
 
@@ -1311,7 +1310,10 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
             replayDecode(state.current_real_graph_bs);
         }
-        outputs.draft_token_ids = graph_instances_[state.current_real_graph_bs].draft_token_ids_;
+        const auto& draft_token_ids = graph_instances_[state.current_real_graph_bs].draft_token_ids_;
+        if (draft_token_ids.defined()) {
+            outputs.draft_token_ids = draft_token_ids.slice(0, 0, state.current_batch_size);
+        }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
                 0, 0, state.seq_len_sum);

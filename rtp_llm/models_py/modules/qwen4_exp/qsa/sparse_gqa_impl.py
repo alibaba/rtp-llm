@@ -382,7 +382,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             not torch.version.hip
             and self.support_cuda_graph()
             and not self.is_prefill
-            and self.attn_inputs.is_exact_cuda_graph_batch
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:

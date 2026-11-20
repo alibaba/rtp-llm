@@ -145,7 +145,6 @@ public:
                      int64_t                  position_id_len_factor,
                      int64_t                  max_context_batch_size,
 
-                     bool                     exact_batch_only,
                      int64_t                  draft_decode_steps) {
         reset_runner();
         GraphParams params;
@@ -318,7 +317,6 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("position_id_len_factor") = 0,
              py::arg("max_context_batch_size") = 128,
 
-             py::arg("exact_batch_only")       = false,
              py::arg("draft_decode_steps")     = 0)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,

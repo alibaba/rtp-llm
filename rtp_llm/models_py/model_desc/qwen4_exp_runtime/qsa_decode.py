@@ -178,7 +178,6 @@ def select_decode_tokens(
     position_state = self.positions(ratio, checks)
     if (
         graph_decode
-        and getattr(self.main_inputs, "is_exact_cuda_graph_batch", False)
         and position_state is None
         and (self.is_mtp_draft or target_mrope)
         and ratio == 4
