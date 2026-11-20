@@ -828,17 +828,9 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseDropVictim(size_t     
         }
     } context{counters, eviction_batch_context};
     const auto can_evict_uncached = [this, group_set_id, tier, &context](TreeNode* node) {
-        if (tier == Tier::DEVICE && isEvictable(node, group_set_id, tier)) {
-            const TransferDescriptor desc(node,
-                                          group_set_id,
-                                          /*path_index=*/0,
-                                          tier,
-                                          Tier::NONE,
-                                          node->group_set_resources[group_set_id].getBlocks(tier),
-                                          /*initial_owner=*/true);
-            if (!canReclaimDeviceDrop(desc, context.eviction_batch_context)) {
-                return context.skip(EvictionVictimSkipReason::NOT_RECLAIMABLE);
-            }
+        if (tier == Tier::DEVICE && isEvictable(node, group_set_id, tier)
+            && !canReclaimDeviceDrop(node, group_set_id, context.eviction_batch_context)) {
+            return context.skip(EvictionVictimSkipReason::NOT_RECLAIMABLE);
         }
         return true;
     };
@@ -1412,37 +1404,48 @@ void BlockTreeEvictor::eraseNodeFromAllHeaps(TreeNode* node) {
     }
 }
 
-bool BlockTreeEvictor::canReclaimDeviceDrop(const TransferDescriptor& desc,
-                                            EvictionBatchContext*     eviction_batch_context) const {
-    const auto can_reclaim = [this](const TransferDescriptor& candidate) {
-        if (candidate.source_tier != Tier::DEVICE) {
-            return true;
-        }
-        const auto& pools = tree_->groupSets()[candidate.group_set_id]->devicePools();
-        for (size_t i = 0; i < candidate.source_blocks.size(); ++i) {
-            if (!isNullBlockIdx(candidate.source_blocks[i])
-                && !pools[i]->canReclaimCacheBlock(candidate.source_blocks[i])) {
+bool BlockTreeEvictor::canReclaimDeviceDrop(TreeNode* node,
+                                           size_t group_set_id,
+                                           EvictionBatchContext* eviction_batch_context) const {
+    const auto can_reclaim = [this](size_t candidate_group_set_id, const BlockIdList& blocks) {
+        const auto& pools = tree_->groupSets()[candidate_group_set_id]->devicePools();
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (!isNullBlockIdx(blocks[i]) && !pools[i]->canReclaimCacheBlock(blocks[i])) {
                 return false;
             }
         }
         return true;
     };
-    if (!can_reclaim(desc)) {
+    // Selection holds the cache mutex, so the primary block list can be read
+    // directly before allocating a descriptor for a drop plan.
+    const auto& blocks = node->group_set_resources[group_set_id].device_blocks;
+    if (!can_reclaim(group_set_id, blocks)) {
         return false;
     }
-    if (tree_->groupSets()[desc.group_set_id]->groupType() == CacheGroupType::FULL) {
+    if (tree_->groupSets()[group_set_id]->groupType() == CacheGroupType::FULL) {
         // FULL usually shares request ownership with its related resources. Rarely,
         // an upward cascade can reach a request-held ancestor whose SWA was dropped.
         // Check only the primary resource to avoid planning the closure twice; any
         // held related block stays physically alive through its request reference.
         return true;
     }
+    const TransferDescriptor desc(node,
+                                  group_set_id,
+                                  /*path_index=*/0,
+                                  Tier::DEVICE,
+                                  Tier::NONE,
+                                  blocks,
+                                  /*initial_owner=*/true);
     std::vector<std::pair<TreeNode*, size_t>> detached_resources;
     const EvictionDropTask                    task = planDropTask(desc, detached_resources, eviction_batch_context);
     // FULL pruning and cascades must not discard cache entries backed by held
     // device blocks either. Planning does not reserve or detach any resource.
-    return std::all_of(task.cascade_descs.begin(), task.cascade_descs.end(), can_reclaim)
-           && std::all_of(task.dependent_prune_descs.begin(), task.dependent_prune_descs.end(), can_reclaim)
+    const auto can_reclaim_related = [&can_reclaim](const TransferDescriptor& candidate) {
+        return candidate.source_tier != Tier::DEVICE
+               || can_reclaim(candidate.group_set_id, candidate.source_blocks);
+    };
+    return std::all_of(task.cascade_descs.begin(), task.cascade_descs.end(), can_reclaim_related)
+           && std::all_of(task.dependent_prune_descs.begin(), task.dependent_prune_descs.end(), can_reclaim_related)
            && std::none_of(detached_resources.begin(), detached_resources.end(), [](const auto& entry) {
                   return entry.first->group_set_resources[entry.second].hasTier(Tier::DEVICE);
               });

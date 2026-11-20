@@ -156,7 +156,7 @@ private:
     // Check demote protections before deciding whether a heap entry is stale.
     std::optional<EvictionVictimSkipReason>
     demoteRejectionReason(TreeNode* node, size_t group_set_id, Tier tier, const GroupSet& group_set) const;
-    bool canReclaimDeviceDrop(const TransferDescriptor& desc, EvictionBatchContext* eviction_batch_context) const;
+    bool canReclaimDeviceDrop(TreeNode* node, size_t group_set_id, EvictionBatchContext* eviction_batch_context) const;
     void logZeroDeviceReclaimLocked(size_t group_set_id,
                                     size_t member_group_id,
                                     size_t required_blocks,
