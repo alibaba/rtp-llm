@@ -1,5 +1,6 @@
 import concurrent.futures
 import logging
+import os
 import threading
 import time
 
@@ -182,6 +183,9 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
     ):
         self.engine = mm_process_engine
         self._transport = create_mm_output_transport(transport_config, local_device_id)
+        self._native_inline_response = (
+            os.environ.get("MM_VIT_NATIVE_INLINE_RESPONSE") == "1"
+        )
 
     def _register_rpc_completion(self, context):
         rpc_done = threading.Event()
@@ -429,6 +433,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 ),
             )
             res = merge_embedding_results(results)
+            if self._native_inline_response:
+                payload = self._transport.encode_inline(multimodal_inputs, res)
+                if payload is not None:
+                    kmonitor.report(
+                        GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
+                        _now_us() - start_us,
+                        tags,
+                    )
+                    return payload
             output_pb = self._transport.transfer(multimodal_inputs, res)
             try:
                 add_multimodal_feature_hashes(

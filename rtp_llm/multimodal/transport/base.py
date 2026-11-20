@@ -43,6 +43,11 @@ class MMTransportBackend(ABC):
     def offer(self, handles: List[str]) -> bool:
         return False
 
+    def encode_inline(
+        self, request: MultimodalInputsPB, res: MMEmbeddingRes
+    ) -> bytes | None:
+        return None
+
     def claim(self, handles: List[str]) -> bool:
         return False
 
@@ -58,37 +63,57 @@ class MMTerminalBackend(MMTransportBackend):
 
 
 def report_output_metrics(result: MMOutputResult) -> None:
-    tags = {"source": METRIC_SOURCE, "transport": result.transport}
+    report_output_payload_metrics(
+        result.transport,
+        result.payload_embedding_bytes,
+        result.payload_pos_bytes,
+        result.payload_extra_bytes,
+        sum(result.receipt.split_size),
+    )
+
+
+def report_output_payload_metrics(
+    transport: str,
+    embedding_bytes: int,
+    position_bytes: int,
+    extra_bytes: int,
+    token_count: int,
+) -> None:
+    tags = {"source": METRIC_SOURCE, "transport": transport}
     kmonitor.report(
         GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC,
-        result.payload_embedding_bytes,
+        embedding_bytes,
         tags,
     )
     kmonitor.report(
-        GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC, result.payload_pos_bytes, tags
+        GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC, position_bytes, tags
     )
     kmonitor.report(
         GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC,
-        result.payload_extra_bytes,
+        extra_bytes,
         tags,
     )
     kmonitor.report(
         GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC,
-        sum(result.receipt.split_size),
+        token_count,
         tags,
     )
 
 
-def serialize_embedding_response(response: MultimodalOutputPB) -> bytes:
+def serialize_embedding_response(response: MultimodalOutputPB | bytes) -> bytes:
     # With the upb protobuf runtime, ByteSize() encodes and copies the
     # message too. Measure the bytes gRPC is already going to send.
-    payload = response.SerializeToString()
+    if isinstance(response, bytes):
+        payload, transport = response, "bytes"
+    else:
+        payload = response.SerializeToString()
+        transport = "rdma" if response.output_rdma_slots else "bytes"
     kmonitor.report(
         GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC,
         len(payload),
         {
             "source": METRIC_SOURCE,
-            "transport": "rdma" if response.output_rdma_slots else "bytes",
+            "transport": transport,
         },
     )
     return payload
@@ -99,6 +124,11 @@ class MMOutputTransport:
 
     def __init__(self, backend: MMTransportBackend):
         self._backend = backend
+
+    def encode_inline(
+        self, request: MultimodalInputsPB, res: MMEmbeddingRes
+    ) -> bytes | None:
+        return self._backend.encode_inline(request, res)
 
     def transfer(
         self, request: MultimodalInputsPB, res: MMEmbeddingRes

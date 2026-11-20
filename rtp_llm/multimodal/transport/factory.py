@@ -20,6 +20,11 @@ class NegotiatedOutputBackend(MMTransportBackend):
         backend = self._rdma if request.support_rdma else self._grpc
         return backend.transfer(request, res)
 
+    def encode_inline(self, request, res):
+        if request.support_rdma:
+            return None
+        return self._grpc.encode_inline(request, res)
+
     def offer(self, handles):
         return self._rdma.offer(handles)
 

@@ -7,8 +7,11 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 from rtp_llm.multimodal.transport.base import (
     MMOutputResult,
     MMTerminalBackend,
+    report_output_payload_metrics,
 )
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.ops import ensure_engine_ops_loaded
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from rtp_llm.utils.grpc_util import trans_from_tensor
 
 TRANSPORT_BYTES = "bytes"
@@ -18,6 +21,24 @@ class GrpcInlineOutputBackend(MMTerminalBackend):
     """Encode the payload directly in the gRPC receipt."""
 
     name = TRANSPORT_BYTES
+
+    def encode_inline(self, request: MultimodalInputsPB, res: MMEmbeddingRes) -> bytes:
+        ensure_engine_ops_loaded()
+        from libth_transformer import encode_vit_inline_response
+
+        with cuda_graph_gate.operation():
+            payload, embedding_bytes, position_bytes, extra_bytes, tokens = (
+                encode_vit_inline_response(
+                    res.embeddings,
+                    res.position_ids or (),
+                    res.extra_input or (),
+                    res.feature_hashes,
+                )
+            )
+        report_output_payload_metrics(
+            TRANSPORT_BYTES, embedding_bytes, position_bytes, extra_bytes, tokens
+        )
+        return payload
 
     def transfer(
         self, request: MultimodalInputsPB, res: MMEmbeddingRes

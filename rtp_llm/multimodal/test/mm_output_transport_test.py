@@ -19,6 +19,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 )
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.multimodal_util import add_multimodal_feature_hashes
 from rtp_llm.multimodal.transport.base import (
     MMOutputTransport,
     MMTransportBackend,
@@ -322,6 +323,38 @@ class MMOutputTransportTest(TestCase):
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 6)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 2)
         self.assertEqual(payload, result.receipt.SerializeToString())
+        self.assertEqual(
+            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], len(payload)
+        )
+
+    @patch("rtp_llm.multimodal.transport.base.kmonitor.report")
+    def test_native_inline_output_wire_and_metrics(self, report):
+        request = MultimodalInputsPB()
+        result = MMEmbeddingRes(
+            [_rows(2).bfloat16(), _rows(1, 100).bfloat16()],
+            position_ids=[
+                torch.arange(2, dtype=torch.int32),
+                torch.zeros(1, dtype=torch.int32),
+            ],
+            extra_input=[torch.ones(3, dtype=torch.float16), None],
+            feature_hashes=[
+                torch.arange(2, dtype=torch.int32),
+                torch.ones(1, dtype=torch.int32),
+            ],
+        )
+        expected = self.terminal.transfer(request, result).receipt
+        add_multimodal_feature_hashes(expected, result.embeddings, result.feature_hashes)
+
+        payload = serialize_embedding_response(
+            self.terminal.encode_inline(request, result)
+        )
+
+        self.assertEqual(payload, expected.SerializeToString())
+        samples = {call.args[0]: call.args[1] for call in report.call_args_list}
+        self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_EMBEDDING_BYTES_METRIC], 24)
+        self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 12)
+        self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 6)
+        self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 3)
         self.assertEqual(
             samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], len(payload)
         )
