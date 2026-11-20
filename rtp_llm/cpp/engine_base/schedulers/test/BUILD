@@ -48,8 +48,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
 
 cc_test(

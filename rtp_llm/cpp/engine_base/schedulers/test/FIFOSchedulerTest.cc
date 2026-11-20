@@ -6210,4 +6210,24 @@ TEST_F(FIFOSchedulerTest, testGlobalChunkBudgetValidatesFanoutReuseAndShortFinal
     ASSERT_EQ(short_stream->currentBatchSize(), 8);
 }
 
+
+TEST_F(FIFOSchedulerTest, testChunkedPrefillAdmitsLateArrivalIntoTailBudget) {
+    ChunkSchedulerTestConfig config;
+    config.role_type = RoleType::PREFILL;
+    ChunkSchedulerTestEnv<FIFOScheduler> env(config);
+    ASSERT_TRUE(env.init());
+    std::vector<int> ids(20);
+    std::iota(ids.begin(), ids.end(), 1);
+    auto first = env.makeStream(ids, /*max_new_tokens=*/0);
+    auto late = env.makeStream(ids, /*max_new_tokens=*/0);
+    ASSERT_TRUE(env.scheduler().enqueue(first).ok());
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {first}, {16}));
+    first->advanceChunk();
+    // Arrival is sequenced after the first chunk, without sleeps or racing RPCs.
+    ASSERT_TRUE(env.scheduler().enqueue(late).ok());
+    ASSERT_TRUE(expectPrefillBatch(env.scheduler().schedule(), {first, late}, {4, 12}));
+    EXPECT_FALSE(first->hasError());
+    EXPECT_FALSE(late->hasError());
+}
+
 }  // namespace rtp_llm
