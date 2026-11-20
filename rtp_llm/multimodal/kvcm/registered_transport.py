@@ -734,10 +734,16 @@ class RegisteredTransportPool:
             type(nbytes) is not int or not 0 < nbytes <= self._max_object_bytes
         ):
             raise ValueError("invalid GDR object size")
-        deadline = time.monotonic() + timeout
+        wait_seconds = max(timeout, 0)
+        deadline = time.monotonic() + wait_seconds
+        if not self._condition.acquire(timeout=wait_seconds):
+            return None
         slot = None
-        with self._condition:
+        try:
             while self._accepting and not self.quarantined:
+                # Condition.wait() reacquires the lock before returning.
+                if wait_seconds and time.monotonic() >= deadline:
+                    break
                 if sized:
                     slot = self._take_range(nbytes, for_write)
                 else:
@@ -763,6 +769,8 @@ class RegisteredTransportPool:
                     break
                 if not self._condition.wait(remaining):
                     break
+        finally:
+            self._condition.release()
         if slot is not None and self._observe_lease is not None:
             self._observe_lease(for_write, 1, slot._capacity)
         return slot

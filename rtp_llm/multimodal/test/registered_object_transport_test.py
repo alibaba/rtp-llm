@@ -356,6 +356,23 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                     if next_slot is not None:
                         pool.release(next_slot)
 
+    def test_acquire_deadline_includes_contended_allocator_lock(self):
+        pool = self.pool()
+        with ThreadPoolExecutor(1) as workers:
+            acquired = None
+            try:
+                with pool._condition:
+                    acquired = workers.submit(pool.acquire, timeout=0.03)
+                    self.assertIsNone(acquired.result(timeout=1))
+            finally:
+                if acquired is not None:
+                    slot = acquired.result(timeout=1)
+                    if slot is not None:
+                        pool.release(slot)
+        slot = pool.acquire()
+        self.assertIsNotNone(slot)
+        pool.release(slot)
+
     def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
         pool = self.pool(
             direct_payload=True,
