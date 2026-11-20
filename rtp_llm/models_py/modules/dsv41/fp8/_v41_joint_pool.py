@@ -440,6 +440,9 @@ def _split_rows(tensor, partitions):
 
 def _resolve_layout(attn, main, index):
     """Resolve native block tables and their physical pool layout."""
+    if main.ndim != 3 or main.shape[-1] != 288:
+        # The precompiled joint reader owns the FP4 layout only.
+        return None
     cp, cache = getattr(attn, "_cp_ctx", None), getattr(attn, "_kv_cache", None)
     tables = getattr(attn, "_block_tables_by_type", None)
     if (

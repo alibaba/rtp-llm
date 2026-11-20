@@ -293,6 +293,7 @@ def _dequantize_and_gather_k_slots_kernel(
     n_quant_blocks: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     CP_RANK_MAJOR_RAW: tl.constexpr,
+    out_row_offsets=None,
 ):
     """Gather/dequant using pre-translated flat global slot ids.
 
@@ -309,15 +310,15 @@ def _dequantize_and_gather_k_slots_kernel(
         gather_len = max_gather_len
 
     slot_row_ptr = slot_mapping_ptr + batch_idx.to(tl.int64) * slot_mapping_stride0
+    if out_row_offsets is not None:
+        batch_offset = tl.load(out_row_offsets + batch_idx).to(tl.int64) * out_stride1
+    else:
+        batch_offset = batch_idx.to(tl.int64) * out_stride0
 
     for i in range(worker_id, gather_len, num_workers):
         slot = tl.load(slot_row_ptr + i).to(tl.int64)
         output_row = offset.to(tl.int64) + i.to(tl.int64)
-        output_row_ptr = (
-            out_ptr
-            + batch_idx.to(tl.int64) * out_stride0.to(tl.int64)
-            + output_row * out_stride1.to(tl.int64)
-        )
+        output_row_ptr = out_ptr + batch_offset + output_row * out_stride1.to(tl.int64)
 
         if slot < 0:
             for j in tl.static_range((fp8_dim + bf16_dim) // 16):
@@ -398,6 +399,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
     block_stride: int,
     num_cache_blocks: int,
     cp_rank_major_raw: bool,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Launch after the caller has established the packed-slot contracts."""
     batch_size = int(slot_mapping.shape[0])
@@ -409,7 +411,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
     _dequantize_and_gather_k_slots_kernel[(batch_size, NUM_WORKERS)](
         out,
         out.stride(0),
-        out.stride(1),
+        out.stride(0) if out_row_offsets is not None else out.stride(1),
         k_cache,
         slot_mapping,
         slot_mapping.stride(0),
@@ -428,6 +430,7 @@ def _launch_dequantize_and_gather_k_slots_unchecked(
         n_quant_blocks=NOPE_TILES,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
         CP_RANK_MAJOR_RAW=bool(cp_rank_major_raw),
+        out_row_offsets=out_row_offsets,
     )
 
 
@@ -440,6 +443,7 @@ def _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
     *,
     full_entries_per_block: int,
     num_unique_blocks: int,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Launch after start/compaction established rank-major raw contracts."""
     _launch_dequantize_and_gather_k_slots_unchecked(
@@ -452,6 +456,7 @@ def _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
         block_stride=int(gathered.shape[1]),
         num_cache_blocks=int(num_unique_blocks),
         cp_rank_major_raw=True,
+        out_row_offsets=out_row_offsets,
     )
 
 
@@ -461,6 +466,8 @@ def dequantize_and_gather_k_cache_slots(
     slot_mapping: torch.Tensor,
     gather_lens: Optional[torch.Tensor],
     offset: int,
+    *,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Dequantize + gather FP8 K cache using flat global slot ids.
 
@@ -468,6 +475,8 @@ def dequantize_and_gather_k_cache_slots(
     ``-1`` zero-fill the corresponding output row and skip all cache reads.
     This is the SWA prefill path for layouts where block-table row coverage
     differs from the per-block ring entry count.
+    With ``out_row_offsets``, the caller supplies a packed output matrix and
+    the base row for each request instead of a padded batch.
     """
     max_gather_len = int(slot_mapping.shape[1])
     if max_gather_len == 0 or int(slot_mapping.shape[0]) == 0:
@@ -490,6 +499,7 @@ def dequantize_and_gather_k_cache_slots(
         block_stride=k_cache.stride(0),
         num_cache_blocks=int(k_cache.shape[0]),
         cp_rank_major_raw=False,
+        out_row_offsets=out_row_offsets,
     )
 
 
@@ -1490,6 +1500,8 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     cp_rank: int,
     cp_size: int,
     compaction: CPByteSlicedSlotCompaction,
+    *,
+    out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """Reconstruct CP byte-sliced SWA entries with all_gather, then dequantize.
 
@@ -1528,6 +1540,22 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     unique_blocks = compaction.unique_blocks
     compact_slots = compaction.compact_slots
     if unique_blocks.numel() == 0:
+        if out_row_offsets is not None:
+            # All compact slots are masked. The kernel zeroes valid output
+            # rows without dereferencing the empty cache.
+            _launch_dequantize_and_gather_k_slots_unchecked(
+                out,
+                k_cache_raw,
+                compact_slots,
+                gather_lens,
+                offset,
+                cache_block_size=full_entries_per_block,
+                block_stride=k_cache_raw.stride(0),
+                num_cache_blocks=0,
+                cp_rank_major_raw=False,
+                out_row_offsets=out_row_offsets,
+            )
+            return
         out[:, offset : offset + W, :].zero_()
         return
 
@@ -1560,6 +1588,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             offset,
             full_entries_per_block=full_entries_per_block,
             num_unique_blocks=int(unique_blocks.numel()),
+            out_row_offsets=out_row_offsets,
         )
         return
     gathered = gathered.view(
@@ -1574,6 +1603,15 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         (int(unique_blocks.numel()), full_entries_per_block, ENTRY_BYTES),
         (int(full_raw.shape[1]), ENTRY_BYTES, 1),
     )
+    if out_row_offsets is not None:
+        return dequantize_and_gather_k_cache_slots(
+            out,
+            full_view,
+            compact_slots,
+            gather_lens_i32,
+            offset,
+            out_row_offsets=out_row_offsets,
+        )
     restored = dequantize_slots_to_bf16(full_view, compact_slots.reshape(-1))
     restored_3d = restored.view(B, W, HEAD_DIM)
     if gather_lens is None:

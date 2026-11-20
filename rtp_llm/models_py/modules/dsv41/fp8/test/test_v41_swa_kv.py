@@ -1,6 +1,7 @@
 """V4.1 fresh/cached SWA KV follows the reference materialization order."""
 
 import unittest
+from functools import partial
 
 import torch
 
@@ -9,6 +10,8 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_triton import (
     dequantize_swa_k_cache,
     quantize_and_insert_swa_k_cache,
 )
+
+compact_swa_kv_norm_rope = partial(swa_kv_norm_rope, v4_layout=False)
 
 
 def reference_norm_rope(raw, weight, frequencies, eps=1e-6):
@@ -69,7 +72,7 @@ class V41SwaKvTest(unittest.TestCase):
             with self.subTest(batch=batch, length=length):
                 raw, weight, frequencies = self.inputs(batch, length)
                 before = raw.clone()
-                output = swa_kv_norm_rope(raw, weight, frequencies, 64)
+                output = compact_swa_kv_norm_rope(raw, weight, frequencies, 64)
                 expected = reference_swa_kv(raw, weight, frequencies)
                 torch.testing.assert_close(output, expected, rtol=0, atol=0)
                 torch.testing.assert_close(raw, before, rtol=0, atol=0)
@@ -77,14 +80,16 @@ class V41SwaKvTest(unittest.TestCase):
     @torch.no_grad()
     def test_batch_chunk_and_cp_row_partition_invariance(self):
         raw, weight, frequencies = self.inputs(4, 25)
-        all_rows = swa_kv_norm_rope(raw, weight, frequencies, 64).reshape(-1, 512)
+        all_rows = compact_swa_kv_norm_rope(raw, weight, frequencies, 64).reshape(
+            -1, 512
+        )
         raw_rows = raw.view(-1, 512)
         for indices in (
             torch.arange(0, 100, 2, device="cuda"),
             torch.arange(1, 100, 2, device="cuda"),
             torch.arange(75, 100, device="cuda"),
         ):
-            selected = swa_kv_norm_rope(
+            selected = compact_swa_kv_norm_rope(
                 raw_rows.index_select(0, indices),
                 weight,
                 frequencies.index_select(0, indices),
@@ -97,7 +102,7 @@ class V41SwaKvTest(unittest.TestCase):
     @torch.no_grad()
     def test_reused_prefix_and_fresh_rows_have_identical_values(self):
         raw, weight, frequencies = self.inputs(1, 153)
-        fresh = swa_kv_norm_rope(raw, weight, frequencies, 64).reshape(-1, 512)
+        fresh = compact_swa_kv_norm_rope(raw, weight, frequencies, 64).reshape(-1, 512)
         pool = torch.empty(2, 128, 528, device="cuda", dtype=torch.uint8)
         slots = torch.arange(153, device="cuda", dtype=torch.int64)
         quantize_and_insert_swa_k_cache(fresh, pool, slots)
@@ -111,7 +116,7 @@ class V41SwaKvTest(unittest.TestCase):
     def test_empty_rows(self):
         raw, weight, frequencies = self.inputs(1, 0)
         self.assertEqual(
-            swa_kv_norm_rope(raw, weight, frequencies, 64).shape, raw.shape
+            compact_swa_kv_norm_rope(raw, weight, frequencies, 64).shape, raw.shape
         )
 
 

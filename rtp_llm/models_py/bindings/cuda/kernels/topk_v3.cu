@@ -159,6 +159,16 @@ __global__ __launch_bounds__(kBlockSize,
         return;
     }
     __shared__ impl::MaxSmem<typename ClusterImpl::Smem> smem;
+#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+    const auto cluster = cooperative_groups::this_cluster();
+    // Hopper writes disjoint prefixes directly to global output; shared-output
+    // staging lost non-primary entries in the SM90 eager/graph regression.
+    ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
+    cluster.sync();
+    if (blockIdx.y == worker_rank) {
+        finish_output<kFilterFinite>(problem);
+    }
+#else
     __shared__ int32_t                                   indices[kMaxTopK];
     auto*                                                destination = problem.out;
     const auto                                           cluster     = cooperative_groups::this_cluster();
@@ -169,6 +179,7 @@ __global__ __launch_bounds__(kBlockSize,
         finish_output<kFilterFinite>(problem);
         copy_output(problem, destination);
     }
+#endif
 }
 
 template<typename ClusterImpl, bool kAlignedInput, bool kFilterFinite, typename Score>
@@ -188,6 +199,13 @@ __global__ __launch_bounds__(kBlockSize,
                 finish_output<kFilterFinite>(problem);
             }
         } else {
+#if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+            ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
+            cluster.sync();
+            if (blockIdx.y == worker_rank) {
+                finish_output<kFilterFinite>(problem);
+            }
+#else
             problem.out = cluster.map_shared_rank(indices, worker_rank);
             ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
             cluster.sync();
@@ -195,6 +213,7 @@ __global__ __launch_bounds__(kBlockSize,
                 finish_output<kFilterFinite>(problem);
                 copy_output(problem, destination);
             }
+#endif
         }
         cluster.sync();
     }

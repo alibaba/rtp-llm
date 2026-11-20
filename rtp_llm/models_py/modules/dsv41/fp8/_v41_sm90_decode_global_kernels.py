@@ -1,0 +1,364 @@
+"""Fuse V4.1 decode compression, normalization, RoPE and typed cache stores.
+
+The two-stage organization follows vLLM's V4.1 fused compressor/indexer
+stores, with RTP's FP4 main cache (interleaved 256B e2m1 payload
+and 32B E4M3 group-16 scales per token) and FP4 index cache (planar 64B payload +
+packed-UE8M0 int32 scales per entry). Stage A reads the previous
+speculative state before any state writes. The index projection uses the native
+WK/cache epilogue when available; Stage B commits state after projection. This
+kernel boundary prevents a token CTA from overwriting another CTA's history
+when the state ring wraps.
+All metadata stays on the device.
+"""
+
+from __future__ import annotations
+
+import torch
+import torch.nn.functional as F
+import triton
+import triton.language as tl
+import triton.language.extra.cuda.libdevice as libdevice
+
+from rtp_llm.device.device_type import is_cuda
+from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV
+from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
+    require_pool_tokens_per_block,
+)
+from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
+    invalid_kv_access_validation_enabled,
+    trap_invalid_kv_access_enabled,
+)
+from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
+    _round_e2m1,
+    _round_power_of_two_scale,
+)
+from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
+    _fake_quantize_global_fp4_values,
+    _store_v4_row,
+)
+
+
+@triton.jit
+def _trap():
+    tl.inline_asm_elementwise(
+        "trap; // dummy $0", "=r", [], dtype=tl.int32, is_pure=False, pack=1
+    )
+
+
+@triton.jit
+def _rope_bf16(x, frequencies, position, D: tl.constexpr):
+    """GPT-J pairs in the last 64 columns, with both BF16 boundaries."""
+    columns = tl.arange(0, D)
+    values = x.to(tl.bfloat16).to(tl.float32)
+    partner = tl.gather(values, columns ^ 1, axis=0)
+    rotary = columns >= D - 64
+    angle = tl.maximum((columns - (D - 64)) // 2, 0)
+    cosine = tl.load(frequencies + position * 64 + angle * 2, rotary, other=1)
+    sine = tl.load(frequencies + position * 64 + angle * 2 + 1, rotary, other=0)
+    product = partner * sine
+    # Match the CUDA complex multiply used by apply_rotary_emb: its last
+    # multiply-add is fused even though normalization retains separate ops.
+    rotated = tl.fma(values, cosine, tl.where(columns % 2 == 0, -product, product))
+    return tl.where(rotary, rotated, values).to(tl.bfloat16)
+
+
+@triton.jit
+def _cache_address(
+    table,
+    position,
+    request,
+    COLS: tl.constexpr,
+    STRIDE: tl.constexpr,
+    TPB: tl.constexpr,
+    RATIO: tl.constexpr,
+):
+    column = position // TPB
+    valid = (position >= 0) & (column < COLS) & ((position + 1) % RATIO == 0)
+    block = tl.load(table + request * STRIDE + column, valid, other=0).to(tl.int64)
+    return block, (position % TPB) // RATIO, valid & (block > 0)
+
+
+@triton.jit
+def _torch_square_sum_512(values, ROWS: tl.constexpr):
+    # Match ATen CUDA Reduce.cuh's contiguous float32 mean: four independent
+    # vector accumulators, then block-x reduction. Its 512-thread configuration
+    # uses 128/64/32 lanes per output for <8 / <16 / >=16 rows respectively.
+    LANES: tl.constexpr = 128 if ROWS < 8 else (64 if ROWS < 16 else 32)
+    lane = tl.arange(0, LANES)
+    sums0 = tl.full((LANES,), 0, tl.float32)
+    sums1 = tl.full((LANES,), 0, tl.float32)
+    sums2 = tl.full((LANES,), 0, tl.float32)
+    sums3 = tl.full((LANES,), 0, tl.float32)
+    squares = values * values
+    for chunk in tl.static_range(128 // LANES):
+        first = (lane + chunk * LANES) * 4
+        sums0 = sums0 + tl.gather(squares, first, 0)
+        sums1 = sums1 + tl.gather(squares, first + 1, 0)
+        sums2 = sums2 + tl.gather(squares, first + 2, 0)
+        sums3 = sums3 + tl.gather(squares, first + 3, 0)
+    partials = ((sums0 + sums1) + sums2) + sums3
+    if LANES == 128:
+        lower = tl.arange(0, 64)
+        partials = tl.gather(partials, lower, 0) + tl.gather(partials, lower + 64, 0)
+    if LANES >= 64:
+        lower = tl.arange(0, 32)
+        partials = tl.gather(partials, lower, 0) + tl.gather(partials, lower + 32, 0)
+    return tl.sum(partials, 0)
+
+
+@triton.jit
+def _compress_norm_main_store_kernel(
+    values,
+    scores,
+    norm_weight,
+    positions,
+    requests,
+    starts,
+    input_lengths,
+    frequencies,
+    state,
+    state_table,
+    main_cache,
+    main_table,
+    index_table,
+    index_positions,
+    index_slots,
+    latent_out,
+    S: tl.constexpr,
+    ROWS: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
+    RATIO: tl.constexpr,
+    EPS: tl.constexpr,
+    STATE_EB: tl.constexpr,
+    STATE_TPB: tl.constexpr,
+    STATE_COLS: tl.constexpr,
+    STATE_STRIDE: tl.constexpr,
+    MAIN_EB: tl.constexpr,
+    MAIN_TPB: tl.constexpr,
+    MAIN_COLS: tl.constexpr,
+    MAIN_TABLE_STRIDE: tl.constexpr,
+    MAIN_CACHE_STRIDE: tl.constexpr,
+    MAIN_BLOCKS: tl.constexpr,
+    INDEX_EB: tl.constexpr,
+    INDEX_TPB: tl.constexpr,
+    INDEX_COLS: tl.constexpr,
+    INDEX_TABLE_STRIDE: tl.constexpr,
+    STATE_BLOCKS: tl.constexpr,
+    TRAP: tl.constexpr,
+    V4_CACHE: tl.constexpr = False,
+):
+    token = tl.program_id(0).to(tl.int64)
+    columns = tl.arange(0, 512)
+    position = tl.load(positions + token).to(tl.int64)
+    request = tl.load(requests + token).to(tl.int64)
+    current = tl.load(values + token * VALUE_STRIDE + columns)
+    if RATIO == 2:
+        current_score = tl.load(scores + token * SCORE_STRIDE + columns)
+        first = (
+            token % S == 0
+            if input_lengths is None
+            else position == tl.load(starts + request).to(tl.int64)
+        )
+        if first:
+            previous_position = tl.maximum(
+                tl.load(starts + request).to(tl.int64) - 1, 0
+            )
+            block = tl.load(
+                state_table
+                + request * STATE_STRIDE
+                + (previous_position // STATE_TPB) % STATE_COLS
+            ).to(tl.int64)
+            if TRAP:
+                if block >= STATE_BLOCKS:
+                    _trap()
+            row = block * STATE_EB + previous_position % STATE_EB
+            previous = tl.load(state + row * 1024 + columns, block > 0, other=0)
+            previous_score = tl.load(
+                state + row * 1024 + 512 + columns, block > 0, other=0
+            )
+        else:
+            previous = tl.load(values + (token - 1) * VALUE_STRIDE + columns)
+            previous_score = tl.load(scores + (token - 1) * SCORE_STRIDE + columns)
+        maximum = tl.maximum(previous_score, current_score)
+        # Match torch.softmax's expf and rounded division. Approximate exp2
+        # and reciprocal can flip BF16 latent values exactly at a midpoint.
+        previous_exp = libdevice.exp(previous_score - maximum)
+        current_exp = libdevice.exp(current_score - maximum)
+        denominator = previous_exp + current_exp
+        pooled = (previous * tl.div_rn(previous_exp, denominator)) + (
+            current * tl.div_rn(current_exp, denominator)
+        )
+    else:
+        pooled = current
+    inverse_rms = tl.rsqrt(_torch_square_sum_512(pooled, ROWS) / 512 + EPS)
+    weight = tl.load(norm_weight + columns).to(tl.float32)
+    latent = (pooled * inverse_rms * weight).to(tl.bfloat16)
+    # wk consumes normalized pre-RoPE BF16 latent, never the main-cache key.
+    tl.store(latent_out + token * 512 + columns, latent)
+    # Produce WK's metadata beside the existing global-cache address work.
+    # Logical C2 pages fill only half the physical Indexer cache entries.
+    index_block, index_offset, index_writable = _cache_address(
+        index_table,
+        position,
+        request,
+        INDEX_COLS,
+        INDEX_TABLE_STRIDE,
+        INDEX_TPB,
+        RATIO,
+    )
+    tl.store(index_positions + token, (position // RATIO) * RATIO)
+    tl.store(
+        index_slots + token,
+        tl.where(index_writable, index_block * INDEX_EB + index_offset, -1),
+    )
+
+    block, offset, writable = _cache_address(
+        main_table,
+        position,
+        request,
+        MAIN_COLS,
+        MAIN_TABLE_STRIDE,
+        MAIN_TPB,
+        RATIO,
+    )
+    if writable:
+        if TRAP:
+            if block >= MAIN_BLOCKS:
+                _trap()
+        rotated = _rope_bf16(latent, frequencies, (position // RATIO) * RATIO, 512)
+        if V4_CACHE:
+            _store_v4_row(
+                _fake_quantize_global_fp4_values(rotated),
+                main_cache,
+                block * MAIN_EB + offset,
+                MAIN_CACHE_STRIDE,
+                MAIN_EB,
+            )
+            return
+        # FP4 GLOBAL store: group-16 E4M3 scales, the official compressed-KV
+        # quantization. Byte-identical to quantize_and_insert_k_cache_fp4.
+        grouped = tl.reshape(rotated.to(tl.float32), (32, 16))
+        maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-9))
+        scale_fp8 = tl.div_rn(maxima, 6.0).to(
+            tl.float8e4nv, fp_downcast_rounding="rtne"
+        )
+        scale = scale_fp8.to(tl.float32)
+        normalized = tl.minimum(
+            tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0
+        )
+        codes = _round_e2m1(normalized).reshape((256, 2))
+        even, odd = tl.split(codes)
+        payload = even | (odd << 4)
+        base = main_cache + block * MAIN_CACHE_STRIDE
+        tl.store(base + offset * 288 + tl.arange(0, 256), payload)
+        tl.store(
+            base + offset * 288 + 256 + tl.arange(0, 32),
+            scale_fp8.to(tl.uint8, bitcast=True),
+        )
+
+
+@triton.jit
+def _index_norm_store_state_kernel(
+    projected,
+    norm_weight,
+    positions,
+    requests,
+    starts,
+    input_lengths,
+    frequencies,
+    index_cache,
+    index_table,
+    values,
+    scores,
+    state,
+    state_table,
+    S: tl.constexpr,
+    VALUE_STRIDE: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
+    RATIO: tl.constexpr,
+    EPS: tl.constexpr,
+    INDEX_EB: tl.constexpr,
+    INDEX_TPB: tl.constexpr,
+    INDEX_COLS: tl.constexpr,
+    INDEX_TABLE_STRIDE: tl.constexpr,
+    INDEX_CACHE_STRIDE: tl.constexpr,
+    STATE_EB: tl.constexpr,
+    STATE_TPB: tl.constexpr,
+    STATE_COLS: tl.constexpr,
+    STATE_STRIDE: tl.constexpr,
+    INDEX_BLOCKS: tl.constexpr,
+    STATE_BLOCKS: tl.constexpr,
+    TRAP: tl.constexpr,
+    STATE_ONLY: tl.constexpr = False,
+):
+    token = tl.program_id(0).to(tl.int64)
+    position = tl.load(positions + token).to(tl.int64)
+    request = tl.load(requests + token).to(tl.int64)
+    block, offset, writable = _cache_address(
+        index_table,
+        position,
+        request,
+        INDEX_COLS,
+        INDEX_TABLE_STRIDE,
+        INDEX_TPB,
+        RATIO,
+    )
+    if writable and not STATE_ONLY:
+        if TRAP:
+            if block >= INDEX_BLOCKS:
+                _trap()
+        columns = tl.arange(0, 128)
+        key = tl.load(projected + token * 128 + columns).to(tl.float32)
+        inverse_rms = tl.rsqrt(tl.sum(key * key, 0) / 128 + EPS)
+        weight = tl.load(norm_weight + columns).to(tl.float32)
+        normalized = (key * inverse_rms * weight).to(tl.bfloat16)
+        rotated = _rope_bf16(
+            normalized, frequencies, (position // RATIO) * RATIO, 128
+        ).to(tl.float32)
+        # FP4 INDEX_K store: group-32 UE8M0 scales, the official indexer
+        # quantization. Byte-identical to quantize_indexer_k_fp4; the packed
+        # scale int32s follow ALL physical payload rows in a block.
+        grouped = tl.reshape(rotated, (4, 32))
+        maxima = tl.maximum(tl.max(tl.abs(grouped), 1), 6.0 * (2.0**-126))
+        scale, exponent = _round_power_of_two_scale(maxima, 1.0 / 6.0)
+        normalized = tl.minimum(
+            tl.maximum(tl.div_rn(grouped, scale[:, None]), -6.0), 6.0
+        )
+        codes = _round_e2m1(normalized).reshape((64, 2))
+        even, odd = tl.split(codes)
+        payload = even | (odd << 4)
+        base = index_cache + block * INDEX_CACHE_STRIDE
+        tl.store(base + offset * 64 + tl.arange(0, 64), payload)
+        tl.store(base + INDEX_EB * 64 + offset * 4 + tl.arange(0, 4), exponent)
+
+    if RATIO == 2:
+        # Every stage-A CTA has finished reading the old ring. Preserve raw
+        # FP32 value/score rows for both accepted and speculative positions.
+        # The original suffix mask prevents stale aliases within each block.
+        block_in_sequence = position // STATE_TPB
+        block = tl.load(
+            state_table + request * STATE_STRIDE + block_in_sequence % STATE_COLS
+        ).to(tl.int64)
+        length = (
+            S
+            if input_lengths is None
+            else tl.load(input_lengths + request).to(tl.int64)
+        )
+        end = tl.load(starts + request).to(tl.int64) + length
+        effective_end = tl.minimum((block_in_sequence + 1) * STATE_TPB, end)
+        if (block > 0) & (position + STATE_EB >= effective_end):
+            if TRAP:
+                if block >= STATE_BLOCKS:
+                    _trap()
+            row = block * STATE_EB + position % STATE_EB
+            columns = tl.arange(0, 512)
+            tl.store(
+                state + row * 1024 + columns,
+                tl.load(values + token * VALUE_STRIDE + columns),
+            )
+            tl.store(
+                state + row * 1024 + 512 + columns,
+                tl.load(scores + token * SCORE_STRIDE + columns),
+            )

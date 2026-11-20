@@ -121,6 +121,17 @@ class MegaAttentionCPU(unittest.TestCase):
             ):
                 self.assertIsNone(mega.prepare(attn))
 
+    def test_sm90_falls_back_before_reading_native_weight_scales(self):
+        attn = self._supported_cpu_fixture()
+        del attn.wq_b.weight_scales
+        attn.wq_b._sm90_linear = object()
+        with patch.dict(os.environ, {"DSV41_MEGA_ATTENTION": "1"}), patch.object(
+            torch.Tensor, "is_cuda", new_callable=PropertyMock, return_value=True
+        ), patch.object(mega, "_device_capability", return_value=(9, 0)), patch.object(
+            mega, "_backend", side_effect=AssertionError("SM10x backend imported")
+        ):
+            self.assertIsNone(mega.prepare(attn))
+
     def test_partial_wheel_and_import_failures_reject_backend(self):
         required = (
             "fused_norm_rope_attn_rope_cast_fwd",

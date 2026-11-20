@@ -324,6 +324,20 @@ py_test(
 )
 
 py_test(
+    name = "test_decode_pool_specs",
+    srcs = ["test_decode_pool_specs.py"],
+    main = "test_decode_pool_specs.py",
+    deps = ["//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "0"},
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
     name = "test_sm90_mxfp8_dense",
     srcs = ["test_sm90_mxfp8_dense.py", "//rtp_llm/test/pytest:pytest_main.py"],
     main = "//rtp_llm/test/pytest:pytest_main.py",

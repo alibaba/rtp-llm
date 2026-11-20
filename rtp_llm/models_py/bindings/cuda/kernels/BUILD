@@ -10,6 +10,8 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
 
 # The DeepSeek V4 TopK uses CTA clusters and requires SM90+. CUDA Runtime reports
 # this host as SM103, so emit an exact SM103 cubin alongside production SM100.
+# CUDA13 x86 also serves Hopper. This target removes the default architecture
+# flags, so it must explicitly retain an SM90 image for V4.1 prefill/decode.
 dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '-O3',
     # TopK is defined by exact FP32 ordering. The global CUDA defaults enable
@@ -18,7 +20,12 @@ dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
     '--cuda-include-ptx=sm_103', '--cuda-gpu-arch=sm_103',
-]
+] + select({
+    "@//:using_cuda13_x86": [
+        '--cuda-include-ptx=sm_90', '--cuda-gpu-arch=sm_90',
+    ],
+    "//conditions:default": [],
+})
 
 # DeepSelect uses Blackwell TMA and 256-bit memory operations. Compile only
 # architecture-specific cubins. The small vendored subset uses C++17 syntax
@@ -253,6 +260,7 @@ cc_library(
     hdrs = [
         "topk_v3.h",
         "topk_v3.cuh",
+        "topk_v3_sm90.cuh",
         "topk_v3_compat.cuh",
     ],
     deps = [
@@ -266,10 +274,9 @@ cc_library(
 
 filegroup(
     name = "topk_v3_jit_headers",
-    srcs = ["topk_v3.cuh", "topk_v3_compat.cuh"],
+    srcs = ["topk_v3.cuh", "topk_v3_sm90.cuh", "topk_v3_compat.cuh"],
     visibility = ["//visibility:public"],
 )
-
 cc_library(
     name = "deepselect_fp32",
     srcs = ["deepselect_fp32.cu", "draft_markov_topk.cu"],

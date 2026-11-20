@@ -12,6 +12,38 @@ from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41 as attention
 
 
 class SparseSelectionIntegrationCPU(unittest.TestCase):
+    def test_candidate_plan_backend_is_selected_inside_indexer(self):
+        indexer = attention.sparse_prefill_indexer
+        candidates = SimpleNamespace(is_cuda=True, device=torch.device("cuda:0"))
+        visible = object()
+        for cuda, capability, logical in (
+            (True, (9, 0), True),
+            (True, (9, 1), False),
+            (True, (10, 0), False),
+            (False, (9, 0), False),
+        ):
+            with self.subTest(cuda=cuda, capability=capability), patch.object(
+                indexer, "is_cuda", return_value=cuda
+            ), patch.object(
+                torch.cuda, "get_device_capability", return_value=capability
+            ) as get_capability, patch.object(
+                indexer, "_plan_supported", return_value=False
+            ) as supported:
+                self.assertIsNone(indexer.prepare_plan(candidates, visible, 2048))
+                supported.assert_called_once_with(
+                    candidates, visible, 2048, 8, sm90=logical
+                )
+                if not cuda:
+                    get_capability.assert_not_called()
+
+    def test_prefill_indexer_does_not_select_sm90_on_hip(self):
+        indexer = attention.prefill_indexer
+        with patch.object(indexer, "is_cuda", return_value=False), patch.object(
+            torch.cuda, "get_device_capability", return_value=(9, 0)
+        ) as get_capability:
+            self.assertFalse(indexer.is_supported(torch.device("cuda:0"), 32, 128))
+            get_capability.assert_not_called()
+
     def test_cache_budget_key_isolation_and_candidate_identity(self):
         candidates = torch.zeros(3, 128, dtype=torch.int32)
         visible = torch.ones(3, dtype=torch.int32)
@@ -134,7 +166,7 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
         self.assertEqual(int((selected[0] >= 0).sum()), 1)
         self.assertEqual(int((selected[1] >= 0).sum()), 17)
 
-    def _check_selection(self, ragged, ratio):
+    def _check_selection(self, ragged, ratio, *, logical_output=False):
         rows = 7
         req_ids = torch.tensor([1, 0, 1, 0, 1, 0, 1] if ragged else [0] * rows)
         lengths = [1537, 1793] if ragged else [1793]
@@ -208,6 +240,14 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
                 plan.logical < 0, -torch.inf
             )
 
+        def score_logical(q, sf, keys, weights, plan):
+            compact = score(q, sf, keys, weights, plan)
+            logits = torch.full((len(q), len(keys)), -torch.inf)
+            for row in range(len(q)):
+                valid = plan.logical[row] >= 0
+                logits[row, plan.logical[row, valid].long()] = compact[row, valid]
+            return logits
+
         def select(logits, end):
             values, columns = logits.topk(512)
             return torch.where(values.isfinite(), columns, -1).int()
@@ -239,11 +279,33 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
             )
             stack.enter_context(
                 patch.object(
-                    attention.sparse_prefill_indexer, "is_supported", return_value=True
+                    attention.sparse_prefill_indexer,
+                    "is_supported",
+                    side_effect=lambda *args, **kwargs: kwargs.get(
+                        "logical_output", False
+                    )
+                    == logical_output,
                 )
             )
             stack.enter_context(
                 patch.object(attention.sparse_prefill_indexer, "MAX_CHUNK_ROWS", 2)
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.prefill_indexer, "logits_chunk_rows", return_value=2
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    attention.prefill_topk, "try_select_tokens", return_value=None
+                )
+            )
+            logical_score_mock = stack.enter_context(
+                patch.object(
+                    attention.sparse_prefill_indexer,
+                    "score_logical",
+                    side_effect=score_logical,
+                )
             )
             prepare_mock = stack.enter_context(
                 patch.object(
@@ -252,7 +314,7 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
                     side_effect=prepare,
                 )
             )
-            stack.enter_context(
+            compact_score_mock = stack.enter_context(
                 patch.object(
                     attention.sparse_prefill_indexer, "score", side_effect=score
                 )
@@ -264,7 +326,7 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
                     side_effect=select,
                 )
             )
-            stack.enter_context(
+            remap_mock = stack.enter_context(
                 patch.object(
                     attention.sparse_prefill_indexer, "remap", side_effect=remap
                 )
@@ -292,6 +354,12 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
                     )
                 )
             self.assertEqual(prepare_mock.call_count, 4)
+            if logical_output:
+                self.assertEqual(logical_score_mock.call_count, 16)
+                compact_score_mock.assert_not_called()
+                remap_mock.assert_not_called()
+            else:
+                logical_score_mock.assert_not_called()
         expected = torch.full((rows, 512), -1, dtype=torch.int32)
         for row in range(rows):
             allowed = sorted(
@@ -308,6 +376,12 @@ class SparseSelectionIntegrationCPU(unittest.TestCase):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         self.assertTrue(all((out is None) == ragged for out in destinations))
         self.assertIs(shared["topk"][39], outputs[-1])
+
+    def test_logical_candidate_scores_skip_sparse_remap_and_second_mask(self):
+        for ragged in (False, True):
+            for ratio in (1, 2):
+                with self.subTest(ragged=ragged, ratio=ratio):
+                    self._check_selection(ragged, ratio, logical_output=True)
 
     def test_single_request_slices_write_in_place_and_reuse_four_consumers(self):
         for ratio in (1, 2):

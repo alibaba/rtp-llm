@@ -1,3 +1,6 @@
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+#include "topk_v3_sm90.cuh"
+#else
 /// \file topk_impl.cuh
 /// \brief DeepSeek V4 (DSA indexer) top-k implementation classes.
 ///
@@ -1482,3 +1485,5 @@ private:
 };
 
 }  // namespace device::topk
+
+#endif  // Hopper-only implementation

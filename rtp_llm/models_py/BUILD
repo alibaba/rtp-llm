@@ -108,12 +108,18 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Experimental implementations are retained for independent comparison tests.
+# Keep their original import paths, but exclude them from serving libraries.
+_DSV41_SM90_EXPERIMENT_SRCS = [
+    "modules/dsv41/fp8/_v41_sm90_attention.py",
+]
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ]),
+    ], exclude = _DSV41_SM90_EXPERIMENT_SRCS),
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
@@ -206,6 +212,17 @@ py_library(
         "kernels/**/*.py",
     ]),
 )
+
+# Test-only implementations remain separate from serving libraries.
+
+py_library(
+    name = "dsv41_sm90_attention_reference",
+    testonly = True,
+    srcs = ["modules/dsv41/fp8/_v41_sm90_attention.py"],
+    deps = [":modules"],
+    visibility = ["//rtp_llm/models_py/modules/dsv41/fp8/test:__pkg__"],
+)
+
 
 py_library(
     name = "configs",
