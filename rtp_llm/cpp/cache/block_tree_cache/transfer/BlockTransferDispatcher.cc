@@ -57,28 +57,21 @@ struct BlockTransferDispatcher::CoordinatedExecution {
         }
     }
 
+    void freeze(const TransferResult& result) noexcept {
+        auto frozen = std::make_shared<FrozenTask>(
+            FrozenTask::prepare(std::move(execution)), result, std::move(cleanup));
+        prepared_slot.front() = frozen;
+        frozen->freeze();
+        owner->retainFrozenTask(prepared_slot);
+    }
+
     void complete(TransferResult result) {
         if (claimed.exchange(true, std::memory_order_acq_rel))
             return;
-        try {
-            if (result.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
-                // All allocation/validation precedes the first frozen hold. If
-                // preparation fails, never turn an unprotected UNKNOWN into a
-                // business failure that would release the ordinary references.
-                auto frozen = std::make_shared<FrozenTask>(
-                    FrozenTask::prepare(std::move(execution)), result, std::move(cleanup));
-                prepared_slot.front() = frozen;
-                frozen->freeze();
-                owner->retainFrozenTask(prepared_slot);
-            } else {
-                // A known failure can receive its physical proof later. Queue
-                // its identity now; worker forget retains RUNNING evidence.
-                if (owner->completion_cleanup_)
-                    owner->completion_cleanup_->enqueue(std::move(cleanup));
-            }
-        } catch (...) {
-            std::terminate();
-        }
+        if (result.checkNeedFreeze())
+            freeze(result);
+        else if (owner->completion_cleanup_)
+            owner->completion_cleanup_->enqueue(std::move(cleanup));
         // A retained or late child callback must not retain the business owner
         // after completion. Invoke outside all registry/pool/frozen-task locks.
         auto notify = std::move(done);

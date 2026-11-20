@@ -16,6 +16,10 @@ class TransferBufferSafety {
 public:
     explicit TransferBufferSafety(std::function<void()> safe_callback): safe_callback_(std::move(safe_callback)) {}
 
+    bool bufferSafe() const noexcept {
+        return reported_.load(std::memory_order_acquire);
+    }
+
     void report(bool buffer_safe) noexcept {
         if (!buffer_safe || reported_.exchange(true, std::memory_order_acq_rel)) {
             return;

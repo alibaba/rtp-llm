@@ -14,6 +14,11 @@
 
 namespace rtp_llm::block_transfer_engine_test {
 
+inline TransferResult bufferSafeResult(TransferResult result = {}) {
+    result.buffer_safe = true;
+    return result;
+}
+
 inline TransferTask makeTransferTask(std::vector<TransferDescriptor> descriptors,
                                      std::chrono::milliseconds timeout = BlockTreeTaskPool::kDefaultQueueWaitTimeout) {
     return TransferTask(std::move(descriptors), timeout);

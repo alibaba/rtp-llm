@@ -46,8 +46,8 @@ FrozenTask::FrozenTask(PreparedExecution&& prepared, TransferResult failure,
     target_block_count_(prepared.target_block_count_),
     created_at_us_(wallTimeUs()),
     cleanup_(std::move(cleanup)) {
-    RTP_LLM_CHECK_WITH_INFO(failure_.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
-                            "only completion-unknown executions can create a frozen task");
+    RTP_LLM_CHECK_WITH_INFO(failure_.checkNeedFreeze(),
+                            "frozen execution requires unproven buffer safety");
 }
 
 void FrozenTask::freeze() noexcept {

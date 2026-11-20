@@ -189,6 +189,10 @@ struct TransferResult {
         return status.ok();
     }
 
+    bool checkNeedFreeze() const noexcept {
+        return !buffer_safe;
+    }
+
     // Completion evidence must survive failure to allocate the diagnostic itself.
     static TransferResult executionException(bool safe, const char* message = nullptr) noexcept {
         TransferResult result;

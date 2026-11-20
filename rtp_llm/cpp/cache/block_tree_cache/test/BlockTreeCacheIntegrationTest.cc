@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm::block_tree_cache_test {
+
 class LoadShutdownTestPeer {
 public:
     static void setTransferDrainObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
@@ -37,6 +38,7 @@ public:
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
+using block_transfer_engine_test::bufferSafeResult;
 
 void expectEvictionTimeSamples(const std::shared_ptr<kmonitor::MetricsReporter>& reporter,
                                Tier                                              tier,
@@ -142,11 +144,12 @@ public:
             cv_.wait(lock, [this] { return released_; });
         }
         if (submit_index == throw_on_submit_) {
+            task.completionProof()->report(true);
             throw std::runtime_error("injected transfer failure");
         }
         if (!succeed_) {
             return std::make_shared<CompletedTransferAsyncContext>(
-                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
+                bufferSafeResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure")));
         }
         return PerRankBlockTransferEngine::executeBatch(std::move(task));
     }
@@ -230,7 +233,7 @@ public:
             if (done_) {
                 return false;
             }
-            error_    = std::move(error);
+            error_    = bufferSafeResult(std::move(error));
             done_     = true;
             callbacks = std::move(callbacks_);
         }
@@ -295,7 +298,7 @@ public:
         }
         if (cleanup_requested_) {
             return std::make_shared<CompletedTransferAsyncContext>(
-                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion"));
+                bufferSafeResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion")));
         }
         auto        context     = std::make_shared<ManuallyCompletedAsyncContext>();
         const auto& descriptors = task.descriptors();
@@ -399,6 +402,7 @@ public:
         if (!throw_enabled_) {
             return PerRankBlockTransferEngine::executeBatch(std::move(task));
         }
+        task.completionProof()->report(true);
         throw std::runtime_error("injected load copy failure");
     }
 
@@ -1983,6 +1987,7 @@ TEST_F(BlockTreeCacheIntegrationTest, WorkLoopEvictLoadRetainsBusinessReferences
         config.btc_transfer_engine_async                    = true;
         config.btc_crc_slot_count                           = 1;
         config.device_disk_staging_block_count              = 4;
+        config.max_descriptors_per_transfer_batch           = 1;
         auto       cache                                    = makeBlockTreeCacheForTest({group}, config);
         const auto request_sources                          = allocateDeviceBlocksForTest(*group, 1);
         ASSERT_EQ(request_sources.size(), 1u);

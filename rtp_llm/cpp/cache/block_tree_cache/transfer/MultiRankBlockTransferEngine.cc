@@ -342,13 +342,15 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
                                                                                   identity,
                                                                                   AsyncProfileKind::Wait) :
                                                        SharedTransferStageTimer{};
-    const size_t block_count       = task.descriptors().size();
-    const auto   deadline_exceeded = [block_count]() {
-        return std::make_shared<CompletedTransferAsyncContext>(
-            TransferResult(
-                ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before multi-rank submission"),
-                CacheCopyError::NOT_EXECUTED),
-            block_count);
+    const size_t block_count = task.descriptors().size();
+    const auto unsubmitted = [block_count](TransferResult result) {
+        result.buffer_safe = true;
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), block_count);
+    };
+    const auto deadline_exceeded = [&] {
+        return unsubmitted(
+            {ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before multi-rank submission"),
+             CacheCopyError::NOT_EXECUTED});
     };
     MemoryOperationRequestPB request;
     if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
@@ -356,12 +358,10 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
             return deadline_exceeded();
         }
         RTP_LLM_LOG_WARNING("failed to encode transfer batch, item_count=%zu", task.descriptors().size());
-        return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"), block_count);
+        return unsubmitted(ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"));
     }
     if (!broadcast_manager_) {
-        return std::make_shared<CompletedTransferAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "missing transfer broadcast manager"), block_count);
+        return unsubmitted(ErrorInfo(ErrorCode::INVALID_PARAMS, "missing transfer broadcast manager"));
     }
     const size_t      worker_count = broadcast_manager_->workerNum();
     FunctionRequestPB function_request;
@@ -404,10 +404,8 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
     if (broadcast_result == nullptr) {
         context->discardUnsubmittedCallback();
         RTP_LLM_LOG_WARNING("failed to start broadcast");
-        return std::make_shared<CompletedTransferAsyncContext>(
-            TransferResult(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "failed to start transfer broadcast"),
-                           CacheCopyError::RPC_FAILED),
-            block_count);
+        return unsubmitted({ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "failed to start transfer broadcast"),
+                            CacheCopyError::RPC_FAILED});
     }
     context->attach(std::move(broadcast_result));
     return context;

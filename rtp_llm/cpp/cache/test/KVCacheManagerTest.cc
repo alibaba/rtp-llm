@@ -2478,6 +2478,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForMixedPartialAn
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
+        EXPECT_TRUE(response.mem_response().buffer_safe());
     }
     {
         FunctionRequestPB request;
@@ -2486,6 +2487,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForMixedPartialAn
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
+        EXPECT_TRUE(response.mem_response().buffer_safe());
     }
     {
         FunctionRequestPB request;
@@ -2505,6 +2507,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForMixedPartialAn
         FunctionResponsePB response;
         EXPECT_TRUE(tiered_manager->executeFunction(request, response));
         EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::INVALID_REQUEST);
+        EXPECT_TRUE(response.mem_response().buffer_safe());
         EXPECT_EQ(backing->freeBlocksNum(), free_before);
         EXPECT_EQ(backing->usedBlocksNum(), used_before);
         EXPECT_EQ(block_tree_cache_test::unreferencedBlocksNum(*backing), unreferenced_before);

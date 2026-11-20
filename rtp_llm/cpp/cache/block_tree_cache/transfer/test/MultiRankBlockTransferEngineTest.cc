@@ -52,7 +52,7 @@ struct MultiRankBlockTransferRpcConfig {
     ErrorInfo                                       error_info{};
     std::shared_ptr<BlockTransferDispatcher>        local_dispatcher{};
     std::vector<GroupSetPtr>                        groups{};
-    std::optional<bool>                            buffer_safe{};
+    std::optional<bool>                            buffer_safe{true};
 };
 
 class MultiRankBlockTransferRpcService final: public RpcService::Service {
@@ -691,12 +691,33 @@ TEST_F(MultiRankBlockTransferEngineTest, CoordinatorSuccessDoesNotDependOnWaiter
     EXPECT_TRUE(context->success());
 }
 
+TEST_F(MultiRankBlockTransferEngineTest, BufferSafeUnknownResultDoesNotFreezeTargets) {
+    MultiRankBlockTransferRpcConfig worker{true, MemoryOperationResponsePB::COPY_FAILED, grpc::Status::OK};
+    worker.error_info = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "copy outcome unknown");
+    worker.buffer_safe = true;
+    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+    auto manager = makeBroadcastManager({worker}, servers);
+    ASSERT_NE(manager, nullptr);
+    auto cache = makeBroadcastCache(manager);
+    auto& dispatcher = *cache->transfer_dispatcher_;
+    std::promise<TransferResult> completed;
+    dispatcher.runTransfer(TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)),
+                           [&](TransferResult result) { completed.set_value(std::move(result)); });
+    const auto result = completed.get_future().get();
+    EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+    EXPECT_TRUE(result.buffer_safe);
+    EXPECT_TRUE(dispatcher.frozenTasks().empty());
+}
+
 TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesTaskWireIdentityAcrossSubmissions) {
     auto state = std::make_shared<MultiRankBlockTransferRpcState>();
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    auto manager = makeBroadcastManager({{true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
-                                         {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, 40}},
-                                        servers);
+    std::vector<MultiRankBlockTransferRpcConfig> configs{
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, 40}};
+    for (auto& worker : configs)
+        worker.buffer_safe.reset();
+    auto manager = makeBroadcastManager(configs, servers);
     ASSERT_NE(manager, nullptr);
     auto                         cache  = makeBroadcastCache(manager);
     auto                         engine = std::make_shared<MultiRankBlockTransferEngine>(cache->groupSets(), manager);
@@ -732,6 +753,13 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesTaskWireIdentityAcro
     // Even successful RPCs from every rank must not grant it implicitly.
     EXPECT_FALSE(first_result.buffer_safe);
     EXPECT_FALSE(second_result.buffer_safe);
+    const auto frozen = dispatcher.frozenTasks();
+    ASSERT_EQ(frozen.size(), 2u);
+    TransferCompletionCleanup cleanup;
+    for (const auto& record : frozen) {
+        EXPECT_TRUE(record->failure().ok());
+        EXPECT_TRUE(record->completeRecovery(cleanup));
+    }
     dispatcher.waitForTransfers();
     std::lock_guard<std::mutex> lock(state->mutex);
     ASSERT_EQ(state->requests.size(), 4u);

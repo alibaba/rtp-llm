@@ -460,6 +460,7 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(
                     error.status.setErrorCode(ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             }
             if (!error.ok()) {
+                error.buffer_safe = !attempted || batch_proof->bufferSafe();
                 if (!registered) {
                     close_submission.run();
                     state->finishSubmitting(std::move(error));
