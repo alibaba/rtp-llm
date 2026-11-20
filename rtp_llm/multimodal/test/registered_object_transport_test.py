@@ -405,6 +405,36 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         factory.assert_called_once_with(gpu_tensors=(pool._arena,))
         self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 512)])
 
+    def test_slow_lease_metrics_do_not_block_another_lease(self):
+        for delayed_delta in (1, -1):
+            with self.subTest(delta=delayed_delta):
+                measuring = threading.Event()
+                finish = threading.Event()
+
+                def observe(for_write, delta, nbytes):
+                    if for_write and delta == delayed_delta:
+                        measuring.set()
+                        finish.wait(timeout=4)
+
+                pool = self.pool(slots=2, direct_payload=True, observe_lease=observe)
+
+                def write():
+                    slot = pool.acquire(for_write=True)
+                    self.assertIsNotNone(slot)
+                    pool.release(slot)
+
+                with ThreadPoolExecutor(2) as executor:
+                    writer = executor.submit(write)
+                    try:
+                        self.assertTrue(measuring.wait(timeout=2))
+                        reader = executor.submit(pool.acquire)
+                        slot = reader.result(timeout=1)
+                        self.assertIsNotNone(slot)
+                        pool.release(slot)
+                    finally:
+                        finish.set()
+                    writer.result(timeout=2)
+
     def test_sized_quarantine_keeps_only_the_unsafe_range_unavailable(self):
         pool = self.pool(
             direct_payload=True,
