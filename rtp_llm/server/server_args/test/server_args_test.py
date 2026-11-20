@@ -57,6 +57,89 @@ class CustomAllReduceArgumentsTest(TestCase):
         self.assertIs(configs.ft_disable_custom_ar_override, True)
 
 
+class DecodeCaptureArgumentsTest(TestCase):
+    def test_dense_environment_and_sparse_cli_override(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {"DECODE_CAPTURE_CONFIG": "32:1"}, clear=True):
+            dense = server_args.setup_args([]).py_hw_kernel_config
+            sparse = server_args.setup_args(
+                ["--decode_capture_config", "32, 1, 32, 4,"]
+            ).py_hw_kernel_config
+
+        self.assertEqual(dense.decode_capture_batch_sizes, list(range(1, 33)))
+        self.assertEqual(sparse.decode_capture_batch_sizes, [1, 4, 32])
+
+    def test_empty_default_and_non_divisible_range(self):
+        from rtp_llm.server.server_args.hw_kernel_group_args import (
+            _parse_decode_capture_config,
+        )
+
+        for config, expected in (
+            ("  ", []),
+            (", ,", []),
+            ("1,0,-5,2,4", [1, 2, 4]),
+            ("15:4", [4, 8, 12, 15]),
+            ("3:4", [3]),
+        ):
+            with self.subTest(config=config):
+                self.assertEqual(_parse_decode_capture_config(config), expected)
+
+    def test_invalid_capture_sizes_fail_before_runtime(self):
+        from argparse import ArgumentTypeError
+
+        from rtp_llm.server.server_args.hw_kernel_group_args import (
+            CPP_INT_MAX,
+            MAX_DECODE_CAPTURE_RANGE_BUCKETS,
+            _parse_decode_capture_config,
+        )
+
+        for config in (
+            "1,typo",
+            str(CPP_INT_MAX),
+            "32:",
+            "32:0",
+            "32:-1",
+            "32:1:2",
+            f"{MAX_DECODE_CAPTURE_RANGE_BUCKETS + 1}:1",
+        ):
+            with self.subTest(config=config), self.assertRaises(ArgumentTypeError):
+                _parse_decode_capture_config(config)
+
+    def test_active_decode_capture_is_bounded_by_runner_capacity(self):
+        from rtp_llm.ops import SpeculativeType
+        from rtp_llm.server.server_args.hw_kernel_group_args import (
+            validate_hw_kernel_group_args,
+        )
+
+        config = HWKernelConfig()
+        config.decode_capture_batch_sizes = [1, 32]
+
+        for enabled, role, limit, rejected in (
+            (True, RoleType.PDFUSION, 32, False),
+            (True, RoleType.PDFUSION, 16, True),
+            (True, RoleType.DECODE, 16, True),
+            (True, RoleType.PREFILL, 16, False),
+            (False, RoleType.PDFUSION, 16, False),
+        ):
+            with self.subTest(enabled=enabled, role=role, limit=limit):
+                config.enable_cuda_graph = enabled
+                args = dict(
+                    max_context_batch_size=1,
+                    concurrency_limit=limit,
+                    role_type=role,
+                    speculative_type=SpeculativeType.NONE,
+                    task_type=TaskType.LANGUAGE_MODEL,
+                )
+                if rejected:
+                    with self.assertRaisesRegex(
+                        ValueError, r"exceeds CONCURRENCY_LIMIT=16"
+                    ):
+                        validate_hw_kernel_group_args(config, **args)
+                else:
+                    validate_hw_kernel_group_args(config, **args)
+
+
 class PDLinearTailArgumentsTest(TestCase):
     def test_default_env_cli_and_pickle(self):
         from rtp_llm.server.server_args import server_args

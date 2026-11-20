@@ -14,6 +14,7 @@ GENERATION_PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT = (
     HWKernelConfig.generation_prefill_cuda_graph_max_requests_limit
 )
 CPP_INT_MAX = (1 << 31) - 1
+MAX_DECODE_CAPTURE_RANGE_BUCKETS = 256
 
 
 def _positive_int(value: str, config_name: str) -> int:
@@ -68,11 +69,25 @@ def validate_hw_kernel_group_args(
     the final task may be inferred from checkpoint metadata rather than the
     legacy ``EMBEDDING_MODEL`` switch.
     """
-    buckets = hw_kernel_config.generation_prefill_capture_token_buckets
     # A retained child config must not prevent operators from rolling back by
     # disabling the master switch. The parser above still validates each
     # option's own syntax/range; only active graphs need cross-option checks.
-    if not hw_kernel_config.enable_cuda_graph or not buckets:
+    if not hw_kernel_config.enable_cuda_graph:
+        return
+
+    if (
+        role_type in (RoleType.PDFUSION, RoleType.DECODE)
+        and task_type == TaskType.LANGUAGE_MODEL
+    ):
+        max_decode_capture = max(hw_kernel_config.decode_capture_batch_sizes, default=0)
+        if max_decode_capture > concurrency_limit:
+            raise ValueError(
+                f"DECODE_CAPTURE_CONFIG batch {max_decode_capture} exceeds "
+                f"CONCURRENCY_LIMIT={concurrency_limit}"
+            )
+
+    buckets = hw_kernel_config.generation_prefill_capture_token_buckets
+    if not buckets:
         return
 
     # Match the configuration-visible part of the C++ secondary-runner
@@ -260,7 +275,8 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         bind_to=(hw_kernel_config, "decode_capture_batch_sizes"),
         help=(
             "Decode CUDA Graph capture batch sizes configuration. "
-            "Supports comma-separated list format, e.g., '1,2,4,8,16,32'. "
+            "Use a list such as '1,2,4,8,16,32', or 'max:step' such as "
+            "'32:1' to capture every batch size from 1 through 32. "
             "If not set, default logic will be used to generate batch sizes."
         ),
     )
@@ -535,36 +551,36 @@ def _parse_generation_prefill_capture_config(config: str) -> List[int]:
 
 
 def _parse_decode_capture_config(config: str) -> List[int]:
-    """
-    Parse decode capture batch sizes configuration string.
-    Only supports comma-separated list format, e.g., '1,2,4,8,16,32'
-
-    Returns empty list if no configuration is provided (will use default logic).
-
-    Args:
-        config: Configuration string
-
-    Returns:
-        List of positive integers (batch sizes), or empty list if config is empty
-    """
+    """Resolve explicit decode graph buckets before constructing graph runners."""
     import argparse
 
-    if not config:
-        # Return empty list to use default logic
+    if not config or not config.strip():
         return []
 
-    config = config.strip()
-    if not config:
-        return []
+    config_name = "decode_capture_config"
+    if ":" in config:
+        parts = config.split(":")
+        if len(parts) != 2:
+            raise argparse.ArgumentTypeError(f"{config_name} range must be 'max:step'")
+        maximum, step = (_positive_int(part, config_name) for part in parts)
+        bucket_count = (maximum + step - 1) // step
+        if bucket_count > MAX_DECODE_CAPTURE_RANGE_BUCKETS:
+            raise argparse.ArgumentTypeError(
+                f"{config_name} range expands to {bucket_count} buckets; "
+                f"maximum is {MAX_DECODE_CAPTURE_RANGE_BUCKETS}"
+            )
+        sizes = list(range(step, maximum, step))
+        sizes.append(maximum)
+        return sizes
 
-    # Only support comma-separated list format
     try:
-        return _parse_comma_separated_ints(
-            config,
-            "decode_capture_config",
-            "decode capture batch sizes",
-            raise_on_empty=False,
+        sizes = {int(part) for part in config.split(",") if part.strip()}
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"Invalid {config_name}: {error}") from error
+    if max(sizes, default=0) >= CPP_INT_MAX:
+        raise argparse.ArgumentTypeError(
+            f"{config_name} batch sizes must be less than {CPP_INT_MAX}"
         )
-    except ValueError as e:
-        # Convert ValueError to ArgumentTypeError for argparse
-        raise argparse.ArgumentTypeError(str(e))
+    if any(size <= 0 for size in sizes):
+        logging.warning("%s ignores non-positive batch sizes", config_name)
+    return sorted(size for size in sizes if size > 0)
