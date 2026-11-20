@@ -430,6 +430,7 @@ def select_decode_tokens(
         # a synchronization to every decode step.
         validate_lengths=False,
         scores_are_masked=True,
+        compressed_lengths=compressed_lengths,
     )
 
 

@@ -435,6 +435,7 @@ def select_draft_graph_tokens(
         token_budget=int(indexer.token_budget),
         validate_lengths=False,
         scores_are_masked=True,
+        compressed_lengths=compressed_lengths,
     )
     from rtp_llm.models_py.kernels.cuda.qsa.draft_layout_triton import (
         try_restore_selection,
@@ -773,6 +774,7 @@ def _incremental_prefill_selection(
         compress_ratio=int(plan.ratio),
         token_budget=int(plan.token_budget),
         validate_lengths=False,
+        compressed_lengths=compressed_lengths,
     )
     # Uniform requests have no padding: their packed row map is the identity.
     # Reuse TopK output instead of copying the full selection matrix per layer.

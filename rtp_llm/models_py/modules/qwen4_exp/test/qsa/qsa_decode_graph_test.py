@@ -35,7 +35,13 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
             head_dim=128,
             n_heads=4,
             compress_ratio=4,
-            token_budget=8,
+            # Use the production budget for the Hopper selector.
+            token_budget=(
+                2048
+                if torch.version.hip is None
+                and torch.cuda.get_device_capability() == (9, 0)
+                else 8
+            ),
             k_norm_gamma=(torch.randn(128, device="cuda") * 0.1).bfloat16(),
             norm_eps=1e-6,
         )

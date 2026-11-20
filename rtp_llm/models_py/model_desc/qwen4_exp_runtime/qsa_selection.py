@@ -13,6 +13,7 @@ def select_qsa_paged_tokens(
     token_budget: int,
     validate_lengths: bool = True,
     scores_are_masked: bool = False,
+    compressed_lengths: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Expand scored block top-k plus the unscored partial tail to token ids.
 
@@ -25,6 +26,11 @@ def select_qsa_paged_tokens(
     ``scores_are_masked`` is an internal producer contract: all columns beyond
     ``token_lengths // compress_ratio`` must already contain negative infinity.
     It is used only with the paged-score kernel; generic inputs keep masking.
+
+    ``compressed_lengths`` may reuse the producer's completed-block counts in
+    score-row order. With validation disabled, the producer owns consistency
+    with token lengths. Validation derives its own counts; no host reads are
+    added to the unchecked runtime path.
     """
     if block_logits.dim() != 2 or not block_logits.is_floating_point():
         raise ValueError("block_logits must be a floating-point [rows, blocks] tensor")
@@ -43,6 +49,7 @@ def select_qsa_paged_tokens(
         )
     if validate_lengths:
         complete_blocks = token_lengths // compress_ratio
+        compressed_lengths = complete_blocks
         invalid_lengths = (token_lengths < 0) | (
             complete_blocks > int(block_logits.shape[1])
         )
@@ -61,6 +68,7 @@ def select_qsa_paged_tokens(
         compress_ratio=compress_ratio,
         token_budget=token_budget,
         scores_are_masked=scores_are_masked,
+        compressed_lengths=compressed_lengths,
     )
     if result is not None:
         return result

@@ -407,6 +407,110 @@ class QsaTopkTritonTest(unittest.TestCase):
             actual, self.reference(scores, lengths), scores, lengths
         )
 
+    @unittest.skipUnless(
+        torch.version.hip is None
+        and torch.cuda.is_available()
+        and torch.cuda.get_device_capability() == (9, 0),
+        "Hopper native TopK",
+    )
+    def test_precomputed_lengths_graph_reuses_live_metadata(self):
+        from unittest.mock import patch
+
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        for columns in (512, 8447, 8448):
+            scores = torch.randn(8, columns, device="cuda")
+            lengths = torch.full((8,), columns * 4, device="cuda", dtype=torch.int32)
+            compressed = (lengths // 4).view(2, 4)
+
+            def select():
+                return select_qsa_paged_tokens(
+                    scores,
+                    lengths,
+                    compress_ratio=4,
+                    token_budget=2048,
+                    validate_lengths=False,
+                    compressed_lengths=compressed,
+                )
+
+            with (
+                patch(
+                    "torch.div",
+                    side_effect=AssertionError("redundant length conversion"),
+                ),
+                patch.object(
+                    rtp_llm_ops, "topk_v3", wraps=rtp_llm_ops.topk_v3
+                ) as native,
+            ):
+                self.assertIsNotNone(select())
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = select()
+                self.assertEqual(native.call_count, 2)
+                self.assertIs(native.call_args[0][1], compressed)
+            for step in range(4):
+                lengths.copy_(
+                    (
+                        torch.arange(8, device="cuda", dtype=torch.int32) * 1373 + step
+                    ).clamp(max=columns * 4 + 3)
+                )
+                compressed.copy_((lengths // 4).view(2, 4))
+                scores.normal_()
+                scores[0].zero_()
+                graph.replay()
+                assert_qsa_selection_close(
+                    actual, self.reference(scores, lengths), scores, lengths
+                )
+            graph.reset()
+
+    @unittest.skipUnless(
+        torch.version.hip is None
+        and torch.cuda.is_available()
+        and torch.cuda.get_device_capability() == (9, 0),
+        "Hopper native TopK",
+    )
+    def test_precomputed_lengths_fallback_and_validation(self):
+        from unittest.mock import patch
+
+        scores = torch.randn(8, 1024, device="cuda")
+        lengths = torch.arange(8, device="cuda", dtype=torch.int32) * 541 + 3
+        compressed = lengths // 4
+        strided = torch.empty(16, device="cuda", dtype=torch.int32)[::2]
+        strided.copy_(compressed)
+        for hint in (
+            None,
+            compressed.long(),
+            compressed.float(),
+            compressed.cpu(),
+            compressed[:1],
+            strided,
+        ):
+            with patch("torch.div", wraps=torch.div) as divide:
+                actual = select_qsa_paged_tokens(
+                    scores,
+                    lengths,
+                    compress_ratio=4,
+                    token_budget=2048,
+                    validate_lengths=False,
+                    compressed_lengths=hint,
+                )
+                divide.assert_called_once()
+            assert_qsa_selection_close(
+                actual, self.reference(scores, lengths), scores, lengths
+            )
+        # Validated calls derive counts from the actual token lengths even if
+        # a caller supplies an outdated hint.
+        actual = select_qsa_paged_tokens(
+            scores,
+            lengths,
+            compress_ratio=4,
+            token_budget=2048,
+            compressed_lengths=torch.zeros_like(compressed),
+        )
+        assert_qsa_selection_close(
+            actual, self.reference(scores, lengths), scores, lengths
+        )
+
     def test_validation_fallback_and_unvalidated_negative_lengths(self):
         scores = torch.randn(7, 31, device="cuda")
         lengths = torch.tensor(
