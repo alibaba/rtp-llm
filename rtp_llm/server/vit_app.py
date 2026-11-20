@@ -102,11 +102,6 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
 class GracefulShutdownServer(Server):
     def set_server(self, vit_endpoint_server):
         self.vit_endpoint_server = vit_endpoint_server
-        if vit_endpoint_server.mm_process_engine is not None and gc.isenabled():
-            young, middle, full = gc.get_threshold()
-            # Keep automatic cycle collection. A full collection on the HTTP
-            # event loop holds the GIL and stalls health and inference requests.
-            gc.set_threshold(young, middle, max(full, 500))
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
@@ -140,6 +135,7 @@ class VitEndpointApp:
             http_port: HTTP 端口号（从外部传入，如果为 None 且最终计算后仍为 None，表示工作进程模式（不启动 HTTP 服务器）
         """
         # Exclude long-lived model and engine objects from request-time GC.
+        # Keep the runtime thresholds so transient cycles are collected regularly.
         gc.collect()
         gc.freeze()
 
