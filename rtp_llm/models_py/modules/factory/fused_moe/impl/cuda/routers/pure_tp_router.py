@@ -123,6 +123,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
             ExpertTokensMetadata(None, num_recv_tokens_per_expert, None),
             adjusted_topk_ids,
             topk_weights,
+            expert_ids_are_local=self.do_recompute_topk,
         )
 
     def finalize(
