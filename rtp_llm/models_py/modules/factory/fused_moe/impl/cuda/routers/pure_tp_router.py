@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     ExpertTokensMetadata,
     FinalizeArgs,
     FusedMoeDataRouter,
+    GlobalExpertIdsContext,
     should_skip_tp_allreduce,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
@@ -94,6 +95,29 @@ class PureTpRouterBase(FusedMoeDataRouter):
             Tuple of (quantized_tensor, scale_tensor)
         """
         raise NotImplementedError
+
+    @property
+    def supports_global_expert_ids(self) -> bool:
+        return self.do_recompute_topk
+
+    def prepare_global_expert_ids(
+        self, a1, a1_scale, a2_scale, topk_weights, topk_ids
+    ) -> ExpertForwardPayload:
+        if not self.supports_global_expert_ids:
+            raise NotImplementedError("This PureTP router does not remap expert IDs")
+        assert a1_scale is None and a2_scale is None, "not support quanted moe"
+        expert_x, expert_x_scale = self._do_quant(a1)
+        return ExpertForwardPayload(
+            expert_x,
+            a1.dtype,
+            expert_x_scale,
+            ExpertTokensMetadata(None, None, None),
+            topk_ids,
+            topk_weights,
+            router_context=GlobalExpertIdsContext(
+                self.expert_start_id, self.expert_num_per_rank
+            ),
+        )
 
     def prepare(
         self,

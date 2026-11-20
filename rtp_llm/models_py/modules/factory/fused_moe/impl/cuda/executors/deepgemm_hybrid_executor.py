@@ -29,12 +29,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
     FusedMoeExpertExecutor,
+    GlobalExpertIdsContext,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+    _STABLE_ALIGNMENT_MAX_ROUTES,
     compact_fp8_decode,
     h20_compact_moe_phase,
 )
@@ -331,6 +333,71 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             == torch.float32
         )
 
+    def _can_consume_h20_compact_global_ids(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[dict[str, Any]],
+    ) -> bool:
+        if not self._h20_compact_fp8:
+            return False
+        phase = h20_compact_moe_phase.get()
+        if _is_cuda_graph_warmup_or_capture():
+            use_compact = self._qwen4_sm90_mixed_graph and phase in (
+                "decode",
+                "target_verify",
+            )
+        else:
+            use_compact = not self.enable_cuda_graph or phase == "eager"
+        if not use_compact or hidden_states.ndim != 2 or not hidden_states.is_cuda:
+            return False
+        rows = hidden_states.shape[0]
+        max_rows = min(
+            self.masked_max_token_num, _STABLE_ALIGNMENT_MAX_ROUTES // self.top_k
+        )
+        return (
+            0 < rows <= max_rows
+            and hidden_states.shape[1] == self.K
+            and hidden_states.is_contiguous()
+            and topk_ids.is_cuda
+            and topk_ids.device == hidden_states.device
+            and topk_ids.dtype in (torch.int32, torch.int64)
+            and topk_ids.shape == (rows, self.top_k)
+            and activation == "SiGLU"
+            and expert_map is None
+            and a1_scale is None
+            and a2_scale is None
+            and not apply_router_weight_on_input
+            and not extra_expert_args
+        )
+
+    def can_consume_global_expert_ids(
+        self,
+        hidden_states,
+        topk_ids,
+        activation,
+        expert_map,
+        a1_scale,
+        a2_scale,
+        apply_router_weight_on_input,
+        extra_expert_args,
+    ) -> bool:
+        return not self.enable_cuda_graph and self._can_consume_h20_compact_global_ids(
+            hidden_states,
+            topk_ids,
+            activation,
+            expert_map,
+            a1_scale,
+            a2_scale,
+            apply_router_weight_on_input,
+            extra_expert_args,
+        )
+
     def execute(
         self,
         payload: ExpertForwardPayload,
@@ -519,12 +586,64 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         assert (
             payload.expert_tokens_meta is not None
         ), "expert_tokens_meta is not initialized"
-        assert payload.expert_tokens_meta.expert_num_tokens is not None
 
         hidden_states_fp8 = payload.expert_x
         hidden_states_scale = payload.expert_x_scale
         topk_idx = payload.expert_topk_ids
         topk_weights = payload.expert_topk_weights
+        global_context = getattr(payload, "router_context", None)
+        if isinstance(global_context, GlobalExpertIdsContext):
+            phase = h20_compact_moe_phase.get()
+            if _is_cuda_graph_warmup_or_capture():
+                use_compact = self._qwen4_sm90_mixed_graph and phase in (
+                    "decode",
+                    "target_verify",
+                )
+            else:
+                use_compact = not self.enable_cuda_graph or phase == "eager"
+            rows = hidden_states_fp8.shape[0] if hidden_states_fp8.ndim == 2 else 0
+            max_rows = min(
+                self.masked_max_token_num, _STABLE_ALIGNMENT_MAX_ROUTES // self.top_k
+            )
+            if not (
+                self._h20_compact_fp8
+                and use_compact
+                and 0 < rows <= max_rows
+                and hidden_states_fp8.shape[1] == self.K
+                and hidden_states_fp8.is_contiguous()
+                and hidden_states_fp8.dtype == torch.float8_e4m3fn
+                and hidden_states_scale.dtype == torch.float32
+                and hidden_states_scale.shape == (rows, self.K // self.BLOCK_SIZE)
+                and topk_idx.dtype in (torch.int32, torch.int64)
+                and topk_idx.shape == (rows, self.top_k)
+                and topk_weights.dtype == torch.float32
+                and topk_weights.shape == topk_idx.shape
+                and global_context.num_local == self.E
+                and global_context.start == self.start_expert_id
+                and activation == "SiGLU"
+                and expert_map is None
+                and a2_scale is None
+                and not apply_router_weight_on_input
+                and not extra_expert_args
+            ):
+                raise RuntimeError(
+                    "Global expert ID payload cannot fall through to a legacy consumer"
+                )
+            output = compact_fp8_decode(
+                hidden_states_fp8,
+                hidden_states_scale,
+                topk_idx,
+                topk_weights,
+                None,
+                self.w13_weight_fp8,
+                self.w2_weight_fp8,
+                global_start=global_context.start,
+            )
+            if not self.enable_cuda_graph:
+                dispose_tensor(hidden_states_fp8)
+            return CombineForwardPayload(fused_expert_output=output)
+
+        assert payload.expert_tokens_meta.expert_num_tokens is not None
         num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
         if self._h20_compact_fp8:

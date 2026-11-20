@@ -69,6 +69,14 @@ class ExpertTokensMetadata:
     expert_num_tokens_cpu: Optional[Union[List[int], torch.Tensor]] = None
 
 
+@dataclass(frozen=True)
+class GlobalExpertIdsContext:
+    """Explicit producer/consumer contract for unmodified global top-k IDs."""
+
+    start: int
+    num_local: int
+
+
 @dataclass
 class ExpertForwardPayload:
     """
@@ -155,6 +163,17 @@ class FusedMoeDataRouter(ABC):
         """Whether this router can pass raw gate output to its executor."""
 
         return False
+
+    @property
+    def supports_global_expert_ids(self) -> bool:
+        return False
+
+    def prepare_global_expert_ids(
+        self, a1, a1_scale, a2_scale, topk_weights, topk_ids
+    ) -> ExpertForwardPayload:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not produce global expert IDs"
+        )
 
     def prepare_gate_pack(
         self,
@@ -245,6 +264,19 @@ class FusedMoeExpertExecutor(ABC):
     def supports_gate_pack(self) -> bool:
         """Whether ``execute`` accepts an ``ExpertGatePayload``."""
 
+        return False
+
+    def can_consume_global_expert_ids(
+        self,
+        hidden_states,
+        topk_ids,
+        activation,
+        expert_map,
+        a1_scale,
+        a2_scale,
+        apply_router_weight_on_input,
+        extra_expert_args,
+    ) -> bool:
         return False
 
     @abstractmethod
@@ -338,13 +370,23 @@ class FusedMoe(torch.nn.Module):
         self._validate_skip_tp_allreduce(skip_tp_allreduce)
         a1 = hidden_states
 
-        expert_payload = self.router.prepare(
-            a1,
-            a1_scale,
-            a2_scale,
-            topk_weights,
-            topk_ids,
+        global_ids = (
+            self.router.supports_global_expert_ids
+            and self.fused_experts.can_consume_global_expert_ids(
+                hidden_states,
+                topk_ids,
+                activation,
+                expert_map,
+                a1_scale,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
+            )
         )
+        prepare = (
+            self.router.prepare_global_expert_ids if global_ids else self.router.prepare
+        )
+        expert_payload = prepare(a1, a1_scale, a2_scale, topk_weights, topk_ids)
         if expert_payload.expert_topk_ids is None:
             expert_payload.expert_topk_ids = topk_ids
         if expert_payload.expert_topk_weights is None:

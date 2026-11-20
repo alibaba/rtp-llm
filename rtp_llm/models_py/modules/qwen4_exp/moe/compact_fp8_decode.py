@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.triton_kernels.moe.ep_kernels import ep_gather
+from rtp_llm.models_py.triton_kernels.moe.ep_kernels import ep_gather_global_routes
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     invoke_fused_moe_kernel,
 )
@@ -36,10 +36,19 @@ _SCALE_BLOCK = [128, 128]
 
 
 @triton.jit
-def _silu_mul_quantize(up_gate, ids, quantized, scales, GROUPS: tl.constexpr):
+def _silu_mul_quantize(
+    up_gate,
+    ids,
+    quantized,
+    scales,
+    GROUPS: tl.constexpr,
+    GLOBAL_START: tl.constexpr = 0,
+    EXPERTS: tl.constexpr = 256,
+):
     route = tl.program_id(0)
     group = tl.program_id(1)
-    if tl.load(ids + route) >= 0:
+    expert = tl.load(ids + route)
+    if (expert >= GLOBAL_START) & (expert < GLOBAL_START + EXPERTS):
         col = group * 128 + tl.arange(0, 128)
         row = up_gate + route * (GROUPS * 256)
         up = tl.load(row + col)
@@ -53,12 +62,20 @@ def _silu_mul_quantize(up_gate, ids, quantized, scales, GROUPS: tl.constexpr):
 
 @triton.jit
 def _silu_mul_quantize_tiles(
-    up_gate, ids, quantized, scales, routes, GROUPS: tl.constexpr, ROWS: tl.constexpr
+    up_gate,
+    ids,
+    quantized,
+    scales,
+    routes,
+    GROUPS: tl.constexpr,
+    ROWS: tl.constexpr,
+    GLOBAL_START: tl.constexpr = 0,
+    EXPERTS: tl.constexpr = 256,
 ):
     row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     group = tl.program_id(1)
     expert = tl.load(ids + row, row < routes, -1)
-    live = expert >= 0
+    live = (expert >= GLOBAL_START) & (expert < GLOBAL_START + EXPERTS)
     col = group * 128 + tl.arange(0, 128)
     offset = row[:, None] * (GROUPS * 256) + col[None, :]
     up = tl.load(up_gate + offset, live[:, None], 0)
@@ -94,17 +111,27 @@ def _project(x, x_scale, weights, out, ids, route_weights, top_k, plans):
 
 
 def compact_fp8_decode(
-    x, x_scale, ids, route_weights, expert_counts, up_weights, down_weights
+    x,
+    x_scale,
+    ids,
+    route_weights,
+    expert_counts,
+    up_weights,
+    down_weights,
+    *,
+    global_start: int = 0,
 ):
     """Run local routes and keep BF16 rounding before the FP32 weighted sum."""
     tokens, hidden = x.shape
     top_k = ids.shape[1]
     experts, _, intermediate = down_weights[0].shape
     routes = tokens * top_k
-    # PureTP emits only local expert IDs and -1 for routes owned by other ranks.
-    ids = ids.to(dtype=torch.int32).contiguous()
     large = routes > _STABLE_ALIGNMENT_MAX_ROUTES
     if large:
+        if global_start != 0 or expert_counts is None:
+            raise ValueError("large compact MoE requires local expert IDs and counts")
+        if ids.dtype != torch.int32 or not ids.is_contiguous():
+            ids = ids.to(dtype=torch.int32).contiguous()
         # Keep smaller tiles for sparse routes. Group heavily used experts
         # into 64-row tiles to reuse the same weights across more tokens.
         small_m, small_n = (32, 64) if tokens >= 1024 else (16, 128)
@@ -119,11 +146,14 @@ def compact_fp8_decode(
         )
         plans = ((small_config, True, small), (dense_config, False, dense))
     else:
+        if not ids.is_contiguous():
+            ids = ids.contiguous()
         layout = moe_align_decode(
             ids,
             _GEMM_CONFIG["BLOCK_SIZE_M"],
             experts,
             max_routes=_STABLE_ALIGNMENT_MAX_ROUTES,
+            global_start=global_start,
         )
         plans = ((_GEMM_CONFIG, True, layout),)
     flat_ids = ids.view(-1)
@@ -137,11 +167,27 @@ def compact_fp8_decode(
     down_scale = x.new_empty((routes, groups), dtype=torch.float32)
     if large:
         _silu_mul_quantize_tiles[(triton.cdiv(routes, 4), groups)](
-            up, flat_ids, down_input, down_scale, routes, groups, 4, num_warps=4
+            up,
+            flat_ids,
+            down_input,
+            down_scale,
+            routes,
+            groups,
+            4,
+            GLOBAL_START=global_start,
+            EXPERTS=experts,
+            num_warps=4,
         )
     else:
         _silu_mul_quantize[(routes, groups)](
-            up, flat_ids, down_input, down_scale, groups, num_warps=1
+            up,
+            flat_ids,
+            down_input,
+            down_scale,
+            groups,
+            GLOBAL_START=global_start,
+            EXPERTS=experts,
+            num_warps=1,
         )
     down = x.new_empty((routes, hidden), dtype=torch.bfloat16)
     _project(
@@ -149,8 +195,5 @@ def compact_fp8_decode(
     )
 
     out = x.new_empty((tokens, hidden), dtype=torch.bfloat16)
-    input_indices = torch.arange(routes, device=x.device, dtype=torch.int32).view_as(
-        ids
-    )
-    ep_gather(down, ids, route_weights, input_indices, out)
+    ep_gather_global_routes(down, ids, route_weights, out, global_start, experts)
     return out
