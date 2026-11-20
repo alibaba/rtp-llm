@@ -36,9 +36,20 @@ namespace rtp_llm {
 
 namespace {
 
-// Pairs init() with a full drain on exceptional exits. DSpark's normal path
-// finishes only writer submissions here and leaves actual publication for the
-// executor's pre-dispatch barrier, preserving overlap with draft computation.
+/** Record metadata readiness after these copies, independently of the per-layer KV events. */
+torch::Tensor toHostAsync(const torch::Tensor& tensor, bool& has_d2h) {
+    if (!tensor.defined() || !tensor.is_cuda()) {
+        return tensor;
+    }
+    auto host = torch::empty(tensor.sizes(), tensor.options().device(torch::kCPU).pinned_memory(true));
+    host.copy_(tensor, /*non_blocking=*/true);
+    has_d2h = true;
+    return host;
+}
+
+/** Pair init() with a full drain on exceptional exits. On the normal tracked
+ * path, finish submissions here and leave publication completion and error
+ * handling to the caller. */
 class CacheStoreWriteCycleGuard {
 public:
     CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer,
@@ -65,8 +76,8 @@ public:
         }
     }
 
-    // Normal path: let a drain failure propagate to the caller. Tracked cycles
-    // keep publication pending for MtpExecutor; legacy cycles drain everything.
+    /** Tracked cycles leave publication completion and error handling to the
+     * caller; untracked cycles finish here. */
     void finish() {
         if (!active_) {
             return;
@@ -745,17 +756,15 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     }
 
     PyCacheStoreInputs cache_store_inputs;
-    // runtimeWriteCacheStore reads these via raw host pointers on the async
-    // writer thread; MTP device-state paths hand in CUDA tensors, so lift them
-    // to host here (sync copy, prefill-frequency only).
-    const auto to_host = [](const torch::Tensor& t) { return (t.defined() && t.is_cuda()) ? t.cpu() : t; };
-    cache_store_inputs.input_lengths_host    = to_host(inputs.input_lengths);
-    cache_store_inputs.prefix_lengths_host   = to_host(inputs.prefix_lengths);
-    cache_store_inputs.publish_start_tokens  = to_host(inputs.cache_store_publish_start_tokens);
-    cache_store_inputs.host_kv_cache_offset  = to_host(inputs.kv_cache_block_id);
+    bool               has_d2h = false;
+    const auto&        block_ids = inputs.kv_cache_block_id;
+    cache_store_inputs.host_kv_cache_offset  = block_ids.defined() && block_ids.is_cuda() ? block_ids.cpu() : block_ids;
+    cache_store_inputs.input_lengths_host    = toHostAsync(inputs.input_lengths, has_d2h);
+    cache_store_inputs.prefix_lengths_host   = toHostAsync(inputs.prefix_lengths, has_d2h);
+    cache_store_inputs.publish_start_tokens  = toHostAsync(inputs.cache_store_publish_start_tokens, has_d2h);
     cache_store_inputs.request_id            = inputs.request_id;
     cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
-    cache_store_inputs.request_deadline_ms   = to_host(inputs.request_deadline_ms);
+    cache_store_inputs.request_deadline_ms   = toHostAsync(inputs.request_deadline_ms, has_d2h);
     if (cache_manager_->hasP2PConnector()) {
         // Capture the per-request chunk for this forward (or microbatch). The writer
         // can call back asynchronously with just the request ID and source deadline.
@@ -792,6 +801,10 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         };
     }
     cache_store_inputs.cache_keys            = inputs.cache_keys;
+
+    if (has_d2h) {
+        cache_store_inputs.metadata_ready_event = runtimeCreateEvent();
+    }
     return cache_store_inputs;
 }
 

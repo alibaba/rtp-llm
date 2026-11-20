@@ -268,9 +268,10 @@ void PPScheduler::maintainWaitingStreams() {
         }
 
         /** Mixing context and decode streams violates the speculative verify input layout.
-         * Reject context streams on DECODE instances to keep scheduled batches decode-only.
+         * A PD handoff remains a context stream until its side channel is loaded;
+         * admit it to the cache-loading state without executing local prefill.
          */
-        if (pd_sep_config_.role_type == RoleType::DECODE && stream->isContextStream()) {
+        if (pd_sep_config_.role_type == RoleType::DECODE && stream->isContextStream() && !stream->queryPdSep()) {
             stream->reportError(ErrorCode::INVALID_PARAMS,
                                 "PP DECODE does not support local prefill; "
                                 "prefill must be completed on a PREFILL instance before decode scheduling.");

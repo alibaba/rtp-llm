@@ -353,57 +353,58 @@ void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_input,
                                            const torch::Tensor& next_position_ids,
                                            size_t               position_id_len_factor,
                                            TensorHolder&        host_holder) {
+    auto to_cuda = [&host_holder](torch::Tensor tensor) {
+        if (tensor.is_cuda()) {
+            return tensor;
+        }
+        tensor = tensor.pin_memory();
+        host_holder.hold_host(tensor);
+        return tensor.to(torch::kCUDA, /*non_blocking=*/true);
+    };
+
     draft_input.last_hidden_states = target_hidden_states;
-    const auto& new_all_token_ids  = sampled_token_ids;
-
-    const size_t        batch_size   = new_all_token_ids.size(0);
-    const size_t        token_stride = new_all_token_ids.size(1);
-    const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
-    torch::Tensor input_lengths_cpu =
-        draft_input.input_lengths.is_cuda() ? draft_input.input_lengths.cpu().pin_memory() : draft_input.input_lengths;
-    torch::Tensor combo_tokens_cpu =
-        draft_input.combo_tokens.is_cuda() ? draft_input.combo_tokens.cpu().pin_memory() : draft_input.combo_tokens;
-
     const bool has_multimodal =
         draft_input.multimodal_features.has_value() && !draft_input.multimodal_features->empty();
     if (has_multimodal) {
+        const auto input_lengths_cpu =
+            draft_input.input_lengths.is_cuda() ? draft_input.input_lengths.cpu() : draft_input.input_lengths;
         draft_input.text_tokens_mask = shiftedMtpTokenField(draft_input.text_tokens_mask, input_lengths_cpu, 1);
         draft_input.combo_tokens_type_ids =
             shiftedMtpTokenField(draft_input.combo_tokens_type_ids, input_lengths_cpu, 0);
         shiftMtpMultimodalLocations(draft_input, input_lengths_cpu);
     }
-    int* input_lengths = input_lengths_cpu.data_ptr<int>();
-    int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
 
-    int  offset = 0;
-    int* combo_position_ids =
-        draft_input.combo_position_ids.defined() ? draft_input.combo_position_ids.data_ptr<int>() : nullptr;
-    /** CPU token/position aliases are updated in place; their original values must no longer be in use. */
-    for (int i = 0; i < batch_size; i++) {
-        int input_length = input_lengths[i];
-        memmove(combo_tokens + offset, combo_tokens + offset + 1, (input_length - 1) * sizeof(int));
+    const auto last_token_indices = draft_input.input_lengths.cumsum(0, torch::kInt64) - 1;
 
-        int new_token_id = new_all_token_ids_cpu.data_ptr<int>()[i * token_stride + token_stride - 1];
-        combo_tokens[offset + input_length - 1] = new_token_id;
+    /** Token assembly needs device indices, while host lengths remain available for attention preparation. */
+    draft_input.combo_tokens             = to_cuda(draft_input.combo_tokens);
+    const auto last_token_indices_device = to_cuda(last_token_indices);
+    const auto sampled_tokens =
+        to_cuda(sampled_token_ids.select(1, sampled_token_ids.size(1) - 1)).to(torch::kInt32);
 
-        if (combo_position_ids != nullptr) {
-            int* stream_position_ids = combo_position_ids + offset * position_id_len_factor;
-            memmove(stream_position_ids,
-                    stream_position_ids + position_id_len_factor,
-                    (input_length - 1) * position_id_len_factor * sizeof(int));
-            int* new_position_ids = stream_position_ids + (input_length - 1) * position_id_len_factor;
-            memcpy(new_position_ids,
-                   next_position_ids.data_ptr<int>() + i * position_id_len_factor,
-                   position_id_len_factor * sizeof(int));
+    /** Roll creates separate storage; replacing each row's tail removes the cross-request boundary values. */
+    draft_input.combo_tokens = torch::roll(draft_input.combo_tokens, {-1}, {0});
+    draft_input.combo_tokens.index_copy_(0, last_token_indices_device, sampled_tokens);
+
+    if (draft_input.combo_position_ids.defined()) {
+        /** Positions do not depend on sampled token values; keep host inputs on CPU for CP remapping. */
+        const auto width            = static_cast<int64_t>(position_id_len_factor);
+        auto       positions        = draft_input.combo_position_ids.reshape({-1, width});
+        auto       next_positions   = next_position_ids.reshape({-1, width});
+        auto       position_indices = last_token_indices;
+        if (positions.is_cuda() || next_positions.is_cuda() || position_indices.is_cuda()) {
+            positions        = to_cuda(positions);
+            next_positions   = to_cuda(next_positions);
+            position_indices = last_token_indices_device;
         }
-        offset += input_length;
+        positions = torch::roll(positions, {-1}, {0});
+        positions.index_copy_(0, position_indices, next_positions);
+        /** CPU roll allocates pageable storage; the draft model's fused H2D copy requires pinned memory. */
+        if (positions.is_cpu()) {
+            positions = positions.pin_memory();
+        }
+        draft_input.combo_position_ids = positions.reshape(draft_input.combo_position_ids.sizes());
     }
-
-    /** Keep draft-prefill lengths on the same device even when RTP_LLM_DEVICE_INPUT is disabled. */
-    draft_input.input_lengths  = toCudaInt32(input_lengths_cpu, host_holder);
-    draft_input.prefix_lengths = toCudaInt32(draft_input.prefix_lengths, host_holder);
-    draft_input.combo_tokens   = toCudaInt32(combo_tokens_cpu, host_holder);
 }
 
 void prepareDraftPrefillAfterVerify(GptModelInputs&                              model_input,
@@ -520,36 +521,21 @@ void syncDraftPrefillAfterVerify(GptModelInputs&          draft_input,
 
 void advanceDraftInput(GptModelInputs&      draft_input,
                        const torch::Tensor& draft_hidden_states,
-                       const torch::Tensor& draft_token_ids,
-                       size_t               position_id_len_factor,
-                       TensorHolder&        host_holder) {
+                       const torch::Tensor& draft_token_ids) {
     int batch_size                 = draft_input.combo_tokens.size(0);
     draft_input.last_hidden_states = draft_hidden_states;
     draft_input.combo_tokens       = draft_token_ids.reshape({batch_size});
 
-    if (draft_input.combo_position_ids.defined() && draft_input.combo_position_ids.is_cuda()) {
-        draft_input.combo_position_ids = draft_input.combo_position_ids + 1;
-    } else if (draft_input.combo_position_ids.defined()) {
+    if (draft_input.combo_position_ids.defined()) {
+        const auto& position_ids = draft_input.combo_position_ids;
+        /** Keep CPU output pinned for the model's asynchronous H2D copy. */
         auto next_position_ids =
-            torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
-        int*       next_position_ids_ptr = next_position_ids.data_ptr<int>();
-        const auto position_ids_cpu      = draft_input.combo_position_ids.cpu().contiguous();
-        const int* position_ids_ptr      = position_ids_cpu.data_ptr<int>();
-        for (int64_t i = 0; i < next_position_ids.numel(); ++i) {
-            next_position_ids_ptr[i] = position_ids_ptr[i] + 1;
-        }
+            torch::empty(position_ids.sizes(), position_ids.options().pinned_memory(position_ids.device().is_cpu()));
+        torch::add_out(next_position_ids, position_ids, 1);
         draft_input.combo_position_ids = std::move(next_position_ids);
     }
 
-    if (draft_input.sequence_lengths.is_cuda()) {
-        draft_input.sequence_lengths = (draft_input.sequence_lengths + 1).to(torch::kInt32);
-    } else {
-        auto sequence_lengths_cpu = draft_input.sequence_lengths.cpu().clone().pin_memory();
-        for (int i = 0; i < batch_size; i++) {
-            sequence_lengths_cpu.data_ptr<int>()[i]++;
-        }
-        draft_input.sequence_lengths = toCudaInt32(sequence_lengths_cpu, host_holder);
-    }
+    draft_input.sequence_lengths = draft_input.sequence_lengths + 1;
 }
 
 void prepareDSparkProposeInput(GptModelInputs&            draft_input,

@@ -43,13 +43,14 @@ protected:
     torch::Tensor computeLocalLastHidden(const torch::Tensor&                      hidden_states,
                                          const GptModelInputs&                     inputs,
                                          const torch_ext::PyContextParallelParams& cp_params);
-    bool          plan(const std::vector<int>& total_input_tokens,
-                       std::vector<int>&       input_tokens,
-                       std::vector<int>&       shuffle_indices,
-                       int                     cp_rank,
-                       int                     cp_size,
-                       int                     cp_chunk_size,
-                       int                     cp_padding_size) override;
+    bool          plan(int               input_length,
+                       const int*        cpu_src,
+                       int*              cpu_dst,
+                       std::vector<int>& shuffle_indices,
+                       int               cp_rank,
+                       int               cp_size,
+                       int               cp_chunk_size,
+                       int               cp_padding_size) override;
 
     torch::Tensor generateQKVRestoreIndices(const torch::Tensor& prefill_cp_chunk_lengths, int cp_size) override;
 
