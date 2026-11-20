@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.models_py.modules.dsv41.hc.delayed import (
     DelayedHCUnit,
     _tile_ops,
@@ -105,6 +106,27 @@ class V41MHCPreNormCPUContractTest(unittest.TestCase):
         torch.testing.assert_close(actual.view(torch.int32), expected, rtol=0, atol=0)
         legacy = ((bits[:5] + 0x1000) & -8192).view(torch.float32)
         self.assertFalse(torch.equal(legacy, actual[:5]))
+    def test_h20_card_gate(self):
+        # The gate follows the SM version, not the SKU name: an H20-3e
+        # reports "NVIDIA H20-3e" and never matched a whole-token "H20"
+        # check, silently disabling the H20 decode paths on that fleet.
+        for name, capability, expected in (
+            ("NVIDIA H20", (9, 0), True),
+            ("NVIDIA H20-3e", (9, 0), True),
+            ("NVIDIA H100 80GB HBM3", (9, 0), True),
+            ("NVIDIA H800", (9, 0), True),
+            ("NVIDIA H200", (9, 0), True),
+            ("NVIDIA B200", (10, 0), False),
+            ("NVIDIA GB200", (10, 0), False),
+        ):
+            with self.subTest(name=name), patch(
+                "rtp_llm.device.device_type.is_cuda", return_value=True
+            ), patch(
+                "torch.cuda.get_device_capability", return_value=capability
+            ), patch(
+                "torch.cuda.get_device_name", return_value=name
+            ):
+                self.assertEqual(is_sm90(torch.device("cuda", 0)), expected)
 
     def test_tf32_tie_rule_and_weight_cache_invalidation(self):
         # RTP adds half a TF32 ULP before truncation, including negative ties;
@@ -170,8 +192,8 @@ class V41MHCPreNormCPUContractTest(unittest.TestCase):
 class V41MHCPreNormCudaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.get_device_capability()[0] != 10:
-            raise unittest.SkipTest("V4.1 prenorm fast path requires SM100")
+        if torch.cuda.get_device_capability()[0] not in (9, 10):
+            raise unittest.SkipTest("V4.1 prenorm fast path requires SM90 or SM100")
 
     def setUp(self):
         torch.manual_seed(41)
@@ -240,7 +262,9 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
     @torch.no_grad()
     @patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
     def test_token_boundaries_and_3d_4d_layouts(self):
-        for tokens in (1, 6, 24, 31, 64, 65, 128, 384, 512):
+        supported = (1, 6, 24, 31, 64)
+        supported += (65, 128, 256) if is_sm90() else (65, 128, 256, 512)
+        for tokens in supported:
             residual, fn, base, scale = self._inputs(tokens)
             batch = 4 if tokens in (24, 64) else 1
             for layout in (residual, residual.reshape(batch, -1, 4, 5120)):
@@ -248,6 +272,12 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                     self.assertTrue(is_supported(layout, fn))
                     actual = self._check_mixes_and_coefficients(layout, fn, base, scale)
                     self.assertEqual(actual.shape, (*layout.shape[:-2], 24))
+        unsupported = (257, 384, 512) if is_sm90() else (513, 768)
+        for tokens in unsupported:
+            with self.subTest(tokens=tokens):
+                residual, fn, _, _ = self._inputs(tokens)
+                self.assertFalse(is_supported(residual, fn))
+                self.assertIsNone(prenorm(residual, fn, _EPS))
 
     @torch.no_grad()
     def test_explicit_tilelang_backends_keep_large_token_fallback(self):
@@ -314,7 +344,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
 
     @torch.no_grad()
     def test_graph_replay_changes_inputs(self):
-        for tokens in (1, 6, 24):
+        for tokens in (1, 6, 24, 128, 256) if is_sm90() else (1, 6, 24):
             with self.subTest(tokens=tokens):
                 residual, fn, base, scale = self._inputs(tokens)
                 with torch.inference_mode():
@@ -391,7 +421,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
             return_value=False,
         ):
             self.assertIsNone(prenorm(residual, fn, _EPS))
-        with patch("torch.cuda.get_device_capability", return_value=(9, 0)):
+        with patch("torch.cuda.get_device_capability", return_value=(8, 0)):
             self.assertFalse(is_supported(residual, fn))
         with torch.enable_grad():
             self.assertFalse(is_supported(residual, fn.clone().requires_grad_()))
@@ -431,7 +461,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                     ) as source:
                         weights.append(source.get_tensor(name).float().cuda())
                 fn, base, scale = weights
-                for tokens in (1, 6, 24):
+                for tokens in (1, 6, 24, 128, 256) if is_sm90() else (1, 6, 24):
                     residual = self._inputs(tokens)[0].reshape(1, tokens, 4, 5120)
                     actual = prenorm(residual, fn, _EPS)
                     self.assertIsNotNone(actual)

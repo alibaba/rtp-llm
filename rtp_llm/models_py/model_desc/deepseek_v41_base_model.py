@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
@@ -1042,6 +1043,26 @@ class DeepSeekV4Model(GptModelBase):
 
     def _load_scoped_extra_weights(self, weights: ModelWeights) -> None:
         self._load_extra_weights(weights)
+        model_weight = getattr(self.v4.embed, "weight", None)
+        if not isinstance(model_weight, torch.Tensor):
+            # DSpARK prefill commit-only models have no token embedding.
+            model_weight = getattr(getattr(self, "main_proj", None), "weight", None)
+        if not (
+            isinstance(model_weight, torch.Tensor)
+            and model_weight.is_cuda
+            and is_sm90(model_weight.device)
+        ):
+            return
+        from rtp_llm.models_py.modules.dsv41.utils import (
+            release_prepared_sm90_checkpoint_weights,
+        )
+
+        released = release_prepared_sm90_checkpoint_weights(self, weights)
+        if released:
+            logging.info(
+                "[DeepSeekV4Model] released prepared SM90 checkpoint weights: %.3f GiB",
+                released / 1024**3,
+            )
 
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         """Subclass hook for loading model-level (non-Block) tensors off

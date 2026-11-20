@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.device.device_type import is_cuda
+
 
 @lru_cache(maxsize=1)
 def _has_prenorm_gemm() -> bool:
@@ -25,18 +27,26 @@ def _has_prenorm_gemm() -> bool:
     return callable(getattr(module, "tf32_hc_prenorm_gemm", None))
 
 
-def max_supported_tokens() -> int:
-    # The <=64 specialization has always selected DeepGEMM directly. Keep
-    # explicit diagnostic overrides for larger batches and share this bound
-    # with startup compilation, whose reduction specializes on every M.
+def configured_max_tokens() -> int:
+    # Diagnostic overrides keep the established <=64-token DeepGEMM path.
     backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "auto").strip().lower()
     return 512 if backend in ("", "auto", "deepgemm", "dg") else 64
+
+
+def max_supported_tokens(capability: tuple[int, int] | None = None) -> int:
+    """Keep the upstream SM100 limit; bound the separate Hopper kernel."""
+    if capability is None or capability[0] == 10:
+        return configured_max_tokens()
+    if tuple(capability) == (9, 0):
+        return min(256, configured_max_tokens())
+    return 0
 
 
 def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     """Static inference gate; large prefills retain the existing implementation."""
     if (
-        residual.device.type != "cuda"
+        not is_cuda()
+        or residual.device.type != "cuda"
         or residual.dtype != torch.bfloat16
         or residual.ndim not in (3, 4)
         or residual.shape[-2:] != (4, 5120)
@@ -45,12 +55,13 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
         or fn.dtype != torch.float32
         or fn.shape != (24, 20480)
         or not fn.is_contiguous()
-        or residual.numel() // 20480 > max_supported_tokens()
         or (torch.is_grad_enabled() and (residual.requires_grad or fn.requires_grad))
     ):
         return False
+    max_tokens = max_supported_tokens(torch.cuda.get_device_capability(residual.device))
     return (
-        torch.cuda.get_device_capability(residual.device)[0] == 10
+        max_tokens > 0
+        and residual.numel() // 20480 <= max_tokens
         and _has_prenorm_gemm()
     )
 
@@ -114,6 +125,10 @@ def prenorm(
     """Return FP32 [..., 24] mixes, or None for the original-path fallback."""
     if not is_supported(residual, fn):
         return None
+    if tuple(torch.cuda.get_device_capability(residual.device)) == (9, 0):
+        from rtp_llm.models_py.modules.dsv41.hc.sm90_prenorm import prenorm as sm90_prenorm
+
+        return sm90_prenorm(residual, fn, eps)
     tokens = residual.numel() // 20480
     output = torch.empty(
         (*residual.shape[:-2], 24), dtype=torch.float32, device=residual.device

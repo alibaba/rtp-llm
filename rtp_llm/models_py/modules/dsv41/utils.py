@@ -4,9 +4,12 @@ import weakref
 
 import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.base.common.embedding import Embedding
+from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+    SM90_DIRECT_SCALE_MAX_TOKENS,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 
 _V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
@@ -28,6 +31,28 @@ class V41MXFP8Linear(torch.nn.Module):
         super().__init__()
         self.weight = weight
         self.N, self.K = weight.shape
+        self._sm90_linear = None
+        if (
+            weight.is_cuda
+            and is_cuda()
+            and torch.cuda.get_device_capability(weight.device) == (9, 0)
+        ):
+            from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+                Sm90DeepGEMMMXFP8Linear,
+                select_sm90_dense_backend,
+            )
+
+            select_sm90_dense_backend(self.N, self.K)  # Reject stale backend overrides.
+            self._sm90_linear = Sm90DeepGEMMMXFP8Linear(weight, scales)
+            # Retain the original executable checkpoint layout.
+            self.weight = self._sm90_linear.weight
+            self._sm90_checkpoint_weight_ref = (
+                weakref.ref(weight)
+                if isinstance(weight, torch.Tensor)
+                and not self._sm90_linear.retains_checkpoint_weight
+                else None
+            )
+            return
         self.weight_scales = self.pack_scales(scales)
 
     def pack_scales(self, scales: torch.Tensor) -> torch.Tensor:
@@ -65,12 +90,17 @@ class V41MXFP8Linear(torch.nn.Module):
         ), scales
 
     def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
-        """Consume group32 E4M3/packed UE8M0 without another quantization.
+        """Consume group32 E4M3 with native FP32 or packed UE8M0 scales.
 
-        Deliberately no quantize_input method: the V4 input-reuse gate must
-        remain closed for this linear. The caller owns the BF16 norm tensor.
-        Input layout and disjoint BF16 output storage are caller preconditions.
+        ``x_s`` is either the FP32 MN-major tensor the SM90 adapter wants or
+        packed int32 UE8M0 words for the SM10x ``fp8_fp4_gemm_nt`` contract;
+        the adapter dispatches on dtype. Deliberately no quantize_input
+        method: the V4 input-reuse gate must remain closed for this linear.
+        The caller owns the BF16 norm tensor. Input layout and disjoint BF16
+        output storage are caller preconditions.
         """
+        if getattr(self, "_sm90_linear", None) is not None:
+            return self._sm90_linear.forward_quantized(x_q, x_s, out=out)
         m = x_q.numel() // self.K
         shape = (*x_q.shape[:-1], self.N)
         output = (
@@ -103,7 +133,38 @@ class V41MXFP8Linear(torch.nn.Module):
     def forward(self, x: torch.Tensor, out=None):
         if x.numel() == 0:
             return out if out is not None else x.new_empty((*x.shape[:-1], self.N))
+        adapter = getattr(self, "_sm90_linear", None)
+        if (
+            adapter is not None
+            and hasattr(adapter, "forward_bf16")
+            and x.dtype == torch.bfloat16
+            and x.numel() // self.K <= SM90_DIRECT_SCALE_MAX_TOKENS
+        ):
+            return adapter.forward_bf16(x, out=out)
         return self.forward_quantized(*self._quantize_input(x), out=out)
+
+
+def release_prepared_sm90_checkpoint_weights(root, weights) -> int:
+    """Release only prepared dense inputs after all model consumers bind.
+
+    The loader/weight manager also owns ModelWeights, so dropping the model's
+    reference alone does not release checkpoint tensors. Match exact tensor
+    identities recorded by the SM90 adapter; unrelated and SM10x weights stay
+    in their original dictionaries. Live consumers retain their own references.
+    """
+    sources = {}
+    for module in root.modules():
+        ref = getattr(module, "_sm90_checkpoint_weight_ref", None)
+        source = ref() if ref is not None else None
+        if source is not None:
+            sources[id(source)] = source
+    released = 0
+    for entries in (*weights.weights, weights.global_weights):
+        for key, value in list(entries.items()):
+            if id(value) in sources and sources[id(value)] is value:
+                released += value.numel() * value.element_size()
+                del entries[key]
+    return released
 
 
 def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:
