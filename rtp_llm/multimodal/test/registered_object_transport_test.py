@@ -384,6 +384,28 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertIsNone(pool.acquire())
         self.assertEqual(observe.call_args_list[-1].args, (False, "closed"))
 
+    def test_lock_hold_sampling_excludes_condition_wait(self):
+        samples = []
+
+        def observe(for_write, stage, nanoseconds):
+            self.assertFalse(pool._condition._is_owned())
+            samples.append((for_write, stage, nanoseconds))
+
+        pool = self.pool(observe_lock_hold=observe)
+        with patch.object(pool._lock_hold_rng, "getrandbits", return_value=1):
+            slot = pool.acquire(for_write=True)
+        with patch.object(pool._lock_hold_rng, "getrandbits", return_value=0):
+            with patch.object(pool._condition, "wait", return_value=False), patch.object(
+                time, "perf_counter_ns", side_effect=(10, 20, 200, 203)
+            ):
+                self.assertIsNone(pool.acquire(timeout=1))
+            with patch.object(time, "perf_counter_ns", side_effect=(500, 508)):
+                pool.release(slot)
+        self.assertEqual(
+            samples,
+            [(False, "gdr_acquire_lock_hold", 13), (True, "gdr_release_lock_hold", 8)],
+        )
+
     def test_sized_lease_materializes_views_outside_the_allocator_lock(self):
         pool = self.pool(
             direct_payload=True,

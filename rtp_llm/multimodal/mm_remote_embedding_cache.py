@@ -254,6 +254,7 @@ class MMRemoteEmbeddingCache:
                     observe_lease=cls._observe_gdr_lease,
                     observe_arena=cls._observe_gdr_arena,
                     observe_acquire_failure=cls._observe_gdr_acquire_failure,
+                    observe_lock_hold=cls._observe_gdr_lock_hold,
                     direct_payload=True,
                 )
             return raw_factory()
@@ -469,6 +470,18 @@ class MMRemoteEmbeddingCache:
                 "operation": "write" if for_write else "read",
                 "stage": "gdr_acquire_" + reason,
                 "status": "skipped",
+            },
+        )
+
+    @classmethod
+    def _observe_gdr_lock_hold(cls, for_write, stage, duration_ns):
+        cls._report_metric(
+            GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+            duration_ns / 1_000_000,
+            {
+                "operation": "write" if for_write else "read",
+                "stage": stage,
+                "status": "success",
             },
         )
 

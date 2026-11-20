@@ -4,6 +4,7 @@ import ctypes
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -492,6 +493,7 @@ class RegisteredTransportPool:
         direct_payload=False,
         arena_bytes=None,
         min_block_bytes=None,
+        observe_lock_hold=None,
     ):
         if type(slots) is not int or slots <= 0:
             raise ValueError("slots must be a positive integer")
@@ -504,6 +506,8 @@ class RegisteredTransportPool:
         self._observe_lease = observe_lease
         self._observe_arena = observe_arena
         self._observe_acquire_failure = observe_acquire_failure
+        self._observe_lock_hold = observe_lock_hold
+        self._lock_hold_rng = random.Random()
         self._gc_stop = threading.Event()
         self._condition = threading.Condition()
         self._accepting = True
@@ -765,9 +769,15 @@ class RegisteredTransportPool:
             raise ValueError("invalid GDR object size")
         wait_seconds = max(timeout, 0)
         deadline = time.monotonic() + wait_seconds
+        # Report about one in 64 acquired locks, outside the lock.
+        sample = (
+            self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
+        )
         if not self._condition.acquire(timeout=wait_seconds):
             self._report_acquire_failure(for_write, "lock_timeout")
             return None
+        held_ns = 0
+        held_since = time.perf_counter_ns() if sample else 0
         slot = None
         failure = "extent_unavailable"
         try:
@@ -806,10 +816,19 @@ class RegisteredTransportPool:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                if not self._condition.wait(remaining):
+                if sample:
+                    held_ns += time.perf_counter_ns() - held_since
+                notified = self._condition.wait(remaining)
+                if sample:
+                    held_since = time.perf_counter_ns()
+                if not notified:
                     break
         finally:
+            if sample:
+                held_ns += time.perf_counter_ns() - held_since
             self._condition.release()
+        if sample:
+            self._observe_lock_hold(for_write, "gdr_acquire_lock_hold", held_ns)
         if slot is None:
             self._report_acquire_failure(for_write, failure)
             return None
@@ -836,11 +855,18 @@ class RegisteredTransportPool:
             self._condition.notify_all()
 
     def release(self, slot):
+        sample = (
+            self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
+        )
         with self._condition:
+            held_since = time.perf_counter_ns() if sample else 0
             for_write = self._in_use.pop(slot)
             if self._free_ranges is not None and not slot.quarantined:
                 self._return_range(slot)
             self._condition.notify_all()
+            held_ns = time.perf_counter_ns() - held_since if sample else 0
+        if sample:
+            self._observe_lock_hold(for_write, "gdr_release_lock_hold", held_ns)
         if self._observe_lease is not None:
             self._observe_lease(for_write, -1, -slot._capacity)
 
