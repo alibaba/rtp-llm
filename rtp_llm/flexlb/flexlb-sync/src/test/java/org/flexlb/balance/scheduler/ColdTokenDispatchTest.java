@@ -16,6 +16,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -1118,6 +1119,71 @@ class ColdTokenDispatchTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void rescueUsesSpareCapacityAndCountsWorkMissingFromEngineFeedback(boolean batch) throws Exception {
+        try (var f = new Fixture(batch, false, false, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(batch ? 128 : 4);
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setEngineQueueAdmissionThreshold(batch ? 4L : 80L);
+            balance.setEngineQueueOverloadDurationMs(0L);
+            balance.setHotspotRescue(20);
+        })) {
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 1));
+            var background = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(71100).setInputLength(1000)
+                    .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
+            f.observeTaskSnapshot(f.b, List.of(background), List.of());
+            f.updateWaiting(f.a, 81L, 1_000_000L);
+            var requests = List.of(f.context(71101), f.context(71102), f.context(71103));
+            var results = requests.stream().map(f.scheduler::submit).toList();
+            // B reports only its pre-existing running task across multiple rescue intervals.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            do {
+                f.updateWaiting(f.a, 81L, 1_000_000L);
+                f.observeTaskSnapshot(f.b, List.of(background), List.of());
+                Thread.sleep(40);
+            } while (System.nanoTime() < deadline);
+            assertEquals(1L, results.stream().filter(result -> result.isDone()).count());
+            assertEquals(2L, f.b.ownership.progress().outstandingRequests());
+            f.updateWaiting(f.a, 0L, 1_000_000L);
+            for (var result : results) { assertTrue(result.get(3, TimeUnit.SECONDS).isSuccess()); }
+            assertEquals(1L, requests.stream().filter(ctx -> ctx.snapshot().route().prefillEp() == f.b).count());
+        }
+    }
+
+    @Test
+    void rescueRechecksTargetWhenNormalTrafficTakesTheLastSpareSlot() throws Exception {
+        try (var f = new Fixture(false, false, true, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setEngineQueueOverloadDurationMs(0L);
+            balance.setHotspotRescue(10);
+        })) {
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 1));
+            var competitor = new java.util.concurrent.CompletableFuture<PrefillState.RouteReservation>();
+            doAnswer(call -> {
+                @SuppressWarnings("unchecked")
+                var plan = (org.flexlb.balance.PlacementResult<RequestRoute, PlacementKey>) call.callRealMethod();
+                if (plan.status() == org.flexlb.balance.PlacementResult.Status.SUCCESS && plan.value().isHotspotRescue()) {
+                    competitor.complete(f.occupy(f.b, 71200));
+                }
+                return plan;
+            }).when(f.router).select(any(), nullable(String.class));
+            f.updateWaiting(f.a, 81L, 1_000_000L);
+            f.updateWaiting(f.b, 0, 1_000_000L);
+            var request = f.context(71201);
+            var result = f.scheduler.submit(request);
+            var occupied = competitor.get(3, TimeUnit.SECONDS);
+            try {
+                f.updateWaiting(f.a, 0L, 1_000_000L);
+                assertTrue(result.get(3, TimeUnit.SECONDS).isSuccess());
+                assertSame(f.a, request.snapshot().route().prefillEp());
+                assertEquals(1L, f.b.ownership.progress().outstandingRequests());
+                verify(f.runtime.deliveryReporter(), never()).reportHotspotRescue(anyString(), anyString());
+            } finally { f.b.release(occupied, null); }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"short", "stale", "busy", "expensive"})
     void hotspotGuardsKeepWaitersOnTheLeader(String scenario) throws Exception {
         try (var f = new Fixture(false, false, false, true, config -> {
@@ -1145,6 +1211,39 @@ class ColdTokenDispatchTest {
             f.updateWaiting(f.a, 0L, 1_000_000L);
             assertTrue(result.get(3, TimeUnit.SECONDS).isSuccess());
             assertSame(f.a, request.snapshot().route().prefillEp());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {true, false})
+    void batchRescueIsCountedOnlyAfterSuccessfulResponse(boolean accepted) throws Exception {
+        try (var f = new Fixture(true, false, false, true, config -> {
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setHotspotRescue(5);
+            balance.setEngineQueueOverloadDurationMs(0L);
+        })) {
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 1));
+            var sent = new java.util.concurrent.CompletableFuture<EngineRpcService.EnqueueBatchRequestPB>();
+            var reply = new java.util.concurrent.CompletableFuture<EngineRpcService.EnqueueBatchResponsePB>();
+            doAnswer(call -> {
+                sent.complete(call.getArgument(2));
+                return reply;
+            }).when(f.grpc).batchEnqueueAsync(anyString(), anyInt(), any());
+            f.updateWaiting(f.a, 81L, 1_000_000L);
+            f.updateWaiting(f.b, 0L, 1_000_000L);
+            long id = 70002;
+            var result = f.scheduler.submit(f.context(id));
+            var batch = sent.get(3, TimeUnit.SECONDS);
+            var reporter = f.runtime.deliveryReporter();
+            verify(reporter, never()).reportHotspotRescue(anyString(), anyString());
+            reply.complete(accepted ? LinearDeliveryFixture.ack(batch) : EngineRpcService.EnqueueBatchResponsePB.newBuilder()
+                    .setBatchId(batch.getBatchId())
+                    .addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder().setRequestId(id)
+                            .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder().setErrorCode(500)))
+                    .build());
+            assertEquals(accepted, result.get(3, TimeUnit.SECONDS).isSuccess());
+            SchedulerTestSupport.awaitRequestWork(f.runtime);
+            verify(reporter, times(accepted ? 1 : 0)).reportHotspotRescue("PREFILL", f.b.getIp());
         }
     }
 

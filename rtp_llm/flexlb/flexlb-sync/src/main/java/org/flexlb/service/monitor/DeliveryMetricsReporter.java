@@ -31,6 +31,7 @@ import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
+import static org.flexlb.constant.MetricConstant.HOTSPOT_RESCUE_REQUESTS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
@@ -71,6 +72,8 @@ public class DeliveryMetricsReporter {
         // Dispatch reason — independent metric for batch path
         monitor.register(ENGINE_BALANCING_MASTER_DISPATCH_REASON, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
+        monitor.register(HOTSPOT_RESCUE_REQUESTS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+
         // Batch size — gauge, reported per dispatch
         monitor.register(ENGINE_BALANCING_MASTER_BATCH_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
@@ -110,7 +113,7 @@ public class DeliveryMetricsReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("DeliveryMetricsReporter initialized (20 metrics)");
+        log.info("DeliveryMetricsReporter initialized");
     }
 
     /** Report a committed delivery; batchId is zero for individual route delivery. */
@@ -199,6 +202,10 @@ public class DeliveryMetricsReporter {
                 "role", role,
                 "priority", String.valueOf(priority));
         monitor.report(ROUTING_QUEUE_WAIT_TIME_MS, tags, waitMs);
+    }
+
+    public void reportHotspotRescue(String role, String engineIp) {
+        monitor.report(HOTSPOT_RESCUE_REQUESTS, FlexMetricTags.ofEngine(engineIp, "role", role), 1);
     }
 
     // ==================== Dispatch reason metrics ====================
@@ -292,6 +299,7 @@ public class DeliveryMetricsReporter {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         if (RoleType.PREFILL.name().equals(role) || RoleType.PDFUSION.name().equals(role)) {
+            monitor.prepare(HOTSPOT_RESCUE_REQUESTS, tags);
             monitor.prepare(DISPATCH_ACK_TIME_MS, tags);
             monitor.prepare(ROUTE_SUBMIT_TIME_MS, tags);
             monitor.prepare(ROUTING_QUEUE_WAIT_TIME_MS, tags);

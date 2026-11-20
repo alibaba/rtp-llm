@@ -224,6 +224,9 @@ public final class WorkerBatcher {
             if (drainClaimed || settings.dispatcherType() == DispatcherConfig.Type.NON_BATCH && prefillEndpoint.isGenerationRetiringOrRetired()) {
                 return false;
             }
+            if (item.isHotspotRescue() && !prefillEndpoint.canEnqueueHotspotRescueLocked()) {
+                return false;
+            }
             accepted = prefillState.updateQueue(PrefillState.QueueChange.ENQUEUE, item, settings.maxOutstandingRequests(), System.currentTimeMillis()) != null;
             if (!accepted && !drainClaimed
                     && settings.preemptQueued()) {

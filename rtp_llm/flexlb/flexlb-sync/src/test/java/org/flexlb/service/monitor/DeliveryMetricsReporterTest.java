@@ -102,6 +102,18 @@ class DeliveryMetricsReporterTest {
     }
 
     @Test
+    void countsRescuedRequestsByDestination() {
+        String metric = "app.flexlb.hotspot.rescue.requests";
+        var tags = FlexMetricTags.ofEngine("10.0.0.2", "role", "PREFILL");
+        reporter.init();
+        reporter.prepareEndpointMetrics("PREFILL", "10.0.0.2");
+        reporter.reportHotspotRescue("PREFILL", "10.0.0.2");
+        verify(monitor).register(metric, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
+        verify(monitor).prepare(metric, tags);
+        verify(monitor).report(metric, tags, 1.0);
+    }
+
+    @Test
     void should_report_dispatch_reason_with_correct_tags() {
         reporter.reportDispatchReason("PREFILL", "10.0.0.1", "batch_full");
 

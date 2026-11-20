@@ -140,6 +140,8 @@ public class MetricConstant {
      */
     public static final String DISPATCH_ACK_TIME_MS = "app.flexlb.dispatch.ack.time.ms";
 
+    public static final String HOTSPOT_RESCUE_REQUESTS = "app.flexlb.hotspot.rescue.requests";
+
     /**
      * Route+submit time (from schedule() entry to batcher offer completion) in milliseconds.
      * Measures the time spent in routing the request and enqueuing it into the per-engine batcher,

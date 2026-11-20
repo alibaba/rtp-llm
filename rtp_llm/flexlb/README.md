@@ -279,11 +279,21 @@ Omitting it or setting it to `0` disables rescue. For example, `"hotspotRescue":
 one migration every 250 ms. Normal hot routes keep maximum prefix affinity. QUEUE paces retries of parked hot requests, preferring
 business priority, fewer previous probes, then lower observed hit fraction. All current cache
 leaders must have reported sustained full Engine waiting queues for `engineQueueOverloadDurationMs`.
-Pressure clears at three quarters of the watermark. The target must be idle, have fresh feedback,
-and belong to a leader's group. Extra uncached tokens are capped at a quarter of the original
+Pressure clears at three quarters of the watermark. A target in a leader's group can have running
+requests if its latest fresh Engine report shows zero waiting. Including the incoming request,
+outstanding requests may reach at most half of `engineQueueAdmissionThreshold`. Rescue also uses
+at most half of `maxInflightPerPrefillWorker` (requests in NON_BATCH, occupied batches plus one
+slot per queued request in BATCH). Both budgets round down with a minimum of one. The Master
+checks headroom at selection and again under the target queue lock at admission, including local
+requests awaiting Engine feedback. Extra uncached tokens are capped at a quarter of the original
 uncached work. Each request can select a rescue destination once. Existing Engine-owned work drains
 in place. The legacy rescue tuning fields, `maxPendingComputeTokens`, `enableWindow` and `windowMs`
 are rejected by the configuration parser.
+
+A successful scheduling response for a rescued request increments the counter
+`app.flexlb.hotspot.rescue.requests` once, tagged with destination `engineIp` and `role`.
+To see the number of migrated queries over the last five minutes in Prometheus, use
+`sum(increase(flexlb_app_flexlb_hotspot_rescue_requests_total[5m]))`.
 
 Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
 demand, capacity limits and admission mode before selecting workers. DIRECT requires

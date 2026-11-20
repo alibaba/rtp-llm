@@ -66,6 +66,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public final long requestLimit;
     private final EngineQueueAdmission engineQueueAdmission;
+    private final long rescueRequestLimit;
+    private final int rescueSlotLimit;
 
     private volatile WorkerBatcher batcher;
     private final DeliveryDispatcher dispatcher;
@@ -112,6 +114,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 : new EngineQueueAdmission(balance.getEngineQueueAdmissionThreshold(), balance.getEngineQueueOverloadDurationMs(),
                         Math.max(1000L, com.google.common.math.LongMath.saturatedMultiply(3L,
                                 config.getWorkerRegistry().getHealth().getStatusPollIntervalMs())));
+        this.rescueRequestLimit = engineQueueAdmission == null ? 0L
+                : Math.max(1L, balance.getEngineQueueAdmissionThreshold() / 2L);
+        this.rescueSlotLimit = Math.max(1, config.getDispatcher().getMaxInflightPerPrefillWorker() / 2);
         if (engineQueueAdmission != null) {
             observeEngineQueue();
             ownership.configureEngineQueueAdmission(this::engineQueueAdmissionState);
@@ -160,11 +165,27 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     || !engineQueueAdmission.freshPressure(source, nowMs, observedAfterMs)) {
                 return false;
             }
-            return source || (engineQueueAllowsAdmission() && ownership.progress().outstandingRequests() == 0
-                    && ownership.tokenWorkload().score() == 0);
+            return source || (hasRescueHeadroomLocked() && ownership.tokenWorkload().plannedTokens() == 0L);
         } finally {
             ownership.lock.unlock();
         }
+    }
+
+    /** Final check under the same lock as queue insertion. The incoming route already owns its token plan. */
+    public boolean canEnqueueHotspotRescueLocked() {
+        checkState(ownership.lock.isHeldByCurrentThread(), "rescue admission requires Prefill ownership lock");
+        return engineQueueAdmission != null
+                && engineQueueAdmission.freshPressure(false, System.nanoTime() / 1_000_000L, Long.MIN_VALUE)
+                && hasRescueHeadroomLocked();
+    }
+
+    private boolean hasRescueHeadroomLocked() {
+        var progress = ownership.progress();
+        // Each queued BATCH request may need its own slot before the next Engine report.
+        long usedSlots = dispatcherType == DispatcherConfig.Type.BATCH
+                ? (long) progress.batchSlots() + progress.queueDepth() : progress.outstandingRequests();
+        return engineQueueAllowsAdmission() && progress.outstandingRequests() < rescueRequestLimit
+                && usedSlots < rescueSlotLimit;
     }
 
     private void observeEngineQueue() {

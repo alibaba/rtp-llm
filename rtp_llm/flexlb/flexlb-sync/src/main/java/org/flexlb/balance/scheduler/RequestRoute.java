@@ -39,6 +39,14 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private ServerStatus vit;
     private long prefillWorkMs;
     private boolean coldTokenBalance;
+    private boolean hotspotRescue;
+
+    public void markHotspotRescue() {
+        checkState(constructionState == BUILDING, "routing policy is frozen after selection");
+        hotspotRescue = true;
+    }
+
+    boolean isHotspotRescue() { return hotspotRescue; }
     private java.util.Set<String> prefillCacheWorkers = java.util.Set.of();
 
     public void setPrefillCacheWorkers(java.util.Set<String> workers) {
@@ -91,6 +99,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
             decode = selected.decode;
             prefillWorkMs = selected.prefillWorkMs;
             coldTokenBalance = selected.coldTokenBalance;
+            hotspotRescue = selected.hotspotRescue;
             tokenPlan = selected.tokenPlan;
             prefillVersion = selected.prefillVersion;
             decodeVersion = selected.decodeVersion;

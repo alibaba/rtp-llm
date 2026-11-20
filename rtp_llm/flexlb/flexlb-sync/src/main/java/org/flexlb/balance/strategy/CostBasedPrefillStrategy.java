@@ -216,6 +216,7 @@ public class CostBasedPrefillStrategy {
         }
 
         if (probe && survivors.cacheHit(selectedIndex) < fleetMaxHit) {
+            route.markHotspotRescue();
             Logger.info("Prefill hotspot rescue plan request={} leaders={} target={} input={} leaderHit={} targetHit={}",
                     requestId, cacheWorkers, survivors.endpointAddress(selectedIndex), seqLen, fleetMaxHit,
                     survivors.cacheHit(selectedIndex));

@@ -146,6 +146,8 @@ class HotOverloadAdmissionE2ETest {
             assertEquals(requests.size(), counts[0].get() + counts[1].get());
             assertEquals(enabled, counts[1].get() > 0);
             long probes = coldTargetSelections.get();
+            org.mockito.Mockito.verify(h.reporter, org.mockito.Mockito.times((int) probes))
+                    .reportHotspotRescue("PREFILL", h.prefillEndpoint(1).getIp());
             assertEquals(enabled, probes > 0);
             assertTrue(probes <= 1L + elapsed / 1000L);
             if (shared) { assertTrue(counts[1].get() > probes, "subsequent arrivals should reuse the warmed prefix"); }

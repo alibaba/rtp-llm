@@ -861,6 +861,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                             rejection = "selected Prefill capacity changed before canonical placement";
                         } else if (publication.status() == PlacementResult.Status.BLOCKED) {
                             plan.waitKey = publication.blocker();
+                            if (routing.isHotspotRescue() && plan.waitKey.role() == RoleType.PREFILL) {
+                                // The target lost its spare capacity. Retry normal affinity without evicting a victim.
+                                return Outcome.REPLAN;
+                            }
                             WorkerEndpoint blocked = routing.blockedEndpointIfCurrent(plan.waitKey);
                             if (blocked == null) { return Outcome.REPLAN; }
                             if (!tryPriorityRescue(plan, blocked)) { return Outcome.BLOCKED; }

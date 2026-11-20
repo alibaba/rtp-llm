@@ -80,6 +80,11 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 config.getDispatcher().requiresGenerateInput() ? "BATCH" : config.getScheduler().getType().name());
         future.whenComplete((response, failure) -> {
             if (failure == null && response != null && response.isSuccess()) {
+                var delivery = ctx.snapshot().delivery();
+                if (delivery != null && delivery.identity().item().isHotspotRescue()) {
+                    var target = delivery.identity().item().prefill();
+                    runtime.deliveryReporter().reportHotspotRescue(target.getRole().name(), target.getServerIp());
+                }
                 try { cacheTrace.report(ctx); }
                 catch (RuntimeException error) { Logger.warn("Route tracing failed", error); }
             }
