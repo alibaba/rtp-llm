@@ -1,5 +1,17 @@
 workspace(name = "rtp_llm")
 
+# Bootstrap without loading a main-repository label while Bazel is still
+# computing the main repository mapping. This rules-only repository has no
+# dependency on pip, arch_config, or the generated selection repository.
+local_repository(
+    name = "sm90_dependency_config_rules",
+    path = "deps/sm90_dependency_config",
+)
+
+load("@sm90_dependency_config_rules//:repositories.bzl", "sm90_dependency_config")
+
+sm90_dependency_config(name = "sm90_dependency_config")
+
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
@@ -35,6 +47,12 @@ local_repository(
     path = "deps",
 )
 
+# Keep public lock tooling addressable when rtp_deps uses the internal overlay.
+local_repository(
+    name = "rtp_public_deps",
+    path = "deps",
+)
+
 local_repository(
     name = "arch_config",
     path = "arch_config",
@@ -63,6 +81,16 @@ py_repositories()
 load("@rtp_deps//:pip.bzl", "pip_deps")
 
 pip_deps()
+
+local_repository(
+    name = "flash_mla_sm90_rules",
+    path = "deps/flash_mla_sm90",
+)
+
+load("@flash_mla_sm90_rules//:repositories.bzl", "flash_mla_sm90_repository")
+
+flash_mla_sm90_repository(name = "flash_mla_sm90_sidecar")
+
 
 load("@rules_python//python:pip.bzl", "pip_parse")
 
@@ -95,6 +123,9 @@ pip_gpu_cuda12_9_torch_install_deps()
 
 load("@pip_gpu_cuda13_torch//:requirements.bzl", pip_gpu_cuda13_torch_install_deps = "install_deps")
 pip_gpu_cuda13_torch_install_deps()
+
+load("@pip_gpu_cuda13_sm90_torch//:requirements.bzl", pip_gpu_cuda13_sm90_torch_install_deps = "install_deps")
+pip_gpu_cuda13_sm90_torch_install_deps()
 
 load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
 pip_cuda12_arm_torch_install_deps()

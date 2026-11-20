@@ -392,3 +392,7 @@ try-import %workspace%/internal_source/.cicd_bazelrc
 
 # Machine-local toolchains, kept out of version control.
 try-import %workspace%/user.bazelrc
+
+# Explicit Hopper x86 backend dependencies; default cuda13/ARM remain upstream.
+build:cuda13_sm90 --config=cuda13
+build:cuda13_sm90 --repo_env=RTP_LLM_SM90_DEPS=1
