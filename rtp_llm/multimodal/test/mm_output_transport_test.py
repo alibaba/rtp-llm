@@ -113,6 +113,8 @@ class MMOutputTransportFactoryTest(TestCase):
         config.allow_inline_clients = True
         exporter = MagicMock()
         exporter.export_embedding.return_value = [_serialized_desc("one")]
+        exporter.offer.return_value = True
+        exporter.claim.return_value = True
         create.return_value = RdmaOutputBackend(exporter)
         transport = create_mm_output_transport(config)
         result = MMEmbeddingRes([_rows(1)])
@@ -120,6 +122,9 @@ class MMOutputTransportFactoryTest(TestCase):
         inline = transport.transfer(MultimodalInputsPB(), result)
         self.assertTrue(inline.HasField("multimodal_embedding"))
         exporter.export_embedding.assert_not_called()
+        transport.offer(inline)
+        self.assertFalse(inline.rdma_claim_required)
+        exporter.offer.assert_not_called()
 
         with _tensors_look_cuda():
             receipt = transport.transfer(_rdma_request(), result)
@@ -128,7 +133,13 @@ class MMOutputTransportFactoryTest(TestCase):
             with self.assertRaisesRegex(RuntimeError, "export failed"):
                 transport.transfer(_rdma_request(), result)
 
-        transport.release(ReleaseLeasePB(lease_id=["one"]))
+        lease = ReleaseLeasePB(lease_id=["one"])
+        transport.offer(receipt)
+        self.assertTrue(receipt.rdma_claim_required)
+        exporter.offer.assert_called_once_with(["one"])
+        self.assertTrue(transport.claim(lease))
+        exporter.claim.assert_called_once_with(["one"])
+        transport.release(lease)
         exporter.release.assert_called_once_with(["one"])
         with patch.object(create.return_value, "close") as close:
             transport.close()
