@@ -93,8 +93,8 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=int,
         default=10000,
         help=(
-            "RDMA：传输超时后等待该时长再关闭相关连接（毫秒）。"
-            "已派发的读操作若缺少完成回调，Decode 会将目标 KV 保留至收到停写确认或隔离满 5 分钟。"
+            "RDMA 传输超时后，若物理传输仍未完成，等待该时长再尝试关闭相关连接（毫秒，默认 10000）。"
+            "Decode 确认所有 rank 停止写入后才释放目标 KV。"
         ),
     )
     cache_store_group.add_argument(
@@ -102,34 +102,10 @@ def init_cache_store_group_args(parser, cache_store_config):
         env_name="P2P_LEASE_QUERY_TIMEOUT_MS",
         bind_to=(cache_store_config, "p2p_lease_query_timeout_ms"),
         type=int,
-        default=20000,
+        default=500,
         help="Decode：单轮 lease 查询的超时上限（毫秒），内部最多等待 500ms；未确认停止则继续持有 KV 并重试。",
     )
-    cache_store_group.add_argument(
-        "--p2p_kv_force_release_timeout_ms",
-        env_name="P2P_KV_FORCE_RELEASE_TIMEOUT_MS",
-        bind_to=(cache_store_config, "p2p_kv_force_release_timeout_ms"),
-        type=int,
-        default=300000,
-        help="已废弃，仅用于兼容旧启动参数。KV 需要确认物理传输结束才会释放。",
-    )
 
-    cache_store_group.add_argument(
-        "--p2p_resource_store_timeout_check_interval_ms",
-        env_name="P2P_RESOURCE_STORE_TIMEOUT_CHECK_INTERVAL_MS",
-        bind_to=(cache_store_config, "p2p_resource_store_timeout_check_interval_ms"),
-        type=int,
-        default=100,
-        help="兼容旧启动配置。当前资源过期由请求截止时间驱动。",
-    )
-    cache_store_group.add_argument(
-        "--p2p_layer_cache_buffer_store_timeout_ms",
-        env_name="P2P_LAYER_CACHE_BUFFER_STORE_TIMEOUT_MS",
-        bind_to=(cache_store_config, "p2p_layer_cache_buffer_store_timeout_ms"),
-        type=int,
-        default=100000,
-        help="保留用于兼容旧配置。当前 P2P 缓冲区使用请求截止时间。",
-    )
     cache_store_group.add_argument(
         "--p2p_cancel_broadcast_timeout_ms",
         env_name="P2P_CANCEL_BROADCAST_TIMEOUT_MS",
@@ -217,31 +193,4 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=int,
         default=10000,
         help="P2P Prefill 异步发送线程池的队列容量，必须大于 0。",
-    )
-
-    cache_store_group.add_argument(
-        "--cache_store_rdma_transfer_wait_timeout_ms",
-        env_name="CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS",
-        bind_to=(cache_store_config, "rdma_transfer_wait_timeout_ms"),
-        type=int,
-        default=180000,
-        help="兼容旧启动配置，P2P 传输路径不使用此参数。",
-    )
-
-    cache_store_group.add_argument(
-        "--p2p_read_steal_before_deadline_ms",
-        env_name="P2P_READ_STEAL_BEFORE_DEADLINE_MS",
-        bind_to=(cache_store_config, "p2p_read_steal_before_deadline_ms"),
-        type=int,
-        default=250,
-        help="兼容旧启动配置，P2P 传输路径不使用此参数。",
-    )
-
-    cache_store_group.add_argument(
-        "--p2p_read_return_before_deadline_ms",
-        env_name="P2P_READ_RETURN_BEFORE_DEADLINE_MS",
-        bind_to=(cache_store_config, "p2p_read_return_before_deadline_ms"),
-        type=int,
-        default=100,
-        help="兼容旧启动配置，P2P 传输路径不使用此参数。",
     )

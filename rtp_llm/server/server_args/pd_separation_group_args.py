@@ -1,6 +1,3 @@
-from rtp_llm.server.server_args.util import str2bool
-
-
 def init_pd_separation_group_args(parser, pd_separation_config):
     ##############################################################################################################
     # PD分离的配置
@@ -41,67 +38,4 @@ def init_pd_separation_group_args(parser, pd_separation_config):
         help="RPC 调用最大超时（毫秒），用作 per-request 未传 timeout 时的默认值；"
         "<=0 表示不设置默认生成期限；PD 交接阶段仍有独立的资源清理期限；"
         "per-request generate_config.timeout_ms 优先级更高",
-    )
-
-    pd_separation_group.add_argument(
-        "--prefill_max_wait_timeout_ms",
-        env_name="PREFILL_MAX_WAIT_TIMEOUT_MS",
-        bind_to=(pd_separation_config, "prefill_max_wait_timeout_ms"),
-        type=int,
-        default=600 * 1000,
-        help="兼容旧启动配置，Decode 入口路径不使用此参数。",
-    )
-
-    pd_separation_group.add_argument(
-        "--prefill_prepare_resource_pool_size",
-        env_name="PREFILL_PREPARE_RESOURCE_POOL_SIZE",
-        bind_to=(pd_separation_config, "prefill_prepare_resource_pool_size"),
-        type=int,
-        default=0,
-        help="兼容旧启动配置，Decode 入口路径不使用此参数。",
-    )
-
-    pd_separation_group.add_argument(
-        "--prefill_stop_stream_wait_timeout_ms",
-        env_name="PREFILL_STOP_STREAM_WAIT_TIMEOUT_MS",
-        bind_to=(pd_separation_config, "prefill_stop_stream_wait_timeout_ms"),
-        type=int,
-        default=2000,
-        help="兼容旧启动配置，Decode 入口路径不使用此参数。",
-    )
-
-    pd_separation_group.add_argument(
-        "--decode_retry_interval_ms",
-        env_name="DECODE_RETRY_INTERVAL_MS",
-        bind_to=(pd_separation_config, "decode_retry_interval_ms"),
-        type=int,
-        default=1,
-        help="兼容旧启动配置，Decode 入口路径不使用此参数。",
-    )
-
-    pd_separation_group.add_argument(
-        "--rdma_connect_retry_times",
-        env_name="RDMA_CONNECT_RETRY_TIMES",
-        bind_to=(pd_separation_config, "rdma_connect_retry_times"),
-        type=int,
-        default=0,
-        help="兼容旧启动配置，Decode 入口路径不使用此参数。",
-    )
-
-    pd_separation_group.add_argument(
-        "--decode_polling_kv_cache_step_ms",
-        env_name="DECODE_POLLING_KV_CACHE_STEP_MS",
-        bind_to=(pd_separation_config, "decode_polling_kv_cache_step_ms"),
-        type=int,
-        default=30,
-        help="兼容旧启动配置，Decode 入口路径不使用此参数。",
-    )
-
-    pd_separation_group.add_argument(
-        "--decode_entrance",
-        env_name="DECODE_ENTRANCE",
-        bind_to=(pd_separation_config, "decode_entrance"),
-        type=str2bool,
-        default=False,
-        help="兼容旧启动配置，Decode 入口路径不使用此参数。",
     )

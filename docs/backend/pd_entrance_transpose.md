@@ -1,6 +1,6 @@
 # PD Decode 入口与同版本发布说明
 
-本版本统一采用 Decode 入口：Frontend 把请求发到 Decode；Prefill 计算首 token，并通过 StartLoad 交付首 token、采样状态和 KV 传输信息；后续生成和流式输出由 Decode 完成。`DECODE_ENTRANCE` / `--decode_entrance` 仍可解析，任一取值都使用 Decode 入口。
+本版本统一采用 Decode 入口：Frontend 把请求发到 Decode；Prefill 计算首 token，并通过 StartLoad 交付首 token、采样状态和 KV 传输信息；后续生成和流式输出由 Decode 完成。`DECODE_ENTRANCE` / `--decode_entrance` 已移除。
 
 ## 发布契约
 
@@ -45,6 +45,37 @@ GetPeerInfo 使用最多 15 秒的探测预算，并受请求剩余时间约束�
 PD handoff 的 token IDs、span 和特征哈希是跨角色缓存身份契约。两侧必须使用相同模型权重、预处理和确定性的 ViT 执行；Prefill 发现哈希不一致会返回 `MM_PROCESS_ERROR`，不会在 Decode 已持有旧 token IDs 时单侧改写身份，也不会通过重试掩盖确定性失配。发布验收应包含真实多模态请求和哈希失配负例。
 
 CP 方法是角色相关配置：Prefill 使用实际通信方法（`ALL_GATHER`、`ALL_GATHER_WITH_OVERLAP` 或 `ALLTOALL`），Decode 使用 `PREFILL_CP` 表示上游开启 CP。分片开关须配套，fixed/SWA Decode 还需明确 `prefill_cp_size`。将未启用实际 CP 的 Prefill 与期望 CP 分片的 Decode 配对属于配置错误，应拒绝，不能通过放宽布局校验兼容。
+
+
+## 配置默认值
+
+默认使用 TCP。启用 `CACHE_STORE_RDMA_MODE` 后才使用 RDMA；各参数也可通过同名小写 CLI 选项覆盖。
+
+| 环境变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `LOAD_CACHE_TIMEOUT_MS` | 5000 ms | KV 单次通信预算 |
+| `MAX_RPC_TIMEOUT_MS` | 7200000 ms | 请求未指定超时时的默认生成期限 |
+| `PREFILL_RETRY_TIMES` | 0 | 多模态瞬时错误的额外尝试次数 |
+| `PREFILL_RETRY_TIMEOUT_MS` | 0 | 追加尝试预算，0 表示仅受请求 deadline 约束 |
+| `P2P_TRANSFER_NOT_DONE_RESOURCE_HOLD_MS` | 10000 ms | RDMA 传输超时后等待物理完成，再尝试关闭连接 |
+| `P2P_LEASE_QUERY_TIMEOUT_MS` | 500 ms | Decode 单轮 lease 查询超时，可调低，内部上限为 500 ms |
+| `P2P_CANCEL_BROADCAST_TIMEOUT_MS` | 1000 ms | P2P 取消广播的 gRPC 超时 |
+| `P2P_CANCELLED_KEYS_TTL_MS` | 3600000 ms | 保留已取消请求的记录，用于拒绝迟到的传输 |
+| `CACHE_STORE_TCP_WORKER_QUEUE_SIZE` | 500 | TCP/RDMA 控制面的 worker 队列容量 |
+| `RDMA_TRANSFER_WORKER_THREAD_COUNT` | 16 | RDMA 传输 worker 线程数 |
+| `RDMA_TRANSFER_WORKER_QUEUE_SIZE` | 100 | RDMA 传输 worker 队列容量 |
+| `P2P_RDMA_ENABLE_H2D_COPY` | false | 启用 pinned host staging 后再做 H2D copy |
+| `P2P_RDMA_STAGING_TOTAL_BYTES` | 0 | staging 容量，启用 H2D 时须至少容纳一个模型 KV block |
+| `P2P_PREFILL_SENDER_THREAD_COUNT` | 4 | Prefill 异步发送线程数 |
+| `P2P_PREFILL_SENDER_QUEUE_SIZE` | 10000 | Prefill 异步发送队列容量 |
+
+升级时从启动模板移除以下旧选项及对应的环境变量。
+
+- 入口及 Prefill 等待：`DECODE_ENTRANCE`、`PREFILL_MAX_WAIT_TIMEOUT_MS`、`PREFILL_PREPARE_RESOURCE_POOL_SIZE`、`PREFILL_STOP_STREAM_WAIT_TIMEOUT_MS`。
+- 旧重试和轮询：`DECODE_RETRY_INTERVAL_MS`、`RDMA_CONNECT_RETRY_TIMES`、`DECODE_POLLING_KV_CACHE_STEP_MS`。
+- 旧 P2P 超时：`CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS`、`P2P_READ_STEAL_BEFORE_DEADLINE_MS`、`P2P_READ_RETURN_BEFORE_DEADLINE_MS`、`P2P_RESOURCE_STORE_TIMEOUT_CHECK_INTERVAL_MS`、`P2P_LAYER_CACHE_BUFFER_STORE_TIMEOUT_MS`、`P2P_KV_FORCE_RELEASE_TIMEOUT_MS`。
+
+PR 早期版本的进程退出阈值 `P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT`、`P2P_KV_LEAK_EXIT_THRESHOLD_MIN_PERCENT` 和 `P2P_KV_LEAK_EXIT_THRESHOLD_MAX_PERCENT` 已在后续提交中移除。
 
 ## 回滚
 

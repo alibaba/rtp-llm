@@ -136,7 +136,7 @@ class EngineConfigTest(TestCase):
                 role_type=RoleType.PREFILL,
             )
 
-    def test_pd_sep_config_roundtrip_preserves_legacy_fields(self):
+    def test_pd_sep_config_roundtrip_preserves_active_fields(self):
         config = PDSepConfig()
         config.role_type = RoleType.DECODE
         config.cache_store_rdma_mode = False
@@ -144,37 +144,35 @@ class EngineConfigTest(TestCase):
         config.max_rpc_timeout_ms = 67890
         config.prefill_retry_times = 3
         config.prefill_retry_timeout_ms = 75
-        config.decode_entrance = True
-        config.prefill_max_wait_timeout_ms = 23456
         state = config.__getstate__()
-        self.assertEqual(len(state), 19)
+        self.assertEqual(len(state), 12)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.role_type, RoleType.DECODE)
         self.assertEqual(restored.load_cache_timeout_ms, 12345)
         self.assertEqual(restored.prefill_retry_times, 3)
         self.assertEqual(restored.prefill_retry_timeout_ms, 75)
-        self.assertTrue(restored.decode_entrance)
-        self.assertEqual(restored.prefill_max_wait_timeout_ms, 23456)
+        legacy = PDSepConfig.__new__(PDSepConfig)
+        legacy.__setstate__(state[:9] + (600000, 1, 30, 0) + state[9:] + (True, 2000, 0))
+        self.assertEqual(legacy.__getstate__(), state)
 
-    def test_cache_store_config_roundtrip_preserves_legacy_fields(self):
+    def test_cache_store_config_roundtrip_preserves_active_fields(self):
         config = CacheStoreConfig()
         self.assertEqual(config.p2p_prefill_sender_thread_count, 4)
         self.assertEqual(config.p2p_prefill_sender_queue_size, 10000)
         config.p2p_prefill_sender_thread_count = 8
         config.p2p_prefill_sender_queue_size = 20000
-        config.rdma_transfer_wait_timeout_ms = 5678
-        config.p2p_resource_store_timeout_check_interval_ms = 123
         state = config.__getstate__()
-        self.assertEqual(len(state), 28)
+        self.assertEqual(len(state), 22)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)
         self.assertEqual(restored.p2p_prefill_sender_queue_size, 20000)
-        self.assertEqual(restored.rdma_transfer_wait_timeout_ms, 5678)
-        self.assertEqual(restored.p2p_resource_store_timeout_check_interval_ms, 123)
+        previous = CacheStoreConfig.__new__(CacheStoreConfig)
+        previous.__setstate__(state + (180000, 250, 100, 100, 100000, 300000))
+        self.assertEqual(previous.__getstate__(), state)
         legacy = CacheStoreConfig.__new__(CacheStoreConfig)
-        legacy.__setstate__(state[:22] + (40, 45) + state[22:-1])
+        legacy.__setstate__(state + (40, 45, 180000, 250, 100, 100, 100000))
         self.assertEqual(legacy.__getstate__(), state)
 
     def test_cache_store_config_preserves_rdma_h2d_staging_total_bytes(self):

@@ -358,13 +358,7 @@ std::string CacheStoreConfig::to_string() const {
         << "messager_worker_thread_count: " << messager_worker_thread_count << "\n"
         << "rdma_max_block_pairs_per_connection: " << rdma_max_block_pairs_per_connection << "\n"
         << "p2p_transfer_not_done_resource_hold_ms: " << p2p_transfer_not_done_resource_hold_ms << "\n"
-        << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
-        << "p2p_read_steal_before_deadline_ms: " << p2p_read_steal_before_deadline_ms << "\n"
-        << "p2p_read_return_before_deadline_ms: " << p2p_read_return_before_deadline_ms << "\n"
-        << "p2p_resource_store_timeout_check_interval_ms: " << p2p_resource_store_timeout_check_interval_ms << "\n"
-        << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
         << "p2p_lease_query_timeout_ms: " << p2p_lease_query_timeout_ms << "\n"
-        << "p2p_kv_force_release_timeout_ms: " << p2p_kv_force_release_timeout_ms << "\n"
         << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
         << "p2p_cancelled_keys_ttl_ms: " << p2p_cancelled_keys_ttl_ms << "\n"
         << "cache_store_tcp_anet_rpc_thread_num: " << cache_store_tcp_anet_rpc_thread_num << "\n"
@@ -589,16 +583,9 @@ std::string PDSepConfig::to_string() const {
         << "remote_rpc_server_port: " << remote_rpc_server_port << "\n"
         << "prefill_retry_times: " << prefill_retry_times << "\n"
         << "prefill_retry_timeout_ms: " << prefill_retry_timeout_ms << "\n"
-        << "prefill_max_wait_timeout_ms: " << prefill_max_wait_timeout_ms << "\n"
-        << "decode_retry_interval_ms: " << decode_retry_interval_ms << "\n"
-        << "decode_polling_kv_cache_step_ms: " << decode_polling_kv_cache_step_ms << "\n"
-        << "rdma_connect_retry_times: " << rdma_connect_retry_times << "\n"
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
-        << "worker_port_offset: " << worker_port_offset << "\n"
-        << "decode_entrance: " << decode_entrance << "\n"
-        << "prefill_prepare_resource_pool_size: " << prefill_prepare_resource_pool_size << "\n"
-        << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms << "\n";
+        << "worker_port_offset: " << worker_port_offset << "\n";
     return oss.str();
 }
 
