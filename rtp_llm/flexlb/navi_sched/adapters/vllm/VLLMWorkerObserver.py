@@ -11,6 +11,7 @@ from vllm.v1.outputs import AsyncModelRunnerOutput
 
 from . import ExecutionTimingProbe as _execution_timing_probe
 from .VLLMCachePolicy import is_vllm_native_pd_prefill
+from .PeerKvLoadTimingProbe import install_peer_kv_load_timing
 
 # Use the same configured vLLM stream as the Engine observer.
 logger = logging.getLogger("vllm.navi_sched.worker")
@@ -226,6 +227,10 @@ class _WorkerObserver:
         result = self._worker.compile_or_warm_up_model(*args, **kwargs)
         _execution_timing_probe.install_worker_sampling_stage_audit(self._worker, self)
         _execution_timing_probe.install_worker_draft_compile_audit(self._worker)
+        install_peer_kv_load_timing(
+            self._worker,
+            getattr(getattr(self._worker, "model_runner", None), "vllm_config", None),
+        )
         _execution_timing_probe.worker_startup_gc_sweep()
         return result
 
