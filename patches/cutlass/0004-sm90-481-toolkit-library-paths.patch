@@ -1,0 +1,32 @@
+diff --git a/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py b/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py
+--- a/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py
++++ b/nvidia_cutlass_dsl/dsl_packages/cutlass/_mlir/_mlir_libs/__init__.py
+@@ -101,7 +101,17 @@
+ 
+     # available[ctk] -> (so_path, runtime_lib_dir_or_None)
+     available = {}
+-    for entry in this_dir.iterdir():
++    # Each pinned Bazel wheel has a separate NVIDIA namespace root.
++    import nvidia_cutlass_dsl
++
++    for entry in (
++        item
++        for root in nvidia_cutlass_dsl.__path__
++        for directory in [Path(root) / "dsl_packages/cutlass/_mlir/_mlir_libs"]
++        if directory.is_dir()
++        for item in directory.iterdir()
++    ):
++        nvidia_root = next(p for p in entry.parents if p.name == "nvidia_cutlass_dsl")
+         m = flavor_re.match(entry.name)
+         if not m:
+             continue
+@@ -130,7 +140,8 @@
+                 )
+             # No cu{N}/ at all → editable install; runtime resolves via
+             # $LD_LIBRARY_PATH or build-tree RPATH.
+-        available[toolkit_ver] = (entry, runtime_dir)
++        # Preserve Python namespace precedence over later system installations.
++        available.setdefault(toolkit_ver, (entry, runtime_dir))
+ 
+     if not available:
+         raise RuntimeError(
