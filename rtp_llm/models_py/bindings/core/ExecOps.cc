@@ -601,7 +601,13 @@ void cudaProfilerBegin() {
 #if USING_CUDA
     check_cuda_value(cudaProfilerStart());
 #else
-    // no-op on ROCm / Ascend
+    // No process-lifetime capture-range marker on Ascend/ROCm.
+    // NOTE: Ascend torch_npu profiling is NOT driven here. It is owned by the
+    // step-windowed TorchProfile (rtp_llm/cpp/engine_base/TorchProfiler.cc),
+    // triggered via the gRPC StartProfile RPC / per-request gen_timeline flag,
+    // and backed by torch_npu.profiler.profile(). This begin/end pair only
+    // brackets the NormalExecutor lifetime (an nsys-style capture range) and is
+    // intentionally a no-op on Ascend.
 #endif
 }
 
@@ -609,7 +615,7 @@ void cudaProfilerEnd() {
 #if USING_CUDA
     check_cuda_value(cudaProfilerStop());
 #else
-    // no-op on ROCm / Ascend
+    // No-op on Ascend/ROCm — see cudaProfilerBegin() above.
 #endif
 }
 

@@ -399,13 +399,15 @@ def start_backend_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
 ):
-    # Fail-fast (same pattern as the MTP gate): Ascend NPU currently supports
-    # single-card only. Remove when the Ascend TP feature lands.
-    if is_ascend() and py_env_configs.parallelism_config.world_size > 1:
+    # Fail-fast: Ascend NPU currently supports pure-TP only (dp_size <= 1).
+    # dp_size > 1 triggers createMinFakeStream's torch::kCUDA allocation in
+    # the engine loop (NormalEngine.cc:592), which aborts on the CPU-only
+    # torch build. Remove when Ascend DP support lands.
+    if is_ascend() and py_env_configs.parallelism_config.dp_size > 1:
         raise RuntimeError(
-            f"TP>1 / multi-rank (world_size={py_env_configs.parallelism_config.world_size}) "
-            "is not yet supported on Ascend NPU; "
-            "run single-card (world_size=1) until Ascend TP support lands."
+            f"DP>1 (dp_size={py_env_configs.parallelism_config.dp_size}) is not yet "
+            "supported on Ascend NPU; use pure TP (dp_size=1, world_size=tp_size) "
+            "until Ascend DP support lands."
         )
 
     # Startup window only: turn SIGTERM/SIGINT into an exception so the teardown
