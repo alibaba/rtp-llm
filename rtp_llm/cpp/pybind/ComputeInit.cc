@@ -1,5 +1,5 @@
 #include <torch/library.h>
-#include "rtp_llm/cpp/pybind/EmbTensorRestore.h"
+#include "rtp_llm/cpp/pybind/EmbTensorCodec.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -17,7 +17,7 @@ void registerExecCtxOps(pybind11::module& m);
 using namespace torch_ext;
 
 PYBIND11_MODULE(librtp_compute_ops, m) {
-    registerEmbTensorRestore(m);
+    registerEmbTensorCodec(m);
 #if USING_CUDA || USING_ROCM
     registerExecCtxOps(m);
 #endif

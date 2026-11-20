@@ -25,6 +25,7 @@ _MAX_NODES = 4096
 _MAX_DEPTH = 32
 _ALIGNMENT = 64
 _USE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE") == "1"
+_USE_NATIVE_PACK = os.environ.get("MM_EMB_NATIVE_PACK") == "1"
 _DTYPES = {
     str(dtype): dtype
     for dtype in (
@@ -183,6 +184,20 @@ def pack_object(
             output[len(prefix) : plan.payload_offset].zero_()
 
     with cuda_graph_gate.operation() if output.is_cuda else nullcontext():
+        if output.is_cuda and _USE_NATIVE_PACK:
+            from librtp_compute_ops import pack_emb_tensor_slices
+
+            with stage("native_pack"):
+                pack_emb_tensor_slices(
+                    output,
+                    _PREFIX.pack(_MAGIC_V2, len(plan.header_bytes)) + plan.header_bytes,
+                    plan.payload_offset,
+                    [
+                        (plan.payload_offset + spec["offset"], spec["nbytes"], tensor)
+                        for tensor, spec in zip(plan.tensors, plan.header["tensors"])
+                    ],
+                )
+            return output
         if not plan.checksum:
             write_header(_MAGIC_V2, plan.header_bytes)
         with stage("pack_payload"):
