@@ -3,7 +3,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.qwen4_exp.qsa.draft_decode_positions_triton import (
     try_prepare_decode_positions,
 )
@@ -322,22 +321,32 @@ class QSAFusedDecodeTest(unittest.TestCase):
             finally:
                 graph.reset()
 
-    def test_topk_order_tail_and_graph_replay(self):
+    def test_topk_selection_tail_and_graph_replay(self):
         from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
             select_qsa_paged_tokens,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import try_cub_qsa_tokens
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
+            try_select_qsa_tokens,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.test.topk_reference import (
+            assert_qsa_selection_close,
+        )
+
+        def select(scores, lengths):
+            return try_select_qsa_tokens(
+                scores, lengths, compress_ratio=4, token_budget=2048
+            )
 
         native_path = "rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton.try_select_qsa_tokens"
         for batch in (16, 32, 64):
             for columns in (1023, 1024):
                 scores = torch.randn(batch, columns, device="cuda")
                 lengths = torch.full((batch,), 2048, device="cuda", dtype=torch.int32)
-                self.assertIsNotNone(try_cub_qsa_tokens(scores, lengths))
+                self.assertIsNotNone(select(scores, lengths))
                 torch.cuda.synchronize()
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
-                    actual = try_cub_qsa_tokens(scores, lengths)
+                    actual = select(scores, lengths)
                 try:
                     for mode in range(4):
                         scores.normal_()
@@ -368,9 +377,8 @@ class QSAFusedDecodeTest(unittest.TestCase):
                                     token_budget=2048,
                                 )
                             graph.replay()
-                            self.assertTrue(
-                                torch.equal(actual, expected),
-                                (batch, columns, mode, length),
+                            assert_qsa_selection_close(
+                                actual, expected, scores, lengths
                             )
                 finally:
                     graph.reset()

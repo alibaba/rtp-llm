@@ -1,4 +1,4 @@
-"""Fuse QSA selection bookkeeping while preserving native TopK tie ordering."""
+"""QSA token selection with native RTP TopK on SM90."""
 
 import torch
 import triton
@@ -16,8 +16,8 @@ def _mask_scores(
     LENGTH_STRIDE: tl.constexpr,
     BN: tl.constexpr,
 ):
-    row = tl.program_id(0)
-    column = tl.arange(0, BN)
+    row = tl.program_id(0).to(tl.int64)
+    column = tl.program_id(1) * BN + tl.arange(0, BN)
     length = tl.load(lengths + row * LENGTH_STRIDE).to(tl.int64)
     complete = (length - tl.where(length < 0, 3, 0)) // 4
     values = tl.load(
@@ -30,7 +30,7 @@ def _mask_scores(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["SCORE_WIDTH", "SCORE_ROW_STRIDE"])
 def _expand_tokens(
     values,
     blocks,
@@ -39,12 +39,21 @@ def _expand_tokens(
     K,
     LENGTH_STRIDE: tl.constexpr,
     FINITE_ONLY: tl.constexpr,
+    SCORE_WIDTH=0,
+    SCORE_ROW_STRIDE=0,
 ):
-    row = tl.program_id(0)
+    row = tl.program_id(0).to(tl.int64)
     slot = tl.arange(0, 4096)
     index = slot // 4
-    value = tl.load(values + row * K + index, index < K, other=float("-inf"))
-    block = tl.load(blocks + row * K + index, index < K, other=0)
+    block = tl.load(blocks + row * K + index, index < K, other=-1)
+    if SCORE_WIDTH:
+        value = tl.load(
+            values + row * SCORE_ROW_STRIDE + block,
+            (index < K) & (block >= 0) & (block < SCORE_WIDTH),
+            other=float("-inf"),
+        )
+    else:
+        value = tl.load(values + row * K + index, index < K, other=float("-inf"))
     if FINITE_ONLY:
         finite = (value == value) & (tl.abs(value) != float("inf"))
     else:
@@ -150,35 +159,66 @@ def try_select_qsa_tokens(
         and torch.version.hip is None
         and scores.dtype == torch.float32
         and scores.ndim == 2
-        and 0 < scores.shape[0] <= 32768
+        and 0 < scores.shape[0] <= 2**31 - 1
         and 0 < scores.shape[1] <= (2**31 - 1) // 4
-        and scores.stride(0) > 0
-        and scores.stride(1) > 0
+        and scores.stride(0) >= 0
+        and scores.stride(1) >= 0
         and lengths.shape == (scores.shape[0],)
         and lengths.dtype == torch.int32
         and lengths.device == scores.device
-        and lengths.stride(0) > 0
+        and lengths.stride(0) >= 0
         and compress_ratio == 4
         and token_budget == 2048
         and torch.cuda.get_device_capability(scores.device)[0] >= 8
     ):
         return None
     rows, columns = scores.shape
+    # Share the native RTP selector with prefill; ties and output order are
+    # unspecified. Runtime lengths keep fixed-capacity graph replays ragged.
+    if torch.cuda.get_device_capability(scores.device) == (9, 0):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+        if scores.stride(1) != 1:
+            staged = torch.empty(
+                (rows, columns), device=scores.device, dtype=scores.dtype
+            )
+            _mask_scores[(rows, triton.cdiv(columns, 1024))](
+                scores,
+                lengths,
+                staged,
+                N=columns,
+                ROW_STRIDE=scores.stride(0),
+                COL_STRIDE=scores.stride(1),
+                LENGTH_STRIDE=lengths.stride(0),
+                BN=1024,
+                num_warps=4,
+            )
+            scores = staged
+        complete = torch.div(lengths, 4, rounding_mode="floor")
+        blocks = torch.empty((rows, 512), device=scores.device, dtype=torch.int32)
+        workspace = torch.empty(0, device=scores.device, dtype=torch.uint8)
+        rtp_llm_ops.topk_v3(scores, complete, blocks, workspace, 512, columns)
+        output = torch.empty((rows, 2051), device=scores.device, dtype=torch.int32)
+        _expand_tokens[(rows,)](
+            scores,
+            blocks,
+            lengths,
+            output,
+            K=512,
+            LENGTH_STRIDE=lengths.stride(0),
+            FINITE_ONLY=finite_only,
+            SCORE_WIDTH=columns,
+            SCORE_ROW_STRIDE=scores.stride(0),
+            num_warps=4,
+        )
+        return compact_qsa_selection(output) if packed_count else output
     if scores_are_masked and not packed_count:
         from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import try_cub_qsa_tokens
 
         output = try_cub_qsa_tokens(scores, lengths, finite_only=finite_only)
         if output is not None:
             return output
-    if torch.cuda.get_device_capability(scores.device) == (9, 0):
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
-            try_radix_qsa_tokens,
-        )
-
-        output = try_radix_qsa_tokens(scores, lengths, finite_only=finite_only)
-        if output is not None:
-            return compact_qsa_selection(output) if packed_count else output
-    # Legacy kernels remain bounded when the streaming contract is unsupported.
+    # Other architectures retain their existing bounded fast paths.
     if columns > 8192:
         return None
     if (
@@ -191,11 +231,8 @@ def try_select_qsa_tokens(
         and torch.version.git_version == "70d99e998b4955e0049d13a98d77ae1b14db1f45"
         and torch.cuda.get_device_capability(scores.device) == (12, 0)
     ):
-        # This bounded, bit-exact radix-key order is validated against the
-        # frozen native CUDA TopK, including mixed ties, signed zero and NaNs.
-        # L20X (SM90) re-measure showed this single-CTA tl.topk variant slower
-        # than the native sbtopk chain at every column width (0.55-0.91x), so
-        # SM90 keeps the radix-select kernel below / the native path.
+        # SM120 retains the bounded native-order fallback when CUB is
+        # unavailable or this caller requests the packed-count format.
         output = torch.empty(
             (rows, 2052 if packed_count else 2051),
             device=scores.device,
@@ -230,7 +267,7 @@ def try_select_qsa_tokens(
             BN=triton.next_power_of_2(columns),
             num_warps=4,
         )
-    # Keep the original primitive and its sorting/tie behavior unchanged.
+    # Unsupported layouts and other architectures retain native Torch ordering.
     values, blocks = torch.topk(masked, min(512, columns), dim=-1)
     output = torch.empty((rows, 2051), device=scores.device, dtype=torch.int32)
     _expand_tokens[(rows,)](

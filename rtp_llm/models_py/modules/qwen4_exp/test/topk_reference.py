@@ -86,3 +86,43 @@ def select_qsa_paged_tokens(
         )
         output[:, token_budget:] = tail.to(torch.int32)
     return output
+
+
+def assert_qsa_selection_close(actual, expected, scores, lengths):
+    if not (
+        scores.is_cuda
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(scores.device) == (9, 0)
+        and scores.dtype == torch.float32
+        and scores.numel() > 0
+    ):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        return
+    # Native RTP TopK has unspecified order and equal-score winners.
+    # Keep the value multiset, unique blocks, grouping and exact tail contract.
+    torch.testing.assert_close(actual[:, 2048:], expected[:, 2048:], atol=0, rtol=0)
+    blocks = actual[:, :2048:4]
+    valid = blocks >= 0
+    indices = blocks // 4
+    complete = lengths[:, None].to(torch.int64) // 4
+    in_bounds = (indices < scores.shape[1]) & (indices < complete)
+    assert bool(torch.all(~valid | ((blocks % 4 == 0) & in_bounds)))
+    grouped = torch.where(
+        valid[:, :, None],
+        blocks[:, :, None] + torch.arange(4, device=scores.device, dtype=blocks.dtype),
+        -1,
+    ).reshape(-1, 2048)
+    torch.testing.assert_close(actual[:, :2048], grouped, atol=0, rtol=0)
+    ordered = indices.masked_fill(~valid, scores.shape[1]).sort(-1).values
+    unique = (ordered[:, 1:] != ordered[:, :-1]) | (ordered[:, 1:] == scores.shape[1])
+    assert bool(torch.all(unique))
+
+    def selected_values(tokens):
+        block = tokens[:, :2048:4]
+        values = scores.gather(1, (block // 4).clamp(0, scores.shape[1] - 1).long())
+        assert bool(torch.all((block < 0) | (values > -torch.inf)))
+        return values.masked_fill(block < 0, -torch.inf).sort(-1).values
+
+    torch.testing.assert_close(
+        selected_values(actual), selected_values(expected), atol=0, rtol=0
+    )

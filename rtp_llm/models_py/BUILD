@@ -108,7 +108,6 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
-        ":qsa_prefill_topk_headers",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
     deps = [
@@ -322,13 +321,6 @@ py_library(
     deps = ["//rtp_llm:torch", "//rtp_llm:triton"],
 )
 
-filegroup(
-    name = "qsa_prefill_topk_headers",
-    srcs = glob(["modules/qwen4_exp/qsa/vllm_topk/*.cuh"]) + [
-        "modules/qwen4_exp/qsa/vllm_topk/LICENSE",
-    ],
-)
-
 py_library(
     name = "qsa_packed_prefill_testlib",
     testonly = True,
@@ -339,11 +331,15 @@ py_library(
         "modules/qwen4_exp/qsa/prefill_filtered_topk.py",
         "modules/qwen4_exp/qsa/prefill_packed_indexer.py",
     ],
-    data = [":qsa_prefill_topk_headers"],
+    data = [
+        "//rtp_llm/libs:frontend_libs",
+        "//rtp_llm/libs:libs",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         ":qsa_prefill_score_testlib",
         "//rtp_llm:numpy",
+        "//rtp_llm:ops",
         "//rtp_llm:setuptools",
     ],
 )

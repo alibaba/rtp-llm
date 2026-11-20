@@ -3,8 +3,8 @@
 The score grid follows vLLM 83f5de466 (Apache-2.0): request/query/key tiles,
 causal tile pruning, and bounded logits workspace. The SM90 reader consumes
 compact block IDs with a trailing token count. Other readers use the
-2051-column selection with a fixed tail offset at 2048. Histogram selection
-and stable sorting/expansion use separate blocks for their own occupancy.
+2051-column selection with a fixed tail offset at 2048. Native RTP TopK
+selection and QSA packing use separate launches for their own occupancy.
 """
 
 from bisect import bisect_left, bisect_right
@@ -115,15 +115,12 @@ def _packed_causal_score(
 
 
 def _is_supported(q, keys, cos, sin, cu, lengths, gamma):
-    from .cub_topk import _TORCH_GIT
-
-    # Short rows use a different native warp sort/tie order; retain their fallback.
+    # Short rows retain their fallback outside the validated packed geometry.
     return (
         1 <= len(lengths) <= 64
         and min(lengths) >= 256
         and q.is_cuda
         and torch.version.hip is None
-        and torch.version.git_version == _TORCH_GIT
         and torch.cuda.get_device_capability(q.device) == (9, 0)
         and q.ndim == 3
         and q.shape[1:] == (4, 128)

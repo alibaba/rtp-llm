@@ -3,11 +3,9 @@ import unittest
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
-from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import _TORCH_GIT
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_score import (
     try_prefill_score,
 )
@@ -27,8 +25,8 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.qsa_topk_triton import (
 @unittest.skipUnless(
     torch.cuda.is_available()
     and torch.cuda.get_device_capability() == (9, 0)
-    and torch.version.git_version == _TORCH_GIT,
-    "requires SM90 and the pinned Torch version",
+    and torch.version.hip is None,
+    "requires SM90 CUDA",
 )
 class PackedIndexerTest(unittest.TestCase):
     def setUp(self):
@@ -80,20 +78,40 @@ class PackedIndexerTest(unittest.TestCase):
                 visible[:, None] * 4 + tail_offsets,
                 -1,
             )
-            torch.testing.assert_close(
-                out, expected, rtol=0, atol=0, msg=f"width={columns}"
+            # Selection order and equal-score winners are unspecified. Check
+            # the selected values, validity, expansion and tail independently.
+            blocks = out[:, :2048:4] // 4
+            actual_values = scores.gather(1, blocks.clamp_min(0).long())
+            actual_values.masked_fill_(blocks < 0, -torch.inf)
+            expected_values = torch.full_like(actual_values, -torch.inf)
+            expected_values[:, : values.shape[1]] = torch.where(
+                values > -torch.inf, values, -torch.inf
             )
+            torch.testing.assert_close(
+                actual_values.sort(dim=-1).values,
+                expected_values.sort(dim=-1).values,
+                rtol=0,
+                atol=0,
+                msg=f"width={columns}",
+            )
+            expanded = blocks[:, :, None] * 4 + torch.arange(4, device="cuda")
+            expanded.masked_fill_(blocks[:, :, None] < 0, -1)
+            torch.testing.assert_close(out[:, :2048], expanded.flatten(1).int())
+            torch.testing.assert_close(out[:, 2048:], expected[:, 2048:])
             packed = torch.empty(
                 (len(cases), BLOCK_SELECTION_WIDTH), device="cuda", dtype=torch.int32
             )
             _load_module().select(scores, visible, positions, packed, 0)
-            valid = expected >= 0
+            valid = out >= 0
             slot = torch.arange(2051, device="cuda")
             stable_order = torch.where(valid, slot, slot + 2051).argsort(dim=-1)
             torch.testing.assert_close(packed[:, -1], valid.sum(dim=-1).int())
             expanded = packed[:, slot // 4] * 4 + (slot % 4).int()
             expanded.masked_fill_(slot >= packed[:, -1:], -1)
-            torch.testing.assert_close(expanded, expected.gather(1, stable_order))
+            torch.testing.assert_close(
+                expanded.sort(dim=-1).values,
+                out.gather(1, stable_order).sort(dim=-1).values,
+            )
 
     def test_build_failure_falls_back_once(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa import (
@@ -130,7 +148,21 @@ class PackedIndexerTest(unittest.TestCase):
                 try_packed_prefill(*args)
 
     def test_topk_boundary_and_ties(self):
-        for columns in [64, 256, 512, 576, 1024, 1088, 2048, 4096, 8192]:
+        for columns in [
+            31,
+            64,
+            256,
+            512,
+            513,
+            576,
+            1024,
+            1088,
+            2048,
+            4096,
+            8192,
+            8447,
+            16385,
+        ]:
             lens = torch.tensor(
                 sorted(
                     set(
@@ -180,18 +212,6 @@ class PackedIndexerTest(unittest.TestCase):
                     count = min(length, 512)
                     blocks = result[: count * 4 : 4] // 4
                     self.assertEqual(blocks.unique().numel(), count)
-                    masked = scores[row].clone()
-                    masked[length:] = -torch.inf
-                    native = masked.topk(min(512, columns))
-                    expected_blocks = native.indices[native.values > -torch.inf]
-                    torch.testing.assert_close(
-                        blocks.long(),
-                        expected_blocks,
-                        rtol=0,
-                        atol=0,
-                        msg=f"columns={columns}, mode={mode}, visible={length}",
-                    )
-
                     self.assertTrue(bool(((blocks >= 0) & (blocks < length)).all()))
                     torch.testing.assert_close(
                         scores[row, blocks.long()].sort().values,
@@ -286,7 +306,7 @@ class PackedIndexerTest(unittest.TestCase):
                 offset += l
             out = try_packed_prefill(raw, keys, cos, sin, cu, lengths, gamma, 1e-6)
             if min(lengths) < 256:
-                self.assertIsNone(out)  # Preserve the native short-row tie order.
+                self.assertIsNone(out)  # Outside the validated packed geometry.
                 continue
             self.assertIsNotNone(out)
             # Independent sampled dense FP32 oracle, including causal/tail boundaries.
@@ -303,12 +323,19 @@ class PackedIndexerTest(unittest.TestCase):
                     token_budget=2048,
                     finite_only=False,
                 )
+                selected_values = []
+                for selection in (out[offset : offset + l], old_selected):
+                    blocks = selection[:, :2048:4].long() // 4
+                    values = old_scores.reshape(l, l // 4).gather(
+                        1, blocks.clamp_min(0)
+                    )
+                    values.masked_fill_(blocks < 0, -torch.inf)
+                    selected_values.append(values.sort(dim=-1).values)
                 torch.testing.assert_close(
-                    out[offset : offset + l],
-                    old_selected,
+                    *selected_values,
                     rtol=0,
                     atol=0,
-                    msg=f"original selection order: lengths={lengths}, request={i}",
+                    msg=f"selected values: lengths={lengths}, request={i}",
                 )
                 sample = sorted(
                     set(
