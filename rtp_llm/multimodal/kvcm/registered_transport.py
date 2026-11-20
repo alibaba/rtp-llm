@@ -3,6 +3,7 @@
 import ctypes
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -312,7 +313,7 @@ class RegisteredObjectTransport:
                         plan, out=self._buffer, observe_stage=self._observe_stage
                     )
                     with self._stage("write", "pack_ready_wait"):
-                        self._stream.record_event().synchronize()
+                        self._wait_for_stream_completion()
                     return packed
             return pack_object(
                 plan, out=self._host_staging, observe_stage=self._observe_stage
@@ -413,7 +414,7 @@ class RegisteredObjectTransport:
                     expected_key=expected_key,
                 )
                 with self._stage("read", "restore_ready_wait"):
-                    self._stream.record_event().synchronize()
+                    self._wait_for_stream_completion()
                 return value
             except Exception as error:
                 # Layout validation completes before any payload copy. Header
@@ -429,6 +430,14 @@ class RegisteredObjectTransport:
                         nbytes=size,
                     )
                 raise
+
+    def _wait_for_stream_completion(self):
+        event = (
+            torch.cuda.Event(blocking=True)
+            if self._owner.blocking_cuda_events
+            else None
+        )
+        self._stream.record_event(event).synchronize()
 
     def _load(self, method, value, buffer, *, key=None, **kwargs):
         with self._serialized("read"):
@@ -489,6 +498,7 @@ class RegisteredTransportPool:
         if type(quarantine_ttl_seconds) is not int or quarantine_ttl_seconds <= 0:
             raise ValueError("quarantine_ttl_seconds must be a positive integer")
         self.direct_payload = direct_payload
+        self.blocking_cuda_events = os.environ.get("MM_EMB_BLOCKING_CUDA_EVENTS") == "1"
         self._quarantine_ttl_seconds = quarantine_ttl_seconds
         self._observe_hold = observe_hold
         self._observe_lease = observe_lease

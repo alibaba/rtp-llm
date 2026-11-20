@@ -588,6 +588,19 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertIs(reused, slot)
         pool.release(reused)
 
+    def test_blocking_completion_wait_preserves_the_stream_fence(self):
+        pool = self.pool(direct_payload=True)
+        pool.blocking_cuda_events = True
+        slot = pool.acquire()
+        try:
+            with patch("torch.cuda.Event") as make_event:
+                slot._wait_for_stream_completion()
+            make_event.assert_called_once_with(blocking=True)
+            slot._stream.record_event.assert_called_once_with(make_event.return_value)
+            slot._stream.record_event.return_value.synchronize.assert_called_once()
+        finally:
+            pool.release(slot)
+
     def test_observes_contention_and_copies_without_extra_cuda_sync(self):
         transport = self.transport()
         stages = {}
