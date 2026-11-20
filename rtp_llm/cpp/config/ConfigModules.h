@@ -234,7 +234,7 @@ struct KVCacheConfig {
     std::string kv_cache_event_instance_group       = "";
     std::string kv_cache_event_instance_id          = "";
     std::string kv_cache_event_host_ip_port         = "";
-    int         kv_cache_event_snapshot_interval_ms = 600000;
+    int         kv_cache_event_snapshot_interval_ms = 300000;
     // BlockTreeCache FULL prefix invariant scanner; defaults to 30 seconds.
     // An interval of 0 disables the scanner thread.
     // Batch size and detail cap are scanner-internal constants, not user-tunable.

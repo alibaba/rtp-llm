@@ -162,8 +162,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS",
         bind_to=(kv_cache_config, "kv_cache_event_snapshot_interval_ms"),
         type=_snapshot_interval_ms,
-        default=600000,
-        help="KVCM 全量快照采集间隔（毫秒），默认 600000；非正数禁用数据上报，保留 remote 控制心跳；未启用 remote 时必须为正数。",
+        default=300000,
+        help="KVCM 全量快照采集间隔（毫秒），默认 300000（5 分钟）；非正数禁用数据上报，保留 remote 控制心跳；未启用 remote 时必须为正数。",
     )
     kv_cache_group.add_argument(
         "--kv_cache_event_instance_id",

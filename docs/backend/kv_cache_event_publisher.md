@@ -44,7 +44,7 @@ When remote cache is enabled, the publisher uses the backend client's discovery 
 | `ENABLE_REMOTE_CACHE` | `0` | Set to `1` for remote cache reads and writes. |
 | `KV_CACHE_EVENT_PUBLISHER_TYPE` (`--kv_cache_event_publisher_type`) | `none` | Set to `kvcm` to publish HBM events. The remote backend can send control heartbeats in either mode. |
 | `KV_CACHE_EVENT_INSTANCE_ID` (`--kv_cache_event_instance_id`) | `SPECTRUM_DEPLOYMENT_NAME`, then `DEPLOYMENT_NAME` | Set an explicit ID if the platform does not provide a deployment name or to keep an existing event identity. |
-| `KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS` (`--kv_cache_event_snapshot_interval_ms`) | `600000` | Leave at the default for a ten-minute snapshot interval. When remote cache is enabled, a nonpositive value disables HBM data events and retains control heartbeats. With remote cache disabled, the interval must be positive. |
+| `KV_CACHE_EVENT_SNAPSHOT_INTERVAL_MS` (`--kv_cache_event_snapshot_interval_ms`) | `300000` | Leave at the default for a five-minute snapshot interval. When remote cache is enabled, a nonpositive value disables HBM data events and retains control heartbeats. With remote cache disabled, the interval must be positive. |
 
 To publish HBM events without remote cache, use `ENABLE_REMOTE_CACHE=0` and `KV_CACHE_EVENT_PUBLISHER_TYPE=kvcm`
 with the KVCM address and group. Local device prefix reuse must be enabled for HBM data events.
