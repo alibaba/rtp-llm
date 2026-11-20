@@ -2255,14 +2255,15 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         const auto& groups = manager->blockTreeCache()->groupSets();
         auto engine = std::make_shared<RecordingBatchTransferEngine>(groups);
         engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O outcome unknown");
-        manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
-        manager->block_tree_cache_->setCompletionCleanup(reclaimer.completion_cleanup_);
+        auto& dispatcher = manager->block_tree_cache_->transfer_dispatcher_;
+        dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
+        reclaimer.bindReclaimers(dispatcher.get());
         auto pool = groups.front()->hostPool();
         ASSERT_NE(pool, nullptr);
         const auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
         pool->incTreeRef(*block, BlockTreeRefType::EVICT);
-        manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
+        dispatcher->runTransfer(
             TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
             [&](TransferResult result) {
                 EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
@@ -2271,7 +2272,6 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         const auto records = reclaimer.frozenTasks();
         ASSERT_EQ(records.size(), 1u);
         ASSERT_NE(engine->last_proof, nullptr);
-        const auto& dispatcher = manager->block_tree_cache_->transfer_dispatcher_;
         auto& queue = *reclaimer.completion_cleanup_;
         auto drain = [&] {
             return queue.drain([&](const auto& target, const auto& traces, int timeout) {
@@ -2311,7 +2311,7 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
     auto& reclaimer = manager.block_tree_cache_->reclaimer();
     ASSERT_EQ(reclaimer.frozen_task_recovery_, nullptr);
     auto check_cleanup = [&](uint64_t trace) {
-        auto& registry = *manager.block_tree_cache_->transfer_dispatcher_->task_registry_;
+        auto& registry = *reclaimer.transfer_worker_;
         ASSERT_TRUE(registry.begin(trace));
         ASSERT_TRUE(registry.finish(trace, true));
         reclaimer.completion_cleanup_->enqueue(reclaimer.completion_cleanup_->prepare({false, 1}, trace));
@@ -2328,7 +2328,7 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
     auto released = release.get_future();
     std::atomic<bool> first{true};
     reclaimer.frozen_task_recovery_ = std::make_unique<FrozenTaskRecovery>(
-        *reclaimer.completion_cleanup_, [&] {
+        *reclaimer.coordinator_, [&] {
             if (first.exchange(false)) {
                 entered.set_value();
                 released.wait_for(std::chrono::seconds(5));

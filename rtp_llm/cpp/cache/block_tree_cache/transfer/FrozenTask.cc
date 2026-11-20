@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionTypes.h"
 
+#include <algorithm>
+#include <numeric>
 #include <chrono>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,15 +41,37 @@ FrozenTask::PreparedExecution FrozenTask::prepare(ExecutionInfo execution) {
 }
 
 FrozenTask::FrozenTask(PreparedExecution&& prepared, TransferResult failure,
-                       TransferCompletionCleanup::Prepared cleanup):
+                       TransferCompletionCleanup::Prepared cleanup, std::vector<size_t> pending_workers):
     execution_(std::move(prepared.execution_)),
     targets_(std::move(prepared.targets_)),
     failure_(std::move(failure)),
     target_block_count_(prepared.target_block_count_),
     created_at_us_(wallTimeUs()),
-    cleanup_(std::move(cleanup)) {
+    cleanup_(std::move(cleanup)), pending_workers_(std::move(pending_workers)) {
+    if (pending_workers_.empty()) {
+        pending_workers_.resize(execution_.rank_count);
+        std::iota(pending_workers_.begin(), pending_workers_.end(), size_t{0});
+    } else {
+        std::sort(pending_workers_.begin(), pending_workers_.end());
+        pending_workers_.erase(std::unique(pending_workers_.begin(), pending_workers_.end()), pending_workers_.end());
+        RTP_LLM_CHECK(pending_workers_.back() < execution_.rank_count);
+    }
     RTP_LLM_CHECK_WITH_INFO(failure_.checkNeedFreeze(),
                             "frozen execution requires unproven buffer safety");
+}
+
+std::vector<size_t> FrozenTask::pendingWorkers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_workers_;
+}
+
+bool FrozenTask::confirmWorker(size_t worker_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = std::lower_bound(pending_workers_.begin(), pending_workers_.end(), worker_id);
+    if (state_ != State::FROZEN || it == pending_workers_.end() || *it != worker_id)
+        return false;
+    pending_workers_.erase(it);
+    return pending_workers_.empty();
 }
 
 void FrozenTask::freeze() noexcept {

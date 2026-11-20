@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionTypes.h"
 
 #include <memory>
@@ -53,6 +53,27 @@ FrozenTask::ExecutionInfo execution(uint64_t                           trace,
 TransferResult unknownResult() {
     return TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timed out"),
                           CacheCopyError::RPC_FAILED);
+}
+
+TEST(FrozenTaskTest, OnlyTheLastPendingWorkerReleasesTheTrace) {
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
+    FrozenTaskReclaimer coordinator(cleanup);
+    const auto pool = makePool("pending-workers");
+    const auto block = heldBlock(pool);
+    const TransferCompletionKey key{uint64_t{41}};
+    const auto result = unknownResult();
+    coordinator.freezeTargetBlocksWithTraceIDAndStillIOWorkerID({key, {true, 3}, result}, {{pool, block}}, {1, 2, 1});
+    EXPECT_FALSE(coordinator.unfreezeTargetBlocksInOneWorkerWithTraceID(key, 0));
+    EXPECT_FALSE(coordinator.unfreezeTargetBlocksInOneWorkerWithTraceID(key, 2));
+    EXPECT_FALSE(coordinator.unfreezeTargetBlocksInOneWorkerWithTraceID(key, 2));
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_TRUE(coordinator.unfreezeTargetBlocksInOneWorkerWithTraceID(key, 1));
+    EXPECT_FALSE(coordinator.unfreezeTargetBlocksInOneWorkerWithTraceID(key, 1));
+    EXPECT_FALSE(pool->isFrozen(block));
+    EXPECT_TRUE(coordinator.frozenTasks().empty());
+    EXPECT_EQ(cleanup->size(), 1u);
+    pool->decTreeRef(block, BlockTreeRefType::CACHE);
 }
 
 TEST(FrozenTaskTest, ReleasesEachOwnedTargetOnceBeforeSubmittingForget) {

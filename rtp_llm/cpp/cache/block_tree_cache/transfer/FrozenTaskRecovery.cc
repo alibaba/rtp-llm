@@ -13,47 +13,28 @@ namespace {
 
 using State = TransferTaskRegistry::State;
 
-struct Proof {
-    bool valid{false};
-    bool safe{false};
-    const char* error{nullptr};
-};
+bool validRank(const TransferCompletionRankResult& row, bool uses_rpc) {
+    return row.error.empty() && (!uses_rpc || row.grpc_code.has_value())
+           && (!row.grpc_code || *row.grpc_code == 0)
+           && (row.state == State::UNKNOWN || row.state == State::RUNNING || row.state == State::BUFFER_SAFE)
+           && (!row.admission_closed || row.state == State::UNKNOWN);
+}
 
-Proof validate(const FrozenTask::ExecutionInfo& execution, const TransferCompletionQueryResult& query) noexcept {
+bool matchesQuery(const FrozenTask::ExecutionInfo& execution, const std::vector<size_t>& pending,
+                  const TransferCompletionQueryResult& query) {
     if (!validTransferCompletionKey(execution.registry_type, execution.trace_id)
-        || query.registry_type != execution.registry_type || query.trace_id != execution.trace_id)
-        return {false, false, "recovery query trace does not match frozen execution"};
-    const auto count = execution.rank_count;
-    if (count == 0 || query.ranks.size() != count
-        || (!execution.uses_rpc && count != 1))
-        return {false, false, "recovery query does not cover the original participants"};
-    if (!query.error.empty())
-        return {false, false, nullptr};
+        || query.registry_type != execution.registry_type || query.trace_id != execution.trace_id
+        || !query.error.empty() || pending.empty() || query.ranks.size() != pending.size()
+        || (!execution.uses_rpc && execution.rank_count != 1))
+        return false;
     bool all_safe = true;
-    for (size_t rank = 0; rank < count; ++rank) {
-        const TransferCompletionRankResult* row = nullptr;
-        for (const auto& candidate : query.ranks) {
-            if (candidate.rank == rank) {
-                if (row)
-                    return {false, false, "recovery query has duplicate participant ranks"};
-                row = &candidate;
-            }
-        }
-        if (!row)
-            return {false, false, "recovery query is missing a participant rank"};
-        if (execution.uses_rpc && !row->grpc_code)
-            return {false, false, "remote recovery query has no gRPC status"};
-        if (!row->error.empty() || (row->grpc_code && *row->grpc_code != 0))
-            return {false, false, "recovery query participant has a transport error"};
-        if (row->state != State::UNKNOWN && row->state != State::RUNNING && row->state != State::BUFFER_SAFE)
-            return {false, false, "recovery query participant has an invalid completion state"};
-        if (row->admission_closed && row->state != State::UNKNOWN)
-            return {false, false, "admission ban requires UNKNOWN completion state"};
-        all_safe = all_safe && row->bufferSafe();
+    for (size_t i = 0; i < pending.size(); ++i) {
+        const auto& row = query.ranks[i];
+        if (row.rank != pending[i] || row.rank >= execution.rank_count)
+            return false;
+        all_safe = all_safe && validRank(row, execution.uses_rpc) && row.bufferSafe();
     }
-    if (query.all_safe != all_safe)
-        return {false, false, "recovery query summary disagrees with participant completion states"};
-    return {true, all_safe, nullptr};
+    return query.all_safe == all_safe;
 }
 
 void recordQuery(const std::shared_ptr<FrozenTask>& task, TransferCompletionQueryResult result) noexcept {
@@ -104,9 +85,9 @@ void logReleased(const FrozenTask& task, bool forced) noexcept {
 
 }  // namespace
 
-FrozenTaskRecovery::FrozenTaskRecovery(TransferCompletionCleanup& cleanup_queue, TaskSource source, Query query, Cleanup cleanup, OnReleased on_released,
+FrozenTaskRecovery::FrozenTaskRecovery(FrozenTaskReclaimer& coordinator, TaskSource source, Query query, Cleanup cleanup, OnReleased on_released,
                                      int force_release_timeout_ms):
-    cleanup_queue_(cleanup_queue), source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)),
+    coordinator_(coordinator), source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)),
     on_released_(std::move(on_released)),
     force_release_timeout_us_(static_cast<int64_t>(force_release_timeout_ms) * 1000) {
     if (force_release_timeout_ms < 0) {
@@ -220,19 +201,24 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
         if (stop())
             break;
         ++summary.queried;
-        bool safe = false;
+        std::vector<size_t> confirmed;
         try {
-            auto result = query_(task->execution(), query_timeout_ms);
-            const auto proof = validate(task->execution(), result);
-            safe = proof.valid && proof.safe;
-            if (!proof.valid) {
-                ++summary.query_failed;
-                // Preserve the returned rows and identity, but annotate why an
-                // inconsistent injected result cannot authorize this release.
-                result.all_safe = false;
-                if (result.error.empty() && proof.error) {
-                    try { result.error = proof.error; } catch (...) {}
+            const auto pending = task->pendingWorkers();
+            auto result = query_(task->execution(), pending, query_timeout_ms);
+            if (matchesQuery(task->execution(), pending, result)) {
+                bool failed = false;
+                for (const auto& row : result.ranks) {
+                    if (!validRank(row, task->execution().uses_rpc))
+                        failed = true;
+                    else if (row.bufferSafe())
+                        confirmed.push_back(row.rank);
                 }
+                summary.query_failed += failed;
+            } else {
+                ++summary.query_failed;
+                result.all_safe = false;
+                if (result.error.empty())
+                    result.error = "recovery response does not match the requested workers or trace";
             }
             recordQuery(task, std::move(result));
         } catch (const std::exception& error) {
@@ -249,21 +235,31 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
                                 std::chrono::system_clock::now().time_since_epoch()).count();
         const bool expired = force_release_timeout_us_ > 0
                              && now_us - snapshot.frozen_at_us >= force_release_timeout_us_;
-        if ((safe || expired) && snapshot.state == FrozenTask::State::FROZEN) {
-            if (stop())
-                break;
-            if (task->completeRecovery(cleanup_queue_)) {
-                ++summary.released;
-                try {
-                    if (on_released_)
-                        on_released_(task->execution(), expired && !safe);
-                } catch (const std::exception& error) {
-                    RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
-                } catch (...) {
-                    RTP_LLM_LOG_WARNING("FrozenTask release observer failed: unknown exception");
-                }
-                logReleased(*task, expired && !safe);
+        bool released = false;
+        bool forced = false;
+        try {
+            for (const auto rank : confirmed) {
+                if (stop())
+                    break;
+                released = coordinator_.unfreezeTargetBlocksInOneWorkerWithTraceID(
+                    {task->execution().registry_type, task->execution().trace_id}, rank);
             }
+        } catch (...) {
+            ++summary.query_failed;
+        }
+        if (expired && !released && !stop() && snapshot.state == FrozenTask::State::FROZEN)
+            forced = task->completeRecovery(*coordinator_.cleanup());
+        if (released || forced) {
+            ++summary.released;
+            try {
+                if (on_released_)
+                    on_released_(task->execution(), forced);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("FrozenTask release observer failed: unknown exception");
+            }
+            logReleased(*task, forced);
         }
         if (task->snapshot().state == FrozenTask::State::FROZEN)
             ++summary.pending;

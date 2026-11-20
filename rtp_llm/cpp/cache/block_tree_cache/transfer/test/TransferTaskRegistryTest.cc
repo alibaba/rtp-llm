@@ -13,6 +13,28 @@ using Registry     = TransferTaskRegistry;
 using State        = Registry::State;
 using ForgetResult = Registry::ForgetResult;
 
+TEST(TransferTaskRegistryTest, OptionalCallbacksCanPublishCompletionAndRetryForget) {
+    Registry worker;
+    int queries = 0;
+    int forgets = 0;
+    ASSERT_TRUE(worker.registerOnWorkerTaskWithTraceID("read", [&] {
+        ++queries;
+        EXPECT_TRUE(worker.ioFinishedOnWorkerWithTraceID("read"));
+    }, [&] {
+        if (++forgets == 1)
+            throw std::runtime_error("retry forget");
+    }));
+    ASSERT_TRUE(worker.registerOnWorkerTaskWithTraceID("local"));
+    EXPECT_FALSE(worker.registerOnWorkerTaskWithTraceID("read"));
+    EXPECT_EQ(worker.forgetTaskInfoOnWorker({"read"}).front(), ForgetResult::RUNNING);
+    EXPECT_EQ(worker.queryIfIoFinishedInOneWorkerWithTraceIDs({"local", "read"}),
+              (std::vector<State>{State::RUNNING, State::BUFFER_SAFE}));
+    EXPECT_EQ(queries, 1);
+    EXPECT_EQ(worker.forgetTaskInfoOnWorker({"read", "read", "read"}),
+              (std::vector<ForgetResult>{ForgetResult::FAILED, ForgetResult::DONE, ForgetResult::DONE}));
+    EXPECT_EQ(forgets, 2);
+}
+
 TEST(TransferTaskRegistryTest, MissingAdmissionFenceSurvivesForgetUntilLateArrivalOrExpiry) {
     auto now = Registry::Clock::time_point{};
     Registry registry([&] { return now; });

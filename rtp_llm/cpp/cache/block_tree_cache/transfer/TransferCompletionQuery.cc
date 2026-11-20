@@ -92,26 +92,27 @@ TransferCompletionQuery::TransferCompletionQuery(std::shared_ptr<BroadcastManage
     broadcast_manager_(std::move(broadcast_manager)), local_reader_(std::move(local_reader)) {}
 
 TransferCompletionQueryResult
-TransferCompletionQuery::query(const TransferCompletionIdentity& execution, int timeout_ms) const {
+TransferCompletionQuery::query(const TransferCompletionIdentity& execution, const std::vector<size_t>& worker_ids, int timeout_ms) const {
     TransferCompletionQueryResult result;
     result.registry_type = execution.registry_type;
     result.trace_id = execution.trace_id;
     const TransferCompletionKey key{execution.registry_type, execution.trace_id};
-    result.ranks.resize(execution.expected_rank_count);
+    result.ranks.resize(worker_ids.size());
     for (size_t rank = 0; rank < result.ranks.size(); ++rank)
-        result.ranks[rank].rank = rank;
+        result.ranks[rank].rank = worker_ids[rank];
     if (timeout_ms <= 0 || !validTransferCompletionKey(key)) {
         fail(result, "completion query requires a valid trace and positive timeout");
         return result;
     }
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     const auto rpc_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
-    if (result.ranks.empty()) {
-        fail(result, "completion query requires the complete original participant set");
+    if (worker_ids.empty() || worker_ids.back() >= execution.expected_rank_count
+        || std::adjacent_find(worker_ids.begin(), worker_ids.end(), std::greater_equal<size_t>()) != worker_ids.end()) {
+        fail(result, "completion query requires valid original participant ranks");
         return result;
     }
     if (!execution.remote) {
-        if (result.ranks.size() != 1 || !local_reader_) {
+        if (execution.expected_rank_count != 1 || !local_reader_) {
             fail(result, "local completion query requires one participant and a local reader");
             return result;
         }
@@ -135,53 +136,45 @@ TransferCompletionQuery::query(const TransferCompletionIdentity& execution, int 
         return result;
     }
 
-    if (!broadcast_manager_ || broadcast_manager_->workerNum() != result.ranks.size()) {
+    if (!broadcast_manager_ || broadcast_manager_->workerNum() != execution.expected_rank_count) {
         fail(result, "completion query manager does not match the original participant count");
         return result;
     }
     try {
-        std::vector<FunctionRequestPB> requests(result.ranks.size());
-        for (auto& request : requests)
-            encodeKey(key, *request.mutable_completion_query()->add_keys());
+        FunctionRequestPB request;
+        encodeKey(key, *request.mutable_completion_query()->add_keys());
         const int submit_timeout = remainingTimeout(deadline);
         if (submit_timeout == 0) {
             fail(result, "completion query deadline exceeded before submission");
             return result;
         }
-        auto rpc = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-            requests, submit_timeout,
+        auto rpc = broadcast_manager_->broadcastToRanks<FunctionRequestPB, FunctionResponsePB>(
+            worker_ids, request, submit_timeout,
             [rpc_deadline](const auto& stub, const auto& context, const auto& request, auto* queue) {
                 context->set_deadline(rpc_deadline);
                 return stub->AsyncExecuteFunction(context.get(), request, queue);
             },
-            execution.request_id, "completion_query", /*fatal_on_error=*/false);
+            execution.request_id, "completion_query");
         if (!rpc) {
             fail(result, "completion query could not be dispatched");
             return result;
         }
         const int wait_timeout = remainingTimeout(deadline);
         // Zero means an infinite wait to BroadcastResult; never pass it here.
-        const bool completed = rpc->done() || (wait_timeout > 0 && rpc->waitDone(wait_timeout, false));
-        if (!completed || !rpc->success()) {
-            fail(result, completed ? "completion query RPC failed: " + rpc->failureSummary() :
-                                     "completion query deadline exceeded");
-            return result;
-        }
-        const auto responses = rpc->responses();
-        for (auto& row : result.ranks) {
-            row.grpc_code = grpc::StatusCode::OK;
-            decodeResponse(responses.at(row.rank), key, row);
-        }
-        if (remainingTimeout(deadline) == 0) {
-            result.error = "completion query deadline exceeded";
-        }
-        if (result.error.empty()
-            && std::any_of(result.ranks.begin(), result.ranks.end(), [](const auto& row) { return !row.error.empty(); })) {
-            result.error = "one or more completion query ranks failed";
+        if (!rpc->done() && wait_timeout > 0)
+            rpc->waitDone(wait_timeout, false);
+        for (size_t i = 0; i < result.ranks.size(); ++i) {
+            auto& row = result.ranks[i];
+            if (const auto response = rpc->responseIfSucceeded(i, deadline)) {
+                row.grpc_code = grpc::StatusCode::OK;
+                decodeResponse(*response, key, row);
+            } else {
+                row.error = "completion query worker did not respond successfully before the deadline";
+            }
         }
         result.all_safe = result.error.empty()
                           && std::all_of(result.ranks.begin(), result.ranks.end(),
-                                         [](const auto& row) { return row.bufferSafe(); });
+                                         [](const auto& row) { return row.error.empty() && row.bufferSafe(); });
     } catch (const std::exception& error) {
         fail(result, error.what());
     } catch (...) {

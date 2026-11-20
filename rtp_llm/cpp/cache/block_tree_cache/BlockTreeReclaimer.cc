@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include <limits>
 namespace rtp_llm {
-BlockTreeReclaimer::BlockTreeReclaimer(BlockTreeCache& tree): tree_(tree), completion_cleanup_(std::make_shared<TransferCompletionCleanup>()) {}
+BlockTreeReclaimer::BlockTreeReclaimer(BlockTreeCache& tree): tree_(tree), completion_cleanup_(std::make_shared<TransferCompletionCleanup>()),
+    coordinator_(std::make_shared<FrozenTaskReclaimer>(completion_cleanup_)) {}
 BlockTreeReclaimer::~BlockTreeReclaimer() {
     stop();
 }
@@ -21,17 +23,19 @@ bool BlockTreeReclaimer::validConfig(int64_t interval, int64_t timeout, int64_t 
            && force_release_timeout >= 0 && force_release_timeout <= std::numeric_limits<int>::max();
 }
 
+void BlockTreeReclaimer::bindReclaimers(BlockTransferDispatcher* transfer_dispatcher) {
+    if (transfer_dispatcher)
+        transfer_dispatcher->setReclaimers(coordinator_, transfer_worker_);
+    if (auto backend = tree_.storageBackend())
+        backend->setReclaimers(coordinator_, kvcm_worker_);
+}
+
 bool BlockTreeReclaimer::start() {
     if (!validConfig(interval_ms_, timeout_ms_, force_release_timeout_ms_))
         return false;
     if (cleanup_thread_.joinable())
         return true;
     stopped_ = false;
-    if (rank_ == 0) {
-        tree_.setCompletionCleanup(completion_cleanup_);
-        if (auto backend = tree_.storageBackend())
-            backend->setCompletionCleanup(completion_cleanup_);
-    }
     try {
         cleanup_thread_ = std::thread([this] { cleanupLoop(); });
         if (startFrozenTaskRecovery())
@@ -57,9 +61,9 @@ void BlockTreeReclaimer::stop() noexcept {
 bool BlockTreeReclaimer::startFrozenTaskRecovery() {
     if (rank_ != 0 || interval_ms_ == 0 || frozen_task_recovery_)
         return true;
-    auto recovery = std::make_unique<FrozenTaskRecovery>(*completion_cleanup_,
+    auto recovery = std::make_unique<FrozenTaskRecovery>(*coordinator_,
         [this] { return frozenTasks(); },
-        [this](const auto& execution, int timeout) { return queryTransferCompletion(execution, timeout); },
+        [this](const auto& execution, const auto& pending, int timeout) { return queryTransferCompletion(execution, pending, timeout); },
         FrozenTaskRecovery::Cleanup{},
         [this](const auto& execution, bool forced) { tree_.reportUnfreezeMetrics(execution, forced); },
         static_cast<int>(force_release_timeout_ms_));
@@ -83,9 +87,8 @@ void BlockTreeReclaimer::cleanupLoop() noexcept {
         try {
             const auto now = std::chrono::steady_clock::now();
             if (now >= next_missing) {
-                tree_.cleanupExpiredMissing();
-                if (auto backend = tree_.storageBackend())
-                    backend->cleanupExpiredMissing();
+                transfer_worker_->cleanupExpiredMissing();
+                kvcm_worker_->cleanupExpiredMissing();
                 next_missing = now + std::chrono::minutes(1);
             }
             if (rank_ == 0) {
@@ -103,13 +106,7 @@ void BlockTreeReclaimer::cleanupLoop() noexcept {
 }
 
 std::vector<std::shared_ptr<FrozenTask>> BlockTreeReclaimer::frozenTasks() const {
-    auto tasks = tree_.frozenTasks();
-    auto backend = tree_.storageBackend();
-    if (backend) {
-        const auto remote_tasks = backend->frozenTasks();
-        tasks.insert(tasks.end(), remote_tasks.begin(), remote_tasks.end());
-    }
-    return tasks;
+    return coordinator_->frozenTasks();
 }
 
 
@@ -117,14 +114,8 @@ TransferTaskRegistry::State BlockTreeReclaimer::localTransferCompletion(const Tr
     if (!validTransferCompletionKey(key)) {
         return TransferTaskRegistry::State::UNKNOWN;
     }
-    if (key.registry_type == RegistryType::BLOCK_TRANSFER) {
-        return tree_.localTransferCompletion(key.numericId());
-    }
-    auto backend = tree_.storageBackend();
-    if (backend) {
-        return backend->queryReadCompletion(key.trace_id);
-    }
-    return TransferTaskRegistry::State::UNKNOWN;
+    auto& worker = key.registry_type == RegistryType::BLOCK_TRANSFER ? transfer_worker_ : kvcm_worker_;
+    return worker->queryIfIoFinishedInOneWorkerWithTraceIDs({key.trace_id}).front();
 }
 
 
@@ -135,12 +126,8 @@ BlockTreeReclaimer::localForgetTransferCompletion(const TransferCompletionKey& k
         RTP_LLM_LOG_WARNING("completion forget requires a nonempty execution trace");
         return Result::INVALID;
     }
-    if (key.registry_type == RegistryType::BLOCK_TRANSFER)
-        return tree_.forgetLocalTransferCompletion(key.numericId());
-    auto backend = tree_.storageBackend();
-    if (backend)
-        return backend->forgetReadCompletion(key.trace_id);
-    return Result::FAILED;
+    auto& worker = key.registry_type == RegistryType::BLOCK_TRANSFER ? transfer_worker_ : kvcm_worker_;
+    return worker->forgetTaskInfoOnWorker({key.trace_id}).front();
 }
 
 
@@ -155,7 +142,7 @@ BlockTreeReclaimer::forgetTransferCompletion(const TransferCompletionTarget& tar
 
 
 TransferCompletionQueryResult BlockTreeReclaimer::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
-                                                                    int timeout_ms) const {
+                                                                    const std::vector<size_t>& pending, int timeout_ms) const {
     TransferCompletionIdentity identity;
     identity.registry_type       = execution.registry_type;
     identity.trace_id            = execution.trace_id;
@@ -165,7 +152,7 @@ TransferCompletionQueryResult BlockTreeReclaimer::queryTransferCompletion(const 
                                    [this](const TransferCompletionKey& key) {
                                        return localTransferCompletion(key);
                                    })
-        .query(identity, timeout_ms);
+        .query(identity, pending, timeout_ms);
 }
 
 

@@ -57,8 +57,10 @@ TEST(WorkerTransferRegistryTest, OneTraceBecomesSafeOnlyAfterSubmissionAndEveryB
         EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
     };
     auto late = task();
-    ASSERT_EQ(dispatcher.queryLocalCompletion(late.traceId()), State::REJECTED);
-    ASSERT_EQ(dispatcher.forgetLocalCompletion(late.traceId()), TransferTaskRegistry::ForgetResult::DONE);
+    auto worker = std::make_shared<TransferTaskRegistry>();
+    dispatcher.setReclaimers(std::make_shared<FrozenTaskReclaimer>(std::make_shared<TransferCompletionCleanup>()), worker);
+    ASSERT_EQ(worker->queryIfIoFinishedInOneWorkerWithTraceIDs({std::to_string(late.traceId())}).front(), State::REJECTED);
+    ASSERT_EQ(worker->forgetTaskInfoOnWorker({std::to_string(late.traceId())}).front(), TransferTaskRegistry::ForgetResult::DONE);
     auto rejected = dispatcher.executePerRank(std::move(late));
     EXPECT_EQ(rejected->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_TRUE(engine->contexts.empty());

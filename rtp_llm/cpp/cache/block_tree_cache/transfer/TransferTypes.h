@@ -251,6 +251,7 @@ struct TransferResult {
     // False means unproven, not necessarily in-flight. Business success, error
     // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
     bool buffer_safe{false};
+    std::vector<size_t> still_io_worker_ids;
 };
 
 struct HostBufferView {

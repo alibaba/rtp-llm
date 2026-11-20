@@ -52,21 +52,18 @@ TEST(FrozenTaskRecoveryTest, StopDuringQueryWaitsForExitAndDiscardsSafeReleasePe
     ASSERT_TRUE(allocated.has_value());
     const auto block = *allocated;
     pool->incTreeRef(block, BlockTreeRefType::CACHE);
-    FrozenTask::ExecutionInfo info;
-    info.trace_id = "51";
-    info.rank_count = 1;
-    info.target_blocks = {{pool, block}};
-    auto task = std::make_shared<FrozenTask>(FrozenTask::prepare(info),
-        TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O pending"), CacheCopyError::COPY_FAILED));
-    task->freeze();
+    FrozenTaskReclaimer coordinator(cleanup);
+    TransferResult failure(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O pending"), CacheCopyError::COPY_FAILED);
+    coordinator.freezeTargetBlocksWithTraceIDAndStillIOWorkerID({uint64_t{51}, {false, 1}, failure}, {{pool, block}}, {0});
+    auto task = coordinator.frozenTasks().front();
     auto entered = std::make_shared<std::promise<void>>();
     auto in_query = entered->get_future();
     auto release = std::make_shared<std::promise<void>>();
     auto released = release->get_future().share();
     auto calls = std::make_shared<std::atomic<size_t>>(0);
-    auto recovery = std::make_shared<FrozenTaskRecovery>(*cleanup,
+    auto recovery = std::make_shared<FrozenTaskRecovery>(coordinator,
         [task] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
-        [entered, released, calls](const auto& execution, int) {
+        [entered, released, calls](const auto& execution, const auto&, int) {
             ++*calls;
             entered->set_value();
             if (released.wait_for(5s) != std::future_status::ready)

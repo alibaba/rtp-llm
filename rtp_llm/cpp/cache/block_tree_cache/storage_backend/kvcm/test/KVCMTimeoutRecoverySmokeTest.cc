@@ -133,8 +133,7 @@ struct NativeWorker {
         manager->block_tree_cache_->reclaimer().configure(parallel.tp_rank,
             config.block_tree_frozen_recovery_interval_ms, config.block_tree_frozen_recovery_query_timeout_ms,
             config.block_tree_frozen_force_release_timeout_ms, std::move(broadcast));
-        manager->block_tree_cache_->reclaimer().completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
-        backend->setCompletionCleanup(manager->block_tree_cache_->reclaimer().completion_cleanup_);
+        manager->block_tree_cache_->reclaimer().bindReclaimers(manager->block_tree_cache_->transfer_dispatcher_.get());
         return true;
     }
 
@@ -162,7 +161,10 @@ protected:
 TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQueryAndForget) {
     FilePayload file;
     NativeWorker owner, peer;
+    std::atomic<size_t> queries_to_safe_worker{0};
     auto handle = [&](size_t rank, const FunctionRequestPB& request, FunctionResponsePB& response) {
+        if (rank == 0 && request.has_completion_query())
+            ++queries_to_safe_worker;
         auto& worker = rank == 0 ? owner : peer;
         if (!worker.manager->executeFunction(request, response))
             return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unhandled request");
@@ -186,12 +188,15 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQue
     ASSERT_EQ(readResult(*owner.backend, owner.request(10s, target.get()), meta).code(), ErrorCode::DEADLINE_EXCEEDED);
     ASSERT_TRUE(owner.environment.device_pool->isFrozen(target.get().front()));
     auto& reclaimer = owner.manager->block_tree_cache_->reclaimer();
+    ASSERT_EQ(reclaimer.frozenTasks().size(), 1u);
+    EXPECT_EQ(reclaimer.frozenTasks().front()->pendingWorkers(), (std::vector<size_t>{1}));
     ASSERT_TRUE(reclaimer.start());
     block_tree_cache_detail::ScopeRollback stop([&] { reclaimer.stop(); });
     ASSERT_TRUE(waitForRecovery([&] {
         return !owner.environment.device_pool->isFrozen(target.get().front())
                && owner.backend->taskRegistry().size() == 0 && peer.backend->taskRegistry().size() == 0;
     }));
+    EXPECT_EQ(queries_to_safe_worker.load(), 0u);
 }
 
 }

@@ -45,6 +45,7 @@ public:
         grpc::Status                         status;
         std::string                          server_addr;
         int                                  timeout_ms{0};
+        std::optional<size_t>                target_rank;
     };
 
 public:
@@ -96,6 +97,14 @@ public:
     bool rpcSucceeded(size_t rank) const {
         std::lock_guard<std::mutex> lock(wait_done_mutex_);
         return rank < rpc_succeeded_.size() && rpc_succeeded_[rank];
+    }
+
+    std::optional<ResponsePB> responseIfSucceeded(size_t index, std::chrono::steady_clock::time_point deadline) const {
+        const auto deadline_us = std::chrono::duration_cast<std::chrono::microseconds>(deadline.time_since_epoch()).count();
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (index >= rpc_succeeded_.size() || !rpc_succeeded_[index] || completion_times_us_[index] > deadline_us)
+            return std::nullopt;
+        return worker_contexts_[index]->response;
     }
 
     bool deadlineExceeded() const {
@@ -171,7 +180,7 @@ public:
                 const auto& ctx      = worker_contexts_[rank];
                 rpc_succeeded_[rank] = cq_event_ok && ctx->status.ok();
                 if (!rpc_succeeded_[rank]) {
-                    const auto summary = rpc_tag_ + " target_rank=" + std::to_string(rank) + " addr=" + ctx->server_addr
+                    const auto summary = rpc_tag_ + " target_rank=" + std::to_string(ctx->target_rank.value_or(rank)) + " addr=" + ctx->server_addr
                                          + " grpc_code=" + std::to_string(ctx->status.error_code())
                                          + " error=" + ctx->status.error_message();
                     if (rpc_failure_summary_.empty()) {
@@ -294,14 +303,43 @@ public:
                                                                       std::optional<int64_t> request_id = std::nullopt,
                                                                       std::string direction = "unknown",
                                                                       bool fatal_on_error = true) const {
-        const auto rpc_tag =
-            "request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction;
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
             RTP_LLM_LOG_WARNING(
                 "broadcast failed, requests size mismatch, req: %zu, worker size: %zu", requests.size(), worker_size);
             return nullptr;
         }
+        return broadcastImpl<RequestPB, ResponsePB>(
+            [&requests](size_t rank) -> const RequestPB& { return requests.at(rank); },
+            timeout_ms,
+            rpc_call,
+            request_id,
+            std::move(direction),
+            fatal_on_error);
+    }
+
+    template<typename RequestPB, typename ResponsePB, typename RpcCall>
+    std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>> broadcastToRanks(
+        const std::vector<size_t>& ranks, const RequestPB& request, int timeout_ms, const RpcCall& rpc_call,
+        std::optional<int64_t> request_id, std::string direction) const {
+        if (ranks.empty() || std::any_of(ranks.begin(), ranks.end(), [this](size_t rank) { return rank >= workerNum(); }))
+            return nullptr;
+        return broadcastImpl<RequestPB, ResponsePB>([&request](size_t) -> const RequestPB& { return request; },
+                                                    timeout_ms, rpc_call, request_id, std::move(direction), false, &ranks);
+    }
+
+private:
+    template<typename RequestPB, typename ResponsePB, typename RequestAt, typename RpcCall>
+    std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>> broadcastImpl(const RequestAt&       request_at,
+                                                                          int                    timeout_ms,
+                                                                          const RpcCall&         rpc_call,
+                                                                          std::optional<int64_t> request_id,
+                                                                          std::string            direction,
+                                                                          bool                   fatal_on_error,
+                                                                          const std::vector<size_t>* ranks = nullptr) const {
+        const auto rpc_tag =
+            "request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction;
+        const auto worker_size = ranks ? ranks->size() : worker_addrs_.size();
         if (!rpc_pool_ || !completion_queue_) {
             RTP_LLM_LOG_WARNING("broadcast failed, manager is not initialized");
             return nullptr;
@@ -313,7 +351,8 @@ public:
         const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
 
         for (int rank = 0; rank < worker_size; ++rank) {
-            const auto& addr        = worker_addrs_[rank];
+            const auto target_rank = ranks ? ranks->at(rank) : static_cast<size_t>(rank);
+            const auto& addr = worker_addrs_.at(target_rank);
             auto        conn_status = rpc_pool_->getConnection(addr);
             if (!conn_status.ok()) {
                 RTP_LLM_LOG_WARNING("broadcast: getConnection failed rank=%d addr=%s error=%s %s",
@@ -327,7 +366,8 @@ public:
             contexts[rank]      = std::make_shared<CtxT>();
             auto& ctx           = contexts.at(rank);
             ctx->stub           = conn_status.value().stub;
-            ctx->request        = requests.at(rank);
+            ctx->request        = request_at(rank);
+            ctx->target_rank    = target_rank;
             ctx->server_addr    = addr;
             ctx->timeout_ms     = timeout_ms;
             ctx->client_context = std::make_shared<grpc::ClientContext>();
@@ -367,6 +407,7 @@ public:
         return result;
     }
 
+public:
     size_t workerNum() const {
         return worker_addrs_.size();
     }

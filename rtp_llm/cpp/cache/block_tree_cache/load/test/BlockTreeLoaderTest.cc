@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
 #include <atomic>
@@ -1259,7 +1260,7 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCom
     ASSERT_TRUE(engine->waitForBatches(2));
     engine->completeResult(1, ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "disk completion unknown"), false);
     EXPECT_FALSE(owner->done());
-    const auto frozen_tasks = env->cache->transfer_dispatcher_->frozenTasks();
+    const auto frozen_tasks = env->cache->reclaimer().frozenTasks();
     ASSERT_EQ(frozen_tasks.size(), 1u);
     for (size_t group = 0; group < env->groups.size(); ++group) {
         EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);

@@ -67,32 +67,28 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
     auto manager = std::make_shared<BroadcastManager>(addresses);
     ASSERT_TRUE(manager->init());
     TransferCompletionQuery query(manager);
-    TransferCompletionCleanup cleanup;
+    FrozenTaskReclaimer coordinator(std::make_shared<TransferCompletionCleanup>());
     for (const TransferCompletionKey& key : {TransferCompletionKey{uint64_t{91}}, TransferCompletionKey{std::string("91")}}) {
-        FrozenTask::ExecutionInfo info;
-        info.registry_type = key.registry_type;
-        info.trace_id = key.trace_id;
-        info.uses_rpc = true;
-        info.rank_count = addresses.size();
-        auto task = std::make_shared<FrozenTask>(FrozenTask::prepare(info),
-            TransferResult(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "lost read reply"), CacheCopyError::RPC_FAILED));
-        task->freeze();
-        FrozenTaskRecovery recovery(cleanup, [&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
-            [&](const auto& original, int timeout) {
+        TransferResult failure(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "lost read reply"), CacheCopyError::RPC_FAILED);
+        coordinator.freezeTargetBlocksWithTraceIDAndStillIOWorkerID({key, {true, addresses.size()}, failure}, {}, {0, 1});
+        auto task = coordinator.frozenTasks().front();
+        FrozenTaskRecovery recovery(coordinator, [&] { return coordinator.frozenTasks(); },
+            [&](const auto& original, const auto& pending_workers, int timeout) {
                 TransferCompletionIdentity identity;
                 identity.trace_id = original.trace_id;
                 identity.registry_type = original.registry_type;
                 identity.remote = original.uses_rpc;
                 identity.expected_rank_count = original.rank_count;
-                auto evidence = query.query(identity, timeout);
+                auto evidence = query.query(identity, pending_workers, timeout);
                 if (reply == Reply::DUPLICATE_RANK) {
                     EXPECT_TRUE(evidence.all_safe);
-                    evidence.ranks.back().rank = evidence.ranks.front().rank;
+                    evidence.ranks.push_back(evidence.ranks.front());
                 }
                 return evidence;
             });
         reply = Reply::RUNNING;
         EXPECT_EQ(recovery.runOnce(2000).released, 0u);
+        EXPECT_EQ(task->pendingWorkers(), (std::vector<size_t>{1}));
         const auto running = task->recoverySnapshot().last_query;
         ASSERT_NE(running, nullptr);
         ASSERT_EQ(running->ranks.size(), 2u);

@@ -5,6 +5,8 @@
 #include <exception>
 #include <limits>
 #include <memory>
+#include <numeric>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -41,28 +43,29 @@ private:
     const BlockTransferDispatcher& dispatcher_;
 };
 
-// The parent callback and retention node exist before the child can submit I/O.
 // Only this coordinator boundary owns freezing; worker-local dispatch never does.
 struct BlockTransferDispatcher::CoordinatedExecution {
     CoordinatedExecution(const BlockTransferDispatcher* owner,
-                         FrozenTask::ExecutionInfo      execution,
+                         const TransferTask&            task,
                          TransferDoneCallback           done):
-        owner(owner), execution(std::move(execution)), done(std::move(done)) {
-        prepared_slot.emplace_back();
+        owner(owner),
+        task(task),
+        done(std::move(done)) {
+        target.remote = owner->multi_rank_engine_ != nullptr;
+        target.rank_count = target.remote ? owner->multi_rank_engine_->workerCount() : 1;
         if (owner->completion_cleanup_) {
-            TransferCompletionTarget target;
-            target.remote = this->execution.uses_rpc;
-            target.rank_count = this->execution.rank_count;
-            cleanup = owner->completion_cleanup_->prepare(std::move(target), TransferCompletionKey{this->execution.registry_type, this->execution.trace_id});
+            cleanup = owner->completion_cleanup_->prepare(target, TransferCompletionKey{task.traceId()});
         }
     }
 
     void freeze(const TransferResult& result) noexcept {
-        auto frozen = std::make_shared<FrozenTask>(
-            FrozenTask::prepare(std::move(execution)), result, std::move(cleanup));
-        prepared_slot.front() = frozen;
-        frozen->freeze();
-        owner->retainFrozenTask(prepared_slot);
+        auto pending = result.still_io_worker_ids;
+        if (pending.empty()) {
+            pending.resize(target.rank_count);
+            std::iota(pending.begin(), pending.end(), size_t{0});
+        }
+        owner->coordinator_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(
+            {TransferCompletionKey{task->traceId()}, target, result}, owner->targetBlocks(*task), std::move(pending));
     }
 
     void complete(TransferResult result) {
@@ -72,6 +75,7 @@ struct BlockTransferDispatcher::CoordinatedExecution {
             freeze(result);
         else if (owner->completion_cleanup_)
             owner->completion_cleanup_->enqueue(std::move(cleanup));
+        task.reset();
         // A retained or late child callback must not retain the business owner
         // after completion. Invoke outside all registry/pool/frozen-task locks.
         auto notify = std::move(done);
@@ -79,10 +83,10 @@ struct BlockTransferDispatcher::CoordinatedExecution {
     }
 
     const BlockTransferDispatcher*                owner;
-    FrozenTask::ExecutionInfo                      execution;
+    std::optional<TransferTask>                    task;
     TransferDoneCallback                          done;
     TransferCompletionCleanup::Prepared           cleanup;
-    std::list<std::shared_ptr<FrozenTask>>         prepared_slot;
+    TransferCompletionTarget                      target;
     std::atomic<bool>                             claimed{false};
 };
 
@@ -127,9 +131,9 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
     const auto ticket = trackTransfer();
     auto context = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
     auto safety = std::make_shared<TransferBufferSafetyTracker>([registry = task_registry_, trace_id] {
-        registry->finish(trace_id, true);
+        registry->ioFinishedOnWorkerWithTraceID(trace_id);
     });
-    if (numeric_trace_id == 0 || !task_registry_->begin(trace_id)) {
+    if (numeric_trace_id == 0 || !task_registry_->registerOnWorkerTaskWithTraceID(trace_id)) {
         const auto* reason = numeric_trace_id == 0 ? "empty transfer trace" : "duplicate transfer trace";
         RTP_LLM_LOG_WARNING("%s: trace=%s", reason, trace_id.c_str());
         TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(reason) + ": " + trace_id),
@@ -207,13 +211,8 @@ BlockTransferDispatcher::executeMultiRank(TransferTask task, const char* complet
     return executePerRank(std::move(task));
 }
 
-FrozenTask::ExecutionInfo
-BlockTransferDispatcher::describeExecution(const TransferTask& task) const {
-    FrozenTask::ExecutionInfo info;
-    info.registry_type = RegistryType::BLOCK_TRANSFER;
-    info.trace_id = std::to_string(task.traceId());
-    info.uses_rpc = multi_rank_engine_ != nullptr;
-    info.rank_count = info.uses_rpc ? multi_rank_engine_->workerCount() : 1;
+std::vector<FrozenTask::TargetBlock> BlockTransferDispatcher::targetBlocks(const TransferTask& task) const {
+    std::vector<FrozenTask::TargetBlock> targets;
     const auto& groups = multi_rank_engine_ ? multi_rank_engine_->groupSets() : per_rank_engine_->groupSets();
     for (const auto& descriptor : task.descriptors()) {
         const GroupSet* group = descriptor.group_set_id < groups.size() ? groups[descriptor.group_set_id].get() : nullptr;
@@ -227,17 +226,17 @@ BlockTransferDispatcher::describeExecution(const TransferTask& task) const {
                 else if (descriptor.target_tier == Tier::DISK)
                     pool = group->diskPool();
             }
-            info.target_blocks.push_back({std::move(pool), descriptor.target_blocks[member]});
+            targets.push_back({std::move(pool), descriptor.target_blocks[member]});
         }
     }
-    return info;
+    return targets;
 }
 
 void BlockTransferDispatcher::submitCoordinated(TransferTask task,
                                                TransferDoneCallback done,
                                                const char* completion_operation) const {
     auto execution = std::make_shared<CoordinatedExecution>(
-        this, describeExecution(task), std::move(done));
+        this, task, std::move(done));
     // Construct the subscription before starting any I/O. The child's callback
     // vector may still reject it; that path also passes through this finalizer.
     TransferAsyncContext::DoneCallback complete =
@@ -274,27 +273,15 @@ void BlockTransferDispatcher::submitCoordinated(TransferTask task,
     }
 }
 
-void BlockTransferDispatcher::retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) const noexcept {
-    std::lock_guard<std::mutex> lock(frozen_mutex_);
-    frozen_tasks_.splice(frozen_tasks_.end(), prepared_slot);
+void BlockTransferDispatcher::setReclaimers(std::shared_ptr<FrozenTaskReclaimer> coordinator,
+                                           std::shared_ptr<TransferTaskRegistry> worker) {
+    coordinator_ = std::move(coordinator);
+    completion_cleanup_ = coordinator_->cleanup();
+    task_registry_ = std::move(worker);
 }
 
 std::vector<std::shared_ptr<FrozenTask>> BlockTransferDispatcher::frozenTasks() const {
-    // Keep retired owners alive until the list lock is released, including if
-    // snapshot allocation throws.
-    std::list<std::shared_ptr<FrozenTask>>   retired;
-    std::vector<std::shared_ptr<FrozenTask>> tasks;
-    {
-        std::lock_guard<std::mutex> lock(frozen_mutex_);
-        for (auto it = frozen_tasks_.begin(); it != frozen_tasks_.end();) {
-            const auto current = it++;
-            if ((*current)->snapshot().state == FrozenTask::State::RELEASED) {
-                retired.splice(retired.end(), frozen_tasks_, current);
-            }
-        }
-        tasks.assign(frozen_tasks_.begin(), frozen_tasks_.end());
-    }
-    return tasks;
+    return coordinator_->frozenTasks();
 }
 
 void BlockTransferDispatcher::runTransfer(TransferTask         task,

@@ -628,11 +628,11 @@ TEST(BlockTransferDispatcherTest, OverlappingTasksKeepIndependentResults) {
     EXPECT_EQ(healthy_result.copy_error, CacheCopyError::NONE);
 }
 
-TransferCompletionCleanup::Forget localCleanupForget(const BlockTransferDispatcher& dispatcher) {
-    return [&dispatcher](const TransferCompletionTarget& target,
+TransferCompletionCleanup::Forget localCleanupForget(TransferTaskRegistry& worker) {
+    return [&worker](const TransferCompletionTarget& target,
                          const std::vector<TransferCompletionKey>& traces, int timeout_ms) {
-        TransferCompletionForget forget(nullptr, [&dispatcher](const TransferCompletionKey& trace) {
-            return dispatcher.forgetLocalCompletion(trace.numericId());
+        TransferCompletionForget forget(nullptr, [&worker](const TransferCompletionKey& trace) {
+            return worker.forgetTaskInfoOnWorker({trace.trace_id}).front();
         });
         return forget.forget(target, traces, timeout_ms);
     };

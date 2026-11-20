@@ -29,8 +29,7 @@
 
 namespace rtp_llm {
 
-class FrozenTask;
-class TransferCompletionCleanup;
+class FrozenTaskReclaimer;
 class BatchKVCacheResource;
 class BlockTreeCacheMetricsReporter;
 enum class AsyncProfileKind;
@@ -171,11 +170,7 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    virtual void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup>) {}
-    virtual void cleanupExpiredMissing() {}
-    virtual std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const { return {}; }
-    virtual TransferTaskRegistry::State queryReadCompletion(const std::string&) const { return TransferTaskRegistry::State::UNKNOWN; }
-    virtual TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string&) { return TransferTaskRegistry::ForgetResult::FAILED; }
+    virtual void setReclaimers(std::shared_ptr<FrozenTaskReclaimer>, std::shared_ptr<TransferTaskRegistry>) {}
 
     class ExternalIoGuard {
     public:

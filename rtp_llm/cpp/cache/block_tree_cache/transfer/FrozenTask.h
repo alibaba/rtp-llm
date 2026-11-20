@@ -80,7 +80,9 @@ public:
     static PreparedExecution prepare(ExecutionInfo execution);
 
     FrozenTask(PreparedExecution&& prepared, TransferResult failure,
-               TransferCompletionCleanup::Prepared cleanup = {});
+               TransferCompletionCleanup::Prepared cleanup = {}, std::vector<size_t> pending_workers = {});
+    std::vector<size_t> pendingWorkers() const;
+    bool confirmWorker(size_t worker_id);
     ~FrozenTask() = default;
     FrozenTask(const FrozenTask&)            = delete;
     FrozenTask& operator=(const FrozenTask&) = delete;
@@ -114,6 +116,7 @@ private:
     int64_t                       frozen_at_us_{0};
     int64_t                       released_at_us_{0};
     RecoverySnapshot              recovery_;
+    std::vector<size_t> pending_workers_;
 };
 
 }  // namespace rtp_llm

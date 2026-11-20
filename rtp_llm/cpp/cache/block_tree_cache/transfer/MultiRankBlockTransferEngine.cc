@@ -192,6 +192,7 @@ private:
         result.expandBlockErrors(block_count_);
         for (size_t rank = 0; rank < responses.size(); ++rank) {
             if (!broadcast_result_->rpcSucceeded(rank)) {
+                result.still_io_worker_ids.push_back(rank);
                 continue;
             }
             const auto& response = responses[rank];
@@ -227,8 +228,12 @@ private:
                     ErrorInfo(rank_result.status.code(),
                               "rank=" + std::to_string(rank) + " {" + rank_result.status.ToString() + "}");
             }
+            if (rank_result.checkNeedFreeze())
+                result.still_io_worker_ids.push_back(rank);
             result.merge(std::move(rank_result));
         }
+        if (responses.size() != worker_count_)
+            result.still_io_worker_ids.clear();
     }
 
     bool publish(TransferResult result, TransferResult published_result) {

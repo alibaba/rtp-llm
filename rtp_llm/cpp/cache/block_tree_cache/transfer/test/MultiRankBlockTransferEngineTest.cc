@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include <gtest/gtest.h>
 #include <grpcpp/grpcpp.h>
 
@@ -1170,6 +1171,7 @@ TEST_P(MultiRankBlockTransferInvalidResponseTest, BroadcastTransferRejectsInvali
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
     EXPECT_FALSE(context->result().buffer_safe);
+    EXPECT_EQ(context->result().still_io_worker_ids, (std::vector<size_t>{1}));
 }
 
 INSTANTIATE_TEST_SUITE_P(InvalidWorkerResponses,
@@ -1348,7 +1350,7 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBefo
         EXPECT_FALSE(error.ok());
         EXPECT_FALSE(host_pool->isFrozen(source));
         EXPECT_TRUE(device_pool->isFrozen(target));
-        const auto records = cache->transfer_dispatcher_->frozenTasks();
+        const auto records = cache->reclaimer().frozenTasks();
         ASSERT_EQ(records.size(), 1u);
         const auto& execution = records.front()->execution();
         EXPECT_EQ(execution.registry_type, RegistryType::BLOCK_TRANSFER);

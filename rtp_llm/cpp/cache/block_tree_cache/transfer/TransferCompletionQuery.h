@@ -21,8 +21,8 @@ public:
                                      LocalReader local_reader = {});
 
     // Positive timeout only. Missing participants, malformed responses and
-    // transport errors never prove completion. Rows are indexed by original rank.
-    TransferCompletionQueryResult query(const TransferCompletionIdentity& execution, int timeout_ms) const;
+    // transport errors never prove completion.
+    TransferCompletionQueryResult query(const TransferCompletionIdentity& execution, const std::vector<size_t>& worker_ids, int timeout_ms) const;
 
 private:
     std::shared_ptr<BroadcastManager> broadcast_manager_;

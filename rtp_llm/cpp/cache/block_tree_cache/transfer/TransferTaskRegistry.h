@@ -8,6 +8,7 @@
 #include <limits>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <string>
@@ -56,7 +57,11 @@ public:
 
     // Insert RUNNING without replacing an existing execution's evidence.
     // False reports an empty or already registered trace to the caller.
-    bool begin(const std::string& trace_id) {
+    using OfferedCallback = std::function<void()>;
+
+    bool registerOnWorkerTaskWithTraceID(const std::string& trace_id,
+                                         OfferedCallback offeredQuery = {},
+                                         OfferedCallback offeredForget = {}) {
         if (trace_id.empty()) {
             logEvent("begin", trace_id, State::UNKNOWN, "invalid");
             return false;
@@ -77,9 +82,25 @@ public:
         }
         const auto state = inserted.first->second;
         const bool admitted = inserted.second;
+        if (admitted && (offeredQuery || offeredForget)) {
+            try {
+                callbacks_.emplace(trace_id, std::make_shared<Callbacks>(Callbacks{std::move(offeredQuery), std::move(offeredForget)}));
+            } catch (...) {
+                records_.erase(inserted.first);
+                throw;
+            }
+        }
         lock.unlock();
         logEvent("begin", trace_id, state, admitted ? "inserted" : "duplicate");
         return admitted;
+    }
+
+    bool begin(const std::string& trace_id) {
+        return registerOnWorkerTaskWithTraceID(trace_id);
+    }
+
+    bool ioFinishedOnWorkerWithTraceID(const std::string& trace_id) {
+        return finish(trace_id, true);
     }
 
     bool begin(uint64_t trace_id) {
@@ -144,7 +165,27 @@ public:
             logEvent("forget", trace_id, state, "retained");
             return ForgetResult::RUNNING;
         }
-        records_.erase(it);
+        const auto found = callbacks_.find(trace_id);
+        std::shared_ptr<Callbacks> callbacks;
+        if (found != callbacks_.end()) {
+            callbacks = found->second;
+            if (callbacks->forgetting || callbacks->active_queries)
+                return ForgetResult::RUNNING;
+            if (callbacks->forget) {
+                callbacks->forgetting = true;
+                lock.unlock();
+                try {
+                    callbacks->forget();
+                } catch (...) {
+                    lock.lock();
+                    callbacks->forgetting = false;
+                    return ForgetResult::FAILED;
+                }
+                lock.lock();
+            }
+            callbacks_.erase(trace_id);
+        }
+        records_.erase(trace_id);
         lock.unlock();
         logEvent("forget", trace_id, State::BUFFER_SAFE, "removed");
         return ForgetResult::DONE;
@@ -152,6 +193,38 @@ public:
 
     ForgetResult forget(uint64_t trace_id) {
         return trace_id == 0 ? ForgetResult::INVALID : forget(std::to_string(trace_id));
+    }
+
+    std::vector<ForgetResult> forgetTaskInfoOnWorker(const std::vector<std::string>& trace_ids) {
+        std::vector<ForgetResult> results;
+        results.reserve(trace_ids.size());
+        for (const auto& trace_id : trace_ids)
+            results.push_back(forget(trace_id));
+        return results;
+    }
+
+    std::vector<State> queryIfIoFinishedInOneWorkerWithTraceIDs(const std::vector<std::string>& trace_ids) {
+        for (const auto& trace_id : trace_ids) {
+            std::shared_ptr<Callbacks> callbacks;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto it = callbacks_.find(trace_id);
+                if (it != callbacks_.end() && it->second->query && !it->second->forgetting) {
+                    callbacks = it->second;
+                    ++callbacks->active_queries;
+                }
+            }
+            if (callbacks) {
+                try {
+                    callbacks->query();
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("worker completion query callback failed for trace=%s", trace_id.c_str());
+                }
+                std::lock_guard<std::mutex> lock(mutex_);
+                --callbacks->active_queries;
+            }
+        }
+        return queryAndBlockMissing(trace_ids);
     }
 
     // Recovery queries close admission for missing identities atomically with
@@ -263,6 +336,15 @@ public:
     }
 
 private:
+    struct Callbacks {
+        OfferedCallback query;
+        OfferedCallback forget;
+        size_t active_queries{0};
+        bool forgetting{false};
+    };
+
+    std::unordered_map<std::string, std::shared_ptr<Callbacks>> callbacks_;
+
     struct MissingRecord {
         uint64_t count{0};
         Clock::time_point expire_time{};
