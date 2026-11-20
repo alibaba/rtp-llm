@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 
@@ -125,6 +126,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
             long latestFinishedTaskVersion =
                     workerStatus.appliedStatusCursor().latestFinishedTaskVersion();
+            long vitRoutedAtPollStart =
+                    roleType == RoleType.VIT ? workerStatus.vitRoutedInputs() : 0L;
 
             engineGrpcService
                     .getWorkerStatusAsync(
@@ -134,18 +137,32 @@ public class GrpcWorkerStatusRunner implements Runnable {
                             syncRequestTimeoutMs,
                             roleType)
                     .thenApply(
-                            response ->
-                                    EngineStatusConverter.convertToStatusObservation(
-                                            workerStatus, response))
+                            response -> {
+                                if (response == null) {
+                                    return null;
+                                }
+                                long receivedNanos = System.nanoTime();
+                                OptionalLong vitLoad =
+                                        roleType == RoleType.VIT && response.hasMmInflightInputs()
+                                                ? OptionalLong.of(
+                                                        response.getMmInflightInputs().getValue())
+                                                : OptionalLong.empty();
+                                return new ReceivedStatus(
+                                        EngineStatusConverter.convertToStatusObservation(
+                                                workerStatus, response),
+                                        vitLoad,
+                                        receivedNanos);
+                            })
                     .handleAsync(
-                            (observation, failure) -> {
+                            (received, failure) -> {
                                 try {
                                     Throwable cause = unwrapCompletionFailure(failure);
                                     if (cause != null) {
                                         handleException(cause, startTime);
                                         recordStatusCheckFailure(cause);
                                     } else {
-                                        handleStatusResponse(observation, startTime);
+                                        handleStatusResponse(
+                                                received, vitRoutedAtPollStart, startTime);
                                     }
                                 } catch (Throwable callbackFailure) {
                                     logger.error(
@@ -184,13 +201,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 : failure;
     }
 
-    private void handleStatusResponse(WorkerStatus.StatusObservation observation, long startTime) {
+    private void handleStatusResponse(
+            ReceivedStatus received, long vitRoutedAtPollStart, long startTime) {
         try {
-            if (observation == null) {
+            if (received == null) {
                 logger.debug("query engine worker status via gRPC, response body is null");
                 reportStatusCheckFailure(BalanceStatusEnum.RESPONSE_NULL, startTime);
                 return;
             }
+            WorkerStatus.StatusObservation observation = received.observation();
             if (!workerDirectory.isCurrentStatus(roleType, ipPort, workerStatus)) {
                 logger.debug(
                         "Ignore stale worker status callback for {}, role: {}", ipPort, roleType);
@@ -311,6 +330,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     // status_version is unchanged. Derive exact endpoint-owned
                     // liveness facts without replaying versioned mutation.
                     activityProjection = ep.observeStatusHeartbeat(workerStatus, observation);
+                }
+                if (ep != null && roleType == RoleType.VIT) {
+                    workerStatus.recordVitLoad(
+                            received.vitLoad(), vitRoutedAtPollStart, received.receivedNanos());
                 }
             } finally {
                 workerStatus.lock.unlock();
@@ -540,4 +563,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 System.nanoTime() / 1000 - createTimeUs,
                 msg);
     }
+
+    /**
+     * Holds the RPC observation and load sample while status application is queued.
+     */
+    private record ReceivedStatus(
+            WorkerStatus.StatusObservation observation, OptionalLong vitLoad, long receivedNanos) {}
 }
