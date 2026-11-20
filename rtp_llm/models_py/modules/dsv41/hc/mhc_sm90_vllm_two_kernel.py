@@ -21,7 +21,7 @@ from tilelang import language as T
 from rtp_llm.models_py.modules.dsv4 import (  # noqa: F401
     tilelang_kernels as _tilelang_kernels,
 )
-from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import prepare_tf32_weight
+
 _mhc_pre_big_fuse_with_norm = importlib.import_module(
     "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_prenorm"
 ).mhc_pre_big_fuse_with_norm_tilelang
@@ -36,6 +36,31 @@ THREADS = 128
 # crossover at ~92 rows; 64 is also the largest decode CUDA-graph bucket.
 MAX_TOKENS = 64
 _WARMED_STREAMS: set[tuple[int, int]] = set()
+
+
+def prepare_sm90_tf32_rne_weight(fn: torch.Tensor) -> torch.Tensor:
+    """Materialize the native TMA TF32 RN-even values for the scalar projection.
+
+    Standalone prenorm passes raw weights to DeepGEMM's TMA conversion. The
+    fused projection uses FP32 arithmetic, so it must perform that conversion
+    explicitly, including exact halfway values. Keep its cache separate from
+    the older biased/truncating helper and retain immutable inference weights.
+    """
+    if torch.is_inference(fn):
+        version = None
+    else:
+        try:
+            version = int(fn._version)
+        except RuntimeError:
+            version = None
+    key = (version, fn.data_ptr(), tuple(fn.shape), tuple(fn.stride()), fn.device)
+    cached = getattr(fn, "_dsv41_sm90_tf32_rne_cache", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    bits = fn.view(torch.int32)
+    weight = ((bits + 0xFFF + ((bits >> 13) & 1)) & -8192).view(torch.float32)
+    fn._dsv41_sm90_tf32_rne_cache = (key, weight)
+    return weight
 
 
 _PASS_CONFIGS = {
@@ -377,7 +402,7 @@ def try_vllm_two_kernel_post_pre(
             residual.view(tokens, HC, DIM),
             post.view(tokens, HC),
             comb.view(tokens, HC, HC),
-            prepare_tf32_weight(next_hc.fn),
+            prepare_sm90_tf32_rne_weight(next_hc.fn),
             previous.pre_mix_out.view(tokens, HC),
             next_hc.scale,
             next_hc.base,

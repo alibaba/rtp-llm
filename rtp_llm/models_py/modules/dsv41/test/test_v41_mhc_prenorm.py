@@ -376,6 +376,70 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                         )
 
     @torch.no_grad()
+    @patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "auto"})
+    def test_sm90_adjacent_prenorm_cap_reference_and_capture(self):
+        if not is_sm90():
+            self.skipTest("SM90 prenorm's 256-token cap is separate from SM100")
+        for tokens in (255, 256):
+            with self.subTest(tokens=tokens):
+                residual, fn, base, scale = self._inputs(tokens)
+                with torch.inference_mode():
+                    fn = fn.clone()
+                self.assertTrue(is_supported(residual, fn))
+                self._check_mixes_and_coefficients(residual, fn, base, scale)
+                # Warm the precise shape before capture; do not include JIT in
+                # the graph or substitute the <=32-token fused HC boundary.
+                for _ in range(3):
+                    prenorm(residual, fn, _EPS)
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    output = prenorm(residual, fn, _EPS)
+                    coefficients = _split_mixes(output, base, scale)
+                graph.replay()
+                initial = output.clone()
+                for amplitude in (-0.75, 2.0):
+                    residual.copy_(torch.randn_like(residual) * amplitude)
+                    graph.replay()
+                    expected = _native_mixes(residual, fn)
+                    self._assert_mixes_close(output, expected)
+                    self.assertFalse(torch.equal(output, initial))
+                    torch.testing.assert_close(
+                        output, prenorm(residual, fn, _EPS), rtol=0, atol=0
+                    )
+                    for actual, reference in zip(
+                        coefficients, _split_mixes(expected, base, scale)
+                    ):
+                        torch.testing.assert_close(
+                            actual, reference, rtol=2e-4, atol=1e-5
+                        )
+
+    @torch.no_grad()
+    @patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "auto"})
+    def test_sm90_257_token_fallback_is_capture_safe_without_gemm_probe(self):
+        if not is_sm90():
+            self.skipTest("SM90 prenorm's 256-token cap is separate from SM100")
+        residual, fn, _, _ = self._inputs(257)
+        marker = torch.zeros(1, device="cuda")
+        graph = torch.cuda.CUDAGraph()
+        with patch(
+            "rtp_llm.models_py.modules.dsv41.hc.v41_prenorm._has_prenorm_gemm",
+            side_effect=AssertionError("257-token fallback probed DeepGEMM"),
+        ) as gemm_probe:
+            self.assertFalse(is_supported(residual, fn))
+            self.assertIsNone(prenorm(residual, fn, _EPS))
+            with torch.cuda.graph(graph):
+                fallback = prenorm(residual, fn, _EPS)
+                # Keep a real graph node so capture/replay success is observed.
+                marker.add_(1)
+            self.assertIsNone(fallback)
+            graph.replay()
+            graph.replay()
+            torch.cuda.synchronize()
+            self.assertEqual(marker.item(), 2)
+            gemm_probe.assert_not_called()
+
+    @torch.no_grad()
     def test_weight_inplace_update_and_replacement_reach_gemm(self):
         residual, fn, base, scale = self._inputs(6)
         before = prenorm(residual, fn, _EPS)
