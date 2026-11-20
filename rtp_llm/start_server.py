@@ -26,6 +26,7 @@ from rtp_llm.models_py.distributed.rank_layout import RankLayout
 from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
+from rtp_llm.utils.drain_flag import DrainFlag
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
@@ -718,7 +719,7 @@ def start_server(py_env_configs: PyEnvConfigs):
     )
     _sync_server_shutdown_timeout(py_env_configs)
 
-    service_draining = multiprocessing.Event()
+    service_draining = DrainFlag()
     # Create process manager with config values
     process_manager = ProcessManager(
         service_draining=service_draining,

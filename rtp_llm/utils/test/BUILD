@@ -292,3 +292,9 @@ py_test(
     srcs = ["dsa_indexing_test.py"],
     data = ["//rtp_llm:utils/dsa_indexing.py"],
 )
+
+py_test(
+    name = "drain_flag_test",
+    srcs = ["drain_flag_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
