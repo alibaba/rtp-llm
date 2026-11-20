@@ -74,10 +74,10 @@ class TelemetryState(Enum):
 _state_lock = threading.Lock()
 _state: TelemetryState = TelemetryState.UNINITIALIZED
 _provider = None  # TracerProvider when ACTIVE
+_tracer = None  # Process-local tracer for the immutable RTP instrumentation scope
 
 
 _sdk_environment_lock = threading.Lock()
-_active_scope_version = ""
 
 
 @contextmanager
@@ -337,7 +337,7 @@ def _init_with_exporter_locked(
     exporter: Any, role: str, tp_rank: int, config: TraceConfig
 ) -> bool:
     """Init order: Resource -> Sampler -> BSP -> Provider -> global propagator."""
-    global _state, _provider, _active_scope_version
+    global _state, _provider, _tracer
     service_name = config.service_name or f"rtp_llm_{role}"
     # Resolved once so service.instance.id, host.name and host.ip can never
     # disagree about which host this process runs on.
@@ -404,6 +404,8 @@ def _init_with_exporter_locked(
             export_timeout_millis=config.http_timeout_ms,
         )
         provider.add_span_processor(processor)
+        scope_version = config.scope_version or package_scope_version()
+        tracer = provider.get_tracer("rtp_llm", scope_version or None)
         propagate.set_global_textmap(TraceContextTextMapPropagator())
     except Exception:
         if processor is not None:
@@ -412,7 +414,7 @@ def _init_with_exporter_locked(
         raise
     # 使用自有 Provider，避免已安装的全局 Provider 接管手工 span。
     _provider = provider
-    _active_scope_version = config.scope_version or package_scope_version()
+    _tracer = tracer
     _state = TelemetryState.ACTIVE
     _LOGGER.info(
         "Trace 已启用 role=%s source=%s root_ratio=%s parent_based=true endpoint=%s",
@@ -426,7 +428,7 @@ def _init_with_exporter_locked(
 
 def shutdown_telemetry(deadline_ms: int = 2000) -> bool:
     """Bounded shutdown on a helper thread; drops remaining spans on timeout."""
-    global _state, _provider
+    global _state, _provider, _tracer
     with _state_lock:
         if _state != TelemetryState.ACTIVE:
             if _state != TelemetryState.UNINITIALIZED:
@@ -434,6 +436,7 @@ def shutdown_telemetry(deadline_ms: int = 2000) -> bool:
             return True
         provider = _provider
         _provider = None
+        _tracer = None
         _state = TelemetryState.SHUTDOWN
 
     done = threading.Event()
@@ -469,17 +472,10 @@ def telemetry_state() -> TelemetryState:
         return _state
 
 
-def _scope_version() -> str:
-    """仅返回启动时确定的 scope 版本，不再读取旧环境变量。"""
-    return _active_scope_version
-
-
 def get_tracer():
     """Returns a tracer when ACTIVE, otherwise None (callers must null-check)."""
     with _state_lock:
-        if _state != TelemetryState.ACTIVE or _provider is None:
-            return None
-        return _provider.get_tracer("rtp_llm", _scope_version() or None)
+        return _tracer if _state == TelemetryState.ACTIVE else None
 
 
 # ---------------------------------------------------------------------------
@@ -855,9 +851,10 @@ def reset_telemetry_for_test(deadline_ms: int = 2000) -> bool:
     if not shutdown_telemetry(deadline_ms):
         return False
 
-    global _state, _provider
+    global _state, _provider, _tracer
     with _state_lock:
         _provider = None
+        _tracer = None
         _state = TelemetryState.UNINITIALIZED
     CURRENT_TRACE_STATE.set(None)
     CURRENT_INTERNAL_CONTEXT.set(None)

@@ -647,6 +647,23 @@ class TestActiveRuntime(TracingTestCase):
         assert tracing.telemetry_state() == tracing.TelemetryState.SHUTDOWN
         assert tracing.shutdown_telemetry()
 
+    def test_request_path_reuses_the_tracer_created_at_startup(self):
+        exporter = _start_in_memory_runtime(TraceConfig(scope_version="test-scope"))
+        tracer = tracing.get_tracer()
+        with mock.patch.object(
+            tracing._provider, "get_tracer", side_effect=AssertionError("request lookup")
+        ):
+            self.assertIs(tracing.get_tracer(), tracer)
+            state = tracing.start_server_span("cached_tracer", {})
+            self.assertIsNotNone(state)
+            state.finish()
+
+        self.assertTrue(tracing.shutdown_telemetry())
+        self.assertIsNone(tracing.get_tracer())
+        (span,) = exporter.get_finished_spans()
+        self.assertEqual(span.instrumentation_scope.name, "rtp_llm")
+        self.assertEqual(span.instrumentation_scope.version, "test-scope")
+
     def test_reset_telemetry_for_test_restores_fixture_state(self):
         _start_in_memory_runtime()
         tracing.CURRENT_TRACE_STATE.set(mock.sentinel.trace_state)
