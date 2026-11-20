@@ -253,6 +253,7 @@ class MMRemoteEmbeddingCache:
                     observe_hold=cls._observe_buffer_hold,
                     observe_lease=cls._observe_gdr_lease,
                     observe_arena=cls._observe_gdr_arena,
+                    observe_acquire_failure=cls._observe_gdr_acquire_failure,
                     direct_payload=True,
                 )
             return raw_factory()
@@ -457,6 +458,18 @@ class MMRemoteEmbeddingCache:
         cls._add_inflight(stage, delta)
         cls._report_metric(
             GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC, nbytes, {"stage": stage}
+        )
+
+    @classmethod
+    def _observe_gdr_acquire_failure(cls, for_write, reason):
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC,
+            1,
+            {
+                "operation": "write" if for_write else "read",
+                "stage": "gdr_acquire_" + reason,
+                "status": "skipped",
+            },
         )
 
     @classmethod

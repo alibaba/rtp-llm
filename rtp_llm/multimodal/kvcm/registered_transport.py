@@ -476,6 +476,7 @@ class RegisteredTransportPool:
         observe_hold=None,
         observe_lease=None,
         observe_arena=None,
+        observe_acquire_failure=None,
         direct_payload=False,
         arena_bytes=None,
         min_block_bytes=None,
@@ -489,6 +490,7 @@ class RegisteredTransportPool:
         self._observe_hold = observe_hold
         self._observe_lease = observe_lease
         self._observe_arena = observe_arena
+        self._observe_acquire_failure = observe_acquire_failure
         self._gc_stop = threading.Event()
         self._condition = threading.Condition()
         self._accepting = True
@@ -750,12 +752,21 @@ class RegisteredTransportPool:
         wait_seconds = max(timeout, 0)
         deadline = time.monotonic() + wait_seconds
         if not self._condition.acquire(timeout=wait_seconds):
+            self._report_acquire_failure(for_write, "lock_timeout")
             return None
         slot = None
+        failure = "extent_unavailable"
         try:
-            while self._accepting and not self.quarantined:
+            while True:
+                if not self._accepting:
+                    failure = "closed"
+                    break
+                if self.quarantined:
+                    failure = "quarantined"
+                    break
                 # Condition.wait() reacquires the lock before returning.
                 if wait_seconds and time.monotonic() >= deadline:
+                    failure = "deadline_with_lock"
                     break
                 if sized:
                     slot = self._take_range(nbytes, for_write)
@@ -765,7 +776,8 @@ class RegisteredTransportPool:
                     writable = len(healthy)
                     if for_write and len(self._slots) > 1:
                         if len(healthy) <= 1:
-                            return None
+                            failure = "read_reserve"
+                            break
                         writable -= 1 + sum(
                             self._in_use.get(slot, False) for slot in healthy
                         )
@@ -784,9 +796,15 @@ class RegisteredTransportPool:
                     break
         finally:
             self._condition.release()
-        if slot is not None and self._observe_lease is not None:
+        if slot is None:
+            self._report_acquire_failure(for_write, failure)
+        elif self._observe_lease is not None:
             self._observe_lease(for_write, 1, slot._capacity)
         return slot
+
+    def _report_acquire_failure(self, for_write, reason):
+        if self._observe_acquire_failure is not None:
+            self._observe_acquire_failure(for_write, reason)
 
     def stop_acquiring(self):
         with self._condition:

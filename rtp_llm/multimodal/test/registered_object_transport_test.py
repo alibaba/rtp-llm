@@ -357,7 +357,8 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                         pool.release(next_slot)
 
     def test_acquire_deadline_includes_contended_allocator_lock(self):
-        pool = self.pool()
+        observe = Mock()
+        pool = self.pool(observe_acquire_failure=observe)
         with ThreadPoolExecutor(1) as workers:
             acquired = None
             try:
@@ -369,9 +370,19 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                     slot = acquired.result(timeout=1)
                     if slot is not None:
                         pool.release(slot)
+        observe.assert_called_once_with(False, "lock_timeout")
         slot = pool.acquire()
         self.assertIsNotNone(slot)
-        pool.release(slot)
+        try:
+            self.assertIsNone(pool.acquire())
+            self.assertEqual(
+                observe.call_args_list[-1].args, (False, "extent_unavailable")
+            )
+        finally:
+            pool.release(slot)
+        pool.stop_acquiring()
+        self.assertIsNone(pool.acquire())
+        self.assertEqual(observe.call_args_list[-1].args, (False, "closed"))
 
     def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
         pool = self.pool(
