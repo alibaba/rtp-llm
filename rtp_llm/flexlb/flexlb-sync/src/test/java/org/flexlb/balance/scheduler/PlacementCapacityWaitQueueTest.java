@@ -71,6 +71,45 @@ class PlacementCapacityWaitQueueTest {
     }
 
     @Test
+    void oneCachePublicationRechecksEveryDifferentPrefixSharingTheOldLeader() {
+        var high = entry(50);
+        var low = entry(40);
+        var oldLeader = affinity(A.endpoint());
+        queue.park(high, oldLeader, 0);
+        queue.park(low, oldLeader, 0);
+        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g", null));
+        assertEquals(List.of(high), drain(8));
+        queue.park(high, oldLeader, 0);
+        assertEquals(List.of(low), drain(8));
+        queue.park(low, oldLeader, 0);
+        assertTrue(drain(8).isEmpty(), "one cache publication must not start another pass");
+    }
+
+    @Test
+    void repeatedCacheChangesPrioritizeUncheckedPrefixesAndRespectGroupScope() {
+        var high = entry(50);
+        var low = entry(40);
+        var otherGroup = entry(90);
+        var anyGroup = entry(39);
+        var leader = affinity(A.endpoint());
+        var groupChange = new PlacementKey(RoleType.PREFILL, "g", null);
+        queue.park(high, leader, 0);
+        queue.park(low, leader, 0);
+        queue.park(otherGroup, new PlacementKey(RoleType.PREFILL, "other", null, leader.cacheWorkers()), 0);
+        queue.park(anyGroup, new PlacementKey(RoleType.PREFILL, null, null, leader.cacheWorkers()), 0);
+        queue.capacityChanged(groupChange);
+        assertEquals(List.of(high, anyGroup), drain(8));
+        queue.remove(anyGroup);
+        queue.park(high, leader, 0);
+        queue.capacityChanged(groupChange);
+        assertEquals(List.of(low), drain(8));
+        queue.park(low, leader, 0);
+        assertEquals(List.of(high), drain(8));
+        queue.park(high, leader, 0);
+        assertTrue(drain(8).isEmpty());
+    }
+
+    @Test
     void affinityParkCannotMissAnEdgeDuringPlanning() {
         availability.changed(B);
         assertFalse(queue.park(entry(50), affinity(B.endpoint()), 0));

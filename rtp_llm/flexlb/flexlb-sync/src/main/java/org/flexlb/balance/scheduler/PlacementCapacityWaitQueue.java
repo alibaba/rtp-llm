@@ -15,7 +15,10 @@ import java.util.function.Consumer;
  * <p>A capacity edge opens one retry per domain, cache-affinity cohort, and Prefill admission class.
  * Successful admission (or cancellation before admission) preserves the opportunity
  * for the next waiter; a failed attempt
- * consumes it. No endpoint probing or request-specific successor state is needed.
+ * consumes it. A group-level cache or topology change instead invalidates the
+ * parked affinity plans: requests sharing the previous leader set may now have
+ * different eligible workers. Recheck the oldest cache version first, in queue order
+ * within that version.
  * Ready domains are globally ordered, and each scan transfers a bounded number of
  * requests. A wakeup grants a fresh route decision, never an endpoint reservation.</p>
  */
@@ -47,7 +50,7 @@ final class PlacementCapacityWaitQueue {
         rescueWaiters = probeIntervalNanos > 0 ? new TreeSet<>(rescueOrder) : null;
         this.availability = Objects.requireNonNull(availability, "availability");
         order = priorityOrdering ? GlobalQueueEntry.PRIORITY_ORDER : GlobalQueueEntry.SEQUENCE_ORDER;
-        ready = new TreeSet<>((left, right) -> order.compare(left.entries.first(), right.entries.first()));
+        ready = new TreeSet<>((left, right) -> order.compare(left.next(), right.next()));
     }
 
     boolean isWaiting(GlobalQueueEntry entry) {
@@ -70,7 +73,7 @@ final class PlacementCapacityWaitQueue {
                 blocker.role().supportsPrefill() && entry.knownColdRequest);
         Domain domain = domains.computeIfAbsent(key, this::newDomain);
         unindex(domain);
-        domain.entries.add(entry);
+        domain.add(entry);
         if (rescueWaiters != null && !blocker.cacheWorkers().isEmpty() && Double.isFinite(hitFraction)) {
             entry.rescueHitFraction = hitFraction;
             if (rescueWaiters.isEmpty()) { nextProbeNanos = System.nanoTime() + probeIntervalNanos; }
@@ -104,17 +107,28 @@ final class PlacementCapacityWaitQueue {
         }
         release(PlacementKey.anyGroup(key.role()));
         if (key.endpoint() != null) {
-            releaseAffinities(key.capacityDomain());
+            releaseAffinities(key.capacityDomain(), false);
         } else {
-            releaseAffinities(key);
-            if (key.group() != null) { releaseAffinities(PlacementKey.anyGroup(key.role())); }
+            releaseAffinities(key, false);
+            if (key.group() != null) { releaseAffinities(PlacementKey.anyGroup(key.role()), true); }
         }
     }
 
-    private void releaseAffinities(PlacementKey key) {
+    private void releaseAffinities(PlacementKey key, boolean wildcardWaitersOnly) {
         var affected = affinityDomains.get(key);
         if (affected != null) {
-            for (Domain domain : affected) { domain.available = true; index(domain); }
+            for (Domain domain : affected) {
+                if (wildcardWaitersOnly && domain.key.capacity().group() != null) { continue; }
+                unindex(domain);
+                if (key.endpoint() == null) {
+                    // A cache/topology update can make only a peer's prefix eligible.
+                    // Invalidate each parked plan once, issuing one retry per domain at a time.
+                    domain.cacheVersion++;
+                } else {
+                    domain.available = true;
+                }
+                index(domain);
+            }
         }
     }
 
@@ -155,7 +169,8 @@ final class PlacementCapacityWaitQueue {
     void resumeReady(int limit, Consumer<GlobalQueueEntry> resume) {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();
-            GlobalQueueEntry entry = domain.entries.pollFirst();
+            GlobalQueueEntry entry = domain.next();
+            domain.take(entry);
             if (rescueWaiters != null) { rescueWaiters.remove(entry); }
             domain.retry = entry;
             domain.available = false;
@@ -187,7 +202,7 @@ final class PlacementCapacityWaitQueue {
             // An edge arriving during this retry remains available.
             domain.available |= progress;
         } else {
-            domain.entries.remove(entry);
+            domain.take(entry);
         }
         index(domain);
     }
@@ -215,7 +230,7 @@ final class PlacementCapacityWaitQueue {
         if (domain.retry == null) {
             if (domain.entries.isEmpty()) {
                 removeDomain(domain);
-            } else if (domain.available) {
+            } else if (domain.available || domain.hasStaleCachePlan()) {
                 ready.add(domain);
             }
         }
@@ -227,8 +242,40 @@ final class PlacementCapacityWaitQueue {
         private boolean available;
         private GlobalQueueEntry retry;
 
+        private long cacheVersion;
+        private final Map<GlobalQueueEntry, Long> checkedVersion;
+        private final NavigableSet<GlobalQueueEntry> cacheOrder;
+
         private Domain(WaitKey key) {
             this.key = key;
+            checkedVersion = key.capacity().cacheWorkers().isEmpty() ? null : new IdentityHashMap<>();
+            cacheOrder = checkedVersion == null ? null : new TreeSet<>(
+                    Comparator.<GlobalQueueEntry>comparingLong(checkedVersion::get).thenComparing(order));
+        }
+
+        private void add(GlobalQueueEntry entry) {
+            entries.add(entry);
+            if (cacheOrder != null) {
+                checkedVersion.put(entry, cacheVersion);
+                cacheOrder.add(entry);
+            }
+        }
+
+        private void take(GlobalQueueEntry entry) {
+            entries.remove(entry);
+            if (cacheOrder != null) {
+                cacheOrder.remove(entry);
+                checkedVersion.remove(entry);
+            }
+        }
+
+        private boolean hasStaleCachePlan() {
+            return cacheOrder != null && !cacheOrder.isEmpty()
+                    && checkedVersion.get(cacheOrder.first()) < cacheVersion;
+        }
+
+        private GlobalQueueEntry next() {
+            return hasStaleCachePlan() ? cacheOrder.first() : entries.first();
         }
     }
 }
