@@ -661,7 +661,12 @@ class Block(nn.Module):
         )
         # On SM90, HC post has submitted its last read of this output.
         # Keep its full-prefill storage out of the subsequent FFN lifetime.
-        if attn_out.is_cuda and is_sm90(attn_out.device):
+        # V4.1 already resolved this architecture gate with its cache ABI.
+        # Legacy attention still resolves it from the actual output device.
+        release_attn_output = getattr(self.attn, "_use_v4_kv_cache", None)
+        if release_attn_output is None:
+            release_attn_output = attn_out.is_cuda and is_sm90(attn_out.device)
+        if release_attn_output:
             del attn_out
         self._sync_after_first_cp_prefill_attention()
 
