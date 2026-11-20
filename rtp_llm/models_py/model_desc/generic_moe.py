@@ -1148,6 +1148,9 @@ class GenericMoeModel(GptModelBase):
             self.kv_cache,
         )
         layer_group_ids = cpu_layer_group_ids(inputs.attention_inputs)
+        layer_progress = getattr(inputs, "prefill_layer_progress", None)
+        if layer_progress is not None:
+            layer_progress(-1)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             if self.layered_prefill_cache is not None:
                 self.layered_prefill_cache.before_layer(i)
@@ -1167,6 +1170,8 @@ class GenericMoeModel(GptModelBase):
             ):
                 diagnostics.indexer(i, output.topk_indices)
             prev_topk_indices = output.topk_indices
+            if layer_progress is not None:
+                layer_progress(i)
             if _rt_on:
                 _rt.record(f"layer{i:02d}_hidden", hidden_states)
                 _rt.record(f"layer{i:02d}_residual", residual)

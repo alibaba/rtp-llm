@@ -347,6 +347,9 @@ class GenericMoeMTPModel(GptModelBase):
             force_reuse_topk_indices=reuse_topk_indices,
         )
         layer_group_ids = cpu_layer_group_ids(inputs.attention_inputs)
+        layer_progress = getattr(inputs, "prefill_layer_progress", None)
+        if layer_progress is not None:
+            layer_progress(-1)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i, layer_group_ids)
             output = decoder_layer(
@@ -361,6 +364,8 @@ class GenericMoeMTPModel(GptModelBase):
             hidden_states = output.hidden_states
             residual = output.residual
             prev_topk_indices = output.topk_indices
+            if layer_progress is not None:
+                layer_progress(i)
 
         if (
             self._mtp_indexer_share_enabled

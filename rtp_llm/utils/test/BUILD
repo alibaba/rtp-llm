@@ -356,3 +356,9 @@ py_test(
     srcs = ["process_manager_fatal_test.py"],
     deps = ["//rtp_llm:utils"],
 )
+
+py_test(
+    name = "prefill_watchdog_test",
+    srcs = ["prefill_watchdog_test.py"],
+    deps = ["//rtp_llm:utils"],
+)

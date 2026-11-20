@@ -368,6 +368,9 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+
+    // Set only for an eager forward inside an active Prefill executor scope.
+    void (*prefill_layer_progress)(int) = nullptr;
 };
 
 struct PyModelOutputs {

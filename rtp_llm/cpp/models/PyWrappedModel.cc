@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/utils/PrefillOptimization.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
@@ -705,6 +706,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
             py::object             py_outputs_obj    = py_forward_method(input_list);
             py_model_outputs                         = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
         }
+        PrefillProgressScope::mark(PrefillPhase::TAIL);
 
         RTP_LLM_CHECK_WITH_INFO(py_model_outputs.size() == input_list.size(),
                                 "py_model_outputs.size:%d != micro_batch_inputs.size:%d",
@@ -891,6 +893,7 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    PrefillProgressScope::mark(PrefillPhase::PREPARE);
     c10::InferenceMode inference_mode(true);
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("py_model.forward(cuda_graph=%d,prefill_cg=%d,model_id=%zu)",
                                   static_cast<int>(enable_cuda_graph_),
@@ -977,7 +980,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     py_model_inputs.attention_inputs.is_prefill,
                     graph_state_.current_real_graph_bs);
                 py_model_inputs.attention_inputs.is_s_padded = true;
-                py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
+                PrefillProgressScope::mark(PrefillPhase::GRAPH);
+                py_model_outputs = graph_runner_->forward(py_model_inputs, graph_state_);
+                PrefillProgressScope::mark(PrefillPhase::TAIL);
                 RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
                 hidden_states = py_model_outputs.hidden_states.clone();
             } else {
@@ -987,11 +992,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                                   py_model_inputs.attention_inputs.is_target_verify,
                                   py_model_inputs.attention_inputs.is_prefill);
-                held_attn_pyobj_      = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+                held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+                if (PrefillProgressScope::active()) {
+                    py_model_inputs.prefill_layer_progress = &PrefillProgressScope::markLayer;
+                }
                 auto py_model_forward = py_model_.attr("forward");
                 auto outputs          = py_model_forward(py_model_inputs, held_attn_pyobj_);
-                py_model_outputs      = outputs.cast<PyModelOutputs>();
-                hidden_states         = py_model_outputs.hidden_states.clone();
+                PrefillProgressScope::mark(PrefillPhase::TAIL);
+                py_model_outputs = outputs.cast<PyModelOutputs>();
+                hidden_states    = py_model_outputs.hidden_states.clone();
             }
 
             if (!prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {

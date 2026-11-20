@@ -145,6 +145,7 @@ cc_library(
         ":logits_processor",
         ":dfa_utils",
         ":context_parallel",
+        "//rtp_llm/cpp/models/prefill_progress",
         "//:rtp_compute_ops",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:tensor_holder",

@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
@@ -403,6 +404,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    PrefillProgressScope prefill_progress(role_type_ == RoleType::PREFILL && !warm_up_
+                                          && PrefillProgressScope::enabled() && hasRealPdPrefillRequest(model_input));
+
     if (profile_step_start_) {
         profile_step_start_();
     }
@@ -468,7 +472,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 
     if (tp_rank_ > 0 || warm_up_ || !has_real_stream) {
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         model_->releaseBuffers();
         if (profile_step_finish_) {
             profile_step_finish_();

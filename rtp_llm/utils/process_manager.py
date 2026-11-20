@@ -4,7 +4,10 @@ import signal
 import threading
 import time
 from multiprocessing import Event, Process, RawValue
-from typing import Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Set
+
+if TYPE_CHECKING:
+    from rtp_llm.utils.prefill_watchdog import PrefillWatchdog
 
 DEFER_FIRST_SIGTERM_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM"
 DEFER_FIRST_SIGTERM_SECONDS_ENV = "RTP_LLM_DEFER_FIRST_SIGTERM_SECONDS"
@@ -76,6 +79,7 @@ class ProcessManager:
         allow_defer_first_sigterm: bool = False,
         pre_exit_cleanup: Optional[Callable[[], None]] = None,
         service_draining=None,
+        prefill_watchdog: Optional["PrefillWatchdog"] = None,
     ):
         if shutdown_timeout <= 0:
             logging.warning(
@@ -89,6 +93,7 @@ class ProcessManager:
         self.failure_detected = False
         self.pre_exit_cleanup = pre_exit_cleanup
         self.service_draining = service_draining
+        self._prefill_watchdog = prefill_watchdog
         self.shutdown_timeout = shutdown_timeout
         self.monitor_interval = monitor_interval
         self.process_groups: Dict[str, List[Process]] = {}
@@ -727,6 +732,30 @@ class ProcessManager:
                 logging.error(f"Error joining process {proc.pid}: {e}")
         logging.info("All processes joined")
 
+    def _poll_prefill_watchdog(self):
+        watchdog = self._prefill_watchdog
+        if watchdog is None:
+            return
+        if self.is_deferred_sigterm_pending() or (
+            self.service_draining is not None and self.service_draining.is_set()
+        ):
+            self.close_prefill_watchdog()
+            return
+        try:
+            watchdog.poll()
+        except Exception:
+            logging.exception("Prefill watchdog failed; disabling it for this backend")
+            self.close_prefill_watchdog()
+
+    def close_prefill_watchdog(self):
+        watchdog = self._prefill_watchdog
+        self._prefill_watchdog = None
+        if watchdog is not None:
+            try:
+                watchdog.close()
+            except Exception:
+                logging.exception("Failed to clean up the Prefill watchdog")
+
     def _monitor_processes_health(self):
         """Watch children; on shutdown or unexpected death, SIGTERM then SIGKILL.
 
@@ -737,9 +766,13 @@ class ProcessManager:
         """
         while self._is_any_process_alive():
             if not self.shutdown_requested and self._is_all_processes_alive():
-                time.sleep(self.monitor_interval)
+                if self._prefill_watchdog is not None:
+                    self._poll_prefill_watchdog()
+                if not self.shutdown_requested:
+                    time.sleep(self.monitor_interval)
                 continue
 
+            self.close_prefill_watchdog()
             if self.shutdown_requested:
                 drain_timeout = 0 if self.failure_detected else self.shutdown_timeout
                 self._terminate_processes(drain_timeout, staged=True)
@@ -768,7 +801,10 @@ class ProcessManager:
         """
         if self.processes:
             logging.info(f"Monitoring {len(self.processes)} processes")
-            self._monitor_processes_health()
+            try:
+                self._monitor_processes_health()
+            finally:
+                self.close_prefill_watchdog()
             self._join_all_processes()
 
             # All children may have exited before the monitor loop first ran
@@ -788,6 +824,7 @@ class ProcessManager:
                     )
                     self.failure_detected = True
         else:
+            self.close_prefill_watchdog()
             logging.info("No processes to monitor")
 
         if self.failure_detected:

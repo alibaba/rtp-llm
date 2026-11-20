@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/prefill_progress/PrefillProgress.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
@@ -1896,6 +1897,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    PrefillProgressScope prefill_progress(role_type_ == RoleType::PREFILL && !warm_up_
+                                          && PrefillProgressScope::enabled() && hasRealPdPrefillRequest(model_input));
     metrics_collector.not_skip = true;
 
     // release model input before forward
@@ -2018,6 +2021,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     bool use_target_mtp_hidden_buffer = false;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        PrefillProgressScope::mark(PrefillPhase::PREPARE);
         // DSv4 exposes a special rank-local pre-hc residual buffer. Models
         // without that buffer (GLM5/GenericMoe MTP) use the restored full
         // hidden from model_output.all_hidden_states; after tpSyncModelInputs
@@ -2054,7 +2058,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        PrefillProgressScope::mark(PrefillPhase::GPU_WAIT);
         cudaSyncAndCheck();
+        PrefillProgressScope::mark(PrefillPhase::GPU_DONE);
         return absl::OkStatus();
     }
 

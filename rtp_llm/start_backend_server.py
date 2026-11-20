@@ -24,12 +24,14 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_cuda_device_and_accl_env,
 )
-from rtp_llm.ops import VitSeparation
+from rtp_llm.ops import RoleType, VitSeparation
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
 from rtp_llm.utils.oom_diag import install_oom_dump
+from rtp_llm.utils.prefill_watchdog import SLOT_ENV as _PREFILL_PROGRESS_SLOT_ENV
+from rtp_llm.utils.prefill_watchdog import PrefillWatchdog
 from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
@@ -459,6 +461,7 @@ def _create_rank_processes(
     py_env_configs: PyEnvConfigs,
     service_draining=None,
     scr_manifest: ScrParticipantManifest | None = None,
+    prefill_watchdog: PrefillWatchdog | None = None,
 ):
     """Create and start rank processes, returns (processes, rank_pipe_readers)"""
     pc = py_env_configs.parallelism_config
@@ -488,8 +491,32 @@ def _create_rank_processes(
             ),
             name=f"rank-{world_rank}",
         )
-        proc.start()
+        previous_slot = os.environ.pop(_PREFILL_PROGRESS_SLOT_ENV, None)
+        slot_path = None
+        try:
+            if prefill_watchdog is not None:
+                try:
+                    slot_path = prefill_watchdog.create_slot(world_rank)
+                except OSError as error:
+                    logging.warning(
+                        "Cannot monitor Prefill rank %s: %s", world_rank, error
+                    )
+                if slot_path is not None:
+                    os.environ[_PREFILL_PROGRESS_SLOT_ENV] = os.fspath(slot_path)
+            proc.start()
+        finally:
+            if previous_slot is None:
+                os.environ.pop(_PREFILL_PROGRESS_SLOT_ENV, None)
+            else:
+                os.environ[_PREFILL_PROGRESS_SLOT_ENV] = previous_slot
         writer.close()  # Parent process closes write end
+        if prefill_watchdog is not None:
+            try:
+                prefill_watchdog.register_process(world_rank, proc.pid)
+            except OSError as error:
+                logging.warning(
+                    "Cannot identify Prefill rank %s: %s", world_rank, error
+                )
         processes.append(proc)
         rank_pipe_readers.append(reader)
 
@@ -611,6 +638,14 @@ def multi_rank_start(
     except RuntimeError as e:
         logging.warning(str(e))
 
+    prefill_watchdog = None
+    if (
+        py_env_configs.role_config.role_type == RoleType.PREFILL
+        and py_env_configs.model_args.model_type == "glm_5"
+        and not py_env_configs.distribute_config.fake_gang_env
+    ):
+        prefill_watchdog = PrefillWatchdog.from_env()
+
     # Create processes and get pipe readers
     manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
@@ -618,10 +653,19 @@ def multi_rank_start(
         allow_defer_first_sigterm=True,
         pre_exit_cleanup=cleanup,
         service_draining=service_draining,
+        prefill_watchdog=prefill_watchdog,
     )
-    processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs, service_draining, scr_manifest
-    )
+    try:
+        processes, rank_pipe_readers = _create_rank_processes(
+            global_controller,
+            py_env_configs,
+            service_draining,
+            scr_manifest,
+            prefill_watchdog,
+        )
+    except BaseException:
+        manager.close_prefill_watchdog()
+        raise
     manager.set_processes(processes, shutdown_group="backend")
     local_world_size = len(processes)
 
@@ -675,6 +719,7 @@ def multi_rank_start(
             except Exception as pipe_error:
                 logging.warning(f"Failed to send status via pipe: {pipe_error}")
 
+        manager.close_prefill_watchdog()
         # Terminate all processes if any rank failed
         logging.error("Terminating all ranks due to startup failures")
         for proc in processes:

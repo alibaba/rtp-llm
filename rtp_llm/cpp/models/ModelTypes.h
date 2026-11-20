@@ -113,6 +113,7 @@ enum GptModelInputDeviceBit : uint32_t {
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
+bool hasRealPdPrefillRequest(const GptModelInputs& inputs);
 
 struct MicroBatchInfo {
     size_t prefill_num;

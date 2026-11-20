@@ -3,11 +3,32 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
 
 namespace rtp_llm {
+
+bool hasRealPdPrefillRequest(const GptModelInputs& inputs) {
+    if (inputs.skip_run || inputs.warmup || inputs.is_fake_stream || inputs.is_target_verify || inputs.is_draft_extend
+        || !inputs.input_lengths.defined() || inputs.input_lengths.dim() != 1 || !inputs.sequence_lengths.defined()
+        || inputs.sequence_lengths.dim() != 1) {
+        return false;
+    }
+
+    const auto  context_batch_size = inputs.input_lengths.size(0) - inputs.sequence_lengths.size(0);
+    const auto& pd_flags           = inputs.request_pd_separation;
+    if (context_batch_size <= 0 || !pd_flags.defined() || !pd_flags.device().is_cpu() || pd_flags.dim() != 1
+        || pd_flags.scalar_type() != torch::kBool || !pd_flags.is_contiguous()
+        || pd_flags.numel() != context_batch_size) {
+        return false;
+    }
+
+    // Startup preRuns can reach the Prefill executor with real-shaped inputs and PD disabled per request.
+    const auto* flags = pd_flags.data_ptr<bool>();
+    return std::any_of(flags, flags + context_batch_size, [](bool pd_enabled) { return pd_enabled; });
+}
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
