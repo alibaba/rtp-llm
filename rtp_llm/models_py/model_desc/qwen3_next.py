@@ -45,20 +45,11 @@ from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_prefill import (
     is_aiter_flydsl_gdn_prefill_available,
     is_aiter_flydsl_gdn_prefill_supported,
 )
-from rtp_llm.models_py.triton_kernels.fla.block import (
-    load_initial_state_from_block_map,
-    store_ssm_state_to_block_map,
-)
 from rtp_llm.models_py.triton_kernels.fla.chunk import (
-    chunk_gated_delta_rule,
     chunk_gated_delta_rule_flydsl_with_cache_store,
     is_flydsl_chunk_gdn_enabled,
     is_flydsl_chunk_gdn_shape_supported,
 )
-from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
-)
-from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
@@ -111,12 +102,7 @@ else:
         load_initial_state_from_block_map,
         store_ssm_state_to_block_map,
     )
-    from rtp_llm.models_py.triton_kernels.fla.chunk import (
-        chunk_gated_delta_rule,
-        chunk_gated_delta_rule_flydsl_with_cache_store,
-        is_flydsl_chunk_gdn_enabled,
-        is_flydsl_chunk_gdn_shape_supported,
-    )
+    from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
     from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
         fused_recurrent_gated_delta_rule,
     )
