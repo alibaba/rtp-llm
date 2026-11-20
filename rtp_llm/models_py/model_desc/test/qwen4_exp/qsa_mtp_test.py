@@ -858,6 +858,148 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
             offset += length
 
     @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_target_prefix_writer_preserves_cache_and_selection_after_page_changes(
+        self,
+    ):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime import (
+            qsa_context,
+            qsa_prefill,
+        )
+
+        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = torch.rand(128, device="cuda")
+        indexer = self._decode_indexer(heads=4)
+        rope = self._base_rope_config(3)
+        rope.dim = 64
+        lengths = [131, 135]
+        kv = torch.randn(16, 32 * 128, dtype=torch.bfloat16, device="cuda").view(
+            torch.uint8
+        )
+        state = torch.randn(16, 8 * 128, device="cuda")
+        kv_table = torch.tensor(
+            [[6, 1, 0], [2, 5, 3]], dtype=torch.int32, device="cuda"
+        )
+        state_table = torch.tensor(
+            [[12, 9, 0], [8, 10, 7]], dtype=torch.int32, device="cuda"
+        )
+        context = self._draft_incremental_context(
+            kv,
+            state,
+            prefixes=[0, 128],
+            lengths=lengths,
+            kv_table=kv_table,
+            state_table=state_table,
+            is_mtp_draft=False,
+        )
+        object.__setattr__(context, "metadata_cache", {})
+        q = torch.randn(sum(lengths), 4, 128, dtype=torch.bfloat16, device="cuda")
+        raw = torch.randn(sum(lengths), 256, dtype=torch.bfloat16, device="cuda")[
+            :, 128:
+        ]
+        before_kv, before_state = kv.clone(), state.clone()
+
+        def select():
+            return context.select_prefix_reuse_prefill_tokens(
+                q, raw, indexer=indexer, rope_config=rope
+            )
+
+        for case in ("distinct", "remapped", "kv_alias", "state_alias"):
+            with self.subTest(case=case):
+                if case == "remapped":
+                    kv_table[1, 1] = 4
+                    state_table[0, 0] = 13
+                elif case == "kv_alias":
+                    kv_table[1, 2] = kv_table[0, 0]
+                elif case == "state_alias":
+                    kv_table[1, 2] = 3
+                    state_table[1, 2] = state_table[0, 0]
+                with patch.object(
+                    qsa_prefill, "_try_write_aligned_prefix_cache", return_value=False
+                ):
+                    expected = select()
+                expected_kv, expected_state = kv.clone(), state.clone()
+                context.rollback_side_cache()
+                with patch.object(
+                    qsa_context,
+                    "write_indexer_cache",
+                    wraps=qsa_context.write_indexer_cache,
+                ) as general_writer:
+                    actual = select()
+                self.assertEqual(
+                    general_writer.call_count, int(case in ("kv_alias", "state_alias"))
+                )
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                torch.testing.assert_close(kv, expected_kv, rtol=0, atol=0)
+                torch.testing.assert_close(state, expected_state, rtol=0, atol=0)
+                context.rollback_side_cache()
+                torch.testing.assert_close(kv, before_kv, rtol=0, atol=0)
+                torch.testing.assert_close(state, before_state, rtol=0, atol=0)
+
+        # Reuse the same tensors with new page values. An invalid destination
+        # must fail before either cache is changed.
+        state_table[0, 0] = state.shape[0]
+        with self.assertRaisesRegex(RuntimeError, "indexer_state"):
+            select()
+        torch.testing.assert_close(kv, before_kv, rtol=0, atol=0)
+        torch.testing.assert_close(state, before_state, rtol=0, atol=0)
+
+        # A failure after the state write restores both snapshots and allows a retry.
+        state_table[0, 0], state_table[1, 2] = 13, 7
+        kv_table[1, 2] = 3
+        index_copy = torch.Tensor.index_copy_
+        failed = False
+
+        def fail_first_kv_write(tensor, *args, **kwargs):
+            nonlocal failed
+            if tensor.data_ptr() == kv.data_ptr() and not failed:
+                failed = True
+                self.assertFalse(torch.equal(state, before_state))
+                raise RuntimeError("injected KV copy failure")
+            return index_copy(tensor, *args, **kwargs)
+
+        with patch.object(torch.Tensor, "index_copy_", fail_first_kv_write):
+            with self.assertRaisesRegex(RuntimeError, "injected KV copy failure"):
+                select()
+        torch.testing.assert_close(kv, before_kv, rtol=0, atol=0)
+        torch.testing.assert_close(state, before_state, rtol=0, atol=0)
+        select()
+        context.rollback_side_cache()
+        torch.testing.assert_close(kv, before_kv, rtol=0, atol=0)
+        torch.testing.assert_close(state, before_state, rtol=0, atol=0)
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for stream-local layouts")
+    def test_short_target_suffix_layout_is_reused_on_its_own_stream(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+            build_aligned_prefill_write_layout,
+        )
+
+        device = torch.device("cuda", torch.cuda.current_device())
+
+        def build():
+            return build_aligned_prefill_write_layout(
+                [1, 3],
+                [128, 256],
+                page_size=128,
+                ratio=4,
+                ring_entries=8,
+                device=device,
+            )
+
+        layout = build()
+        self.assertIs(layout, build())
+        stream = torch.cuda.Stream(device=device)
+        with torch.cuda.stream(stream):
+            other = build()
+            self.assertIs(other, build())
+            self.assertIsNot(layout, other)
+            self.assertEqual(other.state_pages.tolist(), [[0, 1], [1, 2]])
+            self.assertEqual(
+                other.state_writes.tolist(), [[0, 1, 1, 1], [0, 0, 1, 2], [0, 1, 2, 3]]
+            )
+            self.assertEqual(tuple(other.kv_pages.shape), (2, 0))
+            self.assertEqual(tuple(other.kv_writes.shape), (3, 0))
+
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
     def test_mtp_draft_prefix_reuse_accepts_local_cu_kv_coordinates(self):
         device = torch.device("cuda")
         indexer = self._decode_indexer()

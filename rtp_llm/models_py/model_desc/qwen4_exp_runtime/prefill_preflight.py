@@ -6,6 +6,7 @@ only scoped receipts for that forward. Side-cache and selected-token checks
 keep their existing mutation boundaries. No receipt survives a call.
 """
 
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 
 import torch
@@ -29,7 +30,9 @@ def _signature(tensor, *, version=False):
 
 
 class MainGeometryReceipt:
-    def __init__(self, impl, cache, table, bases, lengths, page_size):
+    def __init__(
+        self, impl, cache, table, bases, lengths, page_size, device_lengths=None
+    ):
         self.owners = (cache, table, bases, lengths)
         self.inputs = impl.attn_inputs
         self.padded = bool(self.inputs.is_s_padded)
@@ -38,6 +41,7 @@ class MainGeometryReceipt:
             *(_signature(t, version=True) for t in (table, bases, lengths)),
         )
         self.page_size = page_size
+        self.device_lengths = device_lengths
 
     def matches(self, impl, cache, table, bases, lengths):
         if self.inputs is not impl.attn_inputs or self.padded != bool(
@@ -64,20 +68,34 @@ def main_geometry_preflight(entries):
         _validate_main_cache_layout,
     )
 
+    # Stage the current host values once per input and device. The FMHA layer
+    # can reuse these copies while its receipt matches the current inputs.
+    staged = {}
+
+    def stage(source, device):
+        key = (_signature(source, version=True), device)
+        if key not in staged:
+            staged[key] = source.to(device=device, non_blocking=True)
+        return staged[key]
+
     pending = []
     flags = []
     for impl, cache, bases, lengths in entries:
-        table = impl.attn_inputs.kv_cache_kernel_block_id_device
+        attn_inputs = impl.attn_inputs
+        table = attn_inputs.kv_cache_kernel_block_id_device
         if getattr(impl, "_model_prefill_geometry", None) is not None:
             raise RuntimeError("Qwen4 Prefill geometry scopes must not overlap")
         page_size, pages = _validate_main_cache_layout(
             impl, cache, table, bases.numel(), cache.device
         )
-        receipt = MainGeometryReceipt(impl, cache, table, bases, lengths, page_size)
+        ld, pd = stage(lengths, cache.device), stage(bases, cache.device)
+        receipt = MainGeometryReceipt(
+            impl, cache, table, bases, lengths, page_size, device_lengths=(ld, pd)
+        )
         flags.append(
             geometry_flags(
-                lengths.to(device=cache.device, non_blocking=True),
-                bases.to(device=cache.device, non_blocking=True),
+                ld,
+                pd,
                 table,
                 page_size,
                 pages,
@@ -95,37 +113,51 @@ def main_geometry_preflight(entries):
             if receipts is None:
                 impl._model_prefill_geometry = receipts = []
             receipts.append(receipt)
-        yield
+        yield True
     finally:
         for impl, _ in pending:
             impl._model_prefill_geometry = None
 
 
 def prefill_geometry_scope(model, inputs, fmha_impl):
+    attn_inputs = getattr(inputs, "attention_inputs", None)
+    if isinstance(attn_inputs, Mapping):
+        attn_inputs = next(iter(attn_inputs.values()), None)
     if (
         model.kv_cache is None
-        or fmha_impl is None
-        or getattr(model.config, "is_mtp", False)
-        or torch.version.hip is not None
-        or not inputs.input_ids.is_cuda
-        or torch.cuda.get_device_capability(inputs.input_ids.device) != (12, 0)
-        or any(
-            module._forward_hooks or module._forward_pre_hooks
+        or not getattr(attn_inputs, "is_prefill", False)
+        or getattr(attn_inputs, "is_target_verify", False)
+        or getattr(attn_inputs, "is_cuda_graph", False)
+    ):
+        return nullcontext(True)
+    if (
+        any(
+            module._forward_hooks
+            or module._forward_pre_hooks
+            or "forward" in module.__dict__
             for module in model.modules()
         )
         or torch.nn.modules.module._global_forward_hooks
         or torch.nn.modules.module._global_forward_pre_hooks
     ):
-        return nullcontext()
+        # Hooks can update inference tensors without a version counter. Read
+        # QSA input metadata afresh in each layer when Python can change it.
+        return nullcontext(False)
+    if (
+        fmha_impl is None
+        or getattr(model.config, "is_mtp", False)
+        or torch.version.hip is not None
+        or not inputs.input_ids.is_cuda
+        or torch.cuda.get_device_capability(inputs.input_ids.device) != (12, 0)
+    ):
+        return nullcontext(True)
     from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
     from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
         SparseGqaFmhaImpl,
     )
 
-    if type(model) is not Qwen4ExpModel or any(
-        "forward" in module.__dict__ for module in model.modules()
-    ):
-        return nullcontext()
+    if type(model) is not Qwen4ExpModel:
+        return nullcontext(True)
 
     entries = []
     for index, layer in enumerate(model.layers):
@@ -137,7 +169,7 @@ def prefill_geometry_scope(model, inputs, fmha_impl):
             or impl.is_target_verify
             or impl.attn_inputs.is_cuda_graph
         ):
-            return nullcontext()
+            return nullcontext(True)
         bases = impl.attn_inputs.prefix_lengths
         lengths = impl.attn_inputs.input_lengths
         if (
@@ -148,7 +180,7 @@ def prefill_geometry_scope(model, inputs, fmha_impl):
             or bases.dtype not in (torch.int32, torch.int64)
             or lengths.dtype not in (torch.int32, torch.int64)
         ):
-            return nullcontext()
+            return nullcontext(True)
         if not any(bases.tolist()):
             continue
         cache = model.kv_cache.get_layer_cache(index, model._attention_tag(index))

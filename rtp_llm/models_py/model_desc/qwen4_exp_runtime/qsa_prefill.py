@@ -18,8 +18,12 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     build_qsa_rope_from_logical_positions,
     is_qsa_rope_style,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+    write_aligned_prefill_cache,
+)
 
 from .qsa_cache_views import _block_table, _same_tensor_metadata, _typed_2d_pool
+from .qsa_plans import IncrementalPrefillPlan
 from .qsa_selection import select_qsa_paged_tokens
 
 
@@ -235,8 +239,7 @@ def write_prefill_indexer_cache(
         except ValueError:
             # Preserve the runtime's CU diagnostic; error-only checking
             # happens before either side pool was mutated by the writer.
-            if defer_cu:
-                check_cu_partition()
+            check_cu_partition()
             raise
         if fused_result is not None:
             object.__setattr__(self, "_side_cache_undo", fused_result.pop("undo"))
@@ -538,6 +541,30 @@ def select_draft_prefix_reuse_prefill_tokens(
     )
 
 
+def _try_write_aligned_prefix_cache(
+    self, raw_keys: torch.Tensor, plan: IncrementalPrefillPlan, indexer: Any
+) -> bool:
+    """Publish the side-cache transaction for an eager, page-aligned prefill."""
+    if plan.aligned_write is None:
+        return False
+    if self._side_cache_undo is not None:
+        raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+
+    undo = write_aligned_prefill_cache(
+        raw_keys,
+        plan.rope_cos,
+        plan.rope_sin,
+        indexer.k_norm_gamma,
+        plan.kv_pool,
+        plan.state_pool,
+        plan.aligned_write,
+        ratio=plan.ratio,
+        norm_eps=float(indexer.norm_eps),
+    )
+    object.__setattr__(self, "_side_cache_undo", undo)
+    return True
+
+
 def _incremental_prefill_selection(
     self,
     q: torch.Tensor,
@@ -625,7 +652,7 @@ def _incremental_prefill_selection(
             norm_eps=float(indexer.norm_eps),
         )
         object.__setattr__(self, "_side_cache_undo", undo)
-    else:
+    elif not _try_write_aligned_prefix_cache(self, raw_keys, plan, indexer):
         self._write_indexer_cache_transactional(
             raw_keys,
             plan.cu_seqlens,
@@ -641,6 +668,7 @@ def _incremental_prefill_selection(
             kv_tokens_per_block=int(plan.kv_tokens_per_block),
             state_tokens_per_block=int(plan.state_tokens_per_block),
             norm_eps=float(indexer.norm_eps),
+            collect_stats=False,
             rope_is_token_aligned=True,
         )
 

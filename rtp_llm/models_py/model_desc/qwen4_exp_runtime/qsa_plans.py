@@ -4,6 +4,10 @@ from dataclasses import dataclass
 
 import torch
 
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+    AlignedPrefillWritePlan,
+)
+
 
 @dataclass(frozen=True)
 class IncrementalPrefillPlan:
@@ -29,6 +33,7 @@ class IncrementalPrefillPlan:
     state_table: torch.Tensor
     rope_cos: torch.Tensor
     rope_sin: torch.Tensor
+    aligned_write: AlignedPrefillWritePlan | None
 
 
 @dataclass(frozen=True)

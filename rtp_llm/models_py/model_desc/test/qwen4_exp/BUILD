@@ -28,6 +28,13 @@ py_library(
 )
 
 models_py_test(
+    name = "step_metadata_test",
+    src = "step_metadata_test.py",
+    # Query geometry replay exercises the SM120 Triton producer.
+    gpu = "RTX_5000_PRO_CU13",
+)
+
+models_py_test(
     name = "mtp_test",
     src = "mtp_test.py",
     gpu = "L20_CU13",
@@ -123,6 +130,7 @@ test_suite(
         ":qsa_graph_test",
         ":qsa_mtp_test",
         ":qsa_wiring_test",
+        ":step_metadata_test",
         ":wiring_test",
     ],
 )

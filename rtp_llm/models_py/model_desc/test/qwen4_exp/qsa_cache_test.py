@@ -1,10 +1,17 @@
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
+from torch import nn
 
-from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_KV_TAG
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+    INDEXER_KV_TAG,
+    INDEXER_ROPE_POS_TAG,
+)
+from rtp_llm.models_py.model_desc.module_base import AttnImplFactory
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_cache_views
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     _same_tensor_metadata,
     _validate_required_blocks,
@@ -12,12 +19,13 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
+from rtp_llm.models_py.model_desc.test.qwen4_exp.fixtures import _bare_model
 from rtp_llm.models_py.model_desc.test.qwen4_exp.qsa_fixtures import QSARuntimeFixture
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_interleaved_mrope,
 )
-from rtp_llm.ops import RopeStyle
+from rtp_llm.ops import HybridAttentionType, RopeStyle
 from rtp_llm.ops.compute_ops import PyCacheStoreInputs
 
 
@@ -145,6 +153,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             lengths=[16],
             is_mtp_draft=False,
         )
+        context = replace(context, metadata_cache={})
         options = dict(
             indexer=self._decode_indexer(),
             token_count=16,
@@ -154,6 +163,9 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         )
         expected = context._draft_incremental_prefill_geometry(**options)
         actual = context._draft_incremental_prefill_geometry(**options)
+        self.assertIs(actual.cu_seqlens, expected.cu_seqlens)
+        self.assertIs(actual.visible_lengths, expected.visible_lengths)
+        self.assertIs(actual.compressed_lengths, expected.compressed_lengths)
         for name in (
             "visible_lengths",
             "compressed_lengths",
@@ -169,6 +181,495 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             context._draft_incremental_prefill_geometry(**options)
         torch.testing.assert_close(self.kv_base, kv_before, rtol=0, atol=0)
         torch.testing.assert_close(self.state_base, state_before, rtol=0, atol=0)
+
+    @torch.inference_mode()
+    def test_prefill_forward_shares_geometry_and_keeps_layer_pool_validation(self):
+        context = self._draft_incremental_context(
+            self.kv_base,
+            self.state_base,
+            prefixes=[8],
+            lengths=[16],
+            kv_table=torch.tensor([[1, 2, 3, 4]], dtype=torch.int32),
+            state_table=torch.tensor([[4, 5, 6, 7]], dtype=torch.int32),
+            is_mtp_draft=False,
+        )
+        indexer = self._decode_indexer()
+        options = dict(
+            indexer=indexer,
+            token_count=16,
+            device=self.kv_base.device,
+            rope_config=self.rope_config,
+            draft=False,
+        )
+        other_kv = SimpleNamespace(
+            tag=INDEXER_KV_TAG,
+            kv_cache_base=self.kv_base.clone(),
+            seq_size_per_block=self.KV_TOKENS_PER_BLOCK,
+        )
+        layer_caches = [
+            (context.main_cache, context.indexer_kv_cache, context.indexer_state_cache),
+            (context.main_cache, other_kv, context.indexer_state_cache),
+        ]
+        contexts, plans = [], []
+
+        class PlanLayer(nn.Module):
+            layer_type = HybridAttentionType.NONE
+            self_attn = SimpleNamespace(qsa_indexer=indexer)
+
+            def forward(self, hidden, fmha_impl, *, qsa_runtime, **kwargs):
+                contexts.append(qsa_runtime)
+                plans.append(qsa_runtime._draft_incremental_prefill_geometry(**options))
+                return hidden
+
+        model = _bare_model(layer_caches)
+        nn.Module.__init__(model)
+        model.kv_cache.layers = layer_caches
+        model.config = SimpleNamespace()
+        model.ple_layers = {}
+        model.parallelism_config = None
+        model.weight = None
+        model.fmha_config = None
+        model.py_hw_kernel_config = None
+        model.layers = nn.ModuleList(PlanLayer() for _ in layer_caches)
+        model.word_embedding = lambda inputs: torch.zeros(inputs.input_ids.numel(), 4)
+        model._initial_hyper_states = lambda hidden: hidden
+        model._build_attn_meta = Mock(return_value=None)
+        model.hyper_connection_mixer = lambda hidden: (hidden, None, None)
+
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(16, dtype=torch.int32),
+            attention_inputs={
+                "full": context.main_inputs,
+                INDEXER_KV_TAG: context.indexer_kv_inputs,
+                context.indexer_state_cache.tag: context.indexer_state_inputs,
+            },
+        )
+        # FMHA owns its own wrapper around the current request tensors.
+        fmha_inputs = SimpleNamespace(**vars(context.main_inputs))
+        fmha = SimpleNamespace(attn_inputs=fmha_inputs)
+        with patch.object(
+            AttnImplFactory,
+            "get_fmha_impl",
+            return_value=fmha,
+        ) as prepare:
+            model(inputs)
+        prepare.assert_called_once()
+
+        context, second = contexts
+        first, plan = plans
+        self.assertIs(context.main_inputs, fmha_inputs)
+        self.assertIs(second.main_inputs, fmha_inputs)
+        self.assertIs(plan.visible_lengths, first.visible_lengths)
+        self.assertIs(plan.current_cos, first.current_cos)
+        self.assertIs(plan.rope_sin, first.rope_sin)
+        self.assertEqual(plan.kv_pool.data_ptr(), other_kv.kv_cache_base.data_ptr())
+        self.assertNotEqual(plan.kv_pool.data_ptr(), first.kv_pool.data_ptr())
+        small_pool = replace(
+            second,
+            indexer_state_cache=SimpleNamespace(
+                tag="indexer_state",
+                kv_cache_base=self.state_base[:5],
+                seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+            small_pool._draft_incremental_prefill_geometry(**options)
+        recovered = context._draft_incremental_prefill_geometry(**options)
+        self.assertIs(recovered.visible_lengths, first.visible_lengths)
+        for tensor, delta, error, message in (
+            (
+                fmha_inputs.prefix_lengths,
+                self.KV_TOKENS_PER_BLOCK,
+                RuntimeError,
+                "cu_kv_seqlens do not match",
+            ),
+            (fmha_inputs.combo_position_ids, 1, ValueError, "logical cache positions"),
+        ):
+            self.assertTrue(tensor.is_inference())
+            original = tensor.clone()
+
+            def change_metadata(_layer, _args):
+                tensor.add_(delta)
+
+            try:
+                with model.layers[1].register_forward_pre_hook(change_metadata):
+                    with self.assertRaisesRegex(error, message):
+                        model(inputs, fmha)
+            finally:
+                tensor.copy_(original)
+        context.main_inputs.cu_seqlens_device[1] -= 1
+        with self.assertRaisesRegex(
+            RuntimeError, "cu_seqlens do not match input_lengths"
+        ):
+            context._draft_incremental_prefill_geometry(**options)
+        torch.testing.assert_close(
+            self.kv_base, torch.zeros_like(self.kv_base), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            self.state_base, torch.zeros_like(self.state_base), rtol=0, atol=0
+        )
+
+    def test_draft_incremental_geometry_reuses_eager_cache_and_rejects_graph(self):
+        context = replace(
+            self._draft_incremental_context(
+                self.kv_base,
+                self.state_base,
+                prefixes=[7],
+                lengths=[3],
+            ),
+            metadata_cache={},
+        )
+        options = dict(
+            indexer=self._decode_indexer(),
+            token_count=3,
+            device=self.kv_base.device,
+            rope_config=self._base_rope_config(3),
+            draft=True,
+        )
+        first = context._draft_incremental_prefill_geometry(**options)
+        again = context._draft_incremental_prefill_geometry(**options)
+        self.assertIs(again.visible_lengths, first.visible_lengths)
+        context.main_inputs.is_cuda_graph = True
+        with self.assertRaisesRegex(RuntimeError, "does not support CUDA Graph"):
+            context._draft_incremental_prefill_geometry(**options)
+
+    def check_prefix_reuse_rope_across_layers(self, device, prefix, length):
+        self.D = self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        self.indexer.k_norm_gamma = torch.ones(self.D, device=device)
+        indexer = self._decode_indexer()
+        entries = self.KV_TOKENS_PER_BLOCK // self.RATIO
+        pages = (
+            prefix + length + self.KV_TOKENS_PER_BLOCK - 1
+        ) // self.KV_TOKENS_PER_BLOCK
+        table = torch.arange(1, pages + 1, device=device, dtype=torch.int32)[None]
+        kv_pool = torch.zeros(
+            pages + 1, entries * self.D * 2, device=device, dtype=torch.uint8
+        )
+        state_pool = torch.zeros(pages + 1, 2 * self.RATIO * self.D, device=device)
+        mrope = SimpleNamespace(
+            **(
+                vars(self.rope_config)
+                | dict(dim=64, mrope_dim1=12, mrope_dim2=10, mrope_dim3=10)
+            )
+        )
+        for config, sidecar in (
+            (self._base_rope_config(1), False),
+            (self._base_rope_config(3), False),
+            (mrope, False),
+            (mrope, True),
+        ):
+            with self.subTest(
+                style=config.style, factor=config.index_factor, sidecar=sidecar
+            ):
+                context = self._draft_incremental_context(
+                    kv_pool,
+                    state_pool,
+                    prefixes=[prefix],
+                    lengths=[length],
+                    kv_table=table,
+                    state_table=table,
+                    position_factor=config.index_factor,
+                    is_mtp_draft=False,
+                )
+                context.main_inputs.prefix_lengths_device = (
+                    context.main_inputs.prefix_lengths
+                )
+                if sidecar:
+                    context = replace(
+                        context,
+                        position_state_cache=SimpleNamespace(
+                            tag=INDEXER_ROPE_POS_TAG,
+                            seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+                            kv_cache_base=torch.zeros(
+                                pages + 1,
+                                2 * self.RATIO * 3,
+                                dtype=torch.int32,
+                                device=device,
+                            ),
+                        ),
+                        position_state_inputs=context.indexer_state_inputs,
+                    )
+
+                def prepare(context, metadata, config=config):
+                    return replace(
+                        context, metadata_cache=metadata
+                    )._draft_incremental_prefill_geometry(
+                        indexer=indexer,
+                        token_count=length,
+                        device=device,
+                        rope_config=config,
+                        draft=False,
+                    )
+
+                def assert_rope_equal(actual, expected):
+                    for name in ("current_cos", "current_sin", "rope_cos", "rope_sin"):
+                        torch.testing.assert_close(
+                            getattr(actual, name),
+                            getattr(expected, name),
+                            rtol=0,
+                            atol=0,
+                        )
+
+                expected = prepare(context, None)
+                for metadata, count in ((None, 24), ({}, 2)):
+                    with patch.object(
+                        torch, "cos", wraps=torch.cos
+                    ) as cos, patch.object(torch, "sin", wraps=torch.sin) as sin:
+                        plans = [prepare(context, metadata) for _ in range(12)]
+                    self.assertEqual((cos.call_count, sin.call_count), (count, count))
+                    for plan in plans:
+                        assert_rope_equal(plan, expected)
+                        if metadata is not None:
+                            self.assertIs(plan.current_cos, plans[0].current_cos)
+                            self.assertIs(plan.rope_cos, plans[0].rope_cos)
+
+                changed_config = SimpleNamespace(
+                    **(vars(config) | dict(base=2000, scale=2.0))
+                )
+                adjusted = prepare(context, metadata, changed_config)
+                assert_rope_equal(adjusted, prepare(context, None, changed_config))
+                self.assertFalse(
+                    torch.equal(adjusted.current_cos, expected.current_cos)
+                )
+
+                positions = context.main_inputs.combo_position_ids
+                if sidecar:
+                    positions[1::3].add_(31)
+                    changed = prepare(context, {})
+                    assert_rope_equal(changed, prepare(context, None))
+                    self.assertFalse(
+                        torch.equal(changed.current_cos, expected.current_cos)
+                    )
+                    self.assertFalse(torch.equal(changed.rope_sin, expected.rope_sin))
+
+                    # A group starting before this chunk reads layer-local history.
+                    context.main_inputs.prefix_lengths_device = (
+                        context.main_inputs.prefix_lengths - 1
+                    )
+                    cache = context.position_state_cache
+                    other_layer = replace(
+                        context,
+                        position_state_cache=SimpleNamespace(
+                            tag=cache.tag,
+                            seq_size_per_block=cache.seq_size_per_block,
+                            kv_cache_base=torch.full_like(cache.kv_cache_base, 47),
+                        ),
+                    )
+                    historical_metadata = {}
+                    first = prepare(context, historical_metadata)
+                    second = prepare(other_layer, historical_metadata)
+                    assert_rope_equal(first, prepare(context, None))
+                    assert_rope_equal(second, prepare(other_layer, None))
+                    self.assertFalse(torch.equal(first.rope_cos[0], second.rope_cos[0]))
+                else:
+                    positions[0] += 1
+                    for _ in range(2):
+                        with self.assertRaisesRegex(
+                            ValueError, "three axes are equal|logical cache positions"
+                        ):
+                            prepare(context, metadata)
+
+    def test_prefix_reuse_rope_across_layers_cpu(self):
+        self.check_prefix_reuse_rope_across_layers(torch.device("cpu"), 128, 9)
+
+    @skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_prefix_reuse_rope_across_layers_cuda(self):
+        self.check_prefix_reuse_rope_across_layers(torch.device("cuda:0"), 6144, 2048)
+
+    def test_prefix_prefill_reads_rope_coverage_and_page_aliases_together(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_geometry import (
+            _verify_prefill_pages,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+
+        positions = SimpleNamespace(
+            geometry=SimpleNamespace(groups_all_current=None),
+            groups_in_current_chunk=Mock(return_value=torch.tensor(False)),
+        )
+        checks = DeviceChecks()
+        checks.add(torch.tensor(True), "invalid state page")
+        with self.assertRaisesRegex(RuntimeError, "invalid state page"):
+            _verify_prefill_pages(checks, torch.tensor(False), positions)
+        self.assertIsNone(positions.geometry.groups_all_current)
+
+        checks = DeviceChecks()
+        checks.add(torch.tensor(False), "invalid state page")
+        with patch.object(checks, "verify", wraps=checks.verify) as verify:
+            self.assertTrue(
+                _verify_prefill_pages(checks, torch.tensor(True), positions)
+            )
+            verify.assert_called_once()
+        self.assertIs(positions.geometry.groups_all_current, False)
+
+        # The next layer keeps the coverage decision but resolves its own pages.
+        positions.groups_in_current_chunk.reset_mock()
+        self.assertFalse(
+            _verify_prefill_pages(DeviceChecks(), torch.tensor(False), positions)
+        )
+        positions.groups_in_current_chunk.assert_not_called()
+
+    def test_prefill_checks_share_success_without_sharing_layer_pools(self):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+
+        context = replace(
+            self._draft_incremental_context(
+                self.kv_base,
+                self.state_base,
+                prefixes=[8],
+                lengths=[16],
+                is_mtp_draft=False,
+            ),
+            metadata_cache={},
+        )
+        options = dict(
+            indexer=self._decode_indexer(),
+            token_count=16,
+            device=self.kv_base.device,
+            rope_config=self.rope_config,
+            draft=False,
+        )
+
+        def plan(owner):
+            checks = DeviceChecks()
+            # The model preflight is covered separately; exercise the planner
+            # with the scope marker it supplies before any persistent write.
+            checks.prefill_metadata_readonly = True
+            object.__setattr__(owner, "_prewrite_checks", checks)
+            return owner._draft_incremental_prefill_geometry(**options), checks
+
+        expected, first = plan(context)
+        self.assertTrue(first._checks)
+        # New host tensor storage needs fresh geometry even when its values
+        # match the verified QSA tables and cumulative lengths.
+        other_inputs = SimpleNamespace(**vars(context.main_inputs))
+        other_inputs.input_lengths = context.main_inputs.input_lengths.clone()
+        other = replace(
+            context,
+            main_inputs=other_inputs,
+            indexer_kv_cache=SimpleNamespace(
+                **{
+                    **vars(context.indexer_kv_cache),
+                    "kv_cache_base": self.kv_base.clone(),
+                }
+            ),
+            indexer_state_cache=SimpleNamespace(
+                **{
+                    **vars(context.indexer_state_cache),
+                    "kv_cache_base": self.state_base.clone(),
+                }
+            ),
+        )
+        with patch.object(torch, "zeros_like", wraps=torch.zeros_like) as allocate_cu:
+            actual, second = plan(other)
+        allocate_cu.assert_not_called()
+        self.assertIsNot(actual.visible_lengths, expected.visible_lengths)
+        # This fixture has no position pool. Its separate logical RoPE check
+        # must remain even after the six read-only CU/page flags are accepted.
+        self.assertEqual(len(first._checks) - len(second._checks), 6)
+        self.assertEqual(len(second._checks), 1)
+        self.assertIs(second._checks[0][1], ValueError)
+        self.assertNotEqual(
+            actual.state_pool.data_ptr(), expected.state_pool.data_ptr()
+        )
+        torch.testing.assert_close(actual.visible_lengths, expected.visible_lengths)
+        torch.testing.assert_close(actual.cu_seqlens, expected.cu_seqlens)
+        other.main_inputs.combo_position_ids.add_(1)
+        with self.assertRaisesRegex(ValueError, "logical cache positions"):
+            plan(other)
+        other.main_inputs.combo_position_ids.sub_(1)
+        smaller_kv = replace(
+            other,
+            indexer_kv_cache=SimpleNamespace(
+                **{
+                    **vars(other.indexer_kv_cache),
+                    "kv_cache_base": self.kv_base[:1].clone(),
+                }
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "out-of-range physical block"):
+            plan(smaller_kv)
+        smaller = replace(
+            other,
+            indexer_state_cache=SimpleNamespace(
+                **{
+                    **vars(other.indexer_state_cache),
+                    "kv_cache_base": self.state_base[:6].clone(),
+                }
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+            plan(smaller)
+        context.main_inputs.cu_seqlens_device[0] = 1
+        with self.assertRaisesRegex(RuntimeError, "cu_seqlens do not match"):
+            plan(context)
+        context.main_inputs.cu_seqlens_device[0] = 0
+        context.main_inputs.cu_kv_seqlens_device[0] = 1
+        with self.assertRaisesRegex(RuntimeError, "cu_kv_seqlens do not match"):
+            plan(context)
+        context.main_inputs.cu_kv_seqlens_device[0] = 0
+        context.indexer_state_inputs.kv_cache_block_id_device[0, 2] = 0
+        with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+            plan(context)
+
+    def test_long_prefix_prefill_validates_only_written_state_pages(self):
+        self.KV_TOKENS_PER_BLOCK = self.STATE_TOKENS_PER_BLOCK = 128
+        kv_pool = torch.zeros(65, 32 * self.D * 2, dtype=torch.uint8)
+        state_pool = torch.zeros(17, 2 * self.RATIO * self.D)
+        kv_table = torch.arange(1, 65, dtype=torch.int32).view(1, 64)
+        state_table = torch.zeros(1, 64, dtype=torch.int32)
+        state_table[0, 48:] = torch.arange(1, 17, dtype=torch.int32)
+        context = self._draft_incremental_context(
+            kv_pool,
+            state_pool,
+            prefixes=[6144],
+            lengths=[2048],
+            kv_table=kv_table,
+            state_table=state_table,
+            is_mtp_draft=False,
+        )
+        with patch.object(
+            qsa_cache_views,
+            "_validate_state_pairs",
+            wraps=qsa_cache_views._validate_state_pairs,
+        ) as validate:
+            context._draft_incremental_prefill_geometry(
+                indexer=self._decode_indexer(),
+                token_count=2048,
+                device=kv_pool.device,
+                rope_config=self.rope_config,
+                draft=False,
+            )
+        self.assertEqual(
+            validate.call_args.args[1], [(0, page) for page in range(48, 64)]
+        )
+
+    def test_draft_prefill_state_page_range_includes_history_and_last_token(self):
+        self.STATE_TOKENS_PER_BLOCK = 5
+        table = torch.tensor([[1, 2, 0], [0, 3, 4]], dtype=torch.int32)
+        context = self._draft_incremental_context(
+            self.kv_base,
+            self.state_base,
+            prefixes=[5, 9],
+            lengths=[3, 2],
+            state_table=table,
+        )
+        options = dict(
+            indexer=self._decode_indexer(),
+            token_count=5,
+            device=self.state_base.device,
+            rope_config=self._base_rope_config(3),
+        )
+        context._draft_incremental_prefill_geometry(**options)
+        for row, page in ((0, 0), (1, 2)):
+            with self.subTest(row=row, page=page):
+                original = table[row, page].item()
+                table[row, page] = 0
+                with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+                    context._draft_incremental_prefill_geometry(**options)
+                table[row, page] = original
+        context.indexer_state_inputs.kv_cache_block_id_device = table[:, :2]
+        with self.assertRaisesRegex(RuntimeError, "does not cover"):
+            context._draft_incremental_prefill_geometry(**options)
 
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
