@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -152,7 +153,10 @@ public:
     // for every single rank
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
     // succeeded; the transfer outcome is reported through mem_response.code.
-    bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+    bool executeFunction(
+        const FunctionRequestPB& request,
+        FunctionResponsePB& response,
+        std::chrono::steady_clock::time_point completion_deadline = std::chrono::steady_clock::time_point::max());
 
     // One observation of the original execution; does not release frozen references.
     TransferCompletionQueryResult queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
@@ -191,8 +195,11 @@ private:
     void                              stopMissingCleanup();
     void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
-    TransferTaskRegistry::State localTransferCompletion(const TransferExecutionTrace& trace_id) const;
-    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
+    TransferTaskRegistry::State localTransferCompletion(
+        const TransferExecutionTrace& trace_id,
+        std::chrono::steady_clock::time_point completion_deadline = std::chrono::steady_clock::time_point::max()) const;
+    TransferTaskRegistry::ForgetResult localForgetTransferCompletion(
+        const TransferExecutionTrace& trace_id, bool kvcm_read_released = false) const;
     bool startFrozenTaskRecovery();
     void stopFrozenTaskRecovery() noexcept;
 

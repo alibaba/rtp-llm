@@ -1000,7 +1000,9 @@ std::vector<std::shared_ptr<FrozenTask>> KVCacheManager::frozenTasks() const {
     return tasks;
 }
 
-TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const TransferExecutionTrace& trace_id) const {
+TransferTaskRegistry::State KVCacheManager::localTransferCompletion(
+    const TransferExecutionTrace& trace_id,
+    [[maybe_unused]] std::chrono::steady_clock::time_point completion_deadline) const {
     if (!validTransferExecutionTrace(trace_id) || !block_tree_cache_) {
         return TransferTaskRegistry::State::UNKNOWN;
     }
@@ -1010,14 +1012,14 @@ TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const Transf
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
     auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
     if (backend) {
-        return backend->queryReadCompletion(std::get<std::string>(trace_id));
+        return backend->queryReadCompletion(std::get<std::string>(trace_id), completion_deadline);
     }
 #endif
     return TransferTaskRegistry::State::UNKNOWN;
 }
 
 TransferTaskRegistry::ForgetResult
-KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const {
+KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trace_id, bool kvcm_read_released) const {
     using Result = TransferTaskRegistry::ForgetResult;
     if (!validTransferExecutionTrace(trace_id)) {
         RTP_LLM_LOG_WARNING("completion forget requires a nonempty execution trace");
@@ -1030,7 +1032,7 @@ KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trac
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
     auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
     if (backend)
-        return backend->forgetReadCompletion(std::get<std::string>(trace_id));
+        return backend->forgetReadCompletion(std::get<std::string>(trace_id), kvcm_read_released);
 #endif
     return Result::FAILED;
 }
@@ -1039,8 +1041,8 @@ TransferCompletionForgetResult
 KVCacheManager::forgetTransferCompletion(const TransferCompletionTarget& target,
                                         const std::vector<TransferExecutionTrace>& traces, int timeout_ms) const {
     return TransferCompletionForget(transfer_broadcast_manager_,
-                                    [this](const TransferExecutionTrace& trace) {
-                                        return localForgetTransferCompletion(trace);
+                                     [this, released = target.kvcm_read_released](const TransferExecutionTrace& trace) {
+                                         return localForgetTransferCompletion(trace, released);
                                     }).forget(target, traces, timeout_ms);
 }
 
@@ -1053,12 +1055,15 @@ TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const Froz
         .query(execution, timeout_ms);
 }
 
-bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
+bool KVCacheManager::executeFunction(const FunctionRequestPB& request,
+                                     FunctionResponsePB& response,
+                                     std::chrono::steady_clock::time_point completion_deadline) {
     if (request.has_completion_forget()) {
         auto* forget_response = response.mutable_completion_forget();
         forget_response->Clear();
         forget_response->set_rank(static_cast<uint32_t>(parallelism_config_.tp_rank));
-        const auto& keys = request.completion_forget().keys();
+        const auto& forget = request.completion_forget();
+        const auto& keys = forget.keys();
         if (static_cast<size_t>(keys.size()) > kTransferCompletionForgetBatchSize) {
             RTP_LLM_LOG_WARNING("completion forget batch exceeds limit: %d", keys.size());
             return false;
@@ -1072,7 +1077,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                     result = localForgetTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
                     break;
                 case TransferCompletionKeyPB::kKvcmTraceId:
-                    result = localForgetTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
+                    result = localForgetTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()},
+                                                           forget.kvcm_read_released());
                     break;
                 default:
                     RTP_LLM_LOG_WARNING("completion forget key has no trace namespace");
@@ -1108,7 +1114,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                     state = localTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
                     break;
                 case TransferCompletionKeyPB::kKvcmTraceId:
-                    state = localTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
+                    state = localTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()}, completion_deadline);
                     break;
                 default:
                     break;

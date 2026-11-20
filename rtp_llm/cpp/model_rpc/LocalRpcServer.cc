@@ -1244,7 +1244,18 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
             std::min<int64_t>(request->remote_request().timeout_ms(), remaining_ms));
         request = &bounded_request;
     }
-    if (!cache_manager->executeFunction(*request, *response)) {
+    using CompletionClock = std::chrono::steady_clock;
+    auto completion_deadline = CompletionClock::time_point::max();
+    const auto rpc_deadline = context->deadline();
+    if (request->has_completion_query() && rpc_deadline != std::chrono::system_clock::time_point::max()) {
+        // Share one local deadline across all lookups in this RPC.
+        const auto now = CompletionClock::now();
+        const auto wall_now = std::chrono::system_clock::now();
+        const auto remaining = std::chrono::duration_cast<CompletionClock::duration>(
+            std::max(rpc_deadline, wall_now) - wall_now);
+        completion_deadline = now + std::min(remaining, completion_deadline - now);
+    }
+    if (!cache_manager->executeFunction(*request, *response, completion_deadline)) {
         RTP_LLM_LOG_WARNING("execute function failed, request: [%s]", request->DebugString().c_str());
         const std::string error_msg = "execute function failed, request: [" + request->DebugString() + "]";
         return grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
