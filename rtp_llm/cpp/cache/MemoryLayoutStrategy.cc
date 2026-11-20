@@ -90,10 +90,18 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
                               layer_kv_tensors_[layer_id].numel());
         }
     }
+
+    layer_kv_base_ptrs_.clear();
+    layer_kv_base_ptrs_.reserve(layer_kv_tensors_.size());
+    for (const auto& layer_tensor : layer_kv_tensors_) {
+        layer_kv_base_ptrs_.push_back(layer_tensor.data_ptr());
+    }
 }
 
 bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
     if (!config_.hasScale()) {
+        layer_kv_scale_tensors_.clear();
+        layer_kv_scale_base_ptrs_.clear();
         return true;
     }
 
@@ -167,17 +175,27 @@ bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
         }
     }
 
+    layer_kv_scale_base_ptrs_.clear();
+    layer_kv_scale_base_ptrs_.reserve(layer_kv_scale_tensors_.size());
+    for (const auto& layer_scale_tensor : layer_kv_scale_tensors_) {
+        layer_kv_scale_base_ptrs_.push_back(layer_scale_tensor.data_ptr());
+    }
+
     return true;
 }
 
 // Address and buffer conversion functions
 BlockAddrInfo MemoryLayoutStrategy::convertIndexToAddr(int layer_id, int block_id) const {
-    auto  blocks        = convertIndexToBuffer(layer_id, block_id);
-    void* kv_addr       = blocks[0].addr;
+    checkLayerIdValidity(layer_id);
+    checkBlockIdValidity(block_id);
+
+    void* kv_addr       = static_cast<void*>(static_cast<char*>(layer_kv_base_ptrs_[layer_id])
+                                       + static_cast<size_t>(block_id) * config_.kv_block_stride_bytes);
     void* kv_scale_addr = nullptr;
 
-    if (config_.hasScale() && blocks.size() > 1) {
-        kv_scale_addr = blocks[1].addr;
+    if (config_.hasScale()) {
+        kv_scale_addr = static_cast<void*>(static_cast<char*>(layer_kv_scale_base_ptrs_[layer_id])
+                                           + static_cast<size_t>(block_id) * config_.kv_scale_stride_bytes);
     }
 
     return {kv_addr, kv_scale_addr};
@@ -307,6 +325,13 @@ void MemoryLayoutStrategy::checkLayerIdValidity(int layer_id) const {
                             "Layer ID %d out of range (max: %zu)",
                             layer_id,
                             layer_kv_tensors_.size());
+}
+
+void MemoryLayoutStrategy::checkBlockIdValidity(int block_id) const {
+    RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < config_.block_num,
+                            "Block ID %d out of range (max: %u)",
+                            block_id,
+                            config_.block_num);
 }
 
 }  // namespace rtp_llm

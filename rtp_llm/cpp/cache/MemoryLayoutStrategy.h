@@ -36,6 +36,7 @@ public:
 
 private:
     void                   checkLayerIdValidity(int layer_id) const;
+    void                   checkBlockIdValidity(int block_id) const;
     void                   processKVTensor(torch::Tensor& kv_cache_tensor);
     bool                   processScaleTensor(torch::Tensor& kv_scale_tensor);
     void                   clearKVTensor(torch::Tensor& kv_cache_tensor);
@@ -53,6 +54,8 @@ private:
     rtp_llm::DataType          data_type_         = rtp_llm::TYPE_INVALID;
     std::vector<torch::Tensor> layer_kv_tensors_;
     std::vector<torch::Tensor> layer_kv_scale_tensors_;
+    std::vector<void*>         layer_kv_base_ptrs_;
+    std::vector<void*>         layer_kv_scale_base_ptrs_;
 };
 
 }  // namespace rtp_llm
