@@ -36,24 +36,28 @@ def build_v41_kv_cache_spec_descs(
     draft=False,
     fixed_pool_use_host_memory=False,
     compact_indexer=True,
+    v4_kv_layout=False,
+    fp8_indexer=False,
 ):
-    """Declare byte-exact FP4 global/indexer and FP8 sliding-window pools.
+    """Declare byte-exact global, indexer, and sliding-window pools.
 
     Each indexer page stores only the compressed entries. Distinct ratio tags
     keep the main cache topology's one-physical-prototype-per-tag contract.
     CP sizing and placement use the descriptor's generic policies.
     """
+    global_bytes = 584 if v4_kv_layout else 288
+    swa_bytes = 584 if v4_kv_layout else 528
     global_pools = {
-        ratio: _make_dsv4_desc(tag, "compressed_kv", 288, DataType.TYPE_UINT8, ratio)
+        ratio: _make_dsv4_desc(tag, "compressed_kv", global_bytes, DataType.TYPE_UINT8, ratio)
         for ratio, tag in ((1, HCA_KV_TAG), (2, CSA_KV_TAG))
     }
     for desc in global_pools.values():
-        desc.block_stride_bytes_alignment = 4608  # lcm(512, 288)
+        desc.block_stride_bytes_alignment = 576 if v4_kv_layout else 4608
     indexer_pools = {
         ratio: _make_dsv4_desc(
             "indexer_kv_c2" if compact_indexer and ratio == 2 else "indexer_kv",
             "compressed_kv",
-            68,
+            132 if fp8_indexer else 68,
             DataType.TYPE_UINT8,
             ratio if compact_indexer else 1,
         )
@@ -64,15 +68,15 @@ def build_v41_kv_cache_spec_descs(
     )
     state.compression_ratio = 2
     state.state_ring_overlap = 0
-    swa = _make_dsv4_desc("swa_kv", "sliding_window_kv", 528, DataType.TYPE_UINT8)
+    swa = _make_dsv4_desc("swa_kv", "sliding_window_kv", swa_bytes, DataType.TYPE_UINT8)
     # Native TMA needs whole token rows as well as the allocator alignment.
     # Main combines this with CP divisibility before slicing the block.
-    swa.block_stride_bytes_alignment = 16896  # lcm(512, 528)
+    swa.block_stride_bytes_alignment = 576 if v4_kv_layout else 16896
     decoder_swa = _make_dsv4_desc(
-        "swa_kv", "sliding_window_kv", 528, DataType.TYPE_UINT8
+        "swa_kv", "sliding_window_kv", swa_bytes, DataType.TYPE_UINT8
     )
     decoder_swa.tag = "decoder_swa_kv"
-    decoder_swa.block_stride_bytes_alignment = 16896
+    decoder_swa.block_stride_bytes_alignment = swa.block_stride_bytes_alignment
     reuse = CacheReusePolicyDesc()
     reuse.enable_prefix_reuse = False
     decoder_swa.reuse = reuse
@@ -100,7 +104,11 @@ def build_v41_kv_cache_spec_descs(
 
 
 def configure_v41_kv_cache(model_config, kv_cache_config=None):
+    from rtp_llm.models_py.modules.dsv41.attn_type import (
+        sm90_indexer_mode,
+    )
     from rtp_llm.models_py.modules.dsv41.bounded_replay import enabled
+    from rtp_llm.models_py.modules.dsv41.kv_cache_layout import use_v4_kv_cache
 
     # The inherited legacy hook runs after parsed settings have been applied.
     # Explicit settings may rebuild earlier defaults; the fallback must not.
@@ -114,8 +122,12 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
             attn.kernel_tokens_per_block = promoted
         attn.tokens_per_block = promoted
     bounded = enabled()
+    v4_layout = use_v4_kv_cache()
+    indexer_mode = sm90_indexer_mode()
     draft = bool(model_config.is_mtp)
-    compact_indexer = os.environ.get("DSV41_COMPACT_INDEXER_KV", "1") == "1"
+    compact_indexer = indexer_mode == "fp8_dg" or os.environ.get(
+        "DSV41_COMPACT_INDEXER_KV", "1"
+    ) == "1"
     model_config.hybrid_attention_config.hybrid_attention_types = [
         HybridAttentionType.NONE
     ] * model_config.num_layers
@@ -130,6 +142,8 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
             kv_cache_config and kv_cache_config.dsv4_fixed_pool_use_memory
         ),
         compact_indexer=compact_indexer,
+        v4_kv_layout=v4_layout,
+        fp8_indexer=indexer_mode == "fp8_dg",
     )
     fixed_blocks = (
         int(kv_cache_config.dsv4_fixed_pool_blocks or 0) if kv_cache_config else 0
@@ -163,4 +177,6 @@ def configure_v41_kv_cache(model_config, kv_cache_config=None):
         (0x4453563431494232 if bounded else 0x4453563431494632)
         if compact_indexer
         else (0x4453563431494231 if bounded else 0x4453563431494631)
+    ) ^ (0x5634000000000000 if v4_layout else 0) ^ (
+        0x4638444700000000 if indexer_mode == "fp8_dg" else 0
     )

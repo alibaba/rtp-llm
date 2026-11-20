@@ -12,6 +12,9 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
+    is_supported as v4_swa_is_supported,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import (
     norm_rope_bf16,
     quantize_swa_row,
@@ -178,7 +181,7 @@ def is_supported(
         or not freqs_table.is_contiguous()
         or slots.numel() != positions.numel()
         or not slots.is_contiguous()
-        or not swa_is_supported(pool_3d, slots)
+        or not (swa_is_supported(pool_3d, slots) or v4_swa_is_supported(pool_3d, slots))
     ):
         return False
     if freqs_cis is not None and (
@@ -218,7 +221,7 @@ def try_fused_qkv_rope_cache(
     ``kv_ready`` permits overlap with QB only when raw KV and frequencies were
     completed before QB started. Q rotation/padding retains ordinary ordering.
 
-    Only native V4.1 528-byte cache pages are accepted. Physical slots must be
+    Native V4.1 528-byte or SM90 V4 584-byte pages are accepted. Physical slots must be
     unique within the launch; any negative slot skips its store. Invalid
     positive slots trigger the existing device trap gate. Unsupported shapes
     return None before modifying inputs, and backend errors propagate.
@@ -268,7 +271,13 @@ def try_fused_qkv_rope_cache(
             (positions.numel(), 32), dtype=torch.complex64, device=q.device
         )
     if positions.numel():
-        _fused_qkv_rope_cache_kernel[(positions.numel(), q_tiles + 1)](
+        kernel = _fused_qkv_rope_cache_kernel
+        kernel_options = {}
+        if pool_3d.shape[-1] == 584:
+            from ._v41_sm90_qkv_rope_cache_triton_kernels import _fused_qkv_rope_cache_kernel as kernel
+
+            kernel_options = {"V4_CACHE": True}
+        kernel[(positions.numel(), q_tiles + 1)](
             q,
             q_out,
             kv,
@@ -293,6 +302,7 @@ def try_fused_qkv_rope_cache(
             USE_PDL=use_pdl,
             KV_READY=kv_ready,
             launch_pdl=use_pdl,
+            **kernel_options,
             num_warps=4,
             enable_fp_fusion=False,
         )

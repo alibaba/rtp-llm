@@ -37,7 +37,7 @@ def _enabled(tensor):
     return (
         tensor.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(tensor.device)[0] == 10
+        and torch.cuda.get_device_capability(tensor.device)[0] in (9, 10)
         and not invalid_kv_access_validation_enabled()
     )
 
@@ -88,6 +88,13 @@ def _frequencies(freqs, device):
         and freqs.ndim == 2
         and freqs.shape[1] == 32
         and freqs.is_contiguous()
+    )
+
+
+def _main_pool(pool, device):
+    return _pool(pool, device, 288) or (
+        torch.cuda.get_device_capability(device) == (9, 0)
+        and _pool(pool, device, 584)
     )
 
 
@@ -556,7 +563,7 @@ def compress_main(
         and _vector(boundary_indices, count, device)
         and _vector(main_slots, count, device)
         and _frequencies(freqs, device)
-        and _pool(main_pool, device, 288)
+        and _main_pool(main_pool, device)
     ):
         return None
     if ratio == 2 and not (
@@ -593,7 +600,13 @@ def compress_main(
     output = torch.empty((count, 512), device=device, dtype=torch.bfloat16)
     if count == 0:
         return output
-    _prefill_compress_main_kernel[(count,)](
+    kernel = _prefill_compress_main_kernel
+    kernel_options = {}
+    if main_pool.shape[-1] == 584:
+        from ._v41_sm90_prefill_global_kernels import _prefill_compress_main_kernel as kernel
+
+        kernel_options = {"V4_CACHE": True}
+    kernel[(count,)](
         values,
         scores,
         norm,
@@ -624,6 +637,7 @@ def compress_main(
         main_pool.shape[0],
         trap_invalid_kv_access_enabled(),
         min(128, 512 // min(1 << (count.bit_length() - 1), 16)),
+        **kernel_options,
         num_warps=4,
         enable_fp_fusion=False,
     )
@@ -689,7 +703,13 @@ def compress_main_and_store_states(
     assert main_slots.numel() == count and carry_out.shape == (2, 512)
     assert values.shape[0] % local_rows == 0
     output = torch.empty((count, 512), device=values.device, dtype=torch.bfloat16)
-    _prefill_compress_state_kernel[(count + triton.cdiv(rows, 4),)](
+    kernel = _prefill_compress_state_kernel
+    kernel_options = {}
+    if main_pool.shape[-1] == 584:
+        from ._v41_sm90_prefill_global_kernels import _prefill_compress_state_kernel as kernel
+
+        kernel_options = {"V4_CACHE": True}
+    kernel[(count + triton.cdiv(rows, 4),)](
         values,
         scores,
         norm,
@@ -725,6 +745,7 @@ def compress_main_and_store_states(
         trap_invalid_kv_access_enabled(),
         min(128, 512 // min(1 << (count.bit_length() - 1), 16)) if count else 32,
         carry is not None,
+        **kernel_options,
         num_warps=4,
         enable_fp_fusion=False,
     )

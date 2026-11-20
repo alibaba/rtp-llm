@@ -19,6 +19,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.cuda.libdevice as libdevice
 
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
@@ -352,7 +353,8 @@ def _index_norm_store_state_kernel(
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     """Static decode gate; unsupported layouts retain the unmodified path."""
     if (
-        x.device.type != "cuda"
+        not is_cuda()
+        or x.device.type != "cuda"
         or x.dtype != torch.bfloat16
         or x.ndim != 3
         or x.shape[-1] != 5120
@@ -368,7 +370,8 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
     cp = attn._cp_ctx
     if cp is not None and cp.cp_size > 1:
         return False
-    if torch.cuda.get_device_capability(x.device)[0] != 10:
+    capability = torch.cuda.get_device_capability(x.device)
+    if capability != (9, 0) and capability[0] != 10:
         return False
     for metadata, size in (
         (positions, x.shape[0] * x.shape[1]),
@@ -452,7 +455,10 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
             pool.dtype != torch.uint8
             or pool.ndim != 3
             or (region == INDEXER_KV and not pool.is_contiguous())
-            or pool.shape[2] != (68 if region == INDEXER_KV else 288)
+            or pool.shape[2] not in (
+                (68,) if region == INDEXER_KV
+                else ((288, 584) if capability == (9, 0) else (288,))
+            )
             or pool.stride(2) != 1
             or pool.stride(1) != pool.shape[2]
             or pool.stride(0) < pool.shape[1] * pool.shape[2]
@@ -518,7 +524,13 @@ def try_produce_global(
         STATE_BLOCKS=state.shape[0] // state_eb,
         TRAP=trap_invalid_kv_access_enabled(),
     )
-    _compress_norm_main_store_kernel[(tokens,)](
+    kernel = _compress_norm_main_store_kernel
+    kernel_options = {}
+    if main.shape[-1] == 584:
+        from ._v41_sm90_decode_global_kernels import _compress_norm_main_store_kernel as kernel
+
+        kernel_options = {"V4_CACHE": True}
+    kernel[(tokens,)](
         values,
         scores,
         attn.global_norm,
@@ -554,6 +566,7 @@ def try_produce_global(
         ),
         INDEX_COLS=index_table.shape[1],
         INDEX_TABLE_STRIDE=index_table.stride(0),
+        **kernel_options,
         **state_geometry,
         num_warps=4,
         enable_fp_fusion=False,

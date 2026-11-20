@@ -26,6 +26,7 @@ class PoolLayout:
     tokens_per_block: int
     owner_tokens_per_block: int
     ratio: int
+    entry_width: int = 0
 
 
 def _attention_key(attn):
@@ -42,6 +43,7 @@ def _attention_key(attn):
         int(attn.freqs_cis.shape[0]),
         str(getattr(getattr(attn, "global_norm", None), "dtype", None)),
         str(getattr(getattr(attn, "index_k_norm", None), "dtype", None)),
+        bool(getattr(attn, "_use_v4_kv_cache", False)),
     )
 
 
@@ -80,6 +82,7 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
         CSA_STATE,
         HCA_KV,
         INDEXER_KV,
+        INDEXER_KV_2,
         SWA_KV,
     )
     from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
@@ -92,7 +95,14 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
         regions = [SWA_KV]
         ratio = int(attn.compress_ratio)
         if getattr(attn, "is_kv_source", False):
-            regions.extend((CSA_KV if ratio == 2 else HCA_KV, INDEXER_KV))
+            regions.extend(
+                (
+                    CSA_KV if ratio == 2 else HCA_KV,
+                    attn._indexer_region()
+                    if getattr(attn, "_use_v4_kv_cache", False)
+                    else INDEXER_KV,
+                )
+            )
             if ratio == 2:
                 regions.append(CSA_STATE)
         for region in regions:
@@ -127,7 +137,7 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
                 if kv_cache_sharded
                 else tpb
             )
-            layout = PoolLayout(region, entries, stride, tpb, owner, ratio)
+            layout = PoolLayout(region, entries, stride, tpb, owner, ratio, int(width))
             layouts[(layout, _attention_key(attn))] = attn
     return layouts
 
@@ -471,6 +481,7 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
         CSA_STATE,
         HCA_KV,
         INDEXER_KV,
+        INDEXER_KV_2,
         SWA_KV,
     )
     from rtp_llm.models_py.modules.dsv41.fp8 import _v41_fp4_triton as fp4
@@ -539,7 +550,26 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
                 )
         _warm_swa_byte_slices(layout, cp_size, cp_rank, device)
         return
-    if layout.region == INDEXER_KV:
+    if layout.region in (INDEXER_KV, INDEXER_KV_2):
+        if getattr(attn, "_indexer_mode", "fp4") == "fp8_dg":
+            from ._indexer_quant_triton import quantize_indexer_k
+            from ._v41_sm90_fp8_indexer_cache import (
+                dg_block_table, dg_pages, initialize_zero_page,
+            )
+            from ._v41_sm90_fp8_prefill import (
+                gather_fp8_indexer, gather_raw_fp8_indexer,
+                unpack_raw_fp8_indexer,
+            )
+
+            pool = torch.zeros((2, layout.entries, 132), dtype=torch.uint8, device=device)
+            pages = dg_pages(pool)
+            initialize_zero_page(pages)
+            dg_block_table(torch.tensor([[1]], dtype=torch.int32, device=device), pool)
+            projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
+            quantize_indexer_k(projected, slots, pages)
+            gather_fp8_indexer(pages, slots)
+            unpack_raw_fp8_indexer(gather_raw_fp8_indexer(pages, slots))
+            return
         pool = _private_pool(layout, 68, device)
         projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
         for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
@@ -846,6 +876,83 @@ def _warm_indexer(attn, max_seq_len, device):
             vector_stride=stride,
             vector_offset=offset,
         )
+
+
+def _warm_fp8_indexer_layout(attn, device, max_seq_len):
+    """Compile SM90 FP8 prefill/decode and bounded TopK before graph capture."""
+    import torch
+
+    from ._indexer_quant_triton import quantize_indexer_k
+    from ._v41_decode_topk import (
+        mask_candidates, select_candidates, select_tokens,
+    )
+    from ._v41_sm90_fp8_indexer_cache import (
+        dg_block_table, dg_pages, initialize_zero_page,
+    )
+    from ._v41_sm90_fp8_indexer_score import score_paged_fp8_indexer
+    from ._v41_sm90_fp8_prefill import (
+        quantize_contiguous_fp8_indexer, score_fp8_prefill_chunk,
+    )
+    from ._indexer_q_quant_triton import indexer_q_rope_fp8_quant_fold_indexed
+
+    prefill_width = 1024
+    capacity = max_seq_len // int(attn.compress_ratio)
+    entries = 128 if int(attn.compress_ratio) == 1 else 64
+    resident_blocks = 1 + prefill_width // entries
+    keys = torch.zeros((prefill_width, 128), dtype=torch.bfloat16, device=device)
+    pool = torch.zeros((resident_blocks, entries, 132), dtype=torch.uint8, device=device)
+    pages = dg_pages(pool)
+    slots = torch.arange(
+        entries, prefill_width + entries, dtype=torch.int64, device=device
+    )
+    quantize_indexer_k(keys, slots, pages)
+    initialize_zero_page(pages)
+    table = dg_block_table(
+        (
+            torch.arange(
+                (capacity + entries - 1) // entries,
+                dtype=torch.int32, device=device,
+            ) % (prefill_width // entries) + 1
+        ).view(1, -1),
+        pool,
+    )
+    contiguous = quantize_contiguous_fp8_indexer(keys)
+    for query_len in (1, 2, 3, 5):
+        q = torch.zeros((1, query_len, 32, 128), dtype=torch.bfloat16, device=device)
+        weights = torch.ones((1, query_len, 32), dtype=torch.float32, device=device)
+        positions = torch.arange(query_len, dtype=torch.int64, device=device)
+        lengths = torch.full((1, query_len), prefill_width, dtype=torch.int32, device=device)
+        q_fp8, folded = indexer_q_rope_fp8_quant_fold_indexed(
+            q, weights, attn.freqs_cis, positions, attn.rope_head_dim
+        )
+        score_fp8_prefill_chunk(
+            q_fp8.view(query_len, 32, 128), folded.view(query_len, 32),
+            contiguous, lengths.view(-1),
+        )
+        paged = score_paged_fp8_indexer(
+            q, weights, attn.freqs_cis, positions, pages, table, lengths,
+            max_ctx_len=capacity, rope_head_dim=attn.rope_head_dim,
+        )
+        select_tokens(paged.logits, paged.lengths, 512)
+    candidate_config = getattr(attn, "v41_config", {})
+    candidate_size = int(candidate_config.get("candidate_block_size", 8)) or 8
+    candidate_count = int(candidate_config.get("candidate_topk_blocks", 512)) or 512
+    candidate_width = capacity
+    candidate_logits = torch.zeros(
+        (1, candidate_width), dtype=torch.float32, device=device
+    )
+    candidate_lengths = torch.full(
+        (1,), min(capacity, candidate_size * candidate_count),
+        dtype=torch.int32, device=device,
+    )
+    _, flags = select_candidates(
+        candidate_logits, candidate_lengths, candidate_size, candidate_count,
+        bounded_flags=True,
+    )
+    mask_candidates(
+        candidate_logits, flags, candidate_size,
+        lengths=candidate_lengths, flag_lengths=candidate_lengths,
+    )
 
 
 def _native_topk_warmup_shapes(max_seq_len):
@@ -1507,6 +1614,51 @@ def _warm_q_norm_rope(attn, device):
     )
 
 
+def _warm_sm90_v4_pool(layout, cp_size, cp_rank, device):
+    """Warm the selected V4 codec without entering SM100-only index kernels.
+
+    Uses private storage only. Decode producer and paged attention variants
+    are warmed by the normal decode/CUDA-graph warmup, not sparse prefill.
+    """
+    import torch
+
+    from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+
+    from . import _v41_sm90_v4_cache as codec
+    from ._swa_cp_byte_sliced import CPByteSlicedSlotCompaction
+
+    if layout.entry_width != codec.ENTRY_BYTES:
+        return
+    pool = _private_pool(layout, codec.ENTRY_BYTES, device)
+    rows = min(16, 2 * layout.entries)
+    keys = torch.zeros((rows, 512), dtype=torch.bfloat16, device=device)
+    slots = _private_slots(rows, layout.entries, device)
+    out = torch.empty((1, rows + 1, 512), dtype=torch.bfloat16, device=device)
+    for dtype in (torch.int32, torch.int64):
+        typed_slots = slots.to(dtype)
+        if layout.region == SWA_KV:
+            codec.quantize_and_insert_swa_k_cache(keys, pool, typed_slots)
+        else:
+            codec.quantize_and_insert_k_cache(keys, pool, typed_slots)
+        codec.dequantize_swa_k_cache(pool, typed_slots)
+        raw = codec.gather_k_cache_bytes(pool, typed_slots)
+        codec.dequantize_k_cache_bytes(raw)
+        for lengths in (None, torch.full((1,), rows, dtype=torch.int32, device=device)):
+            codec.dequantize_and_gather_k_cache_slots(
+                out, pool, typed_slots[None], lengths, 1
+            )
+    if layout.region == SWA_KV and cp_size > 1:
+        # Warm only the local writer: startup must not issue a CP collective.
+        local = torch.zeros(
+            (2, layout.stride_bytes // cp_size), dtype=torch.uint8, device=device
+        )
+        blocks = torch.arange(2, dtype=torch.int64, device=device)
+        compaction = CPByteSlicedSlotCompaction(blocks, slots)
+        codec.quantize_and_insert_k_cache_cp_byte_sliced(
+            keys, local, slots, layout.entries, cp_rank, cp_size, compaction
+        )
+
+
 def warmup_v41_attention_jit(
     v4,
     *,
@@ -1531,10 +1683,18 @@ def warmup_v41_attention_jit(
     from rtp_llm.utils.warmup import model_warm_up_enabled
 
     device = torch.device(device)
-    if not model_warm_up_enabled() or device.type != "cuda" or max_m <= 0:
+    from rtp_llm.device.device_type import is_cuda
+
+    if (
+        not is_cuda()
+        or not model_warm_up_enabled()
+        or device.type != "cuda"
+        or max_m <= 0
+    ):
         return
     _assert_not_capturing()
-    if torch.cuda.get_device_capability(device)[0] != 10:
+    capability = torch.cuda.get_device_capability(device)[0]
+    if capability not in (9, 10):
         return
     attentions = _collect_attentions(v4)
     stream = torch.cuda.current_stream(device)
@@ -1566,6 +1726,39 @@ def warmup_v41_attention_jit(
         _WARMED.add(key)
 
     with torch.inference_mode(), torch.cuda.device(device):
+        if capability == 9:
+            # The other warmup routines include SM100-only DeepGEMM/indexer
+            # specializations. Warm only the actual SM90 V4 pool codecs here.
+            layouts = _collect_pool_layouts(
+                attentions, kv_cache, cp_size, kv_cache_sharded
+            )
+            size = cp_size if kv_cache_sharded else 1
+            rank = cp_rank if kv_cache_sharded else 0
+            for (layout, attn_key), attn in layouts.items():
+                if layout.entry_width == 584:
+                    run(
+                        ("sm90_v4_pool", layout, attn_key, size, rank),
+                        partial(_warm_sm90_v4_pool, layout, size, rank, device),
+                    )
+                elif (
+                    layout.entry_width == 132
+                    and getattr(attn, "_indexer_mode", "fp4") == "fp8_dg"
+                ):
+                    run(
+                        ("sm90_fp8_indexer_pool", layout, attn_key, size, rank),
+                        partial(_warm_pool, attn, layout, size, rank, max_batch_size, device),
+                    )
+            for attn_key, attn in attentions.items():
+                if (
+                    getattr(attn, "is_index_source", False)
+                    and getattr(attn, "_indexer_mode", "fp4") == "fp8_dg"
+                ):
+                    run(
+                        ("sm90_fp8_indexer", attn_key, max_seq_len),
+                        partial(_warm_fp8_indexer_layout, attn, device, max_seq_len),
+                        True,
+                    )
+            return
         run(("swa_refresh",), partial(_warm_swa_refresh, device))
         run(("norm_quant",), partial(_warm_norm_quant, device))
         for key, attn in attentions.items():
@@ -1611,14 +1804,15 @@ def warmup_v41_attention_jit(
                     CSA_STATE,
                     HCA_KV,
                     INDEXER_KV,
+                    INDEXER_KV_2,
                 )
 
                 paired = {}
                 for layout, attn_key in layouts:
                     paired.setdefault(attn_key, {})[layout.region] = layout
                 for regions in paired.values():
-                    index_layout = regions.get(INDEXER_KV)
                     main_layout = regions.get(CSA_KV, regions.get(HCA_KV))
+                    index_layout = regions.get(INDEXER_KV)
                     if main_layout is None or index_layout is None:
                         continue
                     producer_layouts = (main_layout, index_layout)
