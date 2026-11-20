@@ -384,6 +384,44 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertIsNone(pool.acquire())
         self.assertEqual(observe.call_args_list[-1].args, (False, "closed"))
 
+    def test_sized_lease_materializes_views_outside_the_allocator_lock(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        view_started, resume_view = threading.Event(), threading.Event()
+        narrow = pool._arena.narrow
+
+        def create_view(dim, offset, size):
+            if offset == pool._GUARD_BYTES:
+                view_started.set()
+                self.assertTrue(resume_view.wait(3))
+                raise RuntimeError("cannot materialize first view")
+            return narrow(dim, offset, size)
+
+        with patch.object(pool._arena, "narrow", side_effect=create_view):
+            with ThreadPoolExecutor(2) as workers:
+                first = workers.submit(pool.acquire, nbytes=64)
+                try:
+                    self.assertTrue(view_started.wait(1))
+                    second = workers.submit(pool.acquire, nbytes=64, timeout=0.1)
+                    slot = second.result(timeout=1)
+                    self.assertIsNotNone(slot)
+                    try:
+                        self.assertEqual(
+                            slot._buffer.storage_offset(), pool._GUARD_BYTES + 64
+                        )
+                    finally:
+                        pool.release(slot)
+                finally:
+                    resume_view.set()
+                with self.assertRaisesRegex(RuntimeError, "cannot materialize"):
+                    first.result(timeout=1)
+        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 256)])
+        self.assertFalse(pool._in_use)
+
     def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
         pool = self.pool(
             direct_payload=True,

@@ -150,10 +150,13 @@ class RegisteredObjectTransport:
     _quarantine_lock = threading.RLock()
     _quarantined_transports = []
 
-    def __init__(self, owner, buffer, device, observe_stage, *, lazy_stream=False):
+    def __init__(
+        self, owner, buffer, device, observe_stage, *, lazy_stream=False, extent=None
+    ):
         self._owner = owner
         self._buffer = buffer
-        self._capacity = buffer.numel()
+        self._extent = extent
+        self._capacity = buffer.numel() if extent is None else extent[1]
         self._device = device
         self._observe_stage = observe_stage
         self._lock = threading.Lock()
@@ -706,10 +709,11 @@ class RegisteredTransportPool:
                 continue
             slot = RegisteredObjectTransport(
                 self,
-                self._arena.narrow(0, offset, capacity),
+                None,
                 self._device,
                 self._observe_stage,
                 lazy_stream=True,
+                extent=(offset, capacity),
             )
             if self._idle_streams:
                 slot._stream = self._idle_streams.pop()
@@ -722,7 +726,7 @@ class RegisteredTransportPool:
         return None
 
     def _return_range(self, slot):
-        offset, capacity = slot._buffer.storage_offset(), slot._capacity
+        offset, capacity = slot._extent
         ranges = self._free_ranges
         index = bisect_left(ranges, (offset,))
         if index > 0:
@@ -798,8 +802,18 @@ class RegisteredTransportPool:
             self._condition.release()
         if slot is None:
             self._report_acquire_failure(for_write, failure)
-        elif self._observe_lease is not None:
+            return None
+        if self._observe_lease is not None:
             self._observe_lease(for_write, 1, slot._capacity)
+        if sized:
+            # The in-use entry keeps the arena and this extent alive until
+            # release. PyTorch dispatcher work need not hold the pool lock.
+            offset, capacity = slot._extent
+            try:
+                slot._buffer = self._arena.narrow(0, offset, capacity)
+            except BaseException:
+                self.release(slot)
+                raise
         return slot
 
     def _report_acquire_failure(self, for_write, reason):
