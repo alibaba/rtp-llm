@@ -188,15 +188,9 @@ class QSAPositionState:
         saved = self.pool.flatten(0, 1)[slots]
         return torch.where(in_current[:, None], current, saved)
 
-    def prefix_reuse_group_rope(self, config, checks):
-        g = self.geometry
-        if g.groups_all_current is None:
-            # Use the same device geometry as the sidecar reads. Carry the
-            # decision with the existing pre-write verdict on the first layer.
-            _, in_current, _ = self._group_lookup()
-            (all_current,) = checks.verify(payload=in_current.all().reshape(1))
-            g.groups_all_current = bool(all_current)
-        return self.rope(config, group=True)
+    def groups_in_current_chunk(self):
+        _, in_current, _ = self._group_lookup()
+        return in_current.all()
 
     def rope(self, config, *, group=False, dtype=torch.bfloat16):
         g = self.geometry

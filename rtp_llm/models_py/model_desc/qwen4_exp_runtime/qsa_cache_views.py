@@ -24,13 +24,19 @@ def _validate_state_pairs(table, pairs, pool_blocks, label, checks=None):
     blocks = table[indices[:, 0], indices[:, 1]]
     own_checks = checks is None
     checks = DeviceChecks() if checks is None else checks
+    _validate_state_blocks(blocks, pool_blocks, label, checks)
+    if own_checks:
+        checks.verify()
+
+
+def _validate_state_blocks(
+    blocks: torch.Tensor, pool_blocks: int, label: str, checks: DeviceChecks
+) -> None:
     checks.add(
         ((blocks <= 0) | (blocks >= pool_blocks)).any(),
         f"QSA cache 'indexer_state' {label} resolves to "
         "an unallocated or out-of-range physical block",
     )
-    if own_checks:
-        checks.verify()
 
 
 def _typed_2d_pool(

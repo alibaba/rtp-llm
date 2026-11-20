@@ -11,8 +11,18 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     INDEXER_STATE_TAG,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+    AlignedPrefillWritePlan,
+    build_aligned_prefill_write_layout,
+)
 
-from .qsa_cache_views import _block_table, _typed_2d_pool, _validate_required_blocks
+from . import qsa_cache_views
+from .qsa_cache_views import (
+    _block_table,
+    _typed_2d_pool,
+    _validate_required_blocks,
+    _validate_state_blocks,
+)
 from .qsa_plans import IncrementalPrefillPlan, TargetVerifyPlan
 from .step_metadata import (
     cached_prefill_geometry,
@@ -23,6 +33,35 @@ from .step_metadata import (
     prefill_group_rope,
     tensor_signature,
 )
+
+
+def _has_aliased_pages(blocks: torch.Tensor) -> torch.Tensor:
+    ordered = blocks.sort().values
+    return (ordered[1:] == ordered[:-1]).any()
+
+
+def _verify_prefill_pages(checks, aliased, position_state) -> bool:
+    # Read the writer and RoPE decisions with the same pre-write verdict.
+    if (
+        position_state is not None
+        and position_state.geometry.groups_all_current is None
+    ):
+        current = position_state.groups_in_current_chunk()
+        if aliased is None:
+            (all_current,) = checks.verify(payload=current.reshape(1))
+            has_alias = False
+        else:
+            all_current, has_alias = checks.verify(
+                payload=torch.stack((current, aliased))
+            )
+        position_state.geometry.groups_all_current = bool(all_current)
+        return bool(has_alias)
+    if aliased is not None:
+        (has_alias,) = checks.verify(payload=aliased.reshape(1))
+        return bool(has_alias)
+    if not checks.verified:
+        checks.verify()
+    return False
 
 
 def _draft_incremental_prefill_geometry(
@@ -182,7 +221,6 @@ def _draft_incremental_prefill_geometry(
             ),
         )
 
-    prefix_values = host_prefixes
     logical_positions = geometry.logical_positions
     position_ids = self.main_inputs.combo_position_ids
     index_factor = int(rope_config.index_factor)
@@ -300,36 +338,95 @@ def _draft_incremental_prefill_geometry(
     # A completed group may read committed raw keys preceding the new rows.
     # Validate that source tail and every destination absolute state page.
     state_table_width = int(state_table.shape[1])
-    state_pairs = []
-    for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
-        first_needed = prefix - (prefix % ratio)
-        first_block = first_needed // state_tokens_per_block
-        last_block = (prefix + length - 1) // state_tokens_per_block
-        if last_block >= state_table_width:
-            raise RuntimeError(
-                "QSA cache 'indexer_state' block table does not cover the "
-                "draft incremental tail"
-            )
-        state_pairs.extend(
-            (request_idx, block) for block in range(first_block, last_block + 1)
+    state_page_ranges = tuple(
+        range(
+            (prefix - prefix % ratio) // state_tokens_per_block,
+            (end - 1) // state_tokens_per_block + 1,
         )
-    from .qsa_cache_views import _validate_state_pairs
+        for prefix, end in zip(host_prefixes, host_visible_ends)
+    )
+    if any(pages.stop > state_table_width for pages in state_page_ranges):
+        raise RuntimeError(
+            "QSA cache 'indexer_state' block table does not cover the "
+            "draft incremental tail"
+        )
+
+    aligned_write = None
+    aliased = None
+    ring_entries = int(state_pool.shape[1])
+    if (
+        not draft
+        and not draft_prefix_reuse
+        and device.type == "cuda"
+        and not self.main_inputs.is_s_padded
+        and state_tokens_per_block == kv_tokens_per_block
+        and kv_tokens_per_block % ring_entries == 0
+        # Check logical coverage on the host before using advanced indexing.
+        # The device preflight still checks all visible KV pages.
+        and all(
+            end // ratio <= int(kv_table.shape[1]) * kv_entries_per_block
+            for end in host_visible_ends
+        )
+    ):
+        layout = cached_step_value(
+            self,
+            (
+                "aligned_prefill_write_layout",
+                tuple(lengths),
+                tuple(host_prefixes),
+                kv_tokens_per_block,
+                ratio,
+                ring_entries,
+                device,
+                torch.cuda.current_stream(device),
+            ),
+            lambda: build_aligned_prefill_write_layout(
+                lengths,
+                host_prefixes,
+                page_size=kv_tokens_per_block,
+                ratio=ratio,
+                ring_entries=ring_entries,
+                device=device,
+            ),
+        )
+        state_blocks = state_table[tuple(layout.state_pages.unbind(0))]
+        kv_blocks = kv_table[tuple(layout.kv_pages.unbind(0))]
+        aliased = _has_aliased_pages(state_blocks) | _has_aliased_pages(kv_blocks)
+        # Only the logical layout is cached. Resolve physical pages per layer.
+        aligned_write = AlignedPrefillWritePlan(layout, state_blocks, kv_blocks)
+
+    def add_state_page_checks() -> None:
+        if aligned_write is not None:
+            _validate_state_blocks(
+                aligned_write.state_blocks,
+                int(state_pool.shape[0]),
+                "draft incremental tail",
+                checks,
+            )
+            return
+        qsa_cache_views._validate_state_pairs(
+            state_table,
+            [
+                (request, column)
+                for request, pages in enumerate(state_page_ranges)
+                for column in pages
+            ],
+            int(state_pool.shape[0]),
+            "draft incremental tail",
+            checks=checks,
+        )
 
     check_prefill_metadata_once(
         self,
         checks,
-        ("indexer_state_pages", tuple(state_pairs), int(state_pool.shape[0])),
+        ("indexer_state_pages", state_page_ranges, int(state_pool.shape[0])),
         (state_table,),
-        lambda: _validate_state_pairs(
-            state_table,
-            state_pairs,
-            int(state_pool.shape[0]),
-            "draft incremental tail",
-            checks=checks,
-        ),
+        add_state_page_checks,
     )
 
     position_state = self.positions(ratio, checks)
+    if _verify_prefill_pages(checks, aliased, position_state if share_rope else None):
+        aligned_write = None
     if position_state is None:
         rope_cos, rope_sin = prefill_group_rope(
             self,
@@ -341,13 +438,8 @@ def _draft_incremental_prefill_geometry(
             device=device,
             share=share_rope,
         )
-    elif share_rope:
-        rope_cos, rope_sin = position_state.prefix_reuse_group_rope(rope_config, checks)
     else:
         rope_cos, rope_sin = position_state.rope(rope_config, group=True)
-
-    if not checks.verified:
-        checks.verify()
     return IncrementalPrefillPlan(
         **{
             "lengths": lengths,
@@ -356,17 +448,13 @@ def _draft_incremental_prefill_geometry(
             "head_num": head_num,
             "ratio": ratio,
             "token_budget": token_budget,
-            "host_prefixes": host_prefixes,
             "prefixes": prefixes,
             "cu_seqlens": expected_cu,
             "current_cos": current_cos,
             "current_sin": current_sin,
             "visible_lengths": visible_lengths,
             "compressed_lengths": compressed_lengths,
-            "max_ctx_len": max(
-                (prefix + length) // ratio
-                for prefix, length in zip(prefix_values, lengths)
-            ),
+            "max_ctx_len": max(host_visible_ends) // ratio,
             "kv_tokens_per_block": kv_tokens_per_block,
             "kv_entries_per_block": kv_entries_per_block,
             "state_tokens_per_block": state_tokens_per_block,
@@ -376,6 +464,7 @@ def _draft_incremental_prefill_geometry(
             "state_table": state_table,
             "rope_cos": rope_cos,
             "rope_sin": rope_sin,
+            "aligned_write": aligned_write,
         }
     )
 
@@ -654,9 +743,7 @@ def _target_verify_geometry(
             if not graph_target:
                 state_pairs.append((request_idx, logical_block))
     if not graph_target:
-        from .qsa_cache_views import _validate_state_pairs
-
-        _validate_state_pairs(
+        qsa_cache_views._validate_state_pairs(
             state_table,
             state_pairs,
             int(state_pool.shape[0]),

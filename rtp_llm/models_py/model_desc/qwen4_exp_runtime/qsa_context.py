@@ -97,10 +97,7 @@ class Qwen4ExpQSARuntimeContext:
             capture_undo=True,
             is_s_padded=bool(self.main_inputs.is_s_padded),
         )
-        undo = result.pop("undo", None)
-        if not isinstance(undo, IndexerCacheUndo):
-            raise RuntimeError("qwen4_exp QSA writer did not return an undo record")
-        object.__setattr__(self, "_side_cache_undo", undo)
+        object.__setattr__(self, "_side_cache_undo", result.pop("undo"))
         return result
 
     def rollback_side_cache(self) -> None:
