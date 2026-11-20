@@ -948,10 +948,14 @@ class MMHashKeyCache:
                 self._building_bytes += charge_bytes
                 return True
 
-        if not current(reserve):
-            return
+        reserved = False
         published = False
         try:
+            # A rejected reservation or a stale embedding still owns the
+            # pending marker installed by begin, but has no byte charge.
+            reserved = bool(current(reserve))
+            if not reserved:
+                return
             # Hash tensors are a few KB. A fixed first-fit pool only adds a
             # linear free-list scan to every publication; store the CPU tensors
             # directly and let the byte-bounded LRU own eviction.
@@ -981,8 +985,9 @@ class MMHashKeyCache:
                 with self._lock:
                     if self._pending.get(cache_key) is value:
                         self._pending.pop(cache_key)
-                    self._building_bytes -= charge_bytes
-                    self._drained.notify_all()
+                    if reserved:
+                        self._building_bytes -= charge_bytes
+                        self._drained.notify_all()
 
     def _remove_locked(self, cache_key: str, retired: List[_HashCacheValue]) -> int:
         value = self._entries.pop(cache_key, None)
