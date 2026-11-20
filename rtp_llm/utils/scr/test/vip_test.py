@@ -63,12 +63,12 @@ class ScrVipTest(unittest.TestCase):
         def publish_map(_):
             self._write_rows(self.rows)
 
-        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
-            network.time, "sleep", side_effect=publish_map
-        ) as sleep, patch.object(
-            network, "validate_device"
-        ) as device:
-            restored = RestoreContext("seed", "10.0.0.3").resolve_world_info(
+        with (
+            patch.dict(os.environ, {"SCR_PHASE": "restore"}),
+            patch.object(network.time, "sleep", side_effect=publish_map) as sleep,
+            patch.object(network, "validate_device") as device,
+        ):
+            restored = RestoreContext("10.0.0.3").resolve_world_info(
                 world, self.pc, self.reader
             )
         sleep.assert_called_once_with(0.5)
@@ -80,18 +80,18 @@ class ScrVipTest(unittest.TestCase):
             restored.self.cache_store_listen_port, world.self.cache_store_listen_port
         )
 
-
     def test_restore_rejects_changed_vip_after_map_becomes_ready(self):
         from rtp_llm.utils.scr.restore_context import RestoreContext
 
         world = self._world()
         self.rows["model-rank-0"]["ip"] = "22.0.1.4"
         self._write_rows(self.rows)
-        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
-            network, "validate_device"
+        with (
+            patch.dict(os.environ, {"SCR_PHASE": "restore"}),
+            patch.object(network, "validate_device"),
         ):
             with self.assertRaisesRegex(RuntimeError, "cannot change"):
-                RestoreContext("seed", "10.0.0.3").resolve_world_info(
+                RestoreContext("10.0.0.3").resolve_world_info(
                     world, self.pc, self.reader
                 )
         self.assertEqual(world.members[0].ip, "22.0.1.2")
@@ -99,12 +99,16 @@ class ScrVipTest(unittest.TestCase):
     def test_restore_waits_for_network_readiness(self):
         from rtp_llm.utils.scr.restore_context import RestoreContext
 
-        with patch.dict(os.environ, {"SCR_PHASE": "restore"}), patch.object(
-            network.time, "sleep"
-        ) as sleep, patch.object(
-            network, "validate_device", side_effect=[RuntimeError("not ready"), None]
+        with (
+            patch.dict(os.environ, {"SCR_PHASE": "restore"}),
+            patch.object(network.time, "sleep") as sleep,
+            patch.object(
+                network,
+                "validate_device",
+                side_effect=[RuntimeError("not ready"), None],
+            ),
         ):
-            world = RestoreContext("seed", "10.0.0.3").resolve_world_info(
+            world = RestoreContext("10.0.0.3").resolve_world_info(
                 self._world(), self.pc, self.reader
             )
         self.assertEqual(world.self.ip, "22.0.1.3")
@@ -131,7 +135,6 @@ class ScrVipTest(unittest.TestCase):
                 network.topology(self.pc, self.reader),
                 {0: "22.0.1.2", 1: "22.0.1.3"},
             )
-
 
     def test_local_vip_uses_rtp_node_rank_without_rank_id_env(self):
         self.pc.world_size = 8
@@ -301,7 +304,6 @@ class ScrVipTest(unittest.TestCase):
                 network.internal_ip(self.pc, "10.0.0.3", self.reader)
         sleep.assert_not_called()
 
-
     def test_platform_network_contract(self):
         addresses = json.dumps([{"addr_info": [{"local": "22.0.1.3"}]}])
         with patch.object(
@@ -420,20 +422,22 @@ class ScrVipTest(unittest.TestCase):
         backend._world_info = world
         backend.engine = Mock()
         endpoints = [(m.ip, m.server_port, m.world_rank) for m in world.members]
-        with patch.dict(
-            os.environ,
-            {
-                "SCR_PHASE": "restore",
-                "RequestedIP": "10.99.0.3",
-                "HIPPO_SLAVE_IP": "10.99.0.3",
-            },
-        ), patch(
-            "rtp_llm.server.backend_manager.get_world_info", return_value=world
-        ), patch.object(network, "validate_device"):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "SCR_PHASE": "restore",
+                    "RequestedIP": "10.99.0.3",
+                    "HIPPO_SLAVE_IP": "10.99.0.3",
+                },
+            ),
+            patch("rtp_llm.server.backend_manager.get_world_info", return_value=world),
+            patch.object(network, "validate_device"),
+        ):
             for real_ip in ("10.1.0.3", "10.2.0.3"):
                 self.rows["model-rank-1"]["real_ip"] = real_ip
                 self._write_rows(self.rows)
-                backend.restore_fixup(RestoreContext("seed", real_ip))
+                backend.restore_fixup(RestoreContext(real_ip))
                 self.assertEqual(runtime.worker_addrs[2], f"{real_ip}:22292:22294")
                 self.assertEqual(runtime.worker_grpc_addrs[2], "22.0.1.3:22291")
                 self.assertEqual(

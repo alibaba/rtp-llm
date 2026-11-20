@@ -43,6 +43,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
     def test_rank_starts_services_only_after_template_release(self):
         from rtp_llm.utils.scr import template_utils as scr
         from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
+        from rtp_llm.utils.scr.restore_context import RestoreContext
 
         for phase, failing_step in (
             ("normal", None),
@@ -51,7 +52,9 @@ class BackendScrIntegrationTest(unittest.TestCase):
             ("restore", "checkpoint"),
             ("restore", "fixup"),
         ):
-            with self.subTest(phase=phase, failing_step=failing_step), ExitStack() as stack:
+            with self.subTest(
+                phase=phase, failing_step=failing_step
+            ), ExitStack() as stack:
                 order = []
                 config = self._config(local_rank=0, world_rank=0)
                 config.parallelism_config.world_size = 1
@@ -73,9 +76,9 @@ class BackendScrIntegrationTest(unittest.TestCase):
                 lifecycle.register(
                     "test-services",
                     CallbackHook(
-                        prepare=lambda generation: order.append("prepare-template"),
-                        release=lambda generation: order.append("release"),
-                        abort=lambda generation: order.append("abort"),
+                        prepare=lambda: order.append("prepare-template"),
+                        release=lambda: order.append("release"),
+                        abort=lambda: order.append("abort"),
                     ),
                 )
 
@@ -87,11 +90,11 @@ class BackendScrIntegrationTest(unittest.TestCase):
                         raise TimeoutError("checkpoint failed")
                     return 0
 
-                def fixup(generation, lifecycle):
+                def fixup(lifecycle):
                     order.append("fixup")
                     if failing_step == "fixup":
                         raise ValueError("fixup failed")
-                    lifecycle.restore_fixup(SimpleNamespace(generation=generation))
+                    lifecycle.restore_fixup(RestoreContext("192.0.2.20"))
 
                 stack.enter_context(
                     mock.patch.dict(
@@ -142,9 +145,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
                     is_snapstart_enable=lambda: True, snapstart_checkpoint=arrival
                 )
                 load_epsilon = stack.enter_context(
-                    mock.patch.object(
-                        scr, "_load_epsilon", return_value=epsilon
-                    )
+                    mock.patch.object(scr, "_load_epsilon", return_value=epsilon)
                 )
                 stack.enter_context(mock.patch.object(scr, "_capture_cuda_device"))
                 stack.enter_context(mock.patch.object(scr, "_prepare_cuda_for_arrival"))
@@ -221,15 +222,14 @@ class BackendScrIntegrationTest(unittest.TestCase):
         lifecycle.register(
             "parent-reporter",
             CallbackHook(
-                prepare=lambda generation: order.append("prepare"),
-                fixup=lambda generation: order.append("fixup"),
-                release=lambda generation: order.append("release"),
+                prepare=lambda: order.append("prepare"),
+                fixup=lambda context: order.append("fixup"),
+                release=lambda: order.append("release"),
             ),
         )
         manifest = SimpleNamespace(
             worker_id=lambda role, instance: 0,
             worker_num=1,
-            generation="parent-generation",
         )
         with mock.patch.dict(
             os.environ,
@@ -237,7 +237,8 @@ class BackendScrIntegrationTest(unittest.TestCase):
         ), mock.patch.object(
             scr, "get_template_lifecycle", return_value=lifecycle
         ), mock.patch.object(
-            scr, "arrive_scr_checkpoint_barrier",
+            scr,
+            "arrive_scr_checkpoint_barrier",
             side_effect=lambda **kwargs: order.append("barrier") or 0,
         ):
             self.assertEqual(launcher._start_parent_scr_arrival(manifest), 0)
@@ -285,7 +286,6 @@ class BackendScrIntegrationTest(unittest.TestCase):
             worker_id=lambda role, instance: int(instance),
             worker_num=worker_num,
             participant_ids={f"backend_rank:{i}": i for i in range(worker_num)},
-            generation="",
         )
 
     def test_disabled_path_is_inert(self):
@@ -329,9 +329,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             backend, "arrive_scr_checkpoint_barrier", return_value=result
         ) as arrive:
             self.assertEqual(
-                backend._start_scr_rank_arrival(
-                    manager, config, scr_manifest=manifest
-                ),
+                backend._start_scr_rank_arrival(manager, config, scr_manifest=manifest),
                 result,
             )
 
@@ -339,7 +337,6 @@ class BackendScrIntegrationTest(unittest.TestCase):
         arrive.assert_called_once_with(
             worker_id=2,
             worker_num=4,
-            generation=None,
             fail_closed=True,
         )
 
@@ -380,7 +377,6 @@ class BackendScrIntegrationTest(unittest.TestCase):
         arrive.assert_called_once_with(
             worker_id=0,
             worker_num=4,
-            generation=None,
             fail_closed=True,
         )
 
@@ -459,8 +455,6 @@ class BackendScrIntegrationTest(unittest.TestCase):
         scr_env = {
             "RTPLLM_ENABLE_SCR": "1",
             "SCR_PHASE": "checkpoint",
-            "SCR_GENERATION": "3",
-            "RTP_LLM_SCR_GENERATION": "3",
             "UNRELATED": "keep",
         }
         seen = {}

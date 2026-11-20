@@ -94,7 +94,6 @@ def start_dash_sc_server(
             result = arrive_scr_template_barrier(
                 worker_id=worker_id,
                 worker_num=scr_manifest.worker_num,
-                generation=scr_manifest.generation or None,
                 fail_closed=True,
             )
             logging.info(

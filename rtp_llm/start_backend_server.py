@@ -33,7 +33,6 @@ from rtp_llm.utils.oom_diag import install_oom_dump
 from rtp_llm.utils.process_lifecycle import arm_parent_death_sigkill
 from rtp_llm.utils.process_manager import ProcessManager
 from rtp_llm.utils.scr.template_utils import (
-    SCR_GENERATION_ENV,
     ScrParticipantManifest,
 )
 from rtp_llm.utils.scr.template_utils import (
@@ -132,17 +131,15 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None):
         worker_num = scr_manifest.worker_num
         logging.info(
             "sCR rank arrival mapping resolved: local_rank=%s worker_id=%s "
-            "worker_num=%s phase=%s generation=%s",
+            "worker_num=%s phase=%s",
             getattr(pc, "local_rank", 0),
             worker_id,
             worker_num,
             os.environ.get("SCR_PHASE", ""),
-            os.environ.get(SCR_GENERATION_ENV, "<unset>"),
         )
         result = arrive_scr_checkpoint_barrier(
             worker_id=worker_id,
             worker_num=worker_num,
-            generation=scr_manifest.generation or None,
             fail_closed=True,
         )
         logging.info(
@@ -170,7 +167,6 @@ def _start_scr_manager_arrival(scr_manifest):
     result = arrive_scr_checkpoint_barrier(
         worker_id=worker_id,
         worker_num=scr_manifest.worker_num,
-        generation=scr_manifest.generation or None,
         fail_closed=True,
     )
     logging.info(

@@ -207,7 +207,7 @@ class FrontendRoutingTest(unittest.TestCase):
                 ds.time, "sleep", side_effect=AssertionError("should not retry")
             ),
         ):
-            configs.distribute_config.gang_annotation_path = f"{directory}/annotations"
+            configs.distribute_config.gang_annocation_path = f"{directory}/annotations"
             with self.assertRaises(FileNotFoundError) as error:
                 ds.get_frontend_world_info(
                     configs.server_config,
@@ -265,17 +265,18 @@ class FrontendRoutingTest(unittest.TestCase):
         pc.world_rank, pc.local_rank = 2, 0
         pc.tp_size, pc.dp_size = 4, 1
         configs.server_config.ip = "10.0.0.3"
-        with patch.dict(
-            os.environ,
-            {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint", "RANK_ID": "1"},
-            clear=True,
-        ), patch.object(
-            network, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
-        ), patch.object(
-            ds, "get_master", return_value=("22.0.1.2", "22290")
-        ), patch.object(
-            ds, "TCPStore"
-        ) as store:
+        with (
+            patch.dict(
+                os.environ,
+                {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint", "RANK_ID": "1"},
+                clear=True,
+            ),
+            patch.object(
+                network, "topology", return_value={0: "22.0.1.2", 1: "22.0.1.3"}
+            ),
+            patch.object(ds, "get_master", return_value=("22.0.1.2", "22290")),
+            patch.object(ds, "TCPStore") as store,
+        ):
             store.return_value.get.return_value = b"22.0.1.2:23000"
             world = ds.get_frontend_world_info(
                 configs.server_config, configs.distribute_config, pc
@@ -284,9 +285,7 @@ class FrontendRoutingTest(unittest.TestCase):
             store.reset_mock()
             with patch.dict(os.environ, {"SCR_PHASE": "restore"}):
                 for ip in ("10.1.0.3", "10.2.0.3"):
-                    restored = RestoreContext("seed", ip).resolve_world_info(
-                        world, pc, gang
-                    )
+                    restored = RestoreContext(ip).resolve_world_info(world, pc, gang)
                     self.assertEqual(
                         ds.get_dp_addrs_from_world_info(restored, pc),
                         ["22.0.1.2:23001"],
@@ -296,9 +295,7 @@ class FrontendRoutingTest(unittest.TestCase):
                 network, "topology", return_value={0: "22.0.1.9", 1: "22.0.1.3"}
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot change"):
-                    RestoreContext("seed", "10.3.0.3").resolve_world_info(
-                        world, pc, gang
-                    )
+                    RestoreContext("10.3.0.3").resolve_world_info(world, pc, gang)
 
 
 if __name__ == "__main__":

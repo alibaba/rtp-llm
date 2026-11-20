@@ -31,7 +31,7 @@ class ScrVipIntegrationTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "custom-annotations"
-            configs.distribute_config.gang_annotation_path = str(path)
+            configs.distribute_config.gang_annocation_path = str(path)
             path.write_text(
                 'unrelated="value"\napp.c2.io/biz-detail-ganginfo='
                 + json.dumps(json.dumps(rows))
@@ -166,14 +166,14 @@ class ScrVipIntegrationTest(unittest.TestCase):
                         [m.ip for m in world.members],
                         [f"22.0.1.{2 + rank // 2}"] * 2,
                     )
-                    restored = RestoreContext("seed", "10.1.0.3").resolve_world_info(
+                    restored = RestoreContext("10.1.0.3").resolve_world_info(
                         world, pc, GangInfoReader.from_config(configs.distribute_config)
                     )
                     self.assertEqual(restored.self.ip, world.self.ip)
                     self.assertEqual(restored.self.server_port, world.self.server_port)
                     world.members[0].ip = "21.0.0.1"
                     with self.assertRaisesRegex(RuntimeError, "cannot change"):
-                        RestoreContext("seed", "10.1.0.3").resolve_world_info(
+                        RestoreContext("10.1.0.3").resolve_world_info(
                             world,
                             pc,
                             GangInfoReader.from_config(configs.distribute_config),

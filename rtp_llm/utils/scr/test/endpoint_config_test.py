@@ -24,7 +24,7 @@ class ScrEndpointConfigTest(unittest.TestCase):
         self.configs.parallelism_config.local_world_size = 1
         member = WorkerInfo("192.0.2.10", 0, 0, "seed", 9000, 9)
         self.world = WorldInfo([member], member, member, 1, True)
-        self.context = RestoreContext("g1", "192.0.2.20")
+        self.context = RestoreContext("192.0.2.20")
 
     def test_backend_refreshes_engine_endpoints(self):
         backend = BackendManager.__new__(BackendManager)

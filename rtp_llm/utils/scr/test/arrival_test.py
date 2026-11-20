@@ -127,15 +127,12 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                 )
         self.assertIsNone(scr.get_scr_barrier_return_time())
 
-
     def test_arrival_supplies_only_blocking_mode_and_participant_identity(self):
         epsilon = _EpsilonDouble()
-        generation = None
         with mock.patch.dict(
             os.environ,
             {
                 "RTPLLM_ENABLE_SCR": "1",
-                scr.SCR_GENERATION_ENV: "generation-7",
                 scr.SCR_PHASE_ENV: scr.SCR_PHASE_RESTORE,
             },
             clear=True,
@@ -143,7 +140,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertEqual(
                 scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1), 0
             )
-            generation = scr._scr_generation()
 
         self.assertEqual(
             epsilon.arrivals,
@@ -155,7 +151,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(generation, "generation-7")
 
     def test_nonzero_epsilon_result_is_preserved_for_controller_diagnostics(self):
         epsilon = _EpsilonDouble(result=17)

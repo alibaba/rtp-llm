@@ -13,17 +13,17 @@ class TemplateLifecycleTest(unittest.TestCase):
         lifecycle.register(
             "one",
             CallbackHook(
-                prepare=lambda generation: events.append(("prepare", generation)),
-                fixup=lambda context: events.append(("fixup", context.generation)),
-                release=lambda generation: events.append(("release", generation)),
+                prepare=lambda: events.append("prepare"),
+                fixup=lambda context: events.append(("fixup", context.pod_ip)),
+                release=lambda: events.append("release"),
             ),
         )
-        lifecycle.prepare_for_template("g1", "restore")
-        lifecycle.restore_fixup(RestoreContext("g1", "192.0.2.50"))
-        lifecycle.release_template("g1")
+        lifecycle.prepare_for_template("restore")
+        lifecycle.restore_fixup(RestoreContext("192.0.2.50"))
+        lifecycle.release_template()
         self.assertEqual(
             events,
-            [("prepare", "g1"), ("fixup", "g1"), ("release", "g1")],
+            ["prepare", ("fixup", "192.0.2.50"), "release"],
         )
         self.assertFalse(lifecycle.active)
 
@@ -33,35 +33,40 @@ class TemplateLifecycleTest(unittest.TestCase):
         lifecycle.register(
             "one",
             CallbackHook(
-                prepare=lambda _generation: events.append("prepare"),
-                abort=lambda _generation: events.append("abort"),
+                prepare=lambda: events.append("prepare"),
+                abort=lambda: events.append("abort"),
             ),
         )
         lifecycle.register(
             "two",
-            CallbackHook(
-                prepare=lambda _generation: (_ for _ in ()).throw(ValueError("boom"))
-            ),
+            CallbackHook(prepare=lambda: (_ for _ in ()).throw(ValueError("boom"))),
         )
         with self.assertRaises(ValueError):
-            lifecycle.prepare_for_template("g1", "checkpoint")
+            lifecycle.prepare_for_template("checkpoint")
         self.assertEqual(events, ["prepare", "abort"])
         self.assertFalse(lifecycle.active)
 
     def test_duplicate_prepare_is_idempotent(self):
         lifecycle = TemplateLifecycle()
         calls = []
-        lifecycle.register(
-            "one", CallbackHook(prepare=lambda _generation: calls.append(1))
-        )
-        lifecycle.prepare_for_template("g1", "restore")
-        lifecycle.prepare_for_template("g1", "restore")
+        lifecycle.register("one", CallbackHook(prepare=lambda: calls.append(1)))
+        lifecycle.prepare_for_template("restore")
+        lifecycle.prepare_for_template("restore")
         self.assertEqual(calls, [1])
+        with self.assertRaisesRegex(RuntimeError, "already active"):
+            lifecycle.prepare_for_template("checkpoint")
+
+    def test_fixup_and_release_require_prepare(self):
+        lifecycle = TemplateLifecycle()
+        with self.assertRaisesRegex(RuntimeError, "fixup without prepare"):
+            lifecycle.restore_fixup(RestoreContext("192.0.2.20"))
+        with self.assertRaisesRegex(RuntimeError, "release without prepare"):
+            lifecycle.release_template()
 
     def test_fixup_only_components_share_inputs_before_release(self):
         lifecycle = TemplateLifecycle()
         events = []
-        context = RestoreContext("seed", "192.0.2.20")
+        context = RestoreContext("192.0.2.20")
         for name in ("server-config", "backend-endpoints", "request-identity"):
             participant = SimpleNamespace(
                 restore_fixup=lambda ctx, name=name: events.append((name, ctx))
@@ -69,18 +74,18 @@ class TemplateLifecycleTest(unittest.TestCase):
             lifecycle.register_fixup(name, participant)
             lifecycle.register_fixup(name, participant)
         lifecycle.register(
-            "service", CallbackHook(release=lambda g: events.append(("ready", g)))
+            "service", CallbackHook(release=lambda: events.append("ready"))
         )
-        lifecycle.prepare_for_template("seed", "restore")
+        lifecycle.prepare_for_template("restore")
         lifecycle.restore_fixup(context)
-        lifecycle.release_template("seed")
+        lifecycle.release_template()
         self.assertEqual(
             events,
             [
                 (name, context)
                 for name in ("server-config", "backend-endpoints", "request-identity")
             ]
-            + [("ready", "seed")],
+            + ["ready"],
         )
         for _, received in events[:-1]:
             self.assertIs(received, context)
@@ -89,22 +94,22 @@ class TemplateLifecycleTest(unittest.TestCase):
         lifecycle = TemplateLifecycle()
         events = []
         release = Mock()
-        lifecycle.register("one", CallbackHook(abort=lambda g: events.append("one")))
+        lifecycle.register("one", CallbackHook(abort=lambda: events.append("one")))
         lifecycle.register(
             "two",
             CallbackHook(
                 fixup=Mock(side_effect=RuntimeError("endpoint fixup failed")),
                 release=release,
-                abort=lambda g: events.append("two"),
+                abort=lambda: events.append("two"),
             ),
         )
-        lifecycle.prepare_for_template("seed", "restore")
+        lifecycle.prepare_for_template("restore")
         with self.assertRaisesRegex(RuntimeError, "endpoint fixup failed"):
-            lifecycle.restore_fixup(RestoreContext("seed", "192.0.2.20"))
+            lifecycle.restore_fixup(RestoreContext("192.0.2.20"))
         with self.assertRaisesRegex(RuntimeError, "before successful fixup"):
-            lifecycle.release_template("seed")
+            lifecycle.release_template()
         release.assert_not_called()
-        lifecycle.abort_template("seed")
+        lifecycle.abort_template()
         self.assertEqual(events, ["two", "one"])
         self.assertFalse(lifecycle.active)
 
@@ -117,24 +122,24 @@ class TemplateLifecycleTest(unittest.TestCase):
                 release=Mock(side_effect=RuntimeError("start failed")), abort=abort
             ),
         )
-        lifecycle.prepare_for_template("seed", "restore")
-        lifecycle.restore_fixup(RestoreContext("seed", "192.0.2.20"))
+        lifecycle.prepare_for_template("restore")
+        lifecycle.restore_fixup(RestoreContext("192.0.2.20"))
         with self.assertRaisesRegex(RuntimeError, "start failed"):
-            lifecycle.release_template("seed")
-        lifecycle.abort_template("seed")
-        abort.assert_called_once_with("seed")
+            lifecycle.release_template()
+        lifecycle.abort_template()
+        abort.assert_called_once_with()
         self.assertFalse(lifecycle.active)
 
     def test_participant_set_cannot_change_during_restore(self):
         lifecycle = TemplateLifecycle()
         lifecycle.register("one", CallbackHook())
-        lifecycle.prepare_for_template("seed", "restore")
+        lifecycle.prepare_for_template("restore")
         with self.assertRaisesRegex(RuntimeError, "cannot register"):
             lifecycle.register_fixup("late", SimpleNamespace(restore_fixup=Mock()))
         with self.assertRaisesRegex(RuntimeError, "cannot unregister"):
             lifecycle.unregister("one")
         with self.assertRaisesRegex(RuntimeError, "before successful fixup"):
-            lifecycle.release_template("seed")
+            lifecycle.release_template()
 
 
 if __name__ == "__main__":

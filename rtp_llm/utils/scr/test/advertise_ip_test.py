@@ -67,7 +67,7 @@ class ScrAdvertiseIpTest(unittest.TestCase):
     def test_manifest_host_wins_over_restored_runtime_identity(self):
         for member in self.world.members:
             member.ip = "192.0.2.50"
-        identity = runtime.RestoreRuntimeIdentity("g1", "192.0.2.20", ())
+        identity = runtime.RestoreRuntimeIdentity("192.0.2.20", ())
         with patch.object(runtime, "_runtime_identity", identity), patch(
             "socket.gethostbyname"
         ) as resolve:

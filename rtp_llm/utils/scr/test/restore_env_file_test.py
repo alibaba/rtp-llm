@@ -43,7 +43,7 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         self.publish({"RequestedIP": "192.0.2.20"})
         self.local_probe.bind.side_effect = OSError("address not available")
         with self.assertRaisesRegex(ValueError, "RequestedIP is not local"):
-            runtime.fixup_runtime_after_restore("same-seed", Mock())
+            runtime.fixup_runtime_after_restore(Mock())
         self.assertEqual(os.environ["RequestedIP"], "192.0.2.10")
 
     def publish(self, values):
@@ -56,10 +56,10 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         lifecycle.register(
             "component",
             CallbackHook(
-                prepare=lambda g: events.append("prepare"),
+                prepare=lambda: events.append("prepare"),
                 fixup=lambda g: events.append(("fixup", os.environ["RequestedIP"])),
-                release=lambda g: events.append("release"),
-                abort=lambda g: events.append("abort"),
+                release=lambda: events.append("release"),
+                abort=lambda: events.append("abort"),
             ),
         )
 
@@ -77,7 +77,8 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
             scr, "arrive_scr_checkpoint_barrier", side_effect=arrive
         ):
             return scr.arrive_scr_template_barrier(
-                worker_id=0, worker_num=1, generation="same-seed"
+                worker_id=0,
+                worker_num=1,
             )
 
     def test_missing_file_falls_back_and_releases(self):

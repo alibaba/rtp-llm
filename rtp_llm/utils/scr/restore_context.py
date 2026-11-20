@@ -10,7 +10,6 @@ from rtp_llm.utils.gang_info import GangInfoReader
 
 @dataclass(frozen=True)
 class RestoreContext:
-    generation: str
     pod_ip: str
 
     def resolve_world_info(

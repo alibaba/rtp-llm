@@ -19,6 +19,62 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class ScrArgumentsTest(TestCase):
+    def test_scr_cli_env_binding_and_effective_switch(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.utils.scr.lifecycle import is_scr_enabled, template_phase_active
+
+        for env, args, expected in (
+            ({}, [], False),
+            ({}, ["--enable_scr", "true"], True),
+            ({"RTPLLM_ENABLE_SCR": "on"}, [], True),
+            ({"RTPLLM_ENABLE_SCR": "t"}, [], True),
+            ({"RTPLLM_ENABLE_SCR": "0"}, [], False),
+            ({"RTPLLM_ENABLE_SCR": "0"}, ["--enable_scr", "1"], True),
+            ({"RTPLLM_ENABLE_SCR": "1"}, ["--enable_scr", "false"], False),
+        ):
+            with self.subTest(env=env, args=args), patch.dict(
+                os.environ, {**env, "SCR_PHASE": "checkpoint"}, clear=True
+            ):
+                config = setup_args(args)
+                self.assertIs(config.server_config.enable_scr, expected)
+                self.assertIs(
+                    pickle.loads(pickle.dumps(config.server_config)).enable_scr,
+                    expected,
+                )
+                # Native metrics and spawn imports use the same resolved value.
+                self.assertEqual(
+                    os.environ["RTPLLM_ENABLE_SCR"], "1" if expected else "0"
+                )
+                self.assertIs(is_scr_enabled(), expected)
+                self.assertIs(template_phase_active(), expected)
+
+    def test_original_gang_path_cli_and_env_binding(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+        from rtp_llm.utils.gang_info import GangInfoReader
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "annotations"
+            rows = {"model_part0": {"ip": "192.0.2.10", "port": 1234}}
+            path.write_text(
+                "app.c2.io/biz-detail-ganginfo=" + json.dumps(json.dumps(rows))
+            )
+            for args in ([], ["--gang_annocation_path", str(path)]):
+                with self.subTest(args=args), patch.dict(
+                    os.environ,
+                    {"GANG_ANNOCATION_PATH": str(path) if not args else "/ignored"},
+                    clear=True,
+                ):
+                    config = setup_args(args)
+                    self.assertEqual(
+                        config.distribute_config.gang_annocation_path, str(path)
+                    )
+                    self.assertEqual(
+                        GangInfoReader.from_config(config.distribute_config).read(),
+                        rows,
+                    )
+
+
 class Glm5EnvironmentArgumentsTest(TestCase):
     def test_registered_flags_cli_override_env_and_survive_pickle(self):
         from rtp_llm.server.server_args.server_args import setup_args

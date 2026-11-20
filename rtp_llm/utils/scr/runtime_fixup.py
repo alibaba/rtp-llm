@@ -44,7 +44,6 @@ RESTORE_ENV_KEYS = frozenset(
 
 @dataclass(frozen=True)
 class RestoreRuntimeIdentity:
-    generation: str
     pod_ip: str
     environment_keys: tuple[str, ...]
 
@@ -106,7 +105,6 @@ def _validate_environment(values: Mapping[str, str | None]) -> dict[str, str | N
 
 
 def fixup_runtime_after_restore(
-    generation: str,
     lifecycle: TemplateLifecycle,
 ) -> RestoreRuntimeIdentity:
     """Fresh inputs -> Logger/identity -> registered component repairs.
@@ -149,7 +147,7 @@ def fixup_runtime_after_restore(
     os.environ["POD_IP"] = pod_ip
     if refresh_logger is not None:
         refresh_logger(pod_ip)
-    identity = RestoreRuntimeIdentity(generation, pod_ip, tuple(sorted(updates)))
+    identity = RestoreRuntimeIdentity(pod_ip, tuple(sorted(updates)))
     _runtime_identity = identity
     # This class caches identity at import time. Refresh even before the Python
     # reporter decides whether this is a Hippo environment on release.
@@ -160,8 +158,7 @@ def fixup_runtime_after_restore(
         hippo_module.HippoHelper.refresh_runtime_identity(pod_ip=pod_ip)
     # Log only identity and key names, never the file body/environment values.
     LOGGER.info(
-        "SCR runtime identity fixed generation=%s previous_runtime_ip=%s pod_ip=%s env_keys=%s",
-        generation,
+        "SCR runtime identity fixed previous_runtime_ip=%s pod_ip=%s env_keys=%s",
         previous.pod_ip if previous else "unrecorded",
         pod_ip,
         identity.environment_keys,
@@ -171,5 +168,5 @@ def fixup_runtime_after_restore(
             "SCR restore input did not supply HIPPO_SLAVE_IP; "
             "host identity retained from environment, freshness unverified"
         )
-    lifecycle.restore_fixup(RestoreContext(generation, pod_ip))
+    lifecycle.restore_fixup(RestoreContext(pod_ip))
     return identity

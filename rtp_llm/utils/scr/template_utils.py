@@ -44,7 +44,7 @@ from rtp_llm.utils.signal_guard import ignore_sigpipe
 LOGGER = logging.getLogger(__name__)
 
 
-def _start_native_kmonitor(generation: str) -> None:
+def _start_native_kmonitor() -> None:
     # Do not import CUDA in CPU/frontend processes just to start metrics.
     extension = sys.modules.get("libth_transformer")
     if extension is None:
@@ -95,21 +95,6 @@ def register_server_config_template_hook(py_env_configs: Any) -> None:
 SCR_PHASE_CHECKPOINT = "checkpoint"
 SCR_PHASE_RESTORE = "restore"
 SCR_PHASE_NORMAL = "normal"
-
-# Snapshot waiting, timeout and cancellation belong to the control plane/Epsilon.
-# RTP supplies participation and blocking semantics, never a timeout budget.
-SCR_GENERATION_ENV = "RTP_LLM_SCR_GENERATION"
-SCR_GENERATION_ALIAS_ENV = "SCR_GENERATION"
-
-
-def _scr_generation() -> str:
-    """Return the controller-provided generation for structured diagnostics."""
-
-    for name in (SCR_GENERATION_ENV, SCR_GENERATION_ALIAS_ENV):
-        value = os.environ.get(name)
-        if value is not None and value.strip():
-            return value.strip()
-    return "<unset>"
 
 
 def epsilon_backend_mode(epsilon: Any | None = None) -> str:
@@ -262,7 +247,6 @@ class ScrParticipantManifest:
 
     worker_num: int
     participant_ids: TypingMapping[str, int]
-    generation: str = ""
 
     def worker_id(self, role: str, instance: Any = "0") -> int:
         key = f"{role}:{instance}"
@@ -282,8 +266,6 @@ class ScrParticipantManifest:
 
 def build_scr_participant_manifest(
     participants: list[tuple[str, Any]],
-    *,
-    generation: str | None = None,
 ) -> ScrParticipantManifest:
     """Assign contiguous IDs to an ordered process-role sequence."""
 
@@ -293,11 +275,7 @@ def build_scr_participant_manifest(
         if key in mapping:
             raise ValueError(f"duplicate sCR participant {key!r}")
         mapping[key] = worker_id
-    if generation is None:
-        generation = _scr_generation()
-    if generation == "<unset>":
-        generation = ""
-    manifest = ScrParticipantManifest(len(mapping), mapping, generation.strip())
+    manifest = ScrParticipantManifest(len(mapping), mapping)
     manifest.validate()
     return manifest
 
@@ -559,9 +537,8 @@ def _register_for_scr_once(
     with _registration_lock:
         _registrations[engine_key] = registration
     LOGGER.info(
-        "sCR registration completed generation=%s phase=%s tensors=%d cache_result=%s "
+        "sCR registration completed phase=%s tensors=%d cache_result=%s "
         "hook_result=%s ok=%s elapsed_ms=%.3f kv_bytes=%d",
-        _scr_generation(),
         os.environ.get(SCR_PHASE_ENV, "<unset>"),
         len(tensors),
         cache_result,
@@ -581,7 +558,7 @@ def get_scr_barrier_return_time() -> float | None:
 
     This is not the platform's restore start; it excludes checkpoint waiting and
     native restore work inside Epsilon. It is None for processes that did not
-    arrive at a template barrier in this generation.
+    arrive at a template barrier.
     """
     return _scr_barrier_return_time
 
@@ -590,7 +567,6 @@ def arrive_scr_checkpoint_barrier(
     *,
     worker_id: int,
     worker_num: int,
-    generation: str | None = None,
     fail_closed: bool = False,
 ) -> int | None:
     """Arrive at Epsilon's rank-local snapshot barrier.
@@ -602,7 +578,7 @@ def arrive_scr_checkpoint_barrier(
     state is at a safe point and then wait for the controller-driven snapshot
     lifecycle. GPU-only KV registration happens separately.
 
-    Every participating rank must call this once per snapshot generation with
+    Every participating rank must call this once per checkpoint with
     a unique ``worker_id`` in ``[0, worker_num)`` and the same ``worker_num``.
     Calls from different processes are expected to happen concurrently.
     """
@@ -627,18 +603,6 @@ def arrive_scr_checkpoint_barrier(
     _scr_barrier_return_time = None
 
     started = time.monotonic()
-    actual_generation = _scr_generation()
-    if generation and generation != actual_generation:
-        LOGGER.error(
-            "sCR generation mismatch expected=%s actual=%s worker_id=%s worker_num=%s",
-            generation,
-            actual_generation,
-            worker_id,
-            worker_num,
-        )
-        return _raise_if_strict(
-            f"sCR generation mismatch expected={generation} actual={actual_generation}"
-        )
     try:
         worker_id = int(worker_id)
         worker_num = int(worker_num)
@@ -671,9 +635,7 @@ def arrive_scr_checkpoint_barrier(
 
     try:
         LOGGER.info(
-            "sCR snapshot arrival started generation=%s phase=%s worker_id=%d "
-            "worker_num=%d",
-            _scr_generation(),
+            "sCR snapshot arrival started phase=%s worker_id=%d " "worker_num=%d",
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
             worker_id,
             worker_num,
@@ -683,9 +645,8 @@ def arrive_scr_checkpoint_barrier(
             _prepare_cuda_for_arrival(prepare_device)
         except Exception:
             LOGGER.exception(
-                "sCR CUDA prepare failed; refusing snapshot arrival generation=%s "
+                "sCR CUDA prepare failed; refusing snapshot arrival "
                 "worker_id=%d worker_num=%d",
-                _scr_generation(),
                 worker_id,
                 worker_num,
             )
@@ -709,9 +670,8 @@ def arrive_scr_checkpoint_barrier(
         elapsed_ms = (time.monotonic() - started) * 1000.0
         if result not in (None, 0):
             LOGGER.error(
-                "sCR snapshot arrival returned non-zero generation=%s phase=%s "
+                "sCR snapshot arrival returned non-zero phase=%s "
                 "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f",
-                _scr_generation(),
                 os.environ.get(SCR_PHASE_ENV, "<unset>"),
                 worker_id,
                 worker_num,
@@ -728,10 +688,9 @@ def arrive_scr_checkpoint_barrier(
             # diagnostic only.
             _scr_barrier_return_time = time.monotonic()
             LOGGER.info(
-                "sCR snapstart checkpoint reached pid=%d generation=%s phase=%s "
+                "sCR snapstart checkpoint reached pid=%d phase=%s "
                 "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f",
                 os.getpid(),
-                _scr_generation(),
                 os.environ.get(SCR_PHASE_ENV, "<unset>"),
                 worker_id,
                 worker_num,
@@ -743,9 +702,8 @@ def arrive_scr_checkpoint_barrier(
         # Preserve provider failures. Active template participants fail closed
         # instead of releasing listeners after a failed checkpoint arrival.
         LOGGER.exception(
-            "sCR snapshot barrier arrival failed generation=%s phase=%s "
+            "sCR snapshot barrier arrival failed phase=%s "
             "worker_id=%d worker_num=%d elapsed_ms=%.3f",
-            _scr_generation(),
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
             worker_id,
             worker_num,
@@ -754,7 +712,7 @@ def arrive_scr_checkpoint_barrier(
         if fail_closed:
             raise ScrArrivalError(
                 "sCR snapshot barrier arrival failed "
-                f"generation={_scr_generation()} worker_id={worker_id} worker_num={worker_num}: {exc}"
+                f"worker_id={worker_id} worker_num={worker_num}: {exc}"
             ) from exc
         return None
 
@@ -763,7 +721,6 @@ def arrive_scr_template_barrier(
     *,
     worker_id: int,
     worker_num: int,
-    generation: str | None = None,
     fail_closed: bool = False,
 ) -> int | None:
     """Run lifecycle hooks and Epsilon arrival as one template barrier."""
@@ -777,31 +734,26 @@ def arrive_scr_template_barrier(
         return arrive_scr_checkpoint_barrier(
             worker_id=worker_id,
             worker_num=worker_num,
-            generation=generation,
             fail_closed=fail_closed,
         )
 
-    actual_generation = generation or _scr_generation()
-    if actual_generation == "<unset>":
-        actual_generation = ""
     phase = os.environ.get(SCR_PHASE_ENV, "").strip().lower()
     lifecycle = get_template_lifecycle()
-    lifecycle.prepare_for_template(actual_generation, phase)
+    lifecycle.prepare_for_template(phase)
     try:
         result = arrive_scr_checkpoint_barrier(
             worker_id=worker_id,
             worker_num=worker_num,
-            generation=generation,
             # A prepared template must never release after a failed arrival.
             # Legacy Epsilon APIs return None on success, so enforce errors at
             # the arrival boundary instead of interpreting None here.
             fail_closed=True,
         )
-        fixup_runtime_after_restore(actual_generation, lifecycle)
-        lifecycle.release_template(actual_generation)
+        fixup_runtime_after_restore(lifecycle)
+        lifecycle.release_template()
         return result
     except BaseException:
-        lifecycle.abort_template(actual_generation)
+        lifecycle.abort_template()
         raise
 
 

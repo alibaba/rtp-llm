@@ -3,7 +3,6 @@
 import json
 import os
 import unittest
-import uuid
 from pathlib import Path
 
 import requests
@@ -25,8 +24,7 @@ class ScrCheckpointSteadyStateTest(unittest.TestCase):
         self.assertTrue(Path(model_path, "config.json").is_file(), model_path)
         output = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
         output.mkdir(parents=True, exist_ok=True)
-        generation = uuid.uuid4().hex
-        barrier = CheckpointBarrier(generation)
+        barrier = CheckpointBarrier()
         self.addCleanup(barrier.close)
         server = MagaServerManager(
             env_args={
@@ -35,7 +33,6 @@ class ScrCheckpointSteadyStateTest(unittest.TestCase):
                 "RTPLLM_ENABLE_SCR": "1",
                 "HIPPO_ROLE_SHORT_NAME": "scr_kmonitor_negative",
                 "HIPPO_SLAVE_IP": "203.0.113.1",  # Reserved example IP, not a real Flume endpoint.
-                "RTP_LLM_SCR_GENERATION": generation,
                 "SCR_TEST_BARRIER_SOCKET": barrier.path,
             },
             role_name="scr_checkpoint",

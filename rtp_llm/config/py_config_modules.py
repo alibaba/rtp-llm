@@ -46,6 +46,7 @@ class ServerConfig:
     """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
+        self.enable_scr: bool = False
         self.frontend_metrics_enable = False
         self.frontend_server_count = 4
         self.vit_server_count = 1
@@ -143,6 +144,7 @@ class ServerConfig:
 
     def to_string(self):
         return (
+            f"enable_scr: {self.enable_scr}\n"
             f"frontend_server_count: {self.frontend_server_count}\n"
             f"vit_server_count: {self.vit_server_count}\n"
             f"start_port: {self.start_port}\n"
@@ -250,7 +252,7 @@ class DistributeConfig:
 
     def __init__(self):
         self.fake_gang_env: bool = False
-        self.gang_annotation_path: str = "/etc/podinfo/annotations"
+        self.gang_annocation_path: str = "/etc/podinfo/annotations"
         self.gang_config_string: Optional[str] = None
         self.zone_name: str = ""
         self.distribute_config_file: str = ""
@@ -285,7 +287,7 @@ class DistributeConfig:
     def to_string(self):
         return (
             f"fake_gang_env: {self.fake_gang_env}\n"
-            f"gang_annotation_path: {self.gang_annotation_path}\n"
+            f"gang_annocation_path: {self.gang_annocation_path}\n"
             f"gang_config_string: {self.gang_config_string}\n"
             f"zone_name: {self.zone_name}\n"
             f"distribute_config_file: {self.distribute_config_file}\n"

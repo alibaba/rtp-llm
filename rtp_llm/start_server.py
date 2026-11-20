@@ -749,7 +749,6 @@ def _start_parent_scr_arrival(
     result = arrive_scr_checkpoint_barrier(
         worker_id=worker_id,
         worker_num=scr_manifest.worker_num,
-        generation=scr_manifest.generation or None,
         fail_closed=True,
     )
     logging.info(

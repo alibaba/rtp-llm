@@ -123,9 +123,9 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
                 lifecycle = TemplateLifecycle()
                 lifecycle.register(
                     "python",
-                    CallbackHook(release=lambda _: worker.start_after_restore()),
+                    CallbackHook(release=lambda: worker.start_after_restore()),
                 )
-                lifecycle.prepare_for_template("seed", "checkpoint")
+                lifecycle.prepare_for_template("checkpoint")
                 with mock.patch.object(
                     runtime,
                     "_read_restore_env_file",
@@ -137,9 +137,9 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
                         "HIPPO_SERVICE_NAME": "restored_group",
                     },
                 ), mock.patch.object(runtime.socket, "socket"):
-                    runtime.fixup_runtime_after_restore("seed", lifecycle)
+                    runtime.fixup_runtime_after_restore(lifecycle)
                 start.assert_not_called()
-                lifecycle.release_template("seed")
+                lifecycle.release_template()
                 worker.start_after_restore()
                 refresh.assert_called_once_with(pod_ip=pod_ip)
                 flume_cls.assert_called_once_with("10.0.0.2", 4141, timeout=1000)
@@ -253,15 +253,15 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
             )
             lifecycle.register(
                 "python",
-                CallbackHook(release=lambda _generation: worker.start_after_restore()),
+                CallbackHook(release=lambda: worker.start_after_restore()),
             )
-            lifecycle.prepare_for_template("failed", "checkpoint")
-            lifecycle.abort_template("failed")
+            lifecycle.prepare_for_template("checkpoint")
+            lifecycle.abort_template()
             self.assertEqual(order, [])
-            lifecycle.prepare_for_template("seed", "checkpoint")
-            lifecycle.restore_fixup(RestoreContext("seed", "192.0.2.20"))
+            lifecycle.prepare_for_template("checkpoint")
+            lifecycle.restore_fixup(RestoreContext("192.0.2.20"))
             self.assertEqual(order, [])
-            lifecycle.release_template("seed")
+            lifecycle.release_template()
             self.assertEqual(order, ["native_start", "python_start"])
 
     def test_native_activation_failure_is_not_silently_ignored(self):
@@ -269,12 +269,14 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
             SimpleNamespace(),
             SimpleNamespace(resume_kmonitor_after_scr=lambda: False),
             SimpleNamespace(
-                resume_kmonitor_after_scr=mock.Mock(side_effect=RuntimeError("sink unavailable"))
+                resume_kmonitor_after_scr=mock.Mock(
+                    side_effect=RuntimeError("sink unavailable")
+                )
             ),
         ):
             with mock.patch.dict(sys.modules, {"libth_transformer": native}):
                 with self.assertLogs(scr.LOGGER, level="ERROR") as messages:
-                    scr._start_native_kmonitor("seed")
+                    scr._start_native_kmonitor()
                 self.assertIn("native Kmonitor", messages.output[0])
 
 

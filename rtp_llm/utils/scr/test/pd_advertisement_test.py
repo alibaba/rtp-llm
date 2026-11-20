@@ -59,7 +59,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         with patch.dict(os.environ, {"SCR_PHASE": "checkpoint"}), patch(
             "socket.gethostbyname", return_value="192.0.2.20"
         ):
-            local_world = RestoreContext("g1", "192.0.2.20").resolve_world_info(
+            local_world = RestoreContext("192.0.2.20").resolve_world_info(
                 current, self.pc, GangInfoReader("/unused/annotations")
             )
             update_worker_addrs(runtime, self.pc, local_world)
@@ -118,7 +118,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         )
         configs = NS(
             server_config=NS(ip="192.0.2.1"),
-            distribute_config=NS(gang_annotation_path="/unused/annotations"),
+            distribute_config=NS(gang_annocation_path="/unused/annotations"),
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )
@@ -132,7 +132,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             "kv",
             CallbackHook(
                 fixup=lambda _g: update_worker_addrs(runtime_config, self.pc, world),
-                release=lambda _g: releases.append(
+                release=lambda: releases.append(
                     (
                         configs.server_config.ip,
                         list(runtime_config.worker_addrs),
@@ -147,7 +147,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
                 {"RequestedIP": "192.0.2.40"},
             ]
         )
-        # Exercise the seed return and clones restored with the same generation.
+        # Exercise the seed return and multiple clones of one checkpoint.
         with patch.object(fixup, "_read_restore_env_file", provider), patch.object(
             fixup.socket, "socket"
         ), patch.dict(os.environ, {"SCR_PHASE": "checkpoint"}), patch.dict(
@@ -171,7 +171,8 @@ class ScrPdAdvertisementTest(unittest.TestCase):
                 os.environ["SCR_PHASE"] = phase
                 self.assertEqual(
                     scr.arrive_scr_template_barrier(
-                        worker_id=0, worker_num=1, generation="same-seed"
+                        worker_id=0,
+                        worker_num=1,
                     ),
                     0,
                 )

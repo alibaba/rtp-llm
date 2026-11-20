@@ -76,18 +76,18 @@ class ScrSchedulerE2ETest(unittest.TestCase):
             {
                 scr.RTPLLM_ENABLE_SCR_ENV: "1",
                 scr.SCR_PHASE_ENV: scr.SCR_PHASE_CHECKPOINT,
-                scr.SCR_GENERATION_ENV: "e2e-generation-1",
             },
             clear=True,
         ), mock.patch.object(
             scr, "_load_epsilon", return_value=_MockEpsilon(scheduler)
-        ), ThreadPoolExecutor(max_workers=4) as workers:
+        ), ThreadPoolExecutor(
+            max_workers=4
+        ) as workers:
             arrivals = [
                 workers.submit(
                     scr.arrive_scr_checkpoint_barrier,
                     worker_id=worker_id,
                     worker_num=4,
-                    generation="e2e-generation-1",
                 )
                 for worker_id in range(4)
             ]
@@ -97,7 +97,9 @@ class ScrSchedulerE2ETest(unittest.TestCase):
                 self.assertTrue(all(not arrival.done() for arrival in arrivals))
             finally:
                 scheduler.release()
-            self.assertEqual([arrival.result(timeout=3) for arrival in arrivals], [0] * 4)
+            self.assertEqual(
+                [arrival.result(timeout=3) for arrival in arrivals], [0] * 4
+            )
 
     def test_control_plane_timeout_aborts_the_waiting_participant(self):
         scheduler = _MockScheduler(worker_num=2)
@@ -123,26 +125,6 @@ class ScrSchedulerE2ETest(unittest.TestCase):
                 scheduler.release(result=110)
             with self.assertRaises(scr.ScrArrivalError):
                 arrival.result(timeout=3)
-
-    def test_generation_mismatch_never_reaches_scheduler(self) -> None:
-        scheduler = _MockScheduler(worker_num=1)
-        epsilon = _MockEpsilon(scheduler)
-        with mock.patch.dict(
-            os.environ,
-            {
-                scr.RTPLLM_ENABLE_SCR_ENV: "1",
-                scr.SCR_PHASE_ENV: scr.SCR_PHASE_CHECKPOINT,
-                scr.SCR_GENERATION_ENV: "current-generation",
-            },
-            clear=True,
-        ), mock.patch.object(scr, "_load_epsilon", return_value=epsilon):
-            result = scr.arrive_scr_checkpoint_barrier(
-                worker_id=0,
-                worker_num=1,
-                generation="stale-generation",
-            )
-        self.assertIsNone(result)
-        self.assertEqual(scheduler.arrivals, {})
 
 
 if __name__ == "__main__":

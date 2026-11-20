@@ -89,7 +89,6 @@ class BlockingTestEpsilon:
                         **self.snapshot(),
                         "worker_id": worker_id,
                         "worker_num": worker_num,
-                        "generation": os.environ["RTP_LLM_SCR_GENERATION"],
                     },
                 )
                 while True:
@@ -136,8 +135,7 @@ def write_socket_message(connection, message, deadline):
 
 
 class CheckpointBarrier:
-    def __init__(self, generation):
-        self.generation = generation
+    def __init__(self):
         self.directory = tempfile.TemporaryDirectory(prefix="scr-smoke-", dir="/tmp")
         self.path = str(Path(self.directory.name) / "barrier.sock")
         self.listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -171,8 +169,7 @@ class CheckpointBarrier:
                 worker_num = arrival["worker_num"]
                 tree = {root_pid, *(p.pid for p in root.children(recursive=True))}
                 if (
-                    arrival["generation"] != self.generation
-                    or arrival["pid"] != peer_pid
+                    arrival["pid"] != peer_pid
                     or peer_pid not in tree
                     or type(worker_id) is not int
                     or type(worker_num) is not int
