@@ -7,6 +7,8 @@ package(default_visibility = ["//visibility:public"])
 models_py_test(
     name = "hc_defer_policy_test",
     src = "hc_defer_policy_test.py",
+)
+
 py_test(
     name = "fp8_sm90_shared_b64_test",
     srcs = ["fp8_sm90_shared_b64_test.py"],
@@ -14,8 +16,6 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-)
-
 )
 
 models_py_test(
@@ -550,7 +550,7 @@ models_py_test(
 py_test(
     name = "qsa_fused_decode_test",
     srcs = ["qsa_fused_decode_test.py", "qsa/target_writer_fusion_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = _REFERENCE_DEPS,
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
@@ -560,7 +560,7 @@ py_test(
     name = "decode_snapshot_sm90_test",
     srcs = ["qsa/decode_snapshot_test.py", "qsa/target_writer_fusion_test.py"],
     main = "qsa/decode_snapshot_test.py",
-    deps = ["//rtp_llm:testlib"],
+    deps = _REFERENCE_DEPS,
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
@@ -956,7 +956,7 @@ py_test(
 py_test(
     name = "qsa_sm90_capacity_test",
     srcs = ["qsa_sm90_capacity_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = _REFERENCE_DEPS,
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},

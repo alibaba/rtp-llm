@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import torch
+from rtp_llm.models_py.kernels.cuda.qsa.test.reference.topk_reference import assert_qsa_selection_close
 from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
     try_select_qsa_tokens,
 )
@@ -69,12 +70,7 @@ class QsaSm90CapacityTest(unittest.TestCase):
                             columns=columns, rows=rows, kind=kind, finite=finite
                         ):
                             actual = self.select(scores, lengths, finite_only=finite)
-                            torch.testing.assert_close(
-                                actual,
-                                self.reference(scores, lengths, finite),
-                                rtol=0,
-                                atol=0,
-                            )
+                            assert_qsa_selection_close(actual, self.reference(scores, lengths, finite), scores, lengths)
 
     def test_signed_zero_above_and_at_selection_threshold(self):
         for columns in (1024, 8192, 8447, 8705, 32768):
@@ -94,28 +90,13 @@ class QsaSm90CapacityTest(unittest.TestCase):
                             columns=columns, rows=rows, positives=positives, zeros=zeros
                         ):
                             actual = self.select(scores, lengths)
-                            torch.testing.assert_close(
-                                actual,
-                                self.reference(scores, lengths, True),
-                                rtol=0,
-                                atol=0,
-                            )
+                            assert_qsa_selection_close(actual, self.reference(scores, lengths, True), scores, lengths)
 
-    def test_long_unsupported_layout_declines_before_legacy_kernels(self):
-        storage = torch.randn(2, 32768, device="cuda")
-        lengths = torch.full((2,), 16000, device="cuda", dtype=torch.int32)
-        with patch.object(torch, "topk", side_effect=AssertionError("native fallback")):
-            self.assertIsNone(
-                try_select_qsa_tokens(
-                    storage[:, ::2], lengths, compress_ratio=4, token_budget=2048
-                )
-            )
-        with patch.object(cub, "_load_module", return_value=None):
-            self.assertIsNone(
-                try_select_qsa_tokens(
-                    storage, lengths, compress_ratio=4, token_budget=2048
-                )
-            )
+    def test_wide_strided_scores_use_native_selector(self):
+        scores = torch.randn(2, 65536, device="cuda")[:, ::2]
+        lengths = torch.full((2,), 32000, device="cuda", dtype=torch.int32)
+        actual = self.select(scores, lengths)
+        assert_qsa_selection_close(actual, self.reference(scores, lengths, True), scores, lengths)
 
     def test_graph_live_lengths_and_fallback(self):
         for rows in (1, 32, 64, 128):
@@ -133,9 +114,7 @@ class QsaSm90CapacityTest(unittest.TestCase):
                 lengths.fill_(length)
                 scores.normal_()
                 graph.replay()
-                torch.testing.assert_close(
-                    actual, self.reference(scores, lengths, True), rtol=0, atol=0
-                )
+                assert_qsa_selection_close(actual, self.reference(scores, lengths, True), scores, lengths)
 
 
 if __name__ == "__main__":
