@@ -19,7 +19,7 @@
      if not _ENABLE_SMALL_DECODE:
          return None
 +    rows = hidden_states.shape[0]
-+    if rows not in (3, 6, 12) and not (rows == 4 and rtp_single_verify.get()):
++    if rows not in (3, 6, 12) and not (rows in (4, 8) and rtp_single_verify.get()):
 +        return None
      if (
 -        hidden_states.shape[0] not in (3, 6, 12)
@@ -36,11 +36,11 @@
              )
 +            from atom.model_ops.qwen38_moe_dispatch import rtp_single_verify
 +
-+            # Select only the verifier graph for one request and three proposals.
++            # Select only the verifier graph for one or two requests and three proposals.
 +            single_verify = (
 +                gdn_metadata is not None
-+                and gdn_metadata.num_spec_decodes == 1
-+                and gdn_metadata.num_spec_decode_tokens == 4
++                and gdn_metadata.num_spec_decodes in (1, 2)
++                and gdn_metadata.num_spec_decode_tokens == 4 * gdn_metadata.num_spec_decodes
 +                and not runtime._rtp_model_config.is_mtp
 +                and str(runtime.parallelism_config.role_type).rsplit(".", 1)[-1] == "DECODE"
 +            )
