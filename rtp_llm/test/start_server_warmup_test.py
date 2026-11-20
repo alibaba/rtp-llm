@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 from rtp_llm import start_server
 from rtp_llm.ops import RoleType, SpeculativeType
+from rtp_llm.utils.drain_flag import DrainFlag
 
 
 class ServiceDrainingPropagationTest(unittest.TestCase):
@@ -39,6 +40,8 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
                 configs.role_config.role_type = role
                 start_server.start_server(configs)
                 event = manager_class.call_args.kwargs["service_draining"]
+                # multiprocessing.Event.set() hangs once a waiter was killed.
+                self.assertIsInstance(event, DrainFlag)
                 self.assertIsNot(event, previous)
                 self.assertFalse(event.is_set())
                 for starter in [vit] if role == RoleType.VIT else starters:
