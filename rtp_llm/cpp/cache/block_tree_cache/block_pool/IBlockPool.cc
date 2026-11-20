@@ -307,6 +307,9 @@ void IBlockPool::checkAllocatedNoLock(BlockIdxType block) const {
 }
 
 void IBlockPool::checkUniqueBlocksNoLock(const BlockIdList& blocks) const {
+    if (blocks.size() < 2) {
+        return;
+    }
     BlockIdList sorted_blocks(blocks.begin(), blocks.end());
     std::sort(sorted_blocks.begin(), sorted_blocks.end());
     RTP_LLM_CHECK_WITH_INFO(std::adjacent_find(sorted_blocks.begin(), sorted_blocks.end()) == sorted_blocks.end(),

@@ -1,40 +1,72 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadOperation.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/BlockTreeCacheMetricsReporter.h"
 
 #include <algorithm>
-#include <cassert>
+#include <exception>
 #include <unordered_map>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
+namespace {
+
+void invokeDoneCallback(const LoadAsyncContext::DoneCallback& callback, ErrorInfo error) {
+    try {
+        callback(std::move(error));
+    } catch (const std::exception& exception) {
+        RTP_LLM_LOG_WARNING("load context completion callback failed: %s", exception.what());
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("load context completion callback failed");
+    }
+}
+
+}  // namespace
 
 LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                                    std::vector<bool>                              joined_load,
+                                   std::vector<std::shared_ptr<LoadOperation>>    load_operations,
                                    size_t                                         local_matched_blocks,
+                                   size_t                                         matched_device_blocks,
+                                   size_t                                         matched_device_host_blocks,
+                                   std::function<bool(size_t)>                    valid_prefix,
                                    uint64_t                                       context_id,
                                    const std::shared_ptr<LoadContextCoordinator>& coordinator,
                                    std::shared_ptr<StorageBackend>                storage_backend,
-                                   StorageRequest                                 storage_request):
+                                   StorageRequest                                 storage_request,
+                                   const BlockTreeCacheMetricsReporter*           metrics_reporter):
     coordinator_(coordinator),
+    metrics_reporter_(metrics_reporter),
     context_id_(context_id),
     load_descs_(std::move(load_descs)),
     joined_load_(std::move(joined_load)),
+    load_operations_(std::move(load_operations)),
     local_matched_blocks_(local_matched_blocks),
     matched_blocks_(local_matched_blocks),
+    matched_device_host_blocks_(matched_device_host_blocks),
+    device_ready_blocks_(matched_device_blocks),
     storage_backend_(std::move(storage_backend)),
     request_id_(storage_request.request_id),
     storage_request_(std::move(storage_request)),
     backend_task_({}, storage_backend_ ? storage_backend_->timeout_ : std::chrono::milliseconds(0), request_id_),
+    valid_prefix_(std::move(valid_prefix)),
     need_backend_match_(storage_backend_ && !storage_request_.empty()),
     backend_pending_(need_backend_match_),
     backend_deadline_state_(need_backend_match_ ? State::PENDING : State::SUCCEEDED),
-    remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
-        return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
-    })) {
+    remaining_transfer_count_(std::count_if(
+        load_descs_.begin(),
+        load_descs_.end(),
+        [](const auto& desc) { return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK; })),
+    remaining_join_count_(std::count(joined_load_.begin(), joined_load_.end(), true)) {
+    RTP_LLM_CHECK(device_ready_blocks_ <= matched_device_host_blocks_
+                  && matched_device_host_blocks_ <= local_matched_blocks_);
+    load_operations_.resize(load_descs_.size());
+    new_load_indices_.reserve(remaining_transfer_count_ - remaining_join_count_);
     workflow_span_ = AsyncProfileSpan("workflow_total",
                                       request_id_.value_or(-1),
                                       0,
@@ -47,19 +79,11 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     if (need_backend_match_) {
         storage_request_.transfer_task = backend_task_.subtask({});
     }
-    remaining_join_count_.store(static_cast<size_t>(std::count(joined_load_.begin(), joined_load_.end(), true)),
-                                std::memory_order_relaxed);
-    rebuildMatchedBlocksByTier();
-}
-
-LoadAsyncContext::~LoadAsyncContext() {
-    abortPending();
-}
-
-void LoadAsyncContext::rebuildMatchedBlocksByTier() {
-    matched_blocks_by_tier_.fill(0);
-    reuse_tier_by_path_.clear();
-    for (const TransferDescriptor& desc : load_descs_) {
+    for (size_t index = 0; index < load_descs_.size(); ++index) {
+        const auto& desc = load_descs_[index];
+        if (desc.source_tier != Tier::DEVICE && !joined_load_[index]) {
+            new_load_indices_.emplace_back(index);
+        }
         if (desc.source_tier < Tier::DEVICE || desc.source_tier > Tier::DISK) {
             continue;
         }
@@ -70,6 +94,19 @@ void LoadAsyncContext::rebuildMatchedBlocksByTier() {
     }
     for (const auto& [_, tier] : reuse_tier_by_path_) {
         ++matched_blocks_by_tier_[static_cast<size_t>(tier)];
+    }
+    if (remaining_join_count_ != 0) {
+        if (metrics_reporter_) {
+            metrics_reporter_->reportLoadJoin(remaining_join_count_);
+        }
+        join_span_ = AsyncProfileSpan(
+            "join_wait", request_id_.value_or(-1), 0, 0, 0, -1, workflowId(), "load", AsyncProfileKind::Wait);
+    }
+}
+
+LoadAsyncContext::~LoadAsyncContext() {
+    if (!abortPending() && state_.load() == State::PENDING) {
+        unsubscribeFromJoinedLoads();
     }
 }
 
@@ -101,12 +138,6 @@ size_t LoadAsyncContext::matchedBlocks(Tier tier, size_t prefix) const {
     return std::count_if(reuse_tier_by_path_.begin(), reuse_tier_by_path_.end(), [=](const auto& item) {
         return item.first < prefix && item.second == tier;
     });
-}
-
-void LoadAsyncContext::setLocalMatchLengths(size_t device_blocks, size_t device_host_blocks) {
-    RTP_LLM_CHECK(device_blocks <= device_host_blocks && device_host_blocks <= local_matched_blocks_);
-    device_ready_blocks_        = device_blocks;
-    matched_device_host_blocks_ = device_host_blocks;
 }
 
 size_t LoadAsyncContext::deviceReadyBlocks() const {
@@ -152,6 +183,64 @@ void LoadAsyncContext::startBackendMatch() {
 
 void LoadAsyncContext::setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
     load_descs_[desc_index].target_blocks = std::move(target_blocks);
+}
+
+bool LoadAsyncContext::createLoadOperations(BlockTree& tree) {
+    std::vector<MultiNodeResource> targets;
+    bool                           success = true;
+    for (size_t desc_index : new_load_indices_) {
+        const auto& desc = load_descs_[desc_index];
+        load_operations_[desc_index] =
+            std::make_shared<LoadOperation>(desc, tree.groupSets()[desc.group_set_id], workflowId());
+        appendBlocks(targets, desc.group_set_id, Tier::DEVICE, desc.target_blocks);
+        if (desc.isCurrentOwner()) {
+            auto& resource = desc.node->group_set_resources[desc.group_set_id];
+            if (resource.transfer_state != GroupSetTransferState::LOAD_PENDING) {
+                RTP_LLM_LOG_ERROR("committed load source is not LOAD_PENDING, group_set_id=%zu", desc.group_set_id);
+                success = false;
+                break;
+            }
+            resource.transfer_state = GroupSetTransferState::LOADING;
+            resource.load_operation = load_operations_[desc_index];
+            tree.refreshPublishedState(desc.node);
+        }
+    }
+    referenceBlocks(tree.groupSets(), targets, BlockTreeRefType::LOAD);
+    return success;
+}
+
+void LoadAsyncContext::subscribeToJoinedLoads() {
+    if (remaining_join_count_ == 0) {
+        return;
+    }
+    const int64_t start_time_us = currentTimeUs();
+    const auto    weak          = weak_from_this();
+    for (size_t index = 0; index < load_operations_.size(); ++index) {
+        if (!joined_load_[index]) {
+            continue;
+        }
+        const auto& operation = load_operations_[index];
+        AsyncProfileSession::taskLink(
+            workflowId(), workflowId(), 0, request_id_.value_or(-1), "load", operation->workflowId());
+        operation->subscribe(
+            workflowId(), [weak, source = load_descs_[index].source_tier, start_time_us](ErrorInfo error) {
+                if (auto context = weak.lock()) {
+                    context->completeTransfers(1, error.ok(), source, start_time_us);
+                }
+            });
+    }
+}
+
+void LoadAsyncContext::unsubscribeFromJoinedLoads() {
+    if (remaining_join_count_.load(std::memory_order_acquire) == 0) {
+        return;
+    }
+    const auto subscriber_id = workflowId();
+    for (size_t index = 0; index < load_operations_.size(); ++index) {
+        if (joined_load_[index]) {
+            load_operations_[index]->unsubscribe(subscriber_id);
+        }
+    }
 }
 
 void LoadAsyncContext::setBackendTargetBlock(size_t key_index, size_t handle_index, BlockIdxType target_block) {
@@ -326,40 +415,18 @@ bool LoadAsyncContext::abortPending() {
     return true;
 }
 
-void LoadAsyncContext::startJoinWait(int64_t start_time_us) {
-    assert(remaining_join_count_.load(std::memory_order_relaxed) != 0);
-    assert(join_start_time_us_ == 0);
-    join_start_time_us_ = start_time_us;
-    join_span_          = AsyncProfileSpan(
-        "join_wait", request_id_.value_or(-1), 0, 0, start_time_us, -1, workflowId(), "load", AsyncProfileKind::Wait);
-}
-
-bool LoadAsyncContext::completeJoinedOne(bool     success,
-                                         bool&    join_completed,
-                                         int64_t& join_wait_latency_us,
-                                         Tier     source_tier) {
-    join_completed       = false;
-    join_wait_latency_us = 0;
-    if (!completeTransfers(1, success, source_tier)) {
-        return false;
-    }
-    const size_t previous_count = remaining_join_count_.fetch_sub(1, std::memory_order_acq_rel);
-    assert(previous_count != 0);
-    if (previous_count == 1) {
-        assert(join_start_time_us_ != 0);
-        if (!join_trace_finished_.exchange(true))
-            join_span_.finish();
-        join_completed       = true;
-        join_wait_latency_us = currentTimeUs() - join_start_time_us_;
-    }
-    return true;
-}
-
-bool LoadAsyncContext::completeTransfers(size_t count, bool success, Tier source_tier) {
+bool LoadAsyncContext::completeTransfers(size_t                 count,
+                                         bool                   success,
+                                         Tier                   source_tier,
+                                         std::optional<int64_t> join_start_time_us) {
     bool                    notify = false;
+    bool                    last_join = false;
     SettlementReadyCallback settlement_ready_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (join_start_time_us) {
+            last_join = remaining_join_count_.fetch_sub(count, std::memory_order_acq_rel) == count;
+        }
         const State                 state = state_.load();
         if (state != State::PENDING || count == 0 || count > remaining_transfer_count_) {
             return false;
@@ -373,14 +440,20 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success, Tier source
         finishIfReadyLocked(notify, settlement_ready_callback);
     }
     dispatchCompletion(notify, std::move(settlement_ready_callback));
+    if (last_join) {
+        if (!join_trace_finished_.exchange(true)) {
+            join_span_.finish();
+        }
+        if (metrics_reporter_) {
+            metrics_reporter_->reportLoadJoinWait(currentTimeUs() - *join_start_time_us);
+        }
+    }
     return true;
 }
 
 void LoadAsyncContext::cancelUnsubmittedTransfers() {
-    // Called only before commit, after removing reservations and join registrations.
-    // Already delivered join completions need not be counted a second time.
+    coordinator_->abort_callback_(*this);
     std::lock_guard<std::mutex> lock(mutex_);
-    assert(!committed_);
     has_local_failure_        = true;
     has_host_failure_         = true;
     remaining_transfer_count_ = 0;
@@ -448,6 +521,11 @@ bool LoadAsyncContext::onTaskFail() {
         discarded_callback = std::move(settlement_ready_callback_);
         state_.store(State::FAILED);
     }
+    for (size_t index : new_load_indices_) {
+        if (load_operations_[index]) {
+            load_operations_[index]->complete(false);
+        }
+    }
     notifyCompletion();
     return true;
 }
@@ -512,7 +590,7 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
         }
     }
     if (run_now) {
-        callback(std::move(error));
+        invokeDoneCallback(callback, std::move(error));
     }
 }
 
@@ -527,6 +605,7 @@ ErrorInfo LoadAsyncContext::completionErrorLocked() const {
 }
 
 void LoadAsyncContext::notifyCompletion() {
+    unsubscribeFromJoinedLoads();
     block_tree_cache_detail::ScopeRollback finish_trace([this] {
         if (!workflow_trace_finished_.exchange(true))
             workflow_span_.finish();
@@ -542,7 +621,7 @@ void LoadAsyncContext::notifyCompletion() {
     }
     cv_.notify_all();
     for (auto& callback : callbacks) {
-        callback(error);
+        invokeDoneCallback(callback, error);
     }
 }
 
@@ -597,18 +676,24 @@ MallocStatus LoadAsyncContext::mallocStatus() const {
 
 LoadContextCoordinator::LoadContextCoordinator(CommitCallback                             commit_callback,
                                                AbortCallback                              abort_callback,
-                                               std::function<bool(std::function<void()>)> defer_cleanup):
+                                               std::function<bool(std::function<void()>)> defer_cleanup,
+                                               const BlockTreeCacheMetricsReporter*       metrics_reporter):
     commit_callback_(std::move(commit_callback)),
     abort_callback_(std::move(abort_callback)),
-    defer_cleanup_(std::move(defer_cleanup)) {}
+    defer_cleanup_(std::move(defer_cleanup)),
+    metrics_reporter_(metrics_reporter) {}
 
-std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<TransferDescriptor> load_descs,
-                                                                 std::vector<bool>               joined_load,
-                                                                 size_t                          matched_blocks,
-                                                                 std::shared_ptr<StorageBackend> storage_backend,
-                                                                 StorageRequest                  storage_request) {
-    const auto coordinator = shared_from_this();
-    uint64_t   context_id  = 0;
+std::shared_ptr<LoadAsyncContext>
+LoadContextCoordinator::create(std::vector<TransferDescriptor>             load_descs,
+                               std::vector<bool>                           joined_load,
+                               std::vector<std::shared_ptr<LoadOperation>> load_operations,
+                               size_t                                      local_matched_blocks,
+                               size_t                                      matched_device_blocks,
+                               size_t                                      matched_device_host_blocks,
+                               std::function<bool(size_t)>                 valid_prefix,
+                               std::shared_ptr<StorageBackend>             storage_backend,
+                               StorageRequest                              storage_request) {
+    uint64_t context_id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!accepting_) {
@@ -616,18 +701,27 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<Tra
         }
         context_id = next_context_id_++;
     }
-    return std::make_shared<LoadAsyncContext>(std::move(load_descs),
-                                              std::move(joined_load),
-                                              matched_blocks,
-                                              context_id,
-                                              coordinator,
-                                              std::move(storage_backend),
-                                              std::move(storage_request));
-}
-
-bool LoadContextCoordinator::registerContext(const std::shared_ptr<LoadAsyncContext>& context) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return accepting_ && pending_contexts_.emplace(context->contextId(), context).second;
+    auto context = std::make_shared<LoadAsyncContext>(std::move(load_descs),
+                                                      std::move(joined_load),
+                                                      std::move(load_operations),
+                                                      local_matched_blocks,
+                                                      matched_device_blocks,
+                                                      matched_device_host_blocks,
+                                                      std::move(valid_prefix),
+                                                      context_id,
+                                                      shared_from_this(),
+                                                      std::move(storage_backend),
+                                                      std::move(storage_request),
+                                                      metrics_reporter_);
+    context->subscribeToJoinedLoads();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!accepting_) {
+            return nullptr;
+        }
+        pending_contexts_.emplace(context_id, context);
+    }
+    return context;
 }
 
 bool LoadContextCoordinator::beginActiveCallback() {
@@ -651,13 +745,11 @@ bool LoadContextCoordinator::commit(uint64_t context_id) {
         ++active_callbacks_;
     }
     block_tree_cache_detail::ScopeRollback callback_guard([this] { retireActiveCallback(); });
-    if (!commit_callback_(context)) {
-        // Publish the typed failure before FAILED. A scheduler may poll the
-        // context as soon as onTaskFail makes it terminal.
-        context->failCommit();
-        return false;
+    if (commit_callback_(context)) {
+        return true;
     }
-    return true;
+    context->failCommit();
+    return false;
 }
 
 bool LoadContextCoordinator::abort(LoadAsyncContext& context) noexcept {

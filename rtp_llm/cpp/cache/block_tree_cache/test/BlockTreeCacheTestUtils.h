@@ -23,6 +23,7 @@
 
 namespace rtp_llm {
 class BroadcastManager;
+class LoadOperation;
 }
 
 namespace rtp_llm::block_tree_cache_test {
@@ -86,8 +87,9 @@ MultiNodeResource makeMultiNodeResourceForTest(size_t                        gro
                                                const std::vector<TreeNode*>& nodes,
                                                const MultiNodeBlocks&        blocks);
 
-size_t             unreferencedBlocksNum(const DeviceBlockPool& pool);
-DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id);
+size_t                         unreferencedBlocksNum(const DeviceBlockPool& pool);
+DeviceBlockPoolPtr             makeStructuralDevicePool(size_t group_set_id);
+std::shared_ptr<LoadOperation> makeLoadOperationForTest(Tier source_tier = Tier::HOST, uint64_t workflow_id = 1);
 void releaseDeviceBlocks(BlockTreeCache& cache, const DeviceBlockPoolPtr& pool, const BlockIdList& blocks);
 void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNodeResource>& resources);
 
@@ -218,6 +220,7 @@ private:
 
 struct FullSWAEnvironmentOptions {
     size_t task_pool_size{8};
+    size_t business_queue_max_size{1000};
     size_t path_length{4};
     size_t usable_device_blocks{16};
     size_t usable_host_blocks{16};

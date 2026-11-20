@@ -3,6 +3,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadOperation.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
@@ -386,6 +388,20 @@ DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     return pool;
 }
 
+std::shared_ptr<LoadOperation> makeLoadOperationForTest(Tier source_tier, uint64_t workflow_id) {
+    std::vector<GroupSetPtr> groups{
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
+                                       makeHostPool(1, 1),
+                                       makeDiskPool(1, 1, std::make_unique<MemoryDiskBlockIO>()))};
+    prepareGroupSetsForTest(groups);
+    const auto source     = groups.front()->allocateSingleBlock(source_tier, BlockTreeRefType::LOAD);
+    auto       descriptor = source_tier == Tier::HOST ? TransferDescriptor::hostToDevice(0, source, {1}) :
+                                                        TransferDescriptor::diskToDevice(0, source, {1});
+    groups.front()->referenceBlocks(MultiNodeResource{0, Tier::DEVICE, {{nullptr, descriptor.target_blocks}}},
+                                    BlockTreeRefType::LOAD);
+    return std::make_shared<LoadOperation>(std::move(descriptor), groups.front(), workflow_id);
+}
+
 namespace {
 
 void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
@@ -522,8 +538,8 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::vector<GroupSetPt
     }
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
-    auto task_pool =
-        std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
+    auto task_pool = std::make_unique<BlockTreeTaskPool>(
+        static_cast<size_t>(config.task_pool_size), config.business_queue_max_size, "BlockTreeCacheTaskPool");
     auto tree  = std::make_unique<BlockTree>(std::move(group_sets));
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(config),
@@ -566,8 +582,8 @@ void releaseLowerTierSeedRefs(const std::vector<GroupSetPtr>&                   
             if (tier != Tier::HOST && tier != Tier::DISK) {
                 continue;
             }
-            group_sets[group_set_id]->releaseSingleBlock(
-                tier, resource.getBlocks(tier).front(), BlockTreeRefType::CACHE);
+            group_sets[group_set_id]->unreferenceBlocks(
+                tier, {resource.getBlocks(tier).front()}, BlockTreeRefType::CACHE);
         }
     }
 }
@@ -745,30 +761,14 @@ bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
         ADD_FAILURE() << "queue-rejection guard requires zero pending cache tasks";
         return false;
     }
-    cache.task_pool_->shutdown();
+    cache.task_pool_->stopAdmission();
     return true;
 }
 
 bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& cache) {
-    try {
-        auto replacement = std::make_unique<BlockTreeTaskPool>(
-            static_cast<size_t>(cache.config_.task_pool_size), 1000, "BlockTreeCacheTaskPool");
-        if (!replacement->start()) {
-            ADD_FAILURE() << "queue-rejection guard failed to start replacement task pool";
-            cache.task_pool_.reset();
-            return false;
-        }
-        cache.task_pool_          = std::move(replacement);
-        cache.evictor_.task_pool_ = cache.task_pool_.get();
-        cache.loader_.task_pool_  = cache.task_pool_.get();
-        return true;
-    } catch (const std::exception& error) {
-        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool: " << error.what();
-    } catch (...) {
-        ADD_FAILURE() << "queue-rejection guard failed to restore thread pool with unknown exception";
-    }
-    cache.task_pool_.reset();
-    return false;
+    std::lock_guard<std::mutex> lock(cache.task_pool_->lifecycle_mutex_);
+    cache.task_pool_->admission_stopped_ = false;
+    return true;
 }
 
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
@@ -949,10 +949,11 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
                                                             options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
-    config.task_pool_size      = options.task_pool_size;
-    config.enable_device_cache = true;
-    config.enable_host_cache   = true;
-    config.enable_disk_cache   = options.enable_disk;
+    config.task_pool_size          = options.task_pool_size;
+    config.business_queue_max_size = options.business_queue_max_size;
+    config.enable_device_cache     = true;
+    config.enable_host_cache       = true;
+    config.enable_disk_cache       = options.enable_disk;
 
     environment->scripted_per_rank_transfer_engine =
         std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups, true, options.enable_disk);

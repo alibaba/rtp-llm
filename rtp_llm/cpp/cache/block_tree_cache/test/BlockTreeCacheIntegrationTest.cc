@@ -2981,7 +2981,8 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureKeepsSuccessfulHostTar
             << event.name;
         EXPECT_EQ(event.name.find("incomplete=1"), std::string::npos);
     }
-    EXPECT_GE(logical_completion_stages, 10u);
+    // Shared operations no longer need a separate join-registry settlement stage.
+    EXPECT_GE(logical_completion_stages, 9u);
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedBatchCount(),

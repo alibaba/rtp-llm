@@ -43,7 +43,8 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     mutex_(&mutex),
     is_tier_enabled_(std::move(is_tier_enabled)),
     settled_(std::move(settled)),
-    task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher)),
+    task_runner_(
+        std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher, task_pool, metrics_reporter)),
     host_timeout_ms_(host_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
     max_descriptors_per_batch_(max_descriptors_per_batch),
@@ -420,43 +421,8 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>    des
                                                           task_ptr->timings[i]);
     }
     updatePendingRelease(task_ptr->descriptors(), true);
-    auto queue_wait =
-        TransferStageTimer::create(CacheStageContext::forTransfer(*metrics_reporter_, task_ptr->transfer_task, "evict"),
-                                   "business_queue_wait",
-                                   "business_task",
-                                   AsyncProfileKind::Wait);
-    block_tree_cache_detail::ScopeRollback discard_wait([&] { queue_wait.discard(); });
-    auto                                   on_timeout = [this, task_ptr, queue_wait]() {
-        queue_wait.finish(false);
-        RTP_LLM_LOG_WARNING("eviction expired in business queue, source=%s target=%s descriptors=%zu",
-                            tierName(task_ptr->descriptors().front().source_tier),
-                            tierName(task_ptr->descriptors().front().target_tier),
-                            task_ptr->descriptors().size());
-        scheduleEvictionSettlement(task_ptr, false);
-    };
-    const auto deadline  = task_ptr->transfer_task.deadline();
-    const bool submitted = task_pool_->submit(
-        BlockTreeTaskClass::BACKGROUND,
-        [this, task_ptr, queue_wait]() {
-            queue_wait.finish(true);
-            runEvictionTask(task_ptr);
-        },
-        deadline,
-        std::move(on_timeout));
-    if (!submitted) {
-        const auto& first  = task_ptr->descriptors().front();
-        const auto  queues = task_pool_->queueSizes();
-        RTP_LLM_INTERVAL_LOG(5,
-                             WARN,
-                             "eviction submission rejected: group_set=%zu source=%s target=%s blocks=%zu "
-                             "queue_load=%zu queue_background=%zu queue_completion=%zu",
-                             first.group_set_id,
-                             tierName(first.source_tier),
-                             tierName(first.target_tier),
-                             task_ptr->descriptors().size(),
-                             queues.load,
-                             queues.background,
-                             queues.completion);
+    if (!task_runner_->submit(task_ptr,
+                              [this, task_ptr](bool success) { scheduleEvictionSettlement(task_ptr, success); })) {
         for (const auto& desc : task_ptr->descriptors()) {
             heaps_[desc.group_set_id].pending_timings.erase({desc.node, desc.generation});
         }
@@ -465,7 +431,6 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>    des
         metrics_reporter_->reportEvictionFinished(*task_ptr, tree_->groupSets(), false, {}, 0);
         return false;
     }
-    discard_wait.dismiss();
     return true;
 }
 
@@ -571,25 +536,6 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
     return {/*direct_progress=*/false,
             /*async_submitted=*/submitted,
             /*scheduled_count=*/submitted ? async_scheduled_count : 0};
-}
-
-void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept {
-    try {
-        task_runner_->runTransfer(task, *metrics_reporter_, [this, task](ErrorInfo error) noexcept {
-            completeEvictionTask(task, std::move(error));
-        });
-        return;
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("eviction copy failed with exception: %s", error.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
-    }
-    completeEvictionTask(std::move(task), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "eviction task runner exception"));
-}
-
-void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task,
-                                            ErrorInfo                                   error) noexcept {
-    scheduleEvictionSettlement(std::move(task), error.ok());
 }
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
@@ -1184,7 +1130,7 @@ void BlockTreeEvictor::completeEvict(DescriptorView descs) {
 }
 
 void BlockTreeEvictor::rollbackTransferLocked(DescriptorView descs) {
-    releaseTargetBlocks(descs);
+    unreferenceTargetBlocks(descs);
     restoreSource(descs);
     settleEviction(descs);
 }
@@ -1270,7 +1216,7 @@ void BlockTreeEvictor::invalidateSources(const std::vector<InvalidationSource>& 
     }
 }
 
-void BlockTreeEvictor::releaseTargetBlocks(DescriptorView descs) {
+void BlockTreeEvictor::unreferenceTargetBlocks(DescriptorView descs) {
     if (descs.empty()) {
         return;
     }
@@ -1283,7 +1229,7 @@ void BlockTreeEvictor::releaseTargetBlocks(DescriptorView descs) {
 
     if (!target_blocks.empty()) {
         const TransferDescriptor& first = descs.front();
-        tree_->groupSets()[first.group_set_id]->releaseBlocks(
+        tree_->groupSets()[first.group_set_id]->unreferenceBlocks(
             first.target_tier, target_blocks, BlockTreeRefType::EVICT);
     }
 }

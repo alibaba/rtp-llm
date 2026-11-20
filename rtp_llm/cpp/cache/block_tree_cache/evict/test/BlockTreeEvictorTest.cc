@@ -112,8 +112,6 @@ void expectEvictionVictimCounters(const EvictionVictimCounters&                 
 static_assert(!noexcept(std::declval<BlockTreeEvictor&>().runDropTask(std::declval<TransferDescriptor>())));
 static_assert(!noexcept(
     std::declval<BlockTreeEvictor&>().rollbackTransferLocked(std::declval<const std::vector<TransferDescriptor>&>())));
-static_assert(noexcept(
-    std::declval<BlockTreeEvictor&>().runEvictionTask(std::declval<std::shared_ptr<const EvictionTransferTask>>())));
 
 std::shared_ptr<FullGroupSet> makeFullGroup(const DeviceBlockPoolPtr& device_pool) {
     return std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, nullptr, nullptr);
@@ -1273,7 +1271,7 @@ TEST_F(HostDiskWatermarkTest, DiskAllocationFailureSkipsGroup) {
     complete(1);
     EXPECT_EQ(env_.host_pools_[0]->usedBlocksNum(), 3u);
     EXPECT_TRUE(env_.transfer_engine_->batchDescriptors(2).empty());
-    env_.groups_[0]->releaseBlocks(Tier::DISK, *occupied, BlockTreeRefType::CACHE);
+    env_.groups_[0]->unreferenceBlocks(Tier::DISK, *occupied, BlockTreeRefType::CACHE);
     expectEvictionQps(0, 3, 3);
     expectEvictionQps(1, 2, 0);
 }
@@ -1857,9 +1855,8 @@ public:
 
     bool runTransfer(const EvictionTransferTask& task) {
         std::optional<bool> result;
-        evictor_->task_runner_->runTransfer(std::make_shared<EvictionTransferTask>(task),
-                                            *evictor_->metrics_reporter_,
-                                            [&](ErrorInfo error) { result = error.ok(); });
+        evictor_->task_runner_->run(std::make_shared<EvictionTransferTask>(task),
+                                    [&](bool success) { result = success; });
         if (!result.has_value()) {
             ADD_FAILURE() << "scripted eviction transfer did not complete inline";
             return false;
@@ -1881,12 +1878,12 @@ public:
             if (resource.hasTier(Tier::HOST)) {
                 const BlockIdxType block = resource.host_block;
                 resource.host_block      = NULL_BLOCK_IDX;
-                groups_[group_set_id]->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
+                groups_[group_set_id]->unreferenceBlocks(Tier::HOST, {block}, BlockTreeRefType::CACHE);
             }
             if (resource.hasTier(Tier::DISK)) {
                 const BlockIdxType block = resource.disk_block;
                 resource.disk_block      = NULL_BLOCK_IDX;
-                groups_[group_set_id]->releaseSingleBlock(Tier::DISK, block, BlockTreeRefType::CACHE);
+                groups_[group_set_id]->unreferenceBlocks(Tier::DISK, {block}, BlockTreeRefType::CACHE);
             }
         }
     }
@@ -2134,7 +2131,7 @@ TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonEvictingResource) {
     unreferenceDeviceBlocksForTest(*group_, MultiNodeBlocks{{source_block}}, BlockTreeRefType::CACHE);
 }
 
-TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingSourceBeforeSettledCallback) {
+TEST_F(BlockTreeEvictorTest, SubmittedEvictionReleasesPendingSourceBeforeSettledCallback) {
     auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
@@ -2154,8 +2151,6 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingSourceBeforeSettledCa
     auto task = activateTransferForTest(*evictor_, *victim);
     ASSERT_TRUE(task.has_value());
     ASSERT_NE(task->descriptors().front().target_tier, Tier::NONE);
-    evictor_->updatePendingRelease(task->descriptors(), true);
-    ASSERT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 1u);
     size_t settled_count = 0;
     evictor_->settled_   = [this, &settled_count](bool check_watermark) {
         ++settled_count;
@@ -2164,9 +2159,8 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingSourceBeforeSettledCa
     };
     evictor_runtime_.transferEngine()->enqueue(false);
 
-    // This test bypasses evictLocked(), so mirror its workflow admission
-    // precondition before invoking the asynchronous runner directly.
-    evictor_->runEvictionTask(std::make_shared<EvictionTransferTask>(*task));
+    ASSERT_TRUE(evictor_->submitEvictionTask(
+        std::vector<TransferDescriptor>(task->descriptors().begin(), task->descriptors().end()), task->timings));
     task_pool.waitForIdle();
 
     EXPECT_EQ(evictor_->pending_release_counts_.at(device_pool_.get()), 0u);
@@ -3023,7 +3017,9 @@ TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescrip
               0);
 }
 
-TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnce) {
+class EvictionQueueTimeoutTest: public BlockTreeEvictorTest, public ::testing::WithParamInterface<bool> {};
+
+TEST_P(EvictionQueueTimeoutTest, BatchTimeoutRollsBackEveryPlannedDescriptorOnce) {
     block_tree_cache_test::ScopedServingMetrics serving_metrics;
     auto host_pool = makePinnedHostPool(2);
     ASSERT_NE(host_pool, nullptr);
@@ -3031,6 +3027,9 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
     BlockTreeTaskPool task_pool(/*thread_count=*/1, /*queue_size=*/4, "batch_queue_timeout");
     ASSERT_TRUE(task_pool.start());
     evictor_ = evictor_runtime_.make(tree_.get(), &task_pool);
+    if (GetParam()) {
+        evictor_->host_timeout_ms_ = 0;
+    }
 
     std::vector<std::pair<TreeNode*, BlockIdxType>> sources;
     for (int64_t key : {100, 200}) {
@@ -3067,7 +3066,9 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
     bool deadline_rewound = false;
     {
         std::lock_guard<std::mutex> lock(task_pool.lifecycle_mutex_);
-        if (task_pool.background_queue_.size() == 1) {
+        if (GetParam()) {
+            deadline_rewound = task_pool.background_queue_.empty() && task_pool.completion_queue_.size() == 1;
+        } else if (task_pool.background_queue_.size() == 1) {
             task_pool.background_queue_.front().deadline =
                 std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
             deadline_rewound = true;
@@ -3116,6 +3117,8 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
                             [](const auto& event) { return event.record.stage == "business_queue_wait"; }),
               1);
 }
+
+INSTANTIATE_TEST_SUITE_P(AdmissionAndQueueExpiry, EvictionQueueTimeoutTest, ::testing::Bool());
 
 TEST_F(BlockTreeEvictorTest, BatchTargetExhaustionLeavesEntirePlannedBatchUnchanged) {
     auto host_pool = makePinnedHostPool(1);
@@ -3714,7 +3717,7 @@ TEST_F(BlockTreeEvictorTest, SuspendAndAdmitCandidateTrackTransferState) {
 
     evictor_->suspendCandidate(node, /*group_set_id=*/0, Tier::HOST);
     resource.host_block = NULL_BLOCK_IDX;
-    group_->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsUnsupportedTier) {
@@ -4405,7 +4408,7 @@ TEST_F(BlockTreeEvictorTest, ExtraTreeReferencesKeepCandidateEligible) {
     EXPECT_EQ(victim->target_tier, Tier::DISK);
 
     insertedNode(result)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
-    group_->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {block}, BlockTreeRefType::CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimAllowsNewLoadReferenceWithoutSideEffects) {
@@ -4441,7 +4444,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimAllowsNewLoadReferenceWithoutSideEffect
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
 
     insertedNode(result)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
-    group_->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
     EXPECT_EQ(host_pool->freeBlocksNum(), 1u);
 }
 
@@ -4471,7 +4474,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesLoadOwner) {
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
 
     insertedNode(result)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
-    group_->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesExistingEvictionOwnerAndTarget) {
@@ -4518,7 +4521,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesExistingEvictionOwnerAndTarget
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
 
     insertedNode(result)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
-    group_->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsSourceTierChangedByLoad) {
@@ -4596,8 +4599,8 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimSkipsFullNodeThatBecameNonLeaf) {
 
     insertedNode(parent_result)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     insertedNode(child_result)->group_set_resources[0].host_block  = NULL_BLOCK_IDX;
-    group_->releaseSingleBlock(Tier::HOST, parent_source, BlockTreeRefType::CACHE);
-    group_->releaseSingleBlock(Tier::HOST, child_source, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {parent_source}, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {child_source}, BlockTreeRefType::CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, LoadingStateExcludesAndIdleStateReadmitsSource) {
@@ -5111,7 +5114,7 @@ TEST_F(BlockTreeEvictorTest, BatchedEvictionRetainsOnlyRematchedSources) {
     EXPECT_EQ(evictor_->candidateCount(0, Tier::DEVICE), 1u);
     EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 1u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
-    group_->releaseSingleBlock(Tier::HOST, evicted.host_block, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {evicted.host_block}, BlockTreeRefType::CACHE);
     evicted.host_block = NULL_BLOCK_IDX;
 }
 
@@ -5182,7 +5185,7 @@ TEST_F(BlockTreeEvictorTest, EvictionExcludesSourceAndRollbackOrSuccessRestoresO
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
 
     resource.host_block = NULL_BLOCK_IDX;
-    group_->releaseSingleBlock(Tier::HOST, target_block, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {target_block}, BlockTreeRefType::CACHE);
 }
 
 TEST_F(BlockTreeEvictorTest, FrozenCandidateRemainsIneligibleAfterOrdinaryHoldsAreReleased) {
@@ -5206,7 +5209,7 @@ TEST_F(BlockTreeEvictorTest, FrozenCandidateRemainsIneligibleAfterOrdinaryHoldsA
 
     evictor_->suspendCandidate(insertedNode(result), 0, Tier::HOST);
     insertedNode(result)->group_set_resources[0].evictFromTier(Tier::HOST);
-    group_->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::CACHE);
+    group_->unreferenceBlocks(Tier::HOST, {block}, BlockTreeRefType::CACHE);
     EXPECT_TRUE(host_pool->isAllocated(block));
     EXPECT_TRUE(host_pool->isFrozen(block));
     EXPECT_EQ(host_pool->freeBlocksNum(), host_pool->totalBlocksNum() - 1);
@@ -5441,8 +5444,8 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     insertedNode(first)->group_set_resources[1].disk_block  = NULL_BLOCK_IDX;
     insertedNode(second)->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     unreferenceDeviceBlocksForTest(*group0, device_set, BlockTreeRefType::CACHE);
-    group0->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::CACHE);
-    group1->releaseSingleBlock(Tier::DISK, disk_block, BlockTreeRefType::CACHE);
+    group0->unreferenceBlocks(Tier::HOST, {host_block}, BlockTreeRefType::CACHE);
+    group1->unreferenceBlocks(Tier::DISK, {disk_block}, BlockTreeRefType::CACHE);
 }
 
 TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {

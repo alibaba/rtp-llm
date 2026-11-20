@@ -128,15 +128,13 @@ protected:
     }
 
     EvictionTaskRunner makeRunner() {
-        return EvictionTaskRunner(group_sets_, transfer_dispatcher_.get());
+        return EvictionTaskRunner(group_sets_, transfer_dispatcher_.get(), &task_pool_, metrics_reporter_);
     }
 
     bool runImmediately(EvictionTransferTask task) {
         auto                runner = makeRunner();
         std::optional<bool> result;
-        runner.runTransfer(std::make_shared<EvictionTransferTask>(std::move(task)),
-                           metrics_reporter_,
-                           [&](ErrorInfo error) { result = error.ok(); });
+        runner.run(std::make_shared<EvictionTransferTask>(std::move(task)), [&](bool success) { result = success; });
         if (!result.has_value()) {
             ADD_FAILURE() << "scripted transfer did not complete inline";
             return false;
@@ -157,6 +155,7 @@ protected:
     std::shared_ptr<kmonitor::MetricsReporter>   kmonitor_metrics_reporter_{
         std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{})};
     BlockTreeCacheMetricsReporter metrics_reporter_{kmonitor_metrics_reporter_};
+    BlockTreeTaskPool             task_pool_{1, 8, "EvictionTaskRunnerTest"};
 };
 
 EvictionTransferTask makeCopyTask(std::vector<TransferDescriptor> descriptors = {
@@ -182,14 +181,14 @@ TEST(EvictionTransferTaskTest, ConstructorOwnsDescriptorsAndTimings) {
 TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
     BlockTransferDispatcher dispatcher(deferred_engine);
-    EvictionTaskRunner      runner(group_sets_, &dispatcher);
+    EvictionTaskRunner      runner(group_sets_, &dispatcher, &task_pool_, metrics_reporter_);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
     size_t                  terminal_count = 0;
 
-    runner.runTransfer(task, metrics_reporter_, [&](ErrorInfo error) {
+    runner.run(task, [&](bool success) {
         ++terminal_count;
-        result = error.ok();
+        result = success;
     });
 
     ASSERT_EQ(deferred_engine->batchCount(), 1u);
@@ -224,14 +223,14 @@ TEST_F(EvictionTaskRunnerTest, SubmitsAllDescriptorsAsOneLogicalTransfer) {
     EXPECT_EQ(descriptors[1].target_blocks, (std::vector<BlockIdxType>{6}));
 }
 
-TEST_F(EvictionTaskRunnerTest, RunTransferOwnsTransferMetricsLifetime) {
+TEST_F(EvictionTaskRunnerTest, RunOwnsTransferMetricsLifetime) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
     BlockTransferDispatcher dispatcher(deferred_engine);
-    EvictionTaskRunner      runner(group_sets_, &dispatcher);
+    EvictionTaskRunner      runner(group_sets_, &dispatcher, &task_pool_, metrics_reporter_);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
 
-    runner.runTransfer(task, metrics_reporter_, [&](ErrorInfo error) { result = error.ok(); });
+    runner.run(task, [&](bool success) { result = success; });
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 1);
@@ -280,7 +279,7 @@ TEST_F(EvictionTaskRunnerTest, SubmitExceptionFinishesTransferMetrics) {
     EXPECT_EQ(evictionInFlight(Tier::DEVICE, Tier::HOST), 0);
 }
 
-TEST_F(EvictionTaskRunnerTest, RunTransferRejectsMalformedDescriptors) {
+TEST_F(EvictionTaskRunnerTest, RunRejectsMalformedDescriptors) {
     const auto expect_rejected = [this](void (*mutate)(TransferDescriptor&)) {
         auto descriptor = TransferDescriptor::deviceToHost(0, {1, 2}, 3);
         mutate(descriptor);
@@ -302,7 +301,7 @@ TEST_F(EvictionTaskRunnerTest, RejectsHeterogeneousBatches) {
     EXPECT_FALSE(runImmediately(std::move(heterogeneous)));
 }
 
-TEST_F(EvictionTaskRunnerTest, RunTransferSupportsHostToDisk) {
+TEST_F(EvictionTaskRunnerTest, RunSupportsHostToDisk) {
     auto task = makeCopyTask({TransferDescriptor::hostToDisk(0, 2, 3)});
 
     ASSERT_TRUE(runImmediately(std::move(task)));

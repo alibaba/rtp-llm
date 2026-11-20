@@ -80,10 +80,10 @@ public:
     const std::vector<DeviceBlockPoolPtr>& devicePools() const {
         return device_pools_;
     }
-    std::shared_ptr<HostBlockPool> hostPool() const {
+    const std::shared_ptr<HostBlockPool>& hostPool() const {
         return host_pool_;
     }
-    std::shared_ptr<DiskBlockPool> diskPool() const {
+    const std::shared_ptr<DiskBlockPool>& diskPool() const {
         return disk_pool_;
     }
 
@@ -94,8 +94,7 @@ public:
 
     BlockIdxType               allocateSingleBlock(Tier tier, BlockTreeRefType ref_type);
     std::optional<BlockIdList> allocateBlocks(size_t n, Tier tier, BlockTreeRefType ref_type);
-    void                       releaseBlocks(Tier tier, const BlockIdList& blocks, BlockTreeRefType ref_type) const;
-    void                       releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const;
+    void                       unreferenceBlocks(Tier tier, const BlockIdList& blocks, BlockTreeRefType ref_type) const;
 
 private:
     std::vector<DeviceBlockPoolPtr>         device_pools_;
@@ -111,5 +110,16 @@ private:
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;
+
+void appendBlocks(std::vector<MultiNodeResource>& resources, size_t group_set_id, Tier tier, const BlockIdList& blocks);
+
+void referenceBlocks(const std::vector<GroupSetPtr>& group_sets, const std::vector<MultiNodeResource>& resources);
+void unreferenceBlocks(const std::vector<GroupSetPtr>& group_sets, const std::vector<MultiNodeResource>& resources);
+void referenceBlocks(const std::vector<GroupSetPtr>&       group_sets,
+                     const std::vector<MultiNodeResource>& resources,
+                     BlockTreeRefType                      ref_type);
+void unreferenceBlocks(const std::vector<GroupSetPtr>&       group_sets,
+                       const std::vector<MultiNodeResource>& resources,
+                       BlockTreeRefType                      ref_type);
 
 }  // namespace rtp_llm
