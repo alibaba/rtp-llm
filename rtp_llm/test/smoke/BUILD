@@ -241,7 +241,7 @@ py_test(
     ],
     env = {"GPU_COUNT": "1", "PYTHONNOUSERSITE": "1"},
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
-    tags = ["H20_CU13", "manual"],
+    tags = ["H20_CU13"],
     deps = [":scr_checkpoint_probe"],
 )
 
