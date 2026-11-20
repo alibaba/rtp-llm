@@ -13,6 +13,7 @@ import triton.language as tl
 
 from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import is_supported
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import native_mn_major_scales
 
 
 class _NativePrepared(threading.local):
@@ -278,7 +279,25 @@ def try_project_quantized_qkv(attn, x, quantized_input=None, *, pdl: bool = Fals
         if quantized_input is None
         else linear.forward_quantized(*quantized_input).view(*x.shape[:-1], linear.N)
     )
-    qr, quantized = query_norm_quant(
+    # Every decode consumer of this one quantization must accept the native
+    # FP32 MN-major layout before it can be emitted. ``wq_b`` is the SM90
+    # adapter on SM90; the SM10x merged Q-B linear (which needs packed words)
+    # only exists where ``wq_b`` is not, so the two can never both apply.
+    index_wq = getattr(attn, "index_wq", None)
+    fp32_scales = native_mn_major_scales(attn.wq_b) and (
+        index_wq is None or native_mn_major_scales(index_wq)
+    )
+    quantize = query_norm_quant_mn_major if fp32_scales else query_norm_quant
+    qr, quantized = quantize(
         projected[..., : attn.q_lora_rank], attn.q_norm, attn.eps, pdl=pdl
     )
     return qr, projected[..., attn.q_lora_rank :], quantized
+
+
+def query_norm_quant_mn_major(x, weight, eps, *, pdl=False):
+    """SM90 native-scale producer; keep the packed SM100 kernel unchanged."""
+    from rtp_llm.models_py.modules.dsv41._sm90_v41_query_quant import (
+        query_norm_quant_mn_major as sm90_quantize,
+    )
+
+    return sm90_quantize(x, weight, eps, pdl=pdl)

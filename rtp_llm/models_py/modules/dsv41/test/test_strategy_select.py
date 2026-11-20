@@ -335,7 +335,7 @@ class StrategySelectTest(unittest.TestCase):
         cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32)
         for probe, value in (
             ("torch.cuda.is_available", False),
-            ("torch.cuda.get_device_capability", (9, 0)),
+            ("torch.cuda.get_device_capability", (8, 0)),
             ("torch.distributed.is_initialized", False),
         ):
             with self.subTest(probe=probe), _env(
@@ -344,6 +344,55 @@ class StrategySelectTest(unittest.TestCase):
                 self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
                 with self.assertRaisesRegex(RuntimeError, "mega_se.*cannot handle"):
                     select_strategy(cfg)
+
+    def test_v41_sm100_shared_selection_does_not_enter_sm90_backend(self):
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.mega_sm90 import (
+            SM90MegaMoEStrategy,
+        )
+
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32)
+        for capability in ((10, 0), (10, 3)):
+            with (
+                self.subTest(capability=capability),
+                _env(DSV4_USE_MEGA_MOE_SE=None),
+                _mega_runtime(),
+                mock.patch("torch.cuda.get_device_capability", return_value=capability),
+                mock.patch.object(
+                    SM90MegaMoEStrategy,
+                    "can_handle",
+                    side_effect=AssertionError("SM100 must retain its existing backend"),
+                ),
+            ):
+                self.assertIs(select_strategy(cfg), MegaMoEStrategySE)
+
+    def test_v41_sm90_selects_its_native_backend_with_explicit_runtime_apis(self):
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.mega_sm90 import (
+            SM90MegaMoEStrategy,
+        )
+
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32)
+        with (
+            _mega_runtime() as deep_gemm,
+            mock.patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+        ):
+            deep_gemm.sm90_fp8_fp4_mega_moe = object()
+            deep_gemm.transform_weights_for_mega_moe_sm90 = object()
+            deep_gemm.get_symm_buffer_for_mega_moe_sm90 = object()
+            self.assertFalse(MegaMoEStrategySE.can_handle(cfg))
+            for forced in (None, "mega_sm90"):
+                with self.subTest(forced=forced):
+                    self.assertIs(select_strategy(cfg, forced=forced), SM90MegaMoEStrategy)
+
+    def test_v41_sm90_missing_native_api_fails_without_sm100_fallback(self):
+        cfg = replace(_cfg(ep_size=4), shared_fp8_block_size=32)
+        with (
+            _mega_runtime(),
+            mock.patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "SM90 MegaMoE.*deep_gemm.sm90_fp8_fp4_mega_moe is missing"
+            ):
+                select_strategy(cfg)
 
     def test_v41_shared_default_preserves_mega_family_disable(self):
         for decode in (False, True):

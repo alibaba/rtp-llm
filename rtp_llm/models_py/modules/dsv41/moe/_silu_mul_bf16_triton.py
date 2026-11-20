@@ -234,3 +234,12 @@ def silu_mul_fp8_g32_quant(
         enable_fp_fusion=False,
     )
     return quant, scales
+
+
+def silu_mul_fp8_g32_quant_mn_major(gate_up, clamp_limit=0.0, *, round_to_bf16=True):
+    """SM90 native-scale producer; keep the packed SM100 kernel unchanged."""
+    from rtp_llm.models_py.modules.dsv41.moe._sm90_silu_mul_fp8_g32_triton import (
+        silu_mul_fp8_g32_quant_mn_major as sm90_quantize,
+    )
+
+    return sm90_quantize(gate_up, clamp_limit, round_to_bf16=round_to_bf16)

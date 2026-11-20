@@ -143,3 +143,12 @@ def fused_sqrtsoftplus_gate(
         num_stages=2,
     )
     return out_w, out_idx
+
+
+def fused_sqrtsoftplus_gate_pack(*args, **kwargs):
+    """SM90-only router and activation staging; imported on explicit use."""
+    from rtp_llm.models_py.modules.dsv41._sm90_gate_fused_triton import (
+        fused_sqrtsoftplus_gate_pack as sm90_pack,
+    )
+
+    return sm90_pack(*args, **kwargs)
