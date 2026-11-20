@@ -6,6 +6,7 @@ weight dicts and transform outputs it leaves behind are identical either way.
 """
 
 import gc
+import glob
 import hashlib
 import json
 import logging
@@ -13,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 import weakref
@@ -553,6 +555,84 @@ def _write_read_only() -> None:
     torch.cuda.synchronize()
 
 
+class IdleOffloadTest(_ResidentStoreTest):
+    """The real mover: an idle record leaves the GPU and comes back unchanged and read-only."""
+
+    def setUp(self):
+        os.environ["RTP_LLM_RESIDENT_STORE"] = (
+            f"rtp_llm_resident_test.{uuid.uuid4().hex}"
+        )
+        self.name = store.default_store_name()
+        store.ensure_running(
+            self.name,
+            owner_pid=os.getpid(),
+            settings=store.StoreSettings(offload_after_s=1.0, host_reserve_ratio=0.0),
+        )
+
+    def _wait_listed(self, condition, what):
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            listed = self._listed()
+            if listed is not None and condition(listed):
+                return listed
+            time.sleep(0.2)
+        logs = glob.glob(
+            os.path.join(tempfile.gettempdir(), "rtp-resident-store.*.log")
+        )
+        tails = "".join(open(path).read()[-4000:] for path in logs)
+        self.fail(
+            f"timed out waiting for {what}: {self._listed()}\nstore log:\n{tails}"
+        )
+
+    def test_an_idle_record_moves_to_host_memory_and_back_read_only(self):
+        weights = _build_weights()
+        manager = _manager()
+        manager.move_to_vmm(weights)
+        outputs = _initialize(weights)
+        expected = _snapshot(weights, outputs)
+        manager.finalize()  # publishes and holds
+        time.sleep(2.0)
+        self.assertFalse(self._listed().on_host)  # held: stays on the GPU
+        gpu_bytes = self._listed().gpu_bytes
+        # This process exits its use of the record: only the store keeps the GPU memory.
+        del weights, outputs, manager
+        gc.collect()
+        torch.cuda.synchronize()
+        free_before, _ = torch.cuda.mem_get_info()
+        self._wait_listed(lambda slot: slot.on_host and not slot.moving, "offload")
+        # The store swaps FDs and sets on_host without blocking on mover exit; wait briefly
+        # for the exiting mover process to finish tearing down its CUDA context.
+        deadline = time.monotonic() + 15.0
+        free_after, _ = torch.cuda.mem_get_info()
+        while (
+            free_after - free_before <= gpu_bytes - (1 << 20)
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.1)
+            free_after, _ = torch.cuda.mem_get_info()
+        # mem_get_info is device-wide and moves by a few pages on its own.
+        self.assertGreater(free_after - free_before, gpu_bytes - (1 << 20))
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(expected, f)
+        self.addCleanup(os.unlink, f.name)
+        child = subprocess.run(
+            [sys.executable, __file__, "restart", f.name],
+            capture_output=True,
+            text=True,
+        )
+        # The record was in host memory, so this attach waited for the move back.
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+        # Moved back as read-only VMM mappings, exactly as published.
+        fault = subprocess.run(
+            [sys.executable, __file__, "write_read_only"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(fault.returncode, 0)
+        self.assertIn("illegal memory access", fault.stdout + fault.stderr)
+
+
 class _FakeLoader:
     """The two ModelLoader methods ``ResidentWeights.load_weights`` calls."""
 
@@ -626,7 +706,7 @@ class ResidentLoadWeightsTest(_ResidentStoreTest):
         manager = _manager()
         loader = _FakeLoader(_build_weights())
         with patch(
-            "rtp_llm.resident_weights.weights.all_ranks_true", return_value=False
+            "rtp_llm.resident_weights.weights.all_ranks_min_state", return_value=1
         ):
             manager.attach_or_load_weights(loader, "cuda:0", {}, synchronize_ranks=True)
         self.assertFalse(manager._attached)
