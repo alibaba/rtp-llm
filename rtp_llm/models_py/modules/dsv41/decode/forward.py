@@ -20,6 +20,9 @@ decode impl.
 from __future__ import annotations
 
 from functools import partial
+import functools
+
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -530,18 +533,32 @@ def forward_decode(
             fmha_impl.prepare_in_graph(attn)
         meta = fmha_impl.metadata
     else:
-        paged_specs = build_paged_pool_specs(
-            kv_cache, v4, max_seq_len=int(v4_args.max_seq_len)
+        profile_prep = (
+            _profiler.record_function_ranges_enabled()
+            and _profiler._torch_profiler_enabled()
         )
-        meta = build_metadata_eager(
-            v4_args,
-            attn,
-            param_dev,
-            paged_specs,
-            kv_cache=kv_cache,
-            fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
-            total_tokens=int(input_ids.numel()),
-        )
+        with (
+            _profiler.record_function_range("dsv41.decode.pool_specs")
+            if profile_prep
+            else nullcontext()
+        ):
+            paged_specs = build_paged_pool_specs(
+                kv_cache, v4, max_seq_len=int(v4_args.max_seq_len)
+            )
+        with (
+            _profiler.record_function_range("dsv41.decode.metadata")
+            if profile_prep
+            else nullcontext()
+        ):
+            meta = build_metadata_eager(
+                v4_args,
+                attn,
+                param_dev,
+                paged_specs,
+                kv_cache=kv_cache,
+                fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
+                total_tokens=int(input_ids.numel()),
+            )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
             return PyModelOutputs(
