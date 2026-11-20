@@ -115,6 +115,30 @@ class VitCacheDirectoryTest {
     }
 
     @Test
+    void selectsAndRevalidatesAnExactLogicalEngineAtASharedAddress() {
+        var first =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "one", a.getIp(), 8000, 8001, "", null, 0, 2);
+        var second =
+                WorkerStatus.createDiscovered(
+                        RoleType.VIT, "one", a.getIp(), 8000, 8001, "", null, 1, 2);
+        live.clear();
+        live.put(first.getLogicalIpPort(), first);
+        live.put(second.getLogicalIpPort(), second);
+        snapshot(first, "first");
+        snapshot(second, "second", "image");
+        var request = context("image");
+        var selected = selector.select(request, "one");
+        assertEquals(1, selected.getEngineIndex());
+        assertEquals(second.getGenerationId(), selected.getWorkerGeneration());
+        request.getRequest().setSelectedVit(selected);
+        assertTrue(selector.validate(request, "one").isSuccess());
+
+        selected.setEngineIndex(0);
+        assertFalse(selector.validate(request, "one").isSuccess());
+    }
+
+    @Test
     void workerRestartInvalidatesColdKeyPlacements() {
         snapshot(a, "a1");
         snapshot(b, "b1");
