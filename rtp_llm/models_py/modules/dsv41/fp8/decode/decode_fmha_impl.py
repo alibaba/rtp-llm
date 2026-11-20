@@ -247,6 +247,12 @@ class DSv4DecodeFmhaImplFP8:
                 attn_inputs, paged_block_tables, valid_request_count=valid_request_count
             )
             return
+        if self._sm90_metadata_updater is not None and self._sm90_metadata_updater.update(
+            as_tagged_attention_inputs(attn_inputs),
+            paged_block_tables=paged_block_tables,
+            valid_request_count=valid_request_count,
+        ):
+            return
         update_decode_metadata_in_place_fp8(
             self.metadata,
             as_tagged_attention_inputs(attn_inputs),

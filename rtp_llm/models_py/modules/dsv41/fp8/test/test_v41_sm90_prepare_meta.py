@@ -31,7 +31,7 @@ ENTRIES = {tag: spec[0] for tag, spec in SPECS.items()}
 TOKENS = {tag: spec[1] for tag, spec in SPECS.items()}
 
 
-def _metadata(bucket, q):
+def _metadata(bucket, q, specs=SPECS):
     return allocate_decode_metadata_fp8(
         max_batch_size=bucket,
         q_len=q,
@@ -41,13 +41,13 @@ def _metadata(bucket, q):
         compress_ratios=[0],
         index_topk=512,
         device=torch.device("cuda", torch.cuda.current_device()),
-        paged_pool_specs=SPECS,
+        paged_pool_specs=specs,
     )
 
 
-def _tables(rows, *, narrow=False, strided=False):
+def _tables(rows, *, narrow=False, strided=False, specs=SPECS):
     result = {}
-    for i, (tag, (_, _, cols)) in enumerate(SPECS.items()):
+    for i, (tag, (_, _, cols)) in enumerate(specs.items()):
         cols = max(1, cols - 1) if narrow else cols
         t = torch.arange(rows * cols, device="cuda", dtype=torch.int32).reshape(
             rows, cols
@@ -79,7 +79,7 @@ def _tensors(meta):
     return result
 
 
-def _legacy(meta, inputs, tables, full=False):
+def _legacy(meta, inputs, tables, full=False, valid_request_count=None):
     update_decode_metadata_in_place_fp8(
         meta,
         inputs,
@@ -88,6 +88,7 @@ def _legacy(meta, inputs, tables, full=False):
         paged_pool_entries_per_block=ENTRIES,
         paged_pool_tokens_per_block=TOKENS,
         capture_full_width_lengths=full,
+        valid_request_count=valid_request_count,
     )
 
 
@@ -108,10 +109,67 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
         self.assertEqual(actual.batch_size, expected.batch_size)
         self.assertEqual(actual.total_tokens, expected.total_tokens)
 
-    def _independent_positions(self, meta, raw, full=False):
+    def test_global_producer_ownership_and_legacy_pool_tags(self):
+        # The shared planner owns legacy CSA/HCA4/128, not V4.1 GLOBAL2/1.
+        # Keep both families in one fixture so changing a ratio cannot hide
+        # accidental writes to the independent AttentionV41FP8 producer state.
+        specs = {**SPECS, "csa_kv": (64, 128, 33), "hca_kv": (128, 128, 33)}
+        entries = {tag: value[0] for tag, value in specs.items()}
+        tokens = {tag: value[1] for tag, value in specs.items()}
+        for q in (1, 3):
+            with self.subTest(q=q):
+                actual, reference = _metadata(4, q, specs), _metadata(4, q, specs)
+                poisoned = {}
+                for tag in ("global_kv_1", "global_kv_2"):
+                    poison = torch.arange(4 * q, device="cuda", dtype=torch.int64) + 99173
+                    actual.pool_write_slot_mappings[tag].copy_(poison)
+                    reference.pool_write_slot_mappings[tag].copy_(poison)
+                    poisoned[tag] = poison
+                source = torch.tensor([3, 7, 127, 1023], device="cuda", dtype=torch.int32)
+                tables = _tables(4, specs=specs)
+                updater = Sm90DecodeMetadataUpdater(actual, entries, tokens)
+                self.assertTrue(updater.enabled)
+                self.assertTrue(updater.update(source, paged_block_tables=tables, valid_request_count=2))
+                update_decode_metadata_in_place_fp8(
+                    reference, source, forbid_realloc=True,
+                    paged_block_tables=tables,
+                    paged_pool_entries_per_block=entries,
+                    paged_pool_tokens_per_block=tokens,
+                    valid_request_count=2,
+                )
+                self._equal(actual, reference)
+                for tag, poison in poisoned.items():
+                    torch.testing.assert_close(actual.pool_write_slot_mappings[tag], poison, rtol=0, atol=0)
+                for tag, ratio in (("csa_kv", 4), ("hca_kv", 128)):
+                    table = tables[tag].cpu()
+                    expected = torch.full((4 * q,), -1, dtype=torch.int64)
+                    for row, start in enumerate(source.cpu().tolist()):
+                        for query in range(q):
+                            position = start + query
+                            if (position + 1) % ratio:
+                                continue
+                            logical = (position + 1) // ratio - 1
+                            column = min(logical // (tokens[tag] // ratio), table.shape[1] - 1)
+                            block = int(table[row, column])
+                            if block > 0:
+                                expected[row * q + query] = block * entries[tag] + logical % entries[tag]
+                    torch.testing.assert_close(actual.pool_write_slot_mappings[tag].cpu(), expected, rtol=0, atol=0)
+
+    def _independent_positions(self, meta, raw, full=False, valid_request_count=None):
         # CPU integer oracle is independent of both Triton implementations.
         starts = raw.cpu().to(torch.int32).clamp(0, 4096 - meta.q_len_per_req)
         bs = starts.numel()
+        live = bs if valid_request_count is None else valid_request_count
+        torch.testing.assert_close(
+            meta.valid_requests.cpu(),
+            torch.arange(meta.valid_requests.numel()) < live,
+            rtol=0,
+            atol=0,
+        )
+        self.assertEqual(
+            meta.decoder_swa_metadata.valid_requests.data_ptr(),
+            meta.valid_requests.data_ptr(),
+        )
         positions = starts[:, None] + torch.arange(
             meta.q_len_per_req, dtype=torch.int32
         )
@@ -178,6 +236,7 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                                 raw,
                                 paged_block_tables=tables,
                                 capture_full_width_lengths=full,
+                                valid_request_count=bs,
                             )
                         )
                         _legacy(reference, raw, tables, full)
@@ -242,14 +301,27 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                 actual, reference = _metadata(4, q), _metadata(4, q)
                 updater = Sm90DecodeMetadataUpdater(actual, ENTRIES, TOKENS)
                 source = torch.zeros(4, device="cuda", dtype=torch.int32)
+                count = torch.full((), 4, device="cuda", dtype=torch.int32)
                 tables = _tables(4)
                 for _ in range(3):
-                    self.assertTrue(updater.update(source, paged_block_tables=tables))
+                    self.assertTrue(
+                        updater.update(
+                            source,
+                            paged_block_tables=tables,
+                            valid_request_count=count,
+                        )
+                    )
                 torch.cuda.synchronize()
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
-                    self.assertTrue(updater.update(source, paged_block_tables=tables))
-                for step in range(4):
+                    self.assertTrue(
+                        updater.update(
+                            source,
+                            paged_block_tables=tables,
+                            valid_request_count=count,
+                        )
+                    )
+                for step, live in enumerate((4, 1, 0, 4)):
                     source.copy_(
                         torch.tensor(
                             [0, 126 + step, 2046 + step, 4095],
@@ -259,10 +331,41 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                     )
                     for table in tables.values():
                         table.add_(step)
+                    count.fill_(live)
                     graph.replay()
-                    _legacy(reference, source, tables)
+                    _legacy(reference, source, tables, valid_request_count=live)
                     self._equal(actual, reference)
-                    self._independent_positions(actual, source)
+                    self._independent_positions(
+                        actual, source, valid_request_count=live
+                    )
+
+    def test_invalid_live_count_is_no_write(self):
+        meta = _metadata(4, 1)
+        updater = Sm90DecodeMetadataUpdater(meta, ENTRIES, TOKENS)
+        source = torch.zeros(4, device="cuda", dtype=torch.int32)
+        tables = _tables(4)
+        before = {name: tensor.clone() for name, tensor in _tensors(meta).items()}
+        for source_input, count in (
+            (source, -1),
+            (source, 5),
+            (source[:1], 2),
+            (source, 1.5),
+            (source, torch.tensor(1, dtype=torch.int32)),
+            (source, torch.tensor(1.0, device="cuda")),
+            (source, torch.ones(2, dtype=torch.int32, device="cuda")),
+        ):
+            with self.subTest(count=count):
+                self.assertFalse(
+                    updater.update(
+                        source_input,
+                        paged_block_tables=tables,
+                        valid_request_count=count,
+                    )
+                )
+                for name, tensor in _tensors(meta).items():
+                    torch.testing.assert_close(
+                        tensor, before[name], rtol=0, atol=0, msg=name
+                    )
 
     def test_unsupported_is_no_write(self):
         meta = _metadata(4, 1)
@@ -301,8 +404,6 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
         for tag in (
             "swa_kv",
             "decoder_swa_kv",
-            "global_kv_2",
-            "global_kv_1",
             "indexer_kv",
         ):
             with self.subTest(missing_write_destination=tag):
@@ -320,6 +421,37 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                     torch.testing.assert_close(
                         tensor, before[name], rtol=0, atol=0, msg=name
                     )
+
+        specs = {**SPECS, "csa_kv": (64, 128, 33), "hca_kv": (128, 128, 33)}
+        entries = {tag: value[0] for tag, value in specs.items()}
+        tokens = {tag: value[1] for tag, value in specs.items()}
+        for tag in ("csa_kv", "hca_kv"):
+            with self.subTest(missing_write_destination=tag):
+                legacy = _metadata(4, 1, specs)
+                legacy.pool_write_slot_mappings.pop(tag)
+                unchanged = {name: value.clone() for name, value in _tensors(legacy).items()}
+                unsupported = Sm90DecodeMetadataUpdater(legacy, entries, tokens)
+                self.assertFalse(unsupported.enabled)
+                self.assertFalse(unsupported.update(
+                    torch.ones(4, device="cuda", dtype=torch.int32),
+                    paged_block_tables=_tables(4, specs=specs),
+                ))
+                for name, value in _tensors(legacy).items():
+                    torch.testing.assert_close(value, unchanged[name], rtol=0, atol=0, msg=name)
+
+        for tag in ("global_kv_1", "global_kv_2"):
+            with self.subTest(optional_independent_global_destination=tag):
+                actual, reference = _metadata(4, 1), _metadata(4, 1)
+                independent = actual.pool_write_slot_mappings.pop(tag)
+                reference.pool_write_slot_mappings.pop(tag)
+                unchanged = independent.clone()
+                supported = Sm90DecodeMetadataUpdater(actual, ENTRIES, TOKENS)
+                self.assertTrue(supported.enabled)
+                source = torch.tensor([3, 7, 127, 1023], device="cuda", dtype=torch.int32)
+                self.assertTrue(supported.update(source, paged_block_tables=tables, valid_request_count=4))
+                _legacy(reference, source, tables, valid_request_count=4)
+                self._equal(actual, reference)
+                torch.testing.assert_close(independent, unchanged, rtol=0, atol=0)
 
     def test_public_fmha_hook_tagged_inputs_and_graph_consumer(self):
         for q in (1, 3):
@@ -374,8 +506,9 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                 persistent = _tensors(impl.metadata)
                 pointers = {name: t.data_ptr() for name, t in persistent.items()}
 
-                # Capture a consumer of every persistent tensor, not the
-                # prepare hook itself: production prepares outside its graph.
+                # The standalone preparation API still accepts changing source
+                # addresses. This graph captures consumers only; the separate
+                # in-graph test below uses the runner's stable input buffers.
                 consumed = {name: torch.empty_like(t) for name, t in persistent.items()}
 
                 def consume():
@@ -405,7 +538,10 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                             table.add_(step)
                         inputs = tagged(raw, tables)
                         host_before = inputs.sequence_lengths.clone()
-                        impl.prepare_cuda_graph(inputs if step != 1 else dict(inputs))
+                        impl.prepare_cuda_graph(
+                            inputs if step != 1 else dict(inputs),
+                            valid_request_count=bs,
+                        )
                         _legacy(reference, inputs, tables)
                         graph.replay()
                         self._equal(impl.metadata, reference)
@@ -444,7 +580,7 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                     "update_decode_metadata_in_place_fp8",
                     wraps=update_decode_metadata_in_place_fp8,
                 ) as fallback:
-                    impl.prepare_cuda_graph(inputs)
+                    impl.prepare_cuda_graph(inputs, valid_request_count=bucket)
                     fallback.assert_called_once()
                 _legacy(reference, inputs, tables)
                 graph.replay()
@@ -453,6 +589,112 @@ class Sm90PrepareMetadataTest(unittest.TestCase):
                     torch.testing.assert_close(
                         tensor, _tensors(reference)[name], rtol=0, atol=0, msg=name
                     )
+
+    def test_public_in_graph_preparation_uses_live_device_count(self):
+        for q in (1, 3):
+            with self.subTest(q=q):
+                bucket = 4
+                host = torch.tensor([0, 1, 126, 2047], dtype=torch.int32).pin_memory()
+                device = host.cuda()
+                plus_one = device + 1
+                tables = _tables(bucket)
+                inputs = TaggedAttentionInputs(
+                    {
+                        tag: SimpleNamespace(
+                            is_target_verify=q > 1,
+                            is_prefill=False,
+                            sequence_lengths=host,
+                            sequence_lengths_plus_1_device=plus_one,
+                            prefix_lengths=host,
+                            prefix_lengths_device=device,
+                            kv_cache_kernel_block_id_device=table,
+                        )
+                        for tag, table in tables.items()
+                    }
+                )
+                config = fmha_module.DSv4DecodeFmhaImplConfigFP8(
+                    max_batch_size=bucket,
+                    q_len=q,
+                    window_size=128,
+                    head_dim=512,
+                    max_seq_len=4096,
+                    compress_ratios=[0],
+                    index_topk=512,
+                    paged_pool_specs=SPECS,
+                    group_tags=list(SPECS),
+                )
+                impl = fmha_module.DSv4DecodeFmhaImplFP8(
+                    config, device.device, inputs
+                )
+                count = impl.cuda_graph_valid_request_count_device
+                self.assertFalse(impl.cuda_graph_preparation_in_graph)
+                persistent = _tensors(impl.metadata)
+                pointers = {
+                    name: tensor.data_ptr() for name, tensor in persistent.items()
+                }
+                consumed = {
+                    name: torch.empty_like(tensor)
+                    for name, tensor in persistent.items()
+                }
+                reference = _metadata(bucket, q)
+
+                def consume():
+                    for name, tensor in persistent.items():
+                        consumed[name].copy_(tensor)
+
+                with mock.patch.object(
+                    fmha_module,
+                    "update_decode_metadata_in_place_fp8",
+                    side_effect=AssertionError(
+                        "supported SM90 replay used generic metadata"
+                    ),
+                ) as forbidden_generic:
+                    impl.prepare_cuda_graph(inputs, valid_request_count=count)
+                    consume()
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        impl.prepare_in_graph(inputs)
+                        consume()
+                    self.assertTrue(impl.cuda_graph_preparation_in_graph)
+                    for step, live in enumerate((bucket, 1, 0, bucket)):
+                        raw = torch.tensor(
+                            [0, 127 + step, 2048 + step, 4095],
+                            device="cuda",
+                            dtype=torch.int32,
+                        )
+                        device.copy_(raw)
+                        plus_one.copy_(raw + 1)
+                        for table in tables.values():
+                            table.add_(step)
+                        # C++ fills these captured buffers before replay. The
+                        # host mirrors may remain at capture-time values.
+                        host_before = host.clone()
+                        count.fill_(live)
+                        impl.prepare_cuda_graph(inputs, valid_request_count=count)
+                        _legacy(reference, raw, tables, valid_request_count=live)
+                        graph.replay()
+                        self._equal(impl.metadata, reference)
+                        self._independent_positions(
+                            impl.metadata, raw, valid_request_count=live
+                        )
+                        for name, tensor in consumed.items():
+                            torch.testing.assert_close(
+                                tensor,
+                                _tensors(reference)[name],
+                                rtol=0,
+                                atol=0,
+                                msg=name,
+                            )
+                        torch.testing.assert_close(host, host_before, rtol=0, atol=0)
+                        self.assertEqual(
+                            pointers,
+                            {
+                                name: tensor.data_ptr()
+                                for name, tensor in _tensors(impl.metadata).items()
+                            },
+                        )
+                    forbidden_generic.assert_not_called()
 
     @unittest.skipUnless(
         os.environ.get("DSV41_SM90_META_BENCH") == "1", "opt-in timing"

@@ -1,7 +1,7 @@
 """SM90-only, in-place V4.1 shared decode metadata preparation.
 
-This is a leaf candidate, not a model hook. V4.1 deliberately gives the shared
-planner no compressed ratios; its actual ratio-1/2 producers remain unchanged.
+V4.1 deliberately gives the shared planner no compressed ratios; its actual
+ratio-1/2 producers remain unchanged.
 The arithmetic follows _fused_prepare_meta_triton and decode_attn_metadata.
 Two launches replace table copy/zero and the small metadata/translation ops.
 No source table is retained as a replacement for graph-owned output storage.
@@ -12,6 +12,14 @@ from __future__ import annotations
 import torch
 import triton
 import triton.language as tl
+
+from rtp_llm.models_py.modules.dsv41.attn_type import (
+    CSA_KV,
+    DECODER_SWA_KV,
+    HCA_KV,
+    INDEXER_KV,
+    SWA_KV,
+)
 
 
 @triton.jit
@@ -47,7 +55,7 @@ def _snapshot_tables(
             tl.store(destinations[i] + off, value, mask=write)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["valid_request_count"])
 def _prepare_metadata(
     positions,
     start_out,
@@ -63,6 +71,10 @@ def _prepare_metadata(
     write_slots,
     state_slots,
     read_slots,
+    bs,
+    valid_requests,
+    valid_request_count,
+    VALID_COUNT_ON_DEVICE: tl.constexpr,
     Q: tl.constexpr,
     WINDOW: tl.constexpr,
     TOPK: tl.constexpr,
@@ -80,6 +92,14 @@ def _prepare_metadata(
 ):
     r = tl.program_id(0)
     q = tl.program_id(1)
+    if VALID_COUNT_ON_DEVICE:
+        valid_request_count = tl.load(valid_request_count)
+    if q == 0:
+        # Visit the whole capture bucket even when source rows shrink or no
+        # requests are live. Metadata for padded rows remains untouched.
+        tl.store(valid_requests + r, (r < bs) & (r < valid_request_count))
+    if r >= bs:
+        return
     t = r * Q + q
     raw = tl.load(positions + r).to(tl.int32)
     sp = tl.minimum(tl.maximum(raw - PLUS_ONE, 0), MAX_START)
@@ -166,7 +186,8 @@ class Sm90DecodeMetadataUpdater:
         ):
             return
         if (
-            self.q_len <= 0
+            self.bucket <= 0
+            or self.q_len <= 0
             or meta.window_size <= 0
             or not self.tags
             or meta.topk_buffer_compressed.shape[-1] <= 0
@@ -176,12 +197,15 @@ class Sm90DecodeMetadataUpdater:
         if "decoder_swa_kv" in self.tags and child is None:
             return
         modes = {
-            "swa_kv": 1,
-            "decoder_swa_kv": 1,
-            "global_kv_2": 4,
-            "indexer_kv": 4,
-            "global_kv_1": 128,
+            SWA_KV: 1,
+            DECODER_SWA_KV: 1,
+            CSA_KV: 4,
+            INDEXER_KV: 4,
+            HCA_KV: 128,
         }
+        # These are the generic planner's legacy4/128 tags. V4.1's
+        # global_kv_2/global_kv_1 are separate AttentionV41FP8 producers;
+        # their graph-owned placeholder buffers must remain untouched here.
         self.tables = tuple(meta.pool_block_tables[t] for t in self.tags)
         self.rows = tuple(int(t.shape[0]) for t in self.tables)
         self.cols = tuple(int(t.shape[1]) for t in self.tables)
@@ -235,6 +259,7 @@ class Sm90DecodeMetadataUpdater:
                 return
         count = self.bucket * self.q_len
         required = (
+            (getattr(meta, "valid_requests", None), torch.bool, self.bucket),
             (meta.start_pos, torch.int32, self.bucket),
             (meta.position_ids, torch.int32, count),
             (meta.position_ids_long, torch.int64, count),
@@ -273,13 +298,20 @@ class Sm90DecodeMetadataUpdater:
             for t, dtype, size in required
         ):
             return
+        if meta.valid_requests.ndim != 1 or meta.valid_requests.numel() != self.bucket:
+            return
         self.raw_positions = torch.empty(
             self.bucket, dtype=torch.int32, device=self.device
         )
         self.enabled = True
 
     def update(
-        self, attention_inputs, *, paged_block_tables, capture_full_width_lengths=False
+        self,
+        attention_inputs,
+        *,
+        paged_block_tables,
+        capture_full_width_lengths=False,
+        valid_request_count: int | torch.Tensor | None = None,
     ):
         if not self.enabled or not paged_block_tables:
             return False
@@ -291,14 +323,6 @@ class Sm90DecodeMetadataUpdater:
             prefix = bool(getattr(attention_inputs, "is_target_verify", False)) or (
                 bool(getattr(attention_inputs, "is_prefill", False)) and self.q_len > 1
             )
-            host = getattr(
-                attention_inputs,
-                "prefix_lengths" if prefix else "sequence_lengths",
-                None,
-            )
-            if not isinstance(host, torch.Tensor) or host.ndim != 1:
-                return False
-            bs = int(host.numel())
             source = getattr(
                 attention_inputs,
                 "prefix_lengths_device" if prefix else "sequence_lengths_plus_1_device",
@@ -308,9 +332,11 @@ class Sm90DecodeMetadataUpdater:
                 isinstance(source, torch.Tensor)
                 and source.device == self.device
                 and source.ndim == 1
-                and source.numel() >= bs
             ):
                 plus_one = not prefix
+                # Match the generic device-metadata contract: shape belongs
+                # to the stream-ordered mirror, not a stale host sentinel.
+                bs = int(source.numel())
             else:
                 # Graph replay leaves host mirrors at capture-time sentinel
                 # values; only the device mirror is stream-ordered and
@@ -326,9 +352,20 @@ class Sm90DecodeMetadataUpdater:
             or not source.is_contiguous()
             or source.device.type not in ("cpu", "cuda")
             or (source.is_cuda and source.device != self.device)
-            or bs <= 0
             or bs > self.bucket
         ):
+            return False
+        live_requests = bs if valid_request_count is None else valid_request_count
+        count_on_device = isinstance(live_requests, torch.Tensor)
+        if count_on_device:
+            if not (
+                live_requests.numel() == 1
+                and live_requests.dtype == torch.int32
+                and live_requests.device == self.device
+                and live_requests.is_contiguous()
+            ):
+                return False
+        elif not isinstance(live_requests, int) or not 0 <= live_requests <= bs:
             return False
         # Missing pools retain old snapshots in the generic path. Keep that
         # uncommon case on fallback rather than partially updating this helper.
@@ -375,7 +412,7 @@ class Sm90DecodeMetadataUpdater:
             BLOCK=256,
         )
         m = self.meta
-        _prepare_metadata[(bs, self.q_len)](
+        _prepare_metadata[(self.bucket, self.q_len)](
             source,
             m.start_pos,
             m.position_ids,
@@ -390,6 +427,10 @@ class Sm90DecodeMetadataUpdater:
             self.write_slots,
             self.state_slots,
             self.read_slots,
+            bs,
+            m.valid_requests,
+            live_requests,
+            VALID_COUNT_ON_DEVICE=count_on_device,
             Q=self.q_len,
             WINDOW=m.window_size,
             TOPK=m.topk_buffer_compressed.shape[-1],
