@@ -783,7 +783,6 @@ class RegisteredTransportPool:
     def release(self, slot):
         with self._condition:
             for_write = self._in_use.pop(slot)
-
             if self._free_ranges is not None and not slot.quarantined:
                 self._return_range(slot)
             self._condition.notify_all()
