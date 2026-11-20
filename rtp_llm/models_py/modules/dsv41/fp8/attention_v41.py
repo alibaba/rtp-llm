@@ -18,7 +18,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
     cp_state_slot_mapping,
 )
-from rtp_llm.models_py.modules.dsv41._cp_collectives import try_all_gather_into
+from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+    SUPPORTED_CP_SIZES,
+    try_all_gather_into,
+)
 from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41._rope_only_triton import rope_only_inplace
@@ -242,7 +245,7 @@ def _prefill_projected_x_cohorts(
     if (
         asynchronous
         and resources is not None
-        and cp_ctx.cp_size == 4
+        and cp_ctx.cp_size in SUPPORTED_CP_SIZES
         and len(groups) == 1
     ):
         from rtp_llm.models_py.distributed.collective_torch import Group
@@ -255,7 +258,10 @@ def _prefill_projected_x_cohorts(
         local_rows = cohorts[stop - 1][1] - cohorts[first][0]
         borrowed = resources.enter_context(
             projected_gather_buffer(
-                x, Group.TP, numel=4 * local_rows * width, dtype=projected_dtype
+                x,
+                Group.TP,
+                numel=cp_ctx.cp_size * local_rows * width,
+                dtype=projected_dtype,
             )
         )
     if asynchronous:

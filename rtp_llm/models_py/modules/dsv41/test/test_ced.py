@@ -909,7 +909,9 @@ class CedTransportDispatchTest(unittest.TestCase):
                     )
                 )
                 workspace = _CED._cp_collectives._initialize(
-                    types.SimpleNamespace(group_name="tp", rank=lambda: 0),
+                    types.SimpleNamespace(
+                        group_name="tp", rank=lambda: 0, size=lambda: 4
+                    ),
                     torch.device("cuda", 0),
                     cp_rank=cp_rank,
                 )

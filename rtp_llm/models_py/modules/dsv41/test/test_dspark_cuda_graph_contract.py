@@ -99,7 +99,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                 self.assertIs(result, model.run_commit_step.return_value)
                 model.run_commit_step.assert_called_with(inputs, device)
                 if should_reuse:
-                    reuse.assert_called_once_with(device)
+                    reuse.assert_called_once_with(device, cp_size=model.tp_size)
                 else:
                     reuse.assert_not_called()
 

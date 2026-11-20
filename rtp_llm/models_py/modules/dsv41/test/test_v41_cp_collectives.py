@@ -1,4 +1,4 @@
-"""Four-GPU regression tests for the DSV4.1 CP prefill symmetric workspace."""
+"""CP2/4/8 GPU regression tests for the DSV4.1 CP prefill symmetric workspace."""
 
 import json
 import os
@@ -14,9 +14,22 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-WORLD_SIZE = 4
 MIB = 1024 * 1024
-SPLITS = ((3, 2, 0, 4), (0, 0, 0, 0), (5, 1, 0, 1), (1, 0, 0, 0))
+
+
+def _exchange_splits(world_size):
+    # Rank 1 sends no data, one destination receives no data for CP4/8,
+    # and rank 0's first segment spans the six-row tile in both layouts.
+    splits = [
+        [(source + 2 * dest) % 5 for dest in range(world_size)]
+        for source in range(world_size)
+    ]
+    splits[0][0] = 7
+    splits[1] = [0] * world_size
+    if world_size > 2:
+        for row in splits:
+            row[2] = 0
+    return tuple(map(tuple, splits))
 
 
 def _assert_constant(tensor, value):
@@ -25,10 +38,12 @@ def _assert_constant(tensor, value):
         assert (part == value).all().item(), f"expected {value} in {tensor.shape}"
 
 
-def _gather_inputs(device, rank, size, dtype, alias, base=0, output_offset=0):
+def _gather_inputs(
+    device, rank, world_size, size, dtype, alias, base=0, output_offset=0
+):
     count = size // dtype.itemsize
     output = torch.empty(
-        (WORLD_SIZE * count + output_offset,), dtype=dtype, device=device
+        (world_size * count + output_offset,), dtype=dtype, device=device
     )[output_offset:]
     if alias:
         shard = output.narrow(0, rank * count, count)
@@ -41,8 +56,8 @@ def _gather_inputs(device, rank, size, dtype, alias, base=0, output_offset=0):
     return shard, output
 
 
-def _check_gather(output, base=0):
-    for rank, shard in enumerate(output.chunk(WORLD_SIZE)):
+def _check_gather(output, world_size, base=0):
+    for rank, shard in enumerate(output.chunk(world_size)):
         midpoint = shard.numel() // 2
         _assert_constant(shard[:midpoint], base + 3 * rank + 1)
         _assert_constant(shard[midpoint:], base + 3 * rank + 2)
@@ -64,7 +79,13 @@ def _check_exchange(received, sizes, rank):
         _assert_constant(chunk, 16 * peer + rank + 1)
 
 
-def _check_borrowed_windows(cp, group, workspace, device, rank):
+def _check_borrowed_windows(cp, group, workspace, device, rank, world_size):
+    # 64 total bytes pass the old CP4 test but leave only eight bytes per
+    # local shard on CP8. The multicast kernel derives width from the output.
+    with cp.projected_gather_buffer(
+        workspace.buffer, group, numel=64, dtype=torch.uint8
+    ) as projected:
+        assert (projected is None) == (world_size == 8)
     count = 12_288
     reference = torch.empty((0,), device=device)
     projected_stream = torch.cuda.Stream()
@@ -73,7 +94,7 @@ def _check_borrowed_windows(cp, group, workspace, device, rank):
     with (
         torch.cuda.stream(projected_stream),
         cp.projected_gather_buffer(
-            reference, group, numel=WORLD_SIZE * count, dtype=torch.float32
+            reference, group, numel=world_size * count, dtype=torch.float32
         ) as projected,
     ):
         assert projected is not None
@@ -87,7 +108,7 @@ def _check_borrowed_windows(cp, group, workspace, device, rank):
         with (
             torch.cuda.stream(main_stream),
             cp.borrowed_gather_buffer(
-                reference, group, numel=WORLD_SIZE * count, dtype=torch.bfloat16
+                reference, group, numel=world_size * count, dtype=torch.bfloat16
             ) as history,
         ):
             assert history is not None
@@ -95,19 +116,21 @@ def _check_borrowed_windows(cp, group, workspace, device, rank):
             local = history.narrow(0, rank * count, count)
             local.fill_(rank + 32)
             cp.gather_inplace(history, local, group)
-            for owner, part in enumerate(history.chunk(WORLD_SIZE)):
+            for owner, part in enumerate(history.chunk(world_size)):
                 _assert_constant(part, owner + 32)
-        for owner, part in enumerate(projected.chunk(WORLD_SIZE)):
+        for owner, part in enumerate(projected.chunk(world_size)):
             _assert_constant(part, owner + 64)
     main_stream.wait_stream(projected_stream)
 
 
-def _check_commit_session(cp, workspace, device, rank):
+def _check_commit_session(cp, workspace, device, rank, world_size):
     left = torch.full((4,), rank, dtype=torch.int32, device=device)
     right = torch.full_like(left, rank + 16)
     kv = torch.full((16, 512), rank + 32, dtype=torch.bfloat16, device=device)
     assert cp.try_commit_all_gather(left) is None
-    with cp.reuse_prefill_cp_collectives(device):
+    with cp.reuse_prefill_cp_collectives(device, cp_size=world_size + 1):
+        assert cp.try_commit_all_gather(left) is None
+    with cp.reuse_prefill_cp_collectives(device, cp_size=world_size):
         left_all = cp.try_commit_all_gather(left, retain=True)
         right_all = cp.try_commit_all_gather(right, retain=True)
         first = cp.try_commit_all_gather(kv)
@@ -115,18 +138,20 @@ def _check_commit_session(cp, workspace, device, rank):
         for view in (left_all, right_all, first):
             assert view.untyped_storage().data_ptr() == workspace.buffer.data_ptr()
         assert left_all.data_ptr() < right_all.data_ptr() < first.data_ptr()
-        for owner, part in enumerate(first.chunk(WORLD_SIZE)):
+        for owner, part in enumerate(first.chunk(world_size)):
             _assert_constant(part, owner + 32)
         kv.fill_(rank + 64)
         second = cp.try_commit_all_gather(kv)
         assert second is not None and second.data_ptr() == first.data_ptr()
-        for owner, part in enumerate(second.chunk(WORLD_SIZE)):
+        for owner, part in enumerate(second.chunk(world_size)):
             _assert_constant(part, owner + 64)
         # Private draft KV uses peer batch with an offset past both retained
         # metadata arrays. Check the real CUDA call as well as the results.
-        large_kv, _ = _gather_inputs(
-            device, rank, 40 * MIB, torch.bfloat16, False, base=72
-        )
+        local_bytes = workspace.buffer.nbytes // world_size + 16
+        large_kv = torch.empty(local_bytes // 2, dtype=torch.bfloat16, device=device)
+        midpoint = large_kv.numel() // 2
+        large_kv[:midpoint].fill_(73 + 3 * rank)
+        large_kv[midpoint:].fill_(74 + 3 * rank)
         runtime = workspace.runtime
         with patch.object(
             runtime, "cudaMemcpyBatchAsync", wraps=runtime.cudaMemcpyBatchAsync
@@ -135,20 +160,24 @@ def _check_commit_session(cp, workspace, device, rank):
         assert large is not None
         assert large.untyped_storage().data_ptr() != workspace.buffer.data_ptr()
         batch.assert_called_once()
-        offset = 2 * WORLD_SIZE * left.nbytes
-        assert batch.call_args.args[1] == [
-            address + offset for address in workspace.peer_addresses
+        offset = 2 * world_size * left.nbytes
+        peers = [*range(rank + 1, world_size), *range(rank + 1)]
+        assert batch.call_args.args[0] == [
+            large.data_ptr() + peer * large_kv.nbytes for peer in peers
         ]
-        assert batch.call_args.args[2] == [large_kv.nbytes] * WORLD_SIZE
-        _check_gather(large, base=72)
-        for owner, part in enumerate(left_all.chunk(WORLD_SIZE)):
+        assert batch.call_args.args[1] == [
+            workspace.peer_addresses[peer] + offset for peer in peers
+        ]
+        assert batch.call_args.args[2] == [large_kv.nbytes] * world_size
+        _check_gather(large, world_size, base=72)
+        for owner, part in enumerate(left_all.chunk(world_size)):
             _assert_constant(part, owner)
-        for owner, part in enumerate(right_all.chunk(WORLD_SIZE)):
+        for owner, part in enumerate(right_all.chunk(world_size)):
             _assert_constant(part, owner + 16)
     assert cp.try_commit_all_gather(left) is None
 
 
-def _check_ptds_stress(cp, group, workspace, device, rank):
+def _check_ptds_stress(cp, group, workspace, device, rank, world_size):
     main = torch.cuda.current_stream(device)
     side = torch.cuda.Stream(device)
     runtime = workspace.runtime
@@ -158,11 +187,11 @@ def _check_ptds_stress(cp, group, workspace, device, rank):
     iterations = 144
     local = [torch.empty(count, dtype=torch.uint8, device=device) for _ in range(2)]
     out = [
-        torch.empty(WORLD_SIZE * count, dtype=torch.uint8, device=device)
+        torch.empty(world_size * count, dtype=torch.uint8, device=device)
         for _ in range(2)
     ]
-    observed = torch.empty(iterations, WORLD_SIZE, 3, dtype=torch.uint8, device=device)
-    errors = torch.empty(iterations, WORLD_SIZE, dtype=torch.bool, device=device)
+    observed = torch.empty(iterations, world_size, 3, dtype=torch.uint8, device=device)
+    errors = torch.empty(iterations, world_size, dtype=torch.bool, device=device)
     assert main.cuda_stream == 0
     for i in range(iterations):
         slot = i % 2
@@ -172,7 +201,7 @@ def _check_ptds_stress(cp, group, workspace, device, rank):
             local[slot].fill_((i + 29 * rank) % 251)
             assert cp.try_all_gather_into(out[slot], local[slot], group)
             torch.cuda._sleep(40_000 * (1 + (2 * rank + i) % 4))
-            rows = out[slot].view(WORLD_SIZE, count)
+            rows = out[slot].view(world_size, count)
             observed[i, :, 0].copy_(rows[:, 0])
             observed[i, :, 1].copy_(rows[:, count // 2])
             observed[i, :, 2].copy_(rows[:, -1])
@@ -183,26 +212,27 @@ def _check_ptds_stress(cp, group, workspace, device, rank):
     main.wait_stream(side)
     expected = (
         torch.arange(iterations, device=device)[:, None]
-        + 29 * torch.arange(WORLD_SIZE, device=device)[None, :]
+        + 29 * torch.arange(world_size, device=device)[None, :]
     ) % 251
     assert torch.equal(observed, expected[:, :, None].expand_as(observed))
     assert not errors.any().item()
 
 
-def _worker(rank, rendezvous):
+def _worker(rank, rendezvous, world_size, *, local_rank=None):
     from rtp_llm.models_py.modules.dsv41 import _cp_collectives as cp
 
-    device = torch.device("cuda", rank)
+    device = torch.device("cuda", rank if local_rank is None else local_rank)
     torch.cuda.set_device(device)
     dist.init_process_group(
         "nccl",
-        init_method="file://" + rendezvous,
+        init_method="env://" if rendezvous is None else "file://" + rendezvous,
         rank=rank,
-        world_size=WORLD_SIZE,
+        world_size=world_size,
         timeout=timedelta(seconds=120),
     )
     try:
         group = dist.group.WORLD
+        splits_matrix = _exchange_splits(world_size)
         cold_free, total = torch.cuda.mem_get_info(device)
         warm = torch.ones(128, device=device)
         dist.all_reduce(warm)
@@ -210,12 +240,15 @@ def _worker(rank, rendezvous):
         del warm
         torch.cuda.empty_cache()
         before_workspace, _ = torch.cuda.mem_get_info(device)
-        model = SimpleNamespace(_cp_size=WORLD_SIZE, _cp_rank=rank)
+        model = SimpleNamespace(_cp_size=world_size, _cp_rank=rank)
         with patch.object(cp, "_get_group", return_value=group):
-            cp.initialize_prefill_cp_collectives(model, device, cp_rank=rank)
+            cp.initialize_prefill_cp_collectives(
+                model, device, cp_size=world_size, cp_rank=rank
+            )
             with cp.prefill_cp_collectives(model, device, eager=True):
                 workspace = cp._workspace(group)
                 assert workspace is not None, "symmetric backend did not enroll"
+                assert workspace.size == world_size
                 assert workspace.buffer.nbytes == 144 * MIB
                 assert workspace.projected is not None
                 assert workspace.projected.buffer.nbytes == 80 * MIB
@@ -231,7 +264,13 @@ def _worker(rank, rendezvous):
                 # Legacy barriers order the batch on the per-thread default stream.
                 assert torch.cuda.current_stream(device).cuda_stream == 0
                 local, gathered = _gather_inputs(
-                    device, rank, 84_483, torch.uint8, False, output_offset=1
+                    device,
+                    rank,
+                    world_size,
+                    84_483,
+                    torch.uint8,
+                    False,
+                    output_offset=1,
                 )
                 runtime = workspace.runtime
                 with (
@@ -249,25 +288,46 @@ def _worker(rank, rendezvous):
                 assert batch.call_args.args[-1] == runtime.cudaStreamPerThread
                 copy.assert_called_once()
                 assert all(call.args[-1] == 0 for call in copy.call_args_list)
-                _check_gather(gathered)
+                _check_gather(gathered, world_size)
                 del local, gathered
 
                 for size, dtype, alias in (
                     (5_406_720, torch.bfloat16, True),
                     (65_536, torch.float32, True),
                 ):
-                    local, gathered = _gather_inputs(device, rank, size, dtype, alias)
-                    assert cp.try_all_gather_into(gathered, local, group)
-                    _check_gather(gathered)
-                    del local, gathered
-
-                # Force the peer route with a short view of the real window.
-                with patch.object(workspace, "buffer", workspace.buffer[: 64 * 1024]):
                     local, gathered = _gather_inputs(
-                        device, rank, 16 * 1024 + 4, torch.uint8, True
+                        device, rank, world_size, size, dtype, alias
                     )
                     assert cp.try_all_gather_into(gathered, local, group)
-                    _check_gather(gathered)
+                    _check_gather(gathered, world_size)
+                    del local, gathered
+
+                # Exercise both ownership contracts using aligned sizes and
+                # rank-dependent source pointer alignment.
+                local, _ = _gather_inputs(
+                    device, rank, world_size, 4096, torch.uint8, False
+                )
+                private = cp.try_all_gather(local, group)
+                assert private is not None
+                with cp.borrowed_all_gather(local, group) as borrowed:
+                    assert borrowed is not None
+                    assert (
+                        borrowed.untyped_storage().data_ptr()
+                        == workspace.buffer.data_ptr()
+                    )
+                    _check_gather(borrowed, world_size)
+                _check_gather(private, world_size)
+                with cp.borrowed_all_gather(local[:-1], group) as unaligned:
+                    assert unaligned is None
+                del local, private, borrowed
+
+                # Force the peer route with a short view of the real window.
+                with patch.object(workspace, "buffer", workspace.buffer[: 32 * 1024]):
+                    local, gathered = _gather_inputs(
+                        device, rank, world_size, 16 * 1024 + 4, torch.uint8, True
+                    )
+                    assert cp.try_all_gather_into(gathered, local, group)
+                    _check_gather(gathered, world_size)
                     del local, gathered
 
                 # Keep the real allocation and shorten the tile in this test.
@@ -275,7 +335,9 @@ def _worker(rank, rendezvous):
                 # segment crossing that boundary in both layouts.
                 with patch.object(cp, "_WORKSPACE_BYTES", 16 * 1024):
                     for transpose in (False, True):
-                        splits = tuple(zip(*SPLITS)) if transpose else SPLITS
+                        splits = (
+                            tuple(zip(*splits_matrix)) if transpose else splits_matrix
+                        )
                         sent, rows, received, sizes = _exchange_inputs(
                             device, rank, splits, torch.bfloat16, width=1300
                         )
@@ -283,7 +345,7 @@ def _worker(rank, rendezvous):
                             received,
                             sent,
                             group,
-                            SPLITS,
+                            splits_matrix,
                             rows=rows,
                             transpose=transpose,
                         )
@@ -291,7 +353,11 @@ def _worker(rank, rendezvous):
                 empty = torch.empty((0, 12), dtype=torch.uint8, device=device)
                 empty_rows = torch.empty(0, dtype=torch.long, device=device)
                 assert cp.try_all_to_all_into(
-                    empty, empty, group, ((0,) * 4,) * 4, rows=empty_rows
+                    empty,
+                    empty,
+                    group,
+                    ((0,) * world_size,) * world_size,
+                    rows=empty_rows,
                 )
 
                 for rows in (1, 4, 32):
@@ -302,19 +368,25 @@ def _worker(rank, rendezvous):
                         device=device,
                     )
                     assert cp.try_all_reduce_sum_(contribution, group)
-                    _assert_constant(contribution, 4)
+                    _assert_constant(contribution, 4 if world_size > 2 else 1)
 
                 stream0, stream1 = torch.cuda.Stream(), torch.cuda.Stream()
                 local0, gathered0 = _gather_inputs(
-                    device, rank, 40 * MIB + 3, torch.uint8, False, output_offset=1
+                    device,
+                    rank,
+                    world_size,
+                    40 * MIB + 3,
+                    torch.uint8,
+                    False,
+                    output_offset=1,
                 )
                 # A full-capacity tile and an odd tail use the same addresses
                 # and must preserve the local shard already in the output.
                 local1, gathered1 = _gather_inputs(
-                    device, rank, 144 * MIB + 3, torch.uint8, True, base=32
+                    device, rank, world_size, 144 * MIB + 3, torch.uint8, True, base=32
                 )
                 sent, rows, received, sizes = _exchange_inputs(
-                    device, rank, SPLITS, torch.bfloat16
+                    device, rank, splits_matrix, torch.bfloat16
                 )
                 contribution = torch.full(
                     (1, 1024), rank + 1, dtype=torch.float32, device=device
@@ -326,7 +398,7 @@ def _worker(rank, rendezvous):
                     assert cp.try_all_gather_into(gathered0, local0, group)
                 with torch.cuda.stream(stream1):
                     assert cp.try_all_to_all_into(
-                        received, sent, group, SPLITS, rows=rows
+                        received, sent, group, splits_matrix, rows=rows
                     )
                 with torch.cuda.stream(stream0):
                     assert cp.try_all_reduce_sum_(contribution, group)
@@ -340,26 +412,36 @@ def _worker(rank, rendezvous):
                 ):
                     assert cp.try_all_gather_into(gathered1, local1, group)
                 assert [call.args[2] for call in batch.call_args_list] == [
-                    [144 * MIB] * (WORLD_SIZE - 1),
-                    [3] * (WORLD_SIZE - 1),
+                    [144 * MIB] * (world_size - 1),
+                    [3] * (world_size - 1),
                 ]
+                peers = [*range(rank + 1, world_size), *range(rank)]
+                for start, call in zip((0, 144 * MIB), batch.call_args_list):
+                    assert call.args[0] == [
+                        gathered1.data_ptr() + peer * local1.nbytes + start
+                        for peer in peers
+                    ]
+                    assert call.args[1] == [
+                        workspace.peer_addresses[peer] for peer in peers
+                    ]
                 assert all(
                     call.args[-1] == stream1.cuda_stream
                     for call in batch.call_args_list
                 )
                 producer.wait_stream(stream0)
                 producer.wait_stream(stream1)
-                _check_gather(gathered0)
+                _check_gather(gathered0, world_size)
                 _check_exchange(received, sizes, rank)
-                _assert_constant(contribution, 10)
-                _check_gather(gathered1, base=32)
-                _check_ptds_stress(cp, group, workspace, device, rank)
-                _check_borrowed_windows(cp, group, workspace, device, rank)
+                _assert_constant(contribution, world_size * (world_size + 1) // 2)
+                _check_gather(gathered1, world_size, base=32)
+                del local0, gathered0, local1, gathered1
+                _check_ptds_stress(cp, group, workspace, device, rank, world_size)
+                _check_borrowed_windows(cp, group, workspace, device, rank, world_size)
 
             assert cp._workspace(group) is None
             stream0.wait_stream(producer)
             with torch.cuda.stream(stream0):
-                _check_commit_session(cp, workspace, device, rank)
+                _check_commit_session(cp, workspace, device, rank, world_size)
             producer.wait_stream(stream0)
             with cp.prefill_cp_collectives(model, device, eager=False):
                 assert cp._workspace(group) is None
@@ -369,15 +451,16 @@ def _worker(rank, rendezvous):
         if receipt_dir:
             receipt = {
                 "rank": rank,
+                "cp_size": world_size,
                 "cold_device_used": total - cold_free,
                 "device_used_before_workspace": total - before_workspace,
                 "device_used_after_workspace": total - after_workspace,
                 "workspace_increment": before_workspace - after_workspace,
                 "both_signal_pads_distinct": True,
             }
-            (Path(receipt_dir) / f"cp-workspace-rank{rank}.json").write_text(
-                json.dumps(receipt)
-            )
+            (
+                Path(receipt_dir) / f"cp{world_size}-workspace-rank{rank}.json"
+            ).write_text(json.dumps(receipt))
         dist.barrier()
     finally:
         dist.destroy_process_group()
@@ -385,12 +468,67 @@ def _worker(rank, rendezvous):
 
 class V41CPCollectivesTest(unittest.TestCase):
     def test_workspace_gather_exchange_reduce_and_cross_stream_reuse(self):
-        self.assertGreaterEqual(torch.cuda.device_count(), WORLD_SIZE)
+        # Keep the existing four-GPU Bazel target as the default. An isolated
+        # host/container can opt into CP2 or CP8 with the same assertions.
+        from rtp_llm.models_py.modules.dsv41._cp_collectives import SUPPORTED_CP_SIZES
+
+        world_size = int(os.environ.get("DSV41_CP_TEST_WORLD_SIZE", "4"))
+        self.assertIn(world_size, SUPPORTED_CP_SIZES)
+        self.assertGreaterEqual(torch.cuda.device_count(), world_size)
         with tempfile.TemporaryDirectory(dir=os.environ.get("TEST_TMPDIR")) as tmp:
-            mp.spawn(_worker, args=(str(Path(tmp) / "rendezvous"),), nprocs=WORLD_SIZE)
+            mp.spawn(
+                _worker,
+                args=(str(Path(tmp) / "rendezvous"), world_size),
+                nprocs=world_size,
+            )
 
 
 class V41CPCollectivesInitializationTest(unittest.TestCase):
+    def test_fabric_domain_preserves_binary_uuid_and_partition(self):
+        import ctypes
+
+        import pynvml
+
+        from rtp_llm.models_py.modules.dsv41 import _cp_collectives as cp
+
+        cluster = bytes(range(16))
+        info = pynvml.c_nvmlGpuFabricInfoV_t()
+        ctypes.memmove(
+            ctypes.addressof(info) + type(info).clusterUuid.offset,
+            cluster,
+            len(cluster),
+        )
+        info.cliqueId = 7
+        info.status = pynvml.NVML_SUCCESS
+        info.state = pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
+        sm = Mock()
+        sm.get_backend.return_value = "CUDA"
+        with (
+            patch.object(pynvml, "nvmlInit"),
+            patch.object(pynvml, "nvmlShutdown"),
+            patch.object(pynvml, "nvmlDeviceGetHandleByUUID"),
+            patch.object(pynvml, "c_nvmlGpuFabricInfoV_t", return_value=info),
+            patch.object(pynvml, "nvmlDeviceGetGpuFabricInfoV"),
+        ):
+            self.assertEqual(cp._fabric_domain(sm, "cuda", "local"), (cluster, 7))
+            info.state = 0
+            self.assertIsNone(cp._fabric_domain(sm, "cuda", "local"))
+
+    def test_inaccessible_fabric_skips_rendezvous(self):
+        from rtp_llm.models_py.modules.dsv41 import _cp_collectives as cp
+
+        sm, group = Mock(), Mock()
+        with (
+            patch.object(cp, "_all", return_value=[True, True]),
+            patch.object(cp, "_can_import_fabric_peers", return_value=False) as probe,
+        ):
+            self.assertEqual(
+                cp._allocate_window(sm, group, "cuda", 1024, check_fabric=True),
+                (None, None),
+            )
+        probe.assert_called_once_with(group, sm.empty.return_value)
+        sm.rendezvous.assert_not_called()
+
     def test_target_creation_registers_the_retained_model(self):
         from rtp_llm.models.deepseek_v41 import DeepSeekV41, DeepSeekV41DSpark
 
@@ -427,23 +565,28 @@ class V41CPCollectivesInitializationTest(unittest.TestCase):
 
         device = torch.device("cuda", 3)
         for role, cp_size, world_size, eligible in (
+            (RoleType.PREFILL, 2, 2, True),
             (RoleType.PREFILL, 4, 4, True),
+            (RoleType.PREFILL, 8, 8, True),
             (RoleType.DECODE, 4, 4, False),
             (RoleType.PDFUSION, 4, 4, False),
-            (RoleType.PREFILL, 8, 8, False),
+            (RoleType.PREFILL, 1, 1, False),
+            (RoleType.PREFILL, 3, 3, False),
             (RoleType.PREFILL, 4, 8, False),
         ):
             with self.subTest(role=role, cp_size=cp_size, world_size=world_size):
                 owner = SimpleNamespace(
                     _prefill_cp_size=cp_size,
                     parallelism_config=SimpleNamespace(
-                        role_type=role, tp_rank=2, world_size=world_size
+                        role_type=role, tp_rank=1, world_size=world_size
                     ),
                 )
                 with patch.object(cp, "initialize_prefill_cp_collectives") as init:
                     DeepSeekV41Model.initialize_prefill_cp_collectives(owner, device)
                 if eligible:
-                    init.assert_called_once_with(owner, device, cp_rank=2)
+                    init.assert_called_once_with(
+                        owner, device, cp_size=cp_size, cp_rank=1
+                    )
                 else:
                     init.assert_not_called()
 
@@ -459,6 +602,7 @@ class V41CPCollectivesInitializationTest(unittest.TestCase):
                     Mock(
                         device=device,
                         group=group,
+                        size=4,
                         buffer=SimpleNamespace(nbytes=144 * MIB),
                         projected=None,
                     )
@@ -468,6 +612,7 @@ class V41CPCollectivesInitializationTest(unittest.TestCase):
                 model = SimpleNamespace(_cp_size=4)
                 with (
                     patch.object(cp.dist, "is_initialized", return_value=True),
+                    patch.object(cp.dist, "get_world_size", return_value=4),
                     patch.object(cp, "_get_group", return_value=group) as get_group,
                     patch.object(cp, "_initialize", return_value=workspace) as init,
                     patch.object(torch.cuda, "device", return_value=nullcontext()),
@@ -478,7 +623,9 @@ class V41CPCollectivesInitializationTest(unittest.TestCase):
                     get_group.assert_not_called()
                     init.assert_not_called()
                     for _ in range(2):
-                        cp.initialize_prefill_cp_collectives(model, device, cp_rank=2)
+                        cp.initialize_prefill_cp_collectives(
+                            model, device, cp_size=4, cp_rank=2
+                        )
                     for eager, cp_size, forward_device, expected in (
                         (True, 4, device, workspace),
                         (False, 4, device, None),

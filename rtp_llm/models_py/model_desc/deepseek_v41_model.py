@@ -66,21 +66,23 @@ class DeepSeekV41Model(DeepSeekV4Model):
 
     def initialize_prefill_cp_collectives(self, device: torch.device) -> None:
         """Reserve the target's symmetric workspace before KV cache sizing."""
-        parallelism = self.parallelism_config
-        if (
-            parallelism.role_type != RoleType.PREFILL
-            or self._prefill_cp_size != 4
-            # Torch 2.11 sequences CUDA symmetric-memory rendezvous globally.
-            # Keep the histories identical before Engram or Mega MoE setup.
-            or parallelism.world_size != 4
-        ):
-            return
         from rtp_llm.models_py.modules.dsv41._cp_collectives import (
+            SUPPORTED_CP_SIZES,
             initialize_prefill_cp_collectives,
         )
 
+        parallelism = self.parallelism_config
+        cp_size = self._prefill_cp_size
+        if (
+            parallelism.role_type != RoleType.PREFILL
+            or cp_size not in SUPPORTED_CP_SIZES
+            # Torch 2.11 sequences CUDA symmetric-memory rendezvous globally.
+            # Keep the histories identical before Engram or Mega MoE setup.
+            or parallelism.world_size != cp_size
+        ):
+            return
         initialize_prefill_cp_collectives(
-            self, device, cp_rank=int(parallelism.tp_rank)
+            self, device, cp_size=cp_size, cp_rank=int(parallelism.tp_rank)
         )
 
     @property
