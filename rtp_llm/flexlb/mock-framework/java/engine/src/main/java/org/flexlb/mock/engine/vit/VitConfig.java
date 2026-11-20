@@ -11,10 +11,11 @@ import org.flexlb.mock.protocol.ConfigInput;
  * Reads and validates the ViT model and Engine settings.
  */
 public record VitConfig(String id, int patch, int merge, int hidden, int minPixels, int maxTokens, int batchSize,
-                           int waitMs, int concurrency, int queueSize, boolean skipDownload, int timeoutMs, int maxFileSizeKb, Map<String,String> downloadHeaders, long deviceBytes, long hostBytes, long hashBytes,
+                           int waitMs, int concurrency, int queueSize, boolean skipDownload, int timeoutMs, int maxFileSizeKb, Map<String,String> downloadHeaders, VitDownloadRouting downloadRouting, long deviceBytes, long hostBytes, long hashBytes,
                            ComputeModel compute, ObjectNode effective) {
     private static final Set<String> NATIVE = Set.of("patch_size", "downsample_ratio", "hidden_size", "min_pixels", "max_image_tokens", "mm_timeout_ms", "mm_image_max_file_size_kb", "download_headers", "gpu_max_batch_size", "gpu_batch_wait_ms", "vit_concurrency", "vit_max_queue_size",
-        "mm_cache_gpu_max_bytes", "mm_cache_cpu_max_bytes", "mm_hash_key_cache_max_bytes");
+        "mm_cache_gpu_max_bytes", "mm_cache_cpu_max_bytes", "mm_hash_key_cache_max_bytes",
+        "oss_internal_region_allowlist", "enable_oss_internal_rewrite");
 
     public static VitConfig fromEnvironment(String id, Map<String, String> env) throws Exception {
         var values = new HashMap<>(env);
@@ -49,7 +50,7 @@ public record VitConfig(String id, int patch, int merge, int hidden, int minPixe
             integer(config,"min_pixels",null,0,Integer.MAX_VALUE), integer(config,"max_image_tokens",null,4,Integer.MAX_VALUE),
             batchSize, integer(config,"gpu_batch_wait_ms",10,0,Integer.MAX_VALUE), concurrency, Math.addExact(concurrency,pending),
             bool(config,"mock.vit.skip.download",false), signedInteger(config,"mm_timeout_ms",120000),
-            signedInteger(config,"mm_image_max_file_size_kb",102400), headers(config),
+            signedInteger(config,"mm_image_max_file_size_kb",102400), headers(config), VitDownloadRouting.load(config),
             number(config,"mm_cache_gpu_max_bytes",2147483648L), number(config,"mm_cache_cpu_max_bytes",2147483648L), number(config,"mm_hash_key_cache_max_bytes",268435456L),compute,effective);
         effective.put("patch_size", result.patch).put("downsample_ratio", result.merge)
             .put("hidden_size", result.hidden).put("min_pixels", result.minPixels).put("max_image_tokens", result.maxTokens)

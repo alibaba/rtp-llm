@@ -47,8 +47,6 @@ def test_compiles_without_java_catalog_and_read_can_have_no_assertion(
         lambda d: d["environment"]["prefill"]["deployment"].update(replicas=True),
         lambda d: d["phases"][0].update(parallel=True),
         lambda d: d["phases"][0]["steps"][0].update(run="background"),
-        lambda d: d["phases"][0]["steps"][0].update(interface="frontend/traffic/run"),
-        lambda d: d["phases"][0]["steps"][0].update(within="-1s"),
         lambda d: d["phases"][0]["steps"][1]["args"].update(
             targets={"ref": "leader.nodes"}
         ),
@@ -60,7 +58,6 @@ def test_compiles_without_java_catalog_and_read_can_have_no_assertion(
         lambda d: d["phases"][0]["steps"][2]["args"].update(range=["0s", "0s"]),
         lambda d: d["phases"][0]["steps"][2]["args"].update(range="all"),
         lambda d: d["phases"][0]["steps"][2].update(expect={"count": 1}),
-        lambda d: d["phases"][0]["steps"][2].update(expect={"gte": 2, "lte": 1}),
         lambda d: d["phases"][0]["steps"][3].update(
             expect={"gte": {"ref": "steps.leader"}}
         ),
@@ -73,6 +70,28 @@ def test_rejects_invalid_case_before_execution(case_data, compile_data, change):
     case_data["environment"]["prefill"]["deployment"] = {}
     change(case_data)
     with pytest.raises(ConfigError):
+        compile_data(case_data)
+
+
+@pytest.mark.parametrize(
+    "step_index, field, value, reason",
+    [
+        (
+            0,
+            "interface",
+            "frontend/traffic/run",
+            "Case interface: 'frontend/traffic/run'",
+        ),
+        (0, "within", "-1s", "Duration out of range: '-1s'"),
+        (2, "expect", {"gte": 2, "lte": 1}, "lower bound exceeds upper bound"),
+    ],
+    ids=["unknown-interface", "negative-within", "inverted-expectation"],
+)
+def test_rejects_invalid_step_for_the_expected_reason(
+    case_data, compile_data, step_index, field, value, reason
+):
+    case_data["phases"][0]["steps"][step_index][field] = value
+    with pytest.raises(ConfigError, match=reason):
         compile_data(case_data)
 
 

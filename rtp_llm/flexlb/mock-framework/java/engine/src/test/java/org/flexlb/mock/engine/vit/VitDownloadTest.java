@@ -133,7 +133,8 @@ class VitDownloadTest {
                         && line.contains("status=\"error\"") && line.endsWith(" 4.0")));
                     assertTrue(snapshot.lines().anyMatch(line->line.startsWith("py_rtp_vit_request_rt_count{")
                         && line.contains("status=\"success\"") && line.endsWith(" 2.0")));
-                    assertTrue(snapshot.contains("mm_type=\"image\",model=\"deepseek_v41\""));
+                    // The invalid image also downloads successfully before decoding fails.
+                    assertEquals(2,VitTest.sample(snapshot,"rtp_llm_vit_image_fetch_rt_us_count"));
                     assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_embedding_rt_count"));
                     assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_download_rt_count"));
                     assertEquals(1,VitTest.sample(snapshot,"py_rtp_vit_preprocess_rt_count"));

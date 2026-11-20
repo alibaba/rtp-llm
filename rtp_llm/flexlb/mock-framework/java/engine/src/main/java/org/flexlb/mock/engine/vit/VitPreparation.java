@@ -197,6 +197,7 @@ final class VitPreparation implements AutoCloseable {
             catch(IllegalArgumentException error) { throw MultimodalProtocol.invalid("Invalid image URL"); }
             if(uri.getHost()==null || (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())))
                 throw MultimodalProtocol.invalid("Image download requires an HTTP(S) URL");
+            uri = config.downloadRouting().endpoint(uri);
             // DSV4.1 load_image_source caps original media at 10 MiB, even when the generic file limit is disabled.
             final long maxBytes=config.maxFileSizeKb()>0 ? Math.min(10L*1024*1024,config.maxFileSizeKb()*1024L) : 10L*1024*1024;
             for(int attempt=0; ; attempt++) {

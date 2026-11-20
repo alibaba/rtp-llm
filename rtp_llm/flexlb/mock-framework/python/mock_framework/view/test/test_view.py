@@ -196,9 +196,7 @@ def test_running_output_is_rejected(completed):
 
 
 def test_case_without_view_saves_framework_default_dashboard(tmp_path):
-    case = compile_case(
-        ROOT / "cases/master_ha_failover/case.yaml", StepRegistry.standard()
-    )
+    case = compile_case(ROOT / "cases/basic/case.yaml", StepRegistry.standard())
     assert case.view == ROOT / "views/default.json"
     records = StepTrace(tmp_path / "result", case, {})
     records.close({"status": "PASS"})

@@ -41,6 +41,7 @@ final class RpcMessages {
     static TaskInfoPB toTaskInfo(EngineScheduler.Task task) {
         var result = TaskInfoPB.newBuilder().setRequestId(task.requestId()).setBatchId(task.batchId())
             .setInputLength(task.inputLength()).setPrefixLength(task.prefixLength()).setPriority(task.priority())
+            .setPrefixLengthValid(task.prefixLengthValid())
             .setDpRank(0).setPhase(switch (task.phase()) {
                 case PENDING -> TaskPhase.TASK_PHASE_PENDING;
                 case RECEIVED -> TaskPhase.TASK_PHASE_RECEIVED;

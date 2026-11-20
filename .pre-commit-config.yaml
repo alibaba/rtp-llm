@@ -11,6 +11,12 @@ repos:
     # Formatters
   - repo: local
     hooks:
+      - id: mock-staged-datasets
+        name: Reject staged Mock replay datasets
+        entry: bash rtp_llm/flexlb/mock-framework/scripts/check-staged-datasets.sh
+        language: system
+        always_run: true
+        pass_filenames: false
       - id: flexlb-java-checker-tests
         name: Test FlexLB Java checkers
         entry: python -m unittest discover -s rtp_llm/flexlb/tools -p test_*.py

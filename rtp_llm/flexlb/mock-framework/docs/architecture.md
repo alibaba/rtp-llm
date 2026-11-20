@@ -24,7 +24,7 @@ flowchart LR
     result --> view["View"]
 ```
 
-图中展示 Frontend 按路由直接向 P 提交请求的路径。Master 也可以先向 P 批量入队，Frontend 再直连 P 调用 Fetch。每个 Master、P、D、V、Frontend 和 ZooKeeper 实例各有自己的 JVM。Master 使用生产调度与 ZooKeeper 选举。Whale 上的 Mock Engine 由平台管理实例和发现。[组件参考](component-reference.md) · [Whale 镜像与启动](whale-engine.md)
+图中展示 Frontend 按路由直接向 P 提交请求的路径。Master 也可以先向 P 批量入队，Frontend 再直连 P 调用 Fetch。每个 Master、P、D、V、Frontend 和 ZooKeeper 实例各有自己的 JVM。Master 使用生产调度与 ZooKeeper 选举。Whale 上的 Mock Engine 由平台管理实例和发现。[Mock 配置参考](configuration.md) · [Whale 镜像与启动](whale-engine.md)
 
 ## Case 如何执行
 
@@ -106,7 +106,7 @@ Case 的 `frontend/start/playback` 通过 Python 调用 Java frontend0 的 `fron
 }
 ```
 
-带图记录保存媒体 ID、插入位置及参考展开长度。插入位置按图片前的纯文本 token 数表示。Frontend 插入占位 token，先向 Master 选 V 并读取 ViT 元数据，再用实际展开长度和行 hash 生成路由键。参考长度不一致时记告警，继续使用 ViT 的结果。基础块和 CP 由回放时的 Frontend 与 Prefill 配置共同决定。[多模态与 CP 配置](component-reference.md#prefill-cp)
+带图记录保存媒体 ID、插入位置及参考展开长度。插入位置按图片前的纯文本 token 数表示。Frontend 插入占位 token，先向 Master 选 V 并读取 ViT 元数据，再用实际展开长度和行 hash 生成路由键。参考长度不一致时记告警，继续使用 ViT 的结果。基础块和 CP 由回放时的 Frontend 与 Prefill 配置共同决定。[Prefill CP 配置](configuration.md#prefill)
 
 请求可以分别记录实际输出量和上限。实际量为正时用作本次生成上限并设置 `ignore_eos`。缺少实际量时使用记录的请求上限，Decode 可在该上限内按高斯分布采样输出长度。两项都缺省时使用 `fallback_max_output_tokens`，未提供该参数则启动失败。
 
@@ -140,9 +140,9 @@ flowchart LR
 
 每个实例同时至多执行一个 Forward。调度在短锁内提交状态，计算等待和网络发送在锁外。D 请求可连续参加多轮，输出发送进度不参与选批。请求取消或超时后不再提交该请求的结果。即使整批请求都已终止，已开始的 Forward 仍按原定时长执行并持有资源引用，结束后才开始下一批。实例关闭时会终止在途模拟计算。迟到回调按执行对象和请求句柄核验。
 
-RTP P 默认使用 `RtpFifoScheduler`，由 Scheduler 从单请求自主合批。显式 `group` 模式使用 `RtpPrefillGroupScheduler`，一次提交完整组，保留成员级结果、超时和取消。组在当前轮放不下的成员留待后续调度，D 始终按单请求准入。内部按请求统计 waiting、loading、running、ready。原生状态把 waiting、loading、ready 合并为 waiting，running 包含两轮计算之间仍留在执行集合的 D 请求。[RTP 节点参数](component-reference.md#engine-配置规则)
+RTP P 默认使用 `RtpFifoScheduler`，由 Scheduler 从单请求自主合批。显式 `group` 模式使用 `RtpPrefillGroupScheduler`，一次提交完整组，保留成员级结果、超时和取消。组在当前轮放不下的成员留待后续调度，D 始终按单请求准入。内部按请求统计 waiting、loading、running、ready。原生状态把 waiting、loading、ready 合并为 waiting，running 包含两轮计算之间仍留在执行集合的 D 请求。[Prefill 配置](configuration.md#prefill)
 
-ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任务和发布，`VitScheduler` 执行合批，`VitCache` 管同键共享和驻留淘汰。Mock 内部使用模拟形状、每张图的 seed 和 split size。真实 Frontend 通过原生 RPC 获取逐行 hash。几何、下载、缓存及负载模型见 [ViT 与输入准备](component-reference.md#vit-配置)。
+ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任务和发布，`VitScheduler` 执行合批，`VitCache` 管同键共享和驻留淘汰。Mock 内部使用模拟形状、每张图的 seed 和 split size。真实 Frontend 通过原生 RPC 获取逐行 hash。几何和下载参数见 [ViT 配置](configuration.md#vit)。
 
 ### KV 准备、容量与回收
 
@@ -150,7 +150,7 @@ ViT 使用自己的图片准备与合批循环。`VitPreparation` 管在途任�
 
 初始 `KvCacheManager.prepare()` 同步匹配并分配。本地成功返回 `Ready` 和 lease。临时容量不足返回可重试的 `Failed`，由失败对象在容量或索引变化后重试。超过单请求容量则终止，已经进入生成的 D 请求在 KV 增长失败时也终止。D 的 P/D LOAD 是另一项协议依赖，完成前不会进入生成。
 
-成功结束时只发布 prompt 的完整块。缓存保留与驻留使用逻辑额度，Host 到 Device 的恢复按瞬时处理。KVCM Reporter 消费有效块变更、快照和心跳，处理的是元数据。P → D 通过原生 RPC 交接输入长度和完整 prompt block keys，D → P 返回生成进度。[容量配置](component-reference.md#kv-容量和-prefill-cp) · [KVCM 接线](component-reference.md#dsv41-engine-与-kvcm-接线)
+成功结束时只发布 prompt 的完整块。缓存保留与驻留使用逻辑额度，Host 到 Device 的恢复按瞬时处理。KVCM Reporter 消费有效块变更、快照和心跳，处理的是元数据。P → D 通过原生 RPC 交接输入长度和完整 prompt block keys，D → P 返回生成进度。[Prefill 容量配置](configuration.md#prefill) · [Decode 容量配置](configuration.md#decode)
 
 ### P/D 交接和输出
 
@@ -193,4 +193,10 @@ WorkerStatus 从接入会话与 Scheduler 采集任务快照，`TaskHistory` 提
 
 调度器管理队列和状态转换，`EngineLoop` 驱动 Forward。每个 `LLMMockEngine` 持有并采集自己的 `RtpMetrics`，RTP Scheduler 在组批、Forward 完成和请求结束等时点记录数据。采集时直接读取调度队列和 KV 状态，再合并 RPC 指标。独立验证调度策略时可从 `LLMMockEngine.start(..., EngineScheduler.Factory)` 注入调度器。
 
-Java 测试覆盖组件状态与原生 RPC，Python 测试覆盖编译、协调、采集和跨语言接线。完整实验用 Case YAML 定义并通过 `mock-case run` 执行，构建及检查命令见 [使用说明](../README.md#开发检查与详细文档)。
+### Java 与 Python 的改动边界
+
+- **Java** 管回放、原生 RPC、调度、计算模拟和 KV。模型默认值和状态转换在所属组件内维护。改取消、超时或关闭时，验证请求只有一次终态、资源能回收、迟到回调不会恢复已结束的请求。改 proto、业务错误码、P/D 交接或 cache key 时，核对生产调用方和协议兼容测试。
+- **Python** 管 Case 编译、动作、进程编排、发现、采集和 View。动作复用 `StepContext` 的查询和剩余预算，按角色管理实例。改 Runner 公共流程时，验证超时、后台失败、写操作回执未知和进程回收。改已有 Case 接口或 `result.json`、`gates.jsonl` 等记录格式时，核对现有 Case 和 View 的读取路径。
+- **跨语言接线** 涉及启动配置、就绪端点或回放结果时，同时核对 Java 产出和 Python 消费，并用实际启动组件的测试覆盖。
+
+完整实验通过 `mock-case run` 执行。[构建及检查命令](../README.md#开发检查与详细文档)
