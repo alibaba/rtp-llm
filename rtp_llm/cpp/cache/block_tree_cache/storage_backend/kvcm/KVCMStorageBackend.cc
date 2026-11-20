@@ -1517,6 +1517,7 @@ public:
     struct ReadExecution {
         std::string                           trace_id;
         std::shared_ptr<TransferBufferSafety> proof;
+        std::shared_ptr<std::atomic<bool>>    recovery_cancelled;
     };
     using ReadExecutionPtr = std::shared_ptr<ReadExecution>;
 
@@ -1564,7 +1565,7 @@ public:
             RTP_LLM_LOG_WARNING("KVCM READ completion forget rejected rank=%ld trace=%s reason=empty_trace",
                                 static_cast<long>(parallelism_config_.world_rank), trace_id.c_str());
         } else if (released && result == TransferTaskRegistry::ForgetResult::RUNNING &&
-                   read_registry_->readExited(trace_id)) {
+                   read_registry_->blockReadRecoveryPublication(trace_id)) {
             // Keep unproven evidence until unfreeze. A missing record can be taken
             // as evidence that the READ never started.
             try {
@@ -1601,7 +1602,13 @@ public:
         execution->trace_id = request.trace_id();
         execution->proof = std::make_shared<TransferBufferSafety>(
             [registry = read_registry_, trace_id = execution->trace_id] { registry->finish(trace_id, true); });
-        if (!read_registry_->begin(execution->trace_id)) {
+        if (kvcm::kSupportsReadRecoveryCancellation && kv_cache_config_.block_tree_frozen_recovery_interval_ms > 0 &&
+            parallelism_config_.role_type != RoleType::DECODE &&
+            std::all_of(request.uris().begin(), request.uris().end(),
+                        [](const auto& uri) { return uri.compare(0, 7, "pace://") == 0; })) {
+            execution->recovery_cancelled = std::make_shared<std::atomic<bool>>(false);
+        }
+        if (!read_registry_->begin(execution->trace_id, execution->recovery_cancelled)) {
             reject("duplicate_trace");
             return nullptr;
         }
@@ -1757,7 +1764,7 @@ public:
                 *source_may_be_touched = unknown;
         });
         const auto result = executeTagTransfers(request.op(), operation.tags, operation.blocks,
-            operation.uris, operation.buffers, response, unknown, nullptr, task, &request, proof);
+            operation.uris, operation.buffers, response, unknown, nullptr, task, &request, proof, execution.get());
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
@@ -2256,11 +2263,13 @@ private:
                                          bool* transfer_attempted,
                                          const TransferTask& task,
                                          const RemoteOperationRequestPB* request = nullptr,
-                                         kvcm::PayloadDispatchProof* proof = nullptr) {
+                                         kvcm::PayloadDispatchProof* proof = nullptr,
+                                         const ReadExecution* execution = nullptr) {
         auto                                 trace_info = makeTransferTraceInfo(blocks, request);
         if (operation == REMOTE_OPERATION_READ && request && kv_cache_config_.block_tree_frozen_recovery_interval_ms > 0 &&
             parallelism_config_.role_type != RoleType::DECODE) {
-            kvcm::setSdkReadExecutionId(trace_info, request->trace_id());
+            kvcm::setSdkReadExecutionId(trace_info, request->trace_id(),
+                                       execution ? execution->recovery_cancelled : nullptr);
         }
         auto                                 completion = kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED;
         RtpLLMRemoteCacheSDKMetricsCollector collector;
@@ -2337,7 +2346,8 @@ private:
                                        bool* transfer_attempted,
                                        const TransferTask& task,
                                        const RemoteOperationRequestPB* request = nullptr,
-                                       kvcm::PayloadDispatchProof* proof = nullptr) {
+                                       kvcm::PayloadDispatchProof* proof = nullptr,
+                                       const ReadExecution* execution = nullptr) {
         if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return TransferResult::FAILED;
@@ -2348,7 +2358,8 @@ private:
             // request unchanged; the SDK selects normal or gather/scatter mode.
             const auto result =
                 executeClientTransfer(operation, registration_tags_.front(), blocks, uris, buffers, actual_uris,
-                                      response, source_may_be_touched, transfer_attempted, task, request, proof);
+                                      response, source_may_be_touched, transfer_attempted, task, request, proof,
+                                      execution);
             if (result != TransferResult::SUCCESS) {
                 return result;
             }

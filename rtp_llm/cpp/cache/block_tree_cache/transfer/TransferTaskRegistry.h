@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <iterator>
@@ -8,6 +9,7 @@
 #include <limits>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <string>
@@ -56,13 +58,13 @@ public:
 
     // Insert RUNNING without replacing an existing execution's evidence.
     // False reports an empty or already registered trace to the caller.
-    bool begin(const std::string& trace_id) {
+    bool begin(const std::string& trace_id, std::shared_ptr<std::atomic<bool>> read_recovery_cancelled = {}) {
         if (trace_id.empty()) {
             logEvent("begin", trace_id, State::UNKNOWN, "invalid");
             return false;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto inserted = records_.emplace(trace_id, Record{State::RUNNING});
+        const auto inserted = records_.emplace(trace_id, Record{State::RUNNING, false, std::move(read_recovery_cancelled)});
         if (!inserted.second && inserted.first->second.state == State::REJECTED) {
             // The fence has intercepted its sole possible late execution. Consume
             // it atomically, but reject this arrival without admitting any I/O.
@@ -118,15 +120,23 @@ public:
             it->second.read_exited = true;
     }
 
-    bool readExited(const std::string& trace_id) const {
+    // Called only for an already force-released READ. SDKs without cancellation
+    // support can discard only after the original call has exited.
+    bool blockReadRecoveryPublication(const std::string& trace_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = records_.find(trace_id);
-        return it != records_.end() && it->second.read_exited;
+        if (it == records_.end() || it->second.state != State::RUNNING)
+            return true;
+        const auto& record = it->second;
+        if (!record.read_recovery_cancelled)
+            return record.read_exited;
+        record.read_recovery_cancelled->store(true);
+        return true;
     }
 
-    // The KVCM exception requires an already released READ, followed by SDK
-    // recovery discard after the READ exited. Missing admission fences survive
-    // all cleanup, and late completions cannot recreate an erased record.
+    // KVCM may forget an already force-released READ once SDK recovery publication
+    // is blocked and the SDK entry was discarded. Preserve missing admission
+    // fences. A late completion cannot recreate an erased record.
     ForgetResult forget(const std::string& trace_id, bool read_recovery_discarded = false) {
         if (trace_id.empty()) {
             logEvent("forget", trace_id, State::UNKNOWN, "invalid");
@@ -138,12 +148,15 @@ public:
             logEvent("forget", trace_id, State::UNKNOWN, "already_missing");
             return ForgetResult::DONE;
         }
-        const auto state = it->second.state;
+        const auto& record = it->second;
+        const auto state = record.state;
         if (state == State::REJECTED) {
             logEvent("forget", trace_id, State::REJECTED, "fence_retained_cleanup_acknowledged");
             return ForgetResult::DONE;
         }
-        if (state != State::BUFFER_SAFE && !(read_recovery_discarded && it->second.read_exited)) {
+        const bool discarded = read_recovery_discarded &&
+            (record.read_exited || (record.read_recovery_cancelled && record.read_recovery_cancelled->load()));
+        if (state != State::BUFFER_SAFE && !discarded) {
             logEvent("forget", trace_id, state, "retained");
             return ForgetResult::RUNNING;
         }
@@ -251,7 +264,8 @@ public:
 private:
     struct Record {
         State state;
-        bool  read_exited{false};
+        bool read_exited{false};
+        std::shared_ptr<std::atomic<bool>> read_recovery_cancelled{};
     };
 
     struct MissingRecord {

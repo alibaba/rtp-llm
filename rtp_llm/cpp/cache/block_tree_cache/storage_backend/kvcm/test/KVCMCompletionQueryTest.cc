@@ -4,6 +4,7 @@
 #include <grpcpp/grpcpp.h>
 #include <thread>
 
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
@@ -230,7 +231,7 @@ TEST(KVCMCompletionQueryTest, LocalReadCleanupAfterSafeCompletionOrUnfreeze) {
                 ASSERT_EQ(frozen.size(), 1u);
                 EXPECT_EQ(cleanup->size(), 0u);
                 EXPECT_FALSE(worker->manager->queryTransferCompletion(frozen.front()->execution(), 2000).all_safe);
-                ASSERT_TRUE(frozen.front()->unfreeze());
+                ASSERT_TRUE(frozen.front()->unfreeze(/*forced=*/true));
             }
             EXPECT_TRUE(worker->manager->frozenTasks().empty());
             EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{"block_tree_read_1"}).front(),
@@ -428,6 +429,17 @@ TEST(KVCMCompletionQueryTest, RpcBatchForgetKeepsRunningReadsAndSeparatesTraceNa
     forget->add_keys();
     for (const bool completed : {false, true}) {
         if (completed) {
+            if (kvcm::kSupportsReadRecoveryCancellation) {
+                FunctionRequestPB release;
+                auto* released = release.mutable_completion_forget();
+                released->set_kvcm_read_released(true);
+                released->add_keys()->set_kvcm_trace_id("71");
+                FunctionResponsePB response;
+                ASSERT_TRUE(rpc(release, response).ok());
+                ASSERT_EQ(response.completion_forget().entries_size(), 1);
+                EXPECT_EQ(response.completion_forget().entries(0).status(), TRANSFER_FORGET_DONE);
+                EXPECT_EQ(running.waitFor(0ms), std::future_status::timeout);
+            }
             gate->release();
             ASSERT_EQ(running.waitFor(5s), std::future_status::ready);
             const auto result = running.get();
@@ -511,6 +523,7 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     auto cleanup = std::make_shared<TransferCompletionCleanup>();
     backend->setCompletionCleanup(cleanup);
     auto forget = [coordinator](const auto& target, const auto& traces, int timeout_ms) {
+        EXPECT_FALSE(target.kvcm_read_released);
         return coordinator->forgetTransferCompletion(target, traces, timeout_ms);
     };
     const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://rank-0"},

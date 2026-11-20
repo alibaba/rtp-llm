@@ -162,7 +162,7 @@ void FrozenTask::freeze() noexcept {
     state_        = State::FROZEN;
 }
 
-bool FrozenTask::unfreeze() noexcept {
+bool FrozenTask::unfreeze(bool forced) noexcept {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ != State::FROZEN) {
@@ -175,8 +175,8 @@ bool FrozenTask::unfreeze() noexcept {
     for (const auto& target : targets_) {
         target.release();
     }
-    // Only this path can authorize cleanup of an unproven KVCM READ.
-    cleanup_.submit(/*kvcm_read_released=*/std::holds_alternative<std::string>(execution_.trace_id));
+    // Authorize discarding unproven KVCM recovery only after a forced release.
+    cleanup_.submit(/*kvcm_read_released=*/forced && std::holds_alternative<std::string>(execution_.trace_id));
     {
         std::lock_guard<std::mutex> lock(mutex_);
         released_at_us_ = wallTimeUs();

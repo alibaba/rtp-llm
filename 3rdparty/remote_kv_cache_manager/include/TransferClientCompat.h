@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -32,14 +33,29 @@ struct HasDiscardReadRecovery: std::false_type {};
 template<typename Client>
 struct HasDiscardReadRecovery<Client, std::void_t<decltype(&Client::DiscardReadRecovery)>>: std::true_type {};
 
+template<typename Trace, typename = void>
+struct HasReadRecoveryCancellation: std::false_type {};
+
+template<typename Trace>
+struct HasReadRecoveryCancellation<Trace, std::void_t<decltype(&Trace::read_recovery_cancelled)>>: std::true_type {};
+
 }  // namespace detail
 
+inline constexpr bool kSupportsReadRecoveryCancellation =
+    detail::HasReadRecoveryCancellation<kv_cache_manager::TransferTraceInfo>::value &&
+    detail::HasDiscardReadRecovery<kv_cache_manager::TransferClient>::value &&
+    detail::HasLateReadSafety<kv_cache_manager::TransferClient, kv_cache_manager::TransferTraceInfo>::value;
+
 template<typename Trace, typename Client = kv_cache_manager::TransferClient>
-void setSdkReadExecutionId(std::shared_ptr<Trace>& trace, const std::string& trace_id) {
+void setSdkReadExecutionId(std::shared_ptr<Trace>&                       trace,
+                           const std::string&                            trace_id,
+                           const std::shared_ptr<std::atomic<bool>>&     read_recovery_cancelled) {
     if constexpr (detail::HasLateReadSafety<Client, Trace>::value) {
         if (!trace)
             trace = std::make_shared<Trace>();
         trace->read_execution_id = trace_id;
+        if constexpr (detail::HasReadRecoveryCancellation<Trace>::value)
+            trace->read_recovery_cancelled = read_recovery_cancelled;
     }
 }
 

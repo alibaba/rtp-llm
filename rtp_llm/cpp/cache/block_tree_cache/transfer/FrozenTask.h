@@ -117,7 +117,7 @@ public:
     // visible until the owner finishes. Notifications run without this mutex.
     // Only the caller completing FROZEN -> RELEASED returns true.
     void freeze() noexcept;
-    bool unfreeze() noexcept;
+    bool unfreeze(bool forced = false) noexcept;
 
     // Construct immutable query results before calling this method. Recording
     // does not change the original failure or release any target references.

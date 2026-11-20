@@ -264,17 +264,18 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
         if ((safe || expired) && snapshot.state == FrozenTask::State::FROZEN) {
             if (stop())
                 break;
-            if (task->unfreeze()) {
+            const bool forced = expired && !safe;
+            if (task->unfreeze(forced)) {
                 ++summary.released;
                 try {
                     if (on_released_)
-                        on_released_(task->execution(), expired && !safe);
+                        on_released_(task->execution(), forced);
                 } catch (const std::exception& error) {
                     RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
                 } catch (...) {
                     RTP_LLM_LOG_WARNING("FrozenTask release observer failed: unknown exception");
                 }
-                logReleased(*task, expired && !safe);
+                logReleased(*task, forced);
             }
         }
         if (task->snapshot().state == FrozenTask::State::FROZEN)
