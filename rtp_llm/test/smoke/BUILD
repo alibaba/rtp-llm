@@ -1,6 +1,6 @@
 load("//rtp_llm/test/perf_test:deepseek_v41_sm90_tests.bzl", "deepseek_v41_sm90_role_test")
 
-load(":defs.bzl", "custom_smoke_test", "smoke_test")
+load(":defs.bzl", "custom_smoke_test", "smoke_test", "SMOKE_FRAMEWORK_DEPS")
 load(":suites_timeout_recovery.bzl", "timeout_recovery_suites")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 package(default_visibility = ["//visibility:public"])
@@ -305,6 +305,7 @@ custom_smoke_test(
         "//rtp_llm:sdk",
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_sm90_semantic_checks.py",
     ],
 )
 
@@ -326,6 +327,7 @@ custom_smoke_test(
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_sm90_pd_contract_test.py",
+        "deepseek_v41_sm90_semantic_checks.py",
         "deepseek_v41_sm90_pd_24layer_golden.json",
     ],
 )
@@ -406,6 +408,39 @@ custom_smoke_test(
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_sm90_pd_contract_test.py",
+        "deepseek_v41_sm90_semantic_checks.py",
         "deepseek_v41_dspark_contract_test.py",
     ],
+)
+
+py_test(
+    name = "deepseek_v41_sm90_semantic_checks_test",
+    srcs = [
+        "deepseek_v41_sm90_semantic_checks.py",
+        "deepseek_v41_sm90_semantic_checks_test.py",
+    ],
+    env = {"GPU_COUNT": "0", "WORLD_SIZE": "1"},
+)
+
+# A controller-owned fixture, not an automatically executed correctness test.
+# It acquires the canonical GPU lease itself; do not add --run_under=gpu_lock.
+py_binary(
+    name = "deepseek_v41_sm90_pd_role",
+    srcs = ["deepseek_v41_sm90_pd_role.py"],
+    deps = SMOKE_FRAMEWORK_DEPS + ["//rtp_llm/test/utils:jit_sys_path_setup"],
+    data = [
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/perf_test:deepseek_v41_sm90_role_test.py",
+    ],
+    tags = ["manual", "sm90_pd_fixture"],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "deepseek_v41_sm90_pd_role_test",
+    srcs = ["deepseek_v41_sm90_pd_role.py", "deepseek_v41_sm90_pd_role_test.py"],
+    env = {"GPU_COUNT": "0", "WORLD_SIZE": "1"},
 )
