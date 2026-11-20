@@ -1233,6 +1233,7 @@ class MMRemoteEmbeddingCache:
                                 consumer_stream=consumer_stream,
                                 expected_key=key,
                                 trace_id=trace_id,
+                                deadline=deadline,
                             )
                         else:
                             # CPU views may outlive the transfer. Give them
@@ -1368,6 +1369,8 @@ class MMRemoteEmbeddingCache:
                 return None
             with self._observe_stage("read", "restore"):
                 timing["stage"] = "restore"
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote embedding read expired before restore")
                 value = (
                     buffer
                     if self._direct_payload
@@ -1382,6 +1385,8 @@ class MMRemoteEmbeddingCache:
                 value, approval = self._decode_value(
                     value, key, require_key=self._transport_mode == "gdr"
                 )
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote embedding read expired before publication")
                 if (
                     entry is not None
                     and restore_approval
@@ -1402,7 +1407,7 @@ class MMRemoteEmbeddingCache:
         except _TIMEOUT_ERRORS as error:
             outcome = "timeout"
             self._count("read_timeout")
-            if future is not None:
+            if future is not None and timing["stage"] != "restore":
                 # A worker can itself raise TimeoutError. Only a caller-side
                 # wait timeout needs a later completion diagnostic; preserve
                 # the race where it finishes just after result() times out.

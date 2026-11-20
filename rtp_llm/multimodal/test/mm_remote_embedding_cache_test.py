@@ -739,6 +739,29 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
+    def test_restore_finishing_after_deadline_is_not_published_as_a_hit(self):
+        value = torch.arange(8)
+        store = Store({"hit": pack_object(plan_object((value, None)))})
+        remote = self.remote(store, read_transfer_workers=1)
+        now = [1.0]
+
+        def restore(*args, **kwargs):
+            now[0] = 3.0
+            return unpack_object(*args, **kwargs)
+
+        with (
+            patch.object(time, "monotonic", side_effect=lambda: now[0]),
+            patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.unpack_object",
+                side_effect=restore,
+            ),
+        ):
+            self.assertIsNone(remote.load("hit"))
+        self.assertEqual(remote.stats().get("hit", 0), 0)
+        self.assertEqual(remote.stats()["read_timeout"], 1)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
     def test_read_timeout_keeps_transfer_permit_until_worker_exits(self):
         value = torch.arange(8)
         store = Store({"hit": pack_object(plan_object((value, None)))})

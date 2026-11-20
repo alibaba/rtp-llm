@@ -374,7 +374,13 @@ class RegisteredObjectTransport:
         return self._load("load_from_meta", meta, buffer, **kwargs)
 
     def load_object_from_meta(
-        self, meta, *, consumer_stream, expected_key=None, trace_id=None
+        self,
+        meta,
+        *,
+        consumer_stream,
+        expected_key=None,
+        trace_id=None,
+        deadline=None,
     ):
         from .tensor_object import unpack_object
 
@@ -382,11 +388,18 @@ class RegisteredObjectTransport:
         if not 0 < size <= self._capacity:
             raise ValueError("invalid registered object size")
         with self._serialized("read"):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("registered EMB read expired before transfer")
             transfer = self._buffer[:size]
             failure_stage = "sdk_transfer"
             try:
                 with self._stage("read", "native_load"):
                     self._client.load_from_meta(meta, transfer, trace_id=trace_id)
+                # Native I/O has completed. No CUDA copy has been submitted
+                # and this timeout can safely return the lease to the arena.
+                failure_stage = "post_transfer"
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("registered EMB read expired before restore")
                 failure_stage = "restore"
                 value = unpack_object(
                     transfer,
@@ -402,8 +415,8 @@ class RegisteredObjectTransport:
             except Exception as error:
                 # Layout validation completes before any payload copy. Header
                 # copies to CPU are synchronous and cannot still use the slot.
-                if failure_stage == "sdk_transfer" or not isinstance(
-                    error, ValueError
+                if failure_stage == "sdk_transfer" or (
+                    failure_stage == "restore" and not isinstance(error, ValueError)
                 ):
                     self._handle_failure(
                         error,

@@ -512,6 +512,33 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         pool.close()
         client.close.assert_not_called()
 
+    def test_completed_transfer_after_deadline_skips_restore_without_quarantine(self):
+        pool = self.pool(direct_payload=True)
+        slot = pool.acquire()
+        now = [1.0]
+
+        def finish_load(*args, **kwargs):
+            now[0] = 3.0
+
+        pool._client.load_from_meta.side_effect = finish_load
+        try:
+            with patch.object(time, "monotonic", side_effect=lambda: now[0]), patch(
+                "rtp_llm.multimodal.kvcm.tensor_object.unpack_object"
+            ) as unpack:
+                with self.assertRaisesRegex(TimeoutError, "expired before restore"):
+                    slot.load_object_from_meta(
+                        SimpleNamespace(size_bytes=16),
+                        consumer_stream=None,
+                        deadline=2.0,
+                    )
+                unpack.assert_not_called()
+            self.assertFalse(slot.quarantined)
+        finally:
+            pool.release(slot)
+        reused = pool.acquire()
+        self.assertIs(reused, slot)
+        pool.release(reused)
+
     def test_observes_contention_and_copies_without_extra_cuda_sync(self):
         transport = self.transport()
         stages = {}
