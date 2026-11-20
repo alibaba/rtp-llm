@@ -30,13 +30,6 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
-from rtp_llm.models_py.triton_kernels.causal_conv1d import (
-    CausalConv1dMetadata,
-    causal_conv1d_fn,
-    causal_conv1d_update,
-    prepare_causal_conv1d_metadata,
-)
-from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
 from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_gdn_decode import (
     AiterFlydslGdnDecodeStateMetadata,
