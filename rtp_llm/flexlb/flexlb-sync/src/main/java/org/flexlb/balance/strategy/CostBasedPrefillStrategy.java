@@ -59,6 +59,7 @@ public class CostBasedPrefillStrategy {
     private final int maxInflightBatches;
     private final RoutingConfig.TokenBalanceConfig tokenBalance;
     private long lastRescueNanos = Long.MIN_VALUE;
+    private final PendingPrefixFills prefixFills;
     private final Object tokenSelectionLock = new Object();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
@@ -67,6 +68,7 @@ public class CostBasedPrefillStrategy {
                                     CacheMetricsReporter cacheMetricsReporter,
                                     ConfigService configService) {
         this.endpointRegistry = endpointRegistry;
+        this.prefixFills = new PendingPrefixFills(ep -> endpointRegistry.publishCacheAvailability(ep.getStatus()));
         this.cacheAwareService = cacheAwareService;
         this.engineHealthReporter = engineHealthReporter;
         this.cacheMetricsReporter = cacheMetricsReporter;
@@ -189,6 +191,17 @@ public class CostBasedPrefillStrategy {
             // Parallel planners must see earlier choices before asynchronous admission commits.
             // Only scoring + soft reservation are serialized; cache lookup/projection stay parallel.
             synchronized (tokenSelectionLock) {
+                var suffix = probe ? null : PendingPrefixFills.suffix(request, roleType, group, fleetMaxHit);
+                long nowMs = System.currentTimeMillis();
+                long startMs = route.ctx().data().getStartTime();
+                // Keep at least half the original dispatch budget available for ordinary placement.
+                long latestWakeMs = startMs + (metadata.expiresAtMs() - startMs) / 2;
+                var producer = prefixFills.waitingFor(suffix, request, metadata.priority(), cacheWorkers,
+                        latestWakeMs, nowMs);
+                if (producer != null) {
+                    route.setPrefillCacheWorkers(java.util.Set.of(producer.ipPort()));
+                    return PlacementResult.blocked(roleType);
+                }
                 selectedIndex = selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
                 if (selectedIndex < 0 && probe) {
                     selectedIndex = selectRescueTarget(discovery, cacheWorkers, survivors, seqLen, fleetMaxHit);
@@ -201,6 +214,10 @@ public class CostBasedPrefillStrategy {
                     }
                 }
                 if (selectedIndex >= 0) {
+                    if (survivors.cacheHit(selectedIndex) == fleetMaxHit) {
+                        prefixFills.remember(suffix, route.ctx(), survivors.endpoint(selectedIndex),
+                                metadata.priority(), nowMs, metadata.expiresAtMs());
+                    }
                     route.reserveTokenPlan(survivors.endpoint(selectedIndex).ownership.planTokenWork(
                             Math.max(0L, seqLen - survivors.cacheHit(selectedIndex))));
                 }

@@ -211,7 +211,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService svc = new JavaMockEngineCluster.FastRpcService(
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, engineScheduler, model, poolBlocks,
+                    port, services, engineScheduler, model,
+                    ((Number) performanceOverrides.getOrDefault("test_decode_pool_blocks", poolBlocks)).intValue(),
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, svc);
             decodeEngines.add(svc);
@@ -469,17 +470,25 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return schedulerRuntime.routeResult(context, defaultRoute(context));
     }
 
+    private final EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
+    private final CacheMetricsReporter cacheReporter = mock(CacheMetricsReporter.class);
+
+    /** Long open-loop replays inspect engine results directly, so old Mockito calls can be discarded. */
+    void discardRecordedCalls() {
+        org.mockito.Mockito.clearInvocations(configService, router, cache, grpcClient, reporter,
+                requestReporter, healthReporter, cacheReporter);
+    }
+
     private RequestWorkerSelector productionRouter() {
         EndpointRegistry workers = endpointRegistry;
         when(cache.findMatchingEngines(any(), any(), any()))
                 .thenReturn(Map.of());
-        EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(
                 List.of(RoleType.DECODE, RoleType.PREFILL));
         return new RequestWorkerSelector(
                 new CostBasedPrefillStrategy(
-                        workers, cache, healthReporter, org.mockito.Mockito.mock(CacheMetricsReporter.class), configService),
+                        workers, cache, healthReporter, cacheReporter, configService),
                 new DecodeSelector(workers, configService, new org.flexlb.balance.scheduler.PlacementConfiguration().decodeAdmissionCapacity(configService)),
                 new VitWorkerSelector(workers),
                 modelMeta);
