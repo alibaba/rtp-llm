@@ -9,6 +9,7 @@ import org.flexlb.enums.TaskPhase;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
@@ -41,6 +42,8 @@ public class WorkerStatus {
     private final AtomicLong cacheLastUpdateTime = new AtomicLong(-1L);
     private final AtomicReference<PollLease> statusPollLease = new AtomicReference<>();
     private final AtomicReference<PollLease> cachePollLease = new AtomicReference<>();
+    private final AtomicLong vitRoutedInputs = new AtomicLong();
+    private volatile VitLoad vitLoad;
 
     private WorkerStatus(TopologySnapshot initialTopology, EngineObservation initialStatus) {
         topology = new AtomicReference<>(initialTopology);
@@ -125,6 +128,37 @@ public class WorkerStatus {
 
     public AppliedStatusCursor appliedStatusCursor() {
         return committedStatus.get().cursor();
+    }
+
+    /** Observe assignments before submitting the ViT status RPC. */
+    public long vitRoutedInputs() {
+        return vitRoutedInputs.get();
+    }
+
+    /** Charge the selected generation for the media inputs routed to it. */
+    public void recordVitRoute(int mediaCount) {
+        vitRoutedInputs.addAndGet(mediaCount);
+    }
+
+    /**
+     * Replace the accepted ViT sample with the receive time and the RPC submission cursor.
+     */
+    public void recordVitLoad(
+            OptionalLong reportedInputs, long routedAtPollStart, long receivedNanos) {
+        vitLoad =
+                reportedInputs.isEmpty() || reportedInputs.getAsLong() < 0
+                        ? null
+                        : new VitLoad(reportedInputs.getAsLong(), routedAtPollStart, receivedNanos);
+    }
+
+    /** Estimate inflight media from a recent sample and the subsequent assignments. */
+    public long vitLoadEstimate(long nowNanos, long maxAgeNanos) {
+        VitLoad sample = vitLoad;
+        if (sample == null || nowNanos - sample.receivedNanos() > maxAgeNanos) {
+            return Long.MAX_VALUE;
+        }
+        long unreported = vitRoutedInputs.get() - sample.routedAtPollStart();
+        return Math.min(sample.reportedInputs(), Long.MAX_VALUE - unreported) + unreported;
     }
 
     /**
@@ -946,6 +980,8 @@ public class WorkerStatus {
         STATUS,
         CACHE
     }
+
+    private record VitLoad(long reportedInputs, long routedAtPollStart, long receivedNanos) {}
 
     /**
      * Exact ownership of one generation-local poll slot. Closing is

@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import com.google.protobuf.Int64Value;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
@@ -16,9 +17,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -346,6 +351,93 @@ class GrpcWorkerStatusRunnerTest {
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");
         nextPoll.close();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"8,8", "0,0", ",9223372036854775807"})
+    void acceptedSameVersionVitStatusReplacesLoadAtApplication(Long reported, long expected) {
+        WorkerStatus status =
+                RunnerTestSupport.alive(RoleType.VIT, null, "127.0.0.1", 8080, 8081, "test-site");
+        String address = status.getLogicalIpPort();
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        WorkerDirectory directory = directory(registry, status);
+        when(registry.get(RoleType.VIT, address, status)).thenReturn(new WorkerEndpoint(status));
+        status.recordVitLoad(OptionalLong.of(17), status.vitRoutedInputs(), System.nanoTime());
+        var response =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_VIT)
+                        .setStatusVersion(status.appliedStatusCursor().statusVersion())
+                        .setAlive(true);
+        if (reported != null) {
+            response.setMmInflightInputs(Int64Value.of(reported));
+        }
+
+        var pendingResponse = new CompletableFuture<EngineRpcService.WorkerStatusPB>();
+        var queuedApplication = new AtomicReference<Runnable>();
+        runVitPoll(status, directory, pendingResponse, queuedApplication::set);
+        pendingResponse.complete(response.build());
+        long afterReceive = System.nanoTime();
+        assertEquals(17, status.vitLoadEstimate(afterReceive, Long.MAX_VALUE));
+
+        queuedApplication.get().run();
+
+        assertEquals(expected, status.vitLoadEstimate(System.nanoTime(), Long.MAX_VALUE));
+        assertEquals(Long.MAX_VALUE, status.vitLoadEstimate(afterReceive + 1, 0));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ROLE_TYPE_VIT,1,true", "ROLE_TYPE_DECODE,2,true", "ROLE_TYPE_VIT,2,false"})
+    void rejectedVitStatusKeepsThePreviousLoad(
+            EngineRpcService.RoleTypePB reportedRole, long version, boolean hasEndpoint) {
+        WorkerStatus status =
+                RunnerTestSupport.discovered(
+                        RoleType.VIT, null, "127.0.0.1", 8080, 8081, "test-site");
+        RunnerTestSupport.publish(status, RunnerTestSupport.response(status, true, 2));
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        WorkerDirectory directory = directory(registry, status);
+        if (hasEndpoint) {
+            when(registry.get(RoleType.VIT, status.getLogicalIpPort(), status))
+                    .thenReturn(new WorkerEndpoint(status));
+        }
+        status.recordVitLoad(OptionalLong.of(17), status.vitRoutedInputs(), System.nanoTime());
+        var response =
+                EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setRoleType(reportedRole)
+                        .setStatusVersion(version)
+                        .setAlive(true)
+                        .setMmInflightInputs(Int64Value.of(0))
+                        .build();
+
+        runVitPoll(status, directory, CompletableFuture.completedFuture(response), Runnable::run);
+
+        assertEquals(17, status.vitLoadEstimate(System.nanoTime(), Long.MAX_VALUE));
+    }
+
+    private static void runVitPoll(
+            WorkerStatus status,
+            WorkerDirectory directory,
+            CompletableFuture<EngineRpcService.WorkerStatusPB> response,
+            Executor callbackExecutor) {
+        WorkerStatus.PollLease lease = status.tryBeginStatusPoll();
+        assertNotNull(lease);
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(response);
+        new GrpcWorkerStatusRunner(
+                        "test-model",
+                        status.getLogicalIpPort(),
+                        "test-site",
+                        RoleType.VIT,
+                        null,
+                        status,
+                        lease,
+                        directory,
+                        mock(EngineHealthReporter.class),
+                        grpc,
+                        5_000L,
+                        mock(CacheAwareService.class),
+                        callbackExecutor)
+                .run();
     }
 
     private static WorkerDirectory directory(EndpointRegistry registry, WorkerStatus status) {

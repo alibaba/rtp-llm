@@ -2076,6 +2076,11 @@ class MMProcessEngine:
             self._async_admitted += count
             return True, self._async_admitted
 
+    def get_inflight_input_count(self) -> int:
+        """Return the number of media inputs holding an async admission slot."""
+        with self._async_admission_lock:
+            return self._async_admitted
+
     def _release_async_slots(self, count: int = 1) -> None:
         if count <= 0:
             return
