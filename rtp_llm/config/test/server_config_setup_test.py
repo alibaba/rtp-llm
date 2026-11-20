@@ -560,8 +560,10 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
-        # Legacy payloads do not carry fields appended after v6.
-        event_state = (*state[:63], *KVCacheConfig().__getstate__()[63:])
+        # Legacy payloads share the load deadline for eviction and omit later fields.
+        legacy_defaults = KVCacheConfig()
+        legacy_defaults.disk_cache_evict_timeout_ms = -1
+        event_state = (*state[:63], *legacy_defaults.__getstate__()[63:])
         # Version 6 carried the retired host-placement flag at index 53.
         state = (state[0], 6, *state[2:53], True, *state[53:63])
         self.assertEqual(restore(state).__getstate__(), event_state)

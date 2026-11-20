@@ -207,8 +207,8 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.__getstate__(), config.__getstate__())
 
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
-        self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
-        self.assertEqual(KVCacheConfig().disk_cache_evict_timeout_ms, -1)
+        self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 3000)
+        self.assertEqual(KVCacheConfig().disk_cache_evict_timeout_ms, 3000)
         for eviction_timeout in (-1, 45000):
             with self.subTest(eviction_timeout=eviction_timeout):
                 config = KVCacheConfig()
@@ -305,7 +305,7 @@ class KVCacheConfigPickleTest(TestCase):
     def test_frozen_force_release_timeout_defaults_boundaries_and_validation(self):
         name = "block_tree_frozen_force_release_timeout_ms"
         config = KVCacheConfig()
-        self.assertEqual(getattr(config, name), 60000)
+        self.assertEqual(getattr(config, name), 300000)
         for timeout in (0, 1, 120000, 1200000, 2**31 - 1):
             with self.subTest(timeout=timeout):
                 setattr(config, name, timeout)
@@ -351,7 +351,7 @@ class KVCacheConfigPickleTest(TestCase):
                 restored.__setstate__(previous)
                 self.assertEqual(previous, original)
                 self.assertEqual(
-                    restored.block_tree_frozen_force_release_timeout_ms, 60000
+                    restored.block_tree_frozen_force_release_timeout_ms, 300000
                 )
                 self.assertEqual(
                     restored.block_tree_task_pool_size, 6 if version == 19 else 4

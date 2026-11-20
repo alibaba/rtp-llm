@@ -342,16 +342,17 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="DISK_CACHE_SYNC_TIMEOUT_MS",
         bind_to=(kv_cache_config, "disk_cache_sync_timeout_ms"),
         type=int,
-        default=30000,
-        help="磁盘 KV cache load 传输超时，包含排队时间，单位毫秒；evict/store 未单独配置时也沿用此值。",
+        default=3000,
+        help="磁盘 KV cache load 传输超时，包含排队时间，默认 3000 毫秒。",
     )
     kv_cache_group.add_argument(
         "--disk_cache_evict_timeout_ms",
         env_name="DISK_CACHE_EVICT_TIMEOUT_MS",
         bind_to=(kv_cache_config, "disk_cache_evict_timeout_ms"),
         type=int,
-        default=-1,
-        help="磁盘 KV cache evict/store 写盘传输超时，包含排队时间，单位毫秒；必须为正数，默认 -1 沿用 DISK_CACHE_SYNC_TIMEOUT_MS。",
+        default=3000,
+        help="磁盘 KV cache evict/store 写盘传输超时，包含排队时间，默认 3000 毫秒。"
+        "设为 -1 时沿用 DISK_CACHE_SYNC_TIMEOUT_MS，否则必须为正数。",
     )
     kv_cache_group.add_argument(
         "--disk_cache_staging_block_count",
@@ -394,8 +395,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="BLOCK_TREE_FROZEN_FORCE_RELEASE_TIMEOUT_MS",
         bind_to=(kv_cache_config, "block_tree_frozen_force_release_timeout_ms"),
         type=_frozen_force_release_timeout_ms,
-        default=60000,
-        help="冻结任务强制解冻超时，单位毫秒，默认 60000（1 分钟）；0 关闭超时兜底，范围 [0, 2147483647]。"
+        default=300000,
+        help="冻结任务强制解冻超时，单位毫秒，默认 300000（5 分钟）；0 关闭超时兜底，范围 [0, 2147483647]。"
         "启用恢复轮询时生效；超时后即使缺少 buffer safe 证明也释放冻结引用，不会取消底层 I/O。",
     )
     kv_cache_group.add_argument(
@@ -482,8 +483,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="KVCM_TASK_TIMEOUT_MS",
         bind_to=(kv_cache_config, "kvcm_task_timeout_ms"),
         type=int,
-        default=20000,
-        help="Remote读写整体任务超时预算（毫秒，包含排队）",
+        default=5000,
+        help="Remote Cache 读写整体任务超时预算，包含排队，默认 5000 毫秒。",
     )
     kv_cache_group.add_argument(
         "--kvcm_meta_channel_retry_time",

@@ -487,8 +487,16 @@ class CacheConfigArgumentsTest(TestCase):
 
     def test_disk_timeouts_support_independent_env_and_cli_overrides(self):
         cases = (
-            ([], {}, (30000, -1)),
-            ([], {"DISK_CACHE_SYNC_TIMEOUT_MS": "4321"}, (4321, -1)),
+            ([], {}, (3000, 3000)),
+            ([], {"DISK_CACHE_SYNC_TIMEOUT_MS": "4321"}, (4321, 3000)),
+            (
+                [],
+                {
+                    "DISK_CACHE_SYNC_TIMEOUT_MS": "4321",
+                    "DISK_CACHE_EVICT_TIMEOUT_MS": "-1",
+                },
+                (4321, -1),
+            ),
             (
                 [],
                 {
@@ -528,7 +536,7 @@ class CacheConfigArgumentsTest(TestCase):
 
     def test_remote_task_budget_is_independent_of_host_and_sdk(self):
         cases = (
-            ([], {}, 20000),
+            ([], {}, 5000),
             ([], {"KVCM_TASK_TIMEOUT_MS": "23000"}, 23000),
             (
                 ["--kvcm_task_timeout_ms", "24000"],
@@ -541,7 +549,7 @@ class CacheConfigArgumentsTest(TestCase):
                 config = self.parse_cache_config(args, env)
                 self.assertEqual(config.kvcm_task_timeout_ms, expected)
                 self.assertEqual(config.memory_cache_sync_timeout_ms, 10000)
-                self.assertEqual(config.disk_cache_sync_timeout_ms, 30000)
+                self.assertEqual(config.disk_cache_sync_timeout_ms, 3000)
                 self.assertEqual(config.kvcm_get_timeout_ms, 12000)
                 self.assertEqual(config.kvcm_put_timeout_ms, 12000)
 
@@ -582,8 +590,8 @@ class CacheConfigArgumentsTest(TestCase):
         name = "block_tree_frozen_force_release_timeout_ms"
         env_name = name.upper()
         for args, env, expected in (
-            ([], {}, 60000),
-            (None, {}, 60000),
+            ([], {}, 300000),
+            (None, {}, 300000),
             ([], {env_name: "120000"}, 120000),
             (None, {env_name: "1200000"}, 1200000),
             ([f"--{name}", "0"], {env_name: "120000"}, 0),

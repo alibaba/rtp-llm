@@ -713,6 +713,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (version >= 14) {
                     c.disk_cache_evict_timeout_ms = field(compact_state ? 76 : 88).cast<int64_t>();
+                } else {
+                    // Older states shared a single disk timeout for loads and evictions.
+                    c.disk_cache_evict_timeout_ms = -1;
                 }
                 if (version >= 17) {
                     c.disk_cache_evict_max_pending_bytes =

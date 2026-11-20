@@ -66,9 +66,9 @@ struct BlockTreeCacheConfig {
     // ---- Transfer deadlines, including queue wait and cross-rank work ----
     int host_cache_sync_timeout_ms{10000};
     // Preserve the existing name for disk loads.
-    int disk_cache_sync_timeout_ms{30000};
+    int disk_cache_sync_timeout_ms{3000};
     // Outbound disk transfers for eviction.
-    int disk_cache_evict_timeout_ms{30000};
+    int disk_cache_evict_timeout_ms{3000};
 
     // Async: blocks per load/evict pair, split by direction and shared by groups.
     // Legacy: rank-wide byte budget measured in maximum-stride blocks.

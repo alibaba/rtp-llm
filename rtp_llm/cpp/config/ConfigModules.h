@@ -170,9 +170,9 @@ struct KVCacheConfig {
     std::string                             disk_cache_paths              = "";
     int64_t                                 disk_cache_size_mb            = 0;
     bool                                    disk_cache_buffered_io        = true;
-    int64_t                                 disk_cache_sync_timeout_ms    = 30000;
+    int64_t                                 disk_cache_sync_timeout_ms    = 3000;
     // Evict/store override; -1 inherits the load timeout above.
-    int64_t disk_cache_evict_timeout_ms                     = -1;
+    int64_t disk_cache_evict_timeout_ms                     = 3000;
     int64_t disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
     int64_t disk_cache_staging_block_count                  = 128;
     int64_t memory_cache_max_descriptors_per_transfer_batch = 32;
@@ -180,7 +180,7 @@ struct KVCacheConfig {
     int64_t block_tree_transfer_worker_count   = 2;
     int64_t block_tree_business_queue_max_size = 10000;
     int64_t block_tree_transfer_queue_max_size = 10000;
-    int64_t block_tree_frozen_force_release_timeout_ms   = 60000;
+    int64_t block_tree_frozen_force_release_timeout_ms   = 300000;
     double  block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
     double  block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
     double  block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
@@ -245,7 +245,7 @@ struct KVCacheConfig {
     std::string kvcm_vipserver_domain                = "";
     std::string kvcm_server_address                  = "";
     std::string kvcm_instance_group                  = "default";
-    int         kvcm_task_timeout_ms                 = 20000;
+    int         kvcm_task_timeout_ms                 = 5000;
     uint32_t    kvcm_meta_channel_retry_time         = 3;
     uint32_t    kvcm_meta_channel_connection_timeout = 6000;
     uint32_t    kvcm_meta_channel_call_timeout       = 1500;

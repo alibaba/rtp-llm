@@ -253,6 +253,9 @@ TEST(FrozenTaskRecoveryTest, TimeoutReleasesRunningUnknownAndFailedQueriesOnlyOn
             EXPECT_EQ(pending.pending, 1u);
             EXPECT_TRUE(pool->isFrozen(block));
             task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(1min).count();
+            EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+            EXPECT_TRUE(pool->isFrozen(block));
+            task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(4min).count();
             const auto expired = recovery.runOnce(1000);
             EXPECT_EQ(expired.released, 1u);
             EXPECT_EQ(expired.pending, 0u);
@@ -309,7 +312,7 @@ TEST(FrozenTaskRecoveryTest, TimeoutPreservesOtherFrozenOwnersAndRetriesForgetUn
     task->freeze();
     other->freeze();
     pool->decTreeRef(block, BlockTreeRefType::CACHE);
-    task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(1min).count();
+    task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(5min).count();
     TransferTaskRegistry registry;
     ASSERT_TRUE(registry.begin(uint64_t{83}));
     size_t             forget_calls = 0;

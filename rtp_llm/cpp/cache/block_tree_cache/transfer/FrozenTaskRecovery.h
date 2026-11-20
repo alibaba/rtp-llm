@@ -42,7 +42,7 @@ public:
                        Query      query,
                        Cleanup    cleanup                  = {},
                        OnReleased on_released              = {},
-                       int        force_release_timeout_ms = 60000);
+                       int        force_release_timeout_ms = 300000);
     ~FrozenTaskRecovery();
 
     // The owner serializes start/stop/destruction outside the recovery thread.
