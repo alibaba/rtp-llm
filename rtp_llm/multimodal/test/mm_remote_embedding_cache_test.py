@@ -7,7 +7,7 @@ import unittest
 import weakref
 from enum import Enum
 from types import SimpleNamespace
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 import torch
 
@@ -630,6 +630,35 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertNotIn("old", slot.objects)
         finally:
             release.set()
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_expired_cuda_producer_wait_is_reported_separately(self):
+        remote, (slot,) = self.slot_cache(
+            1, write_transfer_workers=1, write_timeout_ms=500
+        )
+        event = Mock()
+        clock = [0.0]
+
+        def synchronize():
+            clock[0] = 1.0
+
+        event.synchronize.side_effect = synchronize
+        with (
+            patch.object(remote, "_snapshot", return_value=[event]),
+            patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.time.monotonic",
+                side_effect=lambda: clock[0],
+            ),
+            patch.object(remote._gdr_pool, "acquire") as acquire,
+            patch.object(slot, "pack") as pack,
+            patch.object(remote, "_report_skip") as skip,
+        ):
+            remote.submit_result("producer-slow", (torch.arange(8), None))
+            remote._write_executor.submit(lambda: None).result(timeout=2)
+            event.synchronize.assert_called_once()
+            acquire.assert_not_called()
+            pack.assert_not_called()
+            skip.assert_called_once_with("write", "write_producer_wait_expired")
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
     def test_write_backlog_leaves_room_for_metadata(self):

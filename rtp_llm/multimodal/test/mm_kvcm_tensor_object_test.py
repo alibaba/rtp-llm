@@ -67,6 +67,42 @@ class TensorObjectTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "range"):
                 unpack_object(packed[:-1])
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_cuda_reads_short_header_once_and_fetches_large_header_suffix(self):
+        stages = []
+
+        @contextmanager
+        def observe(operation, stage):
+            stages.append((operation, stage))
+            yield
+
+        tensor = torch.arange(2048, device="cuda")
+        for metadata_size, expected_copies in ((64, 1), (4096, 2)):
+            with self.subTest(metadata_size=metadata_size):
+                value = {"cache_key": "key", "result": (tensor, "x" * metadata_size)}
+                plan = plan_object(value, checksum=False)
+                packed = pack_object(
+                    plan, out=torch.empty(plan.nbytes, dtype=torch.uint8, device="cuda")
+                )
+                stages.clear()
+                restored = unpack_object(
+                    packed, observe_stage=observe, expected_key="key"
+                )
+                actual, metadata = restored["result"]
+                torch.testing.assert_close(actual, tensor)
+                self.assertEqual(metadata, value["result"][1])
+                self.assertEqual(
+                    stages[: expected_copies + 1],
+                    [("read", "d2h_header")] * expected_copies
+                    + [("read", "decode_header")],
+                )
+                self.assertEqual(stages.count(("read", "d2h_header")), expected_copies)
+        stages.clear()
+        packed[8:16].fill_(255)
+        with self.assertRaisesRegex(ValueError, "object header"):
+            unpack_object(packed, observe_stage=observe)
+        self.assertEqual(stages, [("read", "d2h_header")])
+
     def test_pack_into_reused_buffer_matches_zero_initialized_wire_bytes(self):
         value = (
             torch.arange(7, dtype=torch.uint8),

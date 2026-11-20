@@ -19,6 +19,7 @@ _MAGIC_V1 = b"RTPMM001"
 _MAGIC_V2 = b"RTPMM002"
 _PREFIX = struct.Struct("<8sQ")
 _MAX_HEADER = 64 * 1024
+_CUDA_HEADER_READ_BYTES = 1024
 _MAX_NODES = 4096
 _MAX_DEPTH = 32
 _ALIGNMENT = 64
@@ -234,37 +235,39 @@ def unpack_object(
         )
 
     size = buffer.numel()
+    if (
+        buffer.dtype != torch.uint8
+        or buffer.device.type not in ("cpu", "cuda")
+        or buffer.ndim != 1
+        or not buffer.is_contiguous()
+        or not _PREFIX.size <= size <= max_bytes
+    ):
+        raise ValueError("invalid multimodal object buffer")
+    if buffer.is_cuda:
+        # Fetch the usual prefix and metadata together. Large headers still
+        # copy only the missing suffix after validating the declared length.
+        with stage("d2h_header"):
+            head = buffer[:_CUDA_HEADER_READ_BYTES].cpu()
+    else:
+        head = buffer
+    view = memoryview(head.numpy())
+    magic, length = _PREFIX.unpack_from(view)
+    header_end = _PREFIX.size + length
+    offset = _align(header_end)
+    if (
+        (magic != _MAGIC_V2 and (magic != _MAGIC_V1 or buffer.is_cuda))
+        or length > _MAX_HEADER
+        or offset > size
+    ):
+        raise ValueError("invalid multimodal object header")
+    raw_header = bytes(view[_PREFIX.size : header_end])
+    if header_end > len(view):
+        with stage("d2h_header"):
+            suffix = buffer[len(view) : header_end].cpu()
+        raw_header += suffix.numpy().tobytes()
     with stage("decode_header"):
-        if (
-            buffer.dtype != torch.uint8
-            or buffer.device.type not in ("cpu", "cuda")
-            or buffer.ndim != 1
-            or not buffer.is_contiguous()
-            or not _PREFIX.size <= size <= max_bytes
-        ):
-            raise ValueError("invalid multimodal object buffer")
-        if buffer.is_cuda:
-            with stage("d2h_header"):
-                prefix = buffer[: _PREFIX.size].cpu()
-            view = memoryview(prefix.numpy())
-        else:
-            view = memoryview(buffer.numpy())
-        magic, length = _PREFIX.unpack_from(view)
-        offset = _align(_PREFIX.size + length)
-        if (
-            (magic != _MAGIC_V2 and (magic != _MAGIC_V1 or buffer.is_cuda))
-            or length > _MAX_HEADER
-            or offset > size
-        ):
-            raise ValueError("invalid multimodal object header")
-        if buffer.is_cuda:
-            with stage("d2h_header"):
-                metadata = buffer[_PREFIX.size : _PREFIX.size + length].cpu()
-            raw_header = memoryview(metadata.numpy())
-        else:
-            raw_header = view[_PREFIX.size : _PREFIX.size + length]
         try:
-            header = json.loads(bytes(raw_header))
+            header = json.loads(raw_header)
         except (ValueError, UnicodeError, RecursionError) as error:
             raise ValueError("invalid multimodal object metadata") from error
         fields = {"tree", "tensors"}
@@ -309,7 +312,7 @@ def unpack_object(
                 or type(spec["nbytes"]) is not int
             ):
                 raise ValueError("invalid multimodal tensor metadata")
-            width = torch.empty((), dtype=_DTYPES[spec["dtype"]]).element_size()
+            width = _DTYPES[spec["dtype"]].itemsize
             if (
                 spec["nbytes"] != math.prod(shape) * width
                 or spec["offset"] != _align(end)

@@ -925,7 +925,12 @@ class MMRemoteEmbeddingCache:
                 remaining = queue_deadline - time.monotonic()
                 if remaining <= 0:
                     outcome = "skipped"
-                    self._report_skip("write", "write_queue_expired")
+                    self._report_skip(
+                        "write",
+                        "write_producer_wait_expired"
+                        if ready_events
+                        else "write_queue_expired",
+                    )
                     return
                 if self._skip_quarantined("write"):
                     outcome = "skipped"
@@ -954,7 +959,7 @@ class MMRemoteEmbeddingCache:
                         return
                     if time.monotonic() >= queue_deadline:
                         outcome = "skipped"
-                        self._report_skip("write", "write_queue_expired")
+                        self._report_skip("write", "write_slot_unavailable")
                         return
                 failure_stage = "pack"
                 with self._observe_stage("write", "pack"):
