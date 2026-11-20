@@ -7,6 +7,7 @@ boundaries and repeated tensor identities. No pickle or executable metadata.
 import hashlib
 import json
 import math
+import os
 import struct
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ _CUDA_HEADER_READ_BYTES = 1024
 _MAX_NODES = 4096
 _MAX_DEPTH = 32
 _ALIGNMENT = 64
+_USE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE") == "1"
 _DTYPES = {
     str(dtype): dtype
     for dtype in (
@@ -381,7 +383,28 @@ def unpack_object(
         )
 
     tensors = []
-    if buffer.is_cuda:
+    if buffer.is_cuda and _USE_NATIVE_RESTORE:
+        from librtp_compute_ops import restore_emb_tensor_slices
+
+        gpu = torch.device(cuda_device or buffer.device)
+        cpu = torch.device("cpu")
+        with stage("native_restore_payload"):
+            slices = [
+                (
+                    offset + spec["offset"],
+                    spec["nbytes"],
+                    _DTYPES[spec["dtype"]],
+                    spec["shape"],
+                    gpu if restore_devices and spec["device"] == "cuda" else cpu,
+                )
+                for spec in specs
+            ]
+            tensors = restore_emb_tensor_slices(buffer, slices)
+            if consumer_stream is not None:
+                for tensor in tensors:
+                    if tensor.is_cuda:
+                        tensor.record_stream(consumer_stream)
+    elif buffer.is_cuda:
         for spec in specs:
             target_cuda = restore_devices and spec["device"] == "cuda"
             target = (cuda_device or buffer.device) if target_cuda else "cpu"
