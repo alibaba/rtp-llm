@@ -79,14 +79,15 @@ public class VitCacheDirectory {
             if (!isRoutable(worker)) {
                 continue;
             }
-            Snapshot snapshot = snapshots.get(worker.getLogicalIpPort());
+            String address = worker.getLogicalIpPort();
+            Snapshot snapshot = snapshots.get(address);
             int hashHits = 0;
             int gpuHits = 0;
             int cpuHits = 0;
             List<String> matchingKeys =
                     group == null || Objects.equals(group, worker.getGroup()) ? keys : List.of();
             for (String key : matchingKeys) {
-                if (owners.getOrDefault(key, Set.of()).contains(worker.getLogicalIpPort())) {
+                if (owners.getOrDefault(key, Set.of()).contains(address)) {
                     hashHits++;
                 }
                 if (snapshot != null) {
@@ -98,7 +99,7 @@ public class VitCacheDirectory {
                 }
             }
             matches.put(
-                    worker.getLogicalIpPort(),
+                    address,
                     new Candidate(
                             worker,
                             snapshot == null ? null : snapshot.instance(),

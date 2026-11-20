@@ -145,7 +145,9 @@ public class VitCacheSelector {
      */
     public synchronized ServerStatus validate(BalanceContext ctx, String group) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
-        if (selected == null) {
+        if (selected == null
+                || selected.getRole() != RoleType.VIT
+                || selected.getServerIp() == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         WorkerIdentity identity =
@@ -155,8 +157,7 @@ public class VitCacheSelector {
                         selected.getEngineIndex() == null ? 0 : selected.getEngineIndex());
         try (var pin = workers.captureEndpoint(RoleType.VIT, identity.getLogicalIpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
-            if (selected.getRole() != RoleType.VIT
-                    || worker == null
+            if (worker == null
                     || (group != null && !Objects.equals(group, worker.getGroup()))
                     || selected.getGrpcPort() != worker.getGrpcPort()
                     || !Objects.equals(selected.getGroup(), worker.getGroup())
@@ -180,8 +181,8 @@ public class VitCacheSelector {
         status.setWorkerGeneration(worker.getGenerationId());
         status.setServerIp(worker.getIp());
         status.setHttpPort(worker.getPort());
-        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
         status.setGrpcPort(worker.getGrpcPort());
+        status.setSelectedEngineIndex(worker.getEngineIndex(), worker.getMultiEngineNum());
         status.setGroup(worker.getGroup());
         status.setRequestId(requestId);
         status.setSuccess(true);
