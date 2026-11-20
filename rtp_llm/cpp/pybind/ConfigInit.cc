@@ -1128,7 +1128,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_transfer_not_done_resource_hold_ms",
                        &CacheStoreConfig::p2p_transfer_not_done_resource_hold_ms)
         .def_readwrite("p2p_lease_query_timeout_ms", &CacheStoreConfig::p2p_lease_query_timeout_ms)
-        .def_readwrite("p2p_kv_force_release_timeout_ms", &CacheStoreConfig::p2p_kv_force_release_timeout_ms)
         .def_readwrite("p2p_cancel_broadcast_timeout_ms", &CacheStoreConfig::p2p_cancel_broadcast_timeout_ms)
         .def_readwrite("p2p_cancelled_keys_ttl_ms", &CacheStoreConfig::p2p_cancelled_keys_ttl_ms)
         .def_readwrite("cache_store_tcp_anet_rpc_thread_num", &CacheStoreConfig::cache_store_tcp_anet_rpc_thread_num)
@@ -1140,11 +1139,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("p2p_rdma_staging_total_bytes", &CacheStoreConfig::p2p_rdma_staging_total_bytes)
         .def_readwrite("p2p_prefill_sender_thread_count", &CacheStoreConfig::p2p_prefill_sender_thread_count)
         .def_readwrite("p2p_prefill_sender_queue_size", &CacheStoreConfig::p2p_prefill_sender_queue_size)
-        .def_readwrite("rdma_transfer_wait_timeout_ms", &CacheStoreConfig::rdma_transfer_wait_timeout_ms)
-        .def_readwrite("p2p_read_steal_before_deadline_ms", &CacheStoreConfig::p2p_read_steal_before_deadline_ms)
-        .def_readwrite("p2p_read_return_before_deadline_ms", &CacheStoreConfig::p2p_read_return_before_deadline_ms)
-        .def_readwrite("p2p_resource_store_timeout_check_interval_ms", &CacheStoreConfig::p2p_resource_store_timeout_check_interval_ms)
-        .def_readwrite("p2p_layer_cache_buffer_store_timeout_ms", &CacheStoreConfig::p2p_layer_cache_buffer_store_timeout_ms)
         .def("to_string", &CacheStoreConfig::to_string)
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
@@ -1169,13 +1163,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_rdma_enable_h2d_copy,
                                       self.p2p_rdma_staging_total_bytes,
                                       self.p2p_prefill_sender_thread_count,
-                                      self.p2p_prefill_sender_queue_size,
-                                      self.rdma_transfer_wait_timeout_ms,
-                                      self.p2p_read_steal_before_deadline_ms,
-                                      self.p2p_read_return_before_deadline_ms,
-                                      self.p2p_resource_store_timeout_check_interval_ms,
-                                      self.p2p_layer_cache_buffer_store_timeout_ms,
-                                      self.p2p_kv_force_release_timeout_ms);
+                                      self.p2p_prefill_sender_queue_size);
             },
             [](py::tuple t) {
                 if (t.size() == 18) {
@@ -1189,13 +1177,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.rdma_worker_thread_count                     = t[5].cast<int>();
                         c.messager_io_thread_count                     = t[6].cast<int>();
                         c.messager_worker_thread_count                 = t[7].cast<int>();
-                        c.rdma_transfer_wait_timeout_ms                = t[8].cast<int64_t>();
                         c.rdma_max_block_pairs_per_connection          = t[9].cast<int>();
-                        c.p2p_read_steal_before_deadline_ms            = t[10].cast<int64_t>();
-                        c.p2p_read_return_before_deadline_ms           = t[11].cast<int64_t>();
                         c.p2p_transfer_not_done_resource_hold_ms       = t[12].cast<int64_t>();
-                        c.p2p_resource_store_timeout_check_interval_ms = t[13].cast<int>();
-                        c.p2p_layer_cache_buffer_store_timeout_ms      = t[14].cast<int64_t>();
                         c.p2p_cancel_broadcast_timeout_ms              = t[15].cast<int64_t>();
                         c.cache_store_tcp_anet_rpc_thread_num          = t[16].cast<int>();
                         c.cache_store_tcp_anet_rpc_queue_num           = t[17].cast<int>();
@@ -1204,7 +1187,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     return c;
                 }
-                if (t.size() != 27 && t.size() != 28 && t.size() != 29) {
+                // The 27-, 28-, and 29-field layouts append retired values.
+                if (t.size() != 22 && t.size() != 27 && t.size() != 28 && t.size() != 29) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
@@ -1230,16 +1214,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.p2p_rdma_staging_total_bytes = t[19].cast<int64_t>();
                 c.p2p_prefill_sender_thread_count = t[20].cast<int>();
                 c.p2p_prefill_sender_queue_size = t[21].cast<int>();
-                // Older pickles include two retired threshold fields before this suffix.
-                const auto tail = t.size() == 29 ? 24 : 22;
-                c.rdma_transfer_wait_timeout_ms = t[tail].cast<int64_t>();
-                c.p2p_read_steal_before_deadline_ms = t[tail + 1].cast<int64_t>();
-                c.p2p_read_return_before_deadline_ms = t[tail + 2].cast<int64_t>();
-                c.p2p_resource_store_timeout_check_interval_ms = t[tail + 3].cast<int>();
-                c.p2p_layer_cache_buffer_store_timeout_ms = t[tail + 4].cast<int64_t>();
-                if (t.size() == 28) {
-                    c.p2p_kv_force_release_timeout_ms = t[27].cast<int>();
-                }
                 return c;
             }));
 
@@ -2218,13 +2192,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("load_cache_timeout_ms", &PDSepConfig::load_cache_timeout_ms)
         .def_readwrite("max_rpc_timeout_ms", &PDSepConfig::max_rpc_timeout_ms)
         .def_readwrite("worker_port_offset", &PDSepConfig::worker_port_offset)
-        .def_readwrite("prefill_max_wait_timeout_ms", &PDSepConfig::prefill_max_wait_timeout_ms)
-        .def_readwrite("decode_retry_interval_ms", &PDSepConfig::decode_retry_interval_ms)
-        .def_readwrite("decode_polling_kv_cache_step_ms", &PDSepConfig::decode_polling_kv_cache_step_ms)
-        .def_readwrite("rdma_connect_retry_times", &PDSepConfig::rdma_connect_retry_times)
-        .def_readwrite("decode_entrance", &PDSepConfig::decode_entrance)
-        .def_readwrite("prefill_stop_stream_wait_timeout_ms", &PDSepConfig::prefill_stop_stream_wait_timeout_ms)
-        .def_readwrite("prefill_prepare_resource_pool_size", &PDSepConfig::prefill_prepare_resource_pool_size)
         .def("to_string", &PDSepConfig::to_string)
         .def(py::pickle(
             [](const PDSepConfig& self) {
@@ -2237,19 +2204,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.remote_rpc_server_port,
                                       self.prefill_retry_times,
                                       self.prefill_retry_timeout_ms,
-                                      self.prefill_max_wait_timeout_ms,
-                                      self.decode_retry_interval_ms,
-                                      self.decode_polling_kv_cache_step_ms,
-                                      self.rdma_connect_retry_times,
                                       self.load_cache_timeout_ms,
                                       self.max_rpc_timeout_ms,
-                                      self.worker_port_offset,
-                                      self.decode_entrance,
-                                      self.prefill_stop_stream_wait_timeout_ms,
-                                      self.prefill_prepare_resource_pool_size);
+                                      self.worker_port_offset);
             },
             [](py::tuple t) {
-                if (t.size() == 19) {
+                if (t.size() == 12 || t.size() == 19) {
+                    // The 19-field layout placed four retired fields before these timeouts.
+                    const auto timeout_index = t.size() == 19 ? 13 : 9;
                     PDSepConfig c;
                     try {
                         c.role_type                           = t[0].cast<RoleType>();
@@ -2261,22 +2223,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.remote_rpc_server_port              = t[6].cast<int64_t>();
                         c.prefill_retry_times                 = t[7].cast<int64_t>();
                         c.prefill_retry_timeout_ms            = t[8].cast<int64_t>();
-                        c.prefill_max_wait_timeout_ms         = t[9].cast<int64_t>();
-                        c.decode_retry_interval_ms            = t[10].cast<int64_t>();
-                        c.decode_polling_kv_cache_step_ms     = t[11].cast<int64_t>();
-                        c.rdma_connect_retry_times            = t[12].cast<int64_t>();
-                        c.load_cache_timeout_ms               = t[13].cast<int64_t>();
-                        c.max_rpc_timeout_ms                  = t[14].cast<int64_t>();
-                        c.worker_port_offset                  = t[15].cast<int64_t>();
-                        c.decode_entrance                     = t[16].cast<bool>();
-                        c.prefill_stop_stream_wait_timeout_ms = t[17].cast<int64_t>();
-                        c.prefill_prepare_resource_pool_size  = t[18].cast<int64_t>();
+                        c.load_cache_timeout_ms               = t[timeout_index].cast<int64_t>();
+                        c.max_rpc_timeout_ms                  = t[timeout_index + 1].cast<int64_t>();
+                        c.worker_port_offset                  = t[timeout_index + 2].cast<int64_t>();
                     } catch (const std::exception& e) {
                         throw std::runtime_error(std::string("PDSepConfig unpickle error: ") + e.what());
                     }
                     return c;
                 }
-                throw std::runtime_error("Invalid PDSepConfig state: expected 19 fields, got "
+                throw std::runtime_error("Invalid PDSepConfig state: expected 12 or 19 fields, got "
                                          + std::to_string(t.size()));
             }));
 

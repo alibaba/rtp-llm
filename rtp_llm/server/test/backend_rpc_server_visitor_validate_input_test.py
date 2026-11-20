@@ -44,7 +44,6 @@ class BackendRPCServerVisitorValidateInputTest(unittest.IsolatedAsyncioTestCase)
         self.model_rpc_client = _RecordingModelRpcClient()
         pd_sep_config = SimpleNamespace(
             max_rpc_timeout_ms=0,
-            decode_entrance=False,
             role_type=RoleType.FRONTEND,
             to_string=lambda: "test",
         )

@@ -406,15 +406,7 @@ struct CacheStoreConfig {
     int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_transfer_not_done_resource_hold_ms =
         10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
-    // Keep legacy config fields readable during upgrade. The P2P path uses request deadlines and leases.
-    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;
-    int64_t p2p_read_steal_before_deadline_ms = 250;
-    int64_t p2p_read_return_before_deadline_ms = 100;
-    int p2p_resource_store_timeout_check_interval_ms = 100;
-    int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
-    int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
-    static constexpr int kDefaultP2PKvForceReleaseTimeoutMs = 5 * 60 * 1000;
-    int p2p_kv_force_release_timeout_ms = kDefaultP2PKvForceReleaseTimeoutMs;
+    int64_t p2p_lease_query_timeout_ms = 500;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
 
     int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
     // TTL for cancelled_keys_ tombstones; should cover the longest expected
@@ -524,22 +516,10 @@ struct PDSepConfig {
     int64_t  cache_store_rdma_connect_port   = 0;
     int64_t  remote_rpc_server_port          = 0;
     int64_t  prefill_retry_times             = 0;
-    int64_t  prefill_retry_timeout_ms        = 20;
-    int64_t  prefill_max_wait_timeout_ms     = 600 * 1000;
-    int64_t  decode_retry_interval_ms        = 1;
-    int64_t  decode_polling_kv_cache_step_ms = 30;
-    int64_t  rdma_connect_retry_times        = 0;
+    int64_t  prefill_retry_timeout_ms        = 0;
     int64_t  load_cache_timeout_ms           = 5000;
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
-    bool     decode_entrance                 = false;  // Legacy config only. PD always uses Decode ingress.
-    // ========== Prefill Thread Pool Configuration ==========
-    // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
-    int64_t prefill_prepare_resource_pool_size = 0;
-    // Max wait time in stopStream() for Engine Loop to call finish_internal().
-    // When GenerateDone is set and stream has no error, stopStream() waits up to
-    // this many ms for Engine Loop's advance() to detect GenerateDone and set FINISHED.
-    int64_t prefill_stop_stream_wait_timeout_ms = 2000;
 
     std::string to_string() const;
 };

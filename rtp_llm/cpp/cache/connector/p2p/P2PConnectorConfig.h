@@ -25,7 +25,7 @@ struct P2PConnectorSchedulerConfig {
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
     std::string                          pipeline_layout;
-    int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
+    int64_t                  p2p_lease_query_timeout_ms                   = 500;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
     std::shared_ptr<const CacheTopology> topology;

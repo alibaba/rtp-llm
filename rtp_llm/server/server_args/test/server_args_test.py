@@ -2308,24 +2308,18 @@ class CacheStoreArgumentsTest(TestCase):
             parser.parse_args(args)
         return config
 
-    def test_kv_force_release_timeout_can_be_overridden(self):
-        self.assertEqual(self.parse_config([], {}).p2p_kv_force_release_timeout_ms, 300000)
-        env = {"P2P_KV_FORCE_RELEASE_TIMEOUT_MS": "450000"}
-        self.assertEqual(self.parse_config([], env).p2p_kv_force_release_timeout_ms, 450000)
-        config = self.parse_config(["--p2p_kv_force_release_timeout_ms", "600000"], env)
-        self.assertEqual(config.p2p_kv_force_release_timeout_ms, 600000)
-
-    def test_legacy_rdma_transfer_wait_timeout_is_accepted(self):
-        flag = "--cache_store_rdma_transfer_wait_timeout_ms"
-        for args, env in (
-            ([flag, "123456"], {}),
-            ([f"{flag}=123456"], {}),
-            ([], {"CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS": "123456"}),
-        ):
-            with self.subTest(args=args, env=env):
-                config = self.parse_config(args, env)
-                self.assertEqual(config.rdma_transfer_wait_timeout_ms, 123456)
-                self.assertEqual(config.p2p_transfer_not_done_resource_hold_ms, 10000)
+    def test_retired_transfer_options_are_ignored_in_env(self):
+        config = self.parse_config(
+            [],
+            {
+                "CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS": "invalid",
+                "P2P_KV_FORCE_RELEASE_TIMEOUT_MS": "invalid",
+            },
+        )
+        self.assertFalse(hasattr(config, "rdma_transfer_wait_timeout_ms"))
+        self.assertFalse(hasattr(config, "p2p_kv_force_release_timeout_ms"))
+        self.assertEqual(config.p2p_transfer_not_done_resource_hold_ms, 10000)
+        self.assertEqual(config.p2p_lease_query_timeout_ms, 500)
 
 
 if __name__ == "__main__":

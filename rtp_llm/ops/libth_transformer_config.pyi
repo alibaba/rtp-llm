@@ -205,11 +205,6 @@ class CPRotateMethod:
     def value(self) -> int:
         ...
 class CacheStoreConfig:
-    rdma_transfer_wait_timeout_ms: int
-    p2p_read_steal_before_deadline_ms: int
-    p2p_read_return_before_deadline_ms: int
-    p2p_resource_store_timeout_check_interval_ms: int
-    p2p_layer_cache_buffer_store_timeout_ms: int
     cache_store_rdma_mode: bool
     thread_count: int
     rdma_connect_timeout_ms: int
@@ -1263,13 +1258,6 @@ class NormType:
     def value(self) -> int:
         ...
 class PDSepConfig:
-    prefill_max_wait_timeout_ms: int
-    decode_retry_interval_ms: int
-    decode_polling_kv_cache_step_ms: int
-    rdma_connect_retry_times: int
-    decode_entrance: bool
-    prefill_stop_stream_wait_timeout_ms: int
-    prefill_prepare_resource_pool_size: int
     cache_store_connect_port: int
     cache_store_listen_port: int
     cache_store_rdma_connect_port: int
@@ -1277,6 +1265,8 @@ class PDSepConfig:
     cache_store_rdma_mode: bool
     load_cache_timeout_ms: int
     max_rpc_timeout_ms: int
+    prefill_retry_times: int
+    prefill_retry_timeout_ms: int
     remote_rpc_server_port: int
     role_type: RoleType
     worker_port_offset: int
