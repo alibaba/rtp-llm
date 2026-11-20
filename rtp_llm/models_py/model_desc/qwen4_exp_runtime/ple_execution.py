@@ -116,8 +116,6 @@ class PLEExecution:
         if not ids.is_cuda or torch.version.hip is not None:
             return None
         if graph_mode:
-            if not getattr(state_inputs, "is_exact_cuda_graph_batch", False):
-                return None
             lengths = getattr(state_inputs, "sequence_lengths_plus_1_device", None)
             if lengths is None:
                 return None

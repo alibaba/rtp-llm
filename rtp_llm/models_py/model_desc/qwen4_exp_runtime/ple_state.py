@@ -64,6 +64,7 @@ class _PLETargetTransaction:
     commit_started: bool = False
     tentative_committed: bool = False
     graph_key: Optional[int] = None
+    live_batch_size: Optional[int] = None
 
 
 @dataclass(frozen=True)

@@ -348,16 +348,21 @@ def get_sparse_gqa_impl(
     Imported lazily: the impl pulls in the qwen4 Triton scoring kernels, which
     should not be imported for models that never route here.
     """
+    import torch
+
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
     )
-    exact_decode_or_target_graph = (
+    supported_decode_or_target_graph = (
         selection_mode == CudaGraphSelectionMode.DECODE_GRAPH
-        and bool(getattr(attn_inputs, "is_exact_cuda_graph_batch", False))
+        and (
+            torch.version.hip is None
+            or bool(getattr(attn_inputs, "is_exact_cuda_graph_batch", False))
+        )
     )
     if (
         selection_mode != CudaGraphSelectionMode.EAGER
-        and not exact_decode_or_target_graph
+        and not supported_decode_or_target_graph
     ):
         raise RuntimeError(
             "qwen4_exp sparse GQA requires exact-batch decode/target or opted-in draft CUDA Graph "

@@ -366,7 +366,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
     supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
-    if (py::hasattr(py_model_, "requires_exact_cuda_graph_batch")) {
+    const bool has_explicit_exact_batch_policy = py::hasattr(py_model_, "requires_exact_cuda_graph_batch");
+    if (has_explicit_exact_batch_policy) {
         requires_exact_cuda_graph_batch_ = py_model_.attr("requires_exact_cuda_graph_batch")().cast<bool>();
     }
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
@@ -395,7 +396,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             && py::hasattr(py_model_, "supports_device_speculative_handoff")) {
             supports_device_speculative_handoff_ = py_model_.attr("supports_device_speculative_handoff")().cast<bool>();
         }
-        requires_exact_cuda_graph_batch_ |= has_speculative_target_commit_hooks_;
+        if (!has_explicit_exact_batch_policy) {
+            requires_exact_cuda_graph_batch_ |= has_speculative_target_commit_hooks_;
+        }
         if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
             RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "clear_speculative_target_graph_capture")
                                         && py::hasattr(py_model_, "save_speculative_target_graph_capture")

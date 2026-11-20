@@ -1130,9 +1130,10 @@ class Qwen4ExpModel(Qwen35Model):
         return initialized
 
     def requires_exact_cuda_graph_batch(self) -> bool:
-        """Decode side-cache writes need exact batches; draft prefill masks rows."""
-        return bool(self.ple_layers) or bool(
-            getattr(self.config, "enable_qwen4_qsa", False)
+        """ROCm QSA decode requires exact batches; CUDA pads onto reserved block 0."""
+        return torch.version.hip is not None and (
+            bool(self.ple_layers)
+            or bool(getattr(self.config, "enable_qwen4_qsa", False))
         )
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
@@ -1386,8 +1387,12 @@ class Qwen4ExpModel(Qwen35Model):
             communicator.finish_graph_capture()
         return self._ple_coordinator().save_speculative_target_graph_capture(graph_key)
 
-    def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
-        self._ple_coordinator().activate_speculative_target_graph_replay(graph_key)
+    def activate_speculative_target_graph_replay(
+        self, graph_key: int, live_batch_size: Optional[int] = None
+    ) -> None:
+        self._ple_coordinator().activate_speculative_target_graph_replay(
+            graph_key, live_batch_size
+        )
         head_graph = self.__dict__.get("_target_head_graph")
         if head_graph is not None:
             head_graph.activate(graph_key)

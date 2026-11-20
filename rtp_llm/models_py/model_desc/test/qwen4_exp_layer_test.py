@@ -1272,11 +1272,17 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         self.assertFalse(captured.tentative_committed)
 
     def test_side_cache_requires_exact_cuda_graph_batch(self):
-        self.assertTrue(self.model.requires_exact_cuda_graph_batch())
-        self.model.ple_layers = nn.ModuleDict()
-        self.assertFalse(self.model.requires_exact_cuda_graph_batch())
-        self.model.config.enable_qwen4_qsa = True
-        self.assertTrue(self.model.requires_exact_cuda_graph_batch())
+        with patch.object(torch.version, "hip", None):
+            self.assertFalse(self.model.requires_exact_cuda_graph_batch())
+            self.model.config.enable_qwen4_qsa = True
+            self.assertFalse(self.model.requires_exact_cuda_graph_batch())
+        with patch.object(torch.version, "hip", "6.3"):
+            self.model.config.enable_qwen4_qsa = False
+            self.assertTrue(self.model.requires_exact_cuda_graph_batch())
+            self.model.ple_layers = nn.ModuleDict()
+            self.assertFalse(self.model.requires_exact_cuda_graph_batch())
+            self.model.config.enable_qwen4_qsa = True
+            self.assertTrue(self.model.requires_exact_cuda_graph_batch())
 
     def test_graph_physical_blocks_replay_uses_updated_table_and_pages(self):
         if not torch.cuda.is_available():
@@ -1373,6 +1379,26 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         torch.testing.assert_close(state_pool[4], state_seed[1, :2] + 10)
         torch.testing.assert_close(ctx_pool[2], ids_seed[0, 1:] + 100)
         torch.testing.assert_close(ctx_pool[4], ids_seed[1, :2] + 100)
+
+        # Padded replay on bucket 2 with live batch 1 commits only row 0,
+        # ignoring padded row 1 mapped to reserved sentinel block 0.
+        table[1].zero_()
+        prefixes[1] = 0
+        state_seed.add_(20)
+        ids_seed.add_(20)
+        row4_state_before = state_pool[4].clone()
+        row0_state_before = state_pool[0].clone()
+        graph.replay()
+        self.model.activate_speculative_target_graph_replay(2, 1)
+        self.model.prepare_speculative_target_commit(
+            torch.tensor([2], device=device, dtype=torch.int32)
+        )
+        self.model.finish_speculative_target_commit(True)
+        self.model.finalize_speculative_target_commit()
+        torch.testing.assert_close(state_pool[2], state_seed[0, :2] + 10)
+        torch.testing.assert_close(ctx_pool[2], ids_seed[0, :2] + 100)
+        torch.testing.assert_close(state_pool[4], row4_state_before)
+        torch.testing.assert_close(state_pool[0], row0_state_before)
 
     def _move_ple_to_cuda(self, device, cpu_tables=False):
         embedding = self.ple.ple_embedding

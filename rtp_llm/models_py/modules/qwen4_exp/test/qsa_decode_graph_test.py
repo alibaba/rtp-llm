@@ -193,10 +193,37 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
                     )
 
     def test_graph_requires_exact_batch(self):
-        with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
-            self._context(True, exact=False).select_decode_tokens(
-                self.q, self.raw, indexer=self.indexer, rope_config=self.rope
-            )
+        with patch.object(torch.version, "hip", "6.3"):
+            with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
+                self._context(True, exact=False).select_decode_tokens(
+                    self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+                )
+        if torch.version.hip is not None:
+            return
+        # CUDA padded replay: live row 0 updates its cache while padded row 1
+        # (block 0, visible length 1 -> sequence_length 0) leaves sentinel row 0 intact.
+        self.lengths = torch.tensor([7, 0], dtype=torch.int32).pin_memory()
+        self.input_lengths = torch.tensor([1, 1], dtype=torch.int32).pin_memory()
+        self.positions = torch.tensor(
+            [7, 7, 7, 0, 0, 0], dtype=torch.int32, device="cuda"
+        )
+        self.kv_table = torch.tensor([[1, 2], [0, 0]], dtype=torch.int32, device="cuda")
+        self.state_table = self.kv_table.clone()
+        self.q = torch.randn(2, 4, 128, dtype=torch.bfloat16, device="cuda")
+        self.raw = torch.randn(2, 128, dtype=torch.bfloat16, device="cuda")
+        kv_zero_before = self.kv[0].clone()
+        state_zero_before = self.state[0].clone()
+        context = self._context(True, exact=False)
+        selected = context.select_decode_tokens(
+            self.q, self.raw, indexer=self.indexer, rope_config=self.rope
+        )
+        context.finalize_side_cache()
+        self.assertEqual(
+            tuple(selected.shape),
+            (2, self.indexer.token_budget + self.indexer.compress_ratio - 1),
+        )
+        torch.testing.assert_close(self.kv[0], kv_zero_before, rtol=0, atol=0)
+        torch.testing.assert_close(self.state[0], state_zero_before, rtol=0, atol=0)
 
     @skipIf(
         torch.version.hip is not None,

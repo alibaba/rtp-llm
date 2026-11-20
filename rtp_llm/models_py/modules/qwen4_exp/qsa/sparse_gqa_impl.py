@@ -114,8 +114,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "qwen4_exp sparse GQA target verification must use context-style prefill"
             )
         graph_paged = bool(inputs.is_cuda_graph)
-        if graph_paged and not bool(
-            getattr(inputs, "is_exact_cuda_graph_batch", False)
+        if (
+            graph_paged
+            and torch.version.hip is not None
+            and not bool(getattr(inputs, "is_exact_cuda_graph_batch", False))
         ):
             raise RuntimeError(
                 "qwen4_exp sparse GQA Graph decode requires an exact batch graph"
@@ -375,7 +377,6 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             not torch.version.hip
             and self.support_cuda_graph()
             and not self.is_prefill
-            and self.attn_inputs.is_exact_cuda_graph_batch
         )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:

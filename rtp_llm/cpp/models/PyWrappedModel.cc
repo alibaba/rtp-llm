@@ -1253,7 +1253,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
             py::gil_scoped_acquire gil;
             if (has_speculative_target_commit_hooks_ && py_model_inputs.attention_inputs.is_target_verify) {
-                py_model_.attr("activate_speculative_target_graph_replay")(graph_state.current_real_graph_bs);
+                if (graph_state.current_batch_size == graph_state.current_real_graph_bs) {
+                    py_model_.attr("activate_speculative_target_graph_replay")(graph_state.current_real_graph_bs);
+                } else {
+                    py_model_.attr("activate_speculative_target_graph_replay")(
+                        graph_state.current_real_graph_bs, graph_state.current_batch_size);
+                }
             }
             if (!py_model_outputs.draft_token_ids.defined() && !py_model_inputs.attention_inputs.is_prefill
                 && py::hasattr(py_model_, "activate_draft_lm_head_graph")) {

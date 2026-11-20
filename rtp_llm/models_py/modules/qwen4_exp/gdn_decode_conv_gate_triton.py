@@ -46,12 +46,16 @@ def _qwen4_gdn_decode_conv1d_gate_kernel(
         tl.store(BETA + row * HEADS + h, tl.sigmoid(raw_b), valid_h)
 
     length = tl.load(LENGTHS + row).to(tl.int32)
-    if length <= 0:
-        return  # CUDA Graph padding owns no state page.
     channel = tile * BLOCK + tl.arange(0, BLOCK)
+    if length <= 0:
+        tl.store(OUT + row * DIM + channel, 0.0)
+        return  # CUDA Graph padding owns no state page.
     row_map = BLOCK_MAP + row * STRIDE_MAP
-    src_page = tl.load(row_map + (length - 2) // PAGE).to(tl.int64)
+    src_page = tl.load(row_map + tl.maximum(length - 2, 0) // PAGE).to(tl.int64)
     dst_page = tl.load(row_map + (length - 1) // PAGE).to(tl.int64)
+    if (src_page <= 0) | (dst_page <= 0):
+        tl.store(OUT + row * DIM + channel, 0.0)
+        return
     src = STATE + src_page * STRIDE_STATE + channel
     h0, h1, h2 = tl.load(src), tl.load(src + DIM), tl.load(src + 2 * DIM)
     x = tl.load(X + row * STRIDE_X + channel)

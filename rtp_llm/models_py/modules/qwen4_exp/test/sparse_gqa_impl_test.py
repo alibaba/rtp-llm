@@ -354,8 +354,19 @@ class SparseGqaImplForwardTest(unittest.TestCase):
         attn_configs, attn_inputs = _configs(is_prefill=False)
         attn_inputs.is_cuda_graph = True
         attn_inputs.is_s_padded = True
-        with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
-            SparseGqaFmhaImpl(attn_configs, attn_inputs)
+        with patch.object(torch.version, "hip", "6.3"):
+            with self.assertRaisesRegex(RuntimeError, "exact batch graph"):
+                SparseGqaFmhaImpl(attn_configs, attn_inputs)
+        with (
+            patch.object(torch.version, "hip", None),
+            patch.object(
+                sparse_gqa_impl,
+                "FusedRopeKVCacheDecodeOp",
+                self._IdentityDecodeWriter,
+            ),
+        ):
+            impl = SparseGqaFmhaImpl(attn_configs, attn_inputs)
+            self.assertTrue(impl.supports_device_cuda_graph_inputs())
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_target_graph_replays_updated_prefix_and_main_pages(self):

@@ -273,7 +273,9 @@ class PLETransactionCoordinator:
         self.graph_registry.captured[graph_key] = transaction
         self.active_transaction = None
 
-    def activate_speculative_target_graph_replay(self, graph_key: int) -> None:
+    def activate_speculative_target_graph_replay(
+        self, graph_key: int, live_batch_size: Optional[int] = None
+    ) -> None:
         """Select the captured stage whose kernels just replayed."""
         if self.active_transaction is not None:
             raise RuntimeError("previous PLE target transaction is still active")
@@ -284,6 +286,10 @@ class PLETransactionCoordinator:
             raise RuntimeError("PLE target graph stage is missing for replay batch")
         if transaction.prepared_writes is not None or transaction.commit_started:
             raise RuntimeError("PLE target graph stage was not finalized")
+        live_batch = graph_key if live_batch_size is None else live_batch_size
+        if type(live_batch) is not int or not (0 < live_batch <= graph_key):
+            raise RuntimeError("PLE target graph live batch is out of range")
+        transaction.live_batch_size = live_batch
         self.active_transaction = transaction
 
     def _release_ple_target_transaction(
@@ -293,7 +299,48 @@ class PLETransactionCoordinator:
             transaction.prepared_writes = None
             transaction.commit_started = False
             transaction.tentative_committed = False
+            transaction.live_batch_size = None
         self.active_transaction = None
+
+    @staticmethod
+    def _slice_stage_for_live_batch(
+        stage: _PLETargetLayerStage, live_batch: int
+    ) -> _PLETargetLayerStage:
+        def slice_inputs(inputs):
+            device_table = getattr(inputs, "kv_cache_block_id_device", None)
+            host_table = getattr(inputs, "kv_cache_block_id", None)
+            return type(
+                "_LiveBlockTableInputs",
+                (),
+                {
+                    "kv_cache_block_id_device": (
+                        device_table[:live_batch]
+                        if isinstance(device_table, torch.Tensor)
+                        and device_table.dim() == 2
+                        else device_table
+                    ),
+                    "kv_cache_block_id": (
+                        host_table[:live_batch]
+                        if isinstance(host_table, torch.Tensor)
+                        and host_table.dim() == 2
+                        else host_table
+                    ),
+                },
+            )()
+
+        return _PLETargetLayerStage(
+            layer_idx=stage.layer_idx,
+            page_size=stage.page_size,
+            prefixes=stage.prefixes[:live_batch],
+            state_pool=stage.state_pool,
+            ctx_pool=stage.ctx_pool,
+            state_inputs=slice_inputs(stage.state_inputs),
+            ctx_inputs=slice_inputs(stage.ctx_inputs),
+            initial_state=stage.initial_state[:live_batch],
+            candidate_state_inputs=stage.candidate_state_inputs[:live_batch],
+            initial_context=stage.initial_context[:live_batch],
+            candidate_ids=stage.candidate_ids[:live_batch],
+        )
 
     def prepare_speculative_target_commit(self, accept_len: torch.Tensor) -> None:
         """Select accepted PLE snapshots and prepare undo without writing pools."""
@@ -321,21 +368,38 @@ class PLETransactionCoordinator:
                 "qwen4_exp PLE target transaction has incomplete layer coverage: "
                 f"missing={missing}, extra={extra}"
             )
+        expected_batch = (
+            transaction.batch_size
+            if transaction.live_batch_size is None
+            else transaction.live_batch_size
+        )
         if (
             not isinstance(accept_len, torch.Tensor)
             or accept_len.dim() != 1
             or accept_len.dtype != torch.int32
-            or int(accept_len.numel()) != transaction.batch_size
+            or int(accept_len.numel()) != expected_batch
             or accept_len.device != transaction.prefixes.device
         ):
             raise RuntimeError(
                 "qwen4_exp PLE target commit requires device-local int32 accept_len [B]"
             )
+        commit_transaction = transaction
+        if expected_batch < transaction.batch_size:
+            commit_transaction = _PLETargetTransaction(
+                batch_size=expected_batch,
+                query_len=transaction.query_len,
+                prefixes=transaction.prefixes[:expected_batch],
+                expected_layers=transaction.expected_layers,
+                stages={
+                    layer_idx: self._slice_stage_for_live_batch(stage, expected_batch)
+                    for layer_idx, stage in transaction.stages.items()
+                },
+            )
         from rtp_llm.models_py.modules.qwen4_exp.ple.ple_commit_metadata_triton import (
             begin_accepted_pair_resolution,
         )
 
-        resolution = begin_accepted_pair_resolution(transaction, accept_len)
+        resolution = begin_accepted_pair_resolution(commit_transaction, accept_len)
         if resolution is not None:
             # The verdict read is deferred: the gather launches below run while
             # the device computes it, and verify() re-checks before publishing.
@@ -344,19 +408,19 @@ class PLETransactionCoordinator:
         else:
             if bool(
                 torch.any(
-                    (accept_len < 1) | (accept_len > transaction.query_len)
+                    (accept_len < 1) | (accept_len > commit_transaction.query_len)
                 ).item()
             ):
                 raise RuntimeError(
                     "qwen4_exp PLE target accept_len must be in "
-                    f"[1, {transaction.query_len}]"
+                    f"[1, {commit_transaction.query_len}]"
                 )
 
             accepted = accept_len.to(torch.long)
             pending = []
             destination_rows: set[tuple[int, int]] = set()
-            for layer_idx in sorted(transaction.stages):
-                stage = transaction.stages[layer_idx]
+            for layer_idx in sorted(commit_transaction.stages):
+                stage = commit_transaction.stages[layer_idx]
                 destinations = PLECacheViews._commit_physical_block_pair(
                     stage, accepted
                 )

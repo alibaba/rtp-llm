@@ -154,8 +154,10 @@ class Qwen4ExpQSARuntimeContext:
                 raise RuntimeError("qwen4_exp QSA does not support padded execution")
             if graph_mode and not bool(inputs.is_cuda_graph):
                 raise RuntimeError("qwen4_exp QSA Graph cache modes disagree")
-            if graph_mode and not bool(
-                getattr(inputs, "is_exact_cuda_graph_batch", False)
+            if (
+                graph_mode
+                and torch.version.hip is not None
+                and not bool(getattr(inputs, "is_exact_cuda_graph_batch", False))
             ):
                 raise RuntimeError("qwen4_exp QSA Graph requires an exact batch graph")
             if inputs.context_parallel_info is not None:

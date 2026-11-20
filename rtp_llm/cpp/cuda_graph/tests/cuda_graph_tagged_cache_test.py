@@ -651,13 +651,13 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     HIDDEN_SIZE,
                     TOKENS_PER_BLOCK,
                     KERNEL_BLOCK_TABLE_WIDTH,
-                    [1, 2],
+                    [1, 4],
                     GROUP_TAGS,
                     position_id_len_factor=3,
-                    exact_batch_only=True,
+                    exact_batch_only=False,
                     draft_decode_steps=steps,
                 )
-                for replay, batch in enumerate((2, 1, 2)):
+                for replay, batch in enumerate((4, 3, 1, 2, 4)):
                     inputs = _build_decode_inputs(
                         GROUP_TAGS,
                         {"full": replay + 1, "aux": replay + 2},
