@@ -27,8 +27,12 @@ class Qwen4MoeLayer(GenericMoeLayer):
     _shared_stream = None
     _reused_shared_stream = None
     _fuse_ep_shared_gate = False
+    _tp_shared_packed_comm = None
+    _tp_shared_pack_reduce = False
+    _ep_shared_max_tokens = 32
     _ep_shared_stream = None
     _ep_two_batch = None
+    _sm90_mega_moe = None
     _mega_prefill_graph = None
     _pack_ep_shared_reduce = False
 
@@ -94,6 +98,8 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._fuse_ep_shared_gate = (
             os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
         )
+        if os.environ.get("RTP_LLM_H20_COMPACT_FP8_MOE", "1") == "1":
+            self._prepare_tp_fp8_shared_overlap()
         if os.environ.get("QWEN_MOE_EP_SHARED_OVERLAP", "0") == "1":
             self._prepare_ep_shared_overlap()
         if not getattr(self.config, "_qwen4_full_fp8_nvfp4", False):
@@ -162,6 +168,57 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self.select_topk(logits, ids, weights)
         return mega.forward(hidden_states, ids, weights)
 
+    def _prepare_tp_fp8_shared_overlap(self) -> bool:
+        """Overlap H20 FP8 shared expert with routed MoE and pack TP reduction."""
+        from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (
+            DeepGemmMaskedExecutorV2,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+            PureTpRouterFp8PerBlock,
+        )
+        from rtp_llm.models_py.modules.hybrid.dense_mlp import DenseMLP
+
+        from .moe_tp_reduce import prepare_moe_communicator
+
+        pc, shared = self.parallelism_config, self.shared_expert
+        if not (
+            shared is not None
+            and self._sm90_mega_moe is None
+            and pc.tp_size == pc.ep_size == 2
+            and pc.dp_size == 1
+            and pc.tp_size <= getattr(pc, "local_world_size", pc.tp_size)
+            and self.use_ep_shared_allreduce
+            and not self.use_unified_tp_allreduce
+            and not self.config.eplb_config.enable_eplb()
+            and self.fake_balance_expert is None
+            and type(shared) is DenseMLP
+            and type(self.fused_moe.router) is PureTpRouterFp8PerBlock
+            and self.fused_moe.router.supports_skip_tp_allreduce
+            and type(self.fused_moe.fused_experts) is DeepGemmMaskedExecutorV2
+            and type(shared.up_proj) is Fp8Linear
+            and type(shared.down_proj) is Fp8Linear
+            and type(self.shared_expert_gate) is Fp8Linear
+            and tuple(shared.up_proj.weight.shape) == (640, 2560)
+            and tuple(shared.down_proj.weight.shape) == (2560, 320)
+            and tuple(self.shared_expert_gate.weight.shape) == (1, 2560)
+            and shared.up_proj.weight.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(shared.up_proj.weight.device) == (9, 0)
+            and "H20" in torch.cuda.get_device_name(shared.up_proj.weight.device)
+        ):
+            return False
+        device = shared.up_proj.weight.device
+        self._ep_shared_stream = _shared_stream_for_device(device.index)
+        self._ep_shared_input_ready = torch.cuda.Event()
+        self._ep_shared_output_ready = torch.cuda.Event()
+        self._ep_shared_max_tokens = 128
+        self._tp_shared_pack_reduce = True
+        self._tp_shared_packed_comm = prepare_moe_communicator(
+            device, max_decode_rows=self._ep_shared_max_tokens
+        )
+        return True
+
     def _prepare_ep_shared_overlap(self) -> None:
         from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
         from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
@@ -222,6 +279,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
     def _forward_ep_shared_overlap(self, hidden_states):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+        from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
 
         main = torch.cuda.current_stream(hidden_states.device)
         capturing = torch.cuda.is_current_stream_capturing()
@@ -240,6 +298,8 @@ class Qwen4MoeLayer(GenericMoeLayer):
                 hidden_states
             ):
                 experts = self._ep_two_batch.forward(self, hidden_states)
+            elif self._tp_shared_pack_reduce and self._sm90_mega_moe is None:
+                experts = super()._forward_routed(hidden_states, skip_tp_allreduce=True)
             else:
                 experts = self._forward_routed(hidden_states)
         finally:
@@ -248,7 +308,19 @@ class Qwen4MoeLayer(GenericMoeLayer):
             self._ep_shared_output_ready.wait(main)
         if not capturing:
             shared.record_stream(main)
-        shared = getattr(self, "tp_all_reduce", all_reduce)(shared, group=Group.TP)
+        reduce = getattr(self, "tp_all_reduce", all_reduce)
+        if self._tp_shared_pack_reduce and self._sm90_mega_moe is None:
+            # Retain separate BF16 rounding per branch before the final sum.
+            packed = torch.cat((experts, shared), dim=0)
+            comm = self._tp_shared_packed_comm
+            if comm is not None and comm.should_use(packed):
+                with record_function_range("qwen4.tp_all_reduce"):
+                    packed = comm.all_reduce(packed)
+            else:
+                packed = reduce(packed, group=Group.TP)
+            rows = hidden_states.shape[0]
+            return packed[:rows] + packed[rows:]
+        shared = reduce(shared, group=Group.TP)
         return experts + shared
 
     def _gate_shared_expert_output(self, hidden_states, shared_expert_output):
@@ -295,7 +367,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and hidden_states.ndim == 2
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.is_contiguous()
-            and 1 <= hidden_states.shape[0] <= 32
+            and 1 <= hidden_states.shape[0] <= self._ep_shared_max_tokens
             and hidden_states.shape[1] == 2560
         ):
             return self._forward_ep_shared_overlap(hidden_states)

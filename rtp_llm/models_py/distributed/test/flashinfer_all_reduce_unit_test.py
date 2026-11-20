@@ -146,6 +146,35 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
                         tensor.shape = (129, 2560)
                         self.assertFalse(communicator.should_use(tensor))
 
+                communicator_256 = _make_communicator()
+                communicator_256._h20_max_num_tokens = 256
+                communicator_256.cpp_small_enabled = False
+                communicator_256.world_size = 2
+                communicator_256._flashinfer_comm.create_allreduce_fusion_workspace.return_value = (
+                    SimpleNamespace()
+                )
+                if sms == 78 and world_size == 2:
+                    with (
+                        patch(
+                            "torch.cuda.is_current_stream_capturing", return_value=False
+                        ),
+                        patch("torch.cuda.get_device_capability", return_value=(9, 0)),
+                        patch(
+                            "torch.cuda.get_device_properties",
+                            return_value=SimpleNamespace(multi_processor_count=78),
+                        ),
+                        patch.object(torch.version, "hip", None),
+                        patch(
+                            "torch.tensor", return_value=SimpleNamespace(item=lambda: 1)
+                        ),
+                        patch.object(flashinfer_ar.dist, "all_reduce"),
+                        patch.dict("sys.modules", {"flashinfer.comm.mnnvl": backend}),
+                    ):
+                        tensor.shape = (256, 2560)
+                        self.assertTrue(communicator_256.should_use(tensor))
+                        tensor.shape = (257, 2560)
+                        self.assertFalse(communicator_256.should_use(tensor))
+
     def test_capture_never_silently_selects_nccl_before_warmup(self):
         communicator = _make_communicator()
         with patch("torch.cuda.is_current_stream_capturing", return_value=True):

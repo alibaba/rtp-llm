@@ -31,12 +31,16 @@ def enabled_by_config() -> bool:
 
 
 class FlashInferAllReduce:
+    _h20_max_num_tokens: int = 128
+
     def __init__(
         self,
         group: ProcessGroup,
         device: torch.device,
         *,
         single_node: bool,
+        disable_custom_all_reduce: Optional[bool] = None,
+        h20_max_num_tokens: int = 128,
     ) -> None:
         self.group = group
         self.device = device
@@ -47,9 +51,13 @@ class FlashInferAllReduce:
         self._hidden_dim = 0
         self._dtype: Optional[torch.dtype] = None
         self._max_num_tokens = 0
+        if h20_max_num_tokens not in (128, 256):
+            raise ValueError("H20 all-reduce token capacity must be 128 or 256")
+        self._h20_max_num_tokens = h20_max_num_tokens
         self._flashinfer_comm = None
 
-        if not enabled_by_config() or not single_node:
+        enabled = enabled_by_config() if disable_custom_all_reduce is None else not disable_custom_all_reduce
+        if not enabled or not single_node:
             return
         if self.world_size not in _MAX_WORKSPACE_BYTES:
             logging.info(
@@ -97,7 +105,7 @@ class FlashInferAllReduce:
                 ).multi_processor_count
                 == 78
             ):
-                max_num_tokens = min(max_num_tokens, 128)
+                max_num_tokens = min(max_num_tokens, self._h20_max_num_tokens)
             workspace = self._flashinfer_comm.create_allreduce_fusion_workspace(
                 backend="trtllm",
                 world_size=self.world_size,

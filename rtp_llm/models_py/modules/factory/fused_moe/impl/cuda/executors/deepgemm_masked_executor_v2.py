@@ -8,6 +8,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     ExpertForwardPayload,
+    GlobalExpertIdsContext,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
@@ -59,6 +60,28 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
             and not getattr(config.model_config, "_qwen4_full_fp8_nvfp4", False)
         )
 
+    def can_consume_global_expert_ids(
+        self,
+        hidden_states,
+        topk_ids,
+        activation,
+        expert_map,
+        a1_scale,
+        a2_scale,
+        apply_router_weight_on_input,
+        extra_expert_args,
+    ) -> bool:
+        return self._can_consume_h20_compact_global_ids(
+            hidden_states,
+            topk_ids,
+            activation,
+            expert_map,
+            a1_scale,
+            a2_scale,
+            apply_router_weight_on_input,
+            extra_expert_args,
+        )
+
     def execute(
         self,
         payload: ExpertForwardPayload,
@@ -74,6 +97,12 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
             and payload.expert_x.shape[0] > self.masked_max_token_num
             and not _is_cuda_graph_warmup_or_capture()
         ):
+            if isinstance(
+                getattr(payload, "router_context", None), GlobalExpertIdsContext
+            ):
+                raise RuntimeError(
+                    "Global expert ID payload cannot fall through to a legacy consumer"
+                )
             return self.execute_contiguous(
                 payload,
                 activation,

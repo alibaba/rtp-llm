@@ -1538,13 +1538,22 @@ class Qwen4ExpModel(Qwen35Model):
             moe_phase = None
             if not any(group.is_cuda_graph for group in groups):
                 moe_phase = "eager"
-            elif not getattr(config, "is_mtp", False) and all(
-                group.is_cuda_graph and (group.is_target_verify or not group.is_prefill)
+            elif all(
+                group.is_cuda_graph
+                and (
+                    group.is_target_verify
+                    or not group.is_prefill
+                    or getattr(config, "is_mtp", False)
+                )
                 for group in groups
             ):
                 moe_phase = (
                     "target_verify"
-                    if all(group.is_target_verify for group in groups)
+                    if all(
+                        group.is_target_verify
+                        or (getattr(config, "is_mtp", False) and group.is_prefill)
+                        for group in groups
+                    )
                     else "decode"
                 )
             compact_moe_scope = h20_compact_moe_phase.set(moe_phase)
