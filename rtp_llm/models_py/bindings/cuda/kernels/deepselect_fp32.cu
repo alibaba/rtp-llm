@@ -1,5 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 
+#include "rtp_llm/models_py/bindings/cuda/kernels/markov_scaled_logits.h"
+
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <limits>
@@ -69,6 +71,12 @@ markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bi
                 "DSpARK scaled logits require same-device FP32 logits [B,V], contiguous bias [B,V]"
                 " in FP32/BF16/FP16, and contiguous FP32 temperature [B]");
 #if !defined(USE_ROCM) && CUDART_VERSION >= 12090
+    // The original Blackwell kernel remains in this target with its original
+    // architecture flags. Only Hopper uses the separately compiled addition.
+    const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
+    if (properties->major == 9 && properties->minor == 0) {
+        return markov_scaled_logits_sm90(logits, markov_bias, temperature);
+    }
     auto output = torch::empty(logits.sizes(), logits.options());
     if (logits.numel() == 0) {
         return output;

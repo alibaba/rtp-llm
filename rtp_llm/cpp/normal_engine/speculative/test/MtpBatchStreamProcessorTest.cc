@@ -842,6 +842,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsHistoryMateri
     GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {6, 7}, 2);
     for (auto& stream : {stream1, stream2}) {
         stream->setScoreLen(sp_config.gen_num_per_cycle + 1);
+        stream->setReturnAllProbs(ReturnAllProbsMode::NONE);
     }
 
     auto processor = MtpBatchStreamProcessor(
