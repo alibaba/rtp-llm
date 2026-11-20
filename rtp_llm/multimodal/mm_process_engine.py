@@ -760,6 +760,9 @@ class MMProcessEngine:
         )
 
         self.mm_part = mm_part
+        self.supports_precomputed_embedding = bool(
+            getattr(mm_part, "supports_inline_embedding", False)
+        )
 
         self._remote_embedding_cache = None
         if vit_config.mm_remote_cache_enable:
@@ -1501,6 +1504,34 @@ class MMProcessEngine:
             self.report_vit_error(error)
             raise
         return res
+
+    def mm_embedding_precomputed_cpp(
+        self, tensors: List[torch.Tensor]
+    ) -> MMEmbeddingRes:
+        """Fast path for models whose ARPC payload is already preprocessed.
+
+        Unlike ``mm_embedding_cpp``, this avoids rebuilding one Python
+        ``MultimodalInput`` and preprocess-config object per batch item. Models
+        must explicitly opt in through ``supports_inline_embedding``.
+        """
+        if not self.supports_precomputed_embedding:
+            raise RuntimeError(
+                "multimodal model does not support precomputed fast path"
+            )
+        with cuda_graph_gate.operation(), torch.inference_mode(), torch.cuda.device(
+            self.device
+        ):
+            result = self.mm_part.embedding(tensors)
+        _validate_embedding_result(result)
+        embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        position_ids = [
+            position.cpu()
+            for position in maybe_tensor_to_list(result[1], ndim_threshold=2)
+        ]
+        extra_input = (
+            maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
+        )
+        return MMEmbeddingRes(embeddings, position_ids, extra_input)
 
     def mm_embedding_impl(
         self, mm_inputs: List[MultimodalInput], request_id: int = 0

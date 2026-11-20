@@ -41,6 +41,7 @@ void invokeEmbeddingLookup(T*           from_tensor,
                            const int*   input_mask,
                            const int    token_num,
                            const int    hidden_units,
+                           const int    type_vocab_size,
                            cudaStream_t stream);
 
 template<typename T>

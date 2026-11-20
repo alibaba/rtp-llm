@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, Optional
 
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory_register import (
@@ -7,6 +8,23 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTok
 
 
 class BertTokenizer(BaseTokenizer):
+    @staticmethod
+    def _transformers_v5_kwargs(
+        tokenizer_config: Dict[str, Any], tokenizer_obj=None
+    ) -> Dict[str, Any]:
+        kwargs = BaseTokenizer._transformers_v5_kwargs(tokenizer_config, tokenizer_obj)
+        if tokenizer_obj is not None and "do_lower_case" in tokenizer_config:
+            from tokenizers import normalizers
+
+            normalizer = tokenizer_obj.normalizer
+            if isinstance(normalizer, normalizers.BertNormalizer):
+                # tokenizer_object otherwise overrides the config's lowercase setting.
+                state = json.loads(normalizer.__getstate__())
+                state.pop("type")
+                state["lowercase"] = tokenizer_config["do_lower_case"]
+                tokenizer_obj.normalizer = normalizers.BertNormalizer(**state)
+        return kwargs
+
     def _additional_kwargs(self, tokenizer_config: Dict[str, Any]) -> Dict[str, Any]:
         do_lower_case = self._infer_do_lower_case(tokenizer_config)
         if do_lower_case is not None:

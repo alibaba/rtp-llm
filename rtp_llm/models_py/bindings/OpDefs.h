@@ -373,6 +373,11 @@ struct PyModelInputs {
     /** PP boundary tensors received from the upstream stage; empty under pp_size=1. */
     PPIntermediates pp_intermediates;
 
+    // Optional aliases to host metadata retained by the input owner. Encoder
+    // scheduling can consume these without synchronizing device tensors.
+    torch::Tensor input_ids_host;
+    torch::Tensor text_tokens_mask_host;
+
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
     }

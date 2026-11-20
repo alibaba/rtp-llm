@@ -27,9 +27,12 @@ public:
                             const std::optional<MultimodalFeature>& multimodal_features = std::nullopt,
                             std::optional<torch::Tensor>            input_embeddings    = std::nullopt);
 
-    torch::Tensor                               token_ids;
-    torch::Tensor                               token_type_ids;
-    torch::Tensor                               input_lengths;
+    torch::Tensor token_ids;
+    torch::Tensor token_type_ids;
+    torch::Tensor input_lengths;
+    // When true, any CUDA inputs are ready on the submitting thread's current stream.
+    bool                                        allow_stream_overlap = false;
+    std::shared_ptr<c10::Event>                 producer_ready;
     int64_t                                     total_length;
     int64_t                                     request_id;
     std::optional<std::vector<MultimodalInput>> multimodal_inputs;

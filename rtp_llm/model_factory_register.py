@@ -323,6 +323,9 @@ def _register_builtin_lazy_models() -> None:
         ["BertModel", "BertForMaskedLM", "BertForSequenceClassification"],
     )
     register_lazy_model(
+        "vision_bert", "rtp_llm.models.vision_bert.vision_bert", ["VisionBert"]
+    )
+    register_lazy_model(
         "roberta",
         "rtp_llm.models.bert",
         ["XLMRobertaModel", "RobertaModel", "XLMRobertaForSequenceClassification"],
