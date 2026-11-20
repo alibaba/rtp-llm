@@ -338,7 +338,7 @@ class QSAFusedDecodeTest(unittest.TestCase):
                 scores, lengths, compress_ratio=4, token_budget=2048
             )
 
-        native_path = "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection.try_select_qsa_tokens"
+        native_path = "rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton.try_select_qsa_tokens"
         for batch in (16, 32, 64):
             for columns in (1023, 1024):
                 scores = torch.randn(batch, columns, device="cuda")

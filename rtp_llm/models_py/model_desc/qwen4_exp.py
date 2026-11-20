@@ -72,7 +72,7 @@ from rtp_llm.models_py.modules.qwen4_exp._profiler import (
     record_function_range,
 )
 from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
-    h20_compact_moe_decode,
+    h20_compact_moe_phase,
 )
 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
 from rtp_llm.models_py.modules.qwen4_exp.ple.ple import (
@@ -1536,15 +1536,19 @@ class Qwen4ExpModel(Qwen35Model):
         if getattr(config, "_qwen4_full_fp8", False):
             groups = get_attention_inputs_value(inputs)
             groups = groups.values() if isinstance(groups, Mapping) else (groups,)
-            compact_moe_scope = h20_compact_moe_decode.set(
-                not getattr(config, "is_mtp", False)
-                and all(
-                    group.is_cuda_graph
-                    and not group.is_prefill
-                    and not group.is_target_verify
-                    for group in groups
+            moe_phase = None
+            if not any(group.is_cuda_graph for group in groups):
+                moe_phase = "eager"
+            elif not getattr(config, "is_mtp", False) and all(
+                group.is_cuda_graph and (group.is_target_verify or not group.is_prefill)
+                for group in groups
+            ):
+                moe_phase = (
+                    "target_verify"
+                    if all(group.is_target_verify for group in groups)
+                    else "decode"
                 )
-            )
+            compact_moe_scope = h20_compact_moe_phase.set(moe_phase)
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
@@ -1555,7 +1559,7 @@ class Qwen4ExpModel(Qwen35Model):
             if target_reduce is not None:
                 target_reduce.active = False
             if compact_moe_scope is not None:
-                h20_compact_moe_decode.reset(compact_moe_scope)
+                h20_compact_moe_phase.reset(compact_moe_scope)
             for ple in self.ple_layers.values():
                 embedding = getattr(ple, "ple_embedding", None)
                 finish = getattr(embedding, "finish_prefetch", None)
