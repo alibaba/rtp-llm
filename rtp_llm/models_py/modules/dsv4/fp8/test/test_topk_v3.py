@@ -740,6 +740,22 @@ def test_single_coarse_bin_large_radix_exact():
     _assert_equiv(out, logits, lengths, k=K, tag="large radix single-bin")
 
 
+def test_signed_zero_histogram_boundary():
+    # A negative-zero cutoff must not classify both zero signs as above it
+    # and truncate the collection before all positive scores are emitted.
+    for n in (1, 64):
+        for k in (512, 1024, 2048):
+            columns = 2 * k
+            logits = torch.full((n, columns), -0.0, device="cuda")
+            logits[:, ::4] = 1.0
+            logits[:, 2::8] = 0.0
+            lengths = torch.full((n,), columns, device="cuda", dtype=torch.int32)
+            out = _run(logits, lengths, k, columns)
+            _assert_value_equiv(
+                out, logits, lengths, k, tag="signed_zero_histogram_boundary"
+            )
+
+
 def test_zero_length_row():
     """lengths[r] == 0 must yield an all-(-1) row."""
     logits, lengths = _make(2, 1024, seed=8, lengths_mode="full")
@@ -942,6 +958,7 @@ if __name__ == "__main__":
     test_histogram_256_negative_candidate_overflow_exact()
     test_batched_candidate_overflow_exact()
     test_single_coarse_bin_large_radix_exact()
+    test_signed_zero_histogram_boundary()
     test_zero_length_row()
     test_length_clamp_and_output_guards()
     test_empty_batch_is_a_noop()
