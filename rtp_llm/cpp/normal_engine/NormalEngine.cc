@@ -1042,19 +1042,20 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                   nullptr;
     auto               config               = CacheConfigCreator::createConfig(
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
-    auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
-    RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
+    auto block_tree_plan = planBlockTreeCacheLayout(config, kv_cache_config);
+    RTP_LLM_CHECK_WITH_INFO(block_tree_plan != nullptr, "failed to plan BlockTreeCache layout");
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
     const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
     if (parallelism_config.pp_size > 1) {
         PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
         const auto                capacity =
-            negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
+            negotiator.negotiate(config, confirmed_block_num, block_tree_plan->sizing, runtime_config);
         config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
-        block_tree_layout->block_nums = capacity.block_tree;
+        block_tree_plan->block_counts = capacity.block_tree;
     } else {
         config.finalizeBlockNums(confirmed_block_num, runtime_config);
+        block_tree_plan->block_counts = block_tree_plan->computeBlockCounts(config);
     }
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,
@@ -1066,7 +1067,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                      pd_sep_config,
                                                      cache_store_config,
                                                      use_device_malloc_block_pool,
-                                                     std::move(block_tree_layout));
+                                                     std::move(block_tree_plan));
     initializeAndPublishCacheManager(resource_context_,
                                      kv_cache_group_num_,
                                      pd_sep_config.role_type,

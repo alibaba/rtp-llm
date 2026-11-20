@@ -29,9 +29,19 @@ struct BlockTreeCacheBlockNums {
     TierBlockNumOverrides disk;
 };
 
+struct GroupSetPoolSizing {
+    CacheGroupType type;
+    size_t         device_blocks;
+    size_t         pool_stride;
+};
+
 std::vector<size_t> computeTierBlockCounts(size_t                     capacity_bytes,
                                            const std::vector<size_t>& device_block_counts,
                                            const std::vector<size_t>& pool_strides);
+
+BlockTreeCacheBlockNums computeHostDiskBlockCounts(const std::vector<GroupSetPoolSizing>& group_sets,
+                                                   size_t                                 host_budget_bytes,
+                                                   size_t                                 disk_budget_bytes);
 
 /**
  * Final physical block counts: DEVICE per tag, HOST/DISK per GroupSet type.

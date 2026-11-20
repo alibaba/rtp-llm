@@ -163,7 +163,7 @@ struct KVCacheSpec {
         return cache_key_token_stride == 0 ? seq_size_per_block : cache_key_token_stride;
     }
 
-    std::string fingerprint() const {
+    virtual std::string fingerprint() const {
         std::ostringstream os;
         os << "tag=" << tag << ";type=" << static_cast<int>(type) << ";dtype=" << static_cast<int>(memoryLayoutDType())
            << ";seq_size_per_block=" << seq_size_per_block << ";kernel_seq_size_per_block=" << kernel_seq_size_per_block

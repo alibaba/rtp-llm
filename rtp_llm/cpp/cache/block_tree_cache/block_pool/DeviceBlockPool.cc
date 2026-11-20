@@ -242,6 +242,9 @@ std::shared_ptr<const DeviceBlockPoolConfig>
 DeviceBlockPool::normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::DEVICE);
+    if (!config->allocate_storage) {
+        return config;
+    }
     RTP_LLM_CHECK_WITH_INFO(!config->memory_layouts.empty(),
                             "device block pool [%s] memory_layouts must not be empty",
                             config->pool_name.c_str());
@@ -557,9 +560,11 @@ bool DeviceBlockPool::init() {
     RTP_LLM_CHECK(!initialized());
     const auto& cfg = config();
 
-    initializeCacheBuffer();
-    initializeLayerMappings();
-    initializeLayoutStrategies();
+    if (cfg.allocate_storage) {
+        initializeCacheBuffer();
+        initializeLayerMappings();
+        initializeLayoutStrategies();
+    }
 
     markInitialized();
 
@@ -577,7 +582,7 @@ void DeviceBlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cac
     if (cache_store) {
         cache_store_ = std::move(cache_store);
     }
-    if (cache_store_ && !kvcache_reg_mr_) {
+    if (cache_store_ && !kvcache_reg_mr_ && cache_base_ptr_) {
         RTP_LLM_LOG_INFO("start to register user mr, pool_name=%s", config().pool_name.c_str());
         auto       memory_util = cache_store_->getMemoryUtil();
         const bool gpu         = where() == MemoryType::MEMORY_GPU;
@@ -759,7 +764,8 @@ std::string DeviceBlockPool::debugString() const {
     std::ostringstream oss;
     oss << "DeviceBlockPool{" << IBlockPool::debugString() << ", pool_name=" << config().pool_name
         << ", memory_layouts=" << config().memory_layouts.size() << ", total_size_bytes=" << config().total_size_bytes
-        << ", request_ref_blocks=" << request_ref_blocks << ", where=" << memoryTypeName(where()) << "}";
+        << ", request_ref_blocks=" << request_ref_blocks
+        << ", where=" << (cache_base_ptr_ ? memoryTypeName(where()) : "none") << "}";
     return oss.str();
 }
 

@@ -39,7 +39,6 @@ private:
                                   const std::vector<CrcCopyItem>&        items,
                                   Operation                              operation,
                                   const std::vector<TransferDescriptor>& descriptors);
-    static int            deviceFor(const GroupSet& group);
     static TransferStatus statusFor(CrcCopyStatus status);
 
     std::map<int, std::vector<Slot>> slots_;

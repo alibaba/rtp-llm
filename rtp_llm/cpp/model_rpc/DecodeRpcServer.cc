@@ -1169,8 +1169,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
 
     const auto& groups          = cache_config.topology().groups();
-    const bool  declared_layout = std::any_of(groups.begin(), groups.end(), [](const auto& group) {
-        return group.spec->tp_transfer.mode != TpCacheTransferMode::LEGACY;
+    const bool  declared_layout = std::any_of(groups.begin(), groups.end(), [&](const auto& group) {
+        if (group.spec->tp_transfer.mode == TpCacheTransferMode::LEGACY) {
+            return false;
+        }
+        const auto layer_ids = cache_config.layerIdsForGroup(group.tag);
+        return !layer_ids.empty() && static_cast<uint32_t>(layer_ids.front()) < layer_range.size;
     });
     const bool  typed_tp =
         useTypedTpCacheLayout(declared_layout, use_opaque_kv_store, peer_cnt, load_context.partition_count);

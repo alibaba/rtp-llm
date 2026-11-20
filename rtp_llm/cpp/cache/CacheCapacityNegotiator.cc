@@ -39,4 +39,30 @@ std::vector<size_t> computeTierBlockCounts(size_t                     capacity_b
     return block_counts;
 }
 
+BlockTreeCacheBlockNums computeHostDiskBlockCounts(const std::vector<GroupSetPoolSizing>& group_sets,
+                                                   size_t                                 host_budget_bytes,
+                                                   size_t                                 disk_budget_bytes) {
+    std::vector<size_t> device_blocks;
+    std::vector<size_t> strides;
+    for (const auto& group_set : group_sets) {
+        device_blocks.push_back(group_set.device_blocks);
+        strides.push_back(group_set.pool_stride);
+    }
+
+    const auto host = host_budget_bytes > 0 ? computeTierBlockCounts(host_budget_bytes, device_blocks, strides) :
+                                              std::vector<size_t>{};
+    const auto disk = disk_budget_bytes > 0 ? computeTierBlockCounts(disk_budget_bytes, device_blocks, strides) :
+                                              std::vector<size_t>{};
+    BlockTreeCacheBlockNums result;
+    for (size_t i = 0; i < group_sets.size(); ++i) {
+        if (!host.empty()) {
+            result.host.emplace(group_sets[i].type, host[i]);
+        }
+        if (!disk.empty()) {
+            result.disk.emplace(group_sets[i].type, disk[i]);
+        }
+    }
+    return result;
+}
+
 }  // namespace rtp_llm
