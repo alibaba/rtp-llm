@@ -57,10 +57,9 @@ struct GptModelInputs {
     torch::Tensor         lm_output_indexes;  // selected output rows
     // Compact int64 token rows for context scoring; cached/unselected rows are omitted.
     torch::Tensor custom_output_indexes;
-    // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
-    // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor lm_output_lengths;  // [total_batch_size]
-    torch::Tensor prefix_lengths;     // [context_batch_size]
+    // Kept for ModelInputsLogger; async scheduling no longer populates it.
+    torch::Tensor lm_output_lengths;        // [total_batch_size]
+    torch::Tensor prefix_lengths;           // [context_batch_size]
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
     torch::Tensor sequence_lengths_plus_1;           // optional CUDA mirror for target-verify linear attention

@@ -686,7 +686,6 @@ struct Scenario {
     std::vector<int64_t>             capture_layer_ids;
     HiddenStateCaptureDtype          capture_dtype{HiddenStateCaptureDtype::BF16};
     int64_t                          hidden_size{1};
-    bool                             install_final_layernorm{false};
     bool                             install_lm_head{false};
     bool                             increment_request_ids_each_forward{false};
 };
@@ -1229,12 +1228,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
 
     Weights weights;
     weights.layers.resize(scenario.capture_layer_ids.empty() ? 1 : 2);
-    if (scenario.install_final_layernorm) {
-        auto final_layernorm = std::make_shared<LayerNormWeights>();
-        final_layernorm->gamma =
-            torch::tensor({0.5f, 1.5f}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
-        weights.final_layernorm = std::move(final_layernorm);
-    }
     if (scenario.install_lm_head) {
         auto lm_head = std::make_shared<DenseWeights>();
         lm_head->kernel =

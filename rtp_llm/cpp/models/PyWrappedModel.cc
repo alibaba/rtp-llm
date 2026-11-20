@@ -18,7 +18,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <numeric>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
