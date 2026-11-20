@@ -995,7 +995,9 @@ class MMRemoteEmbeddingCache:
                 # storage; pack is the first operation that needs that storage.
                 failure_stage = "client_acquire"
                 if self._gdr_pool is not None:
-                    with self._observe_inflight("write_gdr_wait"):
+                    with self._observe_inflight(
+                        "write_gdr_wait"
+                    ), self._observe_stage("write", "gdr_acquire"):
                         slot = self._gdr_pool.acquire(
                             nbytes=plan.nbytes, for_write=True, timeout=remaining
                         )
@@ -1199,7 +1201,9 @@ class MMRemoteEmbeddingCache:
                         self._GDR_READ_SLOT_WAIT_SECONDS,
                         max(0.0, (deadline - time.monotonic()) / 2),
                     )
-                    with self._observe_inflight("read_gdr_wait"):
+                    with self._observe_inflight(
+                        "read_gdr_wait"
+                    ), self._observe_stage("read", "gdr_acquire"):
                         slot = self._gdr_pool.acquire(nbytes=size, timeout=slot_wait)
                     if slot is None:
                         timing["outcome"] = "skipped"
@@ -1333,7 +1337,9 @@ class MMRemoteEmbeddingCache:
             if self._direct_payload:
                 # Restore on the leased slot stream, but keep the independent
                 # allocations protected while the request stream consumes them.
-                with cuda_graph_gate.operation():
+                with self._observe_stage(
+                    "read", "consumer_stream"
+                ), cuda_graph_gate.operation():
                     consumer_stream = torch.cuda.current_stream(self.cuda_device)
             if not self._transfer_slots.acquire(blocking=False):
                 self._count("admission_skip")
@@ -1349,7 +1355,11 @@ class MMRemoteEmbeddingCache:
                 release_transfer()
                 raise
             future.add_done_callback(release_cancelled_transfer)
-            buffer = future.result(timeout=max(0, deadline - time.monotonic()))
+            result_wait_started = time.perf_counter()
+            try:
+                buffer = future.result(timeout=max(0, deadline - time.monotonic()))
+            finally:
+                self._report_queue_wait("read_result", result_wait_started)
             if buffer is None:
                 outcome = timing["outcome"]
                 if outcome == "miss":
@@ -1399,8 +1409,10 @@ class MMRemoteEmbeddingCache:
                 caller_timed_out = not future.done() or (
                     not future.cancelled() and future.exception() is not error
                 )
-                # The worker keeps its reservation until it actually exits.
-                # A caller timeout cannot release an active transfer.
+                # Cancel work that has not started.
+                # Running workers retain their reservation until they exit.
+                if caller_timed_out:
+                    future.cancel()
             self.record(
                 "read_error",
                 key=key,
@@ -1441,9 +1453,8 @@ class MMRemoteEmbeddingCache:
 
             def complete_read(completed):
                 try:
-                    if caller_timed_out:
-                        cancelled = completed.cancelled()
-                        error = None if cancelled else completed.exception()
+                    if caller_timed_out and not completed.cancelled():
+                        error = completed.exception()
                         if error is not None:
                             self.record(
                                 "read_late_error",
@@ -1471,11 +1482,7 @@ class MMRemoteEmbeddingCache:
                                 elapsed_ms=(time.perf_counter() - started) * 1000,
                                 sdk_api_ms=timing.get("sdk_api_ms"),
                                 **read_timings(),
-                                completion_outcome=(
-                                    "cancelled"
-                                    if cancelled
-                                    else timing.get("outcome", "success")
-                                ),
+                                completion_outcome=timing.get("outcome", "success"),
                             )
                 finally:
                     if cost:
