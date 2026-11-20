@@ -52,6 +52,23 @@ class DeepSeekV41Sm90PDContractTest(pd_contract.DeepSeekV41PDContractTest):
             self.assertEqual("SM90 Engram UVA prefetch enabled" in startup, enabled)
             self.assertNotIn("Engram shared CPU lookup enabled", startup)
 
+    def test_graph_engram_and_prefix_reuse(self):
+        super().test_graph_engram_and_prefix_reuse()
+        raw = json.loads((Path(self.model_path) / "config.json").read_text())
+        text = raw.get("text_config", raw)
+        if int(text["num_hidden_layers"]) == 40:
+            from rtp_llm.test.smoke.deepseek_v41_sm90_semantic_checks import (
+                http_post,
+                run_semantic_checks,
+            )
+
+            run_semantic_checks(
+                http_post(f"http://127.0.0.1:{self.server.port}"),
+                self.output_dir / "full40_semantics",
+                self.vocab_size,
+                expected_pd=True,
+            )
+
     def assert_decode_graph_replayed_and_record_coverage(self):
         super().assert_decode_graph_replayed_and_record_coverage()
         prefill = Path(self.server.log_file_path).read_text(errors="replace")

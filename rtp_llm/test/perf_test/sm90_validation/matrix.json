@@ -1,0 +1,1110 @@
+{
+  "schema_version": 2,
+  "defaults": {
+    "gpu_count": 1,
+    "priority": "required",
+    "real_checkpoint": false,
+    "actual_pd_transfer": false,
+    "duration_seconds": null,
+    "duration_note": "Measure each candidate; cold JIT time is not known from source.",
+    "bazel_test_flags": [
+      "--config=daily_aone_bazel_cache",
+      "--remote_header=x-aone-bazel-api-key=ai-infra-cicd",
+      "--run_under=//rtp_llm/test/utils:gpu_lock",
+      "--test_output=errors",
+      "--nocache_test_results"
+    ],
+    "source_binding": "Record actual paired public/internal SHAs and selected dependency repo with every run."
+  },
+  "lanes": {
+    "sm90": {
+      "config": "cuda13",
+      "repo_env": {
+        "RTP_LLM_SM90_DEPS": "1"
+      },
+      "test_env": {
+        "RTP_LLM_SM90_NVIDIA_WHEEL_PATH": "1"
+      },
+      "gpu_pool": "H20_CU13",
+      "architecture": "SM9.0; local L20Z requires actual device confirmation",
+      "deepgemm": "2.8.2+8692811",
+      "cutlass_dsl": "4.8.1",
+      "sidecar": "flash_mla_sm909241ae3 MLA32"
+    },
+    "sm100_x86": {
+      "config": "cuda13",
+      "repo_env": {
+        "RTP_LLM_SM90_DEPS": "0"
+      },
+      "gpu_pool": "SM103_TEST",
+      "architecture": "SM10.3",
+      "deepgemm": "2.8.2+341b656",
+      "cutlass_dsl": "4.7.1"
+    },
+    "sm100_arm": {
+      "config": "cuda13_arm",
+      "repo_env": {
+        "RTP_LLM_SM90_DEPS": "0"
+      },
+      "gpu_pool": "SM100_ARM_CU13",
+      "architecture": "SM10.0 ARM",
+      "deepgemm": "2.8.2+341b656 ARM",
+      "cutlass_dsl": "4.7.1"
+    },
+    "common_cuda": {
+      "gpu_pool": "L20_CU13 declared by existing BUILD",
+      "gpu_count_basis": "Single-device source usage; BUILD does not explicitly declare a GPU count.",
+      "run_lanes": [
+        "sm90",
+        "sm100_x86",
+        "sm100_arm"
+      ],
+      "note": "Run locally on actual selected hardware/dependency lane to count architecture coverage; pool metadata is not hardware evidence."
+    }
+  },
+  "env_profiles": {
+    "model_full40": {
+      "CHECKPOINT_PATH": "<actual full40 Flash1017 path>",
+      "TOKENIZER_PATH": "<same checkpoint>"
+    },
+    "role_full40": {
+      "CHECKPOINT_PATH": "<full40 Flash1017>",
+      "TOKENIZER_PATH": "<same checkpoint>",
+      "SM90_PERF_MOE_STRATEGY": "mega_sm90_se",
+      "DSV41_ENGRAM_DEVICE_SCALES": "0",
+      "DSV41_CPU_ENGRAM_LOOKUP": "0",
+      "RTP_LLM_DSPARK_FORCE_TOPK": "0",
+      "TMPDIR": "<short writable tmpdir>"
+    },
+    "real_pd_full40": {
+      "CHECKPOINT_PATH": "<full40 Flash1017>",
+      "TOKENIZER_PATH": "<same checkpoint>",
+      "SM90_SMOKE_MOE_STRATEGY": "mega_sm90_se",
+      "DSV41_ENGRAM_DEVICE_SCALES": "0",
+      "DSV41_CPU_ENGRAM_LOOKUP": "0",
+      "RTP_LLM_DSPARK_FORCE_TOPK": "0"
+    },
+    "real_pd_perf": {
+      "CHECKPOINT_PATH": "<full40 Flash1017>",
+      "SM90_SMOKE_MOE_STRATEGY": "mega_sm90_se",
+      "DSV41_ENGRAM_DEVICE_SCALES": "0",
+      "RTP_LLM_DSPARK_FORCE_TOPK": "0"
+    },
+    "reduced24_model": {
+      "CHECKPOINT_PATH": "<exact existing24layergolden checkpoint>",
+      "TOKENIZER_PATH": "<same24layercheckpoint>"
+    }
+  },
+  "tests": [
+    {
+      "id": "default_test_v41_cross_layer_mhc_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_cross_layer_mhc_x86",
+      "lane": "sm100_x86",
+      "purpose": "New thread/device/stream eager-prefill capture scope and delayed-post links",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_v41_cross_layer_mhc",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_cross_layer_mhc",
+      "lane": "sm100_arm",
+      "purpose": "New thread/device/stream eager-prefill capture scope and delayed-post links",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_v41_mhc_prenorm_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_mhc_prenorm_x86",
+      "lane": "sm100_x86",
+      "purpose": "SM100 prenorm TF32/native projection, boundaries and CUDA graph",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_v41_mhc_prenorm",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_mhc_prenorm",
+      "lane": "sm100_arm",
+      "purpose": "SM100 prenorm TF32/native projection, boundaries and CUDA graph",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ],
+      "geometry": [
+        "tokens=(65, 512)"
+      ]
+    },
+    {
+      "id": "default_test_v41_mega_mhc_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_mega_mhc_x86",
+      "lane": "sm100_x86",
+      "purpose": "Upstream SM100 delayed-MHC fused boundary",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_v41_mega_mhc",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_mega_mhc",
+      "lane": "sm100_arm",
+      "purpose": "Upstream SM100 delayed-MHC fused boundary",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ],
+      "geometry": [
+        "rows=(1, 6, 48, 160, 192)",
+        "tokens=(128, 32768)",
+        "original_tokens=(34, 193, 321, 449, 4096, 32768)"
+      ]
+    },
+    {
+      "id": "default_test_v41_mega_mhc_compact_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_mega_mhc_compact_x86",
+      "lane": "sm100_x86",
+      "purpose": "Compact MHC dispatch and prepared path",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_v41_mega_mhc_compact",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_mega_mhc_compact",
+      "lane": "sm100_arm",
+      "purpose": "Compact MHC dispatch and prepared path",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_v41_hc_jit_warmup_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_hc_jit_warmup_x86",
+      "lane": "sm100_x86",
+      "purpose": "MHC graph-stream warmup contract",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_v41_hc_jit_warmup",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_hc_jit_warmup",
+      "lane": "sm100_arm",
+      "purpose": "MHC graph-stream warmup contract",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ],
+      "geometry": [
+        "tokens=(1, 65, 384, 512)"
+      ]
+    },
+    {
+      "id": "default_test_strategy_select_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_strategy_select_x86",
+      "lane": "sm100_x86",
+      "purpose": "Architecture-specific strategy selection",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_strategy_select",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_strategy_select",
+      "lane": "sm100_arm",
+      "purpose": "Architecture-specific strategy selection",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_engram_decode_prefetch_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_engram_decode_prefetch_x86",
+      "lane": "sm100_x86",
+      "purpose": "SM100 Engram schedule/prefetch remains upstream",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ]
+    },
+    {
+      "id": "default_test_engram_decode_prefetch",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_engram_decode_prefetch",
+      "lane": "sm100_arm",
+      "purpose": "SM100 Engram schedule/prefetch remains upstream",
+      "coverage": [
+        "default DG341b656/DSL4.7.1",
+        "no SM90 dependency repo"
+      ],
+      "geometry": [
+        "token=(3, 11, 7)"
+      ]
+    },
+    {
+      "id": "default_test_attention_v41_cp_raw_groups_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_attention_v41_cp_raw_groups_x86",
+      "lane": "sm100_x86",
+      "purpose": "Preserve upstream FP4/528B attention CP layout and collective semantics",
+      "coverage": [
+        "CP raw groups",
+        "typed pool addressing"
+      ]
+    },
+    {
+      "id": "default_test_attention_v41_cp_raw_groups",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_attention_v41_cp_raw_groups",
+      "lane": "sm100_arm",
+      "purpose": "Preserve upstream FP4/528B attention CP layout and collective semantics",
+      "coverage": [
+        "CP raw groups",
+        "typed pool addressing"
+      ]
+    },
+    {
+      "id": "default_test_attention_v41_cp_mixed_nccl_x86",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_attention_v41_cp_mixed_nccl_x86",
+      "lane": "sm100_x86",
+      "purpose": "Preserve upstream FP4/528B attention CP layout and collective semantics",
+      "coverage": [
+        "CP raw groups",
+        "mixed lengths/NCCL"
+      ],
+      "gpu_count": 4
+    },
+    {
+      "id": "default_test_attention_v41_cp_mixed_nccl",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_attention_v41_cp_mixed_nccl",
+      "lane": "sm100_arm",
+      "purpose": "Preserve upstream FP4/528B attention CP layout and collective semantics",
+      "coverage": [
+        "CP raw groups",
+        "mixed lengths/NCCL"
+      ],
+      "gpu_count": 4
+    },
+    {
+      "id": "deepseek_v41_flash_dspark_tp4_ep4_graph_sm103_x86",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_dspark_tp4_ep4_graph_sm103_x86",
+      "lane": "sm100_x86",
+      "purpose": "Full-model default Blackwell regression",
+      "coverage": [
+        "DSpark/graph/reuse",
+        "greedy output consistency",
+        "real checkpoint"
+      ],
+      "gpu_count": 4,
+      "real_checkpoint": true,
+      "env_profile": "model_full40",
+      "limits": [
+        "Use actual SM10x hardware/default dependencies; neither source checks nor Hopper success substitutes",
+        "SM100 ARM PD uses four GPUs split CP2/DP2 on one node"
+      ]
+    },
+    {
+      "id": "deepseek_v41_flash_tp4_ep4_graph_sm103_x86",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_tp4_ep4_graph_sm103_x86",
+      "lane": "sm100_x86",
+      "purpose": "Full-model default Blackwell regression",
+      "coverage": [
+        "non-speculative graph/reuse",
+        "greedy output consistency",
+        "real checkpoint"
+      ],
+      "gpu_count": 4,
+      "real_checkpoint": true,
+      "env_profile": "model_full40",
+      "limits": [
+        "Use actual SM10x hardware/default dependencies; neither source checks nor Hopper success substitutes",
+        "SM100 ARM PD uses four GPUs split CP2/DP2 on one node"
+      ]
+    },
+    {
+      "id": "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
+      "lane": "sm100_arm",
+      "purpose": "Full-model default Blackwell regression",
+      "coverage": [
+        "DSpark/graph/reuse",
+        "greedy output consistency",
+        "real checkpoint"
+      ],
+      "gpu_count": 4,
+      "real_checkpoint": true,
+      "actual_pd_transfer": true,
+      "env_profile": "model_full40",
+      "limits": [
+        "Use actual SM10x hardware/default dependencies; neither source checks nor Hopper success substitutes",
+        "SM100 ARM PD uses four GPUs split CP2/DP2 on one node"
+      ]
+    },
+    {
+      "id": "test_sm90_deepgemm_dense",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_deepgemm_dense",
+      "lane": "sm90",
+      "purpose": "Native G32 dense production shapes",
+      "coverage": [
+        "merged_qkv/cp8_q_b/cp8_o_b/shared_w13/shared_w2",
+        "rows1/128/512",
+        "independent reference",
+        "changed-input graph/native scales"
+      ],
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se"
+      ],
+      "geometry": [
+        "'policy'['[]', '{\"x\":\"deepgemm\"}', '{\"0x32\":\"deepgemm\"}', '{\"256x512\":\"other\"}', 'bad']",
+        "'shape'['merged_qkv', 'cp8_q_b', 'cp8_o_b', 'shared_w13', 'shared_w2']",
+        "'rows'[1, 128, 512]"
+      ]
+    },
+    {
+      "id": "test_sm90_deepgemm_reference_stress",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_deepgemm_reference_stress",
+      "lane": "sm90",
+      "purpose": "Strict independent-reference G32 stress",
+      "coverage": [
+        "large-M512 real layer shapes",
+        "amplified strided inputs and graph"
+      ],
+      "priority": "optional_reference_stress",
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se",
+        "Not an extra throughput benchmark; standalone large-M reference stress may follow core smoke."
+      ],
+      "geometry": [
+        "'shape'['merged_qkv', 'cp8_q_b', 'cp8_o_b', 'shared_w13', 'shared_w2']",
+        "'rows,n,k,leading'[(15, 320, 640, (3, 5)), (129, 256, 512, (129,))]"
+      ]
+    },
+    {
+      "id": "test_sm90_shared_overlap",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_shared_overlap",
+      "lane": "sm90",
+      "purpose": "Standalone native shared-expert fork/join correctness",
+      "coverage": [
+        "rows1/8/32/33/40/48",
+        "changed-input graph",
+        "event dependencies"
+      ],
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se"
+      ],
+      "geometry": [
+        "'rows'[1, 8, 32, 33, 40, 48]"
+      ]
+    },
+    {
+      "id": "test_mhc_sm90_mega_cuda",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_mhc_sm90_mega_cuda",
+      "lane": "sm90",
+      "purpose": "Two-kernel fused boundary (limit64, not256)",
+      "coverage": [
+        "tokens1..64; new33/63/64 numerical cases require execution",
+        "64-row changed-input graph and65 fallback require execution",
+        "PendingCombine BF16 rounding"
+      ],
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se"
+      ],
+      "geometry": [
+        "tokens=(1, 4, 8, 16, 24, 32)",
+        "tokens=(1, 3, 4, 16, 32)",
+        "tokens=(1, 8, 32)"
+      ]
+    },
+    {
+      "id": "test_v41_mhc_prenorm_sm90",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_mhc_prenorm_sm90",
+      "lane": "sm90",
+      "purpose": "Separate prenorm kernel limit256",
+      "coverage": [
+        "eager256",
+        "graph256",
+        "unsupported257/384/512",
+        "TF32 reference"
+      ],
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se"
+      ],
+      "geometry": [
+        "tokens=(65, 512)"
+      ]
+    },
+    {
+      "id": "test_v41_hc_jit_warmup_sm90",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_hc_jit_warmup_sm90",
+      "lane": "sm90",
+      "purpose": "Warmup obeys same SM90 prenorm cap",
+      "coverage": [
+        "cap256",
+        "no giant unsupported warmup allocation"
+      ],
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se"
+      ],
+      "geometry": [
+        "tokens=(1, 65, 384, 512)"
+      ]
+    },
+    {
+      "id": "test_v41_delayed_hc_cuda_graph_sm90",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_v41_delayed_hc_cuda_graph_sm90",
+      "lane": "sm90",
+      "purpose": "Delayed HC graph semantics",
+      "coverage": [
+        "capture/replay changed input",
+        "fallback"
+      ],
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se"
+      ]
+    },
+    {
+      "id": "test_sm90_engram_uva_prefetch",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_engram_uva_prefetch",
+      "lane": "sm90",
+      "purpose": "Hopper UVA prefetch numerical and graph equivalence",
+      "coverage": [
+        "eager/graph",
+        "reference",
+        "two-table lifecycle"
+      ],
+      "limits": [
+        "Synthetic tensors; fused shared expert inside MegaMoE additionally needs model strategy=mega_sm90_se"
+      ]
+    },
+    {
+      "id": "test_v41_sm90_v4_cache",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_sm90_v4_cache",
+      "lane": "sm90",
+      "purpose": "584B planar SWA/GLOBAL storage and new fresh-store adapter",
+      "coverage": [
+        "FP4-preserving GLOBAL vs SWA BF16 source distinction",
+        "CP8 prepare no-write then prefix-read then ring-write",
+        "bytes/padding/invalidslot exact"
+      ]
+    },
+    {
+      "id": "test_v41_sm90_fp8_dg_contract_gpu",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_sm90_fp8_dg_contract_gpu",
+      "lane": "sm90",
+      "purpose": "Paged indexer valid-length/narrow table boundaries",
+      "coverage": [
+        "ratios1/2",
+        "capacity<K,=K,>K",
+        "page table bounds/reference"
+      ]
+    },
+    {
+      "id": "test_v41_sm90_prepare_meta",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_sm90_prepare_meta",
+      "lane": "sm90",
+      "purpose": "584B native metadata and scheduler",
+      "coverage": [
+        "paged head metadata",
+        "SM90 wrapper ABI"
+      ]
+    },
+    {
+      "id": "test_v41_sm90_attention",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_sm90_attention",
+      "lane": "sm90",
+      "purpose": "Target attention end-to-end tensor contract",
+      "coverage": [
+        "SWA/CSA",
+        "prefill/decode",
+        "source reuse"
+      ]
+    },
+    {
+      "id": "test_v41_sm90_paged_decode",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_sm90_paged_decode",
+      "lane": "sm90",
+      "purpose": "584B native FlashMLA sparse decode",
+      "coverage": [
+        "ratios1/2",
+        "head/reduction/planner contract"
+      ],
+      "geometry": [
+        "batch=(1, 2, 4)",
+        "batch=(1, 2)"
+      ]
+    },
+    {
+      "id": "test_v41_sm90_indexer_multiquery",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_sm90_indexer_multiquery",
+      "lane": "sm90",
+      "purpose": "Multiquery indexer/TopK logical shape",
+      "coverage": [
+        "q1/verify-width",
+        "lengths vs compact output",
+        "candidate selection"
+      ],
+      "geometry": [
+        "rows=(1, 2, 3, 17, 33)"
+      ]
+    },
+    {
+      "id": "test_v41_sm90_topk_contract",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_sm90_topk_contract",
+      "lane": "sm90",
+      "purpose": "SM90 selected TopK path",
+      "coverage": [
+        "length masking",
+        "logical candidates",
+        "output indexes"
+      ]
+    },
+    {
+      "id": "cuda_sampler_test",
+      "label": "//rtp_llm/models_py/bindings/cuda/ops/tests:cuda_sampler_test",
+      "lane": "common_cuda",
+      "purpose": "Greedy, mixed batch, long-history and sampling config",
+      "coverage": [
+        "run once defaultSM100 and once SM90 dependency build"
+      ]
+    },
+    {
+      "id": "rejection_sampling_op_test",
+      "label": "//rtp_llm/models_py/bindings/cuda/ops/tests:rejection_sampling_op_test",
+      "lane": "common_cuda",
+      "purpose": "Acceptance/rejection/residual distribution logic",
+      "coverage": [
+        "run once defaultSM100 and once SM90 dependency build"
+      ]
+    },
+    {
+      "id": "mtp_batch_stream_processor_test",
+      "label": "//rtp_llm/cpp/normal_engine/speculative/test:mtp_batch_stream_processor_test",
+      "lane": "common_cuda",
+      "purpose": "Draft commit/history/events and physical/kernel cache table overlays",
+      "coverage": [
+        "native ABI",
+        "forced-topk0 and greedy configs where test asserts"
+      ],
+      "limits": [
+        "No live model/checkpoint; speculative_sampler_test is mostly CPU logic but links CUDA"
+      ]
+    },
+    {
+      "id": "mtp_packed_sampling_test",
+      "label": "//rtp_llm/cpp/normal_engine/speculative/test:mtp_packed_sampling_test",
+      "lane": "common_cuda",
+      "purpose": "Packed verify temperatures/budgets",
+      "coverage": [
+        "native ABI",
+        "forced-topk0 and greedy configs where test asserts"
+      ],
+      "limits": [
+        "No live model/checkpoint; speculative_sampler_test is mostly CPU logic but links CUDA"
+      ]
+    },
+    {
+      "id": "speculative_sampler_test",
+      "label": "//rtp_llm/cpp/normal_engine/speculative/test:speculative_sampler_test",
+      "lane": "common_cuda",
+      "purpose": "Sampler config and draft-to-target mapping",
+      "coverage": [
+        "native ABI",
+        "forced-topk0 and greedy configs where test asserts"
+      ],
+      "limits": [
+        "No live model/checkpoint; speculative_sampler_test is mostly CPU logic but links CUDA"
+      ]
+    },
+    {
+      "id": "prefill_smoke",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_prefill_cp8_ep8_sm90_smoke",
+      "lane": "sm90",
+      "purpose": "Official full40 standalone prefill smoke",
+      "coverage": [
+        "seq32768/65536",
+        "output1",
+        "local batches1",
+        "SE startup marker",
+        "Engram UVA/prefetch gate"
+      ],
+      "gpu_count": 8,
+      "real_checkpoint": true,
+      "env_profile": "role_full40",
+      "limits": [
+        "Decode uses synthetic KV scheduler: not actual PD transfer, semantic correctness or acceptance",
+        "Response checks success/lengths/finite timing, not answer or token golden",
+        "recipe overrides DSV4_MOE_STRATEGY using SM90_PERF_MOE_STRATEGY",
+        "scratch load; no claim fastsafetensors production launch coverage"
+      ]
+    },
+    {
+      "id": "prefill_perf",
+      "label": "//rtp_llm/test/perf_test:deepseek_v41_flash_prefill_cp8_ep8_sm90_perf",
+      "lane": "sm90",
+      "purpose": "Official full40 standalone prefill perf",
+      "coverage": [
+        "seq32768/65536",
+        "output1",
+        "local batches1",
+        "SE startup marker",
+        "Engram UVA/prefetch gate"
+      ],
+      "gpu_count": 8,
+      "real_checkpoint": true,
+      "env_profile": "role_full40",
+      "limits": [
+        "Decode uses synthetic KV scheduler: not actual PD transfer, semantic correctness or acceptance",
+        "Response checks success/lengths/finite timing, not answer or token golden",
+        "recipe overrides DSV4_MOE_STRATEGY using SM90_PERF_MOE_STRATEGY",
+        "scratch load; no claim fastsafetensors production launch coverage"
+      ]
+    },
+    {
+      "id": "decode_smoke",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_decode_dp8_ep8_sm90_smoke",
+      "lane": "sm90",
+      "purpose": "Official full40 standalone decode smoke",
+      "coverage": [
+        "seq32768/65536",
+        "output32",
+        "local batches1",
+        "SE startup marker",
+        "Engram UVA/prefetch gate"
+      ],
+      "gpu_count": 8,
+      "real_checkpoint": true,
+      "env_profile": "role_full40",
+      "limits": [
+        "Decode uses synthetic KV scheduler: not actual PD transfer, semantic correctness or acceptance",
+        "Response checks success/lengths/finite timing, not answer or token golden",
+        "recipe overrides DSV4_MOE_STRATEGY using SM90_PERF_MOE_STRATEGY",
+        "scratch load; no claim fastsafetensors production launch coverage"
+      ]
+    },
+    {
+      "id": "decode_perf",
+      "label": "//rtp_llm/test/perf_test:deepseek_v41_flash_decode_dp8_ep8_sm90_perf",
+      "lane": "sm90",
+      "purpose": "Official full40 standalone decode perf",
+      "coverage": [
+        "seq32768/65536",
+        "output512",
+        "local batches1/4/16 global8/32/128",
+        "SE startup marker",
+        "Engram UVA/prefetch gate"
+      ],
+      "gpu_count": 8,
+      "real_checkpoint": true,
+      "env_profile": "role_full40",
+      "limits": [
+        "Decode uses synthetic KV scheduler: not actual PD transfer, semantic correctness or acceptance",
+        "Response checks success/lengths/finite timing, not answer or token golden",
+        "recipe overrides DSV4_MOE_STRATEGY using SM90_PERF_MOE_STRATEGY",
+        "scratch load; no claim fastsafetensors production launch coverage"
+      ]
+    },
+    {
+      "id": "deepseek_v41_flash_ced_bounded_pd_cp4_dp4_sm90",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_ced_bounded_pd_cp4_dp4_sm90",
+      "lane": "sm90",
+      "purpose": "Full40 actual P/D smoke on one node",
+      "coverage": [
+        "4GPU CP4prefill+4GPU DP4decode",
+        "real KV transfer",
+        "longprefix>=2048 measured prefill reuse",
+        "CED bounded replay",
+        "ordinary decode control",
+        "full40 nativeFrance/chat17+25 semantics; natural chat stop;3greedy repeats+2concurrent pairs"
+      ],
+      "gpu_count": 8,
+      "real_checkpoint": true,
+      "actual_pd_transfer": true,
+      "env_profile": "real_pd_full40",
+      "limits": [
+        "This is CP4/DP4 single-node TCP, not two-node CP8/DP8 RDMA",
+        "DSV41_PD_SMOKE_MODE normal_graph/dspark_eager require24layer fixture; do not select those modes with full40",
+        "Not a runnable release gate on the tested 80GiB-class L20Z containers; retain target and failure evidence. No minimum sufficient GPU capacity is established."
+      ],
+      "priority": "diagnostic_only",
+      "applicability": {
+        "topology": "single-node CP4/DP4 full40",
+        "tested_environment": "80GiB-class L20Z development containers",
+        "release_gate": false,
+        "replacement_workflow": "two_node_cp8_dp8_full40"
+      },
+      "observed_result": {
+        "date": "2026-11-20",
+        "status": "STARTUP_OOM",
+        "phase": "decode model initialization before request assertions",
+        "detail": "Both ordinary and DSpark CP4/DP4 full40 startup failed on the tested 80GiB-class L20Z container; ordinary failure included mega_sm90.setup_weights expert packing."
+      }
+    },
+    {
+      "id": "deepseek_v41_flash_dspark_pd_cp4_dp4_sm90",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_dspark_pd_cp4_dp4_sm90",
+      "lane": "sm90",
+      "purpose": "Full40 actual P/D smoke on one node",
+      "coverage": [
+        "4GPU CP4prefill+4GPU DP4decode",
+        "real KV transfer",
+        "longprefix>=2048 measured prefill reuse",
+        "CED bounded replay",
+        "DSpark accepted counters/greedy/sampling",
+        "full40 nativeFrance/chat17+25 semantics; natural chat stop;3greedy repeats+2concurrent pairs"
+      ],
+      "gpu_count": 8,
+      "real_checkpoint": true,
+      "actual_pd_transfer": true,
+      "env_profile": "real_pd_full40",
+      "limits": [
+        "This is CP4/DP4 single-node TCP, not two-node CP8/DP8 RDMA",
+        "DSV41_PD_SMOKE_MODE normal_graph/dspark_eager require24layer fixture; do not select those modes with full40",
+        "Not a runnable release gate on the tested 80GiB-class L20Z containers; retain target and failure evidence. No minimum sufficient GPU capacity is established."
+      ],
+      "priority": "diagnostic_only",
+      "applicability": {
+        "topology": "single-node CP4/DP4 full40",
+        "tested_environment": "80GiB-class L20Z development containers",
+        "release_gate": false,
+        "replacement_workflow": "two_node_cp8_dp8_full40"
+      },
+      "observed_result": {
+        "date": "2026-11-20",
+        "status": "STARTUP_OOM",
+        "phase": "decode model initialization before request assertions",
+        "detail": "Both ordinary and DSpark CP4/DP4 full40 startup failed on the tested 80GiB-class L20Z container; ordinary failure included mega_sm90.setup_weights expert packing."
+      }
+    },
+    {
+      "id": "real_pd_perf",
+      "label": "//rtp_llm/test/perf_test:deepseek_v41_sm90_pd_perf",
+      "lane": "sm90",
+      "purpose": "Real requests and KV handoff latency",
+      "coverage": [
+        "CP4/DP4 on one node",
+        "offered concurrency, not fixed local batch",
+        "actual pd_sep"
+      ],
+      "gpu_count": 8,
+      "real_checkpoint": true,
+      "actual_pd_transfer": true,
+      "env_profile": "real_pd_perf",
+      "limits": [
+        "Not substitute for synthetic fixed-batch throughput",
+        "Not two-node production topology",
+        "Not a runnable release gate on the tested 80GiB-class L20Z containers; retain target and failure evidence. No minimum sufficient GPU capacity is established."
+      ],
+      "priority": "diagnostic_only",
+      "applicability": {
+        "topology": "single-node CP4/DP4 full40",
+        "tested_environment": "80GiB-class L20Z development containers",
+        "release_gate": false,
+        "replacement_workflow": "two_node_cp8_dp8_full40",
+        "reason": "Same CP4/DP4 full40 topology has startup OOM evidence; no successful perf execution is asserted."
+      }
+    },
+    {
+      "id": "reduced_golden",
+      "label": "//rtp_llm/test/smoke:deepseek_v41_flash_pd_cp4_dp4_24layer_sm90_golden",
+      "lane": "sm90",
+      "purpose": "Separate existing reduced-model determinism fixture",
+      "coverage": [
+        "unchanged24layergolden",
+        "repeat/concurrent IDs"
+      ],
+      "gpu_count": 8,
+      "priority": "optional_separate_checkpoint",
+      "real_checkpoint": true,
+      "actual_pd_transfer": true,
+      "limits": [
+        "Requires exact24layer checkpoint; cannot run with1017 full40 or claim release accuracy"
+      ],
+      "env_profile": "reduced24_model"
+    },
+    {
+      "id": "test_sm90_quant_scale_mn_major",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_quant_scale_mn_major",
+      "lane": "sm90",
+      "purpose": "Native M/N-major G32 scales and FusedQKV consumer layout",
+      "coverage": [
+        "Native M/N-major G32 scales and FusedQKV consumer layout"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "'rows'[0, 1, 3, 7, 17, 128]",
+        "'groups'[1, 8]",
+        "'rows'[1, 7, 17, 128]"
+      ]
+    },
+    {
+      "id": "test_sm90_quant_scale_fused",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_quant_scale_fused",
+      "lane": "sm90",
+      "purpose": "Activation group scale fusion, inverse RoPE and output projection graph",
+      "coverage": [
+        "Activation group scale fusion, inverse RoPE and output projection graph"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ]
+    },
+    {
+      "id": "test_dspark_commit_wkv_sm90",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_dspark_commit_wkv_sm90",
+      "lane": "sm90",
+      "purpose": "Accepted draft row/token WKV commit and history update",
+      "coverage": [
+        "Accepted draft row/token WKV commit and history update"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "rows=(1, 6, 42, 65, 192, 384, 390)",
+        "rows=(1, 3072, 3073)",
+        "rows=(1, 4, 16)"
+      ]
+    },
+    {
+      "id": "test_dspark_prepare_triton_sm90",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_dspark_prepare_triton_sm90",
+      "lane": "sm90",
+      "purpose": "Prepare query/positions/commit maps with duplicate starts and int32/int64 prefixes",
+      "coverage": [
+        "Prepare query/positions/commit maps with duplicate starts and int32/int64 prefixes"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ]
+    },
+    {
+      "id": "test_mega_sm90_input_pack_cuda",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_mega_sm90_input_pack_cuda",
+      "lane": "sm90",
+      "purpose": "Native MegaMoE route/activation/scale buffer pack with graph",
+      "coverage": [
+        "Native MegaMoE route/activation/scale buffer pack with graph"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "tokens=(1, 4, 12, 32, 64, 2048)"
+      ]
+    },
+    {
+      "id": "test_sm90_gate_bf16_input",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_gate_bf16_input",
+      "lane": "sm90",
+      "purpose": "BF16 gate input/route and no FP8 quantization skew",
+      "coverage": [
+        "BF16 gate input/route and no FP8 quantization skew"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "'rows'[0, 1, 2, 4, 8, 32, 33]",
+        "'experts,topk'[(384, 6), (256, 8), (385, 6)]",
+        "'rows'[1, 4, 32]"
+      ]
+    },
+    {
+      "id": "test_sm90_gate_bf16_forward",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_gate_bf16_forward",
+      "lane": "sm90",
+      "purpose": "Gate actual forward and grouped expert routing",
+      "coverage": [
+        "Gate actual forward and grouped expert routing"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "'rows,dim'[(1, 5120), (2, 128), (4, 128), (8, 128), (32, 128)]",
+        "'mode'['fp32', 'debug', 'hash', 'visual', 'hash_visual', 'fusedoff', 'softmax', 'sigmoid', 'large_m', 'h20_large_m', 'grad', 'otherarch', 'cpu', 'empty']",
+        "'rows'[4, 33, 64, 128, 256]"
+      ]
+    },
+    {
+      "id": "test_sm90_dispatch_pad",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_dispatch_pad",
+      "lane": "sm90",
+      "purpose": "Dispatch pad valid row/ragged/stride handling",
+      "coverage": [
+        "Dispatch pad valid row/ragged/stride handling"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "'rows'[0, 1, 2, 3, 4, 8, 31, 32, 33, 257]",
+        "'topk,pad_to'[(1, 2), (2, 2), (3, 4), (4, 8), (6, 8), (7, 8), (8, 8), (15, 16), (16, 16)]",
+        "'rows'[0, 1, 2, 8, 32]"
+      ]
+    },
+    {
+      "id": "test_sm90_decode_batch_optimizations",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_decode_batch_optimizations",
+      "lane": "sm90",
+      "purpose": "Multi-batch production decode pack/scale optimization",
+      "coverage": [
+        "Multi-batch production decode pack/scale optimization"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "batch=(1, 4, 5, 8, 9, 11, 13, 16)"
+      ]
+    },
+    {
+      "id": "test_sm90_delayed_hc",
+      "label": "//rtp_llm/models_py/modules/dsv41/test:test_sm90_delayed_hc",
+      "lane": "sm90",
+      "purpose": "SM90 TileLang delayed HC reference fallback",
+      "coverage": [
+        "SM90 TileLang delayed HC reference fallback"
+      ],
+      "limits": [
+        "Synthetic production-shape tensors; full40 model smoke covers composition"
+      ],
+      "geometry": [
+        "rows=(1, 3)",
+        "rows=(1, 3)",
+        "batched=(False, True)"
+      ]
+    },
+    {
+      "id": "test_v41_prefill_global_mapped_sm90",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_prefill_global_mapped_sm90",
+      "lane": "sm90",
+      "purpose": "Mapped compression+CSA state/carry exact regression on SM90",
+      "coverage": [
+        "rows1/5/97/8192/65536",
+        "formats288/584",
+        "batch1/3/9 offset0/17",
+        "latent/cache/state/carry bitexact"
+      ],
+      "geometry": [
+        "rows=1,5,97,8192,65536; batch=1,3,9; offset=0,17; entry_bytes=288,584"
+      ]
+    },
+    {
+      "id": "default_test_v41_prefill_global",
+      "label": "//rtp_llm/models_py/modules/dsv41/fp8/test:test_v41_prefill_global",
+      "lane": "sm100_arm",
+      "purpose": "Upstream288B mapped producer+state and prefill compressor regression",
+      "coverage": [
+        "SM100 format288 only",
+        "mapped compression/state",
+        "default kernel unchanged"
+      ]
+    }
+  ],
+  "execution": {
+    "precheck": "Use test-execution pre_build_check with explicit non-root container user before each invocation.",
+    "isolation": "Distinct output_user_root per worktree and dependency lane. Keep canonical GPU locks.",
+    "config": "Use cuda13+repo_env1 OR cuda13_sm90, never redundantly expand both.",
+    "artifacts": [
+      "actual executed argv",
+      "paired source SHAs and dirty state",
+      "GPU model/capability",
+      "selected DeepGEMM version/import/native maps",
+      "raw test log",
+      "final exit signal",
+      "test.xml with nonzero passed test bodies",
+      "model/transport/raw response receipts as applicable"
+    ],
+    "scope": "This matrix is source inventory, not Bazel query, execution evidence or model precision certification."
+  },
+  "coverage_limits": [
+    "Official standalone DP8 decode uses synthetic KV; it is not realPD or semantic/acceptance coverage.",
+    "Two-kernel fused HC boundary max64 and standalone prenorm max256 are separate contracts.",
+    "The 24-layer golden requires its exact checkpoint; never use it with full40 release weights.",
+    "CP4/DP4 full40 ordinary and DSpark startup OOM on the tested 80GiB-class L20Z container; those targets are diagnostic only here. Required release semantics/realPD use the two-node CP8/DP8 workflow, with separate actual transport evidence; no PASS is implied.",
+    "Complete timing measurements before timeline collection; derive rank coverage from actual process/rank/device trace metadata. Nov20 standalone DP8 perf observed54 distinct traces covering all8DP; selected6rank0 files are representatives.",
+    "No acceptance or latency threshold is invented from short correctness cases.",
+    "Production scale/gate/inputpack/commit tests are core; alternative experimental backends and tuning sweeps are excluded."
+  ],
+  "fixtures_and_clients": [
+    {
+      "label": "//rtp_llm/test/smoke:deepseek_v41_sm90_pd_role",
+      "kind": "py_binary_owned_fixture",
+      "gpu_count_per_node": 8,
+      "purpose": "One CP8P or DP8D role, existing canonical locks, no automatic accuracy claim",
+      "modes": [
+        "gamma0/budget0 ordinary",
+        "gamma5/budget3 bounded/fixed/packed D only"
+      ],
+      "transport": "TCP0, not RDMA",
+      "cpu_test_label": "//rtp_llm/test/smoke:deepseek_v41_sm90_pd_role_test"
+    },
+    {
+      "module": "rtp_llm.test.smoke.deepseek_v41_sm90_semantic_checks",
+      "kind": "request_client",
+      "purpose": "full40 rawFrance24token factual continuation and chat42 natural-stop;3serial+2concurrent pairs, strict actual IDs/text",
+      "cpu_test_label": "//rtp_llm/test/smoke:deepseek_v41_sm90_semantic_checks_test"
+    },
+    {
+      "module": "rtp_llm.test.smoke.deepseek_v41_sm90_remote_pd_contract",
+      "kind": "request_client",
+      "purpose": "actual8DP routes, first3freshprefill references, CP8>=4096prefix cold/fill/hit/hit/bypass, exact ordinary selectedlogits/cumscore; gamma5 upstream greedy/top_p/full sampling-logprobs each2 on one realD rank",
+      "requires": "Reuse actual fixture ordered PythonPATH for original AutoTokenizer"
+    },
+    {
+      "module": "rtp_llm.test.perf_test.deepseek_v41_sm90_remote_pd_perf",
+      "kind": "request_client",
+      "purpose": "realKV32K/64K, offered perDP1/4/16,128out,2warmup+3measure, actual verified counters, separateprofile",
+      "requires": "Eight verified prefill backend HTTP endpoints; all16 P/D ranks acknowledge INFO before timing; profile armed after observed real decode activity",
+      "limits": [
+        "No fixed GPU-batch claim",
+        "No RDMA claim",
+        "No semantic PASS inferred from timing"
+      ]
+    }
+  ],
+  "release_workflows": [
+    {
+      "id": "two_node_cp8_dp8_full40",
+      "priority": "required",
+      "scope": "Full40 semantic, real PD and reuse/transport release validation on the two 80GiB-class L20Z development containers",
+      "fixture_label": "//rtp_llm/test/smoke:deepseek_v41_sm90_pd_role",
+      "nodes": 2,
+      "gpu_count_per_node": 8,
+      "roles": [
+        "CP8/EP8 prefill",
+        "TP1/DP8/EP8 decode"
+      ],
+      "modes": [
+        "gamma0/budget0 ordinary baseline",
+        "gamma5/budget3 bounded/fixed/packed decode"
+      ],
+      "required_clients": [
+        "rtp_llm.test.smoke.deepseek_v41_sm90_semantic_checks",
+        "rtp_llm.test.smoke.deepseek_v41_sm90_remote_pd_contract"
+      ],
+      "required_evidence": [
+        "Actual full40 checkpoint and paired source/runtime receipts",
+        "Fixture readiness separately from request accuracy",
+        "Factual answers, chat natural stop, native IDs, deterministic repeats and small concurrency",
+        "Real PD execution across eight D ranks, CP8 prefix reuse and server-side eight-CP/eight-DP transport audit"
+      ],
+      "performance_client": "rtp_llm.test.perf_test.deepseek_v41_sm90_remote_pd_perf",
+      "limits": [
+        "TCP mode0 does not certify production RDMA performance.",
+        "This is an executable required workflow, not a recorded PASS.",
+        "Keep all original CP4/DP4 OOM failures; do not reduce layers, substitute the 24-layer golden or relax assertions."
+      ]
+    }
+  ]
+}
