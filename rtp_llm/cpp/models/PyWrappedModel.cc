@@ -25,6 +25,8 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include <ATen/ops/_scaled_mm.h>
+#elif USING_ROCM
+#include <ATen/hip/HIPContext.h>
 #endif
 
 using namespace std;
@@ -32,6 +34,42 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+class ForwardCompletionGuard {
+public:
+    explicit ForwardCompletionGuard(bool active): active_(active) {}
+
+    void finish() {
+        if (!active_) {
+            return;
+        }
+        RTP_LLM_PROFILE_SCOPE("py_model.forward_completion_gate");
+#if USING_ROCM
+        at::hip::getCurrentHIPStream(at::hip::current_device()).synchronize();
+#elif USING_CUDA
+        c10::cuda::getCurrentCUDAStream().synchronize();
+#endif
+        active_ = false;
+    }
+
+    ~ForwardCompletionGuard() {
+        if (!active_) {
+            return;
+        }
+#if USING_CUDA || USING_ROCM
+        try {
+            cudaSyncAndCheck();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("failed to drain forward window while unwinding: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to drain forward window while unwinding: unknown exception");
+        }
+#endif
+    }
+
+private:
+    bool active_;
+};
 
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
 // finishes only writer submissions here and leaves actual publication for the
@@ -957,6 +995,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             flag.store(false, std::memory_order_release);
         }
     } flag_guard{prepared_attention_inputs_};
+    const bool has_sparse_saves =
+        inputs.cache_save_positions.defined() && inputs.cache_save_positions.numel() > 0;
+    ForwardCompletionGuard completion_guard(inputs.require_complete_cache_copy || has_sparse_saves);
 
     if (hidden_state_capture_publisher_) {
         hidden_state_capture_publisher_->beginForward();
@@ -974,6 +1015,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             generation_prefill_cuda_graph_init_status_ :
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     const auto with_generation_prefill_cuda_graph_status = [&](GptModelOutputs outputs) {
+        completion_guard.finish();
         outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
         return outputs;
     };

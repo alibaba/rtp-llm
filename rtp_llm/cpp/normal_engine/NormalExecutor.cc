@@ -404,8 +404,6 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     // PyWrappedModel TensorHolder release point for the previous model forward.
     model_->releaseBuffers();
 
-    const bool cache_completion_batch = partial_tail_reuse_ && model_input.prefix_lengths.defined()
-                                        && model_input.prefix_lengths.numel() > 0 && !model_input.is_fake_stream;
     const bool has_sparse_save = model_input.cache_save_positions.defined()
                                  && model_input.cache_save_positions.numel() > 0;
     RTP_LLM_CHECK_WITH_INFO(!has_sparse_save || (model_ && model_->supportsSparseCacheSave()),
@@ -415,16 +413,11 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
-            if (cache_completion_batch) {
-                cache_work_guard.markGpuWorkSubmitted();
-            }
+            cache_work_guard.markGpuWorkSubmitted(model_input.require_complete_cache_copy);
             cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
                                                      model_input.kv_cache_group_tags,
                                                      model_input.require_complete_cache_copy,
                                                      model_input.kv_cache_copy_token_lengths);
-            if (cache_completion_batch) {
-                confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
-            }
         }
     }
     {
@@ -444,21 +437,15 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
-        if (cache_completion_batch) {
-            cache_work_guard.markGpuWorkSubmitted();
-        }
+        cache_work_guard.markGpuWorkSubmitted(model_input.require_complete_cache_copy);
         model_output                        = std::move(model_->forward(model_input));
+        cache_work_guard.markComplete();
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         expert_balancer_->stepForward(*model_, executor_collector);
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-    }
-
-    if (cache_completion_batch) {
-        confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
-        cache_work_guard.markComplete();
     }
 
     if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
@@ -473,7 +460,7 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         return absl::OkStatus();
     }
 
-    if (cache_completion_batch && cache_manager_ && cache_manager_->isAllocatorOwner()) {
+    if (cache_manager_ && cache_manager_->isAllocatorOwner()) {
         for (const auto& [stream, executed_end] : cache_work_guard.completionEndpoints()) {
             if (!stream->hasError()) {
                 stream->streamCacheResource().completeRegisteredSave(executed_end);

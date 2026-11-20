@@ -845,7 +845,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                     "backend_sigabrt": True,
                     "observations": observations,
                     "f800_insertions": f_publications,
-                    "publication_boundary": "NormalExecutor::model_->forward precedes markComplete and completeRegisteredSave",
+                    "publication_boundary": "NormalExecutor::model_->forward precedes completeRegisteredSave",
                 },
                 indent=2,
             )

@@ -2,13 +2,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
-#include <chrono>
 #include <array>
 #include <algorithm>
 #include <memory>
 #include <numeric>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -120,15 +118,14 @@ public:
         // thread while rank 1 is still delayed in its writer.
         writer_barrier_();
         if (rank_ == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             const auto& registration = *stream_->streamCacheResource().prefixCacheRegistration();
             RTP_LLM_CHECK_WITH_INFO(!registration.source_pins.empty(),
-                                    "owner released required copy source before rank 1 writer");
+                                    "owner released required copy source before local writer finished");
             const auto& tail = registration.points.back();
             RTP_LLM_CHECK_WITH_INFO(tail.endpoint.pos == 9, "CP fixture lost frozen N=9");
             for (const auto& binding : tail.group_bindings) {
                 RTP_LLM_CHECK_WITH_INFO(binding.state != PrefixCacheSaveState::CONTENT_COMPLETE,
-                                        "owner marked N ready before rank 1 writer");
+                                        "owner marked N ready before local writer finished");
             }
             CacheKeysType path;
             for (const auto& point : registration.points) {
@@ -136,11 +133,8 @@ public:
             }
             const auto found = manager_->blockTreeCache()->tree()->findNode(path);
             RTP_LLM_CHECK_WITH_INFO(found.size() < path.size() || found.back()->token_end != 9,
-                                    "owner published N before rank 1 writer");
+                                    "owner published N before local writer finished");
             saw_pending_during_writer_ = true;
-        }
-        if (rank_ == 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(600));
         }
         if (sparse_save) {
             const auto save_ids = inputs.cache_save_block_ids.cpu().contiguous();
@@ -189,6 +183,7 @@ public:
                 }
             }
         }
+        cudaSyncAndCheck();
         saw_write_ = true;
         return {};
     }
@@ -329,13 +324,10 @@ py::dict runCpCompletion(int rank, int world_rank, int world_size, py::function 
     auto* writer_ptr = writer.get();
     executor.setModel(std::move(writer));
     executor.setBatchProcessor(std::make_unique<NoDispatchProcessor>(model, config));
-    const auto started = std::chrono::steady_clock::now();
     const auto status = executor.process(ScheduleOutput{rank == 0 ? std::list<GenerateStreamPtr>{stream} :
                                             std::list<GenerateStreamPtr>{}});
     RTP_LLM_CHECK_WITH_INFO(status.ok(), "CP completion fixture executor failed: %s",
                             status.ToString().c_str());
-    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - started).count();
     RTP_LLM_CHECK_WITH_INFO(writer_ptr->sawCopy() && writer_ptr->sawWrite(),
                             "CP completion fixture did not execute copy and writer");
     RTP_LLM_CHECK_WITH_INFO(writer_ptr->sourceUnchanged(),
@@ -358,7 +350,6 @@ py::dict runCpCompletion(int rank, int world_rank, int world_size, py::function 
             path.push_back(point.endpoint.key);
         }
         const auto tail_key = tail.endpoint.key;
-        // Match the product's terminal release path after the TP writer fence.
         stream->generate_status_->status = StreamState::FINISHED;
         stream->releaseResource();
         const auto found = manager->blockTreeCache()->tree()->findNode(path);
@@ -376,7 +367,6 @@ py::dict runCpCompletion(int rank, int world_rank, int world_size, py::function 
     result["rank"] = rank;
     result["world_rank"] = world_rank;
     result["world_size"] = world_size;
-    result["elapsed_ms"] = elapsed_ms;
     result["content_complete"] = content_complete;
     result["source_pins_empty"] = source_pins_empty;
     result["tail_complete"] = tail_complete;
@@ -392,5 +382,4 @@ py::dict runCpCompletion(int rank, int world_rank, int world_size, py::function 
 PYBIND11_MODULE(libth_tail_reuse_cp_completion_integration_test, m) {
     rtp_llm::registerExecCtxOps(m);
     m.def("run_cp_completion", &rtp_llm::test::runCpCompletion);
-    m.def("confirm_tp_cache_work_completion", &rtp_llm::confirmTpCacheWorkCompletion);
 }

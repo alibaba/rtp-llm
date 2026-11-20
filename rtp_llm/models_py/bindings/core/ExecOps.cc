@@ -755,32 +755,6 @@ AllReduceOutput execAllReduce(const AllReduceParams& params) {
     return AllReduceOutput{result.cast<torch::Tensor>()};
 }
 
-void confirmTpCacheWorkCompletion(int tp_size, int tp_rank) {
-    RTP_LLM_CHECK_WITH_INFO(tp_size > 0 && tp_rank >= 0 && tp_rank < tp_size,
-                            "invalid TP cache completion rank %d of %d", tp_rank, tp_size);
-    // This covers the actual producer and copy streams already enqueued by
-    // the caller. The collective below is entered only after local completion.
-    cudaSyncAndCheck();
-    if (tp_size == 1) {
-        return;
-    }
-    auto identity = torch::zeros({tp_size + 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU));
-    identity.data_ptr<int32_t>()[tp_rank] = 1;
-    identity.data_ptr<int32_t>()[tp_size] = 1;
-    auto reduced = execAllReduce({identity.to(torch::kCUDA), ReduceOp::Sum, ParallelMode::TP, {}}).buffer.cpu();
-    RTP_LLM_CHECK_WITH_INFO(reduced.dim() == 1 && reduced.size(0) == tp_size + 1
-                                && reduced.scalar_type() == torch::kInt32,
-                            "TP cache completion returned invalid membership payload");
-    const auto* members = reduced.data_ptr<int32_t>();
-    for (int rank = 0; rank < tp_size; ++rank) {
-        RTP_LLM_CHECK_WITH_INFO(members[rank] == 1,
-                                "TP cache completion group missing or duplicates rank %d (count=%d)",
-                                rank, members[rank]);
-    }
-    RTP_LLM_CHECK_WITH_INFO(members[tp_size] == tp_size,
-                            "TP cache completion did not include every rank");
-}
-
 void execAllGather(const AllGatherParams& params) {
     py::function           fn;
     py::gil_scoped_acquire gil;

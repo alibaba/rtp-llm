@@ -42,8 +42,8 @@ public:
     PrefillCacheWorkGuard(const PrefillCacheWorkGuard&) = delete;
     PrefillCacheWorkGuard& operator=(const PrefillCacheWorkGuard&) = delete;
 
-    void markGpuWorkSubmitted() {
-        gpu_work_submitted_ = true;
+    void markGpuWorkSubmitted(bool registered_save) {
+        gpu_work_submitted_ = registered_save;
     }
 
     void markComplete() {
@@ -56,8 +56,7 @@ public:
 
     ~PrefillCacheWorkGuard() {
         if (gpu_work_submitted_) {
-            // Preserve the existing fatal CUDA exception path. Best-effort
-            // local drain prevents early block reuse on ordinary unwinding.
+            // A copy or non-Python forward can throw before the model completion gate.
             try {
                 cudaSyncAndCheck();
             } catch (...) {
@@ -71,7 +70,7 @@ public:
 private:
     std::vector<GenerateStreamPtr> streams_;
     std::vector<std::pair<GenerateStreamPtr, size_t>> completion_endpoints_;
-    bool                           gpu_work_submitted_{false};
+    bool gpu_work_submitted_{false};
 };
 
 }  // namespace rtp_llm

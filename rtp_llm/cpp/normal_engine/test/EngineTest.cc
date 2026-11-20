@@ -103,6 +103,7 @@ public:
         if (throw_from_forward_) {
             throw std::runtime_error("injected selected writer failure");
         }
+        cudaSyncAndCheck();
         return {};
     }
 

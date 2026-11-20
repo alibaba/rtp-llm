@@ -299,7 +299,9 @@ public:
         if (forward_observer_) {
             forward_observer_();
         }
-        return output_holder.get();
+        auto output = output_holder.get();
+        cudaSyncAndCheck();
+        return output;
     }
 
     void loadMtpIndexerTopk(const torch::Tensor& topk) override {

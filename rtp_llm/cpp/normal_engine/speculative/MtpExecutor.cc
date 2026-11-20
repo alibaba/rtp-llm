@@ -1183,12 +1183,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (cache_completion_batch && model_input.kv_cache_update_mapping.defined()
         && model_input.kv_cache_update_mapping.numel() > 0) {
         RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "sparse cache copy requires a cache manager");
-        cache_work_guard.markGpuWorkSubmitted();
+        cache_work_guard.markGpuWorkSubmitted(model_input.require_complete_cache_copy);
         cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
                                                  model_input.kv_cache_group_tags,
                                                  model_input.require_complete_cache_copy,
                                                  model_input.kv_cache_copy_token_lengths);
-        confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
         model_input.kv_cache_update_mapping = torch::Tensor();
         model_input.kv_cache_copy_token_lengths = torch::Tensor();
     }
@@ -1209,10 +1208,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        if (cache_completion_batch) {
-            cache_work_guard.markGpuWorkSubmitted();
-        }
+        cache_work_guard.markGpuWorkSubmitted(model_input.require_complete_cache_copy);
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
+        cache_work_guard.markComplete();
         mtp::maybeOverrideLastHiddenWithMtpBuffer(
             model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1229,12 +1227,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (target_only && !is_dspark_
         && canEarlyReturnTargetOnlyPrefill(parallelism_config_.dp_size)) {
         collect_prefill_metrics();
-        if (cache_completion_batch) {
-            confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
-            cache_work_guard.markComplete();
-        } else {
-            cudaSyncAndCheck();
-        }
+        cudaSyncAndCheck();
         releaseAllModelBuffers();
         if (auto deferred_capture_error = model_->takeDeferredHiddenStateCaptureError();
             deferred_capture_error.has_value()) {
@@ -1324,22 +1317,22 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                     "DSpARK prefill requires a draft prefill model");
             RTP_LLM_CHECK_WITH_INFO(!has_sparse_save || sp_prefill_draft_model_->supportsSparseCacheSave(),
                                     "explicit sparse cache save requires a DSpARK draft writer");
+            cache_work_guard.markGpuWorkSubmitted(model_input.require_complete_cache_copy);
             (void)forwardModel(sp_prefill_draft_model_.get(), model_input, ModelInputsModelRole::DRAFT_PREFILL);
+            cache_work_guard.markComplete();
             draft_model_output = GptModelOutputs();
         } else {
             RTP_LLM_CHECK_WITH_INFO(!has_sparse_save || draft_model_->supportsSparseCacheSave(),
                                     "explicit sparse cache save requires an MTP draft writer");
+            cache_work_guard.markGpuWorkSubmitted(model_input.require_complete_cache_copy);
             draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
+            cache_work_guard.markComplete();
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     const bool dspark_cache_store_ok = finishDSparkPrefillCachePublication(model_input, streams);
     cache_store_drain_guard.disarm();
-    if (cache_completion_batch) {
-        confirmTpCacheWorkCompletion(parallelism_config_.tp_size, tp_rank_);
-        cache_work_guard.markComplete();
-    }
     if (!dspark_cache_store_ok) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();

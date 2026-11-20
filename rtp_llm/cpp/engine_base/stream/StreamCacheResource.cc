@@ -246,7 +246,6 @@ void StreamCacheResource::completeRegisteredSave(size_t completed_endpoint) {
             }
         }
     }
-    // T05 calls this only after every rank has completed its copies and writer.
     // Keeping source pins until request release would let completed optional
     // history compete with mandatory fallback runtime allocation.
     resource_context_.cache_manager->releaseRegisteredSourcePins(*prefix_cache_registration_);

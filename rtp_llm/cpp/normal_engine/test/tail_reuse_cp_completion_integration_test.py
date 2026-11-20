@@ -2,6 +2,7 @@ import multiprocessing as mp
 import os
 import time
 import unittest
+from multiprocessing.synchronize import Event
 
 import torch
 import torch.distributed as dist
@@ -9,7 +10,9 @@ import torch.distributed as dist
 from rtp_llm.test.utils.port_util import PortManager
 
 
-def _worker(world_rank: int, world_size: int, port: int, results: mp.Queue) -> None:
+def _worker(
+    world_rank: int, world_size: int, port: int, results: mp.Queue, owner_done: Event
+) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
     torch.cuda.set_device(world_rank)
@@ -64,6 +67,8 @@ def _worker(world_rank: int, world_size: int, port: int, results: mp.Queue) -> N
         # Processes have independent GILs, so this NCCL barrier can wait for
         # both model invocations without a Python observer thread.
         dist.barrier(group=tp_group)
+        if tp_rank == 1 and not owner_done.wait(timeout=30):
+            raise TimeoutError("TP owner waited for the peer cache writer")
 
     try:
         extension.init_exec_ctx(world_rank)
@@ -78,6 +83,8 @@ def _worker(world_rank: int, world_size: int, port: int, results: mp.Queue) -> N
         result = extension.run_cp_completion(
             tp_rank, world_rank, world_size, writer_barrier
         )
+        if tp_rank == 0:
+            owner_done.set()
         result["tp_group_global_root"] = dist.get_global_rank(tp_group, 0)
         result["collective_counts"] = collective_counts
         results.put(dict(result))
@@ -95,8 +102,12 @@ class TailReuseCpCompletionIntegrationTest(unittest.TestCase):
         ports, locks = manager.get_consecutive_ports(1)
         context = mp.get_context("spawn")
         results = context.Queue()
+        owner_done = [context.Event() for _ in range(world_size // 2)]
         processes = [
-            context.Process(target=_worker, args=(rank, world_size, ports[0], results))
+            context.Process(
+                target=_worker,
+                args=(rank, world_size, ports[0], results, owner_done[rank // 2]),
+            )
             for rank in range(world_size)
         ]
         try:
@@ -133,7 +144,7 @@ class TailReuseCpCompletionIntegrationTest(unittest.TestCase):
         for report in (owner, worker):
             self.assertEqual(report["tp_group_global_root"], global_root)
             self.assertGreater(report["collective_counts"]["broadcast"], 0)
-            self.assertGreater(report["collective_counts"]["allreduce"], 0)
+            self.assertEqual(report["collective_counts"]["allreduce"], 0)
         self.assertTrue(owner["copy_rows"])
         self.assertEqual(owner["copy_rows"], worker["copy_rows"])
         self.assertTrue(owner["content_complete"])
@@ -141,7 +152,6 @@ class TailReuseCpCompletionIntegrationTest(unittest.TestCase):
         self.assertTrue(owner["pending_during_writer"])
         self.assertTrue(owner["tail_complete"])
         self.assertTrue(owner["tail_published"])
-        self.assertGreaterEqual(owner["elapsed_ms"], 500)
 
     @unittest.skipIf(
         os.environ.get("TAIL_REUSE_TP_GROUP_COUNT") == "2",
@@ -158,25 +168,6 @@ class TailReuseCpCompletionIntegrationTest(unittest.TestCase):
         reports = self._run_case(4)
         self._check_tp_pair(reports, 0)
         self._check_tp_pair(reports, 2)
-
-    @unittest.skipIf(
-        os.environ.get("TAIL_REUSE_TP_GROUP_COUNT") == "2", "covered by two-GPU target"
-    )
-    def test_tp2_missing_group_rejected(self) -> None:
-        if not torch.cuda.is_available():
-            self.skipTest("requires CUDA")
-        from rtp_llm.cpp.normal_engine.test import (  # noqa: PLC0415
-            libth_tail_reuse_cp_completion_integration_test as extension,
-        )
-
-        torch.cuda.set_device(0)
-        extension.init_exec_ctx(0)
-        extension.clear_comm_ops()
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "broadcast callback not registered|allreduce callback not registered",
-        ):
-            extension.confirm_tp_cache_work_completion(2, 0)
 
 
 if __name__ == "__main__":
