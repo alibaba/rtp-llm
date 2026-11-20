@@ -177,6 +177,8 @@ public final class FlexlbConfigValidator {
         positive(lease.getMinServingWorkers(), path + ".minServingWorkers");
         require(lease.getMaxServingWorkers() >= lease.getMinServingWorkers(), path + ".maxServingWorkers",
                 "must be at least minServingWorkers");
+        positive(lease.getScaleUpStep(), path + ".scaleUpStep");
+        positive(lease.getScaleDownStep(), path + ".scaleDownStep");
         positive(lease.getEvaluationIntervalMs(), path + ".evaluationIntervalMs");
         positive(lease.getWindowSeconds(), path + ".windowSeconds");
         nonNegative(lease.getSettleSeconds(), path + ".settleSeconds");

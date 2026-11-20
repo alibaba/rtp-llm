@@ -741,6 +741,7 @@ Prefill 的 waiting/running 快照和 finished 通知都能确认请求。活跃
 - `automatic`：默认 false。false 时通过手动接口控制；true 时按 WorkerStatus 请求 TTFT **请求加权平均值**控制。
 - `groups`：显式受控 group 列表。首次接入时所有节点先获得 lease，确认后才能分配 chunk。
   关闭功能或移除受控 group 时，状态同步会恢复这些节点的接流权限。
+- `scaleUpStep` / `scaleDownStep`：每次决策最多接流/摘流的节点数，正整数，默认均为 1。受可用节点和接流上下限约束；补足最小接流数也遵循 `scaleUpStep`。批量调整后统一等待确认与新指标窗口；并发状态变化时停止剩余调整，保留已生效部分。
 - `minServingWorkers` / `maxServingWorkers`：自动模式接流下限与新增 lease 的上限，最少为 1；手动模式允许全部摘流。
   切回自动模式时低于下限会逐个恢复；首次接入保留全体接流，不因 max 设置较小而强制摘流，
   后续依 TTFT 逐个收敛。max 是自动新增的上限，不覆盖手动操作。

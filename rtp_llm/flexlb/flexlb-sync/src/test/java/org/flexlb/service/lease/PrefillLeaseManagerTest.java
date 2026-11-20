@@ -79,6 +79,32 @@ class PrefillLeaseManagerTest {
         assertEquals("STANDBY", manager.status("g").getFirst().state());
     }
 
+    @Test
+    void batchUpdatesSnapshotAfterEachOwnChangeAndRejectsStaleSnapshot() {
+        WorkerStatus first = RunnerTestSupport.discovered(RoleType.PREFILL, "g", "127.0.0.1", 8000, 8001, "site");
+        WorkerStatus second = RunnerTestSupport.discovered(RoleType.PREFILL, "g", "127.0.0.2", 8000, 8001, "site");
+        ConfigService configs = mock(ConfigService.class);
+        FlexlbConfig config = new FlexlbConfig();
+        config.getRouter().getRoles().getPrefill().getChunkLease().setEnabled(true);
+        config.getRouter().getRoles().getPrefill().getChunkLease().setGroups(List.of("g"));
+        when(configs.loadBalanceConfig()).thenReturn(config);
+        WorkerDirectory directory = mock(WorkerDirectory.class);
+        when(directory.statusSnapshot(RoleType.PREFILL))
+                .thenReturn(Map.of(first.getLogicalIpPort(), first, second.getLogicalIpPort(), second));
+        when(directory.getWorkerStatuses(RoleType.PREFILL, "g")).thenReturn(List.of(first, second));
+        when(directory.isCurrentStatus(RoleType.PREFILL, first.getLogicalIpPort(), first)).thenReturn(true);
+        when(directory.isCurrentStatus(RoleType.PREFILL, second.getLogicalIpPort(), second)).thenReturn(true);
+        when(directory.exactEndpoint(any(), any(), any())).thenReturn(mock(PrefillEndpoint.class));
+        PrefillLeaseManager manager = new PrefillLeaseManager(configs, directory);
+        String before = PrefillTtftLeaseController.members(manager.status("g"));
+        List<String> addresses = List.of(first.getLogicalIpPort(), second.getLogicalIpPort());
+        assertEquals(addresses, manager.changeIfCurrent("g", before, addresses, false,
+                config.getRouter().getRoles().getPrefill().getChunkLease()));
+        assertTrue(manager.changeIfCurrent("g", before, addresses, true,
+                config.getRouter().getRoles().getPrefill().getChunkLease()).isEmpty());
+        assertTrue(manager.status("g").stream().noneMatch(PrefillLeaseManager.WorkerView::enabled));
+    }
+
     private PrefillLeaseManager manager(WorkerStatus worker, PrefillEndpoint endpoint) {
         ConfigService configs = mock(ConfigService.class);
         FlexlbConfig config = new FlexlbConfig();

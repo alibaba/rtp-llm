@@ -63,12 +63,30 @@ public final class PrefillLeaseManager {
         return List.copyOf(result);
     }
 
-    public synchronized boolean changeIfCurrent(String group, String expectedMembers, String address, boolean enabled) {
-        if (!PrefillTtftLeaseController.members(status(group)).equals(expectedMembers)) {
-            return false;
+    /**
+     * Serializes manual and automatic changes; stops the batch if its worker snapshot becomes stale.
+     * Already issued leases remain valid and must be confirmed before the next decision.
+     */
+    public synchronized List<String> changeIfCurrent(String group,
+                                                     String expectedMembers,
+                                                     List<String> addresses,
+                                                     boolean enabled,
+                                                     PrefillLeaseConfig config) {
+        List<String> changed = new ArrayList<>();
+        for (String address : addresses) {
+            List<WorkerView> current = status(group);
+            if (configService.loadBalanceConfig().getRouter().getRoles().getPrefill().getChunkLease() != config
+                    || !PrefillTtftLeaseController.members(current).equals(expectedMembers)) {
+                break;
+            }
+            WorkerView updated = change(group, address, enabled);
+            changed.add(address);
+            // Advance only our own command; unrelated changes must invalidate the remaining decision.
+            List<WorkerView> expected =
+                    current.stream().map(worker -> worker.address().equals(address) ? updated : worker).toList();
+            expectedMembers = PrefillTtftLeaseController.members(expected);
         }
-        change(group, address, enabled);
-        return true;
+        return List.copyOf(changed);
     }
 
     public synchronized WorkerView change(String group, String address, boolean enabled) {

@@ -16,6 +16,8 @@ public final class PrefillLeaseConfig {
     private List<String> groups = List.of();
     private int minServingWorkers = 1;
     private int maxServingWorkers = Integer.MAX_VALUE;
+    private int scaleUpStep = 1;
+    private int scaleDownStep = 1;
     private long evaluationIntervalMs = 10000;
     private long windowSeconds = 60;
     private long settleSeconds = 30;

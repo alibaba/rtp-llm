@@ -113,14 +113,20 @@ public final class PrefillTtftLeaseController {
         }
         List<WorkerView> serving = workers.stream().filter(WorkerView::enabled).toList();
         if (serving.size() < config.getMinServingWorkers()) {
-            WorkerView target = workers.stream().filter(worker -> !worker.enabled()).findFirst().orElse(null);
-            if (target != null
-                    && configs.loadBalanceConfig().getRouter().getRoles().getPrefill().getChunkLease() == config
-                    && leases.changeIfCurrent(group, members, target.address(), true)) {
-                window.result = "enabled " + target.address() + " to restore minServingWorkers";
+            List<String> targets = workers.stream()
+                    .filter(worker -> !worker.enabled())
+                    .limit(Math.min(config.getScaleUpStep(), config.getMinServingWorkers() - serving.size()))
+                    .map(WorkerView::address)
+                    .toList();
+            List<String> changed = List.of();
+            if (configs.loadBalanceConfig().getRouter().getRoles().getPrefill().getChunkLease() == config) {
+                changed = leases.changeIfCurrent(group, members, targets, true, config);
+            }
+            if (!changed.isEmpty()) {
+                window.result = "enabled " + changed + " to restore minServingWorkers";
                 window.stableSinceMs = now;
             } else {
-                window.result = "no standby worker available to restore minServingWorkers";
+                window.result = "no current standby worker available to restore minServingWorkers";
             }
             window.violations = 0;
             return;
@@ -148,26 +154,35 @@ public final class PrefillTtftLeaseController {
                 window.result = direction == 0 ? "TTFT inside target interval" : "waiting for consecutive violations";
                 return;
             }
-            WorkerView target = null;
+            List<String> targets = List.of();
             if (direction > 0 && serving.size() < config.getMaxServingWorkers()) {
-                target = workers.stream().filter(worker -> !worker.enabled()).findFirst().orElse(null);
+                targets = workers.stream()
+                        .filter(worker -> !worker.enabled())
+                        .limit(Math.min(config.getScaleUpStep(), config.getMaxServingWorkers() - serving.size()))
+                        .map(WorkerView::address)
+                        .toList();
             } else if (direction < 0 && serving.size() > config.getMinServingWorkers()) {
-                target = serving.stream()
-                        .min(Comparator.comparingInt(WorkerView::pendingRequests).thenComparing(WorkerView::address))
-                        .orElse(null);
+                targets = serving.stream()
+                        .sorted(Comparator.comparingInt(WorkerView::pendingRequests).thenComparing(WorkerView::address))
+                        .limit(Math.min(config.getScaleDownStep(), serving.size() - config.getMinServingWorkers()))
+                        .map(WorkerView::address)
+                        .toList();
             }
-            if (target == null) {
+            if (targets.isEmpty()) {
                 window.result = "target outside available worker count bounds";
                 window.violations = 0;
                 return;
             }
-            if (configs.loadBalanceConfig().getRouter().getRoles().getPrefill().getChunkLease() != config
-                    || !leases.changeIfCurrent(group, members, target.address(), direction > 0)) {
+            List<String> changed = List.of();
+            if (configs.loadBalanceConfig().getRouter().getRoles().getPrefill().getChunkLease() == config) {
+                changed = leases.changeIfCurrent(group, members, targets, direction > 0, config);
+            }
+            if (changed.isEmpty()) {
                 window.result = "discarded measurement after configuration or worker set changed";
                 window.violations = 0;
                 return;
             }
-            window.result = (direction > 0 ? "enabled " : "disabled ") + target.address();
+            window.result = (direction > 0 ? "enabled " : "disabled ") + changed;
             window.stableSinceMs = now;
             window.violations = 0;
             LOG.info("Prefill lease group={} action={} meanTtftMs={} samples={}", group, window.result,
