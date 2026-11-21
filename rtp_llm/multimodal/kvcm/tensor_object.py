@@ -166,7 +166,12 @@ def plan_object(
 
 
 def pack_object(
-    plan: TensorObjectPlan, *, out: torch.Tensor | None = None, observe_stage=None
+    plan: TensorObjectPlan,
+    *,
+    out: torch.Tensor | None = None,
+    observe_stage=None,
+    payload_fence=None,
+    blocking_cuda_events=False,
 ) -> torch.Tensor:
     """Pack bytes directly into a supplied host or registered CUDA buffer."""
 
@@ -202,10 +207,16 @@ def pack_object(
 
     with cuda_graph_gate.operation() if output.is_cuda else nullcontext():
         if output.is_cuda and _USE_NATIVE_PACK:
-            from librtp_compute_ops import pack_emb_tensor_slices
+            import librtp_compute_ops
 
-            with stage("native_pack"):
-                pack_emb_tensor_slices(
+            fenced_pack = None
+            if payload_fence is not None and blocking_cuda_events:
+                fenced_pack = getattr(
+                    librtp_compute_ops, "pack_emb_cuda_tensor_slices_and_wait", None
+                )
+            pack_slices = fenced_pack or librtp_compute_ops.pack_emb_tensor_slices
+            with stage("native_pack_fenced" if fenced_pack else "native_pack"):
+                pack_slices(
                     output,
                     _PREFIX.pack(_MAGIC_V2, len(plan.header_bytes)) + plan.header_bytes,
                     plan.payload_offset,
@@ -214,6 +225,9 @@ def pack_object(
                         for tensor, spec in zip(plan.tensors, plan.header["tensors"])
                     ],
                 )
+            if payload_fence is not None and fenced_pack is None:
+                with stage("pack_ready_wait"):
+                    payload_fence()
             return output
         if not plan.checksum:
             write_header(_MAGIC_V2, plan.header_bytes)
@@ -244,6 +258,9 @@ def pack_object(
                     header, separators=(",", ":"), allow_nan=False
                 ).encode()
             write_header(_MAGIC_V1, encoded)
+        if payload_fence is not None:
+            with stage("pack_ready_wait"):
+                payload_fence()
     return output
 
 

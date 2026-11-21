@@ -16,6 +16,7 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace rtp_llm {
@@ -191,6 +192,18 @@ inline void registerEmbTensorCodec(pybind11::module& module) {
     module.def("clone_emb_hashes", &cloneEmbHashes);
 #if USING_CUDA
     module.def("read_emb_cuda_header", &readEmbCudaHeader, pybind11::call_guard<pybind11::gil_scoped_release>());
+    module.def(
+        "pack_emb_cuda_tensor_slices_and_wait",
+        [](const at::Tensor& output,
+           std::string prefix,
+           int64_t payloadOffset,
+           const std::vector<EmbTensorInput>& inputs) {
+            TORCH_CHECK(output.is_cuda(), "expected a CUDA EMB destination");
+            const c10::cuda::CUDAGuard deviceGuard(output.device());
+            packEmbTensorSlices(output, std::move(prefix), payloadOffset, inputs);
+            waitEmbCudaStream(output);
+        },
+        pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def(
         "restore_emb_cuda_tensor_slices_and_wait",
         [](const at::Tensor& buffer, const std::vector<EmbTensorSlice>& slices) {

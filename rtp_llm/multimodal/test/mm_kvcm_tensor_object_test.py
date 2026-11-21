@@ -347,6 +347,35 @@ class TensorObjectTest(unittest.TestCase):
             with self.subTest(index=index):
                 self.assertTrue(torch.equal(actual.cpu(), reference))
 
+    @unittest.skipUnless(torch.cuda.is_available() and torch.version.cuda, "CUDA required")
+    @unittest.skipUnless(os.environ.get("MM_EMB_NATIVE_PACK") == "1", "native pack required")
+    def test_native_pack_fence_completes_before_the_sdk_can_read_output(self):
+        import librtp_compute_ops
+
+        gpu = torch.arange(4096, dtype=torch.int16, device="cuda")
+        cpu = torch.arange(7, dtype=torch.int32)
+        plan = plan_object((gpu, cpu), checksum=False)
+        expected = pack_object(plan)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            output = torch.full((plan.nbytes + 64,), 255, dtype=torch.uint8, device="cuda")
+            with patch.object(
+                librtp_compute_ops,
+                "pack_emb_cuda_tensor_slices_and_wait",
+                wraps=librtp_compute_ops.pack_emb_cuda_tensor_slices_and_wait,
+            ) as native_fence:
+                packed = pack_object(
+                    plan,
+                    out=output,
+                    blocking_cuda_events=True,
+                    payload_fence=lambda: self.fail("Python fence must not run"),
+                )
+            native_fence.assert_called_once()
+            self.assertTrue(stream.query())
+        torch.testing.assert_close(packed.cpu(), expected)
+        self.assertTrue(torch.all(output[plan.nbytes:] == 255))
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_cuda_roundtrip_and_offloaded_device_tree(self):
         device = torch.device("cuda", torch.cuda.current_device())

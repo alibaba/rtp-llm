@@ -312,12 +312,13 @@ class RegisteredObjectTransport:
         try:
             if self._owner.direct_payload:
                 with self._serialized("write"):
-                    packed = pack_object(
-                        plan, out=self._buffer, observe_stage=self._observe_stage
+                    return pack_object(
+                        plan,
+                        out=self._buffer,
+                        observe_stage=self._observe_stage,
+                        payload_fence=self._wait_for_stream_completion,
+                        blocking_cuda_events=self._owner.blocking_cuda_events,
                     )
-                    with self._stage("write", "pack_ready_wait"):
-                        self._wait_for_stream_completion()
-                    return packed
             return pack_object(
                 plan, out=self._host_staging, observe_stage=self._observe_stage
             )
