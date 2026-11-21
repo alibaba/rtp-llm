@@ -3,13 +3,13 @@
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 from safetensors.torch import save_file
 
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models_py.borrowed_parameters import (
     BorrowedParameter,
     validate_borrowed_parameters,
@@ -22,10 +22,12 @@ from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_dspark import Qwen3DSparkForCausalLM
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
-from rtp_llm.ops import RopeStyle
 
 
 def config(draft=True):
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.ops import RopeStyle
+
     # Let the production config derive rank-local heads, RoPE cache length
     # and kernel block geometry; CUDA initializes the real context RoPE on load.
     cfg = ModelConfig()
@@ -120,22 +122,86 @@ def checkpoint(draft=True):
 
 
 class DSparkLoadTest(unittest.TestCase):
+    def test_pipeline_checkpoint_geometry_without_compute_extension(self):
+        # No C++ graph/attention objects are constructed for CPU checkpoint IO.
+        attn = SimpleNamespace(
+            head_num=2, kv_head_num=1, size_per_head=2, is_causal=False
+        )
+        cfg = SimpleNamespace(
+            model_type="qwen_3_dspark",
+            num_layers=2,
+            is_mtp=True,
+            vocab_size=4,
+            input_vocab_size=8,
+            hidden_size=4,
+            inter_size=4,
+            attn_config=attn,
+            capture_aux_hidden_layer_ids=[],
+            hidden_state_capture_layer_ids=[],
+            enable_fp32_lm_head=False,
+            layernorm_eps=1e-6,
+            dspark_target_layer_ids=[0, 3],
+            gen_num_per_cycle=3,
+            dspark_noise_token_id=7,
+            dspark_markov_rank=2,
+            getAttentionConfigs=lambda _: attn,
+        )
+        self._check_last_stage(cfg)
+
     def test_last_pipeline_stage_loads_the_entire_self_contained_draft(self):
+        self._check_last_stage(config())
+
+    def _check_last_stage(self, cfg):
         weights = checkpoint()
         with tempfile.TemporaryDirectory() as root:
             save_file(weights, str(Path(root) / "model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
-                load = replace(load_config(), load_method=method)
-                pc = load.parallelism_config
-                pc.pp_size, pc.pp_rank = 2, 1
-                pc.world_size, pc.world_rank = 2, 1
-                pc.pp_stage_layer_counts = [1, 1]
-                model = NewModelLoader(config(), load, model_path=root).load()
-                self.assertEqual(tuple(model.layer_ids()), (0, 1))
-                self.assertEqual(len(model.layers), 2)
-                torch.testing.assert_close(model.embed_tokens.weight, weights["model.embed_tokens.weight"])
-                torch.testing.assert_close(model.lm_head.weight, weights["lm_head.weight"])
-                torch.testing.assert_close(model.fc.weight, weights["fc.weight"])
+
+            def worker(rank):
+                from torch import distributed as dist
+
+                dist.init_process_group(
+                    "gloo",
+                    init_method=Path(root, "rdv").as_uri(),
+                    rank=rank,
+                    world_size=2,
+                    timeout=timedelta(seconds=30),
+                )
+                try:
+                    tail = dist.new_group([1], backend="gloo")
+                    if rank == 1:
+
+                        class Loader(NewModelLoader):
+                            def _runtime_checkpoint_group(self, group):
+                                from rtp_llm.models_py.distributed.rank_layout import (
+                                    Group,
+                                )
+
+                                assert group == Group.STAGE
+                                return tail
+
+                        self._check_tail_methods(root, weights, cfg, Loader)
+                    dist.barrier()
+                finally:
+                    dist.destroy_process_group()
+
+            torch.multiprocessing.start_processes(worker, nprocs=2, start_method="fork")
+
+    def _check_tail_methods(self, root, weights, cfg, loader_cls):
+        for method in ("scratch", "fastsafetensors"):
+            load = replace(load_config(), load_method=method)
+            pc = load.parallelism_config
+            pc.pp_size, pc.pp_rank = 2, 1
+            pc.world_size, pc.world_rank = 2, 1
+            pc.pp_stage_layer_counts = [1, 1]
+            model = loader_cls(cfg, load, model_path=root).load()
+            self.assertEqual(model._pipeline_partitioned, False)
+            self.assertEqual(tuple(model.layer_ids()), (0, 1))
+            self.assertEqual(len(model.layers), 2)
+            torch.testing.assert_close(
+                model.embed_tokens.weight, weights["model.embed_tokens.weight"]
+            )
+            torch.testing.assert_close(model.lm_head.weight, weights["lm_head.weight"])
+            torch.testing.assert_close(model.fc.weight, weights["fc.weight"])
 
     def load(self, weights, cfg=None, aliases=None, tp=1, rank=0):
         with tempfile.TemporaryDirectory() as root:
@@ -148,6 +214,8 @@ class DSparkLoadTest(unittest.TestCase):
             ).load()
 
     def test_production_registration_and_real_scratch_checkpoint(self):
+        from rtp_llm.ops import RopeStyle
+
         self.assertIs(get_model_class("qwen_3_dspark"), Qwen3DSparkForCausalLM)
         model = self.load(checkpoint())
         # The CUDA graph target loads this same checkpoint and uses these
@@ -236,7 +304,6 @@ class DSparkLoadTest(unittest.TestCase):
         with torch.inference_mode():
             owner.embed_tokens.weight.add_(2)
         torch.testing.assert_close(draft.embed_tokens.weight, before + 2)
-
 
     def test_rope_and_rocm_cache_layout_cpu_math(self):
         q = torch.arange(8.0).reshape(1, 1, 8)
