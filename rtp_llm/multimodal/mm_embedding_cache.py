@@ -22,6 +22,12 @@ from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
+# Terminal entries share a permanently signaled event. Pending entries still
+# own individual wait queues.
+_SIGNALED_EVENT = threading.Event()
+_SIGNALED_EVENT.set()
+
+
 class _PoolCapacityError(RuntimeError):
     pass
 
@@ -646,19 +652,22 @@ class MMEmbeddingCacheEntry:
                 self.original_devices, self.ready_events = prepared_storage
             if defer:
                 self._pending_before_publish = before_publish
+            # Each terminal transition consumes these one-shot callbacks.
+            on_complete, self._on_complete = self._on_complete, None
+            on_fail, self._on_fail = self._on_fail, None
         if defer:
             # Publish the result to waiters immediately; the cache insertion is
             # best-effort and runs on the cache's publication thread. A failed
             # insertion must never turn a successful computation into an error.
-            self._event.set()
+            self._signal_ready()
             try:
-                if self._on_complete is not None:
-                    self._on_complete(self, result)
+                if on_complete is not None:
+                    on_complete(self, result)
             except Exception as error:
                 logging.warning("ViT cache publication enqueue failed: %s", error)
                 try:
-                    if self._on_fail is not None:
-                        self._on_fail(self, error)
+                    if on_fail is not None:
+                        on_fail(self, error)
                 except Exception:
                     logging.exception("Failed to remove unqueued ViT cache entry")
             finally:
@@ -667,8 +676,8 @@ class MMEmbeddingCacheEntry:
                 self._pending_before_publish = None
             return True
         try:
-            if self._on_complete is not None:
-                self._on_complete(self, result)
+            if on_complete is not None:
+                on_complete(self, result)
             # Publish dependent metadata only after storage succeeds, but
             # before any waiter can observe ready. Duplicate completion never
             # executes this hook. Exceptions use the same rollback as storage.
@@ -685,14 +694,14 @@ class MMEmbeddingCacheEntry:
                 self.producer_streams = []
                 owners, self.pool_owners = self.pool_owners, []
             try:
-                if self._on_fail is not None:
-                    self._on_fail(self, error)
+                if on_fail is not None:
+                    on_fail(self, error)
             finally:
                 for owner in owners:
                     owner.release()
             raise
         finally:
-            self._event.set()
+            self._signal_ready()
         return True
 
     def fail(self, error: Exception) -> bool:
@@ -701,12 +710,18 @@ class MMEmbeddingCacheEntry:
                 return False
             self._terminal = True
             self.error = error
+            self._on_complete = None
+            on_fail, self._on_fail = self._on_fail, None
         try:
-            if self._on_fail is not None:
-                self._on_fail(self, error)
+            if on_fail is not None:
+                on_fail(self, error)
         finally:
-            self._event.set()
+            self._signal_ready()
         return True
+
+    def _signal_ready(self):
+        self._event.set()
+        self._event = _SIGNALED_EVENT
 
     @property
     def is_done(self) -> bool:
@@ -747,7 +762,9 @@ class MMEmbeddingCacheEntry:
             self._greennet_verdict = verdict
             self._greennet_checked = checked
             self._resolve_inspection_decision()
-            self._greennet_event.set()
+            if self._greennet_event is not _SIGNALED_EVENT:
+                self._greennet_event.set()
+                self._greennet_event = _SIGNALED_EVENT
 
     def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
         with self._state_lock:
@@ -767,7 +784,9 @@ class MMEmbeddingCacheEntry:
                 return
             self._greennet_error = error
             self._resolve_inspection_decision()
-            self._greennet_event.set()
+            if self._greennet_event is not _SIGNALED_EVENT:
+                self._greennet_event.set()
+                self._greennet_event = _SIGNALED_EVENT
 
     @property
     def greennet_passed(self) -> bool:

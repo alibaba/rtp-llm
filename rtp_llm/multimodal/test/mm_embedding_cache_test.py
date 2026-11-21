@@ -521,6 +521,36 @@ class EmbeddingCacheTurnoverMetricsTest(unittest.TestCase):
 
 
 class EmbeddingCapacityTest(unittest.TestCase):
+    def test_terminal_entries_release_private_wait_events_and_callbacks(self):
+        events = []
+
+        def complete(_entry, value):
+            events.append(value)
+
+        def fail(_entry, error):
+            events.append(type(error))
+
+        entry = MMEmbeddingCacheEntry(on_complete=complete, on_fail=fail)
+        ready_event = weakref.ref(entry._event)
+        inspection_event = weakref.ref(entry._greennet_event)
+        complete_callback = weakref.ref(complete)
+        fail_callback = weakref.ref(fail)
+        del complete, fail
+        verdict = cache_module.GreenNetVerdict(True, 0, "")
+        with concurrent.futures.ThreadPoolExecutor(2) as executor:
+            ready = executor.submit(entry.wait_ready, 2)
+            inspection = executor.submit(entry.wait_greennet, 2)
+            entry.set_greennet_verdict(verdict)
+            self.assertTrue(entry.complete("result"))
+            ready.result(timeout=3)
+            self.assertIs(inspection.result(timeout=3), verdict)
+        self.assertEqual(events, ["result"])
+        self.assertIsNone(ready_event())
+        self.assertIsNone(inspection_event())
+        self.assertIsNone(complete_callback())
+        self.assertIsNone(fail_callback())
+        self.assertEqual(entry.wait(timeout=0), "result")
+
     def test_completed_entry_does_not_retain_its_publication_callback(self):
         class Publisher:
             def __init__(self, entry, calls):
