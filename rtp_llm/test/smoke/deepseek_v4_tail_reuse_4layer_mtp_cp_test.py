@@ -17,6 +17,7 @@ from rtp_llm.test.smoke.deepseek_v4_tail_reuse_4layer_cp_test import (
 from rtp_llm.test.smoke.deepseek_v4_tail_reuse_4layer_mtp_test import (
     DeepSeekV4TailReuseFourLayerMTPTest,
 )
+from rtp_llm.test.smoke.local_tier_reuse import local_cache_args
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -58,7 +59,7 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             "LOAD_PYTHON_MODEL": "1",
             "LOG_LEVEL": "INFO",
             "FT_SERVER_TEST": "1",
-            "DSV4_MOE_STRATEGY": "mega",
+            "MOE_STRATEGY": "mega_moe",
             "DSV4_CHUNK_TOKENS": "2048",
             "REMOTE_RPC_SERVER_IP": "localhost",
             "MODEL_SERVICE_CONFIG": route.model_dump_json(),
@@ -77,15 +78,27 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             f" --sp_type mtp --sp_model_type deepseek_v4_mtp --sp_checkpoint_path {self.model_path}"
             " --sp_act_type bf16 --gen_num_per_cycle 3"
         )
+        probe_file = Path(__file__).with_name(
+            "deepseek_v4_tail_reuse_4layer_mtp_cp_probe.py"
+        )
+        self.assertTrue(probe_file.is_file())
         hook_config = self.output_dir / "tail_reuse_mtp_cp2_hook_config.json"
         hook_config.write_text(
             json.dumps(
                 {
                     "case": "v4_four_layer_mtp_cp2_cache",
+                    "hook_file": str(probe_file),
+                    "dump_dir": str(self.probe_dir),
+                    "trace_dir": str(self.trace_dir),
+                    "trace_case": "four_layer_cp2",
                     "function_hooks": [
                         {
                             "target": "rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers",
-                            "before": "before_forward_layers",
+                            "before": (
+                                "before_forward_layers_with_local_restore"
+                                if self.local_cache_tier != "device"
+                                else "before_forward_layers"
+                            ),
                             "after": "after_forward_layers",
                         },
                         {
@@ -97,26 +110,13 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
                 }
             )
         )
-        probe_file = Path(__file__).with_name(
-            "deepseek_v4_tail_reuse_4layer_mtp_cp_probe.py"
-        )
-        self.assertTrue(probe_file.is_file())
         self.prefill = MagaServerManager(
             env_args={
                 **common_env,
                 "WORLD_SIZE": "2",
                 "REMOTE_SERVER_PORT": decode_port,
-                "MOEDBG": "1",
-                "MOEDBG_ALL_LAYERS": "1",
-                "MOEDBG_MAX_SEQ": "2000",
-                "MOEDBG_FULL_THRESHOLD": "5000000",
-                "MOEDBG_NAME_REGEX": r"^(layer\d\d_(tail128|last)|lm_last_hidden|lm_logits_last)$",
-                "MOEDBG_DIR": str(self.trace_dir),
-                "MOEDBG_CASE": "four_layer_cp2",
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(probe_file),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
                 "T10_PRIVATE_FORK_REFERENCE": "1" if internal_fork else "0",
@@ -127,6 +127,7 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             smoke_args_str=(
                 "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 2"
                 + common_args
+                + local_cache_args(self.local_cache_tier, self.output_dir, 2)
                 + " --role_type PREFILL --enable_cuda_graph 0"
                 + " --cp_rotate_method ALL_GATHER --prefill_cp_kv_cache_sharded 1"
                 + " --prefill_cp_size 2 --enable_prefill_partial_tail_reuse 1"
@@ -141,11 +142,10 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             env_args={
                 **common_env,
                 "WORLD_SIZE": "1",
+                "MOE_STRATEGY": "auto",
                 "REMOTE_SERVER_PORT": prefill_port,
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(probe_file),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "decode",
             },
@@ -254,7 +254,7 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             )
             for suffix in ("ids", "values", "scales"):
                 name = f"source_{suffix}"
-                if name in row:
+                if self.local_cache_tier == "device" and name in row:
                     self.assertTrue(
                         torch.equal(row[name], current[name]),
                         f"rank{rank}: draft source mutated: {name}",
@@ -265,9 +265,14 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             a_runtime = int(row["runtime_table"][0, column]) // pages
             b_write = int(current["runtime_table"][0, column]) // pages
             self.assertGreater(b_write, 0, f"rank{rank}: draft runtime destination")
-            self.assertNotEqual(
-                b_write, save_id, f"rank{rank}: draft source reused for write"
-            )
+            if self.local_cache_tier == "device":
+                self.assertNotEqual(
+                    b_write, save_id, f"rank{rank}: draft source reused for write"
+                )
+            else:
+                self._assert_local_restored_state(
+                    (0, "swa_kv"), row, source_end, end_position, rank, "draft"
+                )
             copy_map[rank] = {
                 "a_runtime": a_runtime,
                 "a_save": save_id,
@@ -355,7 +360,10 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
                 )
                 self.assertEqual(set(current["rows"]), {(0, "swa_kv")})
                 for name in ("source_ids", "source_values", "source_scales"):
-                    if name in before["rows"][(0, "swa_kv")]:
+                    if (
+                        self.local_cache_tier == "device"
+                        and name in before["rows"][(0, "swa_kv")]
+                    ):
                         self.assertTrue(
                             torch.equal(
                                 before["rows"][(0, "swa_kv")][name],
@@ -372,6 +380,10 @@ class DeepSeekV4TailReuseFourLayerMTPCP2Test(DeepSeekV4TailReuseFourLayerCP2Test
             self.assertNotEqual(
                 int(blocks[positions == 800][0]), int(blocks[positions == 2000][0])
             )
+            if self.local_cache_tier != "device":
+                self._assert_local_restored_state(
+                    (0, "swa_kv"), row, 800, 2000, rank, "draft"
+                )
             other = producer[1][1 - rank]["rows"][(0, "swa_kv")]
             self.assertTrue(
                 torch.equal(

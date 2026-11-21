@@ -13,6 +13,7 @@ import os
 import time
 import traceback
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -22,6 +23,9 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     as_attention_inputs_by_tag,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.test.smoke.local_tier_restore_probe import (
+    capture_local_restore as capture_local_restore,
+)
 
 _source_ids: dict[tuple[int, str], torch.Tensor] = {}
 _source_rows: dict[tuple[int, str], dict[str, torch.Tensor]] = {}
@@ -386,8 +390,6 @@ class _ReferenceCache:
                 clone = torch.zeros(
                     (max_id + 1, *base.shape[1:]), dtype=base.dtype, device=base.device
                 )
-                if resume_endpoint == 1300 and not cp_mode:
-                    clone.index_copy_(0, source["ids"], source["values"])
                 scale = layer.kv_scale_base
                 clone_scale = None
                 if scale is not None and scale.numel():
@@ -396,8 +398,6 @@ class _ReferenceCache:
                         dtype=scale.dtype,
                         device=scale.device,
                     )
-                    if resume_endpoint == 1300 and not cp_mode:
-                        clone_scale.index_copy_(0, source["ids"], source["scales"])
                 self._layers[key] = LayerKVCache(
                     clone,
                     layer.seq_size_per_block,
@@ -407,10 +407,8 @@ class _ReferenceCache:
                 )
                 if independent:
                     continue
-                if cp_mode:
-                    self._seed_cp_prefix(key, table)
-                elif resume_endpoint == 1300:
-                    self._seed_verified_1300(key, table)
+                if cp_mode or resume_endpoint == 1300:
+                    self._seed_registered_prefix(key, table)
                 else:
                     self._seed_prefix(key, table)
 
@@ -489,7 +487,7 @@ class _ReferenceCache:
                     scales = layer.kv_scale_base.index_select(0, source_ids)
                     layer.kv_scale_base.index_copy_(0, destination_ids, scales)
 
-    def _seed_cp_prefix(self, key, table):
+    def _seed_registered_prefix(self, key, table):
         source = _source_rows[key]
         tag = key[1]
         physical = self.get_seq_size_per_block(tag)
@@ -530,34 +528,6 @@ class _ReferenceCache:
                         f"missing A CP prefix column {key} column={column}"
                     )
                 self._copy_source_row(key, source_id, destination_id)
-
-    def _seed_verified_1300(self, key, table):
-        source = _source_rows[key]
-        tag = key[1]
-        physical = self.get_seq_size_per_block(tag)
-        kernel = self.get_kernel_seq_size_per_block(tag)
-        pages = physical // kernel
-        points = source["save_positions"].reshape(-1)
-        blocks = source["save_block_ids"].reshape(-1)
-        matched = blocks[points == 1300]
-        if matched.numel() and int(matched[0]) >= 0:
-            source_ids = [int(matched[0]) * pages + offset for offset in range(pages)]
-        else:
-            first = ((1300 - 1) // physical) * pages
-            source_ids = [
-                int(
-                    source["runtime_table"][
-                        0, (first + offset) % source["runtime_table"].shape[1]
-                    ]
-                )
-                for offset in range(pages)
-            ]
-        first = ((1300 - 1) // physical) * pages
-        destinations = [
-            int(table[0, (first + offset) % table.shape[1]]) for offset in range(pages)
-        ]
-        for source_id, destination_id in zip(source_ids, destinations):
-            self._copy_source_row(key, source_id, destination_id)
 
     def _copy_source_row(self, key, source_id, destination_id):
         source = _source_rows[key]
@@ -653,9 +623,86 @@ class _CaptureLayers:
         self.layers[int(layer_id)] = selected.detach().cpu()
 
 
-def _run_direct_reference(ctx, directory, end_position):
-    from rtp_llm.models_py.modules.dsv4 import _record_tensor as recorder
+class _ProductionCapture(_CaptureLayers):
+    enabled = True
 
+    def __init__(self, ctx, case):
+        self.delegate = ctx.kwargs.get("capture_context")
+        self.v4 = ctx.args[0]
+        self.attention = ctx.kwargs["attn_inputs"]
+        self.input_ids = ctx.args[2]
+        self.positions = ctx.args[3]
+        self.trace_dir = Path(ctx.runtime.config["trace_dir"])
+        self.case = case
+        self.cp_mode = _cp_mode(ctx)
+        super().__init__(ctx.args[0] if self.cp_mode else None)
+
+    def capture_layer(self, layer_id, hidden):
+        if self.delegate is not None:
+            self.delegate.capture_layer(layer_id, hidden)
+        super().capture_layer(layer_id, hidden)
+
+    def finalize(self, hidden):
+        v4 = self.v4
+        attention = self.attention
+        prefix = int(attention.prefix_lengths.reshape(-1)[0])
+        if self.cp_mode:
+            cp_ctx = v4.layers[0].attn._cp_ctx
+            mask = (
+                cp_ctx.global_positions == cp_ctx.seq_len_total - 1
+            ) & cp_ctx.local_is_real
+            last = hidden[mask].contiguous()
+            total = int(cp_ctx.seq_len_total)
+            suffix = "tail128"
+        else:
+            last = hidden[-1:].contiguous()
+            total = int(self.input_ids.numel())
+            suffix = "last"
+        tensors = {
+            f"layer{layer:02d}_{suffix}": value.float()
+            for layer, value in self.layers.items()
+        }
+        tensors["lm_last_hidden"] = last.detach().float().cpu()
+        tensors["lm_logits_last"] = (
+            torch.mm(last.to(v4.head_weight.dtype), v4.head_weight.t())
+            .detach()
+            .float()
+            .cpu()
+        )
+        directory = self.trace_dir / self.case
+        directory.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "tensors": tensors,
+                "extra": {
+                    "cp_size": int(getattr(v4, "_cp_size", 1)) if self.cp_mode else 1,
+                    "cp_rank": int(getattr(v4, "_cp_rank", 0)),
+                    "prefix_length": prefix,
+                    "prefix_lengths": attention.prefix_lengths.detach().cpu(),
+                    "seq_len_full": total - prefix if self.cp_mode else total,
+                    "seq_len_total": total,
+                    "positions": self.positions.detach().cpu(),
+                    "input_ids": self.input_ids.detach().cpu(),
+                },
+            },
+            directory / f"rank{_rank()}_step{time.time_ns()}.pt",
+        )
+        if self.delegate is not None and self.delegate.enabled:
+            return self.delegate.finalize(hidden)
+        return SimpleNamespace(hidden_states=hidden)
+
+
+def begin_production_capture(ctx, case=None):
+    if os.environ.get("T07_CACHE_PROBE_ROLE") != "prefill":
+        return
+    if case is None:
+        case = ctx.runtime.config["trace_case"]
+    if isinstance(ctx.kwargs.get("capture_context"), _ProductionCapture):
+        raise AssertionError("production capture_context already installed")
+    ctx.kwargs["capture_context"] = _ProductionCapture(ctx, case)
+
+
+def _run_direct_reference(ctx, directory, end_position):
     production = ctx.args[1]
     tables = ctx.args[5]
     resume_endpoint = int(ctx.kwargs["attn_inputs"].prefix_lengths.reshape(-1)[0])
@@ -682,24 +729,19 @@ def _run_direct_reference(ctx, directory, end_position):
     # cache is built directly from A's saved physical rows, bypassing C++
     # restore/copy/stream resource plumbing and all cache-store writers.
     original = ctx.runtime._patched[ctx.target].original_callable
-    was_recording = recorder.ENABLED
-    recorder.ENABLED = False
-    try:
-        with torch.inference_mode():
-            final = original(*args, **kwargs)
-            if cp_mode:
-                cp_ctx = v4.layers[0].attn._cp_ctx
-                last_mask = (
-                    cp_ctx.global_positions == cp_ctx.seq_len_total - 1
-                ) & cp_ctx.local_is_real
-                final_last = final[last_mask].contiguous()
-            else:
-                final_last = final[-1:].contiguous()
-            logits = torch.mm(
-                final_last.to(v4.head_weight.dtype), v4.head_weight.t()
-            ).float()
-    finally:
-        recorder.ENABLED = was_recording
+    with torch.inference_mode():
+        final = original(*args, **kwargs)
+        if cp_mode:
+            cp_ctx = v4.layers[0].attn._cp_ctx
+            last_mask = (
+                cp_ctx.global_positions == cp_ctx.seq_len_total - 1
+            ) & cp_ctx.local_is_real
+            final_last = final[last_mask].contiguous()
+        else:
+            final_last = final[-1:].contiguous()
+        logits = torch.mm(
+            final_last.to(v4.head_weight.dtype), v4.head_weight.t()
+        ).float()
     torch.save(
         {
             "layers": capture.layers,
@@ -718,8 +760,6 @@ def _run_direct_reference(ctx, directory, end_position):
 def _run_private_fork_reference(ctx, directory, end_position, resume_endpoint):
     """Replay A and B in private pools, then continue C from B's exact F."""
     global _private_fork_cache
-
-    from rtp_llm.models_py.modules.dsv4 import _record_tensor as recorder
 
     production = ctx.args[1]
     tables = ctx.args[5]
@@ -787,24 +827,19 @@ def _run_private_fork_reference(ctx, directory, end_position, resume_endpoint):
     capture = _CaptureLayers(v4 if cp_mode else None)
     kwargs["capture_context"] = capture
     original = ctx.runtime._patched[ctx.target].original_callable
-    was_recording = recorder.ENABLED
-    recorder.ENABLED = False
-    try:
-        with torch.inference_mode():
-            final = original(*args, **kwargs)
-            if cp_mode:
-                cp_ctx = v4.layers[0].attn._cp_ctx
-                last_mask = (
-                    cp_ctx.global_positions == cp_ctx.seq_len_total - 1
-                ) & cp_ctx.local_is_real
-                final_last = final[last_mask].contiguous()
-            else:
-                final_last = final[-1:].contiguous()
-            logits = torch.mm(
-                final_last.to(v4.head_weight.dtype), v4.head_weight.t()
-            ).float()
-    finally:
-        recorder.ENABLED = was_recording
+    with torch.inference_mode():
+        final = original(*args, **kwargs)
+        if cp_mode:
+            cp_ctx = v4.layers[0].attn._cp_ctx
+            last_mask = (
+                cp_ctx.global_positions == cp_ctx.seq_len_total - 1
+            ) & cp_ctx.local_is_real
+            final_last = final[last_mask].contiguous()
+        else:
+            final_last = final[-1:].contiguous()
+        logits = torch.mm(
+            final_last.to(v4.head_weight.dtype), v4.head_weight.t()
+        ).float()
     reference_name = (
         f"direct_reference_{end_position}_g{resume_endpoint}.pt"
         if resume_endpoint == fork_at
@@ -1026,6 +1061,25 @@ def after_forward_layers(ctx):
                 entry["current_save_block_ids"] = (
                     current_block_ids.detach().cpu().clone()
                 )
+                if tag in DSV4_KERNEL_ROW_TAGS:
+                    physical_ids = current_block_ids.reshape(-1).to(
+                        device=base.device, dtype=torch.long
+                    )
+                    physical_ids = physical_ids[physical_ids > 0]
+                    pages = kv_cache.get_seq_size_per_block(
+                        tag
+                    ) // kv_cache.get_kernel_seq_size_per_block(tag)
+                    selected_ids = torch.unique(
+                        (
+                            physical_ids[:, None] * pages
+                            + torch.arange(pages, device=physical_ids.device)
+                        ).reshape(-1),
+                        sorted=True,
+                    )
+                    entry["current_save_ids"] = selected_ids.cpu()
+                    entry["current_save_values"] = (
+                        base.index_select(0, selected_ids).detach().cpu()
+                    )
                 if end_position == 2000:
                     positions = current_positions.reshape(-1)
                     destinations = current_block_ids.reshape(-1)
@@ -1142,9 +1196,15 @@ def after_decode_forward(ctx):
         kernel = group_inputs.kv_cache_kernel_block_id_device
         if physical is None or kernel is None:
             continue
+        positions = (
+            group_inputs.prefix_lengths
+            if group_inputs.is_target_verify
+            else group_inputs.sequence_lengths
+        )
         tables[tag] = {
             "physical_ids": physical[physical >= 0].detach().cpu().tolist(),
             "kernel_ids": kernel[kernel >= 0].detach().cpu().tolist(),
+            "start_positions": positions.detach().cpu().reshape(-1).tolist(),
         }
     if not tables:
         return
@@ -1160,6 +1220,8 @@ def after_decode_forward(ctx):
             {
                 "rank": _rank(),
                 "input_len": int(inputs.input_ids.numel()),
+                "input_ids": inputs.input_ids.detach().cpu().reshape(-1).tolist(),
+                "captured_unix_ns": time.time_ns(),
                 "tables": tables,
             },
             indent=2,

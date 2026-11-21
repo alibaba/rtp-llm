@@ -20,6 +20,10 @@ from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.smoke.deepseek_v4_tail_reuse_4layer_test import (
     DeepSeekV4TailReuseFourLayerTest,
 )
+from rtp_llm.test.smoke.local_tier_reuse import (
+    assert_local_tier_reuse,
+    local_cache_args,
+)
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -62,7 +66,7 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
             "LOAD_PYTHON_MODEL": "1",
             "LOG_LEVEL": "INFO",
             "FT_SERVER_TEST": "1",
-            "DSV4_MOE_STRATEGY": "mega",
+            "MOE_STRATEGY": "mega_moe",
             "DSV4_USE_MEGA_MOE_SE": "0",
             "DSV4_USE_MEGA_MOE_FUSED": "0",
             "DSV4_CHUNK_TOKENS": "2048",
@@ -101,15 +105,30 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 ).replace("--load_method fastsafetensors", "--load_method scratch")
                 + " --role_type DECODE --enable_cuda_graph 0 --cp_rotate_method PREFILL_CP"
             )
+        probe_file = Path(__file__).with_name("deepseek_v4_tail_reuse_probe.py")
         hook_config = self.output_dir / "tail_reuse_cp_hook_config.json"
         hook_config.write_text(
             json.dumps(
                 {
                     "case": "v4_four_layer_cp_cache",
+                    "hook_file": str(probe_file),
+                    "dump_dir": str(self.probe_dir),
+                    "trace_dir": str(self.trace_dir),
+                    "trace_case": "four_layer_cp2",
                     "function_hooks": [
                         {
                             "target": "rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers",
                             "after": "after_forward_layers",
+                            **(
+                                {
+                                    "before": [
+                                        "begin_production_capture",
+                                        "capture_local_restore",
+                                    ]
+                                }
+                                if self.local_cache_tier != "device"
+                                else {"before": "begin_production_capture"}
+                            ),
                         },
                         {
                             "target": "rtp_llm.models_py.modules.dsv4.decode.forward.forward_decode",
@@ -119,22 +138,12 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 }
             )
         )
-        probe_file = Path(__file__).with_name("deepseek_v4_tail_reuse_probe.py")
         self.prefill = MagaServerManager(
             env_args={
                 **common_env,
                 "REMOTE_SERVER_PORT": decode_port,
-                "MOEDBG": "1",
-                "MOEDBG_ALL_LAYERS": "1",
-                "MOEDBG_MAX_SEQ": "2000",
-                "MOEDBG_FULL_THRESHOLD": "5000000",
-                "MOEDBG_NAME_REGEX": r"^(layer\d\d_(tail128|last)|lm_last_hidden|lm_logits_last)$",
-                "MOEDBG_DIR": str(self.trace_dir),
-                "MOEDBG_CASE": "four_layer_cp2",
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(probe_file),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
                 "T10_PRIVATE_FORK_REFERENCE": (
@@ -148,6 +157,7 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
             role_name="v4_tail_cp2_prefill",
             smoke_args_str=(
                 common_args
+                + local_cache_args(self.local_cache_tier, self.output_dir, self.cp_size)
                 + " --role_type PREFILL --enable_cuda_graph 0"
                 + " --cp_rotate_method ALL_GATHER --enable_prefill_partial_tail_reuse 1"
                 + (
@@ -161,11 +171,10 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
             env_args={
                 **common_env,
                 "WORLD_SIZE": "1" if self.decode_world1 else "2",
+                "MOE_STRATEGY": "auto" if self.decode_world1 else "mega_moe",
                 "REMOTE_SERVER_PORT": prefill_port,
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(probe_file),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "decode",
             },
@@ -222,6 +231,7 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
         actual = response.json()
         self.assertNotIn("error_code", actual, actual)
         self.assertIs(actual.get("finished"), True)
+        assert_local_tier_reuse(self.local_cache_tier, actual["aux_info"])
         self.assertEqual(
             len(actual["input_ids"][0]), len(self.tokenizer.encode(prompt))
         )
@@ -245,7 +255,18 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
             int(data["extra"]["cp_rank"]): data
             for data in (torch.load(path, weights_only=False) for path in trace_files)
         }
-        decodes = [json.loads(path.read_text()) for path in sorted(decode_files)]
+        all_decodes = [json.loads(path.read_text()) for path in sorted(decode_files)]
+        decodes = [
+            row
+            for row in all_decodes
+            if request_start_ns <= row["captured_unix_ns"] <= response_end_ns
+            and row["input_ids"][:1] == actual["output_ids"][0][:1]
+            and all(
+                table["start_positions"] == [len(actual["input_ids"][0])]
+                for table in row["tables"].values()
+            )
+        ]
+        self.assertTrue(decodes, f"{label}: request's first P→D forward missing")
         self.assertEqual(set(probes), {0, 1})
         self.assertEqual(set(traces), {0, 1})
         decode_ranks = {item["rank"] for item in decodes}
@@ -279,6 +300,7 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 for rank, trace in traces.items()
             },
             "decode_tables": decodes,
+            "observed_decode_tables": all_decodes,
         }
         (self.output_dir / f"{label}.json").write_text(
             json.dumps(record, indent=2) + "\n"
@@ -322,7 +344,13 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                     source_end,
                     end_position,
                     f"{label} rank{rank}",
+                    rank=rank,
                 )
+                if self.local_cache_tier != "device":
+                    self._assert_local_restored_state(
+                        key, before_row, source_end, end_position, rank
+                    )
+
             if source_end == 1025:
                 for tag in ("csa_state", "indexer_state"):
                     row = b["rows"][(2, tag)]
@@ -352,16 +380,22 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 a_id = int(a["runtime_table"][0, column]) // pages
                 b_id = int(b["runtime_table"][0, column]) // pages
                 if key[1] in DSV4_KERNEL_ROW_TAGS:
-                    save_id = a_id  # FULL publication retains runtime ownership.
+                    selected = a["save_block_ids"][a["save_positions"] == source_end]
+                    save_id = (
+                        int(selected[0])
+                        if selected.numel() and int(selected[0]) > 0
+                        else a_id
+                    )
                 else:
                     save = a["save_block_ids"][a["save_positions"] == source_end]
                     save_id = int(save[0])
                 if b_id > 0:
-                    self.assertNotEqual(
-                        b_id,
-                        save_id,
-                        f"rank{rank} {key}: cached short source reused for write",
-                    )
+                    if self.local_cache_tier == "device":
+                        self.assertNotEqual(
+                            b_id,
+                            save_id,
+                            f"rank{rank} {key}: cached short source reused for write",
+                        )
                     per_rank.append(
                         {"a_runtime": a_id, "a_save": save_id, "b_write": b_id}
                     )
@@ -498,13 +532,13 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 before = source[1][rank]["rows"][key]
                 for suffix in ("ids", "values", "scales"):
                     name = f"source_{suffix}"
-                    if name in before:
+                    if self.local_cache_tier == "device" and name in before:
                         self.assertTrue(
                             torch.equal(before[name], after[name]),
                             f"rank{rank} {key}: A source changed after B",
                         )
                 if key[1] in DSV4_KERNEL_ROW_TAGS:
-                    self.assertFalse((after["current_save_block_ids"] >= 0).any())
+                    self._assert_current_compressed_full_snapshot(key, after, rank)
                     continue
                 positions = after["current_save_positions"].reshape(-1)
                 blocks = after["current_save_block_ids"].reshape(-1)
@@ -527,11 +561,15 @@ class DeepSeekV4TailReuseFourLayerCP2Test(DeepSeekV4TailReuseFourLayerTest):
                 before = source[1][rank]["rows"][key]
                 for suffix in ("ids", "values", "scales"):
                     name = f"source_{suffix}"
-                    if name in before:
+                    if self.local_cache_tier == "device" and name in before:
                         self.assertTrue(
                             torch.equal(before[name], after[name]),
                             f"rank{rank} {key}: A source changed after C",
                         )
+        if self.local_cache_tier != "device":
+            for rank in (0, 1):
+                for key, row in reused_b[1][rank]["rows"].items():
+                    self._assert_local_restored_state(key, row, 800, 2000, rank)
         return source, reused_b, reused_c
 
     def test_cp2_internal_f800_later_request(self):

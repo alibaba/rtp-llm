@@ -25,11 +25,18 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     DSV4_TAGS,
 )
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
+from rtp_llm.test.smoke.local_tier_reuse import (
+    LocalCacheTier,
+    assert_local_tier_reuse,
+    local_cache_args,
+)
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
 class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
+    local_cache_tier: LocalCacheTier = "device"
+
     def setUp(self):
         self.model_path = Path(os.environ["T07_FOUR_LAYER_CHECKPOINT"])
         self.assertTrue((self.model_path / "model.safetensors.index.json").is_file())
@@ -37,8 +44,8 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
         self.assertEqual(config["num_hidden_layers"], 4)
         self.assertEqual(config["compress_ratios"], [0, 0, 4, 128])
         self.output_dir = Path(os.environ["TEST_UNDECLARED_OUTPUTS_DIR"])
-        self.probe_dir = self.output_dir / "physical_cache_probe"
-        self.trace_dir = self.output_dir / "layer_traces"
+        self.probe_dir = self.output_dir / "physical_cache_probe" / self._testMethodName
+        self.trace_dir = self.output_dir / "layer_traces" / self._testMethodName
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_path, trust_remote_code=True, local_files_only=True
         )
@@ -77,7 +84,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             "LOAD_PYTHON_MODEL": "1",
             "LOG_LEVEL": "INFO",
             "FT_SERVER_TEST": "1",
-            "DSV4_MOE_STRATEGY": "mega",
+            "MOE_STRATEGY": "auto",
             "DSV4_CHUNK_TOKENS": "2048",
             "WORLD_SIZE": "1",
             "REMOTE_RPC_SERVER_IP": "localhost",
@@ -108,6 +115,11 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             {
                 "target": "rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers",
                 "after": "after_forward_layers",
+                **(
+                    {"before": ["begin_production_capture", "capture_local_restore"]}
+                    if self.local_cache_tier != "device"
+                    else {"before": "begin_production_capture"}
+                ),
             },
             {
                 "target": "rtp_llm.models_py.modules.dsv4.decode.forward.forward_decode",
@@ -115,7 +127,10 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             },
         ]
         if f800_writer_fault:
-            function_hooks[0]["before"] = "before_forward_layers_fault_scope"
+            function_hooks[0]["before"] = [
+                "begin_production_capture",
+                "before_forward_layers_fault_scope",
+            ]
             function_hooks.extend(
                 [
                     {
@@ -135,7 +150,10 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                 "test_internal_f800_later_request_uses_exact_saved_state",
                 "cost instrumentation requires the ordinary non-CP F800 fixture",
             )
-            function_hooks[0]["before"] = "before_forward_layers_cost"
+            function_hooks[0]["before"] = [
+                "begin_production_capture",
+                "before_forward_layers_cost",
+            ]
             function_hooks.extend(
                 [
                     {
@@ -154,17 +172,21 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                     },
                 ]
             )
+        probe_file = Path(__file__).with_name("deepseek_v4_tail_reuse_probe.py")
+        self.assertTrue(probe_file.is_file())
         hook_config = self.output_dir / "tail_reuse_hook_config.json"
         hook_config.write_text(
             json.dumps(
                 {
                     "case": "v4_four_layer_cache",
+                    "hook_file": str(probe_file),
+                    "dump_dir": str(self.probe_dir),
+                    "trace_dir": str(self.trace_dir),
+                    "trace_case": "four_layer",
                     "function_hooks": function_hooks,
                 }
             )
         )
-        probe_file = Path(__file__).with_name("deepseek_v4_tail_reuse_probe.py")
-        self.assertTrue(probe_file.is_file())
         f1300_private = self._testMethodName == "test_internal_f1300_source2000"
         private_source_end = "1100" if ac02 else ("2000" if f1300_private else "1300")
         private_fork_at = "1300" if ac02 or f1300_private else "800"
@@ -173,15 +195,8 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             env_args={
                 **common_env,
                 "REMOTE_SERVER_PORT": decode_port,
-                "MOEDBG": "1",
-                "MOEDBG_ALL_LAYERS": "1",
-                "MOEDBG_MAX_SEQ": "2000",
-                "MOEDBG_DIR": str(self.trace_dir),
-                "MOEDBG_CASE": "four_layer",
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(probe_file),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
                 "T10_F800_COST_PROBE": "1" if cost_probe else "0",
@@ -199,9 +214,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                     else ""
                 ),
                 "RTP_LLM_PREFIX_CACHE_OBSERVABILITY": (
-                    "true"
-                    if ac02 or f800_writer_fault
-                    else "false"
+                    "true" if ac02 or f800_writer_fault else "false"
                 ),
             },
             device_ids=cards[:1],
@@ -209,6 +222,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             role_name="v4_tail_prefill",
             smoke_args_str=(
                 common_args
+                + local_cache_args(self.local_cache_tier, self.output_dir)
                 + " --role_type PREFILL --enable_cuda_graph 0"
                 + " --enable_prefill_partial_tail_reuse "
                 + (
@@ -229,9 +243,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                 **common_env,
                 "REMOTE_SERVER_PORT": prefill_port,
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(probe_file),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "decode",
             },
@@ -337,6 +349,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
         actual = response.json()
         self.assertNotIn("error_code", actual, actual)
         self.assertIs(actual.get("finished"), True)
+        assert_local_tier_reuse(self.local_cache_tier, actual["aux_info"])
         self.assertEqual(
             len(actual["input_ids"][0]), len(self.tokenizer.encode(prompt))
         )
@@ -371,19 +384,169 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
         )
         return actual, probe, trace, decode_tables
 
+    def _compressed_full_bytes(self, key, row, ids, values, kernel_id, entries):
+        # Production writers pack data and scales in separate planes; block
+        # stride also contains padding that is not part of the valid prefix.
+        ratio, data_bytes, scale_bytes = {
+            "csa_kv": (4, 576, 8),
+            "hca_kv": (128, 576, 8),
+            "indexer_kv": (4, 128, 4),
+        }[key[1]]
+        capacity = int(row["kernel_seq_size_per_block"]) // ratio
+        index = int(torch.searchsorted(ids, torch.tensor(kernel_id)))
+        self.assertLess(index, ids.numel(), f"{key}: missing kernel page {kernel_id}")
+        self.assertEqual(int(ids[index]), kernel_id)
+        raw = values[index].view(torch.uint8).reshape(-1)
+        self.assertLessEqual(entries, capacity)
+        self.assertGreaterEqual(raw.numel(), capacity * (data_bytes + scale_bytes))
+        return torch.cat(
+            (
+                raw[: entries * data_bytes],
+                raw[
+                    capacity * data_bytes : capacity * data_bytes
+                    + entries * scale_bytes
+                ],
+            )
+        )
+
+    def _assert_compressed_full_snapshot(self, key, row, rank):
+        physical = int(row["seq_size_per_block"])
+        kernel = int(row["kernel_seq_size_per_block"])
+        pages = physical // kernel
+        cp_size = int(getattr(self, "cp_size", 1))
+        ratio = 128 if key[1] == "hca_kv" else 4
+        for endpoint, saved in zip(
+            row["save_positions"].reshape(-1), row["save_block_ids"].reshape(-1)
+        ):
+            endpoint, saved = int(endpoint), int(saved)
+            if saved < 0:
+                continue
+            self.assertGreater(saved, 0)
+            chunk = (endpoint - 1) // (physical * cp_size)
+            rank_start = (chunk * cp_size + rank) * physical
+            for page in range(pages):
+                entries = (
+                    max(0, min(kernel, endpoint - rank_start - page * kernel)) // ratio
+                )
+                if entries == 0:
+                    continue
+                runtime = int(row["runtime_table"][0, chunk * pages + page])
+                actual = self._compressed_full_bytes(
+                    key,
+                    row,
+                    row["source_ids"],
+                    row["source_values"],
+                    saved * pages + page,
+                    entries,
+                )
+                expected = self._compressed_full_bytes(
+                    key, row, row["table_ids"], row["table_values"], runtime, entries
+                )
+                self.assertTrue(
+                    torch.equal(actual, expected),
+                    f"rank{rank} {key}: selected FULL prefix at {endpoint} differs from runtime",
+                )
+
+    def _assert_current_compressed_full_snapshot(self, key, row, rank=0):
+        current = dict(row)
+        current["save_positions"] = row["current_save_positions"]
+        current["save_block_ids"] = row["current_save_block_ids"]
+        current["source_ids"] = row["current_save_ids"]
+        current["source_values"] = row["current_save_values"]
+        self._assert_compressed_full_snapshot(key, current, rank)
+
+    def _assert_compressed_full_restore(self, key, source, restored, resume, rank):
+        physical = int(source["seq_size_per_block"])
+        kernel = int(source["kernel_seq_size_per_block"])
+        pages = physical // kernel
+        cp_size = int(getattr(self, "cp_size", 1))
+        ratio = 128 if key[1] == "hca_kv" else 4
+        for block in range((resume + physical - 1) // physical):
+            if block % cp_size != rank:
+                continue
+            for page in range(pages):
+                entries = (
+                    max(0, min(kernel, resume - block * physical - page * kernel))
+                    // ratio
+                )
+                if entries == 0:
+                    continue
+                column = (block // cp_size) * pages + page
+                source_id = int(source["runtime_table"][0, column])
+                target_id = int(restored["runtime_table"][0, column])
+                expected = self._compressed_full_bytes(
+                    key,
+                    source,
+                    source["table_ids"],
+                    source["table_values"],
+                    source_id,
+                    entries,
+                )
+                actual = self._compressed_full_bytes(
+                    key, source, restored["ids"], restored["values"], target_id, entries
+                )
+                self.assertTrue(
+                    torch.equal(actual, expected),
+                    f"rank{rank} {key}: restored FULL block {block} page {page} differs at {resume}",
+                )
+
+    def _assert_local_restored_state(
+        self, key, source, resume, end, rank=0, scope="target"
+    ):
+        if key[1] == "hca_state" and resume % 128 == 0:
+            return
+        restored = torch.load(
+            self.probe_dir / f"restored_{scope}_rank{rank}_g{resume}_n{end}.pt",
+            weights_only=False,
+        )[key]
+        if key[1] in DSV4_KERNEL_ROW_TAGS:
+            self._assert_compressed_full_restore(key, source, restored, resume, rank)
+            return
+        pages = int(source["seq_size_per_block"]) // int(
+            source["kernel_seq_size_per_block"]
+        )
+        slot = (resume - 1) // int(source["seq_size_per_block"])
+        actual_ids = (
+            restored["runtime_table"]
+            .reshape(-1)[slot * pages : (slot + 1) * pages]
+            .long()
+        )
+        self.assertEqual(actual_ids.numel(), pages)
+        self.assertTrue((actual_ids > 0).all())
+        actual_positions = torch.searchsorted(restored["ids"], actual_ids)
+        self.assertTrue(torch.equal(restored["ids"][actual_positions], actual_ids))
+        selected = source.get(f"selected_f{resume}_values")
+        if selected is None:
+            saved = source["save_block_ids"][source["save_positions"] == resume]
+            if saved.numel() == 1:
+                expected_ids = saved.long().reshape(-1) * pages + torch.arange(pages)
+            else:
+                expected_ids = (
+                    source["runtime_table"]
+                    .reshape(-1)[slot * pages : (slot + 1) * pages]
+                    .long()
+                )
+            positions = torch.searchsorted(source["source_ids"], expected_ids)
+            self.assertTrue(torch.equal(source["source_ids"][positions], expected_ids))
+            selected = source["source_values"][positions]
+        self.assertTrue(
+            torch.equal(selected, restored["values"][actual_positions]),
+            f"{key}: restored {scope} state at {resume} differs from publication snapshot",
+        )
+        if "scales" in restored:
+            expected_scales = source.get(f"selected_f{resume}_scales")
+            if expected_scales is None:
+                expected_scales = source["source_scales"][positions]
+            self.assertTrue(
+                torch.equal(expected_scales, restored["scales"][actual_positions]),
+                f"{key}: restored scales at {resume} differ",
+            )
+
     def _assert_registered_source(
-        self, key, source, after, source_end, endpoint, label
+        self, key, source, after, source_end, endpoint, label, rank=0
     ):
         if key[1] in DSV4_KERNEL_ROW_TAGS:
-            # Compressed FULL still has dense prefix coverage in raw-token
-            # coordinates: it publishes runtime pages, never selected snapshots.
-            self.assertFalse((source["save_block_ids"] >= 0).any(), f"{label} {key}")
-            self.assertFalse(
-                (after["current_save_block_ids"] >= 0).any(), f"{label} {key}"
-            )
-            self.assertEqual(
-                set(source["source_ids"].tolist()), set(source["table_ids"].tolist())
-            )
+            self._assert_compressed_full_snapshot(key, source, rank)
         else:
             # DSV4 SWA and compression STATE use OPAQUE_STATE ring payloads;
             # they still require precise endpoint snapshots.
@@ -401,7 +564,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             self.assertGreater(int(saved_end[0]), 0, f"{label} {key}: B save ID")
         for suffix in ("ids", "values", "scales"):
             name = f"source_{suffix}"
-            if name in source:
+            if self.local_cache_tier == "device" and name in source:
                 self.assertTrue(
                     torch.equal(source[name], after[name]),
                     f"{label} {key}: published source mutated: {name}",
@@ -431,7 +594,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                 self._assert_registered_source(
                     key, before_row, after["rows"][key], source_end, end_position, label
                 )
-            elif source_device_stable:
+            elif source_device_stable and self.local_cache_tier == "device":
                 for suffix in ("ids", "values", "scales"):
                     name = f"source_{suffix}"
                     if name in before_row:
@@ -439,6 +602,12 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
                             torch.equal(before_row[name], after["rows"][key][name]),
                             f"{label} {key}: A source changed: {name}",
                         )
+
+        if self.local_cache_tier != "device" and expected_resume == source_end:
+            for key, row in source["rows"].items():
+                self._assert_local_restored_state(
+                    key, row, expected_resume, end_position
+                )
 
         self.assertIs(reused["aux_info"]["pd_sep"], True)
         reuse_len = reused["aux_info"].get("prefill_total_reuse_len")
@@ -617,7 +786,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             positions = row["current_save_positions"].reshape(-1)
             destinations = row["current_save_block_ids"].reshape(-1)
             if key[1] in DSV4_KERNEL_ROW_TAGS:
-                self.assertFalse((destinations >= 0).any(), f"{key}: FULL copy")
+                self._assert_current_compressed_full_snapshot(key, row)
                 continue
             selected_f = destinations[positions == fork_at]
             selected_n = destinations[positions == 2000]
@@ -734,7 +903,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             destinations = row["current_save_block_ids"].reshape(-1)
             self.assertEqual(int((positions == fork_a).sum()), 0, f"{key}: earlier F")
             if key[1] in DSV4_KERNEL_ROW_TAGS:
-                self.assertFalse((destinations >= 0).any(), f"{key}: FULL copy")
+                self._assert_current_compressed_full_snapshot(key, row)
                 continue
             selected_f = destinations[positions == fork_c]
             selected_n = destinations[positions == 2000]
@@ -855,16 +1024,21 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
         # MagaServerManager cannot restart after stop_server sets its stop bit.
         # Fresh managers preserve the route/config while using separate logs
         # and probe paths, so no prior DEVICE point or file can satisfy B.
-        self.probe_dir = self.output_dir / "physical_cache_probe_fresh"
-        self.trace_dir = self.output_dir / "layer_traces_fresh"
+        self.probe_dir = (
+            self.output_dir / "physical_cache_probe_fresh" / self._testMethodName
+        )
+        self.trace_dir = self.output_dir / "layer_traces_fresh" / self._testMethodName
         fresh = []
         for old, role in ((old_prefill, "prefill"), (old_decode, "decode")):
             env = dict(old._env_args)
-            env["RTP_HOT_HOOK_DUMP_DIR"] = str(self.probe_dir)
+            config_path = Path(env["RTP_HOT_HOOK_CONFIG"])
+            config = json.loads(config_path.read_text())
+            config["dump_dir"] = str(self.probe_dir)
+            config["trace_dir"] = str(self.trace_dir)
+            config_path.write_text(json.dumps(config))
             env["T07_CACHE_PROBE_DIR"] = str(self.probe_dir)
             env["T10_F800_WRITER_FAULT_ARM_FILE"] = ""
             if role == "prefill":
-                env["MOEDBG_DIR"] = str(self.trace_dir)
                 env["T10_F800_FATAL_COLD_REFERENCE"] = "1"
             manager = MagaServerManager(
                 env_args=env,
@@ -1071,7 +1245,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             positions = row["current_save_positions"].reshape(-1)
             destinations = row["current_save_block_ids"].reshape(-1)
             if key[1] in DSV4_KERNEL_ROW_TAGS:
-                self.assertFalse((destinations >= 0).any(), f"{key}: FULL copy")
+                self._assert_current_compressed_full_snapshot(key, row)
                 continue
             for endpoint in (800, 2000) if tail_enabled else (800,):
                 selected = destinations[positions == endpoint]
@@ -1092,6 +1266,9 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
             f"{label}_c_2000", prompt_c, True
         )
         self.assertEqual(reused_c["aux_info"].get("prefill_total_reuse_len"), 800)
+        if self.local_cache_tier != "device":
+            for key, row in after_b["rows"].items():
+                self._assert_local_restored_state(key, row, 800, 2000)
         self.assertEqual(int(trace_c["extra"]["seq_len_total"]), 1200)
         self.assertTrue(decode_c)
         private_f = torch.load(
@@ -1146,7 +1323,7 @@ class DeepSeekV4TailReuseFourLayerTest(unittest.TestCase):
         for key, source_row in source["rows"].items():
             for suffix in ("ids", "values", "scales"):
                 name = f"source_{suffix}"
-                if name in source_row:
+                if self.local_cache_tier == "device" and name in source_row:
                     self.assertTrue(
                         torch.equal(source_row[name], after_c["rows"][key][name]),
                         f"{key}: A source changed after C: {name}",

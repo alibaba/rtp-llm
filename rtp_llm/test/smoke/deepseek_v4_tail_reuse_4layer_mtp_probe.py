@@ -10,7 +10,6 @@ from pathlib import Path
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as recorder
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import as_attention_inputs_by_tag
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.test.smoke import deepseek_v4_tail_reuse_probe as target_probe
@@ -56,10 +55,18 @@ def _restore_runtime(v4, saved):
         setattr(v4, name, count)
 
 
-def before_forward_layers(ctx):
+def before_forward_layers_with_local_restore(ctx):
+    before_forward_layers(ctx)
+    mode = _mode(ctx)
+    if mode in ("target", "draft"):
+        target_probe.capture_local_restore(ctx, scope=mode)
+
+
+def before_forward_layers(ctx, *, case_suffix: str = ""):
     mode = _mode(ctx)
     if mode is not None:
-        recorder._DBG_CASE = "four_layer" if mode == "target" else "mtp_draft_prefill"
+        case = "four_layer" if mode == "target" else "mtp_draft_prefill"
+        target_probe.begin_production_capture(ctx, case + case_suffix)
     if mode != "draft" or os.environ.get("T07_CACHE_PROBE_ROLE") != "prefill":
         return
     resume = int(ctx.kwargs["attn_inputs"].prefix_lengths.reshape(-1)[0])
@@ -209,7 +216,6 @@ def before_forward_decode(ctx):
     mode = _mode(ctx)
     if mode is None:
         return
-    recorder._DBG_CASE = "four_layer_decode" if mode == "target" else "mtp_draft_decode"
     if mode != "draft" or os.environ.get("T07_CACHE_PROBE_ROLE") != "decode":
         return
     cache = ctx.args[1]
@@ -268,14 +274,11 @@ def after_forward_decode(ctx):
     args = list(ctx.args)
     args[1] = reference_cache
     original = ctx.runtime._patched[ctx.target].original_callable
-    was_recording = recorder.ENABLED
-    recorder.ENABLED = False
     try:
         _restore_runtime(v4, _pending.runtime)
         with torch.inference_mode():
             direct = original(*args, **ctx.kwargs)
     finally:
-        recorder.ENABLED = was_recording
         _restore_runtime(v4, product_runtime)
         _pending.source = None
 

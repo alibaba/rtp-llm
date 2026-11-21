@@ -931,6 +931,62 @@ private:
     std::shared_ptr<std::promise<void>> release_;
 };
 
+TEST_F(MultiRankBlockTransferEngineTest, ExactStoreWaitsForAllPeersAfterRequestRelease) {
+    for (const size_t ranks : {2u, 4u}) {
+        for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+            for (const bool success : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << ranks << " peers " << tierName(tier) << " success=" << success);
+                auto                                         state = std::make_shared<MultiRankBlockTransferRpcState>();
+                auto                                         release       = std::make_shared<std::promise<void>>();
+                const auto                                   held_response = release->get_future().share();
+                std::vector<MultiRankBlockTransferRpcConfig> configs;
+                for (size_t rank = 0; rank < ranks; ++rank) {
+                    const auto code = !success && rank + 1 == ranks ? MemoryOperationResponsePB::COPY_FAILED :
+                                                                      MemoryOperationResponsePB::OK;
+                    configs.push_back({true, code, grpc::Status::OK, state, 0, held_response});
+                }
+                std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+                const auto broadcaster = makeBroadcastManager(configs, servers);
+                ASSERT_NE(broadcaster, nullptr);
+                auto host  = makeHostPool(256, 8);
+                auto disk  = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
+                auto group = makeBroadcastGroup("exact_store_peer_lifetime", host, disk);
+                initializeBroadcastGroups({group});
+                BlockTreeCacheConfig config;
+                config.enable_device_cache = false;
+                config.enable_host_cache   = tier == Tier::HOST;
+                config.enable_disk_cache   = tier == Tier::DISK;
+                auto       cache  = makeBlockTreeCacheForTest({group}, config, nullptr, broadcaster, nullptr, 64);
+                const auto source = allocateDeviceBlocksForTest(*group, 2);
+                ASSERT_EQ(source.size(), 2u);
+                std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+                resources[0][0].device_blocks = source[0];
+                resources[1][0].device_blocks = source[1];
+                const std::vector<size_t>           ends{64, 80};
+                const std::vector<std::vector<int>> tokens{std::vector<int>(64, 1), std::vector<int>(16, 2)};
+                ScopedRpcResponseRelease            unblock(release);
+                cache->insert({100, 200}, resources, tier, false, &tokens, nullptr, &ends, std::nullopt, true);
+                ASSERT_TRUE(waitForRpcRequests(state, ranks, std::chrono::seconds(5)));
+                unreferenceDeviceBlocksForTest(*group, source);
+                EXPECT_EQ(group->devicePools()[0]->referencedBlocksNum(BlockTreeRefType::STORE), 2u);
+                EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+                unblock.release();
+                BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+                const auto path = cache->tree()->findNode({100, 200});
+                EXPECT_EQ(path.size(), success ? 2u : 0u);
+                if (success && path.size() == 2) {
+                    EXPECT_EQ(path.back()->token_end, 80u);
+                    EXPECT_EQ(path.back()->token_ids, tokens.back());
+                    EXPECT_TRUE(path.back()->group_set_resources[0].hasTier(tier));
+                }
+                EXPECT_EQ(group->devicePools()[0]->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+                EXPECT_EQ(host->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+                EXPECT_EQ(disk->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+            }
+        }
+    }
+}
+
 TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvictionSettlement) {
     for (bool transfer_success : {true, false}) {
         SCOPED_TRACE(transfer_success ? "success" : "failure");

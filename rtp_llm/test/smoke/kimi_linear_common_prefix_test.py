@@ -15,11 +15,18 @@ import torch
 from transformers import AutoTokenizer
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
+from rtp_llm.test.smoke.local_tier_reuse import (
+    LocalCacheTier,
+    assert_local_tier_reuse,
+    local_cache_args,
+)
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
 class KimiLinearCommonPrefixTest(unittest.TestCase):
+    local_cache_tier: LocalCacheTier = "device"
+
     def setUp(self):
         self.model_path = Path(os.environ["T10_KIMI_LINEAR_CHECKPOINT"])
         config_bytes = (self.model_path / "config.json").read_bytes()
@@ -164,6 +171,10 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
             json.dumps(
                 {
                     "case": "kimi_linear_common_prefix",
+                    "hook_file": str(
+                        Path(__file__).with_name("kimi_linear_common_prefix_probe.py")
+                    ),
+                    "dump_dir": str(self.probe_dir),
                     "function_hooks": [
                         {
                             "target": "rtp_llm.models_py.model_desc.kimi_linear.KimiLinearModel.forward",
@@ -180,11 +191,7 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
                 "WORLD_SIZE": "1",
                 "REMOTE_SERVER_PORT": decode_port,
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(
-                    Path(__file__).with_name("kimi_linear_common_prefix_probe.py")
-                ),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T10_KIMI_PROBE_DIR": str(self.probe_dir),
                 "T10_KIMI_PROBE_ROLE": "prefill",
                 "T10_KIMI_NUMERICAL_EXTENSION": (
@@ -197,6 +204,7 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
             role_name="kimi_linear_common_prefix_prefill",
             smoke_args_str=(
                 common_args
+                + local_cache_args(self.local_cache_tier, self.output_dir)
                 + " --role_type PREFILL"
                 + f" --enable_prefill_partial_tail_reuse {0 if self.both_off else 1}"
                 + f" --enable_prefill_common_prefix_recovery {0 if self.both_off else 1}"
@@ -260,6 +268,7 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
         actual = response.json()
         self.assertNotIn("error_code", actual, actual)
         self.assertIs(actual.get("finished"), True)
+        assert_local_tier_reuse(self.local_cache_tier, actual["aux_info"])
         self.assertEqual(len(actual["output_ids"]), 1)
         self.assertEqual(len(actual["output_ids"][0]), 2)
         record = {
@@ -471,6 +480,65 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
             + "\n"
         )
 
+    @staticmethod
+    def _full_tokens(values):
+        if values.ndim == 5:
+            values = values.movedim(3, 1)
+        elif values.ndim != 3:
+            raise AssertionError(f"unexpected FULL layout {values.shape}")
+        return values.flatten(0, 1)
+
+    def _full_prefix(self, row, endpoint, *, snapshots):
+        base = int(row["seq_size_per_block"])
+        kernel = int(row["kernel_seq_size_per_block"])
+        pages = base // kernel
+        chunks = []
+        for begin in range(0, endpoint, base):
+            end = min(begin + base, endpoint)
+            ids = (
+                self._ready_source_ids(row, end)
+                if snapshots
+                else row["runtime_table"][
+                    0, begin // kernel : begin // kernel + pages
+                ].long()
+            )
+            chunks.append(self._full_tokens(self._values_at(row, ids))[: end - begin])
+        return torch.cat(chunks)
+
+    def _assert_local_restored_prefix(self, source_rows, restored_rows, endpoint):
+        for key, source in source_rows.items():
+            restored = restored_rows[key]
+            kernel = int(source["kernel_seq_size_per_block"])
+            if key[1] == "full":
+                self.assertTrue(
+                    torch.equal(
+                        self._full_prefix(source, endpoint, snapshots=True).view(
+                            torch.uint8
+                        ),
+                        self._full_prefix(restored, endpoint, snapshots=False).view(
+                            torch.uint8
+                        ),
+                    ),
+                    f"{key}: restored valid FULL prefix differs at {endpoint}",
+                )
+                continue
+            else:
+                source_ids = self._ready_source_ids(source, endpoint)
+                pages = int(source["seq_size_per_block"]) // kernel
+                slot = (endpoint - 1) // int(source["seq_size_per_block"])
+                target_ids = restored["runtime_table"][
+                    0, slot * pages : (slot + 1) * pages
+                ].long()
+            self.assertEqual(source_ids.numel(), target_ids.numel())
+            self.assertTrue((target_ids > 0).all())
+            self.assertTrue(
+                torch.equal(
+                    self._values_at(source, source_ids).view(torch.uint8),
+                    self._values_at(restored, target_ids).view(torch.uint8),
+                ),
+                f"{key}: restored {endpoint} prefix differs from publication snapshot",
+            )
+
     def test_internal_f800_full_kda(self):
         if self.both_off:
             self._test_both_off()
@@ -536,7 +604,9 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
                 ),
                 f"{key}: original G768 runtime state differs from independent private model",
             )
-            for rows in (b_rows, c_before, c_after):
+            for rows in (
+                (b_rows, c_before, c_after) if self.local_cache_tier == "device" else ()
+            ):
                 self.assertTrue(
                     torch.equal(
                         source.view(torch.uint8),
@@ -556,13 +626,14 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
                 torch.equal(produced_f.view(torch.uint8), expected_f.view(torch.uint8)),
                 f"{key}: F800 conv+SSM differs from independent private model",
             )
-            self.assertTrue(
-                torch.equal(
-                    produced_f.view(torch.uint8),
-                    self._values_at(c_after[key], f_ids).view(torch.uint8),
-                ),
-                f"{key}: B F800 source mutated during C",
-            )
+            if self.local_cache_tier == "device":
+                self.assertTrue(
+                    torch.equal(
+                        produced_f.view(torch.uint8),
+                        self._values_at(c_after[key], f_ids).view(torch.uint8),
+                    ),
+                    f"{key}: B F800 source mutated during C",
+                )
             pages = (
                 b_rows[key]["seq_size_per_block"]
                 // b_rows[key]["kernel_seq_size_per_block"]
@@ -572,7 +643,8 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
                 0, slot * pages : (slot + 1) * pages
             ].long()
             self.assertTrue((runtime_ids > 0).all())
-            self.assertFalse(torch.isin(runtime_ids, f_ids).any())
+            if self.local_cache_tier == "device":
+                self.assertFalse(torch.isin(runtime_ids, f_ids).any())
             self.assertTrue(
                 torch.equal(
                     produced_f.view(torch.uint8),
@@ -581,27 +653,97 @@ class KimiLinearCommonPrefixTest(unittest.TestCase):
                 f"{key}: C restored F800 bytes differ",
             )
         for key in full_keys:
-            row = a_rows[key]
-            blocks = b_rows[key]["save_block_ids"]
-            if blocks is not None:
-                self.assertFalse((blocks > 0).any(), f"{key}: FULL unexpected snapshot")
-            pages = (1300 + row["kernel_seq_size_per_block"] - 1) // row[
-                "kernel_seq_size_per_block"
-            ]
-            ids = row["runtime_table"][0, :pages].long()
-            self.assertTrue((ids > 0).all())
-            original = self._values_at(row, ids)
-            for rows in (b_rows, c_after):
+            for rows, reference, end in (
+                (a_rows, private_a, 1300),
+                (b_rows, private_b, 2000),
+            ):
+                row = rows[key]
+                independent = self._full_tokens(reference["full_runtime_rows"][key])[
+                    :end
+                ]
+                for endpoint, block in zip(
+                    row["save_positions"].reshape(-1), row["save_block_ids"].reshape(-1)
+                ):
+                    if int(block) <= 0:
+                        continue
+                    endpoint = int(endpoint)
+                    ids = self._selected_ids(row, endpoint)
+                    self.assertFalse(
+                        torch.isin(ids, row["runtime_table"].long()).any(),
+                        f"{key}: FULL snapshot aliases live runtime",
+                    )
+                    begin = (
+                        (endpoint - 1)
+                        // row["seq_size_per_block"]
+                        * row["seq_size_per_block"]
+                    )
+                    valid = self._full_tokens(self._values_at(row, ids))[
+                        : endpoint - begin
+                    ]
+                    self.assertTrue(
+                        torch.equal(
+                            valid.view(torch.uint8),
+                            independent[begin:endpoint].view(torch.uint8),
+                        ),
+                        f"{key}: FULL checkpoint {endpoint} differs from independent model",
+                    )
+                    if self.local_cache_tier == "device":
+                        later_rows = (
+                            (b_rows, c_before, c_after)
+                            if rows is a_rows
+                            else (c_before, c_after)
+                        )
+                        for later in later_rows:
+                            retained = self._full_tokens(
+                                self._values_at(later[key], ids)
+                            )[: endpoint - begin]
+                            self.assertTrue(
+                                torch.equal(
+                                    valid.view(torch.uint8), retained.view(torch.uint8)
+                                ),
+                                f"{key}: owned FULL checkpoint {endpoint} mutated",
+                            )
+            f_ids = self._selected_ids(b_rows[key], 800)
+            n_ids = self._selected_ids(b_rows[key], 2000)
+            self.assertFalse(
+                torch.isin(f_ids, n_ids).any(), f"{key}: FULL F/N share destination"
+            )
+            # Runtime continuation may rewrite suffix bytes, but its prefix is immutable.
+            for endpoint, before, after in (
+                (768, b_probes["before_rank0"]["rows"], b_rows),
+                (800, c_before, c_after),
+            ):
                 self.assertTrue(
                     torch.equal(
-                        original.view(torch.uint8),
-                        self._values_at(rows[key], ids).view(torch.uint8),
+                        self._full_prefix(before[key], endpoint, snapshots=False).view(
+                            torch.uint8
+                        ),
+                        self._full_prefix(after[key], endpoint, snapshots=False).view(
+                            torch.uint8
+                        ),
                     ),
-                    f"{key}: FULL A source bytes changed",
+                    f"{key}: continuation overwrote valid prefix {endpoint}",
                 )
-        cold, _ = self._request("c2000_cold", self.prompt_c, reuse=False)
+        if self.local_cache_tier != "device":
+            self._assert_local_restored_prefix(
+                a_rows, b_probes["before_rank0"]["rows"], 768
+            )
+            self._assert_local_restored_prefix(b_rows, c_before, 800)
+        cold, cold_probes = self._request("c2000_cold", self.prompt_c, reuse=False)
         self.assertEqual(cold["prefill_reuse_len"], 0)
         self.assertEqual(c["output_ids"], cold["output_ids"])
+        for key in full_keys:
+            self.assertTrue(
+                torch.equal(
+                    self._full_prefix(c_before[key], 800, snapshots=False).view(
+                        torch.uint8
+                    ),
+                    self._full_prefix(
+                        cold_probes["after_rank0"]["rows"][key], 800, snapshots=False
+                    ).view(torch.uint8),
+                ),
+                f"{key}: restored valid F800 prefix differs from cold computation",
+            )
 
 
 if __name__ == "__main__":

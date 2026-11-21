@@ -3,20 +3,15 @@
 import os
 from pathlib import Path
 
-from rtp_llm.models_py.modules.dsv4 import _record_tensor as recorder
 from rtp_llm.test.smoke import deepseek_v4_tail_reuse_4layer_mtp_probe as mtp_probe
-
 
 _draft_private_cache = None
 
 
 def before_forward_layers(ctx):
-    mtp_probe.before_forward_layers(ctx)
+    mtp_probe.before_forward_layers(ctx, case_suffix="_cp2")
     mode = mtp_probe._mode(ctx)
-    if mode == "target":
-        recorder._DBG_CASE = "four_layer_cp2"
-    elif mode == "draft":
-        recorder._DBG_CASE = "mtp_draft_prefill_cp2"
+    if mode == "draft":
         # The shared tail oracle captures resumed inputs only. Private A also
         # needs its original target pre-HC activation before draft fusion.
         if (
@@ -86,3 +81,10 @@ def before_forward_decode(ctx):
 
 def after_forward_decode(ctx):
     mtp_probe.after_forward_decode(ctx)
+
+
+def before_forward_layers_with_local_restore(ctx):
+    before_forward_layers(ctx)
+    mode = mtp_probe._mode(ctx)
+    if mode in ("target", "draft"):
+        mtp_probe.target_probe.capture_local_restore(ctx, scope=mode)

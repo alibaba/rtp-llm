@@ -45,7 +45,7 @@ def _point(ctx):
         return None
     start = int(prefixes[0])
     end = start + int(lengths[0])
-    if (start, end) not in ((0, 1300), (768, 2000), (800, 2000)):
+    if (start, end) not in ((0, 1300), (0, 2000), (768, 2000), (800, 2000)):
         return None
     return model, inputs, cache, attention, start, end
 
@@ -73,6 +73,8 @@ def _begin_layer_capture(ctx):
         return
     if _layer_capture is not None:
         raise AssertionError("previous Kimi layer capture was not removed")
+    if _point(ctx)[4:] == (0, 2000):
+        return
     model = ctx.args[0]
     if len(model.layers) != 27:
         raise AssertionError("Kimi numerical extension requires all 27 real layers")
@@ -196,6 +198,8 @@ def _capture(ctx, phase):
             raise AssertionError(f"layer {layer_id}: expected one cache group")
         layer = groups[0]
         tag = str(layer.tag)
+        if (start, end) == (0, 2000) and tag != "full":
+            continue
         group = select_attention_inputs_for_layer(inputs, cache, layer_id)
         if isinstance(group, list):
             raise AssertionError(f"layer {layer_id}: ambiguous attention inputs")
@@ -203,7 +207,14 @@ def _capture(ctx, phase):
         table = group.kv_cache_kernel_block_id_device
         if table is None or table.numel() == 0:
             raise AssertionError(f"layer {layer_id}: missing runtime table")
-        ids = torch.empty(0, dtype=torch.long, device=table.device)
+        ids = table.reshape(-1).to(torch.long)
+        positions, blocks = group.cache_save_positions, group.cache_save_block_ids
+        if positions is not None and blocks is not None:
+            for endpoint, block in zip(positions.reshape(-1), blocks.reshape(-1)):
+                if int(block) > 0:
+                    ids = torch.cat(
+                        (ids, _selected_ids(group, cache, tag, int(endpoint)))
+                    )
         if tag == "linear":
             if phase == "after" and start == 0:
                 _source_ids[key] = _ready_source_ids(group, cache, tag, 768)
@@ -232,10 +243,30 @@ def _capture(ctx, phase):
                 ids = torch.cat(
                     (ids, table[0, slot * pages : (slot + 1) * pages].to(torch.long))
                 )
-        elif tag == "full" and phase == "after" and start == 0:
+        elif tag == "full":
             kernel_tokens = cache.get_kernel_seq_size_per_block(tag)
-            used_pages = (1300 + kernel_tokens - 1) // kernel_tokens
-            _source_ids[key] = table[0, :used_pages].to(torch.long).detach().clone()
+            used_pages = (end + kernel_tokens - 1) // kernel_tokens
+            ids = table[0, :used_pages].to(torch.long)
+            positions, blocks = group.cache_save_positions, group.cache_save_block_ids
+            selected = []
+            if positions is not None and blocks is not None:
+                selected = [
+                    _selected_ids(group, cache, tag, int(endpoint))
+                    for endpoint, block in zip(
+                        positions.reshape(-1), blocks.reshape(-1)
+                    )
+                    if int(block) > 0
+                ]
+                if selected:
+                    ids = torch.cat((ids, *selected))
+            if phase == "after" and (start, end) == (0, 1300):
+                owned = [
+                    _ready_source_ids(group, cache, tag, endpoint)
+                    for endpoint in (256, 512, 768, 1024, 1300)
+                ]
+                _source_ids[key] = torch.cat(owned).detach().clone()
+            if phase == "after" and start == 768 and selected:
+                _source_ids[key] = torch.cat((_source_ids[key], *selected))
         if key in _source_ids:
             ids = torch.cat((ids, _source_ids[key]))
         ids = torch.unique(ids, sorted=True)
@@ -292,6 +323,8 @@ def _private_reference(ctx):
     if point is None:
         return
     model, inputs, production, attention, start, end = point
+    if (start, end) == (0, 2000):
+        return
     stages = {(0, 1300): (0, 768), (768, 2000): (1, 800), (800, 2000): (2, None)}
     stage, selected_endpoint = stages[(start, end)]
     if stage == 0:
@@ -316,8 +349,33 @@ def _private_reference(ctx):
     }
     if stage:
         _private_cache.seed_fork_continuation(
-            private_groups, stage=stage, resume_endpoint=start
+            {"linear": private_groups["linear"]}, stage=stage, resume_endpoint=start
         )
+        # FULL has token-addressed history; only [0, start) is valid, even when
+        # its final physical page also contains bytes from a longer request.
+        kernel = production.get_kernel_seq_size_per_block("full")
+        base = production.get_seq_size_per_block("full")
+        pages = base // kernel
+        source = _private_cache.fork_tables["full"]
+        target = private_groups["full"].kv_cache_kernel_block_id_device
+        for column in range((start + kernel - 1) // kernel):
+            source_id = int(source[0, column])
+            if (
+                "full" in _private_cache.fork_selected
+                and column // pages == (start - 1) // base
+            ):
+                source_id = (
+                    _private_cache.fork_selected["full"] * pages + column % pages
+                )
+            count = min(kernel, start - column * kernel)
+            for layer_id in range(27):
+                layer = _private_cache._layers.get((layer_id, "full"))
+                if layer is not None:
+                    values = layer.kv_cache_base
+                    axis = 2 if values.ndim == 5 else 0
+                    values[int(target[0, column])].narrow(axis, 0, count).copy_(
+                        values[source_id].narrow(axis, 0, count)
+                    )
     numerical = os.environ.get("T10_KIMI_NUMERICAL_EXTENSION") == "1"
     if numerical and _layer_capture is None:
         raise AssertionError("Kimi 27-layer production capture absent")
@@ -353,6 +411,19 @@ def _private_reference(ctx):
         _private_cache.remember_fork_inputs(
             private_groups, stage=stage, save_endpoint=selected_endpoint
         )
+    full_runtime_rows = {}
+    for layer_id in range(27):
+        layer = _private_cache._layers.get((layer_id, "full"))
+        if layer is not None:
+            kernel = production.get_kernel_seq_size_per_block("full")
+            ids = (
+                private_groups["full"]
+                .kv_cache_kernel_block_id_device[0, : (end + kernel - 1) // kernel]
+                .long()
+            )
+            full_runtime_rows[(layer_id, "full")] = (
+                layer.kv_cache_base.index_select(0, ids).detach().cpu().clone()
+            )
     state_rows = {}
     if stage in (0, 1):
         selected = _private_cache.fork_selected.get("linear") if stage == 1 else None
@@ -397,6 +468,7 @@ def _private_reference(ctx):
             "position_ids": position_ids,
             "position_ids_source": position_source,
             "state_rows": state_rows,
+            "full_runtime_rows": full_runtime_rows,
             "private_stage": stage,
             "selected_block_ids": dict(_private_cache.fork_selected),
             "production_cache_bytes_copied": 0,

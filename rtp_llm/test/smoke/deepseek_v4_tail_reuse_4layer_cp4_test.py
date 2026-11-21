@@ -22,6 +22,10 @@ from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.smoke.deepseek_v4_tail_reuse_4layer_test import (
     DeepSeekV4TailReuseFourLayerTest,
 )
+from rtp_llm.test.smoke.local_tier_reuse import (
+    assert_local_tier_reuse,
+    local_cache_args,
+)
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -55,27 +59,41 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
                 )
             ],
         )
+        probe_file = Path(__file__).with_name("deepseek_v4_tail_reuse_probe.py")
         hook_config = self.output_dir / "tail_reuse_cp4_hook_config.json"
         hook_config.write_text(
             json.dumps(
                 {
                     "case": "v4_four_layer_cp4_cache",
+                    "hook_file": str(probe_file),
+                    "dump_dir": str(self.probe_dir),
+                    "trace_dir": str(self.trace_dir),
+                    "trace_case": "four_layer_cp4",
                     "function_hooks": [
                         {
                             "target": "rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers",
                             "after": "after_forward_layers",
+                            **(
+                                {
+                                    "before": [
+                                        "begin_production_capture",
+                                        "capture_local_restore",
+                                    ]
+                                }
+                                if self.local_cache_tier != "device"
+                                else {"before": "begin_production_capture"}
+                            ),
                         },
                     ],
                 }
             )
         )
-        probe_file = Path(__file__).with_name("deepseek_v4_tail_reuse_probe.py")
         self.prefill = MagaServerManager(
             env_args={
                 "LOAD_PYTHON_MODEL": "1",
                 "LOG_LEVEL": "INFO",
                 "FT_SERVER_TEST": "1",
-                "DSV4_MOE_STRATEGY": "mega",
+                "MOE_STRATEGY": "mega_moe",
                 "DSV4_USE_MEGA_MOE_SE": "0",
                 "DSV4_USE_MEGA_MOE_FUSED": "0",
                 "DSV4_CHUNK_TOKENS": "2048",
@@ -83,17 +101,8 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
                 "REMOTE_RPC_SERVER_IP": "localhost",
                 "REMOTE_SERVER_PORT": unused_decode_port,
                 "MODEL_SERVICE_CONFIG": route.model_dump_json(),
-                "MOEDBG": "1",
-                "MOEDBG_ALL_LAYERS": "1",
-                "MOEDBG_MAX_SEQ": "2000",
-                "MOEDBG_FULL_THRESHOLD": "5000000",
-                "MOEDBG_NAME_REGEX": r"^(layer\d\d_(tail128|last)|lm_last_hidden|lm_logits_last)$",
-                "MOEDBG_DIR": str(self.trace_dir),
-                "MOEDBG_CASE": "four_layer_cp4",
                 "RTP_HOT_HOOK": "1",
-                "RTP_HOT_HOOK_FILE": str(probe_file),
                 "RTP_HOT_HOOK_CONFIG": str(hook_config),
-                "RTP_HOT_HOOK_DUMP_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_DIR": str(self.probe_dir),
                 "T07_CACHE_PROBE_ROLE": "prefill",
                 "T07_CACHE_PROBE_CP_SIZE": "4",
@@ -113,6 +122,7 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
                 " --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 4"
                 " --role_type PREFILL --enable_cuda_graph 0"
                 " --cp_rotate_method ALL_GATHER --enable_prefill_partial_tail_reuse 1"
+                + local_cache_args(self.local_cache_tier, self.output_dir, self.cp_size)
             ),
         )
         self.addCleanup(self.prefill.stop_server)
@@ -155,6 +165,7 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
         actual = response.json()
         self.assertNotIn("error_code", actual, actual)
         self.assertIs(actual.get("finished"), True)
+        assert_local_tier_reuse(self.local_cache_tier, actual["aux_info"])
         self.assertIs(actual["aux_info"]["pd_sep"], False)
         self.assertEqual(
             len(actual["input_ids"][0]), len(self.tokenizer.encode(prompt))
@@ -227,45 +238,47 @@ class DeepSeekV4TailReuseFourLayerCP4Test(DeepSeekV4TailReuseFourLayerTest):
             self.assertEqual(int(extra["seq_len_total"]), 2000)
             for key, before_row in a["rows"].items():
                 after_row = b["rows"][key]
-                save = before_row["save_block_ids"][
-                    before_row["save_positions"] == 1300
-                ]
-                self.assertEqual(save.numel(), 1, f"rank{rank} {key}: A short save")
-                self.assertGreater(int(save[0]), 0, f"rank{rank} {key}: A save ID")
-                self.assertTrue(
-                    set(before_row["source_ids"].tolist())
-                    - set(before_row["table_ids"].tolist()),
-                    f"rank{rank} {key}: A short source row not captured",
+                self._assert_registered_source(
+                    key, before_row, after_row, 1300, 2000, f"rank{rank}", rank=rank
                 )
-                for suffix in ("ids", "values", "scales"):
-                    name = f"source_{suffix}"
-                    if name in before_row:
-                        self.assertTrue(
-                            torch.equal(before_row[name], after_row[name]),
-                            f"rank{rank} {key}: A source mutated: {name}",
-                        )
-
                 physical = int(before_row["seq_size_per_block"])
                 pages = physical // int(before_row["kernel_seq_size_per_block"])
                 slot = (1300 - 1) // physical
                 if key[1] in DSV4_KERNEL_ROW_TAGS:
                     slot //= self.cp_size
                 column = slot * pages
+                if key[1] in DSV4_KERNEL_ROW_TAGS:
+                    selected = before_row["save_block_ids"][
+                        before_row["save_positions"] == 1300
+                    ]
+                    save_id = (
+                        int(selected[0])
+                        if selected.numel() and int(selected[0]) > 0
+                        else int(before_row["runtime_table"][0, column]) // pages
+                    )
+                else:
+                    save = before_row["save_block_ids"][
+                        before_row["save_positions"] == 1300
+                    ]
+                    save_id = int(save[0])
                 self.assertLess(column, after_row["runtime_table"].shape[1])
                 destination = int(after_row["runtime_table"][0, column]) // pages
                 if destination <= 0:
                     continue
-                self.assertNotEqual(
-                    destination,
-                    int(save[0]),
-                    f"rank{rank} {key}: source reused for write",
-                )
+                if self.local_cache_tier == "device":
+                    self.assertNotEqual(
+                        destination,
+                        save_id,
+                        f"rank{rank} {key}: source reused for write",
+                    )
+                else:
+                    self._assert_local_restored_state(key, before_row, 1300, 2000, rank)
                 copy_map.setdefault(str(key), []).append(
                     {
                         "rank": rank,
                         "a_runtime": int(before_row["runtime_table"][0, column])
                         // pages,
-                        "a_save": int(save[0]),
+                        "a_save": save_id,
                         "b_write": destination,
                     }
                 )
