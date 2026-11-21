@@ -175,6 +175,15 @@ bool GroupSet::hasUsableDeviceResource(const TreeNode& node) const {
            && resource.device_blocks.size() == group_tags_.size();
 }
 
+bool GroupSet::hasUsableLocalResource(const TreeNode& node) const {
+    const auto& resource = node.group_set_resources[group_set_id_];
+    const Tier  tier     = resource.getTopTier();
+    if (tier == Tier::DEVICE) {
+        return hasUsableDeviceResource(node);
+    }
+    return resource.isMatchUsable() && ((tier == Tier::HOST && host_pool_) || (tier == Tier::DISK && disk_pool_));
+}
+
 bool GroupSet::hasPhysicalCoverage(const std::vector<TreeNode*>& path, size_t token_end) const {
     if (path.empty() || token_end == 0 || token_end > path.back()->token_end) {
         return false;
@@ -194,13 +203,12 @@ bool GroupSet::hasPhysicalCoverage(const std::vector<TreeNode*>& path, size_t to
     return true;
 }
 
-bool GroupSet::hasCanonicalCoverage(size_t count, size_t canonical_size_per_block) const {
-    RTP_LLM_CHECK(canonical_size_per_block > 0
-                  && count <= std::numeric_limits<size_t>::max() / canonical_size_per_block);
-    if (groupType() != CacheGroupType::SWA || group(group_tags_.front()).policy.shared_chunk_state || count == 0) {
+bool GroupSet::hasCanonicalCoverage(size_t token_end, size_t canonical_size_per_block) const {
+    RTP_LLM_CHECK(canonical_size_per_block > 0 && token_end % canonical_size_per_block == 0);
+    if (groupType() != CacheGroupType::SWA || group(group_tags_.front()).policy.shared_chunk_state || token_end == 0) {
         return true;
     }
-    const size_t token_end = count * canonical_size_per_block;
+    const size_t count     = token_end / canonical_size_per_block;
     const size_t window    = static_cast<size_t>(std::max(0, group(group_tags_.front()).policy.sliding_window_size));
     const size_t start     = window > 1 && token_end >= window ? token_end - (window - 1) : 0;
     for (size_t index = start / canonical_size_per_block; index < count; ++index) {

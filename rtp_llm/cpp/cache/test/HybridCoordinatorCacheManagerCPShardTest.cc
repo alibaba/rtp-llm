@@ -177,7 +177,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, PendingLowerTierHistoryReserves
                         EXPECT_EQ(context->loadDescs()[index].target_blocks,
                                   BlockIndicesType{resource->blocks(0, "swa")[index]});
                     }
-                    EXPECT_EQ(context->matchedTokenEndpoint(config.canonicalSizePerBlock()), 0u);
+                    EXPECT_EQ(context->matchedTokenEndpoint(), 0u);
                     allocator->free({resource, tokens});
                 }
             }

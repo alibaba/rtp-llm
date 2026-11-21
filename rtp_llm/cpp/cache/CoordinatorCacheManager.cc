@@ -721,8 +721,8 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
             match_keys,
             *kv_resource,
             prepared,
-            [tokens = malloc_info.complete_token_ids, reuse_unit_tokens](size_t count) {
-                return tokens->isValidReuseLength(static_cast<int>(count) * reuse_unit_tokens);
+            [tokens = malloc_info.complete_token_ids](size_t endpoint) {
+                return tokens->isValidReuseLength(static_cast<int>(endpoint));
             },
             request_tokens,
             use_partial_tail ? &partial_tail : nullptr);
@@ -779,11 +779,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
     if (!materializeInitialBlocks(malloc_info, prepared, load_context.get(), prepared.total_logical_blocks)) {
         return rollback();
     }
-    MallocResult result{true,
-                        prepared.precise_local ? static_cast<int>(prepared.matched_device_endpoint) :
-                                                 static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens,
-                        match_cost_time_us,
-                        load_context};
+    MallocResult result{true, static_cast<int>(prepared.matched_device_endpoint), match_cost_time_us, load_context};
     result.target_reuse_len  = static_cast<int>(prepared.target_token_endpoint);
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
@@ -962,11 +958,10 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
             resource.mutableBlockIds(0, config_.groupTags()[id]).assign(BlockIndicesType{});
         }
         prepared.precise_local           = false;
-        prepared.target_token_endpoint   = context.targetTokenEndpoint(config_.canonicalSizePerBlock());
         prepared.matched_device_endpoint = 0;
         prepared.matched_device_blocks   = 0;
     }
-    prepared.target_token_endpoint = context.targetTokenEndpoint(config_.canonicalSizePerBlock());
+    prepared.target_token_endpoint = context.targetTokenEndpoint();
     bool success =
         materializeInitialBlocks(malloc_info,
                                  prepared,

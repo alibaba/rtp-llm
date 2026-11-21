@@ -49,8 +49,9 @@ public:
                      size_t                                         local_matched_blocks,
                      uint64_t                                       context_id,
                      const std::shared_ptr<LoadContextCoordinator>& coordinator,
-                     std::shared_ptr<StorageBackend>                storage_backend = nullptr,
-                     StorageRequest                                 storage_request = {});
+                     std::shared_ptr<StorageBackend>                storage_backend   = nullptr,
+                     StorageRequest                                 storage_request   = {},
+                     size_t                                         reuse_unit_tokens = 1);
     ~LoadAsyncContext() override;
 
     bool     empty() const;
@@ -58,20 +59,17 @@ public:
     size_t   localMatchedBlocks() const;
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
-    size_t   matchedTokenEndpoint(size_t reuse_unit_tokens) const;
-    size_t   matchedTokens(Tier tier, size_t reuse_unit_tokens) const;
+    size_t   matchedTokenEndpoint() const;
+    size_t   matchedTokens(Tier tier) const;
     void     setLocalTokenEndpoints(size_t ready_endpoint, size_t target_endpoint);
-    size_t   targetTokenEndpoint(size_t reuse_unit_tokens) const;
+    size_t   targetTokenEndpoint() const;
     bool     localFallbackSelected() const {
         return local_fallback_selected_.load(std::memory_order_acquire);
     }
-    void     setLocalFallback(size_t token_endpoint, size_t reuse_unit_tokens);
+    void                         setLocalFallback(size_t token_endpoint);
     bool     needBackendMatch() const;
-    PrefixCacheRemoteObservation remoteObservation(size_t reuse_unit_tokens) const;
+    PrefixCacheRemoteObservation remoteObservation() const;
 
-    void setValidPrefix(std::function<bool(size_t)> valid_prefix) {
-        valid_prefix_ = std::move(valid_prefix);
-    }
     void setMatchCallback(MatchCallback callback);
     void   setRemoteSelectionCallback(std::function<bool(LoadAsyncContext&, size_t)> callback,
                                       bool                                           discard_local = false);
@@ -135,23 +133,25 @@ private:
     size_t                                  backend_matched_blocks_{0};
     size_t                                  ready_token_endpoint_{0};
     size_t                                  local_token_endpoint_{0};
+    size_t                                  remote_token_endpoint_{0};
+    const size_t                            reuse_unit_tokens_;
 
     std::array<size_t, 3>                   matched_blocks_by_tier_{};
     std::array<size_t, 3>                   matched_tokens_by_tier_{};
 
     std::shared_ptr<StorageBackend> storage_backend_;
     StorageRequest                  storage_request_;
-    std::function<bool(size_t)>     valid_prefix_;
     MatchCallback                   match_callback_;
     std::function<bool(LoadAsyncContext&, size_t)> remote_selection_callback_;
     bool                                           discard_local_on_remote_{false};
     size_t                                         remote_source_count_{0};
-    size_t                                         remote_base_blocks_{0};
+    const size_t                                   remote_base_blocks_;
+    const size_t                                   remote_base_token_endpoint_;
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
     PrefixCacheRemoteQueryStatus    remote_query_status_{PrefixCacheRemoteQueryStatus::NOT_QUERIED};
-    size_t                          remote_candidate_blocks_{0};
+    size_t                                         remote_candidate_endpoint_{0};
     std::atomic<bool>               commit_started_{false};
     bool                            committed_{false};
 
@@ -165,7 +165,6 @@ private:
     std::atomic<size_t>       remaining_join_count_{0};
     std::atomic<uint64_t>     join_generation_{0};
     size_t                    local_fallback_endpoint_{0};
-    size_t                    local_fallback_reuse_unit_{1};
     std::atomic<bool>         local_fallback_selected_{false};
     int64_t                   join_start_time_us_{0};
     bool                      has_failure_{false};
@@ -187,8 +186,9 @@ public:
     std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
                                              std::vector<bool>               joined_load,
                                              size_t                          matched_blocks,
-                                             std::shared_ptr<StorageBackend> storage_backend = nullptr,
-                                             StorageRequest                  storage_request = {});
+                                             std::shared_ptr<StorageBackend> storage_backend   = nullptr,
+                                             StorageRequest                  storage_request   = {},
+                                             size_t                          reuse_unit_tokens = 1);
     bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
     bool                              commit(uint64_t context_id);
     bool                              abort(LoadAsyncContext& context) noexcept;

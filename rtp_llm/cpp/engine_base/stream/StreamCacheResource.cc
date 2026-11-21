@@ -299,7 +299,7 @@ void StreamCacheResource::releaseResource() {
     if (allocator_load_context_) {
         const auto load_context = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
         if (load_context != nullptr) {
-            remote_observation_ = load_context->remoteObservation(static_cast<size_t>(reuseBlockTokens()));
+            remote_observation_ = load_context->remoteObservation();
         }
         remote_observation_.effective = false;
     }
@@ -521,6 +521,20 @@ absl::Status StreamCacheResource::initKVBlock() {
 
     // The manager initializes the cache keys inside malloc, so the registration
     // reads them only after the first prefill allocation succeeded.
+    const auto register_point =
+        [this](PrefixCacheRegistration& registration, PrefixCachePlanPoint endpoint, bool internal_only = false) {
+            PrefixCacheRegistrationPoint point;
+            point.endpoint      = endpoint;
+            point.internal_only = internal_only;
+            const auto& groups  = resource_context_.cache_manager->blockTreeCache()->groupSets();
+            point.group_bindings.reserve(groups.size());
+            for (const auto& group : groups) {
+                PrefixCacheGroupSaveBinding binding;
+                binding.group_set_id = group->groupSetId();
+                point.group_bindings.push_back(std::move(binding));
+            }
+            registration.points.push_back(std::move(point));
+        };
     if (is_first_malloc && !prefix_cache_registration_ && partialTailReuseEnabled()) {
         PrefixCacheRegistration registration;
         registration.token_ids             = malloc_info.complete_token_ids->completeTokenIdsVec(0);
@@ -540,22 +554,14 @@ absl::Status StreamCacheResource::initKVBlock() {
             // so every full-unit boundary is an original checkpoint.
             const size_t index = pos / base_tokens - 1;
             RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing full checkpoint key");
-            registration.points.push_back({{index, registration.base_keys[index], pos}, {}});
+            register_point(registration, {index, registration.base_keys[index], pos});
         }
         if (resource_context_.enable_prefill_partial_tail_reuse && registration.original_input_tokens > 0
             && (registration.points.empty()
                 || registration.points.back().endpoint.pos != registration.original_input_tokens)) {
             const size_t index = (registration.original_input_tokens - 1) / base_tokens;
             RTP_LLM_CHECK_WITH_INFO(index < registration.base_keys.size(), "missing tail checkpoint key");
-            registration.points.push_back(
-                {{index, registration.base_keys[index], registration.original_input_tokens}, {}});
-        }
-        for (auto& point : registration.points) {
-            for (const auto& group_set : resource_context_.cache_manager->blockTreeCache()->groupSets()) {
-                PrefixCacheGroupSaveBinding binding;
-                binding.group_set_id = group_set->groupSetId();
-                point.group_bindings.push_back(std::move(binding));
-            }
+            register_point(registration, {index, registration.base_keys[index], registration.original_input_tokens});
         }
         prefix_cache_registration_ = std::move(registration);
     }
@@ -573,15 +579,7 @@ absl::Status StreamCacheResource::initKVBlock() {
             && std::none_of(registration.points.begin(), registration.points.end(), [&](const auto& point) {
                    return point.endpoint.pos == fork.pos;
                })) {
-            PrefixCacheRegistrationPoint point;
-            point.endpoint      = fork;
-            point.internal_only = true;
-            for (const auto& group_set : resource_context_.cache_manager->blockTreeCache()->groupSets()) {
-                PrefixCacheGroupSaveBinding binding;
-                binding.group_set_id = group_set->groupSetId();
-                point.group_bindings.push_back(std::move(binding));
-            }
-            registration.points.push_back(std::move(point));
+            register_point(registration, fork, true);
         }
     }
 
@@ -647,7 +645,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     const auto load_context  = std::dynamic_pointer_cast<LoadAsyncContext>(allocator_load_context_);
     auto       malloc_status = load_context == nullptr ? MallocStatus::NONE : load_context->mallocStatus();
     if (prefixObservationEnabled() && load_context != nullptr) {
-        remote_observation_        = load_context->remoteObservation(static_cast<size_t>(reuseBlockTokens()));
+        remote_observation_        = load_context->remoteObservation();
         const int64_t input_length = stream_->inputLength();
         if (remote_observation_.candidate_pos.has_value() && input_length > 0) {
             remote_observation_.candidate_pos =
@@ -667,7 +665,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
                                 host,
                                 disk);
         const int    tokens      = reuseBlockTokens();
-        const size_t exact_total = load_context->matchedTokenEndpoint(static_cast<size_t>(tokens));
+        const size_t exact_total = load_context->matchedTokenEndpoint();
         RTP_LLM_CHECK_WITH_INFO(tokens > 0 && exact_total <= static_cast<size_t>(std::numeric_limits<int>::max()),
                                 "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
                                 total,
@@ -685,9 +683,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         resource.setDiskReuseBlockNum(disk);
         resource.setStorageBackendReuseBlockNum(backend);
         publishReuseLengths(static_cast<int>(exact_total),
-                            load_context->matchedTokens(Tier::HOST, tokens),
-                            load_context->matchedTokens(Tier::DISK, tokens),
-                            load_context->matchedTokens(Tier::REMOTE, tokens));
+                            load_context->matchedTokens(Tier::HOST),
+                            load_context->matchedTokens(Tier::DISK),
+                            load_context->matchedTokens(Tier::REMOTE));
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);

@@ -287,7 +287,7 @@ TEST(LoadAsyncContextTest, RemoteObservationKeepsCandidateAndQueryStatusBeforeMa
     auto   pool        = std::make_shared<TestBlockPool>();
     initBackend(*backend, pool);
     backend->setNextQueryStatus(PrefixCacheRemoteQueryStatus::HIT);
-    auto context = coordinator->create({}, {}, 0, backend, makeRequest(3));
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(3), 2);
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext& current, size_t matched) {
         EXPECT_EQ(matched, 3u);
@@ -296,7 +296,7 @@ TEST(LoadAsyncContextTest, RemoteObservationKeepsCandidateAndQueryStatusBeforeMa
 
     context->startBackendMatch();
     backend->completeMatch(3);
-    const auto observation = context->remoteObservation(/*reuse_unit_tokens=*/2);
+    const auto observation = context->remoteObservation();
     EXPECT_EQ(observation.query_status, PrefixCacheRemoteQueryStatus::HIT);
     ASSERT_TRUE(observation.candidate_pos.has_value());
     EXPECT_EQ(*observation.candidate_pos, 6u);
@@ -584,9 +584,13 @@ TEST(LoadAsyncContextTest, BackendMatchClipsInvalidPrefixBeforeMaterialization) 
     auto   block       = pool->malloc().value();
     pool->incRef(block);
     initBackend(*backend, pool);
-    auto context = coordinator->create({}, {}, 0, backend, makeRequest(3));
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(3), 64);
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setValidPrefix([](size_t blocks) { return blocks <= 1 || blocks >= 4; });
+    std::vector<size_t> tried_endpoints;
+    context->setRemoteSelectionCallback([&](LoadAsyncContext&, size_t endpoint) {
+        tried_endpoints.push_back(endpoint);
+        return endpoint == 64;
+    });
     context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
         EXPECT_EQ(matched, 1u);
         EXPECT_EQ(current.backendHandles().size(), 1u);
@@ -600,6 +604,8 @@ TEST(LoadAsyncContextTest, BackendMatchClipsInvalidPrefixBeforeMaterialization) 
     EXPECT_EQ(backend->readKeys().size(), 1u);
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->matchedBlocks(), 1u);
+    EXPECT_EQ(tried_endpoints, (std::vector<size_t>{192, 128, 64}));
+    EXPECT_EQ(context->matchedTokenEndpoint(), 64u);
     EXPECT_EQ(commits, 1u);
     pool->decRef(block);
     coordinator->shutdown();
@@ -933,14 +939,14 @@ TEST(LoadAsyncContextTest, ExactShortTailAttributionWaitsForCompletionAndDedupli
         ASSERT_TRUE(coordinator->registerContext(context));
         context->setLocalTokenEndpoints(1024, 1026);
         ASSERT_TRUE(context->commit());
-        EXPECT_EQ(context->targetTokenEndpoint(128), 1026u);
-        EXPECT_EQ(context->matchedTokenEndpoint(128), 1024u);
-        EXPECT_EQ(context->matchedTokens(lower, 128), 0u);
+        EXPECT_EQ(context->targetTokenEndpoint(), 1026u);
+        EXPECT_EQ(context->matchedTokenEndpoint(), 1024u);
+        EXPECT_EQ(context->matchedTokens(lower), 0u);
         ASSERT_TRUE(context->completeTransfers(2, true));
         ASSERT_TRUE(context->success());
-        EXPECT_EQ(context->matchedTokenEndpoint(128), 1026u);
-        EXPECT_EQ(context->matchedTokens(lower, 128), 2u);
-        EXPECT_EQ(context->matchedTokens(Tier::DEVICE, 128), 1024u);
+        EXPECT_EQ(context->matchedTokenEndpoint(), 1026u);
+        EXPECT_EQ(context->matchedTokens(lower), 2u);
+        EXPECT_EQ(context->matchedTokens(Tier::DEVICE), 1024u);
         EXPECT_EQ(context->matchedBlocks(lower), 1u);
         coordinator->shutdown();
     }
@@ -956,8 +962,8 @@ TEST(LoadAsyncContextTest, FailedShortTailDoesNotPublishTargetEndpoint) {
     ASSERT_TRUE(context->commit());
     ASSERT_TRUE(context->completeTransfers(1, false));
     EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->matchedTokenEndpoint(128), 1024u);
-    EXPECT_EQ(context->matchedTokens(Tier::HOST, 128), 0u);
+    EXPECT_EQ(context->matchedTokenEndpoint(), 1024u);
+    EXPECT_EQ(context->matchedTokens(Tier::HOST), 0u);
     coordinator->shutdown();
 }
 
@@ -970,9 +976,9 @@ TEST(LoadAsyncContextTest, RemoteMissSelectsExactLocalEndpointWithoutRemoteRead)
     initBackend(*backend, pool);
     auto request                     = makeRequest(3);
     request.local_matched_blocks_num = 2;
-    auto context                     = coordinator->create({}, {}, 2, backend, std::move(request));
+    auto context                     = coordinator->create({}, {}, 2, backend, std::move(request), 256);
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setLocalFallback(600, 256);
+    context->setLocalFallback(600);
     context->setMatchCallback([](LoadAsyncContext& current, size_t matched) {
         EXPECT_EQ(matched, 2u);
         EXPECT_TRUE(current.localFallbackSelected());
@@ -986,7 +992,7 @@ TEST(LoadAsyncContextTest, RemoteMissSelectsExactLocalEndpointWithoutRemoteRead)
     EXPECT_FALSE(backend->readPending());
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->matchedBlocks(), 2u);
-    EXPECT_EQ(context->matchedTokenEndpoint(256), 600u);
+    EXPECT_EQ(context->matchedTokenEndpoint(), 600u);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
     coordinator->shutdown();
@@ -999,10 +1005,10 @@ TEST(LoadAsyncContextTest, LostRemoteCheckpointSelectsPinnedLocalPlanWithoutRequ
     auto   backend     = std::make_shared<ManualBackend>();
     auto   pool        = std::make_shared<TestBlockPool>();
     initBackend(*backend, pool);
-    auto context = coordinator->create({}, {}, 3, backend, makeRequest(3));
+    auto context = coordinator->create({}, {}, 3, backend, makeRequest(3), 128);
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setLocalTokenEndpoints(0, 300);
-    context->setLocalFallback(300, 128);
+    context->setLocalFallback(300);
     context->setRemoteSelectionCallback([](LoadAsyncContext&, size_t) { return false; });
     context->setMatchCallback([](LoadAsyncContext& current, size_t) { return current.commit(); });
     context->startBackendMatch();
@@ -1010,7 +1016,7 @@ TEST(LoadAsyncContextTest, LostRemoteCheckpointSelectsPinnedLocalPlanWithoutRequ
     EXPECT_TRUE(context->success());
     EXPECT_TRUE(context->localFallbackSelected());
     EXPECT_FALSE(backend->readPending());
-    EXPECT_EQ(context->matchedTokenEndpoint(128), 300u);
+    EXPECT_EQ(context->matchedTokenEndpoint(), 300u);
     EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
     coordinator->shutdown();
 }
@@ -1025,10 +1031,10 @@ TEST(LoadAsyncContextTest, RemotePlanIgnoresQueuedCompletionFromDiscardedLocalJo
     pool->incRef(block);
     initBackend(*backend, pool);
     TransferDescriptor source{nullptr, 0, 0, Tier::HOST, Tier::DEVICE, {1}};
-    auto               context = coordinator->create({source}, {true}, 1, backend, makeRequest(3));
+    auto               context = coordinator->create({source}, {true}, 1, backend, makeRequest(3), 128);
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setLocalTokenEndpoints(0, 130);
-    context->setLocalFallback(130, 128);
+    context->setLocalFallback(130);
     context->startJoinWait(1);
     context->setRemoteSelectionCallback(
         [source](LoadAsyncContext& current, size_t) {
@@ -1052,7 +1058,7 @@ TEST(LoadAsyncContextTest, RemotePlanIgnoresQueuedCompletionFromDiscardedLocalJo
     EXPECT_FALSE(completed);
     ASSERT_TRUE(context->completeJoinedOne(true, completed, latency, context->joinGeneration()));
     EXPECT_TRUE(context->success());
-    EXPECT_EQ(context->matchedTokenEndpoint(128), 384u);
+    EXPECT_EQ(context->matchedTokenEndpoint(), 384u);
     pool->decRef(block);
     coordinator->shutdown();
 }
@@ -1069,9 +1075,10 @@ TEST(LoadAsyncContextTest, FartherRemoteHitWinsAndReadFailureDoesNotUseLocalFall
         initBackend(*backend, pool);
         auto request                     = makeRequest(3);
         request.local_matched_blocks_num = 2;
-        auto context                     = coordinator->create({}, {}, 2, backend, std::move(request));
+        auto context                     = coordinator->create({}, {}, 2, backend, std::move(request), 256);
         ASSERT_TRUE(coordinator->registerContext(context));
-        context->setLocalFallback(600, 256);
+        context->setLocalTokenEndpoints(512, 512);
+        context->setLocalFallback(600);
         context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
             EXPECT_EQ(matched, 3u);
             EXPECT_FALSE(current.localFallbackSelected());
@@ -1081,15 +1088,16 @@ TEST(LoadAsyncContextTest, FartherRemoteHitWinsAndReadFailureDoesNotUseLocalFall
         context->startBackendMatch();
         backend->completeMatch(3);
         ASSERT_TRUE(backend->readPending());
+        EXPECT_EQ(context->targetTokenEndpoint(), 768u);
+        EXPECT_EQ(context->matchedTokenEndpoint(), 512u);
         if (fail_read) {
             backend->failNextRead();
         }
         backend->completeRead();
         EXPECT_EQ(context->success(), !fail_read);
         EXPECT_FALSE(context->localFallbackSelected());
-        if (!fail_read) {
-            EXPECT_EQ(context->matchedTokenEndpoint(256), 768u);
-        }
+        EXPECT_EQ(context->matchedTokenEndpoint(), fail_read ? 512u : 768u);
+        EXPECT_EQ(context->matchedTokens(Tier::REMOTE), fail_read ? 0u : 256u);
         EXPECT_EQ(commits, 1u);
         EXPECT_EQ(aborts, 0u);
         pool->decRef(block);

@@ -17,15 +17,19 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
                                    uint64_t                                       context_id,
                                    const std::shared_ptr<LoadContextCoordinator>& coordinator,
                                    std::shared_ptr<StorageBackend>                storage_backend,
-                                   StorageRequest                                 storage_request):
+                                   StorageRequest                                 storage_request,
+                                   size_t                                         reuse_unit_tokens):
     coordinator_(coordinator),
     context_id_(context_id),
     load_descs_(std::move(load_descs)),
     joined_load_(std::move(joined_load)),
     local_matched_blocks_(local_matched_blocks),
     matched_blocks_(local_matched_blocks),
+    reuse_unit_tokens_(reuse_unit_tokens),
     storage_backend_(std::move(storage_backend)),
     storage_request_(std::move(storage_request)),
+    remote_base_blocks_(storage_request_.local_matched_blocks_num),
+    remote_base_token_endpoint_(remote_base_blocks_ * reuse_unit_tokens_),
     need_backend_match_(storage_backend_ && !storage_request_.empty()),
     backend_pending_(need_backend_match_),
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
@@ -33,7 +37,6 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     })) {
     remaining_join_count_.store(static_cast<size_t>(std::count(joined_load_.begin(), joined_load_.end(), true)),
                                 std::memory_order_relaxed);
-    remote_base_blocks_ = storage_request_.local_matched_blocks_num;
     rebuildMatchedBlocksByTier();
 }
 
@@ -86,28 +89,20 @@ void LoadAsyncContext::setLocalTokenEndpoints(size_t ready_endpoint, size_t targ
     rebuildMatchedTokensByTier();
 }
 
-size_t LoadAsyncContext::targetTokenEndpoint(size_t reuse_unit_tokens) const {
+size_t LoadAsyncContext::targetTokenEndpoint() const {
     if (localFallbackSelected()) {
         return local_fallback_endpoint_;
     }
-    const size_t blocks = std::max(matchedBlocks(), backend_matched_blocks_);
-    return blocks <= local_matched_blocks_ ? local_token_endpoint_ : blocks * reuse_unit_tokens;
+    return remote_token_endpoint_ == 0 ? local_token_endpoint_ : remote_token_endpoint_;
 }
 
-size_t LoadAsyncContext::matchedTokenEndpoint(size_t reuse_unit_tokens) const {
-    if (!success()) {
-        return ready_token_endpoint_;
-    }
-    if (localFallbackSelected()) {
-        return local_fallback_endpoint_;
-    }
-    const size_t blocks = matchedBlocks();
-    return blocks <= local_matched_blocks_ ? local_token_endpoint_ : blocks * reuse_unit_tokens;
+size_t LoadAsyncContext::matchedTokenEndpoint() const {
+    return success() ? targetTokenEndpoint() : ready_token_endpoint_;
 }
 
-size_t LoadAsyncContext::matchedTokens(Tier tier, size_t reuse_unit_tokens) const {
+size_t LoadAsyncContext::matchedTokens(Tier tier) const {
     if (tier == Tier::REMOTE) {
-        return success() ? backendMatchedBlocks() * reuse_unit_tokens : 0;
+        return success() && remote_token_endpoint_ != 0 ? remote_token_endpoint_ - remote_base_token_endpoint_ : 0;
     }
     return success() && tier >= Tier::DEVICE && tier <= Tier::DISK ?
                matched_tokens_by_tier_[static_cast<size_t>(tier)] :
@@ -146,22 +141,21 @@ void LoadAsyncContext::rebuildMatchedTokensByTier() {
     matched_tokens_by_tier_[static_cast<size_t>(Tier::DEVICE)] += endpoint - previous;
 }
 
-void LoadAsyncContext::setLocalFallback(size_t token_endpoint, size_t reuse_unit_tokens) {
-    RTP_LLM_CHECK(need_backend_match_ && !backend_started_ && token_endpoint > 0 && reuse_unit_tokens > 0);
-    local_fallback_endpoint_   = token_endpoint;
-    local_fallback_reuse_unit_ = reuse_unit_tokens;
+void LoadAsyncContext::setLocalFallback(size_t token_endpoint) {
+    RTP_LLM_CHECK(need_backend_match_ && !backend_started_ && token_endpoint > 0);
+    local_fallback_endpoint_ = token_endpoint;
 }
 
 bool LoadAsyncContext::needBackendMatch() const {
     return need_backend_match_;
 }
 
-PrefixCacheRemoteObservation LoadAsyncContext::remoteObservation(size_t reuse_unit_tokens) const {
+PrefixCacheRemoteObservation LoadAsyncContext::remoteObservation() const {
     std::lock_guard<std::mutex> lock(backend_match_mutex_);
     PrefixCacheRemoteObservation observation;
     observation.query_status = remote_query_status_;
     if (remote_query_status_ == PrefixCacheRemoteQueryStatus::HIT) {
-        observation.candidate_pos = remote_candidate_blocks_ * reuse_unit_tokens;
+        observation.candidate_pos = remote_candidate_endpoint_;
     }
     return observation;
 }
@@ -267,8 +261,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     if (state_.load() != State::PENDING) {
         return;
     }
-    remote_query_status_       = success ? query_status : PrefixCacheRemoteQueryStatus::ERROR;
-    remote_candidate_blocks_   = success ? matched_blocks_num : 0;
+    remote_query_status_ = success ? query_status : PrefixCacheRemoteQueryStatus::ERROR;
     if (!success) {
         malloc_status_.store(MallocStatus::INTERNAL_ERROR, std::memory_order_release);
         failBeforeCommit();
@@ -277,11 +270,10 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     RTP_LLM_CHECK(storage_request_.keys && storage_request_.keys->size() == storage_request_.handles.size()
                   && matched_blocks_num >= storage_request_.local_matched_blocks_num
                   && matched_blocks_num <= storage_request_.handles.size());
+    remote_candidate_endpoint_ = matched_blocks_num * reuse_unit_tokens_;
+    size_t candidate_endpoint  = remote_candidate_endpoint_;
     for (;;) {
-        while (matched_blocks_num > remote_base_blocks_ && valid_prefix_ && !valid_prefix_(matched_blocks_num)) {
-            --matched_blocks_num;
-        }
-        if (local_fallback_endpoint_ > matched_blocks_num * local_fallback_reuse_unit_) {
+        if (local_fallback_endpoint_ > candidate_endpoint) {
             local_fallback_selected_.store(true, std::memory_order_release);
             matched_blocks_num = local_matched_blocks_;
             for (auto& handles : storage_request_.handles) {
@@ -290,14 +282,16 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
             break;
         }
         if (matched_blocks_num <= remote_base_blocks_ || !remote_selection_callback_
-            || remote_selection_callback_(*this, matched_blocks_num)) {
+            || remote_selection_callback_(*this, candidate_endpoint)) {
             break;
         }
-        // A local checkpoint can disappear between validation and reservation.
-        // Treat that as a shorter match, keeping the pinned fallback available.
         --matched_blocks_num;
+        candidate_endpoint -= reuse_unit_tokens_;
     }
     backend_matched_blocks_ = matched_blocks_num;
+    if (!localFallbackSelected() && matched_blocks_num > remote_base_blocks_) {
+        remote_token_endpoint_ = candidate_endpoint;
+    }
     if (matched_blocks_num < storage_request_.handles.size()) {
         storage_request_.keys = std::make_shared<CacheKeysType>(storage_request_.keys->begin(),
                                                                 storage_request_.keys->begin() + matched_blocks_num);
@@ -603,7 +597,8 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<Tra
                                                                  std::vector<bool>               joined_load,
                                                                  size_t                          matched_blocks,
                                                                  std::shared_ptr<StorageBackend> storage_backend,
-                                                                 StorageRequest                  storage_request) {
+                                                                 StorageRequest                  storage_request,
+                                                                 size_t                          reuse_unit_tokens) {
     const auto coordinator = shared_from_this();
     uint64_t   context_id  = 0;
     {
@@ -619,7 +614,8 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<Tra
                                               context_id,
                                               coordinator,
                                               std::move(storage_backend),
-                                              std::move(storage_request));
+                                              std::move(storage_request),
+                                              reuse_unit_tokens);
 }
 
 bool LoadContextCoordinator::registerContext(const std::shared_ptr<LoadAsyncContext>& context) {

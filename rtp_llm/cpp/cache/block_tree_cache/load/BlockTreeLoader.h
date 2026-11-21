@@ -109,7 +109,7 @@ private:
                                                                                   const std::vector<size_t>&                endpoints,
                                                                                   const CacheKeysType&                      cache_keys,
                                                                                   size_t minimum_endpoint);
-    bool                                                validMatch(std::vector<TreeNode*>&            path,
+    void                                                validMatch(const std::vector<TreeNode*>&      path,
                                                                    std::vector<bool>&                 candidate_valid,
                                                                    std::vector<std::vector<bool>>&    group_valid,
                                                                    const std::function<bool(size_t)>& valid_prefix) const;
@@ -121,10 +121,16 @@ private:
     BlockTreeMatchResult                                createMatchResult(std::vector<TreeNode*>&            path,
                                                                           const CacheKeysType&               cache_keys,
                                                                           const std::function<bool(size_t)>& valid_prefix,
-                                                                          const std::vector<int>*            request_tokens);
-    std::optional<std::vector<TransferDescriptor>> remoteSourcesLocked(const CacheKeysType& keys, size_t count) const;
-    bool
-    prepareRemoteSourcesLocked(LoadAsyncContext& context, const CacheKeysType& keys, size_t count, bool discard_local);
+                                                                          const std::vector<int>*            request_tokens,
+                                                                          std::vector<bool>                  candidate_valid,
+                                                                          std::vector<std::vector<bool>>     group_valid);
+    std::optional<std::vector<TransferDescriptor>>      remoteSourcesLocked(const CacheKeysType& keys,
+                                                                            size_t               endpoint) const;
+    bool                                                prepareRemoteSourcesLocked(LoadAsyncContext&                  context,
+                                                                                   const CacheKeysType&               keys,
+                                                                                   size_t                             endpoint,
+                                                                                   const std::function<bool(size_t)>& valid_endpoint,
+                                                                                   bool                               discard_local);
     StorageRequest makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool           commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void           abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,

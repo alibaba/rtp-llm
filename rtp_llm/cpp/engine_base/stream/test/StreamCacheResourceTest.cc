@@ -2843,19 +2843,23 @@ TEST_F(StreamCacheResourceTest, CacheReuseMetricsReportWithoutCacheManager) {
     EXPECT_EQ(metrics.stream_cache_remote_reuse_length, 8);
 }
 
-TEST_F(StreamCacheResourceTest, AllocatorReuseRejectsInvalidCountsBeforePublishing) {
+TEST_F(StreamCacheResourceTest, AllocatorReuseRejectsInvalidCountsAndEndpointsBeforePublishing) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
-    for (const size_t total : {size_t{0}, static_cast<size_t>(std::numeric_limits<int>::max())}) {
-        auto context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::DEVICE});
+    const auto expect_rejected = [&](size_t total_blocks, size_t token_endpoint) {
+        auto context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::DEVICE}, false);
+        context->setLocalTokenEndpoints(2, token_endpoint);
+        ASSERT_TRUE(context->commit());
         ASSERT_TRUE(context->success());
-        context->matched_blocks_         = total;
+        context->matched_blocks_         = total_blocks;
         resource.allocator_load_context_ = context;
 
         EXPECT_ANY_THROW((void)resource.finalizeAllocatorLoad());
         EXPECT_EQ(stream_->reuseLength(), 0);
         resource.allocator_load_context_.reset();
-    }
+    };
+    expect_rejected(0, 2);
+    expect_rejected(1, static_cast<size_t>(std::numeric_limits<int>::max()) + 1);
 }
 
 TEST_F(StreamCacheResourceTest, testCacheReuseMetricsKeepBlockAlignedInputLength) {
@@ -3292,9 +3296,9 @@ TEST_F(StreamCacheResourceTest, RemoteQuerySelectingLocalShortLeafKeepsExactDevi
     auto  coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
-    auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
+    auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request), 2);
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setLocalFallback(/*token_endpoint=*/5, /*reuse_unit_tokens=*/2);
+    context->setLocalFallback(/*token_endpoint=*/5);
     context->setMatchCallback([&resource](LoadAsyncContext& current, size_t matched) {
         EXPECT_EQ(matched, 0u);
         EXPECT_TRUE(current.localFallbackSelected());
@@ -3308,7 +3312,7 @@ TEST_F(StreamCacheResourceTest, RemoteQuerySelectingLocalShortLeafKeepsExactDevi
     context->waitDone();
     ASSERT_TRUE(context->success());
     ASSERT_TRUE(resource.loadCacheDone());
-    EXPECT_EQ(context->matchedTokenEndpoint(2), 5u);
+    EXPECT_EQ(context->matchedTokenEndpoint(), 5u);
     EXPECT_EQ(stream_->initialReuseLength(), 5);
     EXPECT_EQ(stream_->localReuseLength(), 5);
     EXPECT_EQ(stream_->deviceReuseLength(), 5);

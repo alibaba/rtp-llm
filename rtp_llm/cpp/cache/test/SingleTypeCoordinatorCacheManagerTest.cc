@@ -870,7 +870,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, RemoteSwaCoverageClipsBeforeReadAn
         EXPECT_EQ(backend->match_calls, 1u);
         EXPECT_EQ(backend->read_calls, window == 8 ? 0u : 1u);
         EXPECT_EQ(context->localFallbackSelected(), window == 8);
-        EXPECT_EQ(context->matchedTokenEndpoint(8), window == 8 ? 3u : 8u);
+        EXPECT_EQ(context->matchedTokenEndpoint(), window == 8 ? 3u : 8u);
         if (window == 8) {
             EXPECT_EQ(runtime->blocks(0, "swa").front(), *saved);
             EXPECT_EQ(readDeviceBytes(buffer.front().addr, expected.size()), expected);
@@ -2543,7 +2543,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, PartialTailRemoteCompetitionTransf
     miss_context->waitDone();
     ASSERT_TRUE(miss_context->success());
     EXPECT_TRUE(miss_context->localFallbackSelected());
-    EXPECT_EQ(miss_context->matchedTokenEndpoint(4), 10u);
+    EXPECT_EQ(miss_context->matchedTokenEndpoint(), 10u);
     EXPECT_EQ(miss_info.batch_kv_cache_resource->blocks(0, "default").at(2), (*saved)[2]);
     EXPECT_EQ(pool->refCount((*saved)[2]), 2u);
     EXPECT_EQ(backend->read_calls, 0u);
@@ -2561,7 +2561,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, PartialTailRemoteCompetitionTransf
     interior_context->waitDone();
     ASSERT_TRUE(interior_context->success());
     EXPECT_TRUE(interior_context->localFallbackSelected());
-    EXPECT_EQ(interior_context->matchedTokenEndpoint(4), 9u);
+    EXPECT_EQ(interior_context->matchedTokenEndpoint(), 9u);
     EXPECT_EQ(interior_info.batch_kv_cache_resource->blocks(0, "default").at(2), (*saved)[2]);
     EXPECT_EQ(pool->refCount((*saved)[2]), 2u);
     EXPECT_EQ(backend->read_calls, 0u);
@@ -2578,7 +2578,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, PartialTailRemoteCompetitionTransf
     hit_context->waitDone();
     ASSERT_TRUE(hit_context->success());
     EXPECT_FALSE(hit_context->localFallbackSelected());
-    EXPECT_EQ(hit_context->matchedTokenEndpoint(4), 12u);
+    EXPECT_EQ(hit_context->matchedTokenEndpoint(), 12u);
     EXPECT_EQ(pool->refCount((*saved)[2]), 1u);
     EXPECT_EQ(backend->read_calls, 1u);
     allocator_->free(FreeInfo{hit_info.batch_kv_cache_resource, tokens});

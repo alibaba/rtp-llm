@@ -602,12 +602,12 @@ TEST(BlockTreeLoaderTest, CompleteKeysLoadPreciseCheckpointFromItsActualLocalTie
             }
         }
         block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
-        const auto remote_sources = cache->loader_.remoteSourcesLocked({64, 128}, 2);
+        const auto remote_sources = cache->loader_.remoteSourcesLocked({64, 128}, 128);
         ASSERT_TRUE(remote_sources.has_value());
         ASSERT_EQ(remote_sources->size(), 1u);
         EXPECT_EQ(remote_sources->front().source_tier, tier);
-        EXPECT_FALSE(cache->loader_.remoteSourcesLocked({64}, 1).has_value());
-        const auto zero_state = cache->loader_.remoteSourcesLocked({64, 128, 192}, 3);
+        EXPECT_FALSE(cache->loader_.remoteSourcesLocked({64}, 64).has_value());
+        const auto zero_state = cache->loader_.remoteSourcesLocked({64, 128, 192}, 192);
         ASSERT_TRUE(zero_state.has_value());
         EXPECT_TRUE(zero_state->empty());
     }
@@ -700,7 +700,7 @@ TEST(BlockTreeLoaderTest, RemoteFailureDoesNotPublishAnOlderActiveCheckpoint) {
     context->startBackendMatch();
     context->waitDone();
     EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->matchedTokenEndpoint(64), 0u);
+    EXPECT_EQ(context->matchedTokenEndpoint(), 0u);
     EXPECT_EQ(backend->read_calls.load(), 1u);
     ASSERT_EQ(context->remoteSourceCount(), 1u);
     EXPECT_EQ(context->loadDescs().back().source_blocks, (BlockIndicesType{43}));
@@ -1109,8 +1109,8 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
     context->waitDone();
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_EQ(context->success(), !fail_read);
-    EXPECT_EQ(context->matchedTokenEndpoint(256), fail_read ? 0u : 256u);
-    EXPECT_EQ(context->remoteObservation(256).candidate_pos, 256u);
+    EXPECT_EQ(context->matchedTokenEndpoint(), fail_read ? 0u : 256u);
+    EXPECT_EQ(context->remoteObservation().candidate_pos, 256u);
     EXPECT_EQ(cache->tree()->findNode({environment->keys[0], 400}).size(), 1u);
 
     if (!fail_read && context->success()) {
@@ -1168,8 +1168,8 @@ TEST_P(BlockTreeLoaderRemoteForkTest, RemoteAncestorBelowAuthenticatedForkSettle
             later.async_context->startBackendMatch();
             later.async_context->waitDone();
             EXPECT_TRUE(later.async_context->success());
-            EXPECT_EQ(later.async_context->matchedTokenEndpoint(256), 400u);
-            EXPECT_EQ(later.async_context->remoteObservation(256).candidate_pos, 256u);
+            EXPECT_EQ(later.async_context->matchedTokenEndpoint(), 400u);
+            EXPECT_EQ(later.async_context->remoteObservation().candidate_pos, 256u);
             EXPECT_EQ(backend->read_calls.load(), 1u);  // B only; C chose its farther local F.
             later.local_fallback.reset();
             later.async_context.reset();
@@ -1744,9 +1744,9 @@ TEST(BlockTreeLoaderTest, RemotePreciseSourceAppendDoesNotRejoinCompletedLocalLo
             engine->complete(2, 3);
             pending->waitDone();
             EXPECT_EQ(pending->success(), !remote_fails);
-            EXPECT_EQ(pending->targetTokenEndpoint(64), 128u);
+            EXPECT_EQ(pending->targetTokenEndpoint(), 128u);
             if (!remote_fails) {
-                EXPECT_EQ(pending->matchedTokenEndpoint(64), 128u);
+                EXPECT_EQ(pending->matchedTokenEndpoint(), 128u);
             }
             block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
             for (const auto& [pool, block] : request_refs)

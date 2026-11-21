@@ -579,13 +579,7 @@ std::optional<std::vector<TreeNode*>> BlockTree::coveredDeviceGroupPath(
             continue;
         }
         if (!all_device && std::any_of(required.begin(), required.end(), [&](size_t index) {
-                const auto& resource = path[index]->group_set_resources[group_id];
-                const Tier  tier     = resource.getTopTier();
-                return !resource.isMatchUsable()
-                       || (tier == Tier::DEVICE ? !group->hasUsableDeviceResource(*path[index]) :
-                           tier == Tier::HOST   ? group->hostPool() == nullptr :
-                           tier == Tier::DISK   ? group->diskPool() == nullptr :
-                                                  true);
+                return !group->hasUsableLocalResource(*path[index]);
             })) {
             continue;
         }
