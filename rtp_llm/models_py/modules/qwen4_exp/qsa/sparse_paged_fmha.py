@@ -1063,6 +1063,7 @@ def sparse_paged_gqa_attn(
     validate_selected: bool = True,
     bthd_output: bool = False,
     _h20_direct_decode: bool = False,
+    _h20_mtp_verify: bool = False,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
 
@@ -1237,6 +1238,18 @@ def sparse_paged_gqa_attn(
             # Balance smaller batches with finer splits across H20 SMs.
             block_n, warps = 64, 2
             stages, splits = (1, 32) if batch <= 16 else (2, 16)
+        elif (
+            _h20_mtp_verify
+            and query_len == 4
+            and 1 <= batch <= 16
+            and (q_heads, kv_heads, head_dim) == (12, 1, 256)
+            and page_size == 64
+            and selected_width == 2051
+            and scale_view is None
+            and "H20" in torch.cuda.get_device_name(q.device)
+        ):
+            block_n, warps = 64, 2
+            stages, splits = (1, 32) if batch == 1 else (2, 16)
         else:
             block_n, warps, stages, splits = _grouped_split_config(
                 batch * query_len, kv_heads, selected_width

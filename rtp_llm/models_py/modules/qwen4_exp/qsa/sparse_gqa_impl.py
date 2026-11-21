@@ -820,6 +820,12 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             selected_indices.contiguous(),
             page_size=page_size,
             kv_head_num=self.kv_head_num,
+            _h20_mtp_verify=(
+                self.is_target_verify
+                and self.attn_inputs.is_cuda_graph
+                and not self._is_mtp_draft
+                and os.environ.get("RTP_QWEN4_EXPERIMENT_H20_MTP_QSA") == "1"
+            ),
             **(
                 {
                     "output_gate": output_gate.view(
