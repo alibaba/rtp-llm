@@ -286,14 +286,16 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     load_start = time.monotonic()
     try:
         if url.startswith("http") or url.startswith("https"):
-            response = domain_checked_get(url, stream=True, headers=headers, timeout=10)
-            if response.status_code == 200:
-                res = response.content.decode("utf-8")
-            else:
-                raise_mm(
-                    f"{MMErr.DL_FAILED}: HTTP {response.status_code}",
-                    ExceptionType.MM_DOWNLOAD_FAILED,
-                )
+            with domain_checked_get(
+                url, stream=True, headers=headers, timeout=10
+            ) as response:
+                if response.status_code == 200:
+                    res = response.content.decode("utf-8")
+                else:
+                    raise_mm(
+                        f"{MMErr.DL_FAILED}: HTTP {response.status_code}",
+                        ExceptionType.MM_DOWNLOAD_FAILED,
+                    )
         elif get_base64_prefix(url) > 0:
             bytes_data = _decode_base64_url(url)
             res = bytes_data.decode("utf-8")

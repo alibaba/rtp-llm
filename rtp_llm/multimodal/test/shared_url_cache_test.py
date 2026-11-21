@@ -10,7 +10,72 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from unittest.mock import patch
 
+from rtp_llm.config.exceptions import FtRuntimeException
+from rtp_llm.config.mm_download_domains import domain_checked_get
 from rtp_llm.multimodal.url_cache import _REQUEST, URLDataCache
+
+
+class MediaConnectionReuseTest(unittest.TestCase):
+    def test_reuses_transport_and_isolates_request_state(self):
+        connections = []
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                connections.append(self.client_address)
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header(
+                        "Location", f"http://localhost:{self.server.server_port}/denied"
+                    )
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = self.headers.get("Cookie", "").encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                if self.path == "/set":
+                    self.send_header("Set-Cookie", "media_test=first; Path=/")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            origin = f"http://127.0.0.1:{server.server_port}"
+
+            def get(path, headers):
+                with domain_checked_get(
+                    origin + path, stream=True, headers=headers, timeout=2
+                ) as response:
+                    return response.content
+
+            try:
+                with patch.dict(os.environ, {
+                    "MM_VIT_HTTP_REUSE_CONNECTIONS": "1",
+                    "MM_DOWNLOAD_DOMAIN_DENYLIST": '["localhost"]',
+                    "NO_PROXY": "127.0.0.1,localhost",
+                }):
+                    self.assertEqual(get("/set", {}), b"")
+                    self.assertEqual(get("/read", {}), b"")
+                    self.assertEqual(connections[0], connections[1])
+                    self.assertEqual(
+                        get("/read", {"Cookie": "media_test=explicit"}),
+                        b"media_test=explicit",
+                    )
+                    self.assertNotEqual(connections[1], connections[2])
+                    self.assertEqual(get("/read", {}), b"")
+                    self.assertEqual(connections[3], connections[0])
+                    with self.assertRaises(FtRuntimeException):
+                        get("/redirect", {})
+                    self.assertEqual(len(connections), 5)
+            finally:
+                server.shutdown()
+                thread.join()
 
 
 def _fetch(handle, url, barrier, results, use_v41):

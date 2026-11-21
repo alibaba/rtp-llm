@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import threading
 from collections.abc import Iterable
 from functools import lru_cache
 
@@ -13,6 +14,9 @@ from urllib3.util import parse_url
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 
 _ENV = "MM_DOWNLOAD_DOMAIN_DENYLIST"
+_REUSE_CONNECTIONS_ENV = "MM_VIT_HTTP_REUSE_CONNECTIONS"
+_download_session = threading.local()
+_STATELESS_HEADERS = frozenset({"accept", "accept-encoding", "user-agent"})
 # Stop at the end of the authority, even for long signed URLs. Requests treats
 # a backslash as a path separator when preparing an HTTP URL.
 _AUTHORITY = re.compile(r"^https?://([^/?#\\]*)", re.IGNORECASE | re.ASCII)
@@ -91,12 +95,64 @@ class _DomainCheckedSession(requests.Session):
 
     def send(self, request, **kwargs):
         # Requests sends each resolved redirect through this same session.
-        _check_url(request.url, self._blocked_hosts)
+        if self._blocked_hosts:
+            _check_url(request.url, self._blocked_hosts)
         return super().send(request, **kwargs)
+
+
+class _AnonymousDownloadAdapter(requests.adapters.HTTPAdapter):
+    def send(self, request, **kwargs):
+        proxy = requests.utils.select_proxy(request.url, kwargs.get("proxies"))
+        if (
+            any(
+                name in request.headers
+                for name in ("Authorization", "Proxy-Authorization", "Cookie")
+            )
+            or (proxy and "@" in proxy)
+            or kwargs.get("verify") is not True
+            or kwargs.get("cert") is not None
+        ):
+            # Redirects and .netrc can add credentials after request preparation.
+            adapter = requests.adapters.HTTPAdapter()
+            try:
+                return adapter.send(request, **kwargs)
+            finally:
+                adapter.close()
+        return super().send(request, **kwargs)
+
+
+def _pooled_download(url, hosts, options):
+    pid = os.getpid()
+    entry = getattr(_download_session, "entry", None)
+    # Preprocess workers must never use sockets inherited from a parent.
+    if entry is None or entry[0] != pid or entry[1]._blocked_hosts != hosts:
+        if entry is not None:
+            entry[1].close()
+        session = _DomainCheckedSession(hosts)
+        session.mount("https://", _AnonymousDownloadAdapter())
+        session.mount("http://", _AnonymousDownloadAdapter())
+        _download_session.entry = (pid, session)
+    else:
+        session = entry[1]
+    try:
+        return session.get(url, **options)
+    finally:
+        # Cookies are available during redirects within this logical download.
+        session.cookies.clear()
 
 
 def domain_checked_get(url, **kwargs):
     hosts = blocked_download_domains()
+    if (
+        os.environ.get(_REUSE_CONNECTIONS_ENV) == "1"
+        and kwargs.get("stream") is True
+        and kwargs.keys() <= {"stream", "headers", "timeout", "proxies"}
+        and all(
+            isinstance(name, str) and name.lower() in _STATELESS_HEADERS
+            for name in kwargs.get("headers") or ()
+        )
+    ):
+        return _pooled_download(url, hosts, kwargs)
     if not hosts:
         return requests.get(url, **kwargs)
     with _DomainCheckedSession(hosts) as session:
