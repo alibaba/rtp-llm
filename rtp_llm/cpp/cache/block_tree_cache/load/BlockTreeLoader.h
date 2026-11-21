@@ -104,10 +104,11 @@ private:
     // Phase 2 (reuse): resolve physical device coverage for each candidate endpoint
     // left-to-right and, for the first fully-ready joint endpoint, acquire the
     // references and form the precise match result.
-    std::optional<BlockTreeMatchResult>                resolvePreciseReuseLocked(
-        const ContentMatchContext&            request,
-        const std::vector<BlockTreeContentRange>& ranges,
-        const std::vector<size_t>&                 endpoints);
+    std::optional<BlockTreeMatchResult>                 resolvePreciseReuseLocked(const ContentMatchContext&                request,
+                                                                                  const std::vector<BlockTreeContentRange>& ranges,
+                                                                                  const std::vector<size_t>&                endpoints,
+                                                                                  const CacheKeysType&                      cache_keys,
+                                                                                  size_t minimum_endpoint);
     bool                                                validMatch(std::vector<TreeNode*>&            path,
                                                                    std::vector<bool>&                 candidate_valid,
                                                                    std::vector<std::vector<bool>>&    group_valid,
@@ -121,6 +122,9 @@ private:
                                                                           const CacheKeysType&               cache_keys,
                                                                           const std::function<bool(size_t)>& valid_prefix,
                                                                           const std::vector<int>*            request_tokens);
+    std::optional<std::vector<TransferDescriptor>> remoteSourcesLocked(const CacheKeysType& keys, size_t count) const;
+    bool
+    prepareRemoteSourcesLocked(LoadAsyncContext& context, const CacheKeysType& keys, size_t count, bool discard_local);
     StorageRequest makeStorageRequest(const CacheKeysType& cache_keys, size_t local_matched_blocks_num) const;
     bool           commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void           abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
@@ -132,9 +136,9 @@ private:
     void           scheduleContextSettlement(const LoadTaskRunner::TaskPtr&           task,
                                              const std::shared_ptr<LoadAsyncContext>& context);
     bool           validateLoadTaskLocked(const LoadTaskRunner::Task& task) const;
-    bool           settleLoadLocked(LoadTaskRunner::Task&                           task,
-                                    bool                                            aggregate_success,
-                                    std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
+    bool           settleLoadLocked(LoadTaskRunner::Task&                      task,
+                                    bool                                       aggregate_success,
+                                    std::vector<LoadJoinRegistry::Completion>& joined_contexts);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,

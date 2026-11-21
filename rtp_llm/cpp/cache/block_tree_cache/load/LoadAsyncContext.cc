@@ -33,6 +33,7 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     })) {
     remaining_join_count_.store(static_cast<size_t>(std::count(joined_load_.begin(), joined_load_.end(), true)),
                                 std::memory_order_relaxed);
+    remote_base_blocks_ = storage_request_.local_matched_blocks_num;
     rebuildMatchedBlocksByTier();
 }
 
@@ -145,11 +146,6 @@ void LoadAsyncContext::rebuildMatchedTokensByTier() {
     matched_tokens_by_tier_[static_cast<size_t>(Tier::DEVICE)] += endpoint - previous;
 }
 
-size_t LoadAsyncContext::backendMatchedBlocks() const {
-    return !localFallbackSelected() && backend_matched_blocks_ > local_matched_blocks_ ?
-               backend_matched_blocks_ - local_matched_blocks_ : 0;
-}
-
 void LoadAsyncContext::setLocalFallback(size_t token_endpoint, size_t reuse_unit_tokens) {
     RTP_LLM_CHECK(need_backend_match_ && !backend_started_ && token_endpoint > 0 && reuse_unit_tokens > 0);
     local_fallback_endpoint_   = token_endpoint;
@@ -168,6 +164,47 @@ PrefixCacheRemoteObservation LoadAsyncContext::remoteObservation(size_t reuse_un
         observation.candidate_pos = remote_candidate_blocks_ * reuse_unit_tokens;
     }
     return observation;
+}
+
+void LoadAsyncContext::setRemoteSelectionCallback(std::function<bool(LoadAsyncContext&, size_t)> callback,
+                                                  bool                                           discard_local) {
+    RTP_LLM_CHECK(need_backend_match_ && !backend_started_ && callback);
+    remote_selection_callback_ = std::move(callback);
+    discard_local_on_remote_   = discard_local;
+}
+
+size_t LoadAsyncContext::backendMatchedBlocks() const {
+    return !localFallbackSelected() && backend_matched_blocks_ > remote_base_blocks_ ?
+               backend_matched_blocks_ - remote_base_blocks_ :
+               0;
+}
+
+void LoadAsyncContext::setRemoteSources(std::vector<TransferDescriptor> sources, std::vector<bool> joined) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (discard_local_on_remote_) {
+        load_descs_.clear();
+        joined_load_.clear();
+        local_matched_blocks_     = 0;
+        matched_blocks_           = 0;
+        local_token_endpoint_     = 0;
+        ready_token_endpoint_     = 0;
+        remaining_transfer_count_ = 0;
+        remaining_join_count_.store(0, std::memory_order_release);
+        join_generation_.fetch_add(1, std::memory_order_acq_rel);
+        has_failure_ = false;
+        error_info_  = ErrorInfo::OkStatus();
+    }
+    remote_source_count_ = sources.size();
+    for (size_t i = 0; i < sources.size(); ++i) {
+        remaining_transfer_count_ += sources[i].source_tier != Tier::DEVICE;
+        if (joined[i]) {
+            remaining_join_count_.fetch_add(1, std::memory_order_acq_rel);
+        }
+    }
+    load_descs_.insert(load_descs_.end(), sources.begin(), sources.end());
+    joined_load_.insert(joined_load_.end(), joined.begin(), joined.end());
+    rebuildMatchedBlocksByTier();
+    rebuildMatchedTokensByTier();
 }
 
 void LoadAsyncContext::setMatchCallback(MatchCallback callback) {
@@ -238,20 +275,27 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         return;
     }
     RTP_LLM_CHECK(storage_request_.keys && storage_request_.keys->size() == storage_request_.handles.size()
-                  && storage_request_.local_matched_blocks_num == local_matched_blocks_
-                  && matched_blocks_num >= local_matched_blocks_
+                  && matched_blocks_num >= storage_request_.local_matched_blocks_num
                   && matched_blocks_num <= storage_request_.handles.size());
-    while (matched_blocks_num > local_matched_blocks_ && valid_prefix_ && !valid_prefix_(matched_blocks_num)) {
-        --matched_blocks_num;
-    }
-    if (local_fallback_endpoint_ > matched_blocks_num * local_fallback_reuse_unit_) {
-        // A complete-key remote miss may leave a farther local short leaf.
-        // Keep remote read disabled; its full-key handles cannot name that leaf.
-        local_fallback_selected_.store(true, std::memory_order_release);
-        matched_blocks_num = local_matched_blocks_;
-        for (auto& handles : storage_request_.handles) {
-            handles.clear();
+    for (;;) {
+        while (matched_blocks_num > remote_base_blocks_ && valid_prefix_ && !valid_prefix_(matched_blocks_num)) {
+            --matched_blocks_num;
         }
+        if (local_fallback_endpoint_ > matched_blocks_num * local_fallback_reuse_unit_) {
+            local_fallback_selected_.store(true, std::memory_order_release);
+            matched_blocks_num = local_matched_blocks_;
+            for (auto& handles : storage_request_.handles) {
+                handles.clear();
+            }
+            break;
+        }
+        if (matched_blocks_num <= remote_base_blocks_ || !remote_selection_callback_
+            || remote_selection_callback_(*this, matched_blocks_num)) {
+            break;
+        }
+        // A local checkpoint can disappear between validation and reservation.
+        // Treat that as a shorter match, keeping the pinned fallback available.
+        --matched_blocks_num;
     }
     backend_matched_blocks_ = matched_blocks_num;
     if (matched_blocks_num < storage_request_.handles.size()) {
@@ -261,7 +305,7 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
     }
     for (size_t key_index = 0; key_index < storage_request_.handles.size(); ++key_index) {
         auto& handles = storage_request_.handles[key_index];
-        if (key_index < local_matched_blocks_) {
+        if (localFallbackSelected() || key_index < storage_request_.local_matched_blocks_num) {
             handles.clear();
             continue;
         }
@@ -369,23 +413,38 @@ bool LoadAsyncContext::abortPending() {
 
 void LoadAsyncContext::startJoinWait(int64_t start_time_us) {
     assert(remaining_join_count_.load(std::memory_order_relaxed) != 0);
-    assert(join_start_time_us_ == 0);
-    join_start_time_us_ = start_time_us;
+    if (join_start_time_us_ == 0) {
+        join_start_time_us_ = start_time_us;
+    }
 }
 
-bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us) {
-    join_completed       = false;
+bool LoadAsyncContext::completeJoinedOne(bool     success,
+                                         bool&    join_completed,
+                                         int64_t& join_wait_latency_us,
+                                         uint64_t generation) {
+    join_completed                 = false;
     join_wait_latency_us = 0;
-    if (!completeTransfers(1, success)) {
-        return false;
+    bool                    notify = false;
+    SettlementReadyCallback settlement_ready_callback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation != join_generation_.load(std::memory_order_acquire)) {
+            return true;
+        }
+        if (state_.load() != State::PENDING || remaining_transfer_count_ == 0
+            || remaining_join_count_.load(std::memory_order_relaxed) == 0) {
+            return false;
+        }
+        has_failure_ = has_failure_ || !success;
+        --remaining_transfer_count_;
+        if (remaining_join_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            assert(join_start_time_us_ != 0);
+            join_completed       = true;
+            join_wait_latency_us = currentTimeUs() - join_start_time_us_;
+        }
+        finishIfReadyLocked(notify, settlement_ready_callback);
     }
-    const size_t previous_count = remaining_join_count_.fetch_sub(1, std::memory_order_acq_rel);
-    assert(previous_count != 0);
-    if (previous_count == 1) {
-        assert(join_start_time_us_ != 0);
-        join_completed       = true;
-        join_wait_latency_us = currentTimeUs() - join_start_time_us_;
-    }
+    dispatchCompletion(notify, std::move(settlement_ready_callback));
     return true;
 }
 

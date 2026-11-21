@@ -57,13 +57,13 @@ protected:
 };
 
 bool finishAndNotifyJoinedContexts(LoadJoinRegistry& registry, TreeNode* node, size_t group_set_id, bool success) {
-    std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
+    std::vector<LoadJoinRegistry::Completion> joined_contexts;
     if (!registry.finish(node, group_set_id, joined_contexts)) {
         return false;
     }
     bool all_completed = true;
-    for (const std::shared_ptr<LoadAsyncContext>& context : joined_contexts) {
-        all_completed = context->completeTransfers(1, success) && all_completed;
+    for (const auto& completion : joined_contexts) {
+        all_completed = completion.first->completeTransfers(1, success) && all_completed;
     }
     return all_completed;
 }

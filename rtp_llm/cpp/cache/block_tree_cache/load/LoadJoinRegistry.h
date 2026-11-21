@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -12,14 +13,15 @@ namespace rtp_llm {
 
 class LoadJoinRegistry {
 public:
+    using Completion = std::pair<std::shared_ptr<LoadAsyncContext>, uint64_t>;
     explicit LoadJoinRegistry(BlockTree* tree): tree_(tree) {}
 
     bool start(TreeNode*                                node,
                size_t                                   group_set_id,
                const std::vector<BlockIdxType>&         target_blocks,
                const std::shared_ptr<LoadAsyncContext>& context);
-    bool join(const std::shared_ptr<LoadAsyncContext>& context);
-    bool finish(TreeNode* node, size_t group_set_id, std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
+    bool join(const std::shared_ptr<LoadAsyncContext>& context, size_t first_descriptor = 0);
+    bool finish(TreeNode* node, size_t group_set_id, std::vector<Completion>& joined_contexts);
     bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id);
 
 private:
@@ -41,7 +43,7 @@ private:
     };
 
     struct Record {
-        using ContextMap = std::unordered_map<uint64_t, std::weak_ptr<LoadAsyncContext>>;
+        using ContextMap = std::unordered_map<uint64_t, std::pair<std::weak_ptr<LoadAsyncContext>, uint64_t>>;
 
         std::vector<BlockIdxType> target_blocks;
         uint64_t                  owner_context_id{0};

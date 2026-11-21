@@ -223,9 +223,10 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
         // In the current DSV4 registration every base-B point is an original
         // full checkpoint; only an endpoint between those points is a new
         // short leaf. LINEAR checkpoint spacing is handled separately.
-        if (malloc_info.request_layout && malloc_info.request_layout->partial_tail_reuse && init_result.reuse_len > 0
-            && init_result.reuse_len % static_cast<int>(config_.canonicalSizePerBlock()) != 0) {
-            incr_info.precise_resume_endpoint = static_cast<size_t>(init_result.reuse_len);
+        if (malloc_info.request_layout && malloc_info.request_layout->partial_tail_reuse
+            && init_result.target_reuse_len > 0
+            && init_result.target_reuse_len % static_cast<int>(config_.canonicalSizePerBlock()) != 0) {
+            incr_info.precise_resume_endpoint = static_cast<size_t>(init_result.target_reuse_len);
         }
         MallocResult incr_result = incrMalloc(incr_info);
         if (!incr_result.success) {
@@ -551,7 +552,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&               cache
                                         PreparedKVCache&                   prepared,
                                         const std::function<bool(size_t)>& valid_prefix,
                                         const std::vector<int>*            request_tokens,
-                                        const ContentMatchContext*     partial_tail) {
+                                        const ContentMatchContext*         partial_tail) {
     if (!block_tree_cache_ || (cache_keys.empty() && partial_tail == nullptr)) {
         return nullptr;
     }
@@ -571,7 +572,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&               cache
         for (const auto& group_set : group_sets) {
             for (const auto& tag : group_set->groupTags()) {
                 const size_t reuse_size =
-                    (prepared.precise_local ? loadTargetEndpoint(prepared.matched_device_endpoint, tag) :
+                    (prepared.precise_local ? loadTargetEndpoint(prepared.target_token_endpoint, tag) :
                                               loadTargetPosition(prepared.total_logical_blocks - 1, tag))
                     + 1;
                 kv_resource.mutableBlockIds(0, tag).assign(BlockIndicesType(reuse_size, NULL_BLOCK_IDX));
@@ -588,7 +589,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&               cache
             const size_t group_id        = groupIdForTag(group_tags[member_group_id]);
             const size_t target_position = token_end == 0 ?
                                                loadTargetPosition(path_index, group_tags[member_group_id]) :
-                                               loadTargetEndpoint(std::min(token_end, prepared.matched_device_endpoint),
+                                               loadTargetEndpoint(std::min(token_end, prepared.target_token_endpoint),
                                                                   group_tags[member_group_id]);
             kv_resource.mutableBlockIds(0, group_tags[member_group_id]).setAt(target_position, blocks[member_group_id]);
             prepared.referenced_blocks[group_id].push_back(blocks[member_group_id]);
@@ -596,8 +597,9 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&               cache
     };
 
     for (size_t resource_index = 0; resource_index < match_result.matched_device_resources.size(); ++resource_index) {
-        const auto&  resource        = match_result.matched_device_resources[resource_index];
-        const size_t canonical_start = match_result.matched_device_blocks - resource.node_blocks.size();
+        const auto&  resource = match_result.matched_device_resources[resource_index];
+        const size_t canonical_start =
+            prepared.precise_local ? 0 : match_result.matched_device_blocks - resource.node_blocks.size();
         for (size_t i = 0; i < resource.node_blocks.size(); ++i) {
             set_group_set_blocks(resource.group_set_id,
                                  canonical_start + i,
@@ -612,9 +614,9 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&               cache
         for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
             const auto& desc = load_context->loadDescs()[desc_index];
             if (desc.source_tier == Tier::DEVICE) {
-                set_group_set_blocks(desc.group_set_id, desc.path_index, desc.source_blocks);
+                set_group_set_blocks(desc.group_set_id, desc.path_index, desc.source_blocks, desc.token_end);
             } else if (load_context->joinedLoads()[desc_index]) {
-                set_group_set_blocks(desc.group_set_id, desc.path_index, desc.target_blocks);
+                set_group_set_blocks(desc.group_set_id, desc.path_index, desc.target_blocks, desc.token_end);
             }
         }
     }
@@ -764,10 +766,8 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                 const bool success = finishDeferredMalloc(malloc_info, *invocation_prepared, context, matched_blocks);
                 return LoadMatchResult{success, invocation_prepared->materialize_status};
             });
-        MallocResult result{true,
-                            static_cast<int>(deferred_prepared->matched_device_endpoint),
-                            match_cost_time_us,
-                            load_context};
+        MallocResult result{
+            true, static_cast<int>(deferred_prepared->matched_device_endpoint), match_cost_time_us, load_context};
         result.target_reuse_len  = static_cast<int>(deferred_prepared->target_token_endpoint);
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
@@ -798,12 +798,33 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
                                                        size_t            matched_blocks) {
     auto& kv_resource = *malloc_info.batch_kv_cache_resource;
     prepared.required_positions.assign(kv_cache_groups_.size(), {});
+    std::vector<RequiredPositions> pending_load_positions(kv_cache_groups_.size());
+    if (context != nullptr) {
+        const auto& descriptors = context->loadDescs();
+        for (size_t index = descriptors.size() - context->remoteSourceCount(); index < descriptors.size(); ++index) {
+            const auto& desc = descriptors[index];
+            if (desc.source_tier != Tier::DEVICE && !context->joinedLoads()[index]) {
+                continue;
+            }
+            const auto& blocks = desc.source_tier == Tier::DEVICE ? desc.source_blocks : desc.target_blocks;
+            const auto& tags   = block_tree_cache_->groupSets()[desc.group_set_id]->groupTags();
+            for (size_t member = 0; member < tags.size(); ++member) {
+                const size_t position = loadTargetEndpoint(desc.token_end, tags[member]);
+                auto&        ids      = kv_resource.mutableBlockIds(0, tags[member]);
+                if (ids.blocks().size() <= position) {
+                    ids.resize(position + 1);
+                }
+                ids.setAt(position, blocks[member]);
+                prepared.referenced_blocks[groupIdForTag(tags[member])].push_back(blocks[member]);
+            }
+        }
+    }
 
     if (matched_blocks > 0) {
         for (const GroupSetPtr& group_set : block_tree_cache_->groupSets()) {
             for (const auto& tag : group_set->groupTags()) {
                 const size_t final_slot = prepared.precise_local ?
-                                              loadTargetEndpoint(prepared.matched_device_endpoint, tag) :
+                                              loadTargetEndpoint(prepared.target_token_endpoint, tag) :
                                               loadTargetPosition(matched_blocks - 1, tag);
                 kv_resource.mutableBlockIds(0, tag).resize(final_slot + 1);
             }
@@ -818,7 +839,12 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
             if (desc.source_tier != Tier::DEVICE && !context->joinedLoads()[i]) {
                 for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
                     const size_t group_id = groupIdForTag(tag);
-                    add_target(desc.path_index, group_id, tag);
+                    const size_t position =
+                        desc.token_end > 0 ?
+                            loadTargetEndpoint(std::min(desc.token_end, prepared.target_token_endpoint), tag) :
+                            loadTargetPosition(desc.path_index, tag);
+                    prepared.required_positions[group_id].insert(position);
+                    pending_load_positions[group_id].insert(position);
                 }
             }
         }
@@ -853,7 +879,7 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         auto&               block_ids = kv_resource.mutableBlockIds(0, tag);
         std::vector<size_t> backfilled_positions;
         const auto          history   = prepared.precise_local ?
-                                            preciseSwaHistorySlots(config_, tag, prepared.matched_device_endpoint) :
+                                            preciseSwaHistorySlots(config_, tag, prepared.target_token_endpoint) :
                                             std::nullopt;
         const bool          allocated = history ?
                                             static_cast<SWACacheManager&>(*kv_cache_groups_[static_cast<size_t>(group_id)])
@@ -863,7 +889,8 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
                                                           0,
                                                           &backfilled_positions,
                                                           prepared.required_positions[static_cast<size_t>(group_id)],
-                                                          *history) :
+                                                          *history,
+                                                          pending_load_positions[static_cast<size_t>(group_id)]) :
                                             kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
                                        block_ids,
                                        resolvedGroupTokens(config_, tag, true, common_seq_len),
@@ -880,10 +907,13 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         }
     }
 
-    auto target_blocks = [&](size_t path, size_t group_set_id) {
+    auto target_blocks = [&](const TransferDescriptor& desc) {
         BlockIndicesType blocks;
-        for (const auto& tag : block_tree_cache_->groupSets()[group_set_id]->groupTags()) {
-            blocks.push_back(kv_resource.blocks(0, tag)[loadTargetPosition(path, tag)]);
+        for (const auto& tag : block_tree_cache_->groupSets()[desc.group_set_id]->groupTags()) {
+            const size_t position =
+                desc.token_end > 0 ? loadTargetEndpoint(std::min(desc.token_end, prepared.target_token_endpoint), tag) :
+                                     loadTargetPosition(desc.path_index, tag);
+            blocks.push_back(kv_resource.blocks(0, tag)[position]);
         }
         return blocks;
     };
@@ -891,7 +921,7 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         for (size_t i = 0; i < context->loadDescs().size(); ++i) {
             const auto& desc = context->loadDescs()[i];
             if (!context->joinedLoads()[i]) {
-                context->setTargetBlocks(i, target_blocks(desc.path_index, desc.group_set_id));
+                context->setTargetBlocks(i, target_blocks(desc));
             }
         }
         const auto& backend_handles = context->backendHandles();
@@ -920,19 +950,35 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
                                                    LoadAsyncContext& context,
                                                    size_t            matched_blocks) {
     std::lock_guard<std::mutex> lock(malloc_mutex_);
-    if (context.localFallbackSelected()) {
+    if (context.localFallbackSelected() && prepared.local_fallback) {
         selectLocalFallback(*malloc_info.batch_kv_cache_resource, prepared);
         matched_blocks = prepared.matched_device_blocks;
     }
-    bool success = materializeInitialBlocks(
-        malloc_info, prepared, context.localFallbackSelected() ? nullptr : &context, matched_blocks);
+    if (prepared.precise_local && !context.localFallbackSelected() && context.needBackendMatch()) {
+        auto& resource = *malloc_info.batch_kv_cache_resource;
+        for (size_t id = 0; id < kv_cache_groups_.size(); ++id) {
+            kv_cache_groups_[id]->unreference(prepared.referenced_blocks[id]);
+            prepared.referenced_blocks[id].clear();
+            resource.mutableBlockIds(0, config_.groupTags()[id]).assign(BlockIndicesType{});
+        }
+        prepared.precise_local           = false;
+        prepared.target_token_endpoint   = context.targetTokenEndpoint(config_.canonicalSizePerBlock());
+        prepared.matched_device_endpoint = 0;
+        prepared.matched_device_blocks   = 0;
+    }
+    prepared.target_token_endpoint = context.targetTokenEndpoint(config_.canonicalSizePerBlock());
+    bool success =
+        materializeInitialBlocks(malloc_info,
+                                 prepared,
+                                 context.localFallbackSelected() && prepared.local_fallback ? nullptr : &context,
+                                 matched_blocks);
     if (success) {
-        MallocInfo incr_info = malloc_info;
+        MallocInfo incr_info                   = malloc_info;
         incr_info.enable_remove_skipped_blocks = false;
         // The prepared match, rather than the request's common length, owns G.
-        if (prepared.precise_local && prepared.matched_device_endpoint > 0
-            && prepared.matched_device_endpoint % config_.canonicalSizePerBlock() != 0) {
-            incr_info.precise_resume_endpoint = prepared.matched_device_endpoint;
+        if (prepared.precise_local && prepared.target_token_endpoint > 0
+            && prepared.target_token_endpoint % config_.canonicalSizePerBlock() != 0) {
+            incr_info.precise_resume_endpoint = prepared.target_token_endpoint;
         }
         const auto incr_result = incrMalloc(incr_info);
         success                = incr_result.success;
@@ -963,6 +1009,7 @@ void CoordinatorCacheManager::selectLocalFallback(BatchKVCacheResource& kv_resou
     }
     prepared.precise_local           = true;
     prepared.matched_device_endpoint = fallback->endpoint;
+    prepared.target_token_endpoint   = fallback->endpoint;
     prepared.matched_device_blocks   = fallback->path_nodes;
     for (size_t resource_index = 0; resource_index < fallback->resources.size(); ++resource_index) {
         const auto& pinned = fallback->resources[resource_index];

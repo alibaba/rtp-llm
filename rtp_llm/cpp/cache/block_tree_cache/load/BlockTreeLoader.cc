@@ -70,10 +70,11 @@ void                        completeMatchObservation(PrefixCacheMatchObservation
 BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&               cache_keys,
                                                   const std::function<bool(size_t)>& valid_prefix,
                                                   const std::vector<int>*            request_tokens,
-                                                  const ContentMatchContext*     partial_tail) {
+                                                  const ContentMatchContext*         partial_tail) {
     std::optional<BlockTreeMatchResult> local;
     std::optional<PrefixCachePlanPoint> farthest_fork;
     std::vector<BlockTreeContentRange>  ranges;
+    std::vector<TreeNode*>              complete_path;
     bool                                authenticated_scan = false;
     const auto use_authenticated_content                   = [&ranges](PrefixCacheMatchObservation& observation) {
         if (ranges.empty()) {
@@ -95,8 +96,32 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
         const int64_t match_begin_time_us = currentTimeUs();
         ranges                            = tree_->contentMatchRanges(
             *partial_tail->tokens, partial_tail->endpoint_key, partial_tail->source_identity, &farthest_fork);
-        const auto endpoints = matchPreciseEndpoints(*partial_tail, ranges);
-        local                = resolvePreciseReuseLocked(*partial_tail, ranges, endpoints);
+        auto   endpoints         = matchPreciseEndpoints(*partial_tail, ranges);
+        size_t complete_endpoint = 0;
+        complete_path            = tree_->findNode(cache_keys);
+        if (!complete_path.empty() && tree_->isShortLeaf(complete_path.back())) {
+            complete_path.pop_back();
+        }
+        const auto incompatible = std::find_if(complete_path.begin(), complete_path.end(), [&](const TreeNode* node) {
+            if (node->token_ids.empty()) {
+                return false;
+            }
+            const size_t begin = node->parent->token_end;
+            return node->token_end > partial_tail->tokens->size() || node->token_end <= begin
+                   || node->token_ids.size() != node->token_end - begin
+                   || node->cache_key != partial_tail->endpoint_key(node->token_end)
+                   || !std::equal(
+                       node->token_ids.begin(), node->token_ids.end(), partial_tail->tokens->begin() + begin);
+        });
+        complete_path.erase(incompatible, complete_path.end());
+        auto                           comparison_path = complete_path;
+        std::vector<bool>              complete_valid;
+        std::vector<std::vector<bool>> complete_group_valid;
+        if (!comparison_path.empty()
+            && validMatch(comparison_path, complete_valid, complete_group_valid, valid_prefix)) {
+            complete_endpoint = comparison_path.back()->token_end;
+        }
+        local = resolvePreciseReuseLocked(*partial_tail, ranges, endpoints, cache_keys, complete_endpoint);
         if (local && tree_->observabilityEnabled()) {
             auto observation = makeMatchObservation({}, {}, *partial_tail->tokens, tree_->groupSets());
             completeMatchObservation(observation,
@@ -108,9 +133,13 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
             // The ordinary content scan is token-only. The precise path's M
             // must come from the authenticated ranges used for matching.
             use_authenticated_content(observation);
-            observation.local_valid_pos = local->matched_device_endpoint;
+            observation.local_valid_pos = local->target_token_endpoint;
             observation.local_valid_key.reset();  // Joint groups may use different source nodes.
             local->match_observation = std::move(observation);
+        }
+        if (local && local->async_context) {
+            local->farthest_fork = farthest_fork;
+            return std::move(*local);
         }
         if (local.has_value() && storage_backend_ && !local->short_leaf
             && local->matched_device_endpoint < partial_tail->remote_ceiling) {
@@ -143,7 +172,9 @@ BlockTreeMatchResult BlockTreeLoader::matchLocked(const CacheKeysType&          
     // would make a later remote miss inherit its pending source references and
     // could splice those groups into the short leaf. Query complete keys from
     // an empty local path instead; a remote hit loads complete groups normally.
-    std::vector<TreeNode*> path = local.has_value() ? std::vector<TreeNode*>{} : tree_->findNode(cache_keys);
+    std::vector<TreeNode*> path = local.has_value()  ? std::vector<TreeNode*>{} :
+                                  authenticated_scan ? std::move(complete_path) :
+                                                       tree_->findNode(cache_keys);
     // A short leaf is reusable only after the exact-token, joint-group check
     // above. The legacy validator counts each node as a full physical block;
     // feeding it a short leaf could revive a candidate whose real SWA window
@@ -236,48 +267,150 @@ BlockTreeLoader::matchPreciseEndpoints(const ContentMatchContext&            req
 }
 
 std::optional<BlockTreeMatchResult>
-BlockTreeLoader::resolvePreciseReuseLocked(const ContentMatchContext&            request,
+BlockTreeLoader::resolvePreciseReuseLocked(const ContentMatchContext&                request,
                                            const std::vector<BlockTreeContentRange>& ranges,
-                                           const std::vector<size_t>&                 endpoints) {
+                                           const std::vector<size_t>&                endpoints,
+                                           const CacheKeysType&                      cache_keys,
+                                           size_t                                    minimum_endpoint) {
     for (const size_t endpoint : endpoints) {
-        // Each group resolves the same G, but its physical data may come from
-        // different matched siblings (e.g. FULL at 700, LINEAR state at 600).
-        // A later recurrent state is never truncated to an earlier endpoint.
+        if (endpoint < minimum_endpoint) {
+            break;
+        }
         BlockTreeMatchResult                      result;
         std::vector<std::pair<TreeNode*, size_t>> matched_nodes;
-        bool                                      ready = true;
+        std::vector<TransferDescriptor>           descriptors;
+        std::vector<bool>                         joined;
+        bool                                      covered = true;
         for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
-            const auto sources = tree_->coveredDeviceGroupPath(ranges, endpoint, group_id);
+            const auto sources = tree_->coveredDeviceGroupPath(ranges, endpoint, group_id, false);
             if (!sources) {
-                ready = false;
+                covered = false;
                 break;
-            }
-            if (sources->empty()) {
-                continue;
             }
             MultiNodeResource   pinned{group_id, Tier::DEVICE};
             std::vector<size_t> source_endpoints;
             for (auto* source : *sources) {
-                pinned.node_blocks.emplace_back(nullptr, source->group_set_resources[group_id].getBlocks(Tier::DEVICE));
-                source_endpoints.push_back(source->token_end);
+                const auto& resource = source->group_set_resources[group_id];
+                const Tier  tier     = resource.getTopTier();
                 matched_nodes.emplace_back(source, group_id);
+                if (tier == Tier::DEVICE) {
+                    pinned.node_blocks.emplace_back(nullptr, resource.getBlocks(tier));
+                    source_endpoints.push_back(source->token_end);
+                } else {
+                    TransferDescriptor desc{source,
+                                            group_id,
+                                            (source->token_end - 1) / request.reuse_unit_tokens,
+                                            tier,
+                                            Tier::DEVICE,
+                                            resource.getBlocks(tier)};
+                    desc.token_begin = source->parent->token_end;
+                    desc.token_end   = source->token_end;
+                    descriptors.push_back(std::move(desc));
+                    joined.push_back(resource.transfer_state == GroupSetTransferState::LOADING);
+                }
             }
-            result.matched_device_resources.push_back(std::move(pinned));
-            result.precise_resource_endpoints.push_back(std::move(source_endpoints));
+            if (!pinned.node_blocks.empty()) {
+                result.matched_device_resources.push_back(std::move(pinned));
+                result.precise_resource_endpoints.push_back(std::move(source_endpoints));
+            }
         }
-        if (!ready) {
+        if (!covered) {
             continue;
         }
-        // Descriptor construction above acquires no references. Failed joint
-        // candidates therefore leave no partial holds behind.
+        result.target_token_endpoint = endpoint;
+        result.precise_local         = true;
+        result.short_leaf            = endpoint % request.reuse_unit_tokens != 0;
+        if (descriptors.empty()) {
+            result.matched_device_endpoint = endpoint;
+        } else {
+            for (const size_t ready : endpoints) {
+                if (ready >= endpoint) {
+                    continue;
+                }
+                bool all_device = true;
+                for (size_t id = 0; id < tree_->groupSets().size(); ++id) {
+                    const auto ready_sources = tree_->coveredDeviceGroupPath(ranges, ready, id);
+                    if (!ready_sources
+                        || std::any_of(ready_sources->begin(), ready_sources->end(), [&](TreeNode* node) {
+                               return std::find(matched_nodes.begin(), matched_nodes.end(), std::make_pair(node, id))
+                                      == matched_nodes.end();
+                           })) {
+                        all_device = false;
+                        break;
+                    }
+                }
+                if (all_device) {
+                    result.matched_device_endpoint = ready;
+                    break;
+                }
+            }
+        }
+        result.matched_device_blocks =
+            (result.matched_device_endpoint + request.reuse_unit_tokens - 1) / request.reuse_unit_tokens;
         for (const auto& resource : result.matched_device_resources) {
             tree_->groupSets()[resource.group_set_id]->referenceBlocks(resource);
         }
-        result.matched_device_blocks   = (endpoint + request.reuse_unit_tokens - 1) / request.reuse_unit_tokens;
-        result.matched_device_endpoint = endpoint;
-        result.target_token_endpoint   = endpoint;
-        result.precise_local           = true;
-        result.short_leaf              = endpoint % request.reuse_unit_tokens != 0;
+        if (!descriptors.empty()) {
+            for (size_t i = 0; i < descriptors.size(); ++i) {
+                const auto& desc = descriptors[i];
+                if (!joined[i]) {
+                    tree_->groupSets()[desc.group_set_id]->referenceBlocks(
+                        {desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}},
+                        BlockTreeRefType::LOAD);
+                    desc.node->group_set_resources[desc.group_set_id].transfer_state =
+                        GroupSetTransferState::LOAD_PENDING;
+                    evictor_.suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
+                }
+            }
+            const bool compete_remote  = storage_backend_ && endpoint < request.remote_ceiling;
+            auto       storage_request = compete_remote ? makeStorageRequest(cache_keys, 0) : StorageRequest{};
+            const auto remote_keys     = storage_request.keys;
+            result.async_context       = load_context_coordinator_->create(descriptors,
+                                                                     joined,
+                                                                     (endpoint + request.reuse_unit_tokens - 1)
+                                                                         / request.reuse_unit_tokens,
+                                                                     compete_remote ? storage_backend_ : nullptr,
+                                                                     std::move(storage_request));
+            if (!result.async_context || !load_join_registry_.join(result.async_context)
+                || !load_context_coordinator_->registerContext(result.async_context)) {
+                abortLoadLocked(result.async_context ? result.async_context->loadDescs() : descriptors,
+                                joined,
+                                0,
+                                result.async_context ? result.async_context->contextId() : 0,
+                                true);
+                for (const auto& resource : result.matched_device_resources) {
+                    tree_->groupSets()[resource.group_set_id]->unreferenceBlocks(resource);
+                }
+                return std::nullopt;
+            }
+            if (compete_remote) {
+                result.matched_device_endpoint = 0;
+                result.matched_device_blocks   = 0;
+                result.async_context->setLocalFallback(endpoint, request.reuse_unit_tokens);
+                result.async_context->setRemoteSelectionCallback(
+                    [this, remote_keys](LoadAsyncContext& context, size_t count) {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        return prepareRemoteSourcesLocked(context, *remote_keys, count, true);
+                    },
+                    true);
+                result.async_context->setValidPrefix([this,
+                                                      remote_keys,
+                                                      unit  = request.reuse_unit_tokens,
+                                                      valid = request.valid_endpoint](size_t blocks) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    return valid(blocks * unit) && remoteSourcesLocked(*remote_keys, blocks).has_value()
+                           && std::all_of(tree_->groupSets().begin(), tree_->groupSets().end(), [&](const auto& group) {
+                                  return group->hasCanonicalCoverage(blocks, unit);
+                              });
+                });
+            }
+            result.async_context->setLocalTokenEndpoints(result.matched_device_endpoint, endpoint);
+            const size_t joins = std::count(joined.begin(), joined.end(), true);
+            if (joins != 0) {
+                result.async_context->startJoinWait(currentTimeUs());
+                metrics_reporter_.reportLoadJoin(joins);
+            }
+        }
         evictor_.onMatchedResources(matched_nodes);
         return result;
     }
@@ -303,7 +436,19 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
             bool is_group_valid = false;
             if (tree_->groupSets()[group_set_id]->preciseOnly()) {
                 const std::vector<TreeNode*> prefix(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(i + 1));
-                is_group_valid = tree_->groupSets()[group_set_id]->hasDeviceCoverage(prefix, node->token_end);
+                const auto&                  group    = tree_->groupSets()[group_set_id];
+                const auto                   required = group->requiredPathIndices(prefix, node->token_end);
+                is_group_valid =
+                    group->hasPhysicalCoverage(prefix, node->token_end)
+                    && std::all_of(required.begin(), required.end(), [&](size_t index) {
+                           const auto& resource = prefix[index]->group_set_resources[group_set_id];
+                           const Tier  tier     = resource.getTopTier();
+                           return resource.isMatchUsable()
+                                  && (tier == Tier::DEVICE ? group->hasUsableDeviceResource(*prefix[index]) :
+                                      tier == Tier::HOST   ? group->hostPool() != nullptr :
+                                      tier == Tier::DISK   ? group->diskPool() != nullptr :
+                                                             false);
+                       });
             } else {
                 is_group_valid = match_validators[group_set_id]->validate(node->group_set_resources[group_set_id]);
                 if (is_group_valid) {
@@ -547,17 +692,25 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             result.matched_device_resources.push_back(std::move(matched_device_resource));
         }
 
-        const size_t logical_reuse_count =
-            group_set->preciseOnly() ? 0 : std::min(group_set->computeReuseBlockCount(path.size()), path.size());
+        const auto   lower_required      = group_set->preciseOnly() && !path.empty() ?
+                                               group_set->requiredPathIndices(path, path.back()->token_end) :
+                                               std::vector<size_t>{};
+        const size_t logical_reuse_count = group_set->preciseOnly() ?
+                                               path.size() :
+                                               std::min(group_set->computeReuseBlockCount(path.size()), path.size());
         for (size_t i = std::max(path.size() - logical_reuse_count, result.matched_device_blocks); i < path.size();
              ++i) {
+            if (group_set->preciseOnly()
+                && std::find(lower_required.begin(), lower_required.end(), i) == lower_required.end()) {
+                continue;
+            }
             GroupSetResource&  resource    = path[i]->group_set_resources[group_set_id];
             const Tier         source_tier = resource.getTopTier();
             TreeNode* const    source_node = source_tier == Tier::DEVICE ? nullptr : path[i];
             TransferDescriptor desc{
                 source_node, group_set_id, i, source_tier, Tier::DEVICE, resource.getBlocks(source_tier)};
-            desc.token_begin = path[i]->parent->token_end;
-            desc.token_end   = path[i]->token_end;
+            desc.token_begin     = path[i]->parent->token_end;
+            desc.token_end       = path[i]->token_end;
             const bool is_joined = resource.transfer_state == GroupSetTransferState::LOADING;
             if (!is_joined) {
                 const MultiNodeResource source_resource{group_set_id, source_tier, {{source_node, desc.source_blocks}}};
@@ -581,6 +734,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         storage_request = makeStorageRequest(cache_keys, path.size());
     }
     const bool use_storage = !storage_request.empty();
+    const auto remote_keys = storage_request.keys;
     if (!pending_load_descs.empty() || use_storage) {
         result.async_context = load_context_coordinator_->create(pending_load_descs,
                                                                  joined_loads,
@@ -607,17 +761,120 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
     }
     result.target_token_endpoint = path.empty() ? 0 : path.back()->token_end;
+    if (use_storage && result.matched_device_endpoint > 0
+        && std::any_of(tree_->groupSets().begin(), tree_->groupSets().end(), [&](const auto& group) {
+               return group->requiresExactStateEndpoint() && !group->hasZeroStateDemand(result.matched_device_endpoint);
+           })) {
+        // A farther checkpoint can replace the active state before remote I/O
+        // fails. Keep the pinned local plan, but publish no earlier state to resume.
+        result.matched_device_endpoint = 0;
+    }
     if (result.async_context) {
         result.async_context->setLocalTokenEndpoints(result.matched_device_endpoint, result.target_token_endpoint);
         result.async_context->setValidPrefix(
-            [valid_prefix, groups = tree_->groupSets(), canonical = tree_->reuseUnitTokens()](size_t count) {
-                return (!valid_prefix || valid_prefix(count))
-                       && std::all_of(groups.begin(), groups.end(), [&](const auto& group) {
+            [this, valid_prefix, remote_keys, canonical = tree_->reuseUnitTokens()](size_t count) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                return (!valid_prefix || valid_prefix(count)) && remoteSourcesLocked(*remote_keys, count).has_value()
+                       && std::all_of(tree_->groupSets().begin(), tree_->groupSets().end(), [&](const auto& group) {
                               return group->hasCanonicalCoverage(count, canonical);
                           });
             });
+        if (result.async_context->needBackendMatch()) {
+            result.async_context->setRemoteSelectionCallback(
+                [this, remote_keys](LoadAsyncContext& context, size_t count) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    return prepareRemoteSourcesLocked(context, *remote_keys, count, false);
+                });
+        }
     }
     return result;
+}
+
+std::optional<std::vector<TransferDescriptor>> BlockTreeLoader::remoteSourcesLocked(const CacheKeysType& keys,
+                                                                                    size_t               count) const {
+    const size_t                          endpoint = count * tree_->reuseUnitTokens();
+    std::optional<std::vector<TreeNode*>> path;
+    std::vector<TransferDescriptor>       sources;
+    for (size_t id = 0; id < tree_->groupSets().size(); ++id) {
+        const auto& group = tree_->groupSets()[id];
+        if (group->supportsRemoteReuse() || group->hasZeroStateDemand(endpoint)) {
+            continue;
+        }
+        if (!path) {
+            path = tree_->findNode(CacheKeysType(keys.begin(), keys.begin() + count));
+        }
+        if (path->size() != count || path->empty() || path->back()->token_end != endpoint
+            || !group->hasPhysicalCoverage(*path, endpoint)) {
+            return std::nullopt;
+        }
+        for (const size_t index : group->requiredPathIndices(*path, endpoint)) {
+            const auto& resource = (*path)[index]->group_set_resources[id];
+            const Tier  tier     = resource.getTopTier();
+            if (!resource.isMatchUsable()
+                || (tier == Tier::DEVICE ? !group->hasUsableDeviceResource(*(*path)[index]) :
+                    tier == Tier::HOST   ? group->hostPool() == nullptr :
+                    tier == Tier::DISK   ? group->diskPool() == nullptr :
+                                           true)) {
+                return std::nullopt;
+            }
+            TransferDescriptor desc{tier == Tier::DEVICE ? nullptr : (*path)[index],
+                                    id,
+                                    index,
+                                    tier,
+                                    Tier::DEVICE,
+                                    resource.getBlocks(tier)};
+            desc.token_begin = (*path)[index]->parent->token_end;
+            desc.token_end   = (*path)[index]->token_end;
+            sources.push_back(std::move(desc));
+        }
+    }
+    return sources;
+}
+
+bool BlockTreeLoader::prepareRemoteSourcesLocked(LoadAsyncContext&    context,
+                                                 const CacheKeysType& keys,
+                                                 size_t               count,
+                                                 bool                 discard_local) {
+    auto sources = remoteSourcesLocked(keys, count);
+    if (!sources) {
+        return false;
+    }
+    if (sources->empty() && !discard_local) {
+        return true;
+    }
+    if (discard_local) {
+        abortLoadLocked(context.loadDescs(), context.joinedLoads(), 0, context.contextId(), false);
+    }
+    std::vector<bool> joined;
+    for (const auto& desc : *sources) {
+        const bool joining =
+            desc.node
+            && desc.node->group_set_resources[desc.group_set_id].transfer_state == GroupSetTransferState::LOADING;
+        joined.push_back(joining);
+        if (joining) {
+            continue;
+        }
+        const auto&             group = tree_->groupSets()[desc.group_set_id];
+        const MultiNodeResource resource{desc.group_set_id, desc.source_tier, {{desc.node, desc.source_blocks}}};
+        if (desc.source_tier == Tier::DEVICE) {
+            group->referenceBlocks(resource);
+        } else {
+            group->referenceBlocks(resource, BlockTreeRefType::LOAD);
+        }
+        if (desc.node) {
+            desc.node->group_set_resources[desc.group_set_id].transfer_state = GroupSetTransferState::LOAD_PENDING;
+            evictor_.suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
+        }
+    }
+    const size_t join_count = std::count(joined.begin(), joined.end(), true);
+    context.setRemoteSources(std::move(*sources), std::move(joined));
+    if (join_count != 0) {
+        context.startJoinWait(currentTimeUs());
+        metrics_reporter_.reportLoadJoin(join_count);
+        const size_t first_source = context.loadDescs().size() - context.remoteSourceCount();
+        RTP_LLM_CHECK(load_join_registry_.join(context.shared_from_this(), first_source));
+    }
+    return true;
 }
 
 StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_keys,
@@ -627,7 +884,7 @@ StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_ke
                            local_matched_blocks_num};
     for (auto& key_handles : request.handles) {
         for (const auto& group_set : tree_->groupSets()) {
-            if (group_set->preciseOnly()) {
+            if (!group_set->supportsRemoteReuse()) {
                 continue;
             }
             for (const auto& tag : group_set->groupTags()) {
@@ -856,16 +1113,17 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
                                                 const std::shared_ptr<LoadAsyncContext>& context) {
     auto settle = [this, task, context]() {
         bool                                           settlement_success = context->aggregateSuccess();
-        std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
+        std::vector<LoadJoinRegistry::Completion>      joined_contexts;
         if (task) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
             }
-            for (const std::shared_ptr<LoadAsyncContext>& joined_context : joined_contexts) {
+            for (const auto& [joined_context, generation] : joined_contexts) {
                 bool    join_completed       = false;
                 int64_t join_wait_latency_us = 0;
-                if (!joined_context->completeJoinedOne(settlement_success, join_completed, join_wait_latency_us)) {
+                if (!joined_context->completeJoinedOne(
+                        settlement_success, join_completed, join_wait_latency_us, generation)) {
                     RTP_LLM_LOG_WARNING("failed to complete joined load context");
                 } else if (join_completed) {
                     metrics_reporter_.reportLoadJoinWait(join_wait_latency_us);
@@ -908,9 +1166,9 @@ bool BlockTreeLoader::validateLoadTaskLocked(const LoadTaskRunner::Task& task) c
     return valid;
 }
 
-bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                           task,
-                                       bool                                            aggregate_success,
-                                       std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
+bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                      task,
+                                       bool                                       aggregate_success,
+                                       std::vector<LoadJoinRegistry::Completion>& joined_contexts) {
     std::vector<BlockTreeEvictor::InvalidationSource> corrupted;
     const auto collect_corrupted = [this, &corrupted](const TransferTask& transfer, const TransferResult& result) {
         for (size_t index = 0; index < result.block_errors.size(); ++index) {

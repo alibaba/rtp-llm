@@ -14,6 +14,8 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/PrefixCacheRegistration.h"
+#include "rtp_llm/cpp/cache/SWACacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -112,6 +114,87 @@ protected:
         createDevice();
     }
 };
+
+class PendingHistoryAllocator: public TestHybridTypeCoordinatorCacheManager {
+public:
+    using TestHybridTypeCoordinatorCacheManager::TestHybridTypeCoordinatorCacheManager;
+    using CoordinatorCacheManager::PreparedKVCache;
+    using CoordinatorCacheManager::materializeInitialBlocks;
+};
+
+TEST_F(HybridCoordinatorCacheManagerCPShardTest, PendingLowerTierHistoryReservesProjectedDestinations) {
+    for (const int cp_size : {1, 4}) {
+        CacheConfig config;
+        config.dtype                = DataType::TYPE_FP16;
+        config.layer_num            = 1;
+        config.seq_size_per_block   = 4;
+        auto spec                   = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "swa");
+        auto policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        policy.cp_mapping           = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+        policy.reuse_mode           = CacheReuseMode::STANDARD;
+        policy.sliding_window_size  = 4 * cp_size;
+        policy.validate_tail_blocks = true;
+        policy.active_tail_blocks   = 2;
+        config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});
+        config.finalizeBlockNums(32, RuntimeConfig{});
+        resolveTestCpLayout(config, cp_size);
+        auto allocator = std::make_shared<PendingHistoryAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        ASSERT_EQ(allocator->blockTreeCacheOwner()->groupSets().size(), 1u);
+        for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+            for (const bool missing_source : {false, true}) {
+                auto resource = makeBatchRes(1, config, {});
+                resource->mutableBlockIds(0, "swa").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+                auto                                     tokens = makeTokens(1, 8 * cp_size, 4);
+                MallocInfo                               info{resource, tokens};
+                PendingHistoryAllocator::PreparedKVCache prepared;
+                prepared.precise_local         = true;
+                prepared.target_token_endpoint = 5 * cp_size;
+                prepared.total_logical_blocks  = 2;
+                prepared.referenced_blocks.resize(1);
+                std::vector<TransferDescriptor> descriptors;
+                for (size_t index = missing_source ? 1 : 0; index < 2; ++index) {
+                    TransferDescriptor desc{nullptr, 0, index, tier, Tier::DEVICE, {1}};
+                    desc.token_begin = index == 0 ? 0 : 4 * cp_size;
+                    desc.token_end   = index == 0 ? 4 * cp_size : 5 * cp_size;
+                    descriptors.push_back(desc);
+                }
+                auto coordinator = std::make_shared<LoadContextCoordinator>(
+                    [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+                auto context = coordinator->create(descriptors, std::vector<bool>(descriptors.size(), false), 2);
+                context->setLocalTokenEndpoints(0, 5 * cp_size);
+                if (missing_source) {
+                    EXPECT_ANY_THROW(allocator->materializeInitialBlocks(info, prepared, context.get(), 2));
+                    EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, "swa")[0]));
+                    EXPECT_TRUE(isNullBlockIdx(resource->blocks(0, "swa")[1]));
+                } else {
+                    ASSERT_TRUE(allocator->materializeInitialBlocks(info, prepared, context.get(), 2));
+                    ASSERT_EQ(resource->blocksNum(0, "swa"), 2u);
+                    EXPECT_FALSE(isNullBlockIdx(resource->blocks(0, "swa")[0]));
+                    EXPECT_FALSE(isNullBlockIdx(resource->blocks(0, "swa")[1]));
+                    EXPECT_NE(resource->blocks(0, "swa")[0], resource->blocks(0, "swa")[1]);
+                    for (size_t index = 0; index < 2; ++index) {
+                        EXPECT_EQ(context->loadDescs()[index].target_blocks,
+                                  BlockIndicesType{resource->blocks(0, "swa")[index]});
+                    }
+                    EXPECT_EQ(context->matchedTokenEndpoint(config.canonicalSizePerBlock()), 0u);
+                    allocator->free({resource, tokens});
+                }
+            }
+        }
+        // A W-1 history confined to the last slot must not acquire the ordinary tail-1 requirement.
+        auto swa = std::dynamic_pointer_cast<SWACacheManager>(allocator->cacheGroups().front());
+        ASSERT_NE(swa, nullptr);
+        BlockIds tail_history;
+        tail_history.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+        std::vector<size_t> backfilled;
+        ASSERT_TRUE(swa->mallocWithHistory(tail_history, 8, true, 0, &backfilled, {1}, {1, 2}, {1}));
+        EXPECT_TRUE(isNullBlockIdx(tail_history.blocks()[0]));
+        EXPECT_FALSE(isNullBlockIdx(tail_history.blocks()[1]));
+        EXPECT_EQ(backfilled, std::vector<size_t>{1});
+        swa->unreference(tail_history.blocks());
+    }
+}
 
 TEST_F(HybridCoordinatorCacheManagerCPShardTest, PrefillNeedBlocksUsesEachGroupsReuseLength) {
     auto config                    = makeCPHybridConfig();

@@ -363,7 +363,8 @@ TEST_F(BlockTreeCacheTest, ShortLeafCompetesWithRemoteWithoutPendingHostLoadOrPi
     // established HOST restore path instead of reloading it from REMOTE.
     auto short_node                                      = cache_->tree()->findNode({1, 2, 3}).back();
     short_node->group_set_resources[0].transfer_detached = true;
-    auto complete                                        = cache_->match({1, 2, 5}, {}, nullptr, &request);
+    request.endpoint_key = [](size_t end) { return end == 256 ? 1 : end == 512 ? 2 : end == 768 ? 5 : 0; };
+    auto complete = cache_->match({1, 2, 5}, {}, nullptr, &request);
     ASSERT_NE(complete.async_context, nullptr);
     EXPECT_EQ(complete.local_fallback, nullptr);
     EXPECT_EQ(complete.matched_device_blocks, 2u);

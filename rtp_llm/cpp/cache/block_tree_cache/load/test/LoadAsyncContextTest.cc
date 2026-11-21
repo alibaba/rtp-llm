@@ -920,16 +920,16 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
 
 TEST(LoadAsyncContextTest, ExactShortTailAttributionWaitsForCompletionAndDeduplicatesIntervals) {
     for (const Tier lower : {Tier::HOST, Tier::DISK}) {
-        size_t commits = 0;
-        size_t aborts = 0;
-        auto coordinator = makeCoordinator(commits, aborts);
+        size_t             commits     = 0;
+        size_t             aborts      = 0;
+        auto               coordinator = makeCoordinator(commits, aborts);
         TransferDescriptor tail{nullptr, 0, 8, lower, Tier::DEVICE, {1}};
-        tail.token_begin = 1024;
-        tail.token_end = 1026;
+        tail.token_begin           = 1024;
+        tail.token_end             = 1026;
         TransferDescriptor overlap = tail;
-        overlap.group_set_id = 1;
-        overlap.source_tier = Tier::HOST;
-        auto context = coordinator->create({tail, overlap}, {false, false}, 9);
+        overlap.group_set_id       = 1;
+        overlap.source_tier        = Tier::HOST;
+        auto context               = coordinator->create({tail, overlap}, {false, false}, 9);
         ASSERT_TRUE(coordinator->registerContext(context));
         context->setLocalTokenEndpoints(1024, 1026);
         ASSERT_TRUE(context->commit());
@@ -947,10 +947,10 @@ TEST(LoadAsyncContextTest, ExactShortTailAttributionWaitsForCompletionAndDedupli
 }
 
 TEST(LoadAsyncContextTest, FailedShortTailDoesNotPublishTargetEndpoint) {
-    size_t commits = 0;
-    size_t aborts = 0;
-    auto coordinator = makeCoordinator(commits, aborts);
-    auto context = coordinator->create({{nullptr, 0, 8, Tier::HOST, Tier::DEVICE, {1}}}, {false}, 9);
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   context     = coordinator->create({{nullptr, 0, 8, Tier::HOST, Tier::DEVICE, {1}}}, {false}, 9);
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setLocalTokenEndpoints(1024, 1026);
     ASSERT_TRUE(context->commit());
@@ -989,6 +989,71 @@ TEST(LoadAsyncContextTest, RemoteMissSelectsExactLocalEndpointWithoutRemoteRead)
     EXPECT_EQ(context->matchedTokenEndpoint(256), 600u);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, LostRemoteCheckpointSelectsPinnedLocalPlanWithoutRequestFailure) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 3, backend, makeRequest(3));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setLocalTokenEndpoints(0, 300);
+    context->setLocalFallback(300, 128);
+    context->setRemoteSelectionCallback([](LoadAsyncContext&, size_t) { return false; });
+    context->setMatchCallback([](LoadAsyncContext& current, size_t) { return current.commit(); });
+    context->startBackendMatch();
+    backend->completeMatch(3);
+    EXPECT_TRUE(context->success());
+    EXPECT_TRUE(context->localFallbackSelected());
+    EXPECT_FALSE(backend->readPending());
+    EXPECT_EQ(context->matchedTokenEndpoint(128), 300u);
+    EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, RemotePlanIgnoresQueuedCompletionFromDiscardedLocalJoin) {
+    size_t     commits     = 0;
+    size_t     aborts      = 0;
+    auto       coordinator = makeCoordinator(commits, aborts);
+    auto       backend     = std::make_shared<ManualBackend>();
+    auto       pool        = std::make_shared<TestBlockPool>();
+    const auto block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    TransferDescriptor source{nullptr, 0, 0, Tier::HOST, Tier::DEVICE, {1}};
+    auto               context = coordinator->create({source}, {true}, 1, backend, makeRequest(3));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setLocalTokenEndpoints(0, 130);
+    context->setLocalFallback(130, 128);
+    context->startJoinWait(1);
+    context->setRemoteSelectionCallback(
+        [source](LoadAsyncContext& current, size_t) {
+            current.setRemoteSources({source}, {true});
+            return true;
+        },
+        true);
+    context->setMatchCallback([block](LoadAsyncContext& current, size_t count) {
+        for (size_t index = 0; index < count; ++index) {
+            current.setBackendTargetBlock(index, 0, block);
+        }
+        return current.commit();
+    });
+    context->startBackendMatch();
+    backend->completeMatch(3);
+    backend->completeRead();
+    bool    completed = false;
+    int64_t latency   = 0;
+    ASSERT_TRUE(context->completeJoinedOne(false, completed, latency, 0));
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(completed);
+    ASSERT_TRUE(context->completeJoinedOne(true, completed, latency, context->joinGeneration()));
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(context->matchedTokenEndpoint(128), 384u);
+    pool->decRef(block);
     coordinator->shutdown();
 }
 

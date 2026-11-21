@@ -542,7 +542,7 @@ BlockTree::contentMatchRanges(const std::vector<int>&                           
 }
 
 std::optional<std::vector<TreeNode*>> BlockTree::coveredDeviceGroupPath(
-    const std::vector<BlockTreeContentRange>& ranges, size_t endpoint, size_t group_id) const {
+    const std::vector<BlockTreeContentRange>& ranges, size_t endpoint, size_t group_id, bool device_only) const {
     if (group_id >= group_sets_.size() || endpoint == 0) {
         return std::nullopt;
     }
@@ -564,7 +564,27 @@ std::optional<std::vector<TreeNode*>> BlockTree::coveredDeviceGroupPath(
             path.push_back(cursor);
         }
         std::reverse(path.begin(), path.end());
-        if (!group->hasDeviceCoverage(path, endpoint)) {
+        if (!group->hasPhysicalCoverage(path, endpoint)) {
+            continue;
+        }
+        const auto required   = group->requiredPathIndices(path, endpoint);
+        const bool all_device = group->hasDeviceCoverage(path, endpoint);
+        if (device_only && !all_device) {
+            continue;
+        }
+        if (!device_only && !all_device && !required.empty()
+            && group->hasUsableDeviceResource(*path[required.back()])) {
+            continue;
+        }
+        if (!device_only && std::any_of(required.begin(), required.end(), [&](size_t index) {
+                const auto& resource = path[index]->group_set_resources[group_id];
+                const Tier  tier     = resource.getTopTier();
+                return !resource.isMatchUsable()
+                       || (tier == Tier::DEVICE ? !group->hasUsableDeviceResource(*path[index]) :
+                           tier == Tier::HOST   ? group->hostPool() == nullptr :
+                           tier == Tier::DISK   ? group->diskPool() == nullptr :
+                                                  true);
+            })) {
             continue;
         }
         std::vector<TreeNode*> required_nodes;

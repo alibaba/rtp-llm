@@ -660,7 +660,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         const size_t local = load_context->localMatchedBlocks();
         const size_t host  = load_context->matchedBlocks(Tier::HOST);
         const size_t disk  = load_context->matchedBlocks(Tier::DISK);
-        RTP_LLM_CHECK_WITH_INFO(total >= local && host <= local && disk <= local - host,
+        RTP_LLM_CHECK_WITH_INFO(total >= local,
                                 "invalid allocator reuse counts: total=%zu local=%zu host=%zu disk=%zu",
                                 total,
                                 local,
@@ -677,8 +677,9 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         // A remote miss can select a pinned local short leaf after the remote
         // query started from an empty path. In that case the context's legacy
         // block counts are zero, while its exact endpoint is the DEVICE reuse.
-        const size_t device_blocks =
-            load_context->localFallbackSelected() ? exact_total / static_cast<size_t>(tokens) : local - host - disk;
+        const size_t device_blocks = load_context->localFallbackSelected() ?
+                                         exact_total / static_cast<size_t>(tokens) :
+                                         (local > host + disk ? local - host - disk : 0);
         resource.setDeviceReuseBlockNum(device_blocks);
         resource.setMemoryReuseBlockNum(host);
         resource.setDiskReuseBlockNum(disk);

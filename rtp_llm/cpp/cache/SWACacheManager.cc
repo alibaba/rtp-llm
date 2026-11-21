@@ -98,8 +98,11 @@ void SWACacheManager::checkSWATailBlockIds(const BlockIds& block_ids, const char
     }
 }
 
-void SWACacheManager::checkHistoryBlockIds(
-    const BlockIds& block_ids, HistorySlots history, const char* caller, bool check_tail) const {
+void SWACacheManager::checkHistoryBlockIds(const BlockIds&          block_ids,
+                                           HistorySlots             history,
+                                           const char*              caller,
+                                           bool                     check_tail,
+                                           const RequiredPositions& pending_history) const {
     if (!shouldCheckSWATailBlockIds()) {
         return;
     }
@@ -111,7 +114,7 @@ void SWACacheManager::checkHistoryBlockIds(
                             history.end,
                             blocks.size());
     for (size_t slot = history.begin; slot < history.end; ++slot) {
-        RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks[slot]),
+        RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(blocks[slot]) || pending_history.count(slot) != 0,
                                 "%s missing required SWA history at slot=%zu, block_num=%zu",
                                 caller,
                                 slot,
@@ -268,12 +271,13 @@ bool SWACacheManager::mallocForDecode(BlockIds&            block_ids,
 }
 
 bool SWACacheManager::mallocWithHistory(BlockIds&                block_ids,
-                                         int                      seq_len,
-                                         bool                     enable_reuse_cache,
-                                         int                      reserve_step,
-                                         std::vector<size_t>*     backfilled_positions,
-                                         const RequiredPositions& required_positions,
-                                         HistorySlots             history) {
+                                        int                      seq_len,
+                                        bool                     enable_reuse_cache,
+                                        int                      reserve_step,
+                                        std::vector<size_t>*     backfilled_positions,
+                                        const RequiredPositions& required_positions,
+                                        HistorySlots             history,
+                                        const RequiredPositions& pending_history) {
     (void)reserve_step;
     return mallocImpl(block_ids,
                       seq_len,
@@ -282,7 +286,8 @@ bool SWACacheManager::mallocWithHistory(BlockIds&                block_ids,
                       true,
                       backfilled_positions,
                       required_positions,
-                      history);
+                      history,
+                      pending_history);
 }
 
 bool SWACacheManager::mallocImpl(BlockIds&                   block_ids,
@@ -292,11 +297,11 @@ bool SWACacheManager::mallocImpl(BlockIds&                   block_ids,
                                  bool                        is_prefill,
                                  std::vector<size_t>*        backfilled_positions,
                                  const RequiredPositions&    required_positions,
-                                 std::optional<HistorySlots> history) {
+                                 std::optional<HistorySlots> history,
+                                 const RequiredPositions&    pending_history) {
     if (history) {
-        // A recovered history slot must already be bound to a cached block.
-        // Reject a missing slot before allocating any fresh continuation block.
-        checkHistoryBlockIds(block_ids, *history, "SWACacheManager::mallocWithHistory", false);
+        // Only a pinned lower-tier source may defer its DEVICE destination until backfill.
+        checkHistoryBlockIds(block_ids, *history, "SWACacheManager::mallocWithHistory", false, pending_history);
     }
     const auto check_blocks = [&]() {
         if (history) {

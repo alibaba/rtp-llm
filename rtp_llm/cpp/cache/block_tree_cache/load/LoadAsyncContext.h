@@ -59,7 +59,6 @@ public:
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
     size_t   matchedTokenEndpoint(size_t reuse_unit_tokens) const;
-    size_t   backendMatchedBlocks() const;
     size_t   matchedTokens(Tier tier, size_t reuse_unit_tokens) const;
     void     setLocalTokenEndpoints(size_t ready_endpoint, size_t target_endpoint);
     size_t   targetTokenEndpoint(size_t reuse_unit_tokens) const;
@@ -74,6 +73,16 @@ public:
         valid_prefix_ = std::move(valid_prefix);
     }
     void setMatchCallback(MatchCallback callback);
+    void   setRemoteSelectionCallback(std::function<bool(LoadAsyncContext&, size_t)> callback,
+                                      bool                                           discard_local = false);
+    void   setRemoteSources(std::vector<TransferDescriptor> sources, std::vector<bool> joined);
+    size_t remoteSourceCount() const {
+        return remote_source_count_;
+    }
+    uint64_t joinGeneration() const {
+        return join_generation_.load(std::memory_order_acquire);
+    }
+    size_t backendMatchedBlocks() const;
     void setSettlementReadyCallback(SettlementReadyCallback callback);
     void startBackendMatch();
     void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
@@ -87,7 +96,7 @@ public:
 
     bool         abortPending();
     void         startJoinWait(int64_t start_time_us);
-    bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
+    bool completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us, uint64_t generation = 0);
     bool         completeTransfers(size_t count, bool success);
     void         cancelUnsubmittedTransfers();
     ErrorInfo    errorInfo() const override;
@@ -121,7 +130,7 @@ private:
     const uint64_t                          context_id_;
     std::vector<TransferDescriptor>         load_descs_;
     std::vector<bool>                       joined_load_;
-    const size_t                            local_matched_blocks_{0};
+    size_t                                  local_matched_blocks_{0};
     size_t                                  matched_blocks_{0};
     size_t                                  backend_matched_blocks_{0};
     size_t                                  ready_token_endpoint_{0};
@@ -134,6 +143,10 @@ private:
     StorageRequest                  storage_request_;
     std::function<bool(size_t)>     valid_prefix_;
     MatchCallback                   match_callback_;
+    std::function<bool(LoadAsyncContext&, size_t)> remote_selection_callback_;
+    bool                                           discard_local_on_remote_{false};
+    size_t                                         remote_source_count_{0};
+    size_t                                         remote_base_blocks_{0};
     const bool                      need_backend_match_{false};
     bool                            backend_started_{false};
     bool                            backend_pending_{false};
@@ -150,6 +163,7 @@ private:
     std::condition_variable   cv_;
     size_t                    remaining_transfer_count_{0};
     std::atomic<size_t>       remaining_join_count_{0};
+    std::atomic<uint64_t>     join_generation_{0};
     size_t                    local_fallback_endpoint_{0};
     size_t                    local_fallback_reuse_unit_{1};
     std::atomic<bool>         local_fallback_selected_{false};

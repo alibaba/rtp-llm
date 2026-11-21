@@ -100,7 +100,7 @@ public:
     // Resolve one group's physical source for a shared exact endpoint. The
     // borrowed nodes are valid only while the owning cache lock is held.
     std::optional<std::vector<TreeNode*>> coveredDeviceGroupPath(
-        const std::vector<BlockTreeContentRange>& ranges, size_t endpoint, size_t group_id) const;
+        const std::vector<BlockTreeContentRange>& ranges, size_t endpoint, size_t group_id, bool device_only = true) const;
 
     std::vector<PrefixCachePlanPoint> planRecoveryPoints(
         const CacheKeysType&                              cache_keys,

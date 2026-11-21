@@ -18,11 +18,11 @@ bool LoadJoinRegistry::start(TreeNode*                                node,
     return insert_result.second;
 }
 
-bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
+bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context, size_t first_descriptor) {
     const std::vector<TransferDescriptor>& load_descs   = context->loadDescs();
     const std::vector<bool>&               joined_loads = context->joinedLoads();
     const uint64_t                         context_id   = context->contextId();
-    for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
+    for (size_t desc_index = first_descriptor; desc_index < load_descs.size(); ++desc_index) {
         if (!joined_loads[desc_index]) {
             continue;
         }
@@ -33,18 +33,16 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
             return false;
         }
         if (record_it->second.joined_contexts.find(context_id) == record_it->second.joined_contexts.end()) {
-            record_it->second.joined_contexts[context_id] = context;
+            record_it->second.joined_contexts[context_id] = {context, context->joinGeneration()};
+            context->setTargetBlocks(desc_index, record_it->second.target_blocks);
+            tree_->groupSets()[desc.group_set_id]->referenceBlocks(
+                MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, record_it->second.target_blocks}}});
         }
-        context->setTargetBlocks(desc_index, record_it->second.target_blocks);
-        tree_->groupSets()[desc.group_set_id]->referenceBlocks(
-            MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}});
     }
     return true;
 }
 
-bool LoadJoinRegistry::finish(TreeNode*                                       node,
-                              size_t                                          group_set_id,
-                              std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
+bool LoadJoinRegistry::finish(TreeNode* node, size_t group_set_id, std::vector<Completion>& joined_contexts) {
     const auto record_it = records_.find(Key{node, group_set_id});
     if (record_it == records_.end()) {
         return false;
@@ -53,14 +51,13 @@ bool LoadJoinRegistry::finish(TreeNode*                                       no
     records_.erase(record_it);
 
     for (const auto& context_entry : contexts) {
-        const std::shared_ptr<LoadAsyncContext> context = context_entry.second.lock();
+        const std::shared_ptr<LoadAsyncContext> context = context_entry.second.first.lock();
         if (context != nullptr) {
-            joined_contexts.push_back(context);
+            joined_contexts.emplace_back(context, context_entry.second.second);
         }
     }
     return true;
 }
-
 
 bool LoadJoinRegistry::eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id) {
     const auto record_it = records_.find(Key{node, group_set_id});
