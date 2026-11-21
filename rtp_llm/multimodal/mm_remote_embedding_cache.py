@@ -742,36 +742,40 @@ class MMRemoteEmbeddingCache:
             raise
         finally:
             elapsed_ms = (time.perf_counter() - started) * 1000
-            metric_stage = (
-                "metadata_put_start"
-                if operation == "write" and outcome == "skipped" and stage == "transfer"
-                else stage
-            )
+            cls._report_stage_latency(operation, stage, outcome, elapsed_ms, nbytes)
+
+    @classmethod
+    def _report_stage_latency(cls, operation, stage, outcome, elapsed_ms, nbytes=0):
+        metric_stage = (
+            "metadata_put_start"
+            if operation == "write" and outcome == "skipped" and stage == "transfer"
+            else stage
+        )
+        cls._report_metric(
+            GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+            elapsed_ms,
+            {"operation": operation, "stage": metric_stage, "status": outcome},
+        )
+        if stage == "transfer" and outcome != "skipped":
+            tags = {"operation": operation}
+            completed_bytes = nbytes if outcome == "success" else 0
             cls._report_metric(
-                GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
-                elapsed_ms,
-                {"operation": operation, "stage": metric_stage, "status": outcome},
+                AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
+                completed_bytes,
+                tags,
             )
-            if stage == "transfer" and outcome != "skipped":
-                tags = {"operation": operation}
-                completed_bytes = nbytes if outcome == "success" else 0
+            if completed_bytes:
                 cls._report_metric(
-                    AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
                     completed_bytes,
                     tags,
                 )
-                if completed_bytes:
+                if elapsed_ms > 0:
                     cls._report_metric(
-                        GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
-                        completed_bytes,
+                        GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                        completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
                         tags,
                     )
-                    if elapsed_ms > 0:
-                        cls._report_metric(
-                            GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
-                            completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
-                            tags,
-                        )
 
     @classmethod
     def _report_outcome(cls, operation, outcome, *, stage="all"):
@@ -1084,6 +1088,19 @@ class MMRemoteEmbeddingCache:
             return
         nbytes, tensors = plan.nbytes, plan.header["tensors"]
 
+        def record_success():
+            self._count("write_success")
+            if _OBSERVE_OBJECT_HEADER and random.getrandbits(4) == 0:
+                self._report_header_size("write_plan", len(plan.header_bytes), 0)
+            self.record(
+                "store_success",
+                key=key,
+                trace_id=trace_id,
+                write_source="encoder_result",
+                nbytes=nbytes,
+                tensors=tensors,
+            )
+
         def write():
             client = None
             slot = None
@@ -1097,6 +1114,83 @@ class MMRemoteEmbeddingCache:
                     outcome = "skipped"
                     self._report_skip("write", "write_queue_expired")
                     return
+                native_write = getattr(type(self._gdr_pool), "try_native_write", None)
+                if callable(native_write) and not self._gdr_pool_quarantined():
+                    failure_stage = "native_write"
+                    result = native_write(
+                        self._gdr_pool, plan, ready_events, key, trace_id, queue_deadline
+                    )
+                    if result is not None:
+                        (
+                            state,
+                            code,
+                            inflight,
+                            wait_ns,
+                            acquire_ns,
+                            pack_ns,
+                            sdk_ns,
+                            _,
+                            _,
+                            lease_ns,
+                        ) = result
+                        if wait_ns and ready_events:
+                            self._report_stage_latency(
+                                "write", "producer_wait", "success", wait_ns / 1e6
+                            )
+                        if acquire_ns:
+                            self._report_stage_latency(
+                                "write", "gdr_acquire", "success", acquire_ns / 1e6
+                            )
+                        if pack_ns:
+                            for phase in ("pack", "native_pack_fenced"):
+                                self._report_stage_latency(
+                                    "write", phase, "success", pack_ns / 1e6
+                                )
+                        status = state.name
+                        if lease_ns:
+                            self._report_stage_latency(
+                                "write",
+                                "gdr_lease_hold",
+                                "error" if inflight else "success",
+                                lease_ns / 1e6,
+                            )
+                        if status == "Expired":
+                            outcome = "skipped"
+                            self._report_skip(
+                                "write",
+                                "write_producer_wait_expired"
+                                if ready_events and not acquire_ns
+                                else "write_queue_expired",
+                            )
+                            return
+                        if status in ("ProducerFailure", "CudaFailure"):
+                            failure_stage = "producer_wait" if status == "ProducerFailure" else "pack"
+                            raise RuntimeError("native EMB CUDA " + failure_stage + " failed")
+                        failure_stage = "transfer"
+                        api_ms = sdk_ns / 1e6
+                        plan.tensors.clear()
+                        error = (
+                            self._gdr_pool.native_save_error(code, inflight)
+                            if status == "SdkFailure"
+                            else None
+                        )
+                        transfer_status = (
+                            "success" if error is None
+                            else "skipped" if _is_write_in_progress(error)
+                            else "error"
+                        )
+                        self._report_stage_latency(
+                            "write", "native_save", transfer_status, api_ms
+                        )
+                        self._report_stage_latency(
+                            "write", "transfer", transfer_status, api_ms, nbytes
+                        )
+                        if error is not None:
+                            raise error
+                        outcome = "success"
+                        record_success()
+                        return
+
                 if ready_events and not self._gdr_pool_quarantined():
                     failure_stage = "producer_wait"
                     with self._observe_stage(
@@ -1182,17 +1276,7 @@ class MMRemoteEmbeddingCache:
                             slot = None
                 api_ms = (time.perf_counter() - api_started) * 1000
                 outcome = "success"
-                self._count("write_success")
-                if _OBSERVE_OBJECT_HEADER and random.getrandbits(4) == 0:
-                    self._report_header_size("write_plan", len(plan.header_bytes), 0)
-                self.record(
-                    "store_success",
-                    key=key,
-                    trace_id=trace_id,
-                    write_source="encoder_result",
-                    nbytes=buffer.numel(),
-                    tensors=tensors,
-                )
+                record_success()
             except Exception as error:
                 if _is_write_in_progress(error):
                     outcome = "skipped"

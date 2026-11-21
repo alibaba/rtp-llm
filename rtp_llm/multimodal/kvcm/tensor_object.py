@@ -166,6 +166,18 @@ def plan_object(
     return TensorObjectPlan(header, tensors, encoded, offset, nbytes, checksum)
 
 
+def native_pack_args(plan: TensorObjectPlan):
+    """The RTPMM002 prefix and byte slices consumed by both native writers."""
+    return (
+        _PREFIX.pack(_MAGIC_V2, len(plan.header_bytes)) + plan.header_bytes,
+        plan.payload_offset,
+        [
+            (plan.payload_offset + spec["offset"], spec["nbytes"], tensor)
+            for tensor, spec in zip(plan.tensors, plan.header["tensors"])
+        ],
+    )
+
+
 def pack_object(
     plan: TensorObjectPlan,
     *,
@@ -219,12 +231,7 @@ def pack_object(
             with stage("native_pack_fenced" if fenced_pack else "native_pack"):
                 pack_slices(
                     output,
-                    _PREFIX.pack(_MAGIC_V2, len(plan.header_bytes)) + plan.header_bytes,
-                    plan.payload_offset,
-                    [
-                        (plan.payload_offset + spec["offset"], spec["nbytes"], tensor)
-                        for tensor, spec in zip(plan.tensors, plan.header["tensors"])
-                    ],
+                    *native_pack_args(plan),
                 )
             if payload_fence is not None and fenced_pack is None:
                 with stage("pack_ready_wait"):

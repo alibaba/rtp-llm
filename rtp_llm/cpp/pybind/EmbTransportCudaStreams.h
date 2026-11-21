@@ -96,8 +96,13 @@ public:
         stream_(EmbTransportCudaStreams::instance().acquire(device)) {}
 
     ~EmbTransportCudaStream() {
-        EmbTransportCudaStreams::instance().release(stream_);
+        if (reusable_) {
+            EmbTransportCudaStreams::instance().release(stream_);
+        }
     }
+
+    // An uncertain CUDA failure can leave work pending on this stream.
+    void quarantine() noexcept { reusable_ = false; }
 
     EmbTransportCudaStream(const EmbTransportCudaStream&)            = delete;
     EmbTransportCudaStream& operator=(const EmbTransportCudaStream&) = delete;
@@ -108,6 +113,7 @@ public:
 
 private:
     cudaStream_t stream_;
+    bool reusable_ = true;
 };
 
 }  // namespace rtp_llm

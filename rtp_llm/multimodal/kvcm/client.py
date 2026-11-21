@@ -296,6 +296,25 @@ class RtpKvMetaObjectClient:
 
         self.save((key,), (tensor,), trace_id=trace_id)
 
+    def native_object_api(self):
+        self._ensure_open()
+        export = getattr(type(self._client), "native_object_api", None)
+        return self._client.native_object_api() if callable(export) else None
+
+    def native_save_error(self, code, may_be_inflight):
+        from kv_cache_manager.client.pybind.kvcm_py_client import ClientErrorCode
+
+        try:
+            native_code = ClientErrorCode(code)
+        except ValueError:
+            native_code = code
+        return self._client_error_type(
+            "save",
+            native_code,
+            unknown_outcome=code == 2 or type(native_code) is int,
+            data_transfer_may_be_inflight=may_be_inflight,
+        )
+
     def save_one_with_header_hint(self, key, tensor, header_hint, *, trace_id=None):
         self._ensure_open()
         if callable(getattr(type(self._client), "save_with_user_data", None)):

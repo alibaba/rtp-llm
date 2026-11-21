@@ -18,6 +18,7 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 from .client import USE_EMB_HEADER_HINT, save_one_with_optional_header_hint
 
+_USE_NATIVE_WRITE = os.environ.get("MM_EMB_NATIVE_REGISTERED_WRITE") == "1"
 _ISOLATED_CUDA_STREAMS = os.environ.get("MM_EMB_ISOLATED_CUDA_STREAMS") == "1"
 
 
@@ -168,6 +169,9 @@ class RegisteredObjectTransport:
     transport_mode = "gdr"
     _quarantine_lock = threading.RLock()
     _quarantined_transports = []
+    # Retain the pool independently of any Python result from an in-flight
+    # native call. An OOM during return must not release an uncertain MR.
+    _native_write_owners = []
 
     def __init__(
         self, owner, buffer, device, observe_stage, *, lazy_stream=False, extent=None
@@ -563,13 +567,93 @@ class RegisteredTransportPool:
         self._native_device_failed = False
         self._native_quarantined_bytes = 0
         self._idle_streams = []
+        self._native_write = None
+        self._native_write_capsule = None
+        self._native_write_event_type = None
+        self._native_write_quarantined_bytes = 0
+        self._native_write_quarantine_started = None
+        self._native_write_observed_use = (0, 0)
         self._create_slots(factory, slots, max_object_bytes, device, observe_stage)
+        self._enable_native_write()
         self.instance_id = self._client.instance_id
         self.instance_group = self._client.instance_group
         self._gc_thread = threading.Thread(
             target=self._gc_loop, name="mm-emb-quarantine-gc", daemon=True
         )
         self._gc_thread.start()
+
+    def _enable_native_write(self):
+        if not (_USE_NATIVE_WRITE and self.direct_payload and self._native_arena is not None):
+            return
+        import librtp_compute_ops
+
+        invoke = getattr(librtp_compute_ops, "write_emb_registered_object", None)
+        supports = getattr(librtp_compute_ops, "supports_registered_emb_write", None)
+        event_type = getattr(librtp_compute_ops, "EmbCudaSnapshotReady", None)
+        export = getattr(type(self._client), "native_object_api", None)
+        if not callable(invoke) or not callable(supports) or not callable(export) or event_type is None:
+            return
+        try:
+            capsule = self._client.native_object_api()
+            if not supports(capsule):
+                return
+        except Exception:
+            logging.warning("KVCM native save handle unavailable", exc_info=True)
+            return
+        self._native_write_capsule = capsule
+        self._native_write_event_type = event_type
+        self._native_write = invoke
+        with RegisteredObjectTransport._quarantine_lock:
+            RegisteredObjectTransport._native_write_owners.append(self)
+
+    def try_native_write(self, plan, ready_events, key, trace_id, deadline):
+        invoke, capsule, root = self._native_write, self._native_write_capsule, self._arena
+        if invoke is None or capsule is None or root is None or plan.checksum:
+            return None
+
+        if any(not isinstance(event, self._native_write_event_type) for event in ready_events):
+            return None
+        from .tensor_object import native_pack_args
+
+        pack_args = native_pack_args(plan)
+        header_size = len(plan.header_bytes)
+        sample = (
+            self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
+        )
+        with cuda_graph_gate.operation():
+            result = invoke(
+                self._native_arena,
+                root,
+                plan.nbytes,
+                *pack_args,
+                ready_events,
+                capsule,
+                key,
+                trace_id or f"kvcm-native-save-{uuid.uuid4().hex}",
+                header_size if USE_EMB_HEADER_HINT else None,
+                int((deadline - time.monotonic()) * 1_000_000_000),
+                sample,
+            )
+        state, _, may_be_inflight, _, _, _, _, acquire_lock_ns, release_lock_ns, _ = result
+        if sample:
+            if acquire_lock_ns:
+                self._observe_lock_hold(True, "acquire", acquire_lock_ns)
+            if release_lock_ns:
+                self._observe_lock_hold(True, "release", release_lock_ns)
+        if state.name == "LeaseUnavailable":
+            # Use the same bounded queue and wait outside the CUDA graph gate.
+            return None
+        if state.name == "CudaFailure":
+            self._native_device_failed = True
+        if may_be_inflight:
+            self._native_write_quarantined_bytes = self._native_arena.native_write_quarantine()[0]
+            if self._native_write_quarantine_started is None:
+                self._native_write_quarantine_started = time.monotonic()
+            self._report_hold("write", "entered")
+        return result
+
+    def native_save_error(self, code, may_be_inflight):
+        return self._client.native_save_error(code, may_be_inflight)
 
     def _create_slots(self, factory, slots, capacity, device, observe_stage):
         if not 0 < capacity <= 1024**3:
@@ -638,6 +722,14 @@ class RegisteredTransportPool:
                     initial_failure=held[0]._quarantine_cause,
                     quarantine_id=held[0]._quarantine_id,
                 )
+            if any(
+                pool._native_arena.native_write_quarantine()[1] > 0
+                for pool in RegisteredObjectTransport._native_write_owners
+            ):
+                raise RegisteredTransportUnavailableError(
+                    "native GDR write is quarantined; restart the worker",
+                    quarantined=True,
+                )
             with torch.cuda.device(device):
                 self._allocator = torch.cuda.MemPool()
                 with torch.cuda.use_mem_pool(self._allocator):
@@ -688,9 +780,15 @@ class RegisteredTransportPool:
         age = max(
             (time.monotonic() - slot._quarantine_started for slot in held), default=0
         )
+        native_holds = 0
+        if self._native_write is not None:
+            native_bytes, native_holds = self._native_arena.native_write_quarantine()
+            held_bytes += native_bytes
+            if self._native_write_quarantine_started is not None:
+                age = max(age, time.monotonic() - self._native_write_quarantine_started)
         try:
             self._observe_hold(
-                operation, event, held_bytes, age, registered_bytes, len(held)
+                operation, event, held_bytes, age, registered_bytes, len(held) + native_holds
             )
         except Exception as error:
             logging.error("MM_EMB_GDR_GC_METRIC_ERROR %s", _safe_error_context(error))
@@ -699,12 +797,23 @@ class RegisteredTransportPool:
         gc_interval = min(10, self._quarantine_ttl_seconds)
         elapsed = 0
         while not self._gc_stop.wait(1):
+            with self._condition:
+                if self._native_write is not None and self._observe_lease is not None:
+                    self._report_native_write_in_use()
             if self._observe_arena is not None:
                 self._report_arena()
             elapsed += 1
             if elapsed == gc_interval:
                 self._gc_tick()
                 elapsed = 0
+
+    def _report_native_write_in_use(self):
+        in_use = self._native_arena.native_write_in_use()
+        previous_bytes, previous_count = self._native_write_observed_use
+        nbytes, count = in_use
+        if in_use != self._native_write_observed_use:
+            self._observe_lease(True, count - previous_count, nbytes - previous_bytes)
+            self._native_write_observed_use = in_use
 
     def _report_arena(self):
         if self._native_arena is not None:
@@ -754,7 +863,8 @@ class RegisteredTransportPool:
         if self._native_arena is not None:
             return (
                 self._native_device_failed
-                or self._native_quarantined_bytes >= self._native_capacity
+                or self._native_quarantined_bytes + self._native_write_quarantined_bytes
+                >= self._native_capacity
             )
         return any(slot.device_failed is True for slot in self._slots) or (
             not self._free_ranges and all(slot.quarantined for slot in self._slots)
@@ -1035,7 +1145,9 @@ class RegisteredTransportPool:
         # Called under _condition after all leases drain, including late IO.
         if self._client is None:
             return True
-        if any(slot.quarantined for slot in self._slots):
+        if any(slot.quarantined for slot in self._slots) or (
+            self._native_write is not None and self._native_arena.native_write_quarantine()[1]
+        ):
             return False
         try:
             self._client.close()
@@ -1049,6 +1161,12 @@ class RegisteredTransportPool:
             self._quarantine_registration(error, "close")
             self._report_hold("unknown", "gc_error")
         else:
+            if self._native_write is not None:
+                if self._observe_lease is not None:
+                    self._report_native_write_in_use()
+                with RegisteredObjectTransport._quarantine_lock:
+                    RegisteredObjectTransport._native_write_owners.remove(self)
+                self._native_write = self._native_write_capsule = None
             self._client = None
             for slot in self._slots:
                 slot._buffer = None

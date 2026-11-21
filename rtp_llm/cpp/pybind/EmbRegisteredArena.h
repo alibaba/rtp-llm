@@ -39,6 +39,20 @@ public:
     }
 
     Acquisition acquire(int64_t bytes, bool forWrite, int64_t timeoutNs, bool sample) {
+        return acquireExtent(bytes, forWrite, timeoutNs, sample, false);
+    }
+
+    Acquisition tryAcquireForNativeWrite(int64_t bytes, bool sample) {
+        return acquireExtent(bytes, true, 0, sample, true);
+    }
+
+    std::pair<int64_t, int64_t> nativeWriteInUse() const {
+        std::lock_guard<std::timed_mutex> lock(mutex_);
+        return {nativeWriteActiveBytes_, nativeWriteActiveExtents_};
+    }
+
+private:
+    Acquisition acquireExtent(int64_t bytes, bool forWrite, int64_t timeoutNs, bool sample, bool nativeWrite) {
         if (bytes <= 0 || bytes > bytes_ || timeoutNs < 0 || timeoutNs > 600'000'000'000LL) {
             throw std::invalid_argument("invalid registered EMB arena acquisition");
         }
@@ -68,6 +82,10 @@ public:
                 }
                 tickets_[index(offset)] = {ticket, capacity};
                 ++active_;
+                if (nativeWrite) {
+                    nativeWriteActiveBytes_ += capacity;
+                    ++nativeWriteActiveExtents_;
+                }
                 freeBytes_ -= capacity;
                 if (capacity == it->bytes) {
                     free_.erase(it);
@@ -94,7 +112,22 @@ public:
         return finish(accepting_ ? Result::Quarantined : Result::Closed);
     }
 
+public:
     int64_t release(uint64_t ticket, int64_t offset, bool reusable, bool sample) {
+        return releaseExtent(ticket, offset, reusable, sample, false);
+    }
+
+    int64_t releaseWrittenExtent(uint64_t ticket, int64_t offset, bool reusable, bool sample) {
+        return releaseExtent(ticket, offset, reusable, sample, true);
+    }
+
+    std::pair<int64_t, int64_t> nativeWriteQuarantine() const {
+        std::lock_guard<std::timed_mutex> lock(mutex_);
+        return {nativeWriteQuarantinedBytes_, nativeWriteQuarantinedExtents_};
+    }
+
+private:
+    int64_t releaseExtent(uint64_t ticket, int64_t offset, bool reusable, bool sample, bool nativeWrite) {
         int64_t heldNs = 0;
         {
             std::lock_guard<std::timed_mutex> lock(mutex_);
@@ -108,6 +141,14 @@ public:
                 freeBytes_ += entry.bytes;
             } else {
                 quarantinedBytes_ += entry.bytes;
+                if (nativeWrite) {
+                    nativeWriteQuarantinedBytes_ += entry.bytes;
+                    ++nativeWriteQuarantinedExtents_;
+                }
+            }
+            if (nativeWrite) {
+                nativeWriteActiveBytes_ -= entry.bytes;
+                --nativeWriteActiveExtents_;
             }
             entry = {};
             --active_;
@@ -117,6 +158,7 @@ public:
         return heldNs;
     }
 
+public:
     std::pair<int64_t, int64_t> freeSpace() const {
         std::lock_guard<std::timed_mutex> lock(mutex_);
         int64_t largest = 0;
@@ -186,6 +228,10 @@ private:
     const int64_t writeEnd_;
     int64_t freeBytes_;
     int64_t quarantinedBytes_ = 0;
+    int64_t nativeWriteQuarantinedBytes_ = 0;
+    int64_t nativeWriteQuarantinedExtents_ = 0;
+    int64_t nativeWriteActiveBytes_ = 0;
+    int64_t nativeWriteActiveExtents_ = 0;
     uint64_t lastTicket_ = 0;
     size_t active_ = 0;
     bool accepting_ = true;
@@ -251,6 +297,8 @@ inline void registerEmbRegisteredArena(pybind11::module& module) {
             }
         })
         .def("release", &Arena::release)
+        .def("native_write_quarantine", &Arena::nativeWriteQuarantine, ReleaseGil())
+        .def("native_write_in_use", &Arena::nativeWriteInUse, ReleaseGil())
         .def("free_space", &Arena::freeSpace, ReleaseGil())
         .def("stop", &Arena::stop, ReleaseGil())
         .def("fail_device", &Arena::failDevice, ReleaseGil())

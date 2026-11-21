@@ -104,7 +104,9 @@ cc_library(
         "EmbTensorObjectDecode.cc",
     ],
     hdrs = [
+        "EmbNativeObjectApi.h",
         "EmbRegisteredArena.h",
+        "EmbRegisteredWrite.h",
         "EmbTensorCodec.h",
         "EmbTensorObjectPlan.h",
         "EmbTransportCudaStreams.h",

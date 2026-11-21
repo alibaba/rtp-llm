@@ -1,5 +1,6 @@
 #include <torch/library.h>
 #include "rtp_llm/cpp/pybind/EmbRegisteredArena.h"
+#include "rtp_llm/cpp/pybind/EmbRegisteredWrite.h"
 #include "rtp_llm/cpp/pybind/EmbTensorCodec.h"
 #include "rtp_llm/cpp/pybind/EmbTensorObjectPlan.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -25,6 +26,7 @@ PYBIND11_MODULE(librtp_compute_ops, m) {
     registerEmbTensorCodec(m);
 #if USING_CUDA
     registerEmbTensorObjectDecode(m);
+    registerEmbRegisteredWrite(m);
 #endif
     registerEmbTensorObjectPlan(m);
     registerEmbRegisteredArena(m);
