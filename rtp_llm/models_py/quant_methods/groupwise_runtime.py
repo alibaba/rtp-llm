@@ -69,7 +69,11 @@ class GroupwiseRuntimeState:
     @property
     def metadata(self):
         return dict(
-            layout="aiter_wna16_v1",
+            layout=(
+                "cuda_wna16_v1"
+                if self.weight.is_cuda and torch.version.hip is None
+                else "aiter_wna16_v1"
+            ),
             method=self.layout.method,
             source_bits=self.layout.bits,
             runtime_bits=self.runtime_bits,
@@ -227,15 +231,23 @@ def _load_backend():
 def validate_runtime_device(device, method, bits):
     if method not in ("awq", "gptq") or type(bits) is not int or bits not in (4, 8):
         raise ValueError("AWQ/GPTQ runtime requires an explicit 4/8-bit method")
+    validate_integer_device(device)
+
+
+def validate_integer_device(device):
     device = torch.device(device)
     if device.type != "cuda":
         raise RuntimeError(
             "AWQ/GPTQ serving requires a native accelerator backend; CPU supports checkpoint staging only"
         )
     if torch.version.hip is None:
-        raise RuntimeError(
-            "CUDA AWQ/GPTQ native grouped integer GEMM is not available in this build; NVFP4 Marlin and W4A8 are not equivalent backends"
-        )
+        if (
+            not torch.cuda.is_available()
+            or torch.cuda.get_device_capability(device)[0] < 8
+        ):
+            raise RuntimeError("CUDA integer projections require a CUDA SM80+ device")
+        importlib.import_module("rtp_llm.models_py.quant_methods.groupwise_cuda")
+        return
     if not torch.cuda.is_available():
         raise RuntimeError("ROCm AWQ/GPTQ accelerator is unavailable")
     arch = getattr(torch.cuda.get_device_properties(device), "gcnArchName", "")
@@ -340,6 +352,10 @@ def _projection(
         )
     if x.ndim != 2 or x.shape[1] != state.layout.input_size:
         raise ValueError("Grouped integer GEMM activation shape mismatch")
+    if torch.version.hip is None:
+        from rtp_llm.models_py.quant_methods.groupwise_cuda import project
+
+        return project(state, x, topk_ids, topk_weights, input_top_k, multiply_weights)
     gemm, _, language = _load_backend()
     output = torch.empty(
         (*topk_ids.shape, state.layout.output_size), dtype=x.dtype, device=x.device
@@ -377,13 +393,15 @@ def _projection(
 
 
 def _route(topk_ids, experts):
-    _, sorter, _ = _load_backend()
     # Native align's histogram does not accept -1. Put inactive routes into one
     # extra bucket, then use GEMM's explicit expert=-1 zero-output contract.
     torch._assert_async(
         ((topk_ids >= -1) & (topk_ids < experts)).all(),
         "Groupwise router supplied an invalid local expert ID",
     )
+    if torch.version.hip is None:
+        return None, None, None
+    _, sorter, _ = _load_backend()
     safe_ids = torch.where(topk_ids < 0, experts, topk_ids).to(torch.int32).contiguous()
     capacity = ((topk_ids.numel() + (experts + 1) * 15 + 15) // 16) * 16
     sorted_ids = torch.full(
@@ -438,13 +456,23 @@ def build_moe_executor(layer):
         FusedMoEQuantConfig,
     )
     from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
-    from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.deepep_normal_router import (
-        DeepepNormalRouter,
+
+    platform = "cuda" if torch.version.hip is None else "rocm"
+    routers = (
+        "rtp_llm.models_py.modules.factory.fused_moe.impl." + platform + ".routers."
     )
-    from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers.pure_tp_router import (
-        PureTpRouterBase,
-        PureTpRouterNoQuant,
-    )
+    if layer.ep_size == 1:
+        pure = importlib.import_module(routers + "pure_tp_router")
+        PureTpRouterBase, PureTpRouterNoQuant = (
+            pure.PureTpRouterBase,
+            pure.PureTpRouterNoQuant,
+        )
+    else:
+        normal = importlib.import_module(routers + "deepep_normal_router")
+        DeepepNormalRouter = getattr(
+            normal,
+            "DeepepNormalRouterNoQuant" if platform == "cuda" else "DeepepNormalRouter",
+        )
     from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
         ConditionChecker,
     )
@@ -480,7 +508,7 @@ def build_moe_executor(layer):
         )
     config.expert_num = layer.physical_num_experts
     quant = FusedMoEQuantConfig()  # W-only: router must pass FP16/BF16 unchanged.
-    checker = ConditionChecker("groupwise_rocm_router")
+    checker = ConditionChecker(f"groupwise_{platform}_router")
     if config.ep_size == 1:
         PureTpRouterBase.check_conditions(checker, config)
         router_type = PureTpRouterNoQuant
@@ -581,5 +609,5 @@ def build_moe_executor(layer):
         router,
         IntegerExpertExecutor(),
         config.expert_num,
-        strategy_name="rocm_aiter_groupwise_integer",
+        strategy_name=platform + "_groupwise_integer",
     )

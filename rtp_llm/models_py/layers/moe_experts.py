@@ -63,6 +63,7 @@ class BaseMoEExperts(RtpModule):
     _BASE_QUANT_MAP = {
         "awq": "awq",
         "gptq": "gptq",
+        "INT8": "weight_only_int8",
         "W8A8_INT8_PER_CHANNEL_COMPRESSED": "w8a8_int8_per_channel",
         # already-quantized FP8 ckpts (weight is fp8 + ckpt has weight_scale)
         "FP8_PER_TENSOR_COMPRESSED": "fp8_per_tensor",

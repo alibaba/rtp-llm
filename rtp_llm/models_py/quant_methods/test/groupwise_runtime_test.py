@@ -169,8 +169,10 @@ class GroupwiseRuntimeCPUTest(unittest.TestCase):
                 runtime.prepare_groupwise_state(*values)
 
     def test_cuda_nvfp4_does_not_masquerade_as_integer_groupwise(self):
-        with mock.patch.object(torch.version, "hip", None):
-            with self.assertRaisesRegex(RuntimeError, "NVFP4 Marlin.*not equivalent"):
+        with mock.patch.object(torch.version, "hip", None), mock.patch.object(
+            torch.cuda, "is_available", return_value=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "SM80"):
                 runtime.validate_runtime_device("cuda", "awq", 4)
 
     def test_backend_import_and_symbol_failures_are_explicit(self):
@@ -203,6 +205,38 @@ class GroupwiseRuntimeCPUTest(unittest.TestCase):
     "requires explicitly allocated ROCm GPU",
 )
 class GroupwiseNativeGPUTest(unittest.TestCase):
+    def test_int8_expert_method_selects_real_per_channel_gpu_projection(self):
+        from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+
+        layer = torch.nn.Module()
+        layer.PROJ_NAMES = ("gate_proj", "up_proj", "down_proj")
+        method = QuantizationConfig("INT8").get_moe_quant_method(
+            layer, "layers.0.experts"
+        )
+        method.create_weights(layer, 2, 32, 16, torch.bfloat16)
+        layer.cuda()
+        layer.w13.normal_()
+        layer.w2.normal_()
+        original = layer.w13.detach().clone()
+        method.process_weights_after_loading(layer)
+        state = layer._groupwise_runtime["w13"]
+        scale = original.abs().amax(dim=2, keepdim=True).clamp(min=1e-8) / 128
+        expected_w = (original / scale).round().clamp(-128, 127) * scale
+        x = torch.randn((2, 32), device="cuda", dtype=torch.bfloat16)
+        ids = torch.tensor([[1], [0]], device="cuda", dtype=torch.int32)
+        routing = torch.ones_like(ids, dtype=torch.float32)
+        actual = runtime._projection(
+            state,
+            x,
+            ids,
+            routing,
+            *runtime._route(ids, 2),
+            input_top_k=1,
+            multiply_weights=False
+        )
+        expected = torch.stack([x[i] @ expected_w[1 - i].T for i in range(2)])
+        torch.testing.assert_close(actual[:, 0], expected, atol=0.06, rtol=0.01)
+
     def test_native_dense_and_promoted_zero(self):
         runtime.validate_runtime_device("cuda", "gptq", 4)
         for method in ("awq", "gptq"):

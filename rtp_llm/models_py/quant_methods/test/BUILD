@@ -185,6 +185,20 @@ py_test(
 
 # Native execution is opt-in after an idle ROCm GPU has been allocated.
 py_test(
+    name = "groupwise_runtime_h20_test",
+    srcs = ["groupwise_runtime_test.py"],
+    main = "groupwise_runtime_test.py",
+    env = {"RUN_GROUPWISE_NATIVE_GPU_TESTS": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch"],
+)
+
+py_test(
     name = "groupwise_runtime_rocm_test",
     srcs = ["groupwise_runtime_test.py"],
     main = "groupwise_runtime_test.py",
