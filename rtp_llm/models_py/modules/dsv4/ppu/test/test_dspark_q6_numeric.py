@@ -32,10 +32,7 @@ import unittest
 
 import torch
 
-
-ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), *([os.pardir] * 6))
-)
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), *([os.pardir] * 6)))
 
 HC_MULT = 4
 DIM = 4096
@@ -150,9 +147,7 @@ def ppu_hc_pre_from_mixes(mixes, sq, x, scale, base, norm_weight):
     mid = mixes[:, hc : 2 * hc].contiguous()
     tail = mixes[:, 2 * hc :].contiguous()
     pre = torch.sigmoid(head * scale[0] + base[:hc]) + HC_EPS
-    post = POST_MULT * torch.sigmoid(
-        mid * scale[1] + base[hc : 2 * hc]
-    )
+    post = POST_MULT * torch.sigmoid(mid * scale[1] + base[hc : 2 * hc])
     cm = (tail * scale[2] + base[2 * hc :]).view(-1, hc, hc)
     cm = cm.softmax(-1) + HC_EPS
     cm = cm / (cm.sum(-2, keepdim=True) + HC_EPS)
@@ -174,11 +169,7 @@ def ppu_hc_pre_from_mixes(mixes, sq, x, scale, base, norm_weight):
         sq_per_pos += ol.square()
     sumsq = sq_per_pos.reshape(rows, -1).sum(-1)
     inv_rms = torch.rsqrt(sumsq / DIM + NORM_EPS)
-    y = (
-        readout.to(torch.bfloat16).float()
-        * inv_rms.unsqueeze(-1)
-        * norm_weight.float()
-    )
+    y = readout.to(torch.bfloat16).float() * inv_rms.unsqueeze(-1) * norm_weight.float()
     return y.to(torch.bfloat16), post, cm, inv_rms
 
 
@@ -229,7 +220,9 @@ def ppu_gate(scores, bias, topk, route_scale, pad_to=None):
     """``_gate_padded``: two-pass argmax select, then one FP32 normalize."""
     rows, experts = scores.shape
     pad = max(2, 1 << (topk - 1).bit_length()) if pad_to is None else pad_to
-    active = torch.sqrt(torch.where(scores > 20.0, scores, torch.log1p(torch.exp(scores))))
+    active = torch.sqrt(
+        torch.where(scores > 20.0, scores, torch.log1p(torch.exp(scores)))
+    )
     ranking = active + bias
     idx = torch.full((rows, pad), -1, dtype=torch.long)
     w = torch.zeros((rows, pad), dtype=torch.float32)
@@ -306,11 +299,20 @@ def draft_block_rows(prefix_len, gamma, window=WINDOW):
 # ---------------------------------------------------------------------------
 class DsparkQ6NumericTest(unittest.TestCase):
     def setUp(self):
+        # Batched CPU GEMM can choose a different parallel reduction order
+        # after a row permutation.  That is a BLAS scheduling artifact, not a
+        # DSpARK row-locality signal, so keep this CPU-only semantic pin on one
+        # thread instead of weakening its one-ULP assertions.
+        self._num_threads = torch.get_num_threads()
+        torch.set_num_threads(1)
         torch.manual_seed(20261112)
         self.fn = torch.randn((HC_MULT + 2) * HC_MULT, HC_MULT * DIM) * 0.02
         self.scale = torch.randn(3) * 0.1 + 1.0
         self.base = torch.randn((HC_MULT + 2) * HC_MULT) * 0.1
         self.norm_weight = torch.randn(DIM) * 0.1 + 1.0
+
+    def tearDown(self):
+        torch.set_num_threads(self._num_threads)
 
     def _hc_input(self, batch, q_len):
         x = torch.randn(batch * q_len, HC_MULT * DIM) * 0.5
@@ -378,9 +380,7 @@ class DsparkQ6NumericTest(unittest.TestCase):
                 mixes_l.append(m)
                 sq_l.append(s)
             with self.subTest(q=q):
-                self.assertLess(
-                    (mixes_b - torch.cat(mixes_l)).abs().max().item(), 1e-5
-                )
+                self.assertLess((mixes_b - torch.cat(mixes_l)).abs().max().item(), 1e-5)
                 self.assertLess((sq_b - torch.cat(sq_l)).abs().max().item(), 1e-2)
 
     def test_hc_pre_matches_reference_readout(self):
@@ -489,9 +489,7 @@ class DsparkQ6NumericTest(unittest.TestCase):
         self.assertTrue(torch.equal(codes_a[keep], codes_b[keep]))
         # And the swapped row's own scale tracks its own amax only.
         expected = y2[3].to(torch.bfloat16).float().view(-1, GROUP).abs().amax(-1)
-        self.assertTrue(
-            torch.allclose(scale_b[3], expected * (1.0 / 448.0), atol=1e-6)
-        )
+        self.assertTrue(torch.allclose(scale_b[3], expected * (1.0 / 448.0), atol=1e-6))
 
     def test_verify_rows_are_causal_and_match_single_token_decode(self):
         """Row q of a 6-row verify equals a q=1 step at its own position."""

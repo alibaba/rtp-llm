@@ -14,16 +14,14 @@ from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
-from torch import nn
-
 from rtp_llm.models_py.modules.dsv4.ppu.chunk_env import chunked_moe_enabled
+from rtp_llm.models_py.modules.dsv4.ppu.moe.gate import PpuGate
+from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import PpuMoeConfig
 from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
     fused_moe_epilogue as combine_routed_and_shared,
 )
 from rtp_llm.utils.model_weight import W
-
-from rtp_llm.models_py.modules.dsv4.ppu.moe.gate import PpuGate
-from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import PpuMoeConfig
+from torch import nn
 
 
 def _gather_tp_slices(out: torch.Tensor, original_tokens: int, tp_size: int):
@@ -146,17 +144,23 @@ class PpuEPMoE(nn.Module):
         self._strategy = strategy_type(cfg, **(strategy_kwargs or {}))
         self._strategy.setup_weights(layer_weights)
         self.strategy_name = self._strategy.name
-        self.shared_experts = platform_provider.build_shared_expert(
-            dim,
-            moe_inter_dim,
-            expert_weights={
-                "w13_w": layer_weights[W.v4_shared_w13_w],
-                "w13_s": layer_weights[W.v4_shared_w13_s],
-                "w2_w": layer_weights[W.v4_shared_w2_w],
-                "w2_s": layer_weights[W.v4_shared_w2_s],
-            },
-            swiglu_limit=swiglu_limit,
-            sglang_moe=True,
+        shared_weights = {
+            "w13_w": layer_weights[W.v4_shared_w13_w],
+            "w13_s": layer_weights[W.v4_shared_w13_s],
+            "w2_w": layer_weights[W.v4_shared_w2_w],
+            "w2_s": layer_weights[W.v4_shared_w2_s],
+        }
+        exact_shared = getattr(self._strategy, "build_shared_expert", None)
+        self.shared_experts = (
+            exact_shared(shared_weights, swiglu_limit)
+            if callable(exact_shared)
+            else platform_provider.build_shared_expert(
+                dim,
+                moe_inter_dim,
+                expert_weights=shared_weights,
+                swiglu_limit=swiglu_limit,
+                sglang_moe=True,
+            )
         )
         self._shared_executor = platform_provider.build_shared_expert_executor()
         self._shared_executor.prepare(self.shared_experts)
@@ -293,8 +297,12 @@ class PpuEPMoE(nn.Module):
     def forward_with_hc_pre(
         self, residual, input_ids, hc, norm, *, active_token_mask=None
     ):
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuSharedExpertExecutor
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+            PpuSharedExpertExecutor,
+        )
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
 
         if (
             not self._fuse_hc_sum
@@ -373,14 +381,20 @@ class PpuEPMoE(nn.Module):
             # every rank, so chunk counts and collective order stay in sync.
             flat, ids, positions, active_token_mask, original_tokens = (
                 _slice_tokens_for_tp(
-                    flat, ids, positions, active_token_mask,
-                    self._tp_size, self._tp_rank,
+                    flat,
+                    ids,
+                    positions,
+                    active_token_mask,
+                    self._tp_size,
+                    self._tp_rank,
                 )
             )
         rounds = max((flat.size(0) + capacity - 1) // capacity, 1)
         if not self._is_decode_role and not is_decode_forward and not capturing:
             if not dist.is_initialized() or dist.get_world_size() != self._ep_size:
-                raise RuntimeError("PPU Prefill requires the engine's WORLD-sized EP group")
+                raise RuntimeError(
+                    "PPU Prefill requires the engine's WORLD-sized EP group"
+                )
             # The engine creates DeepEP on WORLD; every rank must dispatch the
             # same number of rounds even after its local token slice is empty.
             common_rounds = torch.tensor(rounds, dtype=torch.int64, device=flat.device)

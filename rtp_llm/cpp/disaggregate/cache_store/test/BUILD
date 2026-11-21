@@ -5,6 +5,16 @@ load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 cc_test = cc_test_wrapper
 
+cc_test(
+    name = "load_context_flow_control_test",
+    srcs = ["LoadContextFlowControlTest.cpp"],
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "@com_google_googletest//:gtest_main",
+    ],
+    copts = copts(),
+)
+
 cc_import(
     name = "cuda13_torch_nvshmem",
     shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",

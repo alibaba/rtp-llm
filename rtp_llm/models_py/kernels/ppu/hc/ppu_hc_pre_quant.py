@@ -34,6 +34,7 @@ def _mhc_pre_norm_quant(
     norm_eps: float = 1e-6,
     parallel_reduction: bool = False,
     column_scales: bool = True,
+    scale_ue8m0: bool = False,
 ):
     num_tokens = T.dynamic("num_tokens")
     mhc_mult3 = mhc_mult * (2 + mhc_mult)
@@ -194,11 +195,10 @@ def _mhc_pre_norm_quant(
                             ol[i1_h] += pre * xl[i_mhc, i1_h]
 
                     if fuse_norm:
-                        # Match the SGLang fused boundary: the RMS denominator
-                        # uses the FP32 readout, while the numerator retains the
-                        # BF16 activation boundary before applying norm weights.
+                        # Match the official DeepSeek boundary: HC readout is
+                        # rounded to BF16 before RMSNorm computes both its
+                        # numerator and denominator.
                         for i1_h in T.Parallel(hidden_block):
-                            sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
                             output_shared[i0_h * hidden_block + i1_h] = T.cast(
                                 ol[i1_h], T.bfloat16
                             )
@@ -208,6 +208,14 @@ def _mhc_pre_norm_quant(
                         )
 
                 if fuse_norm:
+                    # Match the official flat/strided RMS reduction instead of
+                    # the blocked-512 lowering of the pipelined producer loop.
+                    for i1_h in T.Parallel(hidden_block):
+                        for i0_h in T.serial(hidden_size // hidden_block):
+                            rounded = T.cast(
+                                output_shared[i0_h * hidden_block + i1_h], T.float32
+                            )
+                            sumsq_per_pos[i1_h] += rounded * rounded
                     sumsq = T.alloc_fragment(1, T.float32)
                     T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
                     inv_rms = T.alloc_fragment(1, T.float32)
@@ -244,28 +252,39 @@ def _mhc_pre_norm_quant(
                         T.reduce_max(qabs, qmax, dim=1)
                         for g in T.Parallel(hidden_block // 128):
                             qmax[g] = T.max(qmax[g], 1e-4)
+                            group_scale = T.call_pure_extern(
+                                "float32", "__fmul_rn", qmax[g], 1.0 / 448.0
+                            )
+                            if scale_ue8m0:
+                                # Round up to an exact power of two, keeping the
+                                # FP32 column-scale ABI used by Decode DeepGEMM.
+                                bits = T.call_pure_extern(
+                                    "uint32", "__float_as_uint", group_scale
+                                )
+                                group_scale = T.call_pure_extern(
+                                    "float32",
+                                    "__uint_as_float",
+                                    (bits + 0x007FFFFF) & 0x7F800000,
+                                )
+                                qmax[g] = group_scale
                             if column_scales:
                                 qscale[i0_h * (hidden_block // 128) + g, pid] = (
-                                    T.call_pure_extern(
-                                        "float32", "__fmul_rn", qmax[g], 1.0 / 448.0
-                                    )
+                                    group_scale
                                 )
                             else:
                                 qscale[pid, i0_h * (hidden_block // 128) + g] = (
-                                    T.call_pure_extern(
-                                        "float32", "__fmul_rn", qmax[g], 1.0 / 448.0
-                                    )
+                                    group_scale
                                 )
                         for g, c in T.Parallel(hidden_block // 128, 128):
+                            inv_scale = T.call_pure_extern(
+                                "float32",
+                                "__fdiv_rn",
+                                1.0 if scale_ue8m0 else 448.0,
+                                qmax[g],
+                            )
                             qout[pid, i0_h * hidden_block + g * 128 + c] = T.cast(
                                 T.min(
-                                    T.max(
-                                        qvalues[g, c]
-                                        * T.call_pure_extern(
-                                            "float32", "__fdiv_rn", 448.0, qmax[g]
-                                        ),
-                                        -448.0,
-                                    ),
+                                    T.max(qvalues[g, c] * inv_scale, -448.0),
                                     448.0,
                                 ),
                                 T.float8_e4m3fn,
@@ -287,6 +306,7 @@ def hc_pre_norm_quantized(
     norm_eps,
     *,
     column_scales=True,
+    scale_ue8m0=False,
 ):
     leading = residual.shape[:-2]
     rows = residual.numel() // 16384
@@ -314,6 +334,7 @@ def hc_pre_norm_quantized(
         fuse_norm=True,
         norm_eps=norm_eps,
         column_scales=column_scales,
+        scale_ue8m0=scale_ue8m0,
     )(
         partials,
         squares,

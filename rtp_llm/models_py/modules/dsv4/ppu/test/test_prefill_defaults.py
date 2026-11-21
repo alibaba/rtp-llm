@@ -96,6 +96,9 @@ class PrefillDefaultsTest(unittest.TestCase):
     def moe(self, options=None, **overrides):
         options = options or {}
         strategy = Mock(routed_tp_size=overrides.get("tp_size", 4), name="grouped")
+        strategy.name = "grouped"
+        grouped = Mock(return_value=strategy)
+        grouped.name = strategy.name
         shared = SimpleNamespace(
             w13=SimpleNamespace(weight=torch.empty(1)),
             w2=SimpleNamespace(weight=torch.empty(1)),
@@ -105,7 +108,9 @@ class PrefillDefaultsTest(unittest.TestCase):
             "PpuTPMoE",
             Gate=lambda *a, **k: Mock(),
             MoeCfg=lambda **k: k,
-            PpuGroupedFP4Strategy=lambda *a, **k: strategy,
+            PpuGroupedW4A8Strategy=grouped,
+            PpuTPMegaMoEW4A8Strategy=type("MegaStrategy", (), {}),
+            PpuTPMegaMoEFP8SharedExpert=type("MegaSharedExpert", (), {}),
             PpuTPSharedExpert=lambda *a, **k: shared,
             all_reduce=lambda x, **k: x,
             Group=SimpleNamespace(TP="tp"),
@@ -136,7 +141,7 @@ class PrefillDefaultsTest(unittest.TestCase):
             n_hash_layers=3,
             vocab_size=100,
             layer_weights={
-                k: object()
+                k: torch.empty(1)
                 for k in (
                     "v4_shared_w13_w",
                     "v4_shared_w13_s",

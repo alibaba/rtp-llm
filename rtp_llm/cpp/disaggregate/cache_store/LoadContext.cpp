@@ -6,6 +6,13 @@
 
 namespace rtp_llm {
 
+namespace {
+// C40 across eight Decode ranks stays below the peer's 1000-entry RPC queue
+// even when every rank needs this peer: 40 * 8 * 2 = 640 in flight.
+constexpr size_t   kTcpLoadWindow    = 2;
+constexpr unsigned kQueueFullRetries = 5;
+}  // namespace
+
 SyncContext::SyncContext(const std::shared_ptr<CacheStore>& cache_store, bool combine_load):
     cache_store_(cache_store), combine_load_(combine_load) {}
 
@@ -42,9 +49,42 @@ void SyncContext::call(const std::vector<std::shared_ptr<RequestBlockBuffer>>& r
 
     expect_layer_cnt_ = request_block_buffers_.size();
 
+    if (!combine_load_) {
+        for (const auto& buffer : request_block_buffers_) {
+            pending_calls_.push_back({buffer, start_time_ms_});
+        }
+        dispatchPendingCalls();
+        return;
+    }
+
     for (auto& request_block_buffer : request_block_buffers_) {
         if (!doCall(request_block_buffer, timeout_ms)) {
             updateResult(false, CacheStoreErrorCode::InvalidParams, request_block_buffer);
+        }
+    }
+}
+
+void SyncContext::dispatchPendingCalls() {
+    // TCP has one RPC per layer/tag. Bound each request/peer window instead of
+    // flooding the remote RPC queue; waitDone drives replenishment and backoff.
+    while (true) {
+        std::shared_ptr<RequestBlockBuffer> buffer;
+        int64_t                             remaining_ms;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto                  now = autil::TimeUtility::currentTimeInMilliSeconds();
+            if (stopped_ || pending_calls_.empty() || in_flight_ >= kTcpLoadWindow || now >= deadline_ms_
+                || pending_calls_.front().ready_ms > now || (check_cancel_func_ && check_cancel_func_())) {
+                return;
+            }
+            buffer = std::move(pending_calls_.front().buffer);
+            pending_calls_.pop_front();
+            ++in_flight_;
+            remaining_ms = deadline_ms_ - now;
+        }
+        // A transport is allowed to complete synchronously.
+        if (!doCall(buffer, remaining_ms)) {
+            updateResult(false, CacheStoreErrorCode::InvalidParams, buffer);
         }
     }
 }
@@ -53,6 +93,22 @@ void SyncContext::updateResult(bool                                       succes
                                CacheStoreErrorCode                        ec,
                                const std::shared_ptr<RequestBlockBuffer>& request_block_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (stopped_) {
+        return;
+    }
+    if (!combine_load_) {
+        --in_flight_;
+        auto&      retries = retry_counts_[request_block_buffer.get()];
+        const auto now     = autil::TimeUtility::currentTimeInMilliSeconds();
+        if (!success && ec == CacheStoreErrorCode::PushWorkerItemFailed && retries < kQueueFullRetries
+            && now < deadline_ms_) {
+            const auto delay_ms = 5LL << retries++;
+            pending_calls_.push_back({request_block_buffer, now + delay_ms});
+            cond_.notify_all();
+            return;
+        }
+        cond_.notify_all();
+    }
     if (!success) {
         auto error_code = transCacheStoreErrorCode(ec);
         error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
@@ -86,6 +142,8 @@ void SyncContext::waitDone() {
             auto error_code = ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
             timed_out_      = true;
+            stopped_        = true;
+            pending_calls_.clear();
             RTP_LLM_LOG_INFO("load context wait done on timeout");
             return;
         }
@@ -93,16 +151,21 @@ void SyncContext::waitDone() {
         if (check_cancel_func_ != nullptr && check_cancel_func_()) {
             auto error_code = ErrorCode::CANCELLED;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
+            stopped_        = true;
+            pending_calls_.clear();
             RTP_LLM_LOG_INFO("load context wait done on cancelled");
             return;
         }
 
-        // sync wait, safe to use this
-        if (cond_.wait_for(lock, std::chrono::milliseconds(once_time_ms), [this] {
-                return done_layer_cnt_ == expect_layer_cnt_;
-            })) {
-            return;
+        if (!combine_load_) {
+            lock.unlock();
+            dispatchPendingCalls();
+            lock.lock();
+            if (done_layer_cnt_ == expect_layer_cnt_) {
+                return;
+            }
         }
+        cond_.wait_for(lock, std::chrono::milliseconds(once_time_ms));
     }
 }
 

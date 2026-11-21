@@ -179,11 +179,10 @@ def _mhc_pre_big_fuse(
                             ol[i1_h] += pre * xl[i_mhc, i1_h]
 
                     if fuse_norm:
-                        # Match the SGLang fused boundary: the RMS denominator
-                        # uses the FP32 readout, while the numerator retains the
-                        # BF16 activation boundary before applying norm weights.
+                        # Match the official DeepSeek boundary: HC readout is
+                        # rounded to BF16 before RMSNorm computes both its
+                        # numerator and denominator.
                         for i1_h in T.Parallel(hidden_block):
-                            sumsq_per_pos[i1_h] += ol[i1_h] * ol[i1_h]
                             output_shared[i0_h * hidden_block + i1_h] = T.cast(
                                 ol[i1_h], T.bfloat16
                             )
@@ -193,6 +192,16 @@ def _mhc_pre_big_fuse(
                         )
 
                 if fuse_norm:
+                    # Keep the official flat/strided reduction order explicit.
+                    # Accumulating inside the pipelined producer loop is lowered
+                    # as blocked-512 on PPU and changes two BF16 outputs on the
+                    # frozen layer-0 fixture.
+                    for i1_h in T.Parallel(hidden_block):
+                        for i0_h in T.serial(hidden_size // hidden_block):
+                            rounded = T.cast(
+                                output_shared[i0_h * hidden_block + i1_h], T.float32
+                            )
+                            sumsq_per_pos[i1_h] += rounded * rounded
                     sumsq = T.alloc_fragment(1, T.float32)
                     T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
                     inv_rms = T.alloc_fragment(1, T.float32)
