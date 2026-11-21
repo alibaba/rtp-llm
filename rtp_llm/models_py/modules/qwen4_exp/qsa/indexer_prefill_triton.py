@@ -269,6 +269,7 @@ def write_zero_prefix_prefill(
     host_cu_seqlens=None,
     host_kv_table=None,
     host_state_table=None,
+    skip_preflight=False,
 ) -> dict | None:
     """Return None for unsupported geometry or aliased pages, before any write.
 
@@ -321,75 +322,76 @@ def write_zero_prefix_prefill(
         groups * 4, page_size
     ):
         raise ValueError("QSA prefill block table does not cover required pages")
-    host_alias = _check_host_mirrors(
-        lengths,
-        host_cu_seqlens,
-        (host_state_table, host_kv_table),
-        (state_table, kv_table),
-        (state_pool.shape[0], kv_pool.shape[0]),
-        page_size,
-    )
-    if host_alias is None:
-        # Device-only metadata (including MTP and CUDA graph paths) retains the
-        # strict GPU preflight before any side-cache mutation.
-        counts = (
-            [triton.cdiv(n, page_size) for n in lengths],
-            [triton.cdiv(n // 4 * 4, page_size) for n in lengths],
+    if not skip_preflight or qsa_strict_validation_enabled():
+        host_alias = _check_host_mirrors(
+            lengths,
+            host_cu_seqlens,
+            (host_state_table, host_kv_table),
+            (state_table, kv_table),
+            (state_pool.shape[0], kv_pool.shape[0]),
+            page_size,
         )
-        metadata = torch.tensor(
-            [0, *itertools.accumulate(lengths), *counts[0], *counts[1]],
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True,
-        ).to(device=device, non_blocking=True)
-        invalid = torch.any(cu_seqlens != metadata[: batch + 1])
-        aliases = torch.zeros((), dtype=torch.bool, device=device)
-        for index, (table, pool) in enumerate(
-            ((state_table, state_pool), (kv_table, kv_pool))
-        ):
-            offset = batch + 1 + index * batch
-            required = (
-                torch.arange(table.shape[1], device=device)[None, :]
-                < metadata[offset : offset + batch, None]
+        if host_alias is None:
+            # Device-only metadata (including MTP and CUDA graph paths) retains the
+            # strict GPU preflight before any side-cache mutation.
+            counts = (
+                [triton.cdiv(n, page_size) for n in lengths],
+                [triton.cdiv(n // 4 * 4, page_size) for n in lengths],
             )
-            invalid = invalid | torch.any(
-                required & ((table <= 0) | (table >= pool.shape[0]))
-            )
-            ids = (
-                torch.where(required, table, torch.iinfo(torch.int32).max)
-                .flatten()
-                .sort()
-                .values
-            )
-            aliases = aliases | torch.any(
-                (ids[1:] == ids[:-1]) & (ids[1:] != torch.iinfo(torch.int32).max)
-            )
-        if qsa_strict_validation_enabled():
-            verdict = int(
-                (invalid.to(torch.int32) + 2 * aliases.to(torch.int32)).item()
-            )
-            if verdict & 1:
-                raise ValueError(
-                    "QSA prefill has invalid cu_seqlens or physical block ids"
+            metadata = torch.tensor(
+                [0, *itertools.accumulate(lengths), *counts[0], *counts[1]],
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=True,
+            ).to(device=device, non_blocking=True)
+            invalid = torch.any(cu_seqlens != metadata[: batch + 1])
+            aliases = torch.zeros((), dtype=torch.bool, device=device)
+            for index, (table, pool) in enumerate(
+                ((state_table, state_pool), (kv_table, kv_pool))
+            ):
+                offset = batch + 1 + index * batch
+                required = (
+                    torch.arange(table.shape[1], device=device)[None, :]
+                    < metadata[offset : offset + batch, None]
                 )
-            if verdict & 2:
-                return None
-        else:
-            # Engine/allocator invariants trap the device fail-stop at the next
-            # host synchronization instead of raising here; both asserts are
-            # enqueued before the first pool mutation below. Production eager
-            # callers reach the host-mirror branch above, which still declines
-            # aliased pages (vectorized fallback) without any readback.
-            qsa_assert_valid(
-                ~invalid,
-                "QSA prefill has invalid cu_seqlens or physical block ids",
-            )
-            qsa_assert_valid(
-                ~aliases,
-                "QSA prefill has aliased physical block ids",
-            )
-    elif host_alias:
-        return None
+                invalid = invalid | torch.any(
+                    required & ((table <= 0) | (table >= pool.shape[0]))
+                )
+                ids = (
+                    torch.where(required, table, torch.iinfo(torch.int32).max)
+                    .flatten()
+                    .sort()
+                    .values
+                )
+                aliases = aliases | torch.any(
+                    (ids[1:] == ids[:-1]) & (ids[1:] != torch.iinfo(torch.int32).max)
+                )
+            if qsa_strict_validation_enabled():
+                verdict = int(
+                    (invalid.to(torch.int32) + 2 * aliases.to(torch.int32)).item()
+                )
+                if verdict & 1:
+                    raise ValueError(
+                        "QSA prefill has invalid cu_seqlens or physical block ids"
+                    )
+                if verdict & 2:
+                    return None
+            else:
+                # Engine/allocator invariants trap the device fail-stop at the next
+                # host synchronization instead of raising here; both asserts are
+                # enqueued before the first pool mutation below. Production eager
+                # callers reach the host-mirror branch above, which still declines
+                # aliased pages (vectorized fallback) without any readback.
+                qsa_assert_valid(
+                    ~invalid,
+                    "QSA prefill has invalid cu_seqlens or physical block ids",
+                )
+                qsa_assert_valid(
+                    ~aliases,
+                    "QSA prefill has aliased physical block ids",
+                )
+        elif host_alias:
+            return None
 
     # index_qk_proj exposes K as a strided slice of the joint Q/K output.
     raw_keys = raw_keys.contiguous()

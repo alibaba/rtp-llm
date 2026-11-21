@@ -260,12 +260,18 @@ class IndexerWriterGeometry:
     kv_write_valid: torch.Tensor
 
 
-def _writer_geometry_fingerprint(tensor: torch.Tensor) -> tuple[int, int] | None:
+def _writer_geometry_fingerprint(tensor: torch.Tensor) -> tuple | None:
     if not isinstance(tensor, torch.Tensor):
         return None
-    if torch.is_inference(tensor):
-        return (int(tensor.data_ptr()), -1)
-    return (int(tensor.data_ptr()), int(tensor._version))
+    version = -1 if torch.is_inference(tensor) else int(tensor._version)
+    return (
+        int(tensor.data_ptr()),
+        version,
+        tuple(int(d) for d in tensor.shape),
+        tuple(int(s) for s in tensor.stride()),
+        tensor.dtype,
+        tensor.device,
+    )
 
 
 def writer_geometry_applies(
@@ -318,8 +324,6 @@ def writer_geometry_applies(
         ("state_block_table", state_block_table),
     )
     for name, tensor in sources:
-        if getattr(geometry, name) is not tensor:
-            return False
         if geometry.source_fingerprints.get(name) != _writer_geometry_fingerprint(
             tensor
         ):

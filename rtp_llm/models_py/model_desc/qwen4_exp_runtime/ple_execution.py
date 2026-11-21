@@ -1,5 +1,6 @@
 """PLE page planning, embedding lookup and execution for one model."""
 
+from collections import OrderedDict
 from collections.abc import Mapping
 from typing import Any
 
@@ -13,7 +14,11 @@ from rtp_llm.models_py.model_desc.block_map import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     validate_pd_cache_inputs,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_strict_validation_enabled,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    _tensor_fingerprint,
     host_input_mirror,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
@@ -21,6 +26,25 @@ from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 from .ple_cache_views import PLECacheViews
 from .ple_state import PLELookupResult
 from .ple_transaction import PLETransactionCoordinator
+
+
+_PLE_METADATA_AGREE_LIMIT = 8
+_PLE_METADATA_AGREE_CACHE: "OrderedDict[tuple, tuple[Any, Any, tuple, tuple, bool]]" = (
+    OrderedDict()
+)
+
+
+def _ple_attr_fingerprint(value: Any) -> tuple:
+    if isinstance(value, torch.Tensor):
+        return (
+            "tensor",
+            _tensor_fingerprint(value),
+            tuple(int(d) for d in value.shape),
+            tuple(int(s) for s in value.stride()),
+            value.dtype,
+            value.device,
+        )
+    return ("value", value)
 
 
 class PLEExecution:
@@ -55,6 +79,31 @@ class PLEExecution:
         paths and host pairs stay sync-free. The semantics follow
         ``same_tensor_metadata`` per name.
         """
+        cache_key = None
+        cache_fp = None
+        if not qsa_strict_validation_enabled():
+            try:
+                names_tuple = tuple(names)
+                cache_fp = tuple(
+                    (
+                        _ple_attr_fingerprint(getattr(lhs, n, None)),
+                        _ple_attr_fingerprint(getattr(rhs, n, None)),
+                    )
+                    for n in names_tuple
+                )
+                hash(cache_fp)
+                cache_key = (id(lhs), id(rhs), names_tuple)
+            except TypeError:
+                cache_key = None
+                cache_fp = None
+        if cache_key is not None:
+            cached = _PLE_METADATA_AGREE_CACHE.get(cache_key)
+            if cached is not None:
+                if cached[3] == cache_fp:
+                    _PLE_METADATA_AGREE_CACHE.move_to_end(cache_key)
+                    return cached[4]
+                del _PLE_METADATA_AGREE_CACHE[cache_key]
+
         verdict = None
         for name in names:
             left = getattr(lhs, name, None)
@@ -81,7 +130,24 @@ class PLEExecution:
                 continue
             same = (left == right).all()
             verdict = same if verdict is None else verdict & same
-        return True if verdict is None else bool(verdict.item())
+        result = True if verdict is None else bool(verdict.item())
+        if cache_key is not None and cache_fp is not None:
+            live_tensors = tuple(
+                t
+                for n in names
+                for t in (getattr(lhs, n, None), getattr(rhs, n, None))
+                if isinstance(t, torch.Tensor)
+            )
+            _PLE_METADATA_AGREE_CACHE[cache_key] = (
+                lhs,
+                rhs,
+                live_tensors,
+                cache_fp,
+                result,
+            )
+            while len(_PLE_METADATA_AGREE_CACHE) > _PLE_METADATA_AGREE_LIMIT:
+                _PLE_METADATA_AGREE_CACHE.popitem(last=False)
+        return result
 
     @staticmethod
     def _upload_int64(values, device: torch.device) -> torch.Tensor:
@@ -587,6 +653,7 @@ class PLEExecution:
                             output, state = ple.prefill(
                                 chunk_hyper,
                                 history,
+                                add_residual=True,
                                 embeddings=PLELookupResult(
                                     ple.ple_embedding._reduce_rows(
                                         local_rows[idx][:, start:end].contiguous()
@@ -601,6 +668,7 @@ class PLEExecution:
                                 chunk_hyper,
                                 history,
                                 state,
+                                add_residual=True,
                                 embeddings=PLELookupResult(
                                     ple.ple_embedding._reduce_rows(
                                         local_rows[idx][:, start:end].contiguous()
@@ -610,7 +678,7 @@ class PLEExecution:
                                     else None
                                 ).embeddings,
                             )
-                        chunk_outputs.append((chunk_hyper + output).squeeze(0))
+                        chunk_outputs.append(output.squeeze(0))
                         write_rows.append(idx)
                         write_pages.append((prefix + end - 1) // page_size)
                         write_states.append(state.squeeze(0))

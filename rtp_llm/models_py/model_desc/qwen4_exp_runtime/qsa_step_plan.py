@@ -165,19 +165,25 @@ def graph_decode_visible_lengths(
     return lengths
 
 
+def _tensor_storage_key(tensor: torch.Tensor) -> tuple:
+    return (
+        int(tensor.data_ptr()),
+        tuple(int(d) for d in tensor.shape),
+        tuple(int(s) for s in tensor.stride()),
+        tensor.dtype,
+        tensor.device,
+    )
+
+
 def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
     """CPU mirror of a small metadata tensor on the inputs object.
 
     Host sources pass through unchanged (the exact tensor, zero copies).  A
     device source is read back once per step: the mirror is keyed by the
-    source tensor's identity and validated by its fingerprint, so every reader
-    of the same tensor (the gate, the plan build, the per-layer dispatch
-    checks and the three cache regions, which share one inputs tensor per
-    attribute) reuses a single readback, and a fresh step that materialises
-    new tensors refreshes it.  In-place device edits that keep the same storage
-    are outside the fingerprint's reach -- the same bet the plan fingerprints
-    already make (the engine materialises fresh inference tensors per step and
-    the runtime never rewrites the fingerprinted metadata tensors in place).
+    source tensor's backing storage and validated by its fingerprint, so every
+    reader of the same tensor (including C++ pybind11 getters that wrap a
+    fresh Python Tensor per access) reuses a single readback while keeping the
+    backing storage alive until eviction.
     """
     tensor = getattr(main_inputs, name, None)
     if not isinstance(tensor, torch.Tensor):
@@ -185,18 +191,18 @@ def host_input_mirror(main_inputs: Any, name: str) -> torch.Tensor | None:
     if tensor.device.type == "cpu":
         return tensor
     fingerprint = _tensor_fingerprint(tensor)
-    key = id(tensor)
+    key = _tensor_storage_key(tensor)
     entry = _MIRROR_CACHE.get(key)
     if entry is not None:
-        owner, mirror, cached = entry
-        if owner is tensor and cached == fingerprint:
+        _owner, mirror, cached = entry
+        if cached == fingerprint:
             _MIRROR_CACHE.move_to_end(key)
             return mirror
         del _MIRROR_CACHE[key]
     mirror = tensor.detach().to("cpu").contiguous()
     _MIRROR_STATS["readbacks"] += 1
-    # The entry holds the source tensor alive so its id stays unique while
-    # the mirror exists.
+    # The entry holds the source tensor alive so its storage pointer cannot be
+    # reused while the mirror exists.
     _MIRROR_CACHE[key] = (tensor, mirror, fingerprint)
     while len(_MIRROR_CACHE) > _MIRROR_CACHE_LIMIT:
         _MIRROR_CACHE.popitem(last=False)
@@ -273,15 +279,14 @@ def prefill_mirror_facts(main_inputs: Any) -> PrefillMirrorFacts | None:
         _tensor_fingerprint(lengths_mirror),
         _tensor_fingerprint(prefixes_mirror),
     )
-    key = (id(lengths_mirror), id(prefixes_mirror))
+    key = (
+        _tensor_storage_key(lengths_mirror),
+        _tensor_storage_key(prefixes_mirror),
+    )
     entry = _PREFILL_FACTS_CACHE.get(key)
     if entry is not None:
-        cached_lengths, cached_prefixes, facts, cached_fp = entry
-        if (
-            cached_lengths is lengths_mirror
-            and cached_prefixes is prefixes_mirror
-            and cached_fp == fingerprint
-        ):
+        _cached_lengths, _cached_prefixes, facts, cached_fp = entry
+        if cached_fp == fingerprint:
             _PREFILL_FACTS_CACHE.move_to_end(key)
             return facts
         del _PREFILL_FACTS_CACHE[key]
@@ -429,6 +434,9 @@ class Qwen4ExpPrefillStepPlan:
     # per-call chain); each layer's writer re-validates it host-side before
     # use, so a stale bundle can never feed a wrong write.
     writer_geometry: Any = field(default=None, repr=False, compare=False)
+    zero_prefix_preflight_keys: set = field(
+        default_factory=set, repr=False, compare=False
+    )
 
 
 def _cache_regions(context: Any) -> tuple:

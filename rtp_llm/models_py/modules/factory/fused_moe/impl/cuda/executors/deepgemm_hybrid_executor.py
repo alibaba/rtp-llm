@@ -201,6 +201,45 @@ def _empty_fp32_moe_scale(shape, device, *, mn_major=False):
     return torch.empty_strided(shape, strides, device=device, dtype=torch.float32)
 
 
+_CONTIGUOUS_MOE_BUCKET_ROWS = 73728
+
+
+def _acquire_contiguous_moe_workspace(
+    device: torch.device,
+    all_tokens: int,
+    K: int,
+    N: int,
+    in_dtype: torch.dtype,
+    *,
+    graph_layout: bool,
+) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    if (
+        graph_layout
+        or all_tokens <= 4096
+        or torch.is_grad_enabled()
+        or _is_cuda_graph_warmup_or_capture()
+    ):
+        return None
+    alloc_tokens = (
+        _CONTIGUOUS_MOE_BUCKET_ROWS
+        if all_tokens <= _CONTIGUOUS_MOE_BUCKET_ROWS
+        else align_up_math(all_tokens, 8192)
+    )
+    in_bytes = align_up_math(alloc_tokens * K * in_dtype.itemsize, 256)
+    gateup_bytes = align_up_math(alloc_tokens * N * 2, 256)
+    down_bytes = align_up_math(alloc_tokens * K * 2, 256)
+    needed_bytes = max(in_bytes + gateup_bytes, down_bytes)
+    buf = torch.empty(needed_bytes, device=device, dtype=torch.uint8)
+    in_end = all_tokens * K * in_dtype.itemsize
+    gateup_off = align_up_math(in_end, 256)
+    gateup_end = gateup_off + all_tokens * N * 2
+    down_end = all_tokens * K * 2
+    recv_x = buf[:in_end].view(in_dtype).view(all_tokens, K)
+    gateup_out = buf[gateup_off:gateup_end].view(torch.bfloat16).view(all_tokens, N)
+    down_out = buf[:down_end].view(torch.bfloat16).view(all_tokens, K)
+    return recv_x, gateup_out, down_out
+
+
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     _qwen4_sm90_mixed_graph: bool = False
     BLOCK_SIZE = 128
@@ -317,7 +356,6 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         self._sm90_cuda_contiguous_silu = (
             self._sm90_mn_major_scales
             and _native_contiguous_silu_fp8 is not None
-            and "H20" in torch.cuda.get_device_name(self.w13_weight.device)
         )
         self._h20_compact_fp8 = (
             os.environ.get("RTP_LLM_H20_COMPACT_FP8_MOE", "1") == "1"
@@ -326,7 +364,6 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             and getattr(config, "dp_size", 0) == 1
             and getattr(getattr(config, "model_config", None), "_qwen4_full_fp8", False)
             and not getattr(config.model_config, "_qwen4_full_fp8_nvfp4", False)
-            and "H20" in torch.cuda.get_device_name(self.w13_weight.device)
             and self.w13_weight.dtype == self.w2_weight.dtype == torch.float8_e4m3fn
             and self.w13_weight_scale_inv.dtype
             == self.w2_weight_scale_inv.dtype
@@ -990,7 +1027,13 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 expert_alignment,
             )
 
-        if not graph_layout:
+        async_device_counts = (
+            not graph_layout
+            and use_cuda_silu
+            and payload.expert_tokens_meta.expert_num_tokens_cpu is None
+            and token_num <= 2048
+        )
+        if not graph_layout and not async_device_counts:
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
@@ -1017,11 +1060,23 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         N = self.w13_weight.size(1)
         hidden_states_fp8_shape = hidden_states_fp8.shape
         hidden_states_fp8_device = hidden_states_fp8.device
+        ws_views = _acquire_contiguous_moe_workspace(
+            hidden_states_fp8_device,
+            all_tokens,
+            K,
+            N,
+            hidden_states_fp8.dtype,
+            graph_layout=graph_layout,
+        )
         input_tensor = [
-            torch.empty(
-                (all_tokens, K),
-                device=hidden_states_fp8.device,
-                dtype=hidden_states_fp8.dtype,
+            (
+                ws_views[0]
+                if ws_views is not None
+                else torch.empty(
+                    (all_tokens, K),
+                    device=hidden_states_fp8.device,
+                    dtype=hidden_states_fp8.dtype,
+                )
             ),
             (
                 torch.zeros(
@@ -1041,13 +1096,19 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         # keep unused graph workspace tiles inactive instead of routing to 0.
         # This relies on the pinned SM120 wheel (8bcfcab); non-SM120 scatter
         # below fills all padded rows with valid expert IDs for older wheels.
-        m_indices = torch.full(
-            (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
+        m_indices = (
+            torch.zeros(
+                (all_tokens,), device=hidden_states_fp8.device, dtype=torch.int32
+            )
+            if async_device_counts
+            else torch.full(
+                (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
+            )
         )
         output_index = torch.full_like(topk_idx, -1)
         scatter_num_tokens_per_expert = num_recv_tokens_per_expert
         scatter_alignment = expert_alignment
-        if not self.is_sm120 and not graph_layout:
+        if not self.is_sm120 and not graph_layout and not async_device_counts:
             # Reuse one persistent pinned buffer instead of a per-layer
             # cudaHostAlloc; the counts read above synchronized the stream,
             # so the previous layer's H2D from this buffer has drained
@@ -1076,7 +1137,13 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             scatter_alignment = 1
         # DeepGEMM on SM90 skips WGMMA when a 64-row group's first index is
         # negative. The activation needs the expert owner of padded rows.
-        gemm_m_indices = torch.empty_like(m_indices) if use_cuda_silu else m_indices
+        gemm_m_indices = (
+            torch.full(
+                (all_tokens,), -1, device=hidden_states_fp8.device, dtype=torch.int32
+            )
+            if async_device_counts
+            else (torch.empty_like(m_indices) if use_cuda_silu else m_indices)
+        )
         expert_start_loc = torch.empty_like(scatter_num_tokens_per_expert)
         ep_scatter(
             hidden_states_fp8,
@@ -1099,10 +1166,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         # Preserve the eager input lifetime without invalidating graph buffers.
         if not graph_layout:
             dispose_tensor(hidden_states_fp8)
-        gateup_output = torch.empty(
-            (all_tokens, N),
-            device=hidden_states_fp8_device,
-            dtype=torch.bfloat16,
+        gateup_output = (
+            ws_views[1]
+            if ws_views is not None
+            else torch.empty(
+                (all_tokens, N),
+                device=hidden_states_fp8_device,
+                dtype=torch.bfloat16,
+            )
         )
         if not is_deep_gemm_e8m0_used() and not mn_major_scales:
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
@@ -1123,21 +1194,24 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         del input_tensor
         if mn_major_scales and self._sm90_prefill_silu_fp8:
             if use_cuda_silu:
-                counts = num_recv_tokens_per_expert_cpu
-                padded = padded_num_tokens_per_expert
-                start, end = 0, all_tokens
-                first = 0
-                while first < len(padded) and counts[first] == padded[first]:
-                    start += padded[first]
-                    first += 1
-                if first == len(padded):
-                    start = end = 0
+                if async_device_counts:
+                    start, end = 0, all_tokens
                 else:
-                    last = len(padded) - 1
-                    while counts[last] == padded[last]:
-                        end -= padded[last]
-                        last -= 1
-                    start += counts[first]
+                    counts = num_recv_tokens_per_expert_cpu
+                    padded = padded_num_tokens_per_expert
+                    start, end = 0, all_tokens
+                    first = 0
+                    while first < len(padded) and counts[first] == padded[first]:
+                        start += padded[first]
+                        first += 1
+                    if first == len(padded):
+                        start = end = 0
+                    else:
+                        last = len(padded) - 1
+                        while counts[last] == padded[last]:
+                            end -= padded[last]
+                            last -= 1
+                        start += counts[first]
                 down_input_fp8, down_input_scale = _native_contiguous_silu_fp8(
                     gateup_output,
                     m_indices if start < end else None,
@@ -1148,11 +1222,16 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             else:
                 down_input_fp8, down_input_scale = silu_mul_native_fp8(gateup_output)
             del gateup_output
-            down_output = torch.empty(
-                (all_tokens, K),
-                device=hidden_states_fp8_device,
-                dtype=torch.bfloat16,
+            down_output = (
+                ws_views[2]
+                if ws_views is not None
+                else torch.empty(
+                    (all_tokens, K),
+                    device=hidden_states_fp8_device,
+                    dtype=torch.bfloat16,
+                )
             )
+            del ws_views
         else:
             down_input = torch.empty(
                 (
@@ -1165,11 +1244,16 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             gateup_output = gateup_output.view(-1, N)
             silu_and_mul(down_input, gateup_output)
             del gateup_output
-            down_output = torch.empty(
-                (all_tokens, K),
-                device=hidden_states_fp8_device,
-                dtype=torch.bfloat16,
+            down_output = (
+                ws_views[2]
+                if ws_views is not None
+                else torch.empty(
+                    (all_tokens, K),
+                    device=hidden_states_fp8_device,
+                    dtype=torch.bfloat16,
+                )
             )
+            del ws_views
             if is_deep_gemm_e8m0_used():
                 down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
                     down_input,

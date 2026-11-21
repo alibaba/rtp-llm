@@ -100,6 +100,18 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.model_weight import W
 
 
+_QSA_AUX_STREAMS: Dict[int, torch.cuda.Stream] = {}
+
+
+def _qsa_aux_stream_for_device(device: torch.device) -> torch.cuda.Stream:
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    stream = _QSA_AUX_STREAMS.get(index)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device)
+        _QSA_AUX_STREAMS[index] = stream
+    return stream
+
+
 class Qwen4ExpAttention(Qwen3NextAttention):
     """Qwen4 full attention plus its checkpoint-backed QSA indexer.
 
@@ -537,6 +549,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                     else {}
                 )
 
+                aux_stream = None
                 with record_function_range("qwen4.qsa.indexer"):
                     prepared = None
                     # Every packed window up to the context bound -- decode and
@@ -568,17 +581,41 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         selection_kwargs["projected"] = (
                             self.qsa_indexer.split_projected(projected_qk)
                         )
-                    selected = self._qsa_selected_indices(
-                        hidden_states, qsa_runtime, **selection_kwargs
+                    fused_gate_forward = getattr(
+                        fmha_impl, "forward_with_output_gate", None
                     )
+                    overlap_indexer = (
+                        prepared is not None
+                        and torch.cuda.is_current_stream_capturing()
+                        and type(self) is Qwen4ExpAttention
+                        and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+                        and type(fmha_impl) is SparseGqaFmhaImpl
+                        and callable(fused_gate_forward)
+                        and hidden_states.is_cuda
+                        and torch.version.hip is None
+                        and hidden_states.ndim == 2
+                        and 1 <= hidden_states.shape[0] <= 256
+                        and torch.cuda.get_device_capability(hidden_states.device)
+                        == (9, 0)
+                    )
+                    if overlap_indexer:
+                        main_stream = torch.cuda.current_stream(hidden_states.device)
+                        aux_stream = _qsa_aux_stream_for_device(hidden_states.device)
+                        aux_stream.wait_stream(main_stream)
+                        with torch.cuda.stream(aux_stream):
+                            selected = self._qsa_selected_indices(
+                                hidden_states, qsa_runtime, **selection_kwargs
+                            )
+                        fmha_impl._qsa_selection_ready_stream = aux_stream
+                    else:
+                        selected = self._qsa_selected_indices(
+                            hidden_states, qsa_runtime, **selection_kwargs
+                        )
                 if trusted_selection:
                     fmha_impl.set_trusted_selected_indices(selected)
                 else:
                     set_selected(selected)
                 with record_function_range("qwen4.qsa.fmha"):
-                    fused_gate_forward = getattr(
-                        fmha_impl, "forward_with_output_gate", None
-                    )
                     if callable(fused_gate_forward):
                         from rtp_llm.models_py.distributed.collective_torch import (
                             Group,
@@ -612,6 +649,12 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                             self, hidden_states, fmha_impl, kv_cache, gate
                         )
             except BaseException:
+                ready_stream = getattr(fmha_impl, "_qsa_selection_ready_stream", None)
+                if ready_stream is not None:
+                    fmha_impl._qsa_selection_ready_stream = None
+                    torch.cuda.current_stream(hidden_states.device).wait_stream(
+                        ready_stream
+                    )
                 if main_cache_mutation_started():
                     # Once the fused main writer has started, rolling back only
                     # the side pools would make the two cache views disagree.
@@ -621,6 +664,13 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 else:
                     rollback_side_cache()
                 raise
+            finally:
+                ready_stream = getattr(fmha_impl, "_qsa_selection_ready_stream", None)
+                if ready_stream is not None:
+                    fmha_impl._qsa_selection_ready_stream = None
+                    torch.cuda.current_stream(hidden_states.device).wait_stream(
+                        ready_stream
+                    )
             with record_function_range("qwen4.qsa.side_cache"):
                 finalize_side_cache()
             return output
@@ -854,11 +904,13 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         with record_function_range("qwen4.hc.attn"):
             if pending_injection is not None:
                 previous_output, previous_gate = pending_injection
+                pending_injection = None
                 hidden_states, hyper_states, inject_weights = (
                     self.attn_hyper_connection.forward_with_injection(
                         hyper_states, previous_output, previous_gate
                     )
                 )
+                del previous_output, previous_gate
             else:
                 hidden_states, hyper_states, inject_weights = (
                     self.attn_hyper_connection(hyper_states)
@@ -870,10 +922,12 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             attention_inputs=attention_inputs,
             attn_meta=attn_meta,
         )
+        del hidden_states
         if qsa_runtime is not None:
             attn_kwargs["qsa_runtime"] = qsa_runtime
         with record_function_range(self._attn_profile_range):
             hidden_states = self.self_attn(**attn_kwargs)
+        del attn_kwargs
         with record_function_range("qwen4.hc.mlp"):
             if isinstance(self.mlp_hyper_connection, GatedResidual):
                 hidden_states, hyper_states, inject_weights = (
@@ -1688,6 +1742,8 @@ class Qwen4ExpModel(Qwen35Model):
             ple_prefetch = self._start_eager_ple_prefetch(inputs, attention_inputs)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
+        if not is_cuda_graph:
+            self._mtp_target_hidden_states = None
         attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
 
         if fmha_impl is None:
@@ -1702,11 +1758,15 @@ class Qwen4ExpModel(Qwen35Model):
                 if prepared_hyper is None
                 else prepared_hyper
             )
+        del prepared_hyper, hidden_states
 
-        attention_inputs = get_attention_inputs_value(inputs)
         ple_input_ids = inputs.input_ids
         if self.ple_layers:
             ple_input_ids = self._ple_input_ids(inputs)
+            if isinstance(ple_input_ids, torch.Tensor):
+                ple_input_ids = ple_input_ids.reshape(-1).to(
+                    device=hyper_states.device, dtype=torch.long
+                )
         pending_injection = None
         hc_defer_shape = (
             hyper_states.ndim == 2
@@ -1744,7 +1804,11 @@ class Qwen4ExpModel(Qwen35Model):
                         hyper_states,
                         ple_input_ids,
                         attention_inputs,
-                        **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
+                        **(
+                            {"prefetch": ple_prefetch.pop(i)}
+                            if i in ple_prefetch
+                            else {}
+                        ),
                     )
                 if self.kv_cache is None:
                     layer_kv_cache = None

@@ -572,7 +572,11 @@ def chunk_gated_delta_rule_fwd_h(
         assert K == V == 128 and state_pool.dtype == torch.float32
         assert state_pool.shape[1:] == (H, V, K)
         assert state_pool.stride()[1:] == (V * K, K, 1)
-        assert k.dtype == torch.bfloat16 and gk is None and page_size in (64, 128)
+        assert (
+            k.dtype == torch.bfloat16
+            and gk is None
+            and page_size in (64, 128, 256)
+        )
         # chunk-o already rounds every h load to BF16. Cache pages retain FP32.
         h_dtype = k.dtype if state_dtype is None else state_dtype
     h = k.new_empty(B, NT, H, V, K, dtype=h_dtype)

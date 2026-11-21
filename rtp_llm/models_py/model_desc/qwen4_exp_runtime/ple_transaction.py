@@ -98,9 +98,18 @@ class PLETransactionCoordinator:
             raise RuntimeError(
                 "qwen4_exp PLE target verify requires int32 prefix_lengths [B]"
             )
-        prefixes_device = prefixes.to(
-            device=hyper_states.device, dtype=torch.long, non_blocking=True
-        ).contiguous()
+        if (
+            graph_capture
+            and self.active_transaction is not None
+            and self.active_transaction.prefixes.device == hyper_states.device
+            and self.active_transaction.prefixes.dtype == torch.long
+            and int(self.active_transaction.prefixes.numel()) == batch_size
+        ):
+            prefixes_device = self.active_transaction.prefixes
+        else:
+            prefixes_device = prefixes.to(
+                device=hyper_states.device, dtype=torch.long, non_blocking=True
+            ).contiguous()
         # Host-mirror read (a device source was read back once per step) keeps
         # this per-layer check free of a CUDA scalar readback.
         if not graph_capture and bool(
@@ -177,6 +186,7 @@ class PLETransactionCoordinator:
             hyper_states.reshape(batch_size, query_len, -1),
             history,
             initial_state,
+            add_residual=True,
             **({"embeddings": embeddings} if embeddings is not None else {}),
         )
 
@@ -232,7 +242,7 @@ class PLETransactionCoordinator:
                 f"qwen4_exp PLE target layer {layer_idx} was staged twice"
             )
         transaction.stages[layer_idx] = stage
-        return hyper_states + output.reshape_as(hyper_states)
+        return output.reshape_as(hyper_states)
 
     @staticmethod
     def _synchronize_ple_transaction(transaction: _PLETargetTransaction) -> None:

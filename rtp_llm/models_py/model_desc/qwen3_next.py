@@ -141,6 +141,30 @@ class Qwen3NextMetadata(object):
             tuple[object, ...], _AiterFlydslGdnDecodeCacheEntry
         ] = {}
         self.aiter_flydsl_gdn_decode_unsupported: set[tuple[object, ...]] = set()
+        self._canonical_cu_seqlens: dict[
+            tuple[int, tuple[int, ...], torch.dtype], torch.Tensor
+        ] = {}
+
+    def canonical_cu_seqlens(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
+        cu = attn_inputs.cu_seqlens_device
+        if not isinstance(cu, torch.Tensor):
+            return cu
+        key = (int(cu.data_ptr()), tuple(cu.shape), cu.dtype)
+        cached = self._canonical_cu_seqlens.get(key)
+        if cached is not None:
+            return cached
+        if (
+            not self.is_cuda_graph
+            and not getattr(attn_inputs, "is_cuda_graph", False)
+            and isinstance(getattr(attn_inputs, "input_lengths", None), torch.Tensor)
+            and attn_inputs.input_lengths.device.type == "cpu"
+            and attn_inputs.input_lengths.numel() + 1 == cu.numel()
+        ):
+            cu._host_lengths = _cpu_sequence_lengths(attn_inputs.input_lengths)
+        if len(self._canonical_cu_seqlens) >= 8:
+            self._canonical_cu_seqlens.clear()
+        self._canonical_cu_seqlens[key] = cu
+        return cu
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -517,14 +541,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             mixed_qkv.is_cuda
             and torch.version.hip is None
             and mixed_qkv.dtype == torch.bfloat16
-            and mixed_qkv.shape in ((8192, 5120), (32768, 5120))
-            and seq_size_per_block == 64
+            and mixed_qkv.ndim == 2
+            and mixed_qkv.shape[0] >= 4096
+            and mixed_qkv.shape[1] == 5120
+            and seq_size_per_block in (64, 128)
             and attn_inputs.input_lengths.numel() == 1
-            and attn_inputs.prefix_lengths.device.type == "cpu"
-            and int(attn_inputs.prefix_lengths[0]) == 0
             and torch.cuda.get_device_capability(mixed_qkv.device) == (9, 0)
-            and torch.cuda.get_device_properties(mixed_qkv.device).multi_processor_count
-            == 78
         ):
             block_n = 512
         out = causal_conv1d_fn(
@@ -604,8 +626,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             else None
         )
         context_batch_size = attn_inputs.input_lengths.shape[0]
-        # cu_seqlens_without_padding = attn_inputs.cu_seqlens_device[: context_batch_size + 1]
-        cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
+        canonical_cu = getattr(attn_meta, "canonical_cu_seqlens", None)
+        cu_seqlens_without_padding = (
+            canonical_cu(attn_inputs)
+            if callable(canonical_cu)
+            else attn_inputs.cu_seqlens_device
+        )
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
             # Reuse one buffer across the layers of a step: the shape is a
@@ -690,7 +716,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             and query.dtype == key.dtype == value.dtype == torch.bfloat16
             and query.shape[-2:] == (8, 128)
             and value.shape[-2:] == (24, 128)
-            and 2048 <= query.shape[1] <= 32768
+            and 512 <= query.shape[1] <= 32768
             and cu_seqlens_without_padding.numel() == 2
             and seq_size_per_block in (64, 128)
             and torch.cuda.get_device_capability(query.device) == (9, 0)
@@ -1054,6 +1080,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
+        *,
+        ba_ready_stream: Optional[torch.cuda.Stream] = None,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
         assert (
@@ -1069,6 +1097,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             and not is_target_verify
             and getattr(self, "_packed_decode", None) is None
         ):
+            if ba_ready_stream is not None:
+                torch.cuda.current_stream(mixed_qkv.device).wait_stream(ba_ready_stream)
             fused = conv_gate(
                 mixed_qkv,
                 self.conv_weights,
@@ -1093,6 +1123,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                     attn_meta,
                     precomputed_gates=(g, beta),
                 )
+            ba_ready_stream = None
         mixed_qkv = self._conv1d(
             mixed_qkv,
             kv_cache_tensor,
@@ -1100,6 +1131,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             is_target_verify,
         )
+        if ba_ready_stream is not None:
+            torch.cuda.current_stream(mixed_qkv.device).wait_stream(ba_ready_stream)
         attn_out = self._fla(
             mixed_qkv,
             b,
@@ -1174,6 +1207,18 @@ class Qwen3NextAttention(CausalAttention):
         gate = self.gate(hidden_states)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
+
+
+_GDN_BA_STREAMS: Dict[int, torch.cuda.Stream] = {}
+
+
+def _gdn_ba_stream_for_device(device: torch.device) -> torch.cuda.Stream:
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    stream = _GDN_BA_STREAMS.get(index)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device)
+        _GDN_BA_STREAMS[index] = stream
+    return stream
 
 
 class Qwen3NextGatedDeltaNet(nn.Module):
@@ -1290,10 +1335,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             and torch.version.hip is None
             and torch.cuda.get_device_capability(self.in_proj_ba.weight.device)
             == (9, 0)
-            and torch.cuda.get_device_properties(
-                self.in_proj_ba.weight.device
-            ).multi_processor_count
-            == 78
         )
         self._fp8_input_project_pair = None
         if self.use_sm90_gdn_fp8_decode:
@@ -1306,8 +1347,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 pass
             else:
                 self._fp8_input_project_pair = try_project_pair
-                self._fp8_input_ba_stream = torch.cuda.Stream(
-                    device=self.in_proj_ba.weight.device
+                self._fp8_input_ba_stream = _gdn_ba_stream_for_device(
+                    self.in_proj_ba.weight.device
                 )
         extended_gdn = os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED", "1") == "1"
         if (
@@ -1329,7 +1370,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
             if attn_tp_size == 2 and self.decode_gdn.ssm_state_dtype == torch.float32:
                 packed_decode = try_packed_decode
-                if self.use_sm90_gdn_fp8_decode:
+                if (
+                    self.use_sm90_gdn_fp8_decode
+                    and torch.cuda.get_device_properties(
+                        self.in_proj_ba.weight.device
+                    ).multi_processor_count
+                    == 78
+                ):
                     packed_decode = partial(try_packed_decode, tune_h20=True)
                 elif (
                     os.environ.get("RTP_QWEN4_SM90_GDN_BF16_PACKED", "1") == "1"
@@ -1410,19 +1457,28 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         hidden_states: torch.Tensor,
         *,
         overlap_ba: bool = False,
+        defer_ba_wait: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return QKVZ and BA projections using the available BF16 or FP8 path."""
+        self._fp8_ba_deferred = False
         if self._qkvz_ba_fused:
             fused = self.in_proj_fused(hidden_states)
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
         if self._fp8_input_project_pair is not None:
+            ba_stream = self._fp8_input_ba_stream if overlap_ba else None
             projected = self._fp8_input_project_pair(
                 hidden_states,
                 self.in_proj_qkvz,
                 self.in_proj_ba,
-                ba_stream=self._fp8_input_ba_stream if overlap_ba else None,
+                ba_stream=ba_stream,
+                defer_ba_wait=defer_ba_wait,
             )
             if projected is not None:
+                self._fp8_ba_deferred = (
+                    defer_ba_wait
+                    and ba_stream is not None
+                    and torch.cuda.is_current_stream_capturing()
+                )
                 return projected
         return self.in_proj_qkvz(hidden_states), self.in_proj_ba(hidden_states)
 
@@ -1651,31 +1707,53 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
         is_prefill = attention_inputs.is_prefill and not attn_meta.is_target_verify
+        overlap_ba = not is_prefill and hidden_states.shape[0] <= 256
+        defer_ba_wait = (
+            overlap_ba
+            and torch.cuda.is_current_stream_capturing()
+            and self._fp8_input_project_pair is not None
+            and getattr(self.decode_gdn, "_packed_decode", None) is not None
+        )
         projected_states_qkvz, projected_states_ba = self._input_project(
             hidden_states,
-            overlap_ba=not is_prefill
-            and not (attention_inputs.is_target_verify or attn_meta.is_target_verify),
+            overlap_ba=overlap_ba,
+            **({"defer_ba_wait": True} if defer_ba_wait else {}),
         )
-        mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        if is_prefill:
-            if attn_meta.is_cp_linear_attn:
-                return self._forward_cp_prefill(
-                    mixed_qkv, z, b, a, attention_inputs, kv_cache, attn_meta
+        ba_deferred = getattr(self, "_fp8_ba_deferred", False)
+        self._fp8_ba_deferred = False
+        ba_ready_stream = self._fp8_input_ba_stream if ba_deferred else None
+        try:
+            mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
+                projected_states_qkvz, projected_states_ba
+            )
+            if is_prefill:
+                if attn_meta.is_cp_linear_attn:
+                    return self._forward_cp_prefill(
+                        mixed_qkv, z, b, a, attention_inputs, kv_cache, attn_meta
+                    )
+                attn_output = self.prefill_gdn(
+                    mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
                 )
-            attn_output = self.prefill_gdn(
-                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
-            )
-        else:
-            attn_output = self.decode_gdn(
-                mixed_qkv,
-                b,
-                a,
-                attention_inputs,
-                kv_cache,
-                attn_meta,
-            )
+            else:
+                attn_output = self.decode_gdn(
+                    mixed_qkv,
+                    b,
+                    a,
+                    attention_inputs,
+                    kv_cache,
+                    attn_meta,
+                    **(
+                        {"ba_ready_stream": ba_ready_stream}
+                        if ba_ready_stream is not None
+                        else {}
+                    ),
+                )
+                ba_ready_stream = None
+        finally:
+            if ba_ready_stream is not None:
+                torch.cuda.current_stream(hidden_states.device).wait_stream(
+                    ba_ready_stream
+                )
         attn_output = self._output_project(attn_output, z)
         if self.parallelism_config.get_attn_tp_size() > 1:
             reduce_output = getattr(self, "tp_all_reduce", all_reduce)

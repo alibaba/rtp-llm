@@ -143,12 +143,28 @@ def write_prefill_indexer_cache(
         and int(self.indexer_state_cache.seq_size_per_block) == kv_tokens_per_block
         and raw_keys.is_cuda
     ):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
+            _writer_geometry_fingerprint,
+        )
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill_triton import (
             write_zero_prefix_prefill,
         )
 
         if self._side_cache_undo is not None:
             raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+        preflight_set = getattr(step, "zero_prefix_preflight_keys", None)
+        preflight_key = (
+            (
+                _writer_geometry_fingerprint(cu_seqlens),
+                _writer_geometry_fingerprint(state_table),
+                _writer_geometry_fingerprint(kv_table),
+                int(state_pool.shape[0]),
+                int(kv_pool.shape[0]),
+                int(kv_tokens_per_block),
+            )
+            if isinstance(preflight_set, set)
+            else None
+        )
         try:
             fused_result = write_zero_prefix_prefill(
                 raw_keys,
@@ -179,6 +195,11 @@ def write_prefill_indexer_cache(
                     if not self.main_inputs.is_cuda_graph
                     else None
                 ),
+                **(
+                    {"skip_preflight": True}
+                    if preflight_key is not None and preflight_key in preflight_set
+                    else {}
+                ),
             )
         except ValueError:
             # Preserve the runtime's CU diagnostic; error-only checking
@@ -187,6 +208,8 @@ def write_prefill_indexer_cache(
                 check_cu_partition()
             raise
         if fused_result is not None:
+            if preflight_key is not None:
+                preflight_set.add(preflight_key)
             object.__setattr__(self, "_side_cache_undo", fused_result.pop("undo"))
             return lengths, rope_cos, rope_sin, fused_result
 
