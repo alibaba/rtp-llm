@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
+import contextlib
 import functools
 import importlib
 import logging
@@ -27,6 +28,7 @@ from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     SUPPRESS_LEVEL,
     autocast_custom_fwd,
+    custom_device_ctx,
     env_flag,
     input_guard,
     is_amd,
@@ -176,7 +178,7 @@ def _use_sm90_chunk(k, v, beta):
         and beta.dtype in (torch.bfloat16, torch.float32)
         and k.shape[-1] == v.shape[-1] == 128
         and (k.shape[-2], v.shape[-2]) in ((2, 6), (4, 12), (8, 24), (16, 48))
-        and 2048 <= k.shape[1] <= 32768
+        and 512 <= k.shape[1] <= 32768
         and k.is_contiguous()
         and v.is_contiguous()
         and beta.is_contiguous()
@@ -605,6 +607,55 @@ def chunk_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if (
+        not torch.is_grad_enabled()
+        and not torch.is_autocast_enabled("cuda")
+        and not torch.is_autocast_cpu_enabled()
+        and q.is_cuda
+    ):
+        q_c = q if q.is_contiguous() else q.contiguous()
+        k_c = k if k.is_contiguous() else k.contiguous()
+        v_c = v if v.is_contiguous() else v.contiguous()
+        g_c = g if g.is_contiguous() else g.contiguous()
+        beta_c = beta if beta.is_contiguous() else beta.contiguous()
+        init_c = (
+            initial_state
+            if initial_state is None or initial_state.is_contiguous()
+            else initial_state.contiguous()
+        )
+        cu_c = (
+            cu_seqlens
+            if cu_seqlens is None or cu_seqlens.is_contiguous()
+            else cu_seqlens.contiguous()
+        )
+        dev_idx = q_c.device.index
+        ctx = (
+            custom_device_ctx(dev_idx)
+            if dev_idx is not None and dev_idx != torch.cuda.current_device()
+            else contextlib.nullcontext()
+        )
+        with ctx:
+            if use_qk_l2norm_in_kernel:
+                if is_amd:
+                    q_c, k_c = fused_l2norm_qk(q_c, k_c)
+                else:
+                    q_c = l2norm_fwd(q_c)
+                    k_c = l2norm_fwd(k_c)
+            _, o, _, final_state, _, h, _ = chunk_gated_delta_rule_fwd(
+                q=q_c,
+                k=k_c,
+                v=v_c,
+                g=g_c,
+                beta=beta_c,
+                scale=scale,
+                initial_state=init_c,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_c,
+                page_state_store=page_state_store,
+            )
+        if o.dtype != q.dtype:
+            o = o.to(q.dtype)
+        return o, h, final_state
     o, h, final_state = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,

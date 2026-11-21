@@ -4,6 +4,8 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache import prepare_main_qk_cache
+
 from rtp_llm.models_py.modules.qwen4_exp.test.support.main_qk_cache import (
     MainQkCacheFixture,
 )

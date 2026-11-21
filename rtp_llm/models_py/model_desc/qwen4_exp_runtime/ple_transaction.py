@@ -198,6 +198,7 @@ class PLETransactionCoordinator:
             hyper_states.reshape(batch_size, query_len, -1),
             history,
             initial_state,
+            add_residual=True,
             **({"embeddings": embeddings} if embeddings is not None else {}),
         )
 
@@ -255,8 +256,12 @@ class PLETransactionCoordinator:
             )
         transaction.stages[layer_idx] = stage
         if live_rows is not None:
-            output = torch.where(live_rows.to(output.device)[:, None, None], output, 0)
-        return hyper_states + output.reshape_as(hyper_states)
+            output = torch.where(
+                live_rows.to(output.device)[:, None, None],
+                output,
+                hyper_states.view(batch_size, query_len, -1),
+            )
+        return output.reshape_as(hyper_states)
 
     @staticmethod
     def _synchronize_ple_transaction(transaction: _PLETargetTransaction) -> None:

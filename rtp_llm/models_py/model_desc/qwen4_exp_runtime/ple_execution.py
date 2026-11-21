@@ -10,7 +10,11 @@ from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_t
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.pd_publication import (
     validate_pd_cache_inputs,
 )
+from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
+    qsa_strict_validation_enabled,
+)
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_step_plan import (
+    _tensor_fingerprint,
     host_input_mirror,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
@@ -550,6 +554,7 @@ class PLEExecution:
                             output, state = ple.prefill(
                                 chunk_hyper,
                                 history,
+                                add_residual=True,
                                 embeddings=(
                                     ple.ple_embedding._reduce_rows(
                                         local_rows[idx][:, start:end].contiguous()
@@ -564,6 +569,7 @@ class PLEExecution:
                                 chunk_hyper,
                                 history,
                                 state,
+                                add_residual=True,
                                 embeddings=(
                                     ple.ple_embedding._reduce_rows(
                                         local_rows[idx][:, start:end].contiguous()
@@ -573,7 +579,7 @@ class PLEExecution:
                                     else None
                                 ),
                             )
-                        chunk_outputs.append((chunk_hyper + output).squeeze(0))
+                        chunk_outputs.append(output.squeeze(0))
                         write_rows.append(idx)
                         write_pages.append((prefix + end - 1) // page_size)
                         write_states.append(state.squeeze(0))
