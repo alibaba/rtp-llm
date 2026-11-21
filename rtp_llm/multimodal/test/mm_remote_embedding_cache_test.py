@@ -42,6 +42,69 @@ from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 class RemoteCacheTest(unittest.TestCase):
+    def test_sdk_transfer_timeouts_keep_timeout_metrics_and_original_error(self):
+        result = (torch.ones(3), None)
+        sdk_error = type("KvMetaObjectClientError", (RuntimeError,), {})
+        for code, may_be_inflight in (
+            ("ER_SDK_TIMEOUT_BUFFER_SAFE", False),
+            ("ER_SDK_TIMEOUT", True),
+        ):
+            with self.subTest(code=code):
+                store = Store({"hit": pack_object(plan_object(result))})
+                remote = self.remote(store)
+                write_started = threading.Event()
+
+                def fail(operation):
+                    error = sdk_error(code)
+                    error.operation = operation
+                    error.code = SimpleNamespace(name=code)
+                    error.data_transfer_may_be_inflight = may_be_inflight
+                    if operation == "save":
+                        write_started.set()
+                    raise error
+
+                with (
+                    patch.object(
+                        store, "load_one", side_effect=lambda *a, **kw: fail("load")
+                    ),
+                    patch.object(
+                        store, "save_one", side_effect=lambda *a, **kw: fail("save")
+                    ),
+                    patch(
+                        "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+                    ) as report,
+                    self.assertLogs(level="ERROR") as logs,
+                ):
+                    self.assertIsNone(remote.load("hit"))
+                    remote.submit_result("new", result)
+                    self.assertTrue(write_started.wait(2))
+                    remote.close()
+                self.assertEqual(remote.stats()["read_timeout"], 1)
+                for metric in (
+                    AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC,
+                    AccMetrics.VIT_REMOTE_EMB_WRITE_QPS_METRIC,
+                ):
+                    self.assertEqual(
+                        self.metric_values(report, metric), [(1, {"status": "timeout"})]
+                    )
+                stage_tags = [
+                    tags
+                    for _, tags in self.metric_values(
+                        report, GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC
+                    )
+                ]
+                for operation in ("read", "write"):
+                    self.assertIn(
+                        {"operation": operation, "stage": "transfer", "status": "timeout"},
+                        stage_tags,
+                    )
+                for item in logs.output:
+                    row = json.loads(item.split("MM_EMB_REMOTE_JSON ", 1)[1])
+                    self.assertEqual(row["error_code"], code)
+                    self.assertIs(row["data_transfer_may_be_inflight"], may_be_inflight)
+                    if row["operation"] == "read":
+                        self.assertFalse(row["caller_timed_out"])
+
     def test_slow_metadata_logs_only_the_join_key_with_rate_limit(self):
         remote = self.remote(Store(), read_timeout_ms=500)
         trace = "0123456789ab4cde8f0123456789abcd"

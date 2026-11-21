@@ -69,6 +69,17 @@ def _is_write_in_progress(error):
     )
 
 
+def _is_transfer_timeout(error):
+    if isinstance(error, _TIMEOUT_ERRORS):
+        return True
+    return (
+        type(error).__name__ == "KvMetaObjectClientError"
+        and getattr(error, "operation", None) in ("load", "save")
+        and getattr(getattr(error, "code", None), "name", None)
+        in ("ER_SDK_TIMEOUT", "ER_SDK_TIMEOUT_BUFFER_SAFE")
+    )
+
+
 def _is_read_miss(error):
     return (
         type(error).__name__ == "KvMetaObjectClientError"
@@ -754,12 +765,11 @@ class MMRemoteEmbeddingCache:
         outcome = "success"
         try:
             yield
-        except _TIMEOUT_ERRORS:
-            outcome = "timeout"
-            raise
         except Exception as error:
             outcome = (
-                "skipped"
+                "timeout"
+                if _is_transfer_timeout(error)
+                else "skipped"
                 if stage == "transfer"
                 and (
                     (operation == "write" and _is_write_in_progress(error))
@@ -1205,6 +1215,7 @@ class MMRemoteEmbeddingCache:
                         transfer_status = (
                             "success" if error is None
                             else "skipped" if _is_write_in_progress(error)
+                            else "timeout" if _is_transfer_timeout(error)
                             else "error"
                         )
                         self._report_stage_latency(
@@ -1314,7 +1325,7 @@ class MMRemoteEmbeddingCache:
                     )
                 else:
                     outcome = (
-                        "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
+                        "timeout" if _is_transfer_timeout(error) else "error"
                     )
                     self.record(
                         "write_error",
@@ -1412,7 +1423,8 @@ class MMRemoteEmbeddingCache:
         ) = result
         status = state.name
         error = self._gdr_pool.native_read_error(code, inflight) if status == "SdkFailure" else None
-        if status == "Expired":
+        sdk_timed_out = error is not None and _is_transfer_timeout(error)
+        if status == "Expired" or sdk_timed_out:
             stage_status = "timeout"
         elif error is not None and _is_read_miss(error):
             stage_status = "skipped"
@@ -1425,8 +1437,11 @@ class MMRemoteEmbeddingCache:
         if held_ns:
             self._report_stage_latency("read", "gdr_lease_hold", stage_status, held_ns / 1e6)
         if sdk_ns:
+            sdk_status = "success"
+            if status == "SdkFailure":
+                sdk_status = "timeout" if sdk_timed_out else "error"
             self._report_stage_latency(
-                "read", "native_load", "error" if status == "SdkFailure" else "success", sdk_ns / 1e6
+                "read", "native_load", sdk_status, sdk_ns / 1e6
             )
             self._report_stage_latency(
                 "read", "transfer", stage_status, (sdk_ns + restore_ns) / 1e6, size
@@ -1755,34 +1770,20 @@ class MMRemoteEmbeddingCache:
                 nbytes=size,
             )
             return value
-        except _TIMEOUT_ERRORS as error:
-            outcome = "timeout"
-            self._count("read_timeout")
-            if future is not None and timing["stage"] != "restore":
-                # A worker can itself raise TimeoutError. Only a caller-side
-                # wait timeout needs a later completion diagnostic; preserve
-                # the race where it finishes just after result() times out.
-                caller_timed_out = not future.done() or (
-                    not future.cancelled() and future.exception() is not error
-                )
-                # Cancel work that has not started.
-                # Running workers retain their reservation until they exit.
-                if caller_timed_out:
-                    future.cancel()
-            self.record(
-                "read_error",
-                key=key,
-                trace_id=trace_id,
-                stage=timing["stage"],
-                nbytes=timing["nbytes"],
-                timeout_ms=timeout_ms,
-                elapsed_ms=(time.perf_counter() - started) * 1000,
-                caller_timed_out=caller_timed_out,
-                **read_timings(),
-                **self._error_context(error),
-            )
-            return None
         except Exception as error:
+            timeout_fields = {}
+            if _is_transfer_timeout(error):
+                outcome = "timeout"
+                self._count("read_timeout")
+                if future is not None and timing["stage"] != "restore":
+                    # Only caller-side timeouts need a later completion diagnostic.
+                    # SDK timeouts raised by this same worker remain its outcome.
+                    caller_timed_out = not future.done() or (
+                        not future.cancelled() and future.exception() is not error
+                    )
+                    if caller_timed_out:
+                        future.cancel()
+                timeout_fields = {"caller_timed_out": caller_timed_out}
             self.record(
                 "read_error",
                 key=key,
@@ -1791,6 +1792,7 @@ class MMRemoteEmbeddingCache:
                 nbytes=timing["nbytes"],
                 timeout_ms=timeout_ms,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
+                **timeout_fields,
                 **read_timings(),
                 **self._error_context(error),
             )
