@@ -20,7 +20,7 @@ from rtp_llm.models_py.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from rtp_llm.models_py.layers.norm import RMSNorm
+from rtp_llm.models_py.layers.norm import RMSNorm, decoder_rms_norm
 from rtp_llm.models_py.model_desc.block_map import get_primary_attention_inputs
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import CheckpointLoadTarget, RtpModule
@@ -240,8 +240,8 @@ class Qwen3DecoderLayer(RtpModule):
         prefix: str = "layer",
     ):
         super().__init__()
-        self.input_layernorm = RMSNorm(
-            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype
+        self.input_layernorm = decoder_rms_norm(
+            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype, quant_config=quant_config
         )
         self.self_attn = Qwen3Attention(
             hidden_size=hidden_size,
@@ -256,8 +256,8 @@ class Qwen3DecoderLayer(RtpModule):
             rms_norm_eps=rms_norm_eps,
             prefix=f"{prefix}.self_attn",
         )
-        self.post_attention_layernorm = RMSNorm(
-            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype
+        self.post_attention_layernorm = decoder_rms_norm(
+            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype, quant_config=quant_config
         )
         self.mlp = Qwen3MLP(
             hidden_size=hidden_size,

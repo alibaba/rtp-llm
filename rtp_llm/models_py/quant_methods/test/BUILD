@@ -161,6 +161,26 @@ py_test(
 )
 
 py_test(
+    name = "test_smooth_omni",
+    srcs = ["test_smooth_omni.py"],
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
+)
+
+py_test(
+    name = "test_smooth_omni_h20",
+    srcs = ["test_smooth_omni.py"],
+    main = "test_smooth_omni.py",
+    env = {"TEST_SMOOTH_OMNI_CUDA": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
+)
+
+py_test(
     name = "test_w8a8_int8_moe",
     srcs = ["test_w8a8_int8_moe.py"],
     data = ["//:rtp_compute_ops", "//:th_transformer_config"],

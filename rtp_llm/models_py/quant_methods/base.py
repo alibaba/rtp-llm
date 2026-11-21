@@ -401,6 +401,8 @@ class QuantizationConfig:
                 from rtp_llm.models_py.quant_methods import weight_only_int8  # noqa: F401
             elif self.quant_type == "W8A8_INT8_PER_CHANNEL_COMPRESSED":
                 from rtp_llm.models_py.quant_methods import w8a8_int8  # noqa: F401
+            elif self.quant_type in ("smooth_quant", "omni_quant"):
+                from rtp_llm.models_py.quant_methods import smooth_omni  # noqa: F401
             elif self.quant_type in ("awq", "gptq"):
                 from rtp_llm.models_py.quant_methods import groupwise  # noqa: F401
 

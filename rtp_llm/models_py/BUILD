@@ -118,6 +118,7 @@ py_test(
     )
     for name, src in [
         ("qwen4_nvfp4_experts_checkpoint_test", "new_models/qwen4_exp/nvfp4_experts_test.py"),
+        ("qwen4_rank_local_ft_test", "new_models/qwen4_exp/test/test_rank_local_ft.py"),
         ("qwen4_expert_factory_checkpoint_test", "new_models/qwen4_exp/expert_factory_test.py"),
         ("qwen4_mtp_input_checkpoint_test", "new_models/qwen4_exp_mtp/mtp_input_test.py"),
         ("qwen4_mtp_draft_replay_metadata_test", "new_models/qwen4_exp_mtp/draft_replay_test.py"),

@@ -10,7 +10,7 @@ from rtp_llm.models_py.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from rtp_llm.models_py.layers.norm import RMSNorm
+from rtp_llm.models_py.layers.norm import decoder_rms_norm
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.model_base import required_config_value
 from rtp_llm.models_py.new_models.qwen2.trt_checkpoint import Qwen2CheckpointMapper
@@ -152,8 +152,8 @@ class Qwen2DecoderLayer(RtpModule):
         qkv_bias_as_matrix: bool = False,
     ):
         super().__init__()
-        self.input_layernorm = RMSNorm(
-            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype
+        self.input_layernorm = decoder_rms_norm(
+            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype, quant_config=quant_config
         )
         self.self_attn = Qwen2Attention(
             hidden_size=hidden_size,
@@ -169,8 +169,8 @@ class Qwen2DecoderLayer(RtpModule):
             qkv_bias=qkv_bias,
             qkv_bias_as_matrix=qkv_bias_as_matrix,
         )
-        self.post_attention_layernorm = RMSNorm(
-            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype
+        self.post_attention_layernorm = decoder_rms_norm(
+            hidden_size, eps=rms_norm_eps, params_dtype=params_dtype, quant_config=quant_config
         )
         self.mlp = Qwen2MLP(
             hidden_size=hidden_size,

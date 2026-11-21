@@ -235,10 +235,19 @@ class Qwen4DecoderWeights(RtpModule):
 
 
 class Qwen4TargetWeights(RtpModule):
-    def __init__(self, model_config, load_config):
+    @classmethod
+    def from_ft_checkpoint_header(cls, model_config, load_config, checkpoint):
+        from rtp_llm.models_py.new_models.qwen4_exp.rank_local_ft import rank_local_plan
+        return cls(model_config, load_config, checkpoint_plan=rank_local_plan(model_config, load_config, checkpoint))
+
+    def load_ft_checkpoint(self, checkpoint):
+        from rtp_llm.models_py.new_models.qwen4_exp.rank_local_ft import load_rank_local
+        load_rank_local(self, checkpoint)
+
+    def __init__(self, model_config, load_config, *, checkpoint_plan=None):
         super().__init__()
         directory = model_config.get("ckpt_path") if isinstance(model_config,dict) else model_config.ckpt_path
-        self.checkpoint_plan = plan = Qwen4CheckpointPlan(directory, model_config)
+        self.checkpoint_plan = plan = checkpoint_plan or Qwen4CheckpointPlan(directory, model_config)
         self.WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={plan.prefix:""})
         self.embed_tokens = Qwen4VocabWeight(plan.vocab_size,plan.hidden_size,tp_size=load_config.attn_tp_size,
             tp_rank=load_config.attn_tp_rank,embedding=True,dtype=load_config.compute_dtype,fp8_storage=plan.vocab_fp8)

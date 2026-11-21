@@ -8,7 +8,7 @@ from rtp_llm.models_py.new_models.qwen4_exp.target_weights import Qwen4TargetWei
 
 
 class Qwen4ForCausalLM(Qwen4TargetWeights):
-    def __init__(self, model_config, load_config):
+    def __init__(self, model_config, load_config, *, checkpoint_plan=None):
         # The frontend must use main's resolved/frozen Qwen4 deployment config.
         # Raw JSON is only accepted by the checkpoint-only CPU owner.
         if isinstance(model_config,dict) or load_config.parallelism_config is None:
@@ -19,7 +19,7 @@ class Qwen4ForCausalLM(Qwen4TargetWeights):
             ffn_tp_size=parallelism.get_ffn_tp_size(),ffn_tp_rank=parallelism.get_ffn_tp_rank())
         validate_qwen4_runtime(model_config,parallelism)
         freeze_runtime_config(model_config,parallelism)
-        super().__init__(model_config,load_config)
+        super().__init__(model_config,load_config,checkpoint_plan=checkpoint_plan)
         self.config = model_config
         self.load_config = load_config
         object.__setattr__(self,"_runtime",None)

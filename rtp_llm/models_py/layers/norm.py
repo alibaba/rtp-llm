@@ -95,6 +95,27 @@ class RMSNorm(RtpModule):
         return (self.weight * normalized).to(input_dtype)
 
 
+class OmniRMSNorm(RMSNorm):
+    """The Omni checkpoint's norm beta belongs to the norm, not the next GEMM."""
+
+    def __init__(self, hidden_size, eps, params_dtype):
+        super().__init__(hidden_size, eps, params_dtype)
+        self.bias = nn.Parameter(torch.empty_like(self.weight), requires_grad=False)
+
+    def load_weights(self, weights):
+        for name, tensor in weights.items():
+            if name not in ("weight", "bias") or not self._assign_weight(self, name, tensor):
+                raise ValueError(f"Unexpected OmniQuant RMSNorm parameter {name!r}")
+
+    def forward(self, x):
+        return super().forward(x) + self.bias
+
+
+def decoder_rms_norm(hidden_size, *, eps, params_dtype, quant_config):
+    cls = OmniRMSNorm if getattr(quant_config, "quant_type", None) == "omni_quant" else RMSNorm
+    return cls(hidden_size, eps, params_dtype)
+
+
 class RMSResNorm(RtpModule):
     """RMSNorm with the residual-add contract used by decoder runtimes."""
 

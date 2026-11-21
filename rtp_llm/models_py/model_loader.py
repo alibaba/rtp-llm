@@ -1054,7 +1054,7 @@ class NewModelLoader:
                 f"name filtering and would materialize non-local experts: {unsupported}"
             )
 
-    def _create_model(self, *, ft_load_config=None) -> nn.Module:
+    def _create_model(self, *, ft_load_config=None, ft_checkpoint=None) -> nn.Module:
         model_type = self._model_type()
         try:
             model_cls = get_model_class(model_type)
@@ -1067,7 +1067,12 @@ class NewModelLoader:
         resolve_runtime = getattr(model_cls, "resolve_runtime_class", None)
         if resolve_runtime is not None:
             model_cls = resolve_runtime(self.model_config)
-        model = model_cls(self.model_config, ft_load_config or self.load_config)
+        construct = getattr(model_cls, "from_ft_checkpoint_header", None)
+        load = ft_load_config or self.load_config
+        if ft_checkpoint is not None and callable(construct):
+            model = construct(self.model_config, load, ft_checkpoint)
+        else:
+            model = model_cls(self.model_config, load)
         if not isinstance(model, RtpModule):
             raise TypeError(
                 f"Registered model {model_cls.__name__} must inherit RtpModule to "
@@ -1098,6 +1103,9 @@ class NewModelLoader:
         quant = self.load_config.quant_config
         adapt = getattr(quant, "for_ft_snapshot", None)
         encoded = adapt() if isinstance(checkpoint, FTCheckpoint) and callable(adapt) else quant
+        if isinstance(checkpoint, FTCheckpoint):
+            load = self.load_config if encoded is quant else replace(self.load_config, quant_config=encoded)
+            return self._create_model(ft_load_config=load, ft_checkpoint=checkpoint)
         if encoded is quant:
             return self._create_model()
         return self._create_model(ft_load_config=replace(self.load_config, quant_config=encoded))

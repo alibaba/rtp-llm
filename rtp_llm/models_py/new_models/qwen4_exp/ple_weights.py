@@ -172,7 +172,7 @@ class Qwen4PLEHostTable(FixedHostCheckpointStorage, RtpModule):
                     )
                 parameter_name = name.removesuffix(".weight")
                 target = self._parameters[parameter_name]
-                owned = torch.empty(source.shape, dtype=target.dtype, device="cpu")
+                owned = target.data if tuple(target.shape) == tuple(source.shape) else torch.empty(source.shape, dtype=target.dtype, device="cpu")
                 copy_weight_(owned, source, name)
                 # Parameters stay stable, but the initial zero-sized allocation
                 # becomes a single correctly sized local shard. No shared FST
