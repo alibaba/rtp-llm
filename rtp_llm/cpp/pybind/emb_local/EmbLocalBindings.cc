@@ -21,7 +21,8 @@ Shard::Streams streamFor(uintptr_t stream, int device) {
 }
 
 py::tuple lookupResult(const Index::Lookup& state) {
-    return py::make_tuple(state.cell, state.resident ? (state.resident->tier == Tier::Gpu ? "gpu" : "cpu") : "");
+    const auto* tier = state.resident ? (state.resident->tier == Tier::Gpu ? "gpu" : "cpu") : "";
+    return py::make_tuple(state.cell, tier, state.cell ? state.cell->generation() : 0);
 }
 
 bool encode(py::handle                              value,
@@ -299,7 +300,9 @@ void registerEmbLocalCache(pybind11::module& m) {
         .def("resident_charge",
              [](Shard& shard) {
                  const auto snapshot = shard.charge();
-                 return py::make_tuple(snapshot.tokens, snapshot.bytes[0] + snapshot.bytes[1]);
+                 return py::make_tuple(snapshot.tokens,
+                                       snapshot.bytes[0] + snapshot.bytes[1],
+                                       snapshot.entries[0] + snapshot.entries[1]);
              })
         .def("stats", [](Shard& shard) {
             const auto snapshot = shard.charge();

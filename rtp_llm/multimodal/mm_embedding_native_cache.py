@@ -119,7 +119,7 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
         if self._owns_lifetime_metrics and self._lifetime_metrics is not None:
             self._lifetime_metrics.resize(gpu_max_bytes + cpu_max_bytes)
 
-    def _new_entry(self, cache_key, cell, ready=False):
+    def _new_entry(self, cache_key, cell, generation, ready=False):
         # Only pending work has a canonical Python entry. A resident
         # generation holds the native record and immutable topology.
         owner = weakref.ref(self)
@@ -130,7 +130,7 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
                 raise RuntimeError("embedding cache owner was released")
             return shard._read_entry(cache_key, entry, timeout)
 
-        generation = f"{self.instance_id}-{cell.generation}"
+        generation = f"{self.instance_id}-{generation}"
         if ready:
             return _NativeRequestEntry(generation, cell, None, None, on_read, True)
 
@@ -148,16 +148,16 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
 
     def try_acquire(self, cache_key):
         with self._lock:
-            cell, tier = (
+            cell, tier, generation = (
                 self._core.claim(cache_key)
                 if self.enabled and not self._native_closed
-                else (None, "")
+                else (None, "", 0)
             )
             if cell is None:
                 entry = MMEmbeddingCacheEntry()
                 state = "miss"
             elif tier:
-                entry = self._new_entry(cache_key, cell, ready=True)
+                entry = self._new_entry(cache_key, cell, generation, ready=True)
                 entry.tier = tier
                 if self._report_metrics_enabled:
                     entry._cache_hit_implementation = "native"
@@ -166,7 +166,7 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
             else:
                 entry = self._pending_entries.get(cell)
                 if entry is None:
-                    entry = self._new_entry(cache_key, cell)
+                    entry = self._new_entry(cache_key, cell, generation)
                     self._pending_entries[cell] = entry
                     state = "miss"
                 else:
@@ -282,9 +282,9 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
 
     def peek(self, cache_key):
         with self._lock:
-            cell, tier = self._core.peek(cache_key)
+            cell, tier, generation = self._core.peek(cache_key)
             if tier:
-                return self._new_entry(cache_key, cell, ready=True)
+                return self._new_entry(cache_key, cell, generation, ready=True)
             return self._pending_entries.get(cell)
 
     def is_current(self, cache_key, entry):
@@ -360,5 +360,5 @@ class NativeMMEmbeddingCache(MMEmbeddingCache):
 
     def _report_current_residency(self):
         if self._report_metrics_enabled:
-            tokens, nbytes = self._core.resident_charge()
-            self._report_resident_metrics(tokens, nbytes)
+            tokens, nbytes, entries = self._core.resident_charge()
+            self._report_resident_metrics(tokens, nbytes, entries)

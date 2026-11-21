@@ -1315,6 +1315,9 @@ class MMEmbeddingCache:
         self._gpu_pool = _TensorMemoryPool(gpu_max_bytes, gpu_device)
         self._cpu_pool = _TensorMemoryPool(cpu_max_bytes, torch.device("cpu"))
         self._report_metrics_enabled = report_metrics
+        self._residency_tags = (
+            {"cache_shard": "0"} if report_metrics and _PROFILE_LOCAL_HITS else None
+        )
         self._owns_lifetime_metrics = lifetime_metrics is None
         self._lifetime_metrics = lifetime_metrics or (
             _CacheLifetimeMetrics(gpu_max_bytes + cpu_max_bytes)
@@ -2111,7 +2114,8 @@ class MMEmbeddingCache:
         with self._lock:
             tokens = self._resident_tokens
             size_bytes = self._gpu_bytes + self._cpu_bytes
-        self._report_resident_metrics(tokens, size_bytes)
+            entries = len(self._gpu_lru) + len(self._cpu_lru)
+        self._report_resident_metrics(tokens, size_bytes, entries)
 
     def _report_admission(self, size_bytes: int) -> None:
         if not self._report_metrics_enabled or self._lifetime_metrics is None:
@@ -2131,11 +2135,22 @@ class MMEmbeddingCache:
         }[state]
         kmonitor.report(metric, 1)
 
-    def _report_resident_metrics(self, tokens: int, size_bytes: int) -> None:
+    def _report_resident_metrics(self, tokens: int, size_bytes: int, entries: int) -> None:
         if not self._report_metrics_enabled:
             return
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC, tokens)
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC, size_bytes)
+        if self._residency_tags is not None:
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                entries,
+                self._residency_tags,
+            )
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC,
+                size_bytes,
+                self._residency_tags,
+            )
 
 
 def is_current_cache_entry(cache, key, entry):
@@ -2203,6 +2218,9 @@ class ShardedMMEmbeddingCache:
                 _split_budget(cpu_max_bytes, shards),
             )
         ]
+        if report_metrics and _PROFILE_LOCAL_HITS:
+            for index, shard in enumerate(self._shards):
+                shard._residency_tags = {"cache_shard": str(index)}
         self.instance_id = uuid.uuid4().hex
 
     @property

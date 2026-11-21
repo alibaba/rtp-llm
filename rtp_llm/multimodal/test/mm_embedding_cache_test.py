@@ -1728,6 +1728,46 @@ class ShardedEmbeddingCacheTest(unittest.TestCase):
         cache.clear()
         self.assertEqual(cache.stats()["resident_entries"], 0)
 
+    def test_residency_profile_counts_only_published_entries_per_shard(self):
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        with (
+            patch("rtp_llm.multimodal.mm_embedding_cache._PROFILE_LOCAL_HITS", True),
+            patch("rtp_llm.multimodal.mm_embedding_cache.kmonitor.report") as report,
+        ):
+            cache = ShardedMMEmbeddingCache(0, 8192, shards=2, report_metrics=True)
+            self.addCleanup(cache.close)
+            source = torch.arange(64, dtype=torch.bfloat16)
+            keys = {}
+            for number in range(100):
+                key = str(number)
+                keys.setdefault(hash(key) % 2, key)
+                if len(keys) == 2:
+                    break
+            self.assertEqual(len(keys), 2)
+
+            for index, key in keys.items():
+                state, entry = cache.try_acquire(key)
+                self.assertEqual(state, "miss")
+                self.assertTrue(cache.complete(key, entry, source))
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                    1,
+                    {"cache_shard": str(index)},
+                )
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC,
+                    source.nbytes,
+                    {"cache_shard": str(index)},
+                )
+            cache.clear()
+            for index in keys:
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                    0,
+                    {"cache_shard": str(index)},
+                )
+
     def test_native_publication_releases_python_owners(self):
         try:
             import librtp_compute_ops

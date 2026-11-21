@@ -329,6 +329,8 @@ class GaugeMetrics(Enum):
     VIT_EMBEDDING_CACHE_HIT_RT_METRIC = "py_rtp_vit_embedding_cache_hit_rt_ms"
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
+    VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC = "py_rtp_vit_embedding_cache_resident_bytes"
+    VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC = "py_rtp_vit_embedding_cache_resident_entries"
     # Configured GPU + CPU capacity / successful new admission bytes per second.
     # All shards share one activity-driven window of at least 60s. Idle periods
     # emit no samples. This is an estimated turnover time, not a per-entry TTL.
