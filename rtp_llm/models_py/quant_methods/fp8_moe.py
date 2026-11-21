@@ -815,9 +815,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             weight_dequant = (
                 weight.float() * expanded[: weight.shape[0], : weight.shape[1]]
             )
-            return per_block_quant_like_legacy(
+            quantized, scale = per_block_quant_like_legacy(
                 weight_dequant.to(torch.bfloat16), layer._FP8_BLOCK_SIZE
             )
+            quantized, scale = self._requant_block_to_runtime_fp8(
+                quantized.unsqueeze(0), scale.unsqueeze(0), [layer._FP8_BLOCK_SIZE] * 2
+            )
+            return quantized.squeeze(0), scale.squeeze(0)
 
         src_w13_scale = layer.w13_scale
         src_w2_scale = layer.w2_scale

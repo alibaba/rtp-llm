@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import (
+    configure_lm_head,
     make_lm_head,
     validate_load_groups,
     validate_v4_static_placement,
@@ -15,6 +16,26 @@ from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import (
 
 
 class FlashLoadGeometryTest(unittest.TestCase):
+    def test_pruned_head_reads_selected_rows_and_zero_pads_last_rank(self):
+        model = dict(
+            enable_output_vocab_pruning=True,
+            output_vocab_ids=[1, 6, 8],
+            output_vocab_padded_size=4,
+        )
+        source = torch.arange(20, dtype=torch.float32).view(10, 2)
+        for rank, rows in enumerate(([1, 6], [8, None])):
+            args = SimpleNamespace(vocab_size=10, dim=2, dp_size=1, ep_size=1)
+            configure_lm_head(
+                args, model, SimpleNamespace(lm_head_tp_size=2, lm_head_tp_rank=rank)
+            )
+            head = make_lm_head(args, torch.float32)
+            spec = head.checkpoint_read_spec("weight", tuple(source.shape))
+            head.load_weights({"weight": spec.materialize(source)})
+            expected = torch.stack(
+                [source[i] if i is not None else torch.zeros(2) for i in rows]
+            )
+            torch.testing.assert_close(head.weight, expected)
+
     def test_head_shards_full_and_preselected_rows_have_the_same_padding(self):
         for vocab, tp, dp, ep, rows in (
             (19, 1, 1, 1, 19),

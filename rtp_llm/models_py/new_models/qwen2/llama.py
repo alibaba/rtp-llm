@@ -44,9 +44,13 @@ class LlamaForCausalLM(Qwen2ForCausalLM):
                 if not is_ft:
                     raise ValueError("Missing Llama config.json or Meta/FT metadata")
         family = hf.get("model_type", "llama")
-        expected = {"llama": "LlamaForCausalLM", "mistral": "MistralForCausalLM"}
-        if family not in expected or expected[family] not in hf.get(
-            "architectures", [expected.get(family)]
+        expected = {
+            "llama": {"LlamaForCausalLM", "LLaMAForCausalLM", "YiForCausalLM"},
+            "yi": {"YiForCausalLM", "LlamaForCausalLM"},
+            "mistral": {"MistralForCausalLM"},
+        }
+        if family not in expected or not expected[family].intersection(
+            hf.get("architectures", expected[family])
         ):
             raise ValueError(f"Unsupported HF decoder for llama checkpoint: {family!r}")
         if (

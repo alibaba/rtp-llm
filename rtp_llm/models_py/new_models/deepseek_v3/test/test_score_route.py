@@ -1,4 +1,5 @@
 """Dense and sparse DeepSeek-V3 family reach the public direct serving owner."""
+
 import json
 import math
 import tempfile
@@ -81,14 +82,20 @@ def _score_weights():
     return weights
 
 
-
 def _check_expert_reduction(rank, rendezvous):
     import torch.distributed as dist
+
     from rtp_llm.models_py.distributed.collective_torch import Group
 
-    dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2,
-                            timeout=timedelta(seconds=45))
+    dist.init_process_group(
+        "gloo",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=45),
+    )
     try:
+
         def tp_reduce(value, group):
             assert group == Group.TP
             dist.all_reduce(value)
@@ -98,21 +105,37 @@ def _check_expert_reduction(rank, rendezvous):
         # when branches are reduced independently versus combined on each rank.
         for ep_size, can_skip in ((1, True), (1, False), (2, True)):
             expected_skip = ep_size == 1 and can_skip
+
             class Routed:
-                fused_moe = SimpleNamespace(router=SimpleNamespace(
-                    tp_collective_size=2, supports_skip_tp_allreduce=can_skip))
+                fused_moe = SimpleNamespace(
+                    router=SimpleNamespace(
+                        tp_collective_size=2, supports_skip_tp_allreduce=can_skip
+                    )
+                )
 
                 def __call__(self, x, weights, ids, *, skip_tp_allreduce=False):
                     assert skip_tp_allreduce == expected_skip
-                    routed = torch.tensor([256.0 if rank == 0 else -256.0], dtype=torch.bfloat16)
+                    routed = torch.tensor(
+                        [256.0 if rank == 0 else -256.0], dtype=torch.bfloat16
+                    )
                     return routed if skip_tp_allreduce else tp_reduce(routed, Group.TP)
 
-            owner = SimpleNamespace(ffn_tp_size=2, ep_size=ep_size, experts=Routed(),
-                                    shared_experts=lambda x: torch.ones(1, dtype=torch.bfloat16))
-            with patch("rtp_llm.models_py.distributed.collective_torch.all_reduce", tp_reduce):
+            owner = SimpleNamespace(
+                ffn_tp_size=2,
+                ep_size=ep_size,
+                experts=Routed(),
+                shared_experts=lambda x: torch.ones(1, dtype=torch.bfloat16),
+            )
+            with patch(
+                "rtp_llm.models_py.distributed.collective_torch.all_reduce", tp_reduce
+            ):
                 result = DeepSeekV32MoEBlock._merge_experts(owner, None, None, None)
-            torch.testing.assert_close(result, torch.tensor([1.0 if expected_skip else 2.0],
-                                                            dtype=torch.bfloat16), rtol=0, atol=0)
+            torch.testing.assert_close(
+                result,
+                torch.tensor([1.0 if expected_skip else 2.0], dtype=torch.bfloat16),
+                rtol=0,
+                atol=0,
+            )
     finally:
         dist.destroy_process_group()
 
@@ -120,8 +143,11 @@ def _check_expert_reduction(rank, rendezvous):
 class ScoreRouteTest(unittest.TestCase):
     def test_shared_experts_round_after_the_correct_collective(self):
         with tempfile.TemporaryDirectory() as root:
-            torch.multiprocessing.spawn(_check_expert_reduction,
-                                        args=((Path(root)/"rendezvous").as_uri(),), nprocs=2)
+            torch.multiprocessing.spawn(
+                _check_expert_reduction,
+                args=((Path(root) / "rendezvous").as_uri(),),
+                nprocs=2,
+            )
 
     def test_main_config_load_and_sparse_runtime_ownership(self):
         for tag, hf, sparse, interleave in (
@@ -132,73 +158,164 @@ class ScoreRouteTest(unittest.TestCase):
         ):
             data = _score_weights()
             cfg = dict(
-                model_type=hf, hidden_size=32, intermediate_size=32,
-                max_position_embeddings=128, moe_intermediate_size=32, topk_method="noaux_tc",
-                scoring_func="sigmoid", norm_topk_prob=True, num_attention_heads=4, n_group=1,
-                topk_group=1, n_routed_experts=4, n_shared_experts=1, num_experts_per_tok=2,
-                num_hidden_layers=2, num_nextn_predict_layers=1, first_k_dense_replace=1,
-                moe_layer_freq=1, q_lora_rank=32, kv_lora_rank=32, qk_nope_head_dim=4,
-                qk_rope_head_dim=4, v_head_dim=4, vocab_size=32, routed_scaling_factor=2.5,
-                rms_norm_eps=1e-6, rope_theta=10000, torch_dtype="bfloat16",
+                model_type=hf,
+                hidden_size=32,
+                intermediate_size=32,
+                max_position_embeddings=128,
+                moe_intermediate_size=32,
+                topk_method="noaux_tc",
+                scoring_func="sigmoid",
+                norm_topk_prob=True,
+                num_attention_heads=4,
+                n_group=1,
+                topk_group=1,
+                n_routed_experts=4,
+                n_shared_experts=1,
+                num_experts_per_tok=2,
+                num_hidden_layers=2,
+                num_nextn_predict_layers=1,
+                first_k_dense_replace=1,
+                moe_layer_freq=1,
+                q_lora_rank=32,
+                kv_lora_rank=32,
+                qk_nope_head_dim=4,
+                qk_rope_head_dim=4,
+                v_head_dim=4,
+                vocab_size=32,
+                routed_scaling_factor=2.5,
+                rms_norm_eps=1e-6,
+                rope_theta=10000,
+                torch_dtype="bfloat16",
             )
             if tag == "deepseek2":
                 # V2-Lite: the checkpoint has a direct Q projection, not Q-LoRA.
                 cfg["q_lora_rank"] = None
                 for layer in range(2):
                     prefix = f"model.layers.{layer}.self_attn."
-                    data[prefix + "q_proj.weight"] = data.pop(prefix + "q_a_proj.weight")
-                    del data[prefix + "q_b_proj.weight"], data[prefix + "q_a_layernorm.weight"]
+                    data[prefix + "q_proj.weight"] = data.pop(
+                        prefix + "q_a_proj.weight"
+                    )
+                    del (
+                        data[prefix + "q_b_proj.weight"],
+                        data[prefix + "q_a_layernorm.weight"],
+                    )
             if sparse:
-                cfg.update(index_n_heads=2, index_head_dim=128, index_topk=4, indexer_rope_interleave=interleave)
+                cfg.update(
+                    index_n_heads=2,
+                    index_head_dim=128,
+                    index_topk=4,
+                    indexer_rope_interleave=interleave,
+                )
                 for layer in range(2):
+                    if tag == "glm_5" and layer == 1:
+                        # A shared layer has no indexer checkpoint or cache slot.
+                        continue
                     prefix = f"model.layers.{layer}.self_attn.indexer."
                     for key, shape in {
-                        "wq_b.weight": (256, 32), "wk.weight": (128, 32),
-                        "k_norm.weight": (128,), "k_norm.bias": (128,),
+                        "wq_b.weight": (256, 32),
+                        "wk.weight": (128, 32),
+                        "k_norm.weight": (128,),
+                        "k_norm.bias": (128,),
                         "weights_proj.weight": (2, 32),
                     }.items():
                         data[prefix + key] = _deterministic_values(shape, 17 + layer)
-            data["model.layers.2.embed_tokens.weight"] = data["model.embed_tokens.weight"].clone()
+            data["model.layers.2.embed_tokens.weight"] = data[
+                "model.embed_tokens.weight"
+            ].clone()
             with tempfile.TemporaryDirectory() as root:
                 (Path(root) / "config.json").write_text(json.dumps(cfg))
                 save_file(data, str(Path(root) / "model.safetensors"))
                 config = DeepSeekV2._create_config(root)
                 config.model_type, config.ckpt_path, config.max_seq_len = tag, root, 128
+                if tag == "glm_5":
+                    config.index_topk_pattern = "FS"
                 # Main fills attention page geometry after parsing HF config.
                 config.attn_config.tokens_per_block = 64
                 config.attn_config.kernel_tokens_per_block = 64
                 DeepSeekV2._post_build_model_config(config)
-                config.data_type, config.enable_fp32_lm_head, config.lora_infos = "bf16", False, {}
+                config.data_type, config.enable_fp32_lm_head, config.lora_infos = (
+                    "bf16",
+                    False,
+                    {},
+                )
                 for method in ("scratch", "fastsafetensors"):
                     with self.subTest(model=tag, method=method):
                         service = SimpleNamespace(
-                            model_config=config, _weight_alias_names=(), _weight_alias_owner=None,
-                            _get_device_str=lambda: "cpu", parallelism_config=ParallelismConfig(),
-                            hw_kernel_config=None, moe_config=None, fmha_config=None,
-                            max_generate_batch_size=1, load_method=method, custom_module=None,
+                            model_config=config,
+                            _weight_alias_names=(),
+                            _weight_alias_owner=None,
+                            _get_device_str=lambda: "cpu",
+                            parallelism_config=ParallelismConfig(),
+                            hw_kernel_config=None,
+                            moe_config=None,
+                            fmha_config=None,
+                            max_generate_batch_size=1,
+                            load_method=method,
+                            custom_module=None,
                         )
                         load_owned_model(service)
                         model = service.py_model
                         self.assertIsInstance(model, DeepSeekV32ForCausalLM)
-                        self.assertEqual(service.model_weights_loader.loaded_method, NewLoaderLoadMethod(method))
-                        q_source = weakref.ref(model.layers[0].self_attn.q_a_proj.weight)
-                        self.assertTrue(model.initialize(SimpleNamespace(kv_cache=None)))
-                        self.assertIs(model.weight.weights[1][W.mla_kc], model.layers[1].self_attn._kc_w)
-                        self.assertEqual(model._get_fmha_group_tags(), ["default", "indexer_kv"] if sparse else None)
+                        self.assertEqual(
+                            service.model_weights_loader.loaded_method,
+                            NewLoaderLoadMethod(method),
+                        )
+                        q_source = weakref.ref(
+                            model.layers[0].self_attn.q_a_proj.weight
+                        )
+                        self.assertTrue(
+                            model.initialize(SimpleNamespace(kv_cache=None))
+                        )
+                        self.assertIs(
+                            model.weight.weights[1][W.mla_kc],
+                            model.layers[1].self_attn._kc_w,
+                        )
+                        self.assertEqual(
+                            model._get_fmha_group_tags(),
+                            ["default", "indexer_kv"] if sparse else None,
+                        )
                         if sparse:
-                            idx = model.layers[1].indexer
-                            self.assertIs(idx.indexer_op.cos_sin_cache, model.cos_sin_cache)
-                            self.assertEqual(idx.indexer_op.is_neox_style, not interleave)
+                            full_layer = 0 if tag == "glm_5" else 1
+                            idx = model.layers[full_layer].indexer
+                            if tag == "glm_5":
+                                shared = model.layers[1].self_attn
+                                self.assertIsNone(shared.indexer)
+                                prior = torch.tensor([[2, 0]])
+                                self.assertIs(
+                                    shared._run_sparse_indexer(
+                                        None,
+                                        None,
+                                        None,
+                                        None,
+                                        SimpleNamespace(is_sparse=lambda: True),
+                                        prior,
+                                    ),
+                                    prior,
+                                )
+                            self.assertIs(
+                                idx.indexer_op.cos_sin_cache, model.cos_sin_cache
+                            )
+                            self.assertEqual(
+                                idx.indexer_op.is_neox_style, not interleave
+                            )
                             torch.testing.assert_close(
-                                idx.weights_proj.weight, data["model.layers.1.self_attn.indexer.weights_proj.weight"],
+                                idx.weights_proj.weight,
+                                data[
+                                    f"model.layers.{full_layer}.self_attn.indexer.weights_proj.weight"
+                                ],
                             )
                             model.to(dtype=torch.bfloat16)
                             x = torch.ones(1, 32, dtype=torch.bfloat16)
                             scales = torch.ones(1, 2, 1)
                             expected = torch.nn.functional.linear(
-                                x.float(), data["model.layers.1.self_attn.indexer.weights_proj.weight"]
+                                x.float(),
+                                data[
+                                    f"model.layers.{full_layer}.self_attn.indexer.weights_proj.weight"
+                                ],
                             ).unsqueeze(-1) * (idx.softmax_scale * idx.weights_scale)
-                            torch.testing.assert_close(idx._get_logits_head_gate(x, scales), expected)
+                            torch.testing.assert_close(
+                                idx._get_logits_head_gate(x, scales), expected
+                            )
                         else:
                             self.assertIsNone(model.layers[1].indexer)
                         if tag == "deepseek2":
@@ -210,7 +327,9 @@ class ScoreRouteTest(unittest.TestCase):
                             manager.update_tensors({name: updated})
                             self.assertEqual(manager.version, 1)
                             self.assertEqual(norm.weight.data_ptr(), before_ptr)
-                            torch.testing.assert_close(norm.weight, updated, rtol=0, atol=0)
+                            torch.testing.assert_close(
+                                norm.weight, updated, rtol=0, atol=0
+                            )
                             self.assertIsNone(q_source())
                             # Writing an expired projection would not update the
                             # fused tensor that inference actually consumes.
@@ -221,8 +340,13 @@ class ScoreRouteTest(unittest.TestCase):
                             # The global check still catches changes to a live
                             # parameter even when the RPC targets another one.
                             other = model.layers[0].post_attention_layernorm
-                            other.weight = torch.nn.Parameter(other.weight.clone(), requires_grad=False)
-                            with self.assertRaisesRegex(RuntimeError, "parameter/storage changed.*post_attention_layernorm"):
+                            other.weight = torch.nn.Parameter(
+                                other.weight.clone(), requires_grad=False
+                            )
+                            with self.assertRaisesRegex(
+                                RuntimeError,
+                                "parameter/storage changed.*post_attention_layernorm",
+                            ):
                                 manager.update_tensors({name: updated})
                             self.assertEqual(manager.version, 1)
 

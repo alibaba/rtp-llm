@@ -622,6 +622,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         q_view: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_impl: MlaImplBase,
+        previous_topk: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         """Compute sparse top-k indices via the Indexer submodule.
 
@@ -633,7 +634,13 @@ class DeepSeekV32MlaAttention(RtpModule):
         from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 
         return MlaAttention._run_sparse_indexer(
-            self, hidden_states, q_c, q_view, kv_cache, fmha_impl
+            self,
+            hidden_states,
+            q_c,
+            q_view,
+            kv_cache,
+            fmha_impl,
+            prev_topk_indices=previous_topk,
         )
 
     def forward(
@@ -641,7 +648,10 @@ class DeepSeekV32MlaAttention(RtpModule):
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
-    ) -> torch.Tensor:
+        *,
+        previous_topk: Optional[torch.Tensor] = None,
+        return_topk: bool = False,
+    ):
         input_shape = hidden_states.shape[:-1]
         q_c = None
 
@@ -704,7 +714,7 @@ class DeepSeekV32MlaAttention(RtpModule):
             )
         )
         topk_indices = self._run_sparse_indexer(
-            hidden_states, q_c, q_view, indexer_cache, indexer_impl
+            hidden_states, q_c, q_view, indexer_cache, indexer_impl, previous_topk
         )
         attn_output = default_impl.forward(
             q_view, compressed_kv, k_pe, default_cache, self.layer_idx, topk_indices
@@ -719,4 +729,4 @@ class DeepSeekV32MlaAttention(RtpModule):
                 device=hidden_states.device,
             )
         attn_output = self.o_proj(attn_output)
-        return attn_output
+        return (attn_output, topk_indices) if return_topk else attn_output

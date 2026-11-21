@@ -126,16 +126,12 @@ register_lazy_model(
     "DeepSeekV41DSparkForCausalLM",
 )
 
-register_lazy_model(
-    "qwen_3_moe",
-    "rtp_llm.models_py.new_models.qwen3_moe.language",
-    "Qwen3MoeForCausalLM",
-)
-register_lazy_model(
-    "qwen_3",
-    "rtp_llm.models_py.new_models.qwen3",
-    "Qwen3ForCausalLM",
-)
+for _name in ("qwen_3_moe", "qwen3_coder_moe"):
+    register_lazy_model(
+        _name, "rtp_llm.models_py.new_models.qwen3_moe.language", "Qwen3MoeForCausalLM"
+    )
+for _name in ("qwen_3", "qwen_3_tool"):
+    register_lazy_model(_name, "rtp_llm.models_py.new_models.qwen3", "Qwen3ForCausalLM")
 register_lazy_model(
     "glm4_moe",
     "rtp_llm.models_py.new_models.glm4_moe.language",
@@ -156,9 +152,8 @@ register_lazy_model(
 )
 # qwen_tool changes tokenization/rendering and request output selection, not
 # the language-model parameters. Keep its complete causal LM projection.
-register_lazy_model(
-    "qwen_tool", "rtp_llm.models_py.new_models.qwen2", "Qwen2ForCausalLM"
-)
+for _name in ("qwen_tool", "qwen_agent"):
+    register_lazy_model(_name, "rtp_llm.models_py.new_models.qwen2", "Qwen2ForCausalLM")
 register_lazy_model(
     "qwen_2_embedding",
     "rtp_llm.models_py.new_models.qwen2.language",
@@ -171,6 +166,7 @@ register_lazy_model(
 # Distinct service types share main's vision tower, not a text-only runtime.
 for _vl_type, _vl_owner in (
     ("qwen2_vl", "Qwen2VLForCausalLM"),
+    ("qwen2_5_vl", "Qwen2VLForCausalLM"),
     ("qwen3_vl", "Qwen3VLForCausalLM"),
     ("qwen3_vl_moe", "Qwen3VLMoeForCausalLM"),
 ):
@@ -180,7 +176,15 @@ for _vl_type, _vl_owner in (
 
 # The owner selects direct Q, compressed Q or the sparse indexer from the
 # parsed attention config; it does not replace a sparse model with dense MLA.
-for _model_type in ("deepseek2", "glm4_moe_lite", "deepseek3", "deepseek_v32", "glm_5"):
+for _model_type in (
+    "deepseek2",
+    "glm4_moe_lite",
+    "deepseek3",
+    "deepseek_v32",
+    "glm_5",
+    "deepseek_v31",
+    "kimi_k2",
+):
     register_lazy_model(
         _model_type,
         "rtp_llm.models_py.new_models.deepseek_v3.language",

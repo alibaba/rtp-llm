@@ -15,6 +15,7 @@ from rtp_llm.models_py.new_models.deepseek_v4.backbone import (
     OwnedV4Transformer,
 )
 from rtp_llm.models_py.new_models.deepseek_v4.load_geometry import (
+    configure_lm_head,
     validate_load_groups,
     validate_v4_static_placement,
 )
@@ -97,8 +98,7 @@ class OwnedV4ModelMixin:
             args.cuda_native_rms = use_native_rms(load_config.device)
         validate_load_groups(args, load_config)
         validate_v4_static_placement(args, model_config, load_config)
-        args.lm_head_tp_size = load_config.lm_head_tp_size
-        args.lm_head_tp_rank = load_config.lm_head_tp_rank
+        configure_lm_head(args, model_config, load_config)
         # The main runtime has already validated checkpoint geometry and
         # resolved the role-independent MoE budget, including batch overrides.
         self._v4_args = args

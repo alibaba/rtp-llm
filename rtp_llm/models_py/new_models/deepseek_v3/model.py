@@ -246,7 +246,16 @@ class DeepSeekV32DecoderLayer(RtpModule):
         # DeepSeekV32MlaAttention._run_sparse_indexer); the `self.indexer`
         # property here is just a convenience accessor for callers that
         # want to reach the indexer from the layer level.
-        if is_sparse:
+        self.carries_dsa_topk = (
+            is_sparse and getattr(model_config, "model_type", None) == "glm_5"
+        )
+        if self.carries_dsa_topk:
+            from rtp_llm.utils.dsa_indexing import dsa_layer_skips_topk
+
+            self.self_attn.reuse_topk_indices = dsa_layer_skips_topk(
+                model_config, layer_idx
+            )
+        if is_sparse and not self.self_attn.reuse_topk_indices:
             self.self_attn.indexer = DeepSeekV32Indexer(
                 index_n_heads=index_n_heads,
                 index_head_dim=index_head_dim,
@@ -284,15 +293,28 @@ class DeepSeekV32DecoderLayer(RtpModule):
         residual: torch.Tensor,
         fmha_impl: MlaImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        previous_topk: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         # self_attn.forward owns the sparse Indexer call internally,
         # mirroring legacy MlaAttention (modules/hybrid/mla_attention.py).
-        attn_output = self.self_attn(hidden_states, fmha_impl, kv_cache)
+        if self.carries_dsa_topk:
+            attn_output, topk = self.self_attn(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                previous_topk=previous_topk,
+                return_topk=True,
+            )
+        else:
+            attn_output = self.self_attn(hidden_states, fmha_impl, kv_cache)
         hidden_states = attn_output
 
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
 
-        return DecodeLayerOutput(hidden_states, residual)
+        output = DecodeLayerOutput(hidden_states, residual)
+        if self.carries_dsa_topk:
+            output.topk_indices = topk
+        return output

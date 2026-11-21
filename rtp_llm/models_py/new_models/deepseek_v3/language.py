@@ -505,13 +505,6 @@ def extract_config_values(
         "config.json tie_word_embeddings",
     )
     tie_word_embeddings = model_tie_word_embeddings or checkpoint_tie_word_embeddings
-    if tie_word_embeddings and (
-        attn_tp_size != lm_head_tp_size or attn_tp_rank != lm_head_tp_rank
-    ):
-        raise ValueError(
-            "tied DeepSeek embeddings require matching attention and LM-head "
-            "TP partitions"
-        )
     moe_config = getattr(load_config, "moe_config", None)
 
     # Kernel tokens per block

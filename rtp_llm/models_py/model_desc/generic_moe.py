@@ -574,13 +574,20 @@ class GenericMoeModel(GptModelBase):
                 group_tag: select_fmha_impl_for_group(fmha_impl, group_tag)
                 for group_tag in ("default", "indexer_kv")
             }
+        previous_topk = None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
+            carries_topk = is_sparse_mla and getattr(
+                decoder_layer, "carries_dsa_topk", False
+            )
             if is_sparse_mla:
                 layer_fmha_impl = sparse_fmha_impl
+                tags = (
+                    ("default",)
+                    if carries_topk and decoder_layer.self_attn.reuse_topk_indices
+                    else ("default", "indexer_kv")
+                )
                 layer_kv_cache = (
-                    get_layer_caches_for_groups(
-                        self.kv_cache, i, ("default", "indexer_kv")
-                    )
+                    get_layer_caches_for_groups(self.kv_cache, i, tags)
                     if self.kv_cache is not None
                     else None
                 )
@@ -596,7 +603,10 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=layer_kv_cache,
+                **({"previous_topk": previous_topk} if carries_topk else {}),
             )
+            if carries_topk:
+                previous_topk = output.topk_indices
             hidden_states = output.hidden_states
             residual = output.residual
             capture.capture_layer(i, hidden_states, residual)

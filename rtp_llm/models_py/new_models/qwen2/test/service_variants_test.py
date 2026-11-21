@@ -214,6 +214,12 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
                     )
 
     def test_qwen2_vl_real_vision_and_biased_language_checkpoint(self):
+        self._check_qwen2_vl_checkpoint("qwen2_vl")
+
+    def test_qwen25_vl_real_vision_and_biased_language_checkpoint(self):
+        self._check_qwen2_vl_checkpoint("qwen2_5_vl")
+
+    def _check_qwen2_vl_checkpoint(self, variant):
         from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
         from rtp_llm.multimodal.multimodal_mixins.qwen2_vl.image_processing_qwen2_vl import (
             Qwen2VLImageProcessor,
@@ -236,9 +242,24 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
                 spatial_merge_size=1,
                 temporal_patch_size=1,
             )
+            tower = Qwen2VisionTransformerPretrainedModel
+            architecture = "Qwen2VLForConditionalGeneration"
+            if variant == "qwen2_5_vl":
+                from rtp_llm.multimodal.multimodal_mixins.qwen2_5_vl.modeling_qwen2_5_vl import (
+                    Qwen2_5_VisionTransformerPretrainedModel,
+                )
+
+                tower = Qwen2_5_VisionTransformerPretrainedModel
+                architecture = "Qwen2_5_VLForConditionalGeneration"
+                vision.update(
+                    hidden_size=8,
+                    intermediate_size=16,
+                    out_hidden_size=4,
+                    fullatt_block_indexes=[0],
+                )
             config.update(
-                architectures=["Qwen2VLForConditionalGeneration"],
-                model_type="qwen2_vl",
+                architectures=[architecture],
+                model_type=variant,
                 vision_config=vision,
                 rope_theta=10000,
                 vision_start_token_id=5,
@@ -246,7 +267,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
             )
             config_path.write_text(json.dumps(config))
             Qwen2VLImageProcessor().save_pretrained(root)
-            reference = Qwen2VisionTransformerPretrainedModel(vision)
+            reference = tower(vision)
             visual = {
                 "visual." + n: p.detach().half()
                 for n, p in reference.named_parameters()
@@ -258,7 +279,7 @@ class Qwen2ServiceVariantsTest(unittest.TestCase):
             index_path.write_text(json.dumps(index))
             for method in ("scratch", "fastsafetensors"):
                 with self.subTest(method=method):
-                    model = load(root, "qwen2_vl", method)
+                    model = load(root, variant, method)
                     owner = model.py_model
                     torch.testing.assert_close(
                         owner.lm_head.weight, tensors["lm_head.weight"]

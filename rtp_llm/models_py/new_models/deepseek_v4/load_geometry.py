@@ -1,7 +1,13 @@
 """Check that the weight reader and the existing V4 runtime use the same ranks."""
 
 from rtp_llm.models_py.expert_placement import expert_placement_for_layer
-from rtp_llm.models_py.layers.embedding import ParallelLMHead
+from rtp_llm.models_py.layers.embedding import ParallelLMHead, output_vocab_head_kwargs
+
+
+def configure_lm_head(args, model_config, load_config):
+    args.lm_head_tp_size = load_config.lm_head_tp_size
+    args.lm_head_tp_rank = load_config.lm_head_tp_rank
+    args.output_head_options = output_vocab_head_kwargs(model_config)
 
 
 def make_lm_head(args, dtype):
@@ -14,6 +20,7 @@ def make_lm_head(args, dtype):
         tp_rank=args.lm_head_tp_rank,
         params_dtype=dtype,
         tp_pad8=max(args.lm_head_tp_size, args.dp_size, args.ep_size) > 1,
+        **getattr(args, "output_head_options", {}),
     )
 
 
