@@ -9,6 +9,7 @@
 #if USING_CUDA
 #include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAGuard.h>
+#include "rtp_llm/cpp/pybind/EmbTransportCudaStreams.h"
 #endif
 
 #include <algorithm>
@@ -251,13 +252,50 @@ inline std::vector<at::Tensor> restoreEmbTensorSlices(const at::Tensor& buffer,
 
     std::vector<at::Tensor> result;
     result.reserve(slices.size());
+#if USING_CUDA
+    const auto copyStream = buffer.is_cuda()
+        ? std::optional<c10::cuda::CUDAStream>(c10::cuda::getCurrentCUDAStream(buffer.get_device()))
+        : std::nullopt;
+    const auto allocationStream = copyStream ? EmbTransportCudaStreams::instance().allocationFor(*copyStream)
+                                             : std::nullopt;
+    if (allocationStream) {
+        // One allocator stream avoids building a separate caching-allocator
+        // free list for each concurrent transport stream. It submits allocations
+        // only, so the copy stream never waits behind encoder compute here.
+        at::cuda::CUDAEvent ready(cudaEventDisableTiming);
+        {
+            const c10::cuda::CUDAStreamGuard guard(*allocationStream);
+            for (const auto& [offset, bytes, dtype, shape, device] : slices) {
+                if (bytes > 0 && device == buffer.device()) {
+                    result.push_back(at::empty(shape, buffer.options().dtype(dtype).device(device)));
+                } else {
+                    result.emplace_back();
+                }
+            }
+            ready.record(*allocationStream);
+        }
+        ready.block(*copyStream);
+    } else
+#endif
+    {
+        result.resize(slices.size());
+    }
+    size_t index = 0;
     for (const auto& [offset, bytes, dtype, shape, device] : slices) {
+        auto& output = result[index++];
         const auto options = buffer.options().dtype(dtype).device(device);
         if (bytes == 0) {
-            result.push_back(at::empty(shape, options));
+            output = at::empty(shape, options);
         } else {
             const auto view = buffer.narrow(0, offset, bytes).view(dtype).reshape(shape);
-            result.push_back(view.to(options, /*non_blocking=*/true, /*copy=*/true));
+#if USING_CUDA
+            if (output.defined()) {
+                output.record_stream(*copyStream);
+                output.copy_(view, /*non_blocking=*/true);
+                continue;
+            }
+#endif
+            output = view.to(options, /*non_blocking=*/true, /*copy=*/true);
         }
     }
     return result;
@@ -268,6 +306,9 @@ inline void registerEmbTensorCodec(pybind11::module& module) {
     module.def("store_emb_hashes", &storeEmbHashes);
     module.def("clone_emb_hashes", &cloneEmbHashes);
 #if USING_CUDA
+    pybind11::class_<EmbTransportCudaStream>(module, "EmbTransportCudaStream")
+        .def(pybind11::init<c10::DeviceIndex>(), pybind11::call_guard<pybind11::gil_scoped_release>())
+        .def_property_readonly("address", &EmbTransportCudaStream::address);
     pybind11::class_<EmbCudaSnapshotReady>(module, "EmbCudaSnapshotReady")
         .def("synchronize", &EmbCudaSnapshotReady::synchronize, pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def("snapshot_emb_cuda_tensors",

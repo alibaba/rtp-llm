@@ -17,12 +17,26 @@ from rtp_llm.multimodal.kvcm.registered_transport import (
     RegisteredTransportPool,
     RegisteredTransportUnavailableError,
     _enable_sync_memops,
+    _new_cuda_stream,
 )
 
 from rtp_llm.multimodal.kvcm.tensor_object import plan_object
 
 
 class CudaRdmaSyncMemopsTest(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_registered_stream_handles_are_distinct_and_reusable(self):
+        with patch(
+            "rtp_llm.multimodal.kvcm.registered_transport._ISOLATED_CUDA_STREAMS",
+            True,
+        ):
+            streams = [_new_cuda_stream(torch.device("cuda:0")) for _ in range(33)]
+            addresses = {stream.cuda_stream for stream in streams}
+            self.assertEqual(len(addresses), 33)
+            streams.clear()
+            streams = [_new_cuda_stream(torch.device("cuda:0")) for _ in range(33)]
+            self.assertEqual({stream.cuda_stream for stream in streams}, addresses)
+
     def test_enables_and_checks_the_owned_allocation(self):
         arena = Mock()
         arena.data_ptr.return_value = 0x12340000
@@ -250,7 +264,9 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.device = patch("torch.cuda.device", return_value=nullcontext())
         self.device.start()
         self.addCleanup(self.device.stop)
-        stream_factory = patch("torch.cuda.Stream")
+        stream_factory = patch(
+            "rtp_llm.multimodal.kvcm.registered_transport._new_cuda_stream"
+        )
         stream_factory.start()
         self.addCleanup(stream_factory.stop)
         stream_context = patch("torch.cuda.stream", return_value=nullcontext())
@@ -264,7 +280,10 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         allocate = torch.empty
         with patch("torch.cuda.MemPool"), patch(
             "torch.cuda.use_mem_pool", return_value=nullcontext()
-        ), patch("torch.cuda.Stream", return_value=torch.cuda.current_stream()), patch(
+        ), patch(
+            "rtp_llm.multimodal.kvcm.registered_transport._new_cuda_stream",
+            return_value=torch.cuda.current_stream(),
+        ), patch(
             "torch.empty",
             side_effect=lambda size, *, dtype, **kw: allocate(size, dtype=dtype),
         ):

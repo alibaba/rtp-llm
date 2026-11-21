@@ -16,6 +16,21 @@ import torch
 
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
+_ISOLATED_CUDA_STREAMS = os.environ.get("MM_EMB_ISOLATED_CUDA_STREAMS") == "1"
+
+
+def _new_cuda_stream(device):
+    if not _ISOLATED_CUDA_STREAMS:
+        return torch.cuda.Stream(device=device)
+    from librtp_compute_ops import EmbTransportCudaStream
+
+    device = torch.device(device)
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    owner = EmbTransportCudaStream(index)
+    stream = torch.cuda.ExternalStream(owner.address, device=device)
+    stream._emb_stream_owner = owner
+    return stream
+
 
 def _enable_sync_memops(arena):
     # GPUDirect mappings must remain consistent with CUDA copies of this
@@ -172,7 +187,7 @@ class RegisteredObjectTransport:
                 self._capacity, dtype=torch.uint8, device="cpu", pin_memory=True
             )
         )
-        self._stream = None if lazy_stream else torch.cuda.Stream(device=device)
+        self._stream = None if lazy_stream else _new_cuda_stream(device)
 
     @property
     def _client(self):
@@ -297,7 +312,7 @@ class RegisteredObjectTransport:
                 stack.enter_context(cuda_graph_gate.operation())
             stack.enter_context(torch.cuda.device(self._device))
             if self._stream is None:
-                self._stream = torch.cuda.Stream(device=self._device)
+                self._stream = _new_cuda_stream(self._device)
             stack.enter_context(torch.cuda.stream(self._stream))
             yield
 

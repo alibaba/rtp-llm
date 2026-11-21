@@ -107,6 +107,7 @@ cc_library(
         "EmbRegisteredArena.h",
         "EmbTensorCodec.h",
         "EmbTensorObjectPlan.h",
+        "EmbTransportCudaStreams.h",
     ],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
