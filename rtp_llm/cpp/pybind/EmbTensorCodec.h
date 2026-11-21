@@ -25,6 +25,19 @@ using EmbTensorSlice = std::tuple<int64_t, int64_t, at::ScalarType, std::vector<
 
 using EmbTensorInput = std::tuple<int64_t, int64_t, at::Tensor>;
 
+inline std::vector<at::Tensor> snapshotEmbTensors(const std::vector<at::Tensor>& inputs) {
+    std::vector<at::Tensor> snapshots;
+    snapshots.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        if (input.is_cuda()) {
+            const c10::impl::VirtualGuardImpl guard(input.device().type());
+            input.record_stream(guard.getStream(input.device()));
+        }
+        snapshots.push_back(input.detach().clone(at::MemoryFormat::Contiguous));
+    }
+    return snapshots;
+}
+
 inline void packEmbTensorSlices(const at::Tensor& output,
                                 std::string prefix,
                                 int64_t payloadOffset,
@@ -146,6 +159,7 @@ inline std::vector<at::Tensor> cloneEmbHashes(const pybind11::capsule& handle) {
 }
 
 inline void registerEmbTensorCodec(pybind11::module& module) {
+    module.def("snapshot_emb_tensors", &snapshotEmbTensors, pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def("store_emb_hashes", &storeEmbHashes);
     module.def("clone_emb_hashes", &cloneEmbHashes);
 #if USING_CUDA

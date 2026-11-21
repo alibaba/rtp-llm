@@ -34,6 +34,7 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 # Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
 _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
+_USE_NATIVE_SNAPSHOT = os.environ.get("MM_EMB_NATIVE_SNAPSHOT") == "1"
 
 
 def _is_write_in_progress(error):
@@ -876,12 +877,21 @@ class MMRemoteEmbeddingCache:
                 if producer != caller:
                     producer.wait_stream(caller)
                 with torch.cuda.stream(producer):
-                    for i in indices:
-                        tensor = plan.tensors[i]
-                        plan.tensors[i] = tensor.detach().clone(
-                            memory_format=torch.contiguous_format
+                    if _USE_NATIVE_SNAPSHOT:
+                        from librtp_compute_ops import snapshot_emb_tensors
+
+                        snapshots = snapshot_emb_tensors(
+                            [plan.tensors[i] for i in indices]
                         )
-                        tensor.record_stream(producer)
+                        for i, snapshot in zip(indices, snapshots):
+                            plan.tensors[i] = snapshot
+                    else:
+                        for i in indices:
+                            tensor = plan.tensors[i]
+                            plan.tensors[i] = tensor.detach().clone(
+                                memory_format=torch.contiguous_format
+                            )
+                            tensor.record_stream(producer)
                     ready = producer.record_event()
                 if producer != caller:
                     caller.wait_event(ready)
@@ -953,7 +963,8 @@ class MMRemoteEmbeddingCache:
             self._release(cost)
 
         try:
-            ready_events = self._snapshot(plan, producer_streams)
+            with self._observe_stage("write", "snapshot_submit"):
+                ready_events = self._snapshot(plan, producer_streams)
         except Exception as error:
             self.record(
                 "write_error",
