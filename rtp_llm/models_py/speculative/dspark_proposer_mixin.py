@@ -36,12 +36,15 @@ sampler using each request's real sampling parameters.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+import os
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 
 def optional_tensor(value: Any) -> Optional[torch.Tensor]:
@@ -57,9 +60,7 @@ def device_metadata_tensor(attention_inputs: Any, name: str) -> Optional[torch.T
     to the host field keeps eager and unit-test callers compatible, while the
     preferred path avoids introducing a host-to-device copy inside capture.
     """
-    device_value = optional_tensor(
-        getattr(attention_inputs, f"{name}_device", None)
-    )
+    device_value = optional_tensor(getattr(attention_inputs, f"{name}_device", None))
     if device_value is not None:
         return device_value
     return optional_tensor(getattr(attention_inputs, name, None))
@@ -219,6 +220,8 @@ class DSparkProposerMixin:
     ) -> PyModelOutputs:
         """Zero-filled normalized hidden states with serving geometry."""
         width = self._dspark_query_width
+        from rtp_llm.ops.compute_ops import PyModelOutputs
+
         return PyModelOutputs(
             torch.zeros(
                 (batch_size * width, self._dspark_hidden_dim),
@@ -259,6 +262,8 @@ class DSparkProposerMixin:
         hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
 
         def _empty_outputs() -> PyModelOutputs:
+            from rtp_llm.ops.compute_ops import PyModelOutputs
+
             return PyModelOutputs(
                 torch.zeros(
                     (0, self._dspark_hidden_dim),
@@ -321,6 +326,12 @@ class DSparkProposerMixin:
             starts, lengths, committed_ends, row_count, inputs
         )
 
+        if os.getenv("RTP_V41_DRAFT_ROLE") and commit_ctx is not None:
+            from rtp_llm.models_py.modules.v41_first_draft import fixed_features
+
+            features = fixed_features(
+                self, features, positions, req, committed_ends, commit_ctx
+            )
         main_x = self.combine_hidden_states(features)
         self.commit_feature_rows(
             main_x,
@@ -332,6 +343,8 @@ class DSparkProposerMixin:
         )
         # The fixed-width commit CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
+        from rtp_llm.ops.compute_ops import PyModelOutputs
+
         return PyModelOutputs(main_x)
 
     def run_propose_step(
@@ -404,5 +417,7 @@ class DSparkProposerMixin:
         # stays balanced; only the non-collective head is skipped.
         if batch_size == 0:
             return self.dspark_empty_outputs(0, device)
+
+        from rtp_llm.ops.compute_ops import PyModelOutputs
 
         return PyModelOutputs(self.compute_draft_hidden_states(hidden))

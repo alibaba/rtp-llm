@@ -622,10 +622,9 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    const bool    use_global_budget_warmup =
-        token_budget > 0 && !runtime_config.warm_up_with_loss;
-    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+    const int64_t token_budget             = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool    use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
@@ -860,16 +859,16 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
 }
 
 #if USING_CUDA
-std::vector<AccuracyScenario> NormalEngine::accuracyScenariosForStartup(const ModelConfig& model_config,
-                                                                      const RuntimeConfig& runtime_config,
-                                                                      const KVCacheConfig& cache_config,
-                                                                      size_t block_size,
-                                                                      size_t temporary_block_num) {
+std::vector<AccuracyScenario> NormalEngine::accuracyScenariosForStartup(const ModelConfig&   model_config,
+                                                                        const RuntimeConfig& runtime_config,
+                                                                        const KVCacheConfig& cache_config,
+                                                                        size_t               block_size,
+                                                                        size_t               temporary_block_num) {
     const auto executable = [&](const AccuracyScenario& scenario) {
         size_t max_plain = 0, max_seq = 0;
         for (const auto& seq : scenario.seqs) {
             max_plain = std::max(max_plain, seq.prefix_len + seq.chunk_len);
-            max_seq = std::max(max_seq, seq.prefix_len + seq.chunk_len + seq.decode_steps);
+            max_seq   = std::max(max_seq, seq.prefix_len + seq.chunk_len + seq.decode_steps);
         }
         // Match runCheck(), including its strict token-budget comparison.
         const auto token_budget = runtime_config.fifo_scheduler_config.max_batch_tokens_size;
@@ -877,21 +876,22 @@ std::vector<AccuracyScenario> NormalEngine::accuracyScenariosForStartup(const Mo
                && scenario.seqs.size() <= static_cast<size_t>(runtime_config.max_generate_batch_size)
                && (token_budget == 0 || max_plain * scenario.seqs.size() < static_cast<size_t>(token_budget))
                && max_seq <= static_cast<size_t>(model_config.max_seq_len) && max_seq <= 65536
-               && AccuracyChecker::computeTemporaryBlockNum(block_size, cache_config, {scenario}) <= temporary_block_num;
+               && AccuracyChecker::computeTemporaryBlockNum(block_size, cache_config, {scenario})
+                      <= temporary_block_num;
     };
     std::vector<AccuracyScenario> scenarios;
-    bool has_decode = false;
+    bool                          has_decode = false;
     for (const auto& scenario : AccuracyChecker::defaultScenarios()) {
         if (executable(scenario)) {
             scenarios.push_back(scenario);
-            has_decode |= std::any_of(scenario.seqs.begin(), scenario.seqs.end(),
-                                      [](const auto& seq) { return seq.decode_steps > 0; });
+            has_decode |= std::any_of(
+                scenario.seqs.begin(), scenario.seqs.end(), [](const auto& seq) { return seq.decode_steps > 0; });
         }
     }
     if (!has_decode) {
         AccuracyScenario minimal{{{0, 1, 1}}};
         RTP_LLM_CHECK_WITH_INFO(executable(minimal),
-                               "accuracy check requires capacity for batch 1, one prompt token and one decode step");
+                                "accuracy check requires capacity for batch 1, one prompt token and one decode step");
         scenarios.push_back(std::move(minimal));
     }
     return scenarios;
@@ -939,14 +939,19 @@ absl::StatusOr<bool> NormalEngine::runAttentionAccuracyCheck(const EngineInitPar
                             "attention accuracy check requires one FULL KV cache group");
         return false;
     }
-    auto accuracy_scenarios = accuracyScenariosForStartup(
-        model_config_, runtime_config, check_config, cache_config.seq_size_per_block, std::numeric_limits<size_t>::max());
+    auto accuracy_scenarios = accuracyScenariosForStartup(model_config_,
+                                                          runtime_config,
+                                                          check_config,
+                                                          cache_config.seq_size_per_block,
+                                                          std::numeric_limits<size_t>::max());
     cache_config.finalizeBlockNums(
         AccuracyChecker::computeTemporaryBlockNum(cache_config.seq_size_per_block, check_config, accuracy_scenarios),
         runtime_config);
-    accuracy_scenarios = accuracyScenariosForStartup(
-        model_config_, runtime_config, check_config, cache_config.seq_size_per_block,
-        cache_config.topology().groups().front().block_num);
+    accuracy_scenarios = accuracyScenariosForStartup(model_config_,
+                                                     runtime_config,
+                                                     check_config,
+                                                     cache_config.seq_size_per_block,
+                                                     cache_config.topology().groups().front().block_num);
     ResourceContext check_context;
     check_context.initCacheConfig(check_config);
     check_context.role_type  = pd_sep_config.role_type;
@@ -1417,11 +1422,11 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 }
 
 bool NormalEngine::isMTPEagle() {
-    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK;
+    return sp_config.type == SP_TYPE_MTP || isEagle() || sp_config.type == SP_TYPE_DSPARK;
 }
 
 bool NormalEngine::isEagle() {
-    return sp_config.type == SP_TYPE_EAGLE;
+    return sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_EAGLE3;
 }
 
 bool NormalEngine::isDSpark() {

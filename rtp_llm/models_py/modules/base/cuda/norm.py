@@ -11,21 +11,25 @@ from rtp_llm.models_py.modules.base.common.norm import (  # noqa: F401
     BaseResNorm,
     LayerNorm,
 )
-from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
 class RMSNorm(BaseNorm):
-    def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
+    def __init__(self, weight: torch.Tensor, eps: float = 1e-6, *, implementation=None):
         super().__init__(weight, eps)
+        self._implementation = implementation
 
     def forward(
         self, hidden_states: torch.Tensor, output: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         # Lazy import: this module is also imported where flashinfer is
         # absent (e.g. ppu/rocm), so importing it must not require flashinfer.
-        import flashinfer
+        if self._implementation is None:
+            import flashinfer
 
-        return flashinfer.norm.rmsnorm(
+            implementation = flashinfer.norm.rmsnorm
+        else:
+            implementation = self._implementation
+        return implementation(
             hidden_states,
             self.weight.data,
             eps=self.variance_epsilon,
@@ -137,6 +141,8 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
     ):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.fused_add_layernorm(
             hidden_states,
             residual,

@@ -28,7 +28,10 @@ def init_load_group_args(parser, load_config, model_args):
         bind_to=(load_config, "load_method"),
         type=str,
         default="auto",
-        help="模型权重加载方法",
+        help=(
+            "NewLoader 权重读取：auto 在加速卡上优先 fastsafetensors，"
+            "前置条件不满足时选择 scratch；显式 fastsafetensors 不回退。"
+        ),
     )
     load_group.add_argument(
         "--force_cpu_load_weights",

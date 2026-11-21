@@ -98,6 +98,24 @@ class WeightOnlyPerColWeight(CompositeWeight, QuantWeight):
         load_config: LoadConfig,
     ) -> torch.Tensor:
         kernel = tensor.get(self.kernel.name)
+        from rtp_llm.models_py.quant_methods.int8 import WeightOnlyInt8ExportModule
+
+        get_device_type = getattr(load_config.exported_device, "get_device_type", None)
+        platform = get_device_type().name if callable(get_device_type) else None
+        if platform in ("Cuda", "Ppu", "ROCm"):
+            arch = 0
+            if platform in ("Cuda", "Ppu"):
+                arch = (
+                    load_config.exported_device.specify_gpu_arch
+                    or load_config.exported_device.arch
+                )
+            module = WeightOnlyInt8ExportModule(
+                kernel, stacked=isinstance(self.kernel, MoeAtomicWeight)
+            )
+            weight, scale = module.export(platform=platform, arch=arch, device=device)
+            return {self.kernel.name: weight, self.scale.name: scale}
+        # External/CPU offline converters retain their existing layout API;
+        # this is a file-format extension point, never a serving loader fallback.
         if isinstance(self.kernel, MoeAtomicWeight):
             weight, scale = load_config.exported_device.moe_apply_int8(kernel, device)
         else:

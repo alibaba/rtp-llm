@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -20,12 +22,7 @@ from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
-    DenseMLP,
-    Embedding,
-    FMHAImplBase,
-    LinearFactory,
     MultimodalEmbeddingInjector,
-    RMSResNorm,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
@@ -71,12 +68,14 @@ from rtp_llm.ops import (
     LinearAttentionConfig,
     ParallelismConfig,
 )
-from rtp_llm.ops.compute_ops import (
-    LayerKVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
-)
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules import FMHAImplBase
+    from rtp_llm.ops.compute_ops import (
+        LayerKVCache,
+        PyAttentionInputs,
+        PyModelInputs,
+        PyModelOutputs,
+    )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import (
     can_fuse_swizzled_kn,
@@ -248,6 +247,8 @@ class _QwenGdnGraphDelegate:
         if not self.bounds_by_tag:
             return
         groups = get_attention_inputs_value(inputs)
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
         if isinstance(groups, PyAttentionInputs):
             groups = {"": groups}
         anchor_lengths = groups[self.anchor].sequence_lengths
@@ -383,6 +384,8 @@ def _is_cuda_graph_forward(inputs: PyModelInputs, fmha_impl=None) -> bool:
         # unlike scalar fields changed on an earlier wrapper, survives.
         return True
     attention_inputs = get_attention_inputs_value(inputs)
+    from rtp_llm.ops.compute_ops import PyAttentionInputs
+
     if isinstance(attention_inputs, PyAttentionInputs):
         return attention_inputs.is_cuda_graph
     # Only FMHA groups are prepared by prepare_fmha_impl. In a mixed cache,
@@ -405,12 +408,19 @@ def _should_use_aiter_flydsl_gdn_prefill(
     )
 
 
+@dataclass(frozen=True)
+class Qwen3NextGdnStateParameters:
+    conv: torch.Tensor
+    dt_bias: torch.Tensor
+    a_log: torch.Tensor
+
+
 class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
     def __init__(
         self,
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
-        weights: Dict[str, torch.Tensor],
+        weights: Dict[str, torch.Tensor] | Qwen3NextGdnStateParameters,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -457,9 +467,14 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
             conv_state_dtype=self.conv_state_dtype,
         )
         # weights
-        self.conv_weights = weights[W.linear_attn_conv1d_w].squeeze(1)
-        self.dt_bias = weights[W.linear_attn_dt_b]
-        self.alog = weights[W.linear_attn_alog]
+        if isinstance(weights, Qwen3NextGdnStateParameters):
+            self.conv_weights = weights.conv
+            self.dt_bias = weights.dt_bias
+            self.alog = weights.a_log
+        else:
+            self.conv_weights = weights[W.linear_attn_conv1d_w].squeeze(1)
+            self.dt_bias = weights[W.linear_attn_dt_b]
+            self.alog = weights[W.linear_attn_alog]
 
     def forward(
         self,
@@ -486,7 +501,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         self,
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
-        weights: Dict[str, torch.Tensor],
+        weights: Dict[str, torch.Tensor] | Qwen3NextGdnStateParameters,
     ):
         super().__init__(linear_attn_config, parallelism_config, weights)
 
@@ -1011,7 +1026,7 @@ class Qwen3NextAttention(CausalAttention):
         return attn_out
 
 
-class Qwen3NextGatedDeltaNet(nn.Module):
+class _PackedGdnProjections(nn.Module):
     def __init__(
         self,
         linear_attn_config: LinearAttentionConfig,
@@ -1024,7 +1039,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         linear_factory=None,
     ):
         super().__init__()
-        self.linear_factory = linear_factory or LinearFactory
+        if linear_factory is None:
+            from rtp_llm.models_py.modules import LinearFactory
+
+            linear_factory = LinearFactory
+        self.linear_factory = linear_factory
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
@@ -1129,6 +1148,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             quant_config,
             hw_kernel_config=hw_kernel_config,
         )
+
+class Qwen3NextGdnExecution:
+    """Shared GDN forward, including CP, graph replay, and accelerator dispatch."""
 
     def _input_project(
         self, hidden_states: torch.Tensor
@@ -1396,8 +1418,12 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         return attn_output
 
 
+class Qwen3NextGatedDeltaNet(Qwen3NextGdnExecution, _PackedGdnProjections):
+    pass
+
+
 class Qwen3NextDecoderLayer(nn.Module):
-    _linear_factory = LinearFactory
+    _linear_factory = None
     _moe_layer_cls = GenericMoeLayer
 
     def __init__(
@@ -1413,6 +1439,10 @@ class Qwen3NextDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.layer_idx = layer_idx
+        if self._linear_factory is None:
+            from rtp_llm.models_py.modules import LinearFactory
+
+            self._linear_factory = LinearFactory
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
         ]
@@ -1451,6 +1481,8 @@ class Qwen3NextDecoderLayer(nn.Module):
                 linear_factory=self._linear_factory,
             )
         elif config.moe_style == 0:
+            from rtp_llm.models_py.modules import DenseMLP
+
             self.mlp = DenseMLP(
                 config.activation_type,
                 parallelism_config,
@@ -1486,6 +1518,8 @@ class Qwen3NextDecoderLayer(nn.Module):
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]
     ) -> None:
+        from rtp_llm.models_py.modules import RMSResNorm
+
         self.input_layernorm = RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
@@ -1540,6 +1574,8 @@ class Qwen3NextModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
         )
+        from rtp_llm.models_py.modules import Embedding
+
         layer_ids = self.layer_ids()
         self.embed_tokens = (
             Embedding(
@@ -1574,6 +1610,8 @@ class Qwen3NextModel(GptModelBase):
     def _build_output_head(
         self, model_config: ModelConfig, weights: ModelWeights
     ) -> None:
+        from rtp_llm.models_py.modules import RMSResNorm
+
         self.norm = (
             RMSResNorm(
                 weights.get_global_weight(W.final_ln_gamma),
@@ -1610,6 +1648,8 @@ class Qwen3NextModel(GptModelBase):
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
         groups = (
             {"": attention_inputs}
             if isinstance(attention_inputs, PyAttentionInputs)
@@ -1928,6 +1968,8 @@ class Qwen3NextModel(GptModelBase):
                 assert self._mtp_target_hidden_states is not None
                 outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
             return outputs
+        from rtp_llm.ops.compute_ops import PyModelOutputs
+
         outputs = PyModelOutputs(hidden_states)
         intermediates = {
             "hidden_states": hidden_states,

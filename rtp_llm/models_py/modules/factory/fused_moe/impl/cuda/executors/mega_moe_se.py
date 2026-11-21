@@ -30,7 +30,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_buffer import
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
     stage_shared_fp8_input_scales,
 )
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase
 from .mega_moe import (
@@ -82,23 +82,18 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
     def setup_weights(self, layer_weights):
         if self._prepared_policy is not None:
             return super().setup_weights(layer_weights)
-        from rtp_llm.utils.model_weight import W
-
         super().setup_weights(layer_weights)
         self.setup_shared_expert_from_fp8(
-            layer_weights.pop(W.ffn_w13),
-            layer_weights.pop(W.ffn_s13),
-            layer_weights.pop(W.ffn_w2),
-            layer_weights.pop(W.ffn_s2),
+            take_weight(layer_weights, "shared_w13"),
+            take_weight(layer_weights, "shared_s13"),
+            take_weight(layer_weights, "shared_w2"),
+            take_weight(layer_weights, "shared_s2"),
         )
         self.maybe_warmup_fused_shared_jit_once()
 
-    def _setup_shared_expert_weights(self, layer_weights, deep_gemm, D, inter):
-        w13_fp8 = layer_weights.pop(W.ffn_w13)
-        w13_scale = layer_weights.pop(W.ffn_s13)
-        w2_fp8 = layer_weights.pop(W.ffn_w2)
-        w2_scale = layer_weights.pop(W.ffn_s2)
-
+    def _setup_shared_expert_weights(
+        self, w13_fp8, w13_scale, w2_fp8, w2_scale, deep_gemm, D, inter
+    ):
         shared_inter = inter * self.cfg.n_shared_experts
         expected_w13 = (2 * shared_inter, D)
         expected_w2 = (D, shared_inter)
@@ -185,7 +180,10 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
                 "MegaMoE-SE does not support padded routed intermediate sizes"
             )
         self._setup_shared_expert_weights(
-            {W.ffn_w13: w1_w, W.ffn_s13: w1_s, W.ffn_w2: w2_w, W.ffn_s2: w2_s},
+            w1_w,
+            w1_s,
+            w2_w,
+            w2_s,
             deep_gemm,
             self.cfg.dim,
             inter,

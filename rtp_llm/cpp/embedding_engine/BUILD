@@ -2,6 +2,17 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "requirement", "whl_deps")
 
 cc_library(
+    name = "embedding_token_range",
+    hdrs = ["EmbeddingTokenRange.h"],
+)
+
+cc_test(
+    name = "embedding_token_range_test",
+    srcs = ["test/EmbeddingTokenRangeTest.cc"],
+    deps = [":embedding_token_range"],
+)
+
+cc_library(
     name = "embedding_engine",
     hdrs = glob([
         "*.h",

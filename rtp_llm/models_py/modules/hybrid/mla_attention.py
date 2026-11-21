@@ -219,18 +219,18 @@ class MlaAttention(nn.Module):
             )
         return topk_indices
 
-    def forward(
+    def _resolve_layer_routes(
         self,
-        hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
-        x_fp8: Optional[torch.Tensor] = None,
-        x_scale: Optional[torch.Tensor] = None,
-        prev_topk_indices: Optional[torch.Tensor] = None,
-        force_reuse_topk_indices: bool = False,
-        return_topk: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
-        if self.attn_config.is_sparse:
+    ):
+        return self.resolve_layer_routes(
+            self.attn_config.is_sparse, self.reuse_topk_indices, fmha_impl, kv_cache
+        )
+
+    @staticmethod
+    def resolve_layer_routes(is_sparse, reuse_topk_indices, fmha_impl, kv_cache):
+        if is_sparse:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
                 raise RuntimeError(
@@ -247,7 +247,7 @@ class MlaAttention(nn.Module):
                 indexer_kv_cache = None
             elif isinstance(kv_cache, Mapping) and (
                 set(kv_cache) == required_tags
-                or (self.reuse_topk_indices and set(kv_cache) == {"default"})
+                or (reuse_topk_indices and set(kv_cache) == {"default"})
             ):
                 default_kv_cache = kv_cache["default"]
                 indexer_kv_cache = kv_cache.get("indexer_kv")
@@ -268,6 +268,24 @@ class MlaAttention(nn.Module):
                 raise RuntimeError("dense MLA does not accept tagged cache routes")
             default_fmha_impl = cast(MlaImplBase, fmha_impl)
             default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
+            indexer_fmha_impl = indexer_kv_cache = None
+
+        return default_fmha_impl, default_kv_cache, indexer_fmha_impl, indexer_kv_cache
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
+        kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
+        return_topk: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        default_fmha_impl, default_kv_cache, indexer_fmha_impl, indexer_kv_cache = (
+            self._resolve_layer_routes(fmha_impl, kv_cache)
+        )
 
         fmha_impl = default_fmha_impl
         kv_cache = default_kv_cache

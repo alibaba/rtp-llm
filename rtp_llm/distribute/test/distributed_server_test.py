@@ -128,6 +128,12 @@ class TestGetWorldInfo(TestCase):
     @patch.dict(
         "os.environ",
         {
+            # Keep the CI worker's accelerator allocation stable across
+            # import torch and lazy CUDA initialization in setup_default_args.
+            **{k: v for k, v in os.environ.items() if k in (
+                "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES",
+                "CUDA_DEVICE_ORDER", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES",
+            )},
             "TP_SIZE": "2",
             "PP_SIZE": "1",
             "WORLD_SIZE": "2",

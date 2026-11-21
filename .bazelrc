@@ -436,8 +436,6 @@ test:ppu --test_env PPU_HOME="/usr/local/PPU_SDK/"
 test:ppu --test_env PATH="/opt/conda312/bin:/usr/local/PPU_SDK/ppu-smi/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 test:ppu --test_env LD_LIBRARY_PATH="/opt/conda310/lib/:/opt/conda312/lib:/usr/local/PPU_SDK/pccl/nccl_wrapper/lib:/usr/local/PPU_SDK/pccl/lib:/usr/local/PPU_SDK/lib/:/usr/local/cuda/lib64:/usr/local/PPU_SDK/sailSHMEM/lib"
 test:ppu --test_env SKIP_DISTRIBUTED_TEST=1
-# fastsafetensors pread on PPU NAS is 2-4x slower than scratch; use scratch globally
-test:ppu --test_env LOAD_METHOD=scratch
 
 try-import %workspace%/internal_source/.cicd_bazelrc
 try-import %workspace%/internal_source/.internal_bazelrc

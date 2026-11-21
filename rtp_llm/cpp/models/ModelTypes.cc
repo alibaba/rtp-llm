@@ -204,6 +204,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
     encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
     encode_flag(inputs.use_opaque_kv_cache_store, GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    encode_flag(inputs.v41_cache_fixture, GptModelInputControlFlag::kControlV41CacheFixture);
     shape_hints[GptModelInputIndex::modelControlFlags]     = static_cast<int64_t>(control_flags);
     shape_hints[GptModelInputIndex::kvBlockStrideBytes]    = static_cast<int64_t>(inputs.kv_block_stride_bytes);
     shape_hints[GptModelInputIndex::kvScaleStrideBytes]    = static_cast<int64_t>(inputs.kv_scale_stride_bytes);
@@ -245,8 +246,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
 
 torch::Tensor makeModelInputShapeHintsTensor(const GptModelInputs& inputs) {
     const auto shape_hints = getModelInputShapeHints(inputs);
-    auto tensor =
-        torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())},
+                               torch::TensorOptions(torch::kInt64).pinned_memory(true));
     std::copy(shape_hints.begin(), shape_hints.end(), tensor.data_ptr<int64_t>());
     return tensor;
 }
@@ -323,8 +324,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
 
     // first sync stage: shape hints
-    auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
-    auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    auto shape_hints_t                                     = makeModelInputShapeHintsTensor(inputs);
+    auto shape_hints_ptr                                   = shape_hints_t.data_ptr<int64_t>();
     shape_hints_ptr[GptModelInputIndex::recordExecutionId] = inputs.record_execution_id;
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
@@ -361,6 +362,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
     inputs.use_opaque_kv_cache_store = has_flag(GptModelInputControlFlag::kControlOpaqueKvCacheStore);
+    inputs.v41_cache_fixture         = has_flag(GptModelInputControlFlag::kControlV41CacheFixture);
     inputs.kv_block_stride_bytes =
         static_cast<size_t>(checkedHint(GptModelInputIndex::kvBlockStrideBytes, "kvBlockStrideBytes"));
     inputs.kv_scale_stride_bytes =
@@ -385,8 +387,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto engram_width    = checkedHint(GptModelInputIndex::engramTokenWindowWidth, "engramTokenWindowWidth");
     const auto mm_features_num = checkedHint(GptModelInputIndex::mmFeaturesNum, "mmFeaturesNum");
     if (mm_features_num) {
-        mm_features_shape_t =
-            torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        mm_features_shape_t = torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int64_t>();
         for (int64_t i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =

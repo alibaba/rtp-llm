@@ -203,6 +203,7 @@ class QWen2_VL(QWen_VL):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()
+        config.ckpt_path = ckpt_path
 
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):

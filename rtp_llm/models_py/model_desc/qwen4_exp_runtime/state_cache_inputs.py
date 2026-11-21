@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
+from rtp_llm.config.qwen4_cache_tags import (
     INDEXER_ROPE_POS_TAG,
     INDEXER_STATE_TAG,
     PLE_NGRAM_CTX_TAG,

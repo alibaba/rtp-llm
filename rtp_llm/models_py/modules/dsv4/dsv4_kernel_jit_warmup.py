@@ -1167,7 +1167,7 @@ def _collect_dsv4_mhc_prenorm_shapes(model: Any) -> Dict[tuple[int, int], dict]:
 
     shapes: Dict[tuple[int, int], dict] = {}
     for module_name, module in model.named_modules():
-        if module.__class__.__name__ != "TileLangHCUnit":
+        if not any(cls.__name__ == "TileLangHCUnit" for cls in type(module).__mro__):
             continue
         fn = getattr(module, "fn", None)
         if not isinstance(fn, torch.Tensor) or fn.dim() != 2:
@@ -1209,7 +1209,7 @@ def _collect_dsv4_mhc_head_fused_shapes(model: Any) -> Dict[tuple[int, int], dic
 
     shapes: Dict[tuple[int, int], dict] = {}
     for module_name, module in model.named_modules():
-        if module.__class__.__name__ != "TileLangHCHead":
+        if not any(cls.__name__ == "TileLangHCHead" for cls in type(module).__mro__):
             continue
         fn = getattr(module, "fn", None)
         if not isinstance(fn, torch.Tensor) or fn.dim() != 2:

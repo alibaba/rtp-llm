@@ -41,10 +41,16 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
 
-_CUBLAS_GEMM_BF16_BF16_FP32 = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
+
+def _cublas_gemm_bf16_bf16_fp32(x, weight):
+    op = getattr(rtp_llm_ops, "cublas_gemm_bf16_bf16_fp32", None)
+    if op is None:
+        raise RuntimeError("cublas_gemm_bf16_bf16_fp32 op is not built")
+    return op(x, weight)
 
 
 def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -53,12 +59,9 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     assert weight.dtype == torch.bfloat16, f"expected BF16 weight, got {weight.dtype}"
     assert x.is_contiguous(), "expected contiguous input"
     assert weight.is_contiguous(), "expected contiguous weight"
-    assert (
-        _CUBLAS_GEMM_BF16_BF16_FP32 is not None
-    ), "cublas_gemm_bf16_bf16_fp32 op is not built"
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    out_2d = _cublas_gemm_bf16_bf16_fp32(x_2d, weight)
     return out_2d.reshape(*leading_shape, weight.shape[0])
 
 
@@ -436,7 +439,7 @@ class _CompressorNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.bfloat16))
 
 
-class CompressorFP8(PoolBackedModule):
+class CompressorFP8(PoolBackedModule, RtpModule):
     """FP8 KV cache compressor — vLLM-aligned per-token state pool path.
 
     Compress ratio: CSA uses ratio=4 (overlap=True), HCA uses ratio=128
@@ -464,10 +467,12 @@ class CompressorFP8(PoolBackedModule):
             f"CompressorFP8 supports head_dim in {{{KV_HEAD_DIM}, "
             f"{INDEXER_HEAD_DIM}}}; got {head_dim}"
         )
-        assert compressor_weights is not None, (
-            "CompressorFP8 requires compressor_weights — meta-tensor / "
-            "stand-alone construction is not supported (use the BF16 path)."
-        )
+        self._checkpoint_owned = compressor_weights is None
+        if self._checkpoint_owned:
+            if isinstance(dim, bool) or not isinstance(dim, int) or dim <= 0:
+                raise ValueError("Compressor dim must be a positive integer")
+            if compress_ratio not in (4, 128):
+                raise ValueError("Compressor checkpoint owner requires ratio 4 or 128")
         self.dim = dim
         self.head_dim = head_dim
         # Which per-forward workspace CP buffer pair this compressor's gather
@@ -498,27 +503,49 @@ class CompressorFP8(PoolBackedModule):
         # Register ape as a non-trainable Parameter so .to(device) follows the
         # module.
         self.ape = nn.Parameter(
-            compressor_weights["ape"].float().contiguous(), requires_grad=False
+            (
+                torch.empty((compress_ratio, coff * head_dim), dtype=torch.float32)
+                if self._checkpoint_owned
+                else compressor_weights["ape"].float().contiguous()
+            ),
+            requires_grad=False,
         )
-        self.wkv = nn.Linear(dim, coff * head_dim, bias=False)
-        self.wgate = nn.Linear(dim, coff * head_dim, bias=False)
+        # Avoid initializing a second pair of full projection tensors before
+        # the checkpoint is streamed into the actual runtime parameters.
+        self.wkv = nn.Linear(dim, coff * head_dim, bias=False, device="meta")
+        self.wgate = nn.Linear(dim, coff * head_dim, bias=False, device="meta")
         with torch.no_grad():
             self.wkv.weight = nn.Parameter(
-                compressor_weights["wkv"].to(torch.bfloat16), requires_grad=False
+                (
+                    torch.empty((coff * head_dim, dim), dtype=torch.bfloat16)
+                    if self._checkpoint_owned
+                    else compressor_weights["wkv"].to(torch.bfloat16)
+                ),
+                requires_grad=False,
             )
             self.wgate.weight = nn.Parameter(
-                compressor_weights["wgate"].to(torch.bfloat16), requires_grad=False
+                (
+                    torch.empty((coff * head_dim, dim), dtype=torch.bfloat16)
+                    if self._checkpoint_owned
+                    else compressor_weights["wgate"].to(torch.bfloat16)
+                ),
+                requires_grad=False,
             )
         self.norm = _CompressorNorm(head_dim)
         self.norm.weight = nn.Parameter(
-            compressor_weights["norm"].to(torch.bfloat16),
+            (
+                torch.empty(head_dim, dtype=torch.bfloat16)
+                if self._checkpoint_owned
+                else compressor_weights["norm"].to(torch.bfloat16)
+            ),
             requires_grad=False,
         )
 
         # Fuse wkv + wgate into one bf16 weight matrix; saves one
         # GEMM launch per compressor decode call (~92/step at bs16).
         self._wkv_wgate_fused: Optional[torch.Tensor] = None
-        self._fuse_wkv_wgate(coff)
+        if not self._checkpoint_owned:
+            self._fuse_wkv_wgate(coff)
 
         # Legacy attribute kept for attention.py's cmp_T fallback (line 1583).
         self._kv_cache_t: int = 0
@@ -549,8 +576,29 @@ class CompressorFP8(PoolBackedModule):
             ).contiguous()
             self._wkv_wgate_fused = fused
             out_dim = coff * self.head_dim
-            self.wkv.weight = nn.Parameter(fused[:out_dim], requires_grad=False)
-            self.wgate.weight = nn.Parameter(fused[out_dim:], requires_grad=False)
+            # Keep the Parameter identities tracked by NewLoader completeness
+            # and online update consumers; the kernel sees the same storage.
+            self.wkv.weight.data = fused[:out_dim]
+            self.wgate.weight.data = fused[out_dim:]
+
+    def process_weights_after_loading(self) -> None:
+        if self._checkpoint_owned and self._wkv_wgate_fused is None:
+            self._fuse_wkv_wgate(self.coff)
+
+    def _apply(self, fn, recurse=True):
+        had_fused_projection = self._wkv_wgate_fused is not None
+        result = super()._apply(fn, recurse=recurse)
+        if had_fused_projection and (
+            self._wkv_wgate_fused.device != self.wkv.weight.device
+            or self._wkv_wgate_fused.dtype != self.wkv.weight.dtype
+            or self.wkv.weight.data_ptr() != self._wkv_wgate_fused.data_ptr()
+            or self.wgate.weight.data_ptr()
+            != self._wkv_wgate_fused[self.coff * self.head_dim :].data_ptr()
+        ):
+            # .to()/FST device preparation must not leave a stale CPU view in
+            # the GEMM cache while the live parameters have moved elsewhere.
+            self._fuse_wkv_wgate(self.coff)
+        return result
 
     # ----------------------------------------------------------------------
     # Compatibility shims (kept to match the BF16 ``Compressor`` API surface

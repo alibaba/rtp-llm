@@ -19,6 +19,7 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
+from rtp_llm.frontend import next_smoke_prefix
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -139,6 +140,8 @@ class FrontendWorker:
         generate_config: dict,
         frontend_metric_tags=None,
         frontend_metric_observer=None,
+        *,
+        _next_fixture_prefix_file=None,
     ) -> BatchPipelineResponse:
         responses = await self.pipeline.batch_infer(
             prompts=prompts,
@@ -148,6 +151,8 @@ class FrontendWorker:
             frontend_metric_tags=frontend_metric_tags,
             frontend_metric_observer=frontend_metric_observer,
         )
+        if _next_fixture_prefix_file is not None:
+            next_smoke_prefix.capture(_next_fixture_prefix_file, responses)
         # Reconstruct GenerateConfig to check flags (aux_info, calculate_loss, etc.)
         gc = self.pipeline.create_generate_config(
             generate_config,
@@ -202,6 +207,11 @@ class FrontendWorker:
         return BatchPipelineResponse(response_batch=pipeline_responses)
 
     def inference(self, **kwargs: Any) -> CompleteResponseAsyncGenerator:
+        prefix_file = next_smoke_prefix.approve("single", kwargs)
+        if prefix_file is not None:
+            next_smoke_prefix.authorize(prefix_file, kwargs.get("__request_id__"), (0,))
+        # Never permit the transport to supply the internal test-only observer.
+        kwargs.pop("_next_fixture_prefix_file", None)
         default_generate_config = GenerateConfig()
         request_extractor = RequestExtractor(default_generate_config)
         request, kwargs = request_extractor.extract_request(kwargs)
@@ -212,6 +222,8 @@ class FrontendWorker:
                 "request is non_stream but use incremental decoder",
             )
 
+        if prefix_file is not None:
+            kwargs["_next_fixture_prefix_file"] = prefix_file
         response_generator = self._inference(request, **kwargs)
 
         complete_response_collect_func = partial(
@@ -387,6 +399,7 @@ class FrontendWorker:
         group_id: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[Dict[str, Any], None]:
+        prefix_file = kwargs.pop("_next_fixture_prefix_file", None)
         stream = self.pipeline.pipeline_async(
             prompt=text,
             request_id=request_id,
@@ -398,6 +411,8 @@ class FrontendWorker:
             **kwargs,
         )
         async for generate_response in stream:
+            if prefix_file is not None:
+                next_smoke_prefix.capture(prefix_file, (generate_response,))
             yield self._format_response_new(generate_response, generate_config)
 
     def is_streaming(self, req: Dict[str, Any]):

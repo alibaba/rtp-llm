@@ -1720,6 +1720,8 @@ __global__ void decode_add_fusedQKV_bias_transpose_kernel(T* q_buf,
 
     int position_id = position_ids[token_idx * rope_config.index_factor];
     int sequence_length = sequence_lengths[token_idx];
+    // History excludes the current token; seq_len=1 is only Q's layout.
+    const int rope_seq_len = ROPE_STYLE == RopeStyle::DynamicNTK ? sequence_length + 1 : seq_len;
 
     if (bidy < head_num) {
         const int head_idx = bidy;
@@ -1733,7 +1735,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_kernel(T* q_buf,
             q = add(q, q_bias);
         }
 
-        apply_rope<T, Vec_t, ROPE_STYLE>(rope_config, q, reinterpret_cast<T*>(smem_), tidx, position_id, seq_len);
+        apply_rope<T, Vec_t, ROPE_STYLE>(rope_config, q, reinterpret_cast<T*>(smem_), tidx, position_id, rope_seq_len);
 
         if (use_logn_attn) {
             logn_attention(q, seq_idx, rope_config.max_pos);
@@ -1758,7 +1760,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_kernel(T* q_buf,
             k = add(k, k_bias);
         }
 
-        apply_rope<T, Vec_t, ROPE_STYLE>(rope_config, k, reinterpret_cast<T*>(smem_), tidx, position_id, seq_len);
+        apply_rope<T, Vec_t, ROPE_STYLE>(rope_config, k, reinterpret_cast<T*>(smem_), tidx, position_id, rope_seq_len);
 
         __syncthreads();
 
@@ -2256,6 +2258,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T* q_buf,
 
     int position_id = position_ids[token_idx * rope_config.index_factor];
     int sequence_length = sequence_lengths[token_idx];
+    const int rope_seq_len = ROPE_STYLE == RopeStyle::DynamicNTK ? sequence_length + 1 : seq_len;
 
     if (bidy < max_q_bidy) {
         Vec_t q[2];
@@ -2294,7 +2297,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T* q_buf,
             }
 
             apply_rope<T, Vec_t, ROPE_STYLE>(
-                rope_config, q[q_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, seq_len);
+                rope_config, q[q_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, rope_seq_len);
 
             if (use_logn_attn) {
                 logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
@@ -2311,7 +2314,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T* q_buf,
         }
 
         apply_rope<T, Vec_t, ROPE_STYLE>(
-            rope_config, q[q_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, seq_len);
+            rope_config, q[q_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, rope_seq_len);
 
         if (use_logn_attn) {
             logn_attention(q[q_store_idx], seq_idx, rope_config.max_pos);
@@ -2368,7 +2371,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T* q_buf,
             }
 
             apply_rope<T, Vec_t, ROPE_STYLE>(
-                rope_config, k[k_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, seq_len);
+                rope_config, k[k_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, rope_seq_len);
 
             __syncthreads();
 
@@ -2395,7 +2398,7 @@ __global__ void decode_add_fusedQKV_bias_transpose_non_int8_kernel(T* q_buf,
         }
 
         apply_rope<T, Vec_t, ROPE_STYLE>(
-            rope_config, k[k_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, seq_len);
+            rope_config, k[k_store_idx], reinterpret_cast<T*>(smem_), tidx, position_id, rope_seq_len);
 
         __syncthreads();
 

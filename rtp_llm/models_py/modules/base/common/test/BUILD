@@ -39,7 +39,7 @@ py_test(
 py_test(
     name = "vocab_embedding_test",
     srcs = ["vocab_embedding_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:new_weight_loader"],
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},

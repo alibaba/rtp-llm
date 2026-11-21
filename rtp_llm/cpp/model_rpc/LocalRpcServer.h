@@ -163,6 +163,8 @@ protected:
     kmonitor::MetricsReporterPtr          metrics_reporter_;
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
+    // Serialize pause/restart with writes until the rank-local commit completes.
+    std::mutex                            update_lifecycle_mutex_;
     py::object                            weight_manager_;
     std::shared_ptr<BroadcastManager>     tp_broadcaster_;
     bool                                  torch_allocator_dump_enabled_{false};

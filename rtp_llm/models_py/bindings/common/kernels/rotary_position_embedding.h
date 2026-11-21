@@ -326,11 +326,19 @@ rope_inv_freq(const int zid, const int rot_embed_dim, const float t_step, const 
     return (t_step / pow(base, zid / (float)rot_embed_dim));
 }
 
+struct Llama3Rope;
+
 template<typename RopeInit>
 __device__ __inline__ float2 rotary_embedding_coefficient(
     const int zid, const int rot_embed_dim, const float t_step, const float base, const RopeInit& rope_init) {
-    float inv_freq      = rope_inv_freq(zid, rot_embed_dim, t_step, base);
-    inv_freq            = rope_init(inv_freq, zid);
+    float inv_freq;
+    if constexpr (std::is_same<RopeInit, Llama3Rope>::value) {
+        // Llama3 chooses frequency bands BEFORE multiplication by position.
+        inv_freq = t_step * rope_init(rope_inv_freq(zid, rot_embed_dim, 1.0f, base), zid);
+    } else {
+        // Preserve the existing arithmetic/rounding of all other styles.
+        inv_freq = rope_init(rope_inv_freq(zid, rot_embed_dim, t_step, base), zid);
+    }
     float sin_cos_scale = rope_init.sin_cos_scale();
 #if USING_CUDA
     float sin_i, cos_i;
@@ -422,6 +430,11 @@ struct Llama3Rope {
     int   old_context_len;
 
     __device__ __inline__ float operator()(float inv_freq, int zid) const {
+        // A style-only configuration is exactly base RoPE, including when
+        // original context/frequency factors are left at their defaults.
+        if (factor == 1.0f) {
+            return inv_freq;
+        }
         const float pi                = 3.141592654f;
         const float wavelen           = 2 * pi / inv_freq;
         const float low_freq_wavelen  = old_context_len / low_freq_factor;
@@ -923,7 +936,7 @@ __device__ inline void apply_rope(RopeConfig    rope_config,
                 x, tidx, seqidx, dim / 2, base, LinearScaleRope{rope_config.scale});
             break;
         case RopeStyle::DynamicNTK:
-            if (seq_len > rope_config.max_pos) {
+            if (rope_config.max_pos > 0 && seq_len > rope_config.max_pos) {
                 base = get_dynamic_ntk_base(dim, base, seq_len, rope_config.scale, rope_config.max_pos);
             }
             normal_rope(x, smem, tidx, seqidx, dim, base, DefaultRope{});
@@ -1015,13 +1028,16 @@ __device__ inline void context_rope(RopeConfig    rope_config,
         input_len = input_len + prefix_prompt_length;
         seqidx    = seqidx + prefix_prompt_length;
     }
-    if (position_id > 0 || (position_id == 0 && rope_config.style == RopeStyle::Mrope)) {
+    if (position_id >= 0) {
         seqidx = position_id;
     }
 
-    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, q, smem, tidx, seqidx, seq_len, cos_sin_cache);
+    // seq_len describes the padded launch geometry, not this request. NTK
+    // scaling uses its real input length (including a counted prefix above).
+    const int rope_seq_len = ROPE_STYLE == RopeStyle::DynamicNTK ? input_len : seq_len;
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, q, smem, tidx, seqidx, rope_seq_len, cos_sin_cache);
 
-    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, k, smem, tidx, seqidx, seq_len, cos_sin_cache);
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, k, smem, tidx, seqidx, rope_seq_len, cos_sin_cache);
 }
 
 template<typename scalar_t, typename vector_t, RopeStyle ROPE_STYLE>
@@ -1046,7 +1062,7 @@ __device__ inline void attention_rope(RopeConfig rope_config,
         prefix_prompt_length = 0;
     }
 
-    if (position_id > 0 || (position_id == 0 && rope_config.style == RopeStyle::Mrope)) {
+    if (position_id >= 0) {
         tlength = position_id;
     }
 
@@ -1054,10 +1070,13 @@ __device__ inline void attention_rope(RopeConfig rope_config,
         tlength = tlength - prefix_prompt_length;
     }
 
-    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, q, smem, tidx, tlength, seq_len, cos_sin_cache);
+    // ROCm callers pass the history length (the current token is not in KV
+    // yet). Match context_rope and PPU/CUDA decode's real total length.
+    const int rope_seq_len = ROPE_STYLE == RopeStyle::DynamicNTK ? seq_len + 1 : seq_len;
+    apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, q, smem, tidx, tlength, rope_seq_len, cos_sin_cache);
 
     if (handle_kv) {
-        apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, k, smem, tidx, tlength, seq_len, cos_sin_cache);
+        apply_rope<scalar_t, vector_t, ROPE_STYLE>(rope_config, k, smem, tidx, tlength, rope_seq_len, cos_sin_cache);
     }
 }
 

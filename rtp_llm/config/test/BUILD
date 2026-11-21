@@ -93,7 +93,7 @@ py_test(
 py_test(
     name = "model_size_test",
     srcs = ["model_size_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:new_loader_core"],
 )
 
 py_test(

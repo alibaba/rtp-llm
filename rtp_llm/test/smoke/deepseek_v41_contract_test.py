@@ -58,8 +58,13 @@ class DeepSeekV41ContractTest(unittest.TestCase):
             self.assertEqual(level.json(), {"status": "ok"})
         self.log_offset = Path(self.graph_server.log_file_path).stat().st_size
         startup = Path(self.graph_server.log_file_path).read_text(errors="replace")
-        self.assertIn("DeepSeek V4.1 Engram initialized on layers", startup)
-        self.assertIn("capture success for batch size", startup)
+        self.assertTrue(
+            "DeepSeek V4.1 Engram initialized on layers" in startup,
+            "Engram did not initialize",
+        )
+        self.assertTrue(
+            "capture success for batch size" in startup, "graph capture did not finish"
+        )
         self.observed = []
 
     def start_servers(self):

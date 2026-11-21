@@ -87,7 +87,9 @@ def try_project_quantized_qkv(attn, x):
     if os.environ.get("DSV41_FUSED_QUERY_QUANT", "1") != "1":
         return None
     linear = getattr(attn, "wq_a_wkv", None)
-    if not isinstance(attn.wq_b, V41MXFP8Linear):
+    if not isinstance(
+        getattr(attn.wq_b, "v41_runtime_linear", attn.wq_b), V41MXFP8Linear
+    ):
         return None
     if not is_supported(linear, x, attn.q_norm, attn.q_lora_rank):
         return None

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/metrics/ServiceStatus.h"
+#include "rtp_llm/cpp/normal_engine/NextSmokeSamplerAudit.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -129,11 +130,15 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0 && !accuracy_check_mode_) {
         // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+        int first_moe_layer = params.model_config_.moe_layer_index.front();
+        // Python-owned experts do not populate legacy DenseWeights.
+        DataType moe_weight_type = DataType::TYPE_FP16;
+        int64_t  moe_inter_size  = 0;
+        if (!ExpertBalancerPythonWrapper::usesDirectInstall(params.py_eplb)) {
+            const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
+            moe_weight_type        = torchDTypeToDataType(moe_kernel.dtype());
+            moe_inter_size = params.model_config_.isGatedActivation() ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+        }
 
         expert_balancer_ = make_shared<ExpertBalancer>(params.model_config_.expert_num,
                                                        params.eplb_config.phy_exp_num(params.model_config_.expert_num),
@@ -457,7 +462,30 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         CHECK_AND_RETURN_REF(sampler_input,
                              batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
         holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+        std::pair<at::Tensor, at::Tensor> audit;
+        if (next_smoke_audit::enabled()) {
+            const auto& streams = stream_groups.allStreams();  // same sampler-row gather order
+            bool        ok      = !streams.empty() && streams.size() <= 3 && sampler_input.logits.defined()
+                      && sampler_input.logits.dim() == 2 && sampler_input.logits.size(1) >= 2
+                      && sampler_input.logits.size(0) == static_cast<int64_t>(streams.size());
+            for (const auto& stream : streams) {
+                if (!ok)
+                    break;
+                const int   step = stream->seqLength() - stream->inputLength();
+                const auto& g    = *stream->generateConfig();
+                ok = !stream->isFakeStream() && !stream->needTilingForSampling() && stream->inputLength() == 4
+                     && stream->currentBatchSize() == 1 && stream->nextBatchSize() == 1 && g.top_k == 1
+                     && g.num_beams == 1 && g.max_new_tokens == 20 && step >= 0 && step < 20
+                     && next_smoke_audit::slot(stream->streamId()) >= 0;
+            }
+            if (ok)
+                audit = next_smoke_audit::top2(sampler_input.logits);
+        }
         sampler_output = std::move(sampler_->forward(sampler_input));
+        if (audit.first.defined()) {
+            sampler_output.next_smoke_top_values = std::move(audit.first);
+            sampler_output.next_smoke_top_ids    = std::move(audit.second);
+        }
         RTP_LLM_LOG_DEBUG("sampler forward done");
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }

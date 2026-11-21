@@ -20,7 +20,7 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
 
         with (
             mock.patch.object(indexer, "rtp_llm_ops", SimpleNamespace(topk_v3=topk_v3)),
-            mock.patch.object(indexer, "_TOPK_V3_OK", True),
+            mock.patch.object(indexer, "_has_topk_v3", return_value=True),
             mock.patch.object(indexer, "_get_topk_workspace", return_value=workspace),
         ):
             self.assertTrue(
@@ -40,7 +40,7 @@ class IndexerTopkV3RoutingTest(unittest.TestCase):
 
         with (
             mock.patch.object(indexer, "rtp_llm_ops", fake_ops),
-            mock.patch.object(indexer, "_TOPK_V3_OK", True),
+            mock.patch.object(indexer, "_has_topk_v3", return_value=True),
         ):
             self.assertFalse(
                 indexer._run_topk_v3(tensor, lengths, output, 256, 256)

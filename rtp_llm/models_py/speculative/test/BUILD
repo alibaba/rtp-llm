@@ -33,6 +33,7 @@ py_test(
     deps = [
         "//rtp_llm:async_model",
         "//rtp_llm:models",
+        "//rtp_llm/models_py:new_weight_loader",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     exec_properties = {"gpu": "L20_CU13"},

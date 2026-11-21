@@ -166,7 +166,7 @@ cc_test(
     testonly = True,
     srcs = ["PerRankBlockTransferEngineCrcTest.cc"],
     copts = test_copts,
-    tags = ["exclusive-if-local"],
+    tags = ["H20_CU13", "SM100_ARM_CU13", "exclusive-if-local"],
     deps = test_deps + [":block_transfer_engine_test_utils"],
 )
 

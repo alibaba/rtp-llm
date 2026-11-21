@@ -93,6 +93,9 @@ Padding-token slots are nulled via ``cp_info.prefill_qkv_padding_mask``.
 
 from __future__ import annotations
 
+import contextvars
+import hashlib
+import json
 import logging
 import os
 from contextlib import nullcontext
@@ -100,6 +103,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 import torch
 
+from rtp_llm.models_py.modules import v41_cache_model_trace
 from rtp_llm.models_py.modules.dsv41 import _profiler
 from rtp_llm.models_py.modules.dsv41.cp import (
     build_cp_context_for_forward,
@@ -140,6 +144,90 @@ if TYPE_CHECKING:
 
 
 _TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_V41_FIXTURE = contextvars.ContextVar("v41_fixed_layer_trace", default=False)
+
+
+def _run_fixture_forward(forward, *args):
+    """Entered by the native eager path after matching all 783 unsplit IDs."""
+    token = _V41_FIXTURE.set(True)
+    try:
+        return forward(*args)
+    finally:
+        _V41_FIXTURE.reset(token)
+
+
+def _fixture_sha(tensor):
+    # Stream even an entire device-resident LM head through bounded host memory.
+    value = tensor.detach()
+    if value.ndim == 0:
+        value = value.reshape(1)
+    if not value.numel():
+        return hashlib.sha256(b"").hexdigest()
+    row_bytes = max(1, value[0].numel() * value.element_size()) if len(value) else 1
+    digest = hashlib.sha256()
+    for block in value.split(max(1, (4 << 20) // row_bytes)):
+        raw = block.contiguous().view(torch.uint8).cpu().numpy()
+        digest.update(memoryview(raw).cast("B"))
+    return digest.hexdigest()
+
+
+def _fixture_emit(**data):
+    # Rank logging can be disabled or redirected in PD launches. These are
+    # test-only artifacts; only a hasher for the explicitly verified fixture
+    # can reach this code. One writer per file, no inter-rank synchronization.
+    root = os.environ["TEST_UNDECLARED_OUTPUTS_DIR"]
+    path = os.path.join(root, f"v41_fixed_trace_rank{data['rank']}.jsonl")
+    with open(path, "a", encoding="ascii") as sink:
+        sink.write(json.dumps(data, separators=(",", ":")) + "\n")
+
+
+def _trace_fixture_layer(stage, h, cp, count):
+    # Padded CP positions can duplicate the last real position. CED can move
+    # the owner at layer 20. Always consult the *current* validity/layout.
+    if cp is None or cp.local_is_real.numel() != h.size(0):
+        raise ValueError("V4.1 trace expected matching CP row metadata")
+    valid = cp.local_is_real.reshape(-1).bool()
+    positions = cp.global_positions.reshape(-1)
+    live = h[valid]
+    owner = torch.where(valid & (positions == 782))[0]
+    if len(owner) > 1:
+        raise ValueError("multiple valid copies of the fixture's last token")
+    _fixture_emit(
+        stage=stage,
+        rank=int(cp.cp_rank),
+        layers=count,
+        dtype=str(h.dtype),
+        valid_shape=list(live.shape),
+        positions_sha=_fixture_sha(positions[valid].to(torch.int64)),
+        valid_sha=_fixture_sha(live),
+        last_sha=_fixture_sha(h[owner[0]]) if len(owner) else None,
+    )
+
+
+def _trace_fixture_head(hidden, kernel, rank, world):
+    # Actual computeLogits input, after CP gather and native row selection.
+    if hidden.ndim != 2 or hidden.size(0) != 1 or kernel.ndim != 2:
+        raise ValueError("unexpected fixture LM head dimensions")
+    width = kernel.size(0)
+    offset = int(rank) * width
+    candidates = {
+        str(i): _fixture_sha(kernel[i - offset])
+        for i in (1606, 28)
+        if offset <= i < offset + width
+    }
+    _fixture_emit(
+        stage="lm_head",
+        rank=int(rank),
+        world=int(world),
+        last_sha=_fixture_sha(hidden[0]),
+        hidden_dtype=str(hidden.dtype),
+        head_sha=_fixture_sha(kernel),
+        head_shape=list(kernel.shape),
+        head_dtype=str(kernel.dtype),
+        candidate_sha=candidates,
+    )
+
+
 _PREFILL_FAST_LAYER_CALLS_ATTR = "_dsv4_prefill_fast_layer_calls"
 
 _PrefillFastLayerCall = Callable[..., torch.Tensor]
@@ -437,6 +525,12 @@ def forward_layers(
             h = h.unsqueeze(-2).repeat(1, v4.hc_mult, 1)  # [T_total, hc, dim]
         else:
             h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
+    cache_trace = v41_cache_model_trace.active()
+    if cache_trace is not None:
+        cache_trace.hidden("embedding", cp_ctx, h)
+    tracing = _V41_FIXTURE.get()
+    if tracing:
+        _trace_fixture_layer("embedding", h, cp_ctx, len(v4.layers))
     image_token_mask = getattr(v4, "_image_token_mask", None)
     if image_token_mask is not None:
         input_ids = torch.where(
@@ -586,6 +680,29 @@ def forward_layers(
                 else v4.layers
             )
             for layer_idx, layer_call in enumerate(layer_calls):
+                if (
+                    cache_trace is not None
+                    and cache_trace.phase == "hit"
+                    and layer_idx == 1
+                    and os.environ.get("RTP_V41_CAUSAL_ROLE")
+                ):
+                    from functools import partial
+
+                    from rtp_llm.models_py.modules.v41_causal import observe
+
+                    layer_call = partial(
+                        observe, cache_trace, layer_call, v4.layers[1], cp_ctx
+                    )
+                if tracing and layer_idx == 1:
+                    from functools import partial
+
+                    from rtp_llm.models_py.modules.v41_fixture_boundaries import (
+                        observe_fixture_layer,
+                    )
+
+                    layer_call = partial(
+                        observe_fixture_layer, layer_call, v4.layers[1], cp_ctx
+                    )
                 if layer_idx == 21 and ced_tail is not None:
                     with _profiler.record_function_range("dsv41.ced.compact"):
                         if not ced_in_l20:
@@ -651,6 +768,22 @@ def forward_layers(
                             )  # [T, hc, dim]
                     if shared_prefill is not None:
                         release_v41_prefill_shared(shared_prefill, layer_idx)
+                    if tracing:
+                        layout = (
+                            ced_tail.context
+                            if layer_idx == 20 and ced_in_l20
+                            else cp_ctx
+                        )
+                        _trace_fixture_layer(
+                            f"layer_{layer_idx}", h, layout, len(v4.layers)
+                        )
+                    if cache_trace is not None:
+                        layout = (
+                            ced_tail.context
+                            if layer_idx == 20 and ced_in_l20
+                            else cp_ctx
+                        )
+                        cache_trace.hidden(f"layer_{layer_idx}", layout, h)
                     if layer_idx in capture_ids:
                         v4.capture_aux_hidden(layer_idx, h)
                     if write_cache_store_impl is not None:
@@ -678,6 +811,11 @@ def forward_layers(
             v4._note_aux_hidden_rows(h.size(0), is_cuda_graph=False)
             if ced_tail is not None:
                 ced_tail.restore_aux(v4)
+            if cache_trace is not None:
+                rows = original_cp_ctx.local_is_real.numel()
+                cache_trace.hidden(
+                    "target_export", original_cp_ctx, v4._mtp_hidden_buffer[:rows]
+                )
         else:
             _pre_hc_flat = h.flatten(-2)
             v4._write_mtp_hidden_buffer(_pre_hc_flat, is_cuda_graph=False)
@@ -689,7 +827,11 @@ def forward_layers(
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
     with record_range_ctx():
         h = v4._hc_head_reduce(h)  # [T, dim]
+        if tracing:
+            _trace_fixture_layer("hc_reduce", h, cp_ctx, len(v4.layers))
         h = v4.norm(h)  # [T, dim]
+        if tracing:
+            _trace_fixture_layer("norm", h, cp_ctx, len(v4.layers))
     # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
     # gather/restore scratch) is a local of this function: it drops here on
     # return, returning ~16 GiB to the caching allocator so the MTP draft

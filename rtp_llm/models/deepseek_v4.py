@@ -146,15 +146,9 @@ def _require_n_shared_experts(config_json: dict) -> int:
 
 
 def _is_ppu_flash(config):
-    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp"):
-        return False
-    from rtp_llm.device.device_type import is_ppu
+    from rtp_llm.models_py.new_models.deepseek_v4.ppu_platform import is_ppu_flash
 
-    return (
-        is_ppu()
-        and config.hidden_size == 4096
-        and config.num_layers == (1 if config.model_type == "deepseek_v4_mtp" else 43)
-    )
+    return is_ppu_flash(config)
 
 
 def configure_ppu_scheduler(config, scheduler):
@@ -733,7 +727,7 @@ class DeepSeekV4(DeepSeekV2):
 
         model_config.kv_cache_spec_descs = descs
 
-    def create_model_loader(self):
+    def load(self, skip_python_model: bool = False):
         if _is_ppu_flash(self.model_config):
             from rtp_llm.models_py.modules.dsv4.ppu.metadata.cache import (
                 configure_indexer_cache,
@@ -751,7 +745,7 @@ class DeepSeekV4(DeepSeekV2):
                     self.parallelism_config,
                     options={"DSV4_PPU_TP_COMM_WARMUP": "1", **os.environ},
                 )
-        return super().create_model_loader()
+        return super().load(skip_python_model=skip_python_model)
 
     def _create_python_model(self):
         if _is_ppu_flash(self.model_config):

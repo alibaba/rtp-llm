@@ -13,8 +13,8 @@ What this class does NOT do — by design:
     the FP8 pool directly via ``fp8_paged_mqa_logits`` /
     ``fp8_mqa_logits``. No bf16 dequant intermediate.
   * NO env gate (``_fp8_deepgemm_score_enabled`` / equivalent). FP8
-    class always uses DeepGEMM. If DeepGEMM is unavailable at runtime,
-    the layer construction itself should fail loudly.
+    class always uses DeepGEMM. Bound-weight construction checks the backend
+    immediately; checkpoint-owned construction is checked by loading preflight.
   * NO bf16 / FP8 runtime branching. Pick the right indexer class at
     attention construction time.
 """
@@ -22,12 +22,14 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -51,6 +53,8 @@ from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
     fp8_paged_indexer_score,
     has_fp8_mqa_logits,
     has_fp8_paged_mqa_logits,
+    supports_mqa_logits,
+    supports_paged_mqa_logits,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
@@ -59,7 +63,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     _CompressorPending,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
-from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.models_py.modules.dsv4 import native_ops as rtp_llm_ops
 
 
 def _as_bf16_contig(t: torch.Tensor) -> torch.Tensor:
@@ -76,8 +80,16 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
 
 # Exact SGLang radix-select TopK used by the shared DeepSeek V4 Flash/Pro FP8
 # indexer decode and target-verify path.
-_TOPK_V3_OK = hasattr(rtp_llm_ops, "topk_v3")
-_FAST_PREFILL_TOPK_OK = hasattr(rtp_llm_ops, "fast_topk_v2_variable")
+@lru_cache(maxsize=1)
+def _has_topk_v3() -> bool:
+    return hasattr(rtp_llm_ops, "topk_v3")
+
+
+@lru_cache(maxsize=1)
+def _has_fast_prefill_topk() -> bool:
+    return hasattr(rtp_llm_ops, "fast_topk_v2_variable")
+
+
 _TOPK_V3_WORKSPACE_SIZE = 1024 * 1024  # 1 MB
 _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS = 12 * 1024
 _topk_v3_workspace_cache: Dict[torch.device, torch.Tensor] = {}
@@ -95,7 +107,7 @@ def _run_prefill_topk(
     # length so the 16k policy matches the user-visible prefill length.
     estimated_input_tokens = int(logits.size(1)) * int(compress_ratio)
     if (
-        _FAST_PREFILL_TOPK_OK
+        _has_fast_prefill_topk()
         and int(topk) in (512, 1024, 2048)
         and estimated_input_tokens <= _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS
     ):
@@ -147,7 +159,7 @@ def _run_topk_v3(
     k: int,
     max_seq_len: int,
 ) -> bool:
-    if k not in (512, 1024, 2048) or not _TOPK_V3_OK:
+    if k not in (512, 1024, 2048) or not _has_topk_v3():
         return False
     rtp_llm_ops.topk_v3(
         logits,
@@ -224,7 +236,7 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     indexer_cp_local_cu: Optional[torch.Tensor]
 
 
-class IndexerFP8(PoolBackedModule):
+class IndexerFP8(PoolBackedModule, RtpModule):
     """FP8 lightning indexer. DeepGEMM-only score; nested
     ``CompressorFP8(head_dim=128)`` writes the 132B pool."""
 
@@ -246,20 +258,19 @@ class IndexerFP8(PoolBackedModule):
         (``ModelWeights.weights[layer_id]``), keyed by ``W.v4_*`` enum.
         Indexer reads ``W.v4_indexer_wq_b_{w,s}``, ``W.v4_indexer_weights_proj_w``,
         and the four ``W.v4_indexer_compressor_*`` keys for its nested
-        ``CompressorFP8``."""
+        ``CompressorFP8``. With ``layer_weights=None``, the same runtime owns
+        checkpoint Parameters directly and folds the projection after loading.
+        """
         super().__init__()
         assert index_head_dim == INDEXER_HEAD_DIM, (
             f"IndexerFP8 locked to index_head_dim={INDEXER_HEAD_DIM} "
             f"(matches CompressorFP8 132B layout); got {index_head_dim}"
         )
-        assert has_fp8_paged_mqa_logits(), (
+        self._checkpoint_owned = layer_weights is None
+        assert self._checkpoint_owned or has_fp8_paged_mqa_logits(), (
             "FP8 indexer kernel stack unavailable — IndexerFP8 needs either "
             "deep_gemm.fp8_paged_mqa_logits or the group-128 Triton fallback. "
             "Use IndexerBF16 if neither is importable."
-        )
-        assert layer_weights is not None, (
-            "IndexerFP8 requires layer_weights — meta-tensor / stand-alone "
-            "construction is not supported (use the BF16 path for that)."
         )
         self.dim = dim
         self.n_heads = index_n_heads
@@ -270,29 +281,38 @@ class IndexerFP8(PoolBackedModule):
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
 
-        from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
-        from rtp_llm.utils.model_weight import W
-
-        self.wq_b = _v4_fp8_linear(
-            layer_weights[W.v4_indexer_wq_b_w],
-            layer_weights[W.v4_indexer_wq_b_s],
-        )
         # weights_proj is plain BF16. Pre-fold the runtime ``softmax_scale *
         # n_heads^-0.5`` into the weight at load time so prefill / decode can
         # do a single ``F.linear`` (cuBLAS GEMM) without a trailing elementwise
         # mul. New tensor — never mutate ``layer_weights`` in place.
-        _wp_scale = self.softmax_scale * self.n_heads**-0.5
-        self.weights_proj = (
-            layer_weights[W.v4_indexer_weights_proj_w] * _wp_scale
-        ).contiguous()
+        self._weights_proj_folded = not self._checkpoint_owned
+        if self._checkpoint_owned:
+            from rtp_llm.models_py.modules.dsv4.fp8.linear_owner import Dsv4FP8Linear
 
-        # Nested compressor: 132B layout (head_dim=128).
-        inner_cmp_weights = {
-            "ape": layer_weights[W.v4_indexer_compressor_ape],
-            "wkv": layer_weights[W.v4_indexer_compressor_wkv],
-            "wgate": layer_weights[W.v4_indexer_compressor_wgate],
-            "norm": layer_weights[W.v4_indexer_compressor_norm],
-        }
+            self.wq_b = Dsv4FP8Linear(q_lora_rank, index_n_heads * index_head_dim)
+            self.weights_proj = nn.Parameter(
+                torch.empty((index_n_heads, dim), dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+            inner_cmp_weights = None
+        else:
+            from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
+            from rtp_llm.utils.model_weight import W
+
+            self.wq_b = _v4_fp8_linear(
+                layer_weights[W.v4_indexer_wq_b_w],
+                layer_weights[W.v4_indexer_wq_b_s],
+            )
+            self.weights_proj = (
+                layer_weights[W.v4_indexer_weights_proj_w]
+                * (self.softmax_scale * self.n_heads**-0.5)
+            ).contiguous()
+            inner_cmp_weights = {
+                "ape": layer_weights[W.v4_indexer_compressor_ape],
+                "wkv": layer_weights[W.v4_indexer_compressor_wkv],
+                "wgate": layer_weights[W.v4_indexer_compressor_wgate],
+                "norm": layer_weights[W.v4_indexer_compressor_norm],
+            }
         self.compressor = CompressorFP8(
             dim=dim,
             head_dim=index_head_dim,
@@ -316,6 +336,70 @@ class IndexerFP8(PoolBackedModule):
         # the nested compressor rebuilds its slot mappings post-gather
         # (CompressorFP8.forward handles that internally).
         self._cp_ctx: Optional[CPContext] = None
+
+    def load_weights(self, weights):
+        if not self._checkpoint_owned:
+            raise RuntimeError("Checkpoint loading requires an owned IndexerFP8")
+        items = weights.items() if isinstance(weights, dict) else weights
+
+        def checkpoint_names():
+            for name, value in items:
+                # Runtime consumes a Tensor, so this one checkpoint Linear
+                # weight is owned directly on the indexer, without a W.* map.
+                if name == "weights_proj.weight":
+                    name = "weights_proj"
+                yield name, value
+
+        super().load_weights(checkpoint_names())
+
+    def validate_runtime_device(self, device):
+        if not self._checkpoint_owned:
+            return
+        if torch.device(device).type != "cuda" or getattr(torch.version, "hip", None):
+            raise RuntimeError("IndexerFP8 requires CUDA execution")
+        self.wq_b.validate_runtime_device(device)
+        # Group-128 MQA does not necessarily use DeepGEMM. In particular
+        # main dispatches SM100 with DeepGEMM >=2.8.1 to Triton. Validate
+        # the selected prefill and decode backends rather than forcing the
+        # older wheel's symbols onto both. Decode may additionally route to
+        # Triton for an unsupported pool block size.
+        try:
+            from rtp_llm.models_py.triton_kernels import legacy_fp8_indexer_score
+
+            required = [(legacy_fp8_indexer_score, "legacy_fp8_paged_mqa_logits")]
+            if supports_mqa_logits(device) or supports_paged_mqa_logits(device):
+                import deep_gemm
+            if supports_mqa_logits(device):
+                required.append((deep_gemm, "fp8_mqa_logits"))
+            else:
+                required.append((legacy_fp8_indexer_score, "legacy_fp8_mqa_logits"))
+            if supports_paged_mqa_logits(device):
+                required.extend(
+                    (deep_gemm, name)
+                    for name in (
+                        "fp8_paged_mqa_logits",
+                        "get_paged_mqa_logits_metadata",
+                    )
+                )
+        except (ImportError, OSError, AttributeError) as exc:
+            raise RuntimeError("IndexerFP8 cannot import its score backend") from exc
+        missing = [
+            name
+            for module, name in required
+            if not callable(getattr(module, name, None))
+        ]
+        if missing:
+            raise RuntimeError(f"IndexerFP8 missing score symbols: {missing}")
+
+    def process_weights_after_loading(self):
+        if not self._checkpoint_owned or self._weights_proj_folded:
+            return
+        self.validate_weights_loaded()
+        # Preserve the Parameter identity/storage used by FST. This is the
+        # same BF16 multiply as the bound-weight path, folded exactly once.
+        with torch.no_grad():
+            self.weights_proj.mul_(self.softmax_scale * self.n_heads**-0.5)
+        self._weights_proj_folded = True
 
     # --------------------------------------------------------------
     # Pool propagation to nested compressor

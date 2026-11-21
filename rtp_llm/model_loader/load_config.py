@@ -7,7 +7,6 @@ import torch
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from rtp_llm.ops import VitSeparation
-from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.util import check_with_info
 
 
@@ -71,12 +70,15 @@ class LoadConfig(BaseModel):
     def validate_custom_types(cls, value: Any, info) -> Any:
         field_name = info.field_name
 
-        expected_types = {
-            "database": BaseDatabase,
-            "compute_dtype": torch.dtype,
-            "quant_algo": (type(None), object),
-        }
-        expected = expected_types[field_name]
+        if field_name == "database":
+            from rtp_llm.utils.database import BaseDatabase
+
+            expected = BaseDatabase
+        else:
+            expected = {
+                "compute_dtype": torch.dtype,
+                "quant_algo": (type(None), object),
+            }[field_name]
 
         if not isinstance(value, expected):
             raise TypeError(

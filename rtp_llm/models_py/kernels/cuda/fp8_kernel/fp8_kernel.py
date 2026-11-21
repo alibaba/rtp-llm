@@ -295,9 +295,20 @@ def cutlass_moe_mm_fp8_scaled(
         )
 
     assert per_act_token == True
-    assert per_out_ch == False
 
     E, N, _ = w.shape
+    if per_out_ch:
+        # OldLoader stores [E, N, 1]; NewLoader owns [E, N]. CUTLASS indexes
+        # the contiguous FP32 table by expert * N + output_channel.
+        if (
+            w_scale.shape not in ((E, N), (E, N, 1))
+            or w_scale.dtype != torch.float32
+            or not w_scale.is_contiguous()
+        ):
+            raise ValueError(
+                "CUTLASS FP8 requires one contiguous FP32 scale per expert/output channel"
+            )
+        w_scale = w_scale.view(E, N)
     M, K = aq.shape
     configs = get_cutlass_groupgemm_best_config(E, N, K)
     if configs:
@@ -459,36 +470,12 @@ def quant_weight_ue8m0(
 def quant_weight_ue8m0_packed(
     weight_dequant: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Quantize source weights once to FP8 with packed UE8M0 scales.
+    """Compatibility entry point for the shared, single-pass dense converter."""
+    from rtp_llm.models_py.kernels.cuda.fp8_quant import (
+        quant_weight_ue8m0_packed as quantize_source,
+    )
 
-    This is the native SM100/SM120 DeepGEMM representation.  Keeping the
-    original floating-point tensor until this operation avoids the lossy
-    float-scale FP8 -> BF16 -> UE8M0 FP8 requantization path.
-    """
-    if weight_dequant.dim() != 2:
-        raise ValueError(
-            "Direct packed UE8M0 weight quantization requires a 2D tensor, "
-            f"got shape {tuple(weight_dequant.shape)}"
-        )
-
-    # Limit floating-point temporaries during online loading.  Quantizing the
-    # complete matrix in one call materializes both a padded source and a
-    # scaled floating-point tensor in addition to the master weight.  Chunking
-    # on a 128-row boundary preserves exactly the same quantization blocks.
-    row_chunk_size = 1024
-    n, k = weight_dequant.shape
-    out_w = torch.empty((n, k), dtype=fp8_dtype, device=weight_dequant.device)
-    scale_chunks = []
-    for row_start in range(0, n, row_chunk_size):
-        row_end = min(row_start + row_chunk_size, n)
-        chunk_w, chunk_s = per_block_cast_to_fp8(
-            weight_dequant[row_start:row_end], use_ue8m0=True
-        )
-        out_w[row_start:row_end].copy_(chunk_w)
-        scale_chunks.append(chunk_s)
-
-    out_s = torch.cat(scale_chunks, dim=0)
-    return out_w, _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
+    return quantize_source(weight_dequant)
 
 
 def requant_weight_ue8m0(

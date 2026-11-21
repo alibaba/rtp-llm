@@ -104,7 +104,9 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         scale: Optional[AtomicWeight] = None
         act_scale: Optional[AtomicWeight] = None
         act_scale_inv: Optional[AtomicWeight] = None
-        logging.debug("PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix)
+        logging.debug(
+            "PerTensorInt8QuantWeight : %s, %s", self.qs_suffix, self.qw_suffix
+        )
 
         if src_weight_info.name == W.attn_qkv_w:
             (kernel, scale, act_scale, act_scale_inv) = self._get_qkv_quant_weight_info(
@@ -422,7 +424,16 @@ class PerTensorInt8QuantWeight(CompositeWeight, QuantWeight):
         # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
-        kernel_weight = kernel_weight.reshape(kernel_weight.shape[-1], -1)
+        from rtp_llm.models_py.quant_methods.int8 import PrequantizedInt8ExportModule
+
+        # Keep FT's byte layout and activation-scale fields unchanged. The
+        # BERT pre-decoder norm is floating point despite this recipe's name.
+        module = PrequantizedInt8ExportModule(
+            kernel_weight,
+            per_channel=False,
+            norm=self.kernel.name == W.pre_decoder_ln_gamma,
+        )
+        kernel_weight, _ = module.export()
         processed_res[self.kernel.name] = kernel_weight
 
         return processed_res

@@ -1,6 +1,32 @@
 load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 
+def _v4_xgrammar_with_fst_probes(name, envs, **kwargs):
+    # The existing blocking smoke logs asynchronous markers without adding a
+    # CUDA fence. Only its label is returned to the normal suite.
+    fenced = dict(envs)
+    # With asynchronous launches both prefill ranks reached layer 0's host
+    # wo_a_packed marker before RoPE H2D reported an unspecified launch failure.
+    # Set this in the role's environment *before* its CUDA context is created,
+    # so native/ATen failures can be observed at their launch sites, including
+    # launches on the FST producer thread. Keep the ordinary smoke asynchronous:
+    # a timing-sensitive failure disappearing in this leg does not clear it.
+    fenced["prefill"] = envs["prefill"] + [
+        "RTP_V4_XGRAMMAR_FST_DIAG=fenced",
+        "CUDA_LAUNCH_BLOCKING=1",
+        "TORCH_SHOW_CPP_STACKTRACES=1",
+        "TORCH_DISABLE_ADDR2LINE=1",
+    ]
+    smoke_test(
+        name = "v4_0731_xgrammar_real_fst_fenced_sm100_arm",
+        tags = ["v4_loader_diagnostic"],  # smoke_test already adds "manual".
+        envs = fenced,
+        **kwargs
+    )
+    ordinary = dict(envs)
+    ordinary["prefill"] = envs["prefill"] + ["RTP_V4_XGRAMMAR_FST_DIAG=trace"]
+    return smoke_test(name = name, envs = ordinary, **kwargs)
+
 def cuda13_suites():
     # ============================================================================
     # DeepSeek-V4 smoke — minimal production-config coverage
@@ -65,8 +91,9 @@ def cuda13_suites():
             # into the routed kernel, the only mega-moe form deep_gemm 2.6.1
             # exports), taking over the SE coverage from the retired dedicated
             # mega_moe_se case on this same CP2/DP2 page-RR topology.
-            smoke_test(
+            _v4_xgrammar_with_fst_probes(
                 name="smoke_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_cprr_async_xgrammar_json_sm100",
+                data=["//rtp_llm/test/smoke/arm_causal_inputs:v4"],
                 task_info="data/model/deepseek_v4/q_r_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_async_xgrammar_json_sm100_arm.json",
                 sleep_time_qr=2,
                 smoke_args={

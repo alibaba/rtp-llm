@@ -3,7 +3,7 @@
 Covers:
   - StackSplitTensorSource: cache hit/miss, split correctness, passthrough
   - MoeAtomicWeight._build_split_config: per-expert key generation
-  - ModelLoader._build_stacked_key_config: stacked key mapping construction
+  - NewLoader: rank-local stacked and unstacked checkpoint parity
 """
 
 import unittest
@@ -20,7 +20,6 @@ from rtp_llm.model_loader.ffn_weight import (
     MoeWeight,
     iter_stacked_moe_weights,
 )
-from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
@@ -232,65 +231,10 @@ def _make_moe_weight(config, w1_ckpt, w2_ckpt, stacked):
     return MoeWeight(sub_weights=[moe_w1, moe_w2], config=config)
 
 
-class TestBuildStackedKeyConfig(unittest.TestCase):
-    """Tests for ModelLoader._build_stacked_key_config (static method)."""
-
-    def test_basic_mapping(self):
-        from rtp_llm.model_loader.loader import ModelLoader
-
-        config = MoeConfig(expert_num=4)
-        moe_weight = _make_moe_weight(
-            config,
-            [CkptWeightInfo("model.layers.{i}.moe.w1")],
-            [CkptWeightInfo("model.layers.{i}.moe.w2")],
-            stacked=True,
-        )
-
-        result = ModelLoader._build_stacked_key_config(
-            ModelWeightInfo(weights=[], layer_weights=[moe_weight])
-        )
-        self.assertIn("model.layers.0.moe.w1", result)
-        self.assertIn("model.layers.0.moe.w2", result)
-        template = result["model.layers.0.moe.w1"]
-        self.assertIn("{expert_id}", template)
-        formatted = template.format(expert_id=2)
-        self.assertIn("2", formatted)
-
-    def test_non_identity_merge_fun_skipped(self):
-        from rtp_llm.model_loader.loader import ModelLoader
-
-        config = MoeConfig(expert_num=2)
-
-        def custom_merge(ts):
-            return torch.stack(ts)
-
-        moe_weight = _make_moe_weight(
-            config,
-            [CkptWeightInfo("model.layers.{i}.w1", merge_fun=custom_merge)],
-            [CkptWeightInfo("model.layers.{i}.w2", merge_fun=custom_merge)],
-            stacked=True,
-        )
-
-        result = ModelLoader._build_stacked_key_config(
-            ModelWeightInfo(weights=[], layer_weights=[[moe_weight]])
-        )
-        self.assertEqual(len(result), 0)
-
-    def test_non_stacked_weights_ignored(self):
-        from rtp_llm.model_loader.loader import ModelLoader
-
-        config = MoeConfig(expert_num=4)
-        moe_weight = _make_moe_weight(
-            config,
-            [CkptWeightInfo("model.layers.{i}.moe.w1")],
-            [CkptWeightInfo("model.layers.{i}.moe.w2")],
-            stacked=False,
-        )
-
-        result = ModelLoader._build_stacked_key_config(
-            ModelWeightInfo(weights=[], layer_weights=[[moe_weight]])
-        )
-        self.assertEqual(len(result), 0)
+class TestDirectStackedExpertLoading(unittest.TestCase):
+    def test_stacked_and_per_expert_sources_match_rank_local_parameters(self):
+        from rtp_llm.models_py.owner_migration_checkpoint_test import check_stacked_routing
+        check_stacked_routing(self)
 
 
 class TestIterStackedMoeWeights(unittest.TestCase):

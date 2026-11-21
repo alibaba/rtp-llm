@@ -148,6 +148,51 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
         topk_weights /= topk_weights.sum(dim=1, keepdim=True)
         return hidden_states, topk_weights, topk_ids
 
+    def test_eplb_masked_graph_keeps_logical_outputs_after_slot_swap(self) -> None:
+        """One real SM90 executor; the smoke separately gates both EP ranks."""
+        hidden, gates, logical_ids = self._make_inputs(offset=0)
+        physical_ids = logical_ids.clone()
+        expected = self.fused_moe(hidden, gates, logical_ids).clone()
+        executor = self.fused_moe.fused_experts
+        executor.use_deterministic_eplb_gather = True
+        self.fused_moe.router.use_deterministic_eplb_gather = True
+
+        def forward():
+            return self.fused_moe(
+                hidden,
+                gates,
+                physical_ids,
+                extra_finalize_args={
+                    "eplb_logical_topk_ids": logical_ids,
+                    "eplb_logical_experts_per_rank": self.NUM_EXPERTS,
+                },
+            )
+
+        warmup = torch.cuda.Stream()
+        warmup.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup):
+            first = forward()
+        torch.cuda.current_stream().wait_stream(warmup)
+        torch.testing.assert_close(first, expected, rtol=0, atol=0)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = forward()
+        # Keep capture addresses (including packed FP8 scales) stable. Reverse
+        # every physical slot without changing the checkpoint's logical experts.
+        with torch.no_grad():
+            for tensor in (*executor.w13_weight_fp8, *executor.w2_weight_fp8):
+                previous = tensor.clone()
+                for slot in range(self.NUM_EXPERTS):
+                    tensor[slot].copy_(previous[self.NUM_EXPERTS - 1 - slot])
+        graph.replay()
+        self.assertFalse(
+            torch.equal(captured, expected), "replay ignored the physical weights"
+        )
+        physical_ids.copy_(self.NUM_EXPERTS - 1 - logical_ids)
+        graph.replay()
+        torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
     def test_replay_with_updated_hidden_states_and_routing(self) -> None:
         static_hidden, static_weights, static_ids = self._make_inputs(offset=0)
 

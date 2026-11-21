@@ -628,7 +628,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "fn": torch.empty((24, 16384), dtype=torch.float32),
             },
         )
-        root.add_module("attn_hc", TileLangHCUnit())
+        class OwnedHCUnit(TileLangHCUnit):
+            pass
+
+        root.add_module("attn_hc", OwnedHCUnit())
         root.add_module("ffn_hc_same_shape", TileLangHCUnit())
         root.add_module("head_hc", TileLangHCHead())
         root.add_module("fallback_hc", FallbackHCUnit())
@@ -664,7 +667,10 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
                 "hc_mult": 4,
             },
         )
-        root.add_module("head_hc", TileLangHCHead())
+        class OwnedHCHead(TileLangHCHead):
+            pass
+
+        root.add_module("head_hc", OwnedHCHead())
         root.add_module("head_hc_same_shape", TileLangHCHead())
         root.add_module("fallback_head", FallbackHCHead())
 

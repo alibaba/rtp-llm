@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Protocol, TypeVar
+from typing import TYPE_CHECKING, Protocol, TypeVar, Union
 
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
 
-AttentionInputs = PyAttentionInputs | Mapping[str, PyAttentionInputs]
+AttentionInputs = Union["PyAttentionInputs", Mapping[str, "PyAttentionInputs"]]
 T = TypeVar("T")
 
 
@@ -14,6 +17,8 @@ class LayeredKVCache(Protocol):
 
 
 def get_attention_inputs_value(inputs: PyModelInputs) -> AttentionInputs:
+    from rtp_llm.ops.compute_ops import PyAttentionInputs
+
     value = inputs.attention_inputs
     if isinstance(value, PyAttentionInputs):
         return value
@@ -29,7 +34,7 @@ def get_primary_attention_inputs(
 ) -> PyAttentionInputs:
     """Return the common/single fast-path value without interpreting tag names."""
     value = get_attention_inputs_value(inputs)
-    if isinstance(value, PyAttentionInputs):
+    if not isinstance(value, Mapping):
         return value
     return next(iter(value.values()))
 
@@ -38,6 +43,8 @@ def select_attention_inputs_for_tag(
     attention_inputs: AttentionInputs, tag: str
 ) -> PyAttentionInputs:
     """Select a group directly when the model already knows its business tag."""
+    from rtp_llm.ops.compute_ops import PyAttentionInputs
+
     if isinstance(attention_inputs, PyAttentionInputs):
         return attention_inputs
     if not isinstance(attention_inputs, Mapping):
@@ -148,7 +155,7 @@ def select_attention_inputs_for_layer(
 ) -> PyAttentionInputs | list[PyAttentionInputs]:
     """Return the group-local input(s) owned by a model-local layer."""
     value = get_attention_inputs_value(inputs)
-    if isinstance(value, PyAttentionInputs):
+    if not isinstance(value, Mapping):
         return value
 
     tags = get_layer_tags(kv_cache, local_layer_idx)
