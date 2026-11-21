@@ -90,7 +90,10 @@ cc_library(
     srcs = [
         "ComputeInit.cc",
     ],
-    hdrs = ["EmbTensorCodec.h"],
+    hdrs = [
+        "EmbTensorCodec.h",
+        "EmbTensorObjectPlan.h",
+    ],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_info",

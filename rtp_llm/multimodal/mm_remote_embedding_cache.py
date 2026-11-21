@@ -922,16 +922,17 @@ class MMRemoteEmbeddingCache:
                         message=verdict.message,
                         request_scoped=self.request_scoped_inspection,
                     )
-            plan = plan_object(
-                {
-                    "version": 1,
-                    "result": result,
-                    "greennet": inspection,
-                    "cache_key": key,
-                },
-                max_bytes=self.max_object_bytes,
-                checksum=False,
-            )
+            with self._observe_stage("write", "plan_submit"):
+                plan = plan_object(
+                    {
+                        "version": 1,
+                        "result": result,
+                        "greennet": inspection,
+                        "cache_key": key,
+                    },
+                    max_bytes=self.max_object_bytes,
+                    checksum=False,
+                )
         except (ValueError, TypeError, RecursionError):
             self._count("encode_skip")
             self._report_skip("write", "unsupported_payload")

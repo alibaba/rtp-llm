@@ -26,6 +26,7 @@ _MAX_DEPTH = 32
 _ALIGNMENT = 64
 _USE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE") == "1"
 _USE_NATIVE_PACK = os.environ.get("MM_EMB_NATIVE_PACK") == "1"
+_USE_NATIVE_PLAN = os.environ.get("MM_EMB_NATIVE_PLAN") == "1"
 _DTYPES = {
     str(dtype): dtype
     for dtype in (
@@ -57,10 +58,7 @@ class TensorObjectPlan:
     checksum: bool
 
 
-def plan_object(
-    value: Any, *, devices=None, max_bytes=1024**3, checksum=True
-) -> TensorObjectPlan:
-    """Describe without copying/allocating tensor data; used for admission."""
+def _describe_object(value, devices, max_bytes):
     tensors, specs, identities = [], [], {}
     payload_size = nodes = 0
 
@@ -135,7 +133,26 @@ def plan_object(
         # The recursive closure captures both itself and the tensor list. Break
         # that cycle so releasing the plan releases tensors without waiting for GC.
         del visit
-    header = dict(tree=tree, tensors=specs)
+    return dict(tree=tree, tensors=specs), tensors, payload_size
+
+
+def plan_object(
+    value: Any, *, devices=None, max_bytes=1024**3, checksum=True
+) -> TensorObjectPlan:
+    """Describe without copying/allocating tensor data; used for admission."""
+    description = None
+    if (
+        _USE_NATIVE_PLAN
+        and devices is None
+        and type(max_bytes) is int
+        and 0 <= max_bytes <= (1 << 63) - 1 - _ALIGNMENT
+    ):
+        from librtp_compute_ops import plan_emb_tensor_object
+
+        description = plan_emb_tensor_object(value, max_bytes)
+    if description is None:
+        description = _describe_object(value, devices, max_bytes)
+    header, tensors, payload_size = description
     if checksum:
         header["sha256"] = "0" * 64
     encoded = json.dumps(header, separators=(",", ":"), allow_nan=False).encode()
