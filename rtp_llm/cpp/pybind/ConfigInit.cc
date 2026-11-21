@@ -1090,6 +1090,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register CacheStoreConfig
     py::class_<CacheStoreConfig>(m, "CacheStoreConfig")
         .def(py::init<>())
+        .def_readwrite("cache_store_transport", &CacheStoreConfig::cache_store_transport)
         .def_readwrite("cache_store_rdma_mode", &CacheStoreConfig::cache_store_rdma_mode)
         .def_readwrite("wrr_available_ratio", &CacheStoreConfig::wrr_available_ratio)
         .def_readwrite("rank_factor", &CacheStoreConfig::rank_factor)
@@ -1135,10 +1136,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.p2p_layer_cache_buffer_store_timeout_ms,
                                       self.p2p_cancel_broadcast_timeout_ms,
                                       self.cache_store_tcp_anet_rpc_thread_num,
-                                      self.cache_store_tcp_anet_rpc_queue_num);
+                                      self.cache_store_tcp_anet_rpc_queue_num,
+                                      self.cache_store_transport);
             },
             [](py::tuple t) {
-                if (t.size() != 20)
+                if (t.size() != 21)
                     throw std::runtime_error("Invalid state!");
                 CacheStoreConfig c;
                 try {
@@ -1162,6 +1164,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.p2p_cancel_broadcast_timeout_ms              = t[17].cast<int64_t>();
                     c.cache_store_tcp_anet_rpc_thread_num          = t[18].cast<int>();
                     c.cache_store_tcp_anet_rpc_queue_num           = t[19].cast<int>();
+                    c.cache_store_transport                       = t[20].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("CacheStoreConfig unpickle error: ") + e.what());
                 }

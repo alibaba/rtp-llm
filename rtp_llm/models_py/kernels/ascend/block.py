@@ -36,9 +36,13 @@ def _load_initial_state_from_block_map_npu(
     )
     # The paged cache is V-first so recurrent decode can consume it directly,
     # whereas the historical chunk-prefill interface exposes K-first states.
-    loaded_states = (
-        conv_states.index_select(0, block_indices).transpose(-1, -2).contiguous()
-    )
+    if conv_states.device.type == "npu":
+        from rtp_llm.models_py.kernels.ascend.prefill_state import gather_state_pages
+
+        selected_states = gather_state_pages(conv_states, block_indices)
+    else:
+        selected_states = conv_states.index_select(0, block_indices)
+    loaded_states = selected_states.transpose(-1, -2).contiguous()
     if loaded_states.shape != initial_states.shape:
         raise ValueError(
             "initial_states must use the K-first transpose of the paged cache"
@@ -84,7 +88,12 @@ def _copy_states_to_blocks(
         .contiguous()
         .to(dtype=ssm_states.dtype)
     )
-    ssm_states.index_copy_(0, valid_blocks, valid_sources)
+    if ssm_states.device.type == "npu":
+        from rtp_llm.models_py.kernels.ascend.prefill_state import scatter_state_pages
+
+        scatter_state_pages(ssm_states, valid_blocks, valid_sources)
+    else:
+        ssm_states.index_copy_(0, valid_blocks, valid_sources)
 
 
 def _store_ssm_state_to_block_map_npu(

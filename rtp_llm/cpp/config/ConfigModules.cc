@@ -365,7 +365,8 @@ std::string VitConfig::to_string() const {
 // CacheStoreConfig
 std::string CacheStoreConfig::to_string() const {
     std::ostringstream oss;
-    oss << "cache_store_rdma_mode: " << cache_store_rdma_mode << "\n"
+    oss << "cache_store_transport: " << cache_store_transport << "\n"
+        << "cache_store_rdma_mode: " << cache_store_rdma_mode << "\n"
         << "wrr_available_ratio: " << wrr_available_ratio << "\n"
         << "rank_factor: " << rank_factor << "\n"
         << "thread_count: " << thread_count << "\n"

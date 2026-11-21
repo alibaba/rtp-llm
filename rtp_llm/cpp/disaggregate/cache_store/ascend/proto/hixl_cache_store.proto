@@ -1,0 +1,70 @@
+// Copyright (c) 2026 Alibaba Cloud.
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto2";
+package rtp_llm.hixl_proto;
+
+import "arpc/proto/rpc_extensions.proto";
+option cc_generic_services = true;
+
+enum Status {
+    OK = 0;
+    INVALID_REQUEST = 1;
+    SOURCE_UNAVAILABLE = 2;
+    DEADLINE_EXCEEDED = 3;
+    UNREGISTERED_MEMORY = 4;
+}
+
+message Block {
+    optional string key = 1;
+    optional uint64 bytes = 2;
+    optional uint64 address = 3;
+    optional uint64 region_id = 4;
+    optional uint64 region_address = 5;
+    optional uint64 region_bytes = 6;
+}
+
+message ManifestRequest {
+    optional string request_id = 1;
+    // Fresh reader-instance identity, not just a reusable IP or engine port.
+    optional string reader_id = 2;
+    repeated Block blocks = 3;
+    optional uint32 timeout_ms = 4;
+    optional string reader_engine_id = 5;
+    optional uint64 transfer_id = 6;
+    // Transfers at or below this watermark were acknowledged by the source.
+    optional uint64 retired_through = 7;
+}
+
+message ManifestResponse {
+    optional Status status = 1;
+    optional string engine_id = 2;
+    reserved 3;
+    reserved "grant_id";
+    repeated Block blocks = 4;
+    // Changes whenever the source engine process restarts at the same address.
+    optional string source_instance = 5;
+}
+
+message ReleaseRequest {
+    optional string reader_id = 1;
+    reserved 2;
+    reserved "grant_id";
+    optional string reader_engine_id = 3;
+    optional uint64 transfer_id = 4;
+    optional uint64 retired_through = 5;
+}
+
+message ReleaseResponse {
+    optional bool released = 1;
+}
+
+service HixlCacheStoreService {
+    option (arpc.global_service_id) = 10020;
+
+    rpc manifest(ManifestRequest) returns (ManifestResponse) {
+        option (arpc.local_method_id) = 10001;
+    }
+    rpc release(ReleaseRequest) returns (ReleaseResponse) {
+        option (arpc.local_method_id) = 10002;
+    }
+}

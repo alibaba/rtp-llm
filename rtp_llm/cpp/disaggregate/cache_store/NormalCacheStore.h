@@ -56,6 +56,9 @@ public:
 
     void markRequestEnd(const std::string& requestid);
 
+    void finishRegistration() override {
+        messager_->finishRegistration();
+    }
     void debugInfo() override;
 
     const std::shared_ptr<MemoryUtil>& getMemoryUtil() const override;

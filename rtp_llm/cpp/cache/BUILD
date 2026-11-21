@@ -370,6 +370,9 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
         ":cache_async_context",
+        ":transfer_block_lease",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         ":cache_core",
         ":cp_slot_mapper",
         ":prefill_cache_hit_metrics_reporter",
@@ -392,4 +395,12 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_library(
+    name = "transfer_block_lease",
+    hdrs = ["TransferBlockLease.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/cache/block_tree_cache:device_block_pool"],
 )

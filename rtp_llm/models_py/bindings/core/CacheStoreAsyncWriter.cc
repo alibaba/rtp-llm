@@ -12,6 +12,7 @@
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -426,6 +427,23 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
             return makeStoreCompletionCallback(completion_state, std::move(publication_lease));
         };
     }
+    // PyWrappedModel has materialized the tag-local metadata on the host.
+    // Pin pages before queueing so cancellation cannot recycle queued writes.
+    std::vector<std::shared_ptr<void>> publication_leases;
+    if (cache_store->getMemoryUtil()->requiresBlockLease()) {
+        const auto offsets = cache_store_inputs.host_kv_cache_offset.accessor<int32_t, 2>();
+        const auto pd = cache_store_inputs.request_pd_separation.accessor<bool, 1>();
+        const int64_t contexts = cache_store_inputs.request_id.numel();
+        const int64_t decoders = cache_store_inputs.input_lengths_host.numel() - contexts;
+        publication_leases.reserve(contexts);
+        for (int64_t batch = 0; batch < contexts; ++batch) {
+            if (pd[batch]) {
+                const auto* row = offsets[decoders + batch].data();
+                publication_leases.push_back(cache_store->retainTransferBlocks(
+                    std::vector<int32_t>(row, row + offsets.size(1)), layer_kv.tag));
+            }
+        }
+    }
     // Create the event on the main thread to avoid event-record contention in worker threads.
     auto event = runtimeCreateEvent();
     auto run   = [captured_cache_store_inputs,
@@ -433,6 +451,7 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                 cache_config,
                 cache_store,
                 register_store_completion,
+                publication_leases = std::move(publication_leases),
                 cache_model_id = cache_model_id_,
                 cp_rank        = cp_rank_,
                 cp_size        = cp_size_,
@@ -446,6 +465,8 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                                cp_size,
                                std::move(event),
                                register_store_completion);
+        // Published BlockBuffers now own their independent transfer leases.
+        publication_leases.clear();
     };
     submit(std::move(run));
 }

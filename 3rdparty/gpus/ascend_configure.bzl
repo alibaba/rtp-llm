@@ -81,6 +81,8 @@ def _ascend_create(repository_ctx, toolkit_path, include_path, lib_path, version
     lib_files = {
         "libascendcl.so": "ascend",
         "libhccl.so":     "hccl",
+        "libcann_hixl.so": "hixl",
+        "libgraph.so": "graph",
     }
     for lib_name, target_name in lib_files.items():
         src = repository_ctx.path(lib_path + "/" + lib_name)
@@ -93,6 +95,13 @@ def _ascend_create(repository_ctx, toolkit_path, include_path, lib_path, version
 config_setting(
     name = "using_ascend",
     values = {"define": "using_ascend=true"},
+)
+
+cc_library(
+    name = "hixl",
+    srcs = ["lib/libcann_hixl.so", "lib/libgraph.so"],
+    deps = [":ascend_headers", ":ascend"],
+    linkstatic = 1,
 )
 
 cc_library(

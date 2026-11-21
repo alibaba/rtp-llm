@@ -637,7 +637,8 @@ void DeviceBlockPool::registerUserMrForBuffer(std::shared_ptr<MemoryUtil> memory
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     auto  start_us = currentTimeUs();
 
-    if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
+    if (!memory_util->regUserMrWithOwner(
+            base_ptr, bytes, gpu, stride_bytes, std::make_shared<torch::Tensor>(cache_aligned_buffer_))) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed, pool_name=%s",
                      layout_idx,
                      buffer_type.c_str(),

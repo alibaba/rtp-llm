@@ -40,6 +40,11 @@ bool RequestBlockBufferStore::setRequestBlockBuffer(const std::shared_ptr<Reques
         }
     }
 
+    if (!staging_blocks.empty() && memory_util_->requiresBlockLease()) {
+        RTP_LLM_LOG_ERROR("HIXL publication requires registered device memory, request=%s",
+                          request_block_buffer->getRequestId().c_str());
+        return false;
+    }
     if (!staging_blocks.empty()) {
         auto staged = makeValidBlocks(staging_blocks);
         if (staged.size() != staging_blocks.size()) {
@@ -138,7 +143,7 @@ RequestBlockBufferStore::getOrInsertRequestBlockBuffer(const std::string& reques
 }
 
 bool RequestBlockBufferStore::isValidBlock(const std::shared_ptr<BlockBuffer>& block) {
-    if (memory_util_->isRdmaMode()) {
+    if (memory_util_->supportsDeviceMemory()) {
         return memory_util_->isMemoryMr(block->addr.get(), block->len, block->gpu_mem, block->adopted);
     }
     return block->gpu_mem == false;
@@ -209,6 +214,9 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
     std::shared_ptr<RequestBlockBuffer> request_block_buffer;
     {
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
+        if (memory_util_->requiresBlockLease()) {
+            request_cache_map_.try_emplace(requestid, nullptr);
+        }
         auto                                iter = request_cache_map_.find(requestid);
         if (iter != request_cache_map_.end()) {
             request_block_buffer          = iter->second;

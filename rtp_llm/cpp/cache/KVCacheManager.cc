@@ -1,4 +1,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/TransferBlockLease.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include <unordered_map>
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
@@ -684,6 +687,16 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
 // 系统资源管理
 
 void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    if (cache_store && cache_store->getMemoryUtil()->requiresBlockLease()) {
+        std::unordered_map<std::string, std::weak_ptr<DeviceBlockPool>> pools;
+        for (const auto& group : coordinator_manager_->cacheGroups()) {
+            pools.emplace(group->tag(), group->blockPool());
+        }
+        cache_store->setBlockLeaseProvider(
+            [pools = std::move(pools)](const std::vector<int32_t>& blocks, const std::string& tag) {
+                return std::make_shared<TransferBlockLease>(pools.at(tag).lock(), blocks);
+            });
+    }
     coordinator_manager_->regUserMr(model_id, std::move(cache_store));
 }
 

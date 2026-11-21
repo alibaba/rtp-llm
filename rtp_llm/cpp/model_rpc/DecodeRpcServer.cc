@@ -648,11 +648,15 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         generate_stream->markGrpcNormalDeviceStatePending();
     }
     if (propose_maga_init_params_) {
-        // gRPC handler threads default to CUDA device 0; pin allocations below
-        // to this worker's device so local_rank>0 workers don't place the MTP
-        // device-state tensors on the wrong GPU.
-        c10::DeviceGuard device_guard(torch::Device(
-            torch::kCUDA, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank)));
+        // Bind the gRPC handler's MTP state to this worker's accelerator.
+#if USING_ASCEND
+        constexpr auto device_type = torch::kPrivateUse1;
+#else
+        constexpr auto device_type = torch::kCUDA;
+#endif
+        const torch::Device mtp_device(
+            device_type, static_cast<c10::DeviceIndex>(maga_init_params_.parallelism_config.local_rank));
+        c10::DeviceGuard device_guard(mtp_device);
         const size_t     propose_step = propose_maga_init_params_->gen_num_per_circle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
         if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {
@@ -686,17 +690,17 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
             auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
-            const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
-            sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+            const auto device_i32           = torch::TensorOptions().dtype(torch::kInt32).device(mtp_device);
+            sp_output_buffer->all_probs     = propose_probs_t.to(mtp_device);
+            sp_output_buffer->hidden_states = propose_hidden_t.to(mtp_device);
 
-            auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
-            auto accept_len                      = torch::ones({1}, cuda_i32);
-            auto accept_tokens                   = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, cuda_i32);
+            auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(device_i32, /*non_blocking=*/true);
+            auto accept_len                      = torch::ones({1}, device_i32);
+            auto accept_tokens                   = torch::zeros({1, static_cast<int64_t>(propose_step + 1)}, device_i32);
             accept_tokens[0][0]                  = sp_output_buffer->tokens[0][0];
             sp_output_buffer->propose_tokens_gpu = propose_tokens_gpu;
 
-            auto next_seq_len = torch::ones({1}, cuda_i32);
+            auto next_seq_len = torch::ones({1}, device_i32);
             next_seq_len[0]   = generate_stream->seqLength();
 
             generate_stream->setSPOutputBuffer(sp_output_buffer);
@@ -1198,6 +1202,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
 
                 const auto& block_ids = load_context.blockIdsForGroup(tag).blocks();
+                auto lease = resource_.cache_store->getMemoryUtil()->requiresBlockLease() ?
+                    resource_.cache_store->retainTransferBlocks(block_ids, tag) : std::shared_ptr<void>{};
                 auto        block_num = block_ids.size();
                 size_t      model_id  = maga_init_params_.model_id;
 
@@ -1252,7 +1258,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                           block_id,
                                           block.addr,
                                           block.size_bytes);
-                        std::shared_ptr<void> addr(block.addr, [](void*) {});
+                        std::shared_ptr<void> addr(lease, block.addr);
                         load_layer_cache->addBlock(
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                     };
@@ -1330,6 +1336,8 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 std::to_string(load_context.request_id), request_key);
 
                             const auto& block_ids = load_context.blockIdsForGroup(tag).blocks();
+                            auto lease = resource_.cache_store->getMemoryUtil()->requiresBlockLease() ?
+                                resource_.cache_store->retainTransferBlocks(block_ids, tag) : std::shared_ptr<void>{};
                             auto        block_num = block_ids.size();
                             size_t      model_id  = module_plan.cache_model_id;
 
@@ -1393,7 +1401,7 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                       block_id,
                                                       block.addr,
                                                       block.size_bytes);
-                                    std::shared_ptr<void> addr(block.addr, [](void*) {});
+                                    std::shared_ptr<void> addr(lease, block.addr);
                                     load_layer_cache->addBlock(
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
