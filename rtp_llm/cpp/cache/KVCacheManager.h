@@ -98,6 +98,7 @@ public:
         return !config_.tiered_cache_configs.empty();
     }
     void          markOffloadOverwrite(const std::string& tag, const BlockIndicesType& blocks);
+    size_t        upgradeOffloadBlocksForLoad(const BatchKVCacheResourcePtr& resource, int reuse_length);
     torch::Tensor takeOffloadVersionUpdates();
     void          publishOffloadVersions(const torch::Tensor& updates, const std::vector<std::string>& group_tags);
     // Called on the engine compute stream, after TP input synchronization.

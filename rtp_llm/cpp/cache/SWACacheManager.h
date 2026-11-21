@@ -28,18 +28,19 @@ public:
         RTP_LLM_CHECK_WITH_INFO(tail_blocks > 0, "reuse cache tail blocks must be positive");
     }
 
-    bool           malloc(BlockIds&                block_ids,
-                          int                      seq_len,
-                          bool                     enable_reuse_cache   = false,
-                          int                      reserve_step         = 0,
-                          std::vector<size_t>*     backfilled_positions = nullptr,
-                          const RequiredPositions& required_positions   = {},
-                          int                      initial_seq_len      = 0) override;
-    bool           mallocForDecode(BlockIds&            block_ids,
-                                   int                  seq_len,
-                                   bool                 enable_reuse_cache   = false,
-                                   int                  reserve_step         = 0,
-                                   std::vector<size_t>* backfilled_positions = nullptr) override;
+    bool malloc(BlockIds&                block_ids,
+                int                      seq_len,
+                bool                     enable_reuse_cache           = false,
+                int                      reserve_step                 = 0,
+                std::vector<size_t>*     backfilled_positions         = nullptr,
+                const RequiredPositions& required_positions           = {},
+                int                      initial_seq_len              = 0,
+                bool                     prefer_host_for_pending_load = false) override;
+    bool mallocForDecode(BlockIds&            block_ids,
+                         int                  seq_len,
+                         bool                 enable_reuse_cache   = false,
+                         int                  reserve_step         = 0,
+                         std::vector<size_t>* backfilled_positions = nullptr) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,

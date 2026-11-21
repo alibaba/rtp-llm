@@ -613,6 +613,13 @@ void KVCacheManager::markOffloadOverwrite(const std::string& tag, const BlockInd
     coordinator_manager_->groupBlockPools()[it - tags.begin()]->markOffloadOverwrite(blocks);
 }
 
+size_t KVCacheManager::upgradeOffloadBlocksForLoad(const BatchKVCacheResourcePtr& resource, int reuse_length) {
+    if (!hasSparseKvOffload() || !isAllocatorOwner()) {
+        return 0;
+    }
+    return coordinator_manager_->upgradeOffloadBlocksForLoad(resource, reuse_length);
+}
+
 torch::Tensor KVCacheManager::takeOffloadVersionUpdates() {
     RTP_LLM_CHECK_WITH_INFO(isAllocatorOwner(), "only TP0 may take offload version updates");
     std::vector<std::vector<std::pair<BlockIdxType, int64_t>>> snapshots;

@@ -35,7 +35,7 @@ public:
     void                 init(int batch_size);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id) const;
-    absl::Status         initKVBlock();
+    absl::Status         initKVBlock(bool prefer_host_for_pending_load = false);
     absl::Status         waitForAllocatorLoad();
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();

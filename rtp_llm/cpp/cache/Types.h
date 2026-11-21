@@ -80,6 +80,10 @@ struct MallocInfo {
 
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
+    // Prefer pinned Host blocks during P/D ALLOCATE so queued requests do not pin
+    // HBM before Prefill begins transferring KV; LOAD upgrades them in-place when
+    // HBM is free.
+    bool prefer_host_for_pending_load = false;
 
     int incrSeqLen() const;
 };

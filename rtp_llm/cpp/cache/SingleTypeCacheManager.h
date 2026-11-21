@@ -53,11 +53,12 @@ public:
     // prefix reuse. Zero denotes ordinary growth of an already admitted request.
     virtual bool malloc(BlockIds&                block_ids,
                         int                      seq_len,
-                        bool                     enable_reuse_cache   = false,
-                        int                      reserve_step         = 0,
-                        std::vector<size_t>*     backfilled_positions = nullptr,
-                        const RequiredPositions& required_positions   = {},
-                        int                      initial_seq_len      = 0) = 0;
+                        bool                     enable_reuse_cache           = false,
+                        int                      reserve_step                 = 0,
+                        std::vector<size_t>*     backfilled_positions         = nullptr,
+                        const RequiredPositions& required_positions           = {},
+                        int                      initial_seq_len              = 0,
+                        bool                     prefer_host_for_pending_load = false) = 0;
     virtual bool mallocForDecode(BlockIds&            block_ids,
                                  int                  seq_len,
                                  bool                 enable_reuse_cache   = false,

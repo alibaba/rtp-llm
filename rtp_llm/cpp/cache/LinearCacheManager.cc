@@ -177,7 +177,8 @@ bool LinearCacheManager::malloc(BlockIds&                block_ids,
                                 int                      reserve_step,
                                 std::vector<size_t>*     backfilled_positions,
                                 const RequiredPositions& required_positions,
-                                int /*initial_seq_len*/) {
+                                int /*initial_seq_len*/,
+                                bool /*prefer_host_for_pending_load*/) {
     (void)reserve_step;
     return mallocImpl(block_ids, seq_len, 0, true, enable_reuse_cache, backfilled_positions, required_positions);
 }

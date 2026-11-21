@@ -3,6 +3,7 @@
 #include <limits>
 #include <map>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -377,6 +378,77 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
     return true;
 }
 
+size_t CoordinatorCacheManager::upgradeOffloadBlocksForLoad(const BatchKVCacheResourcePtr& resource, int reuse_length) {
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    RTP_LLM_CHECK(resource != nullptr && reuse_length >= 0);
+
+    size_t     total_upgraded = 0;
+    const auto groups         = cacheGroups();
+    for (const auto& group : groups) {
+        const auto& pool = group->blockPool();
+        if (!pool->hasFreeOffloadHbmBlocks()) {
+            continue;
+        }
+        const auto&  tag             = group->tag();
+        const int    local_reuse_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, reuse_length);
+        const size_t block_size      = static_cast<size_t>(group->seqSizePerBlock());
+        const size_t upgrade_begin   = (static_cast<size_t>(local_reuse_len) + block_size - 1) / block_size;
+
+        const size_t expected_blocks = resource->batchSize() > 0 ? static_cast<size_t>(resource->blocksNum(0, tag)) : 0;
+        std::unordered_set<BlockIdxType>                                            immutable_blocks;
+        std::unordered_set<BlockIdxType>                                            all_request_blocks;
+        std::vector<BlockIdxType>                                                   candidate_order;
+        std::unordered_map<BlockIdxType, std::vector<std::pair<BlockIds*, size_t>>> candidate_locations;
+        all_request_blocks.reserve(expected_blocks);
+        candidate_order.reserve(expected_blocks);
+        candidate_locations.reserve(expected_blocks);
+
+        for (int batch = 0; batch < resource->batchSize(); ++batch) {
+            auto&       ids    = resource->mutableBlockIds(batch, tag);
+            const auto& blocks = ids.blocks();
+            for (size_t pos = 0; pos < blocks.size(); ++pos) {
+                const BlockIdxType block = blocks[pos];
+                if (isNullBlockIdx(block) || block <= 0) {
+                    continue;
+                }
+                all_request_blocks.insert(block);
+                if (pos < upgrade_begin) {
+                    immutable_blocks.insert(block);
+                    continue;
+                }
+                auto& locs = candidate_locations[block];
+                if (locs.empty()) {
+                    candidate_order.push_back(block);
+                }
+                locs.emplace_back(&ids, pos);
+            }
+        }
+
+        std::vector<DeviceBlockPool::HostBlockUpgradeCandidate> candidates;
+        candidates.reserve(candidate_order.size());
+        for (const BlockIdxType block : candidate_order) {
+            if (immutable_blocks.count(block) != 0) {
+                continue;
+            }
+            candidates.push_back({block, static_cast<uint32_t>(candidate_locations[block].size())});
+        }
+        if (candidates.empty()) {
+            continue;
+        }
+
+        const auto upgraded = pool->upgradeHostBlocksToHbm(candidates, all_request_blocks.size());
+        for (const auto& [old_block, new_block] : upgraded) {
+            const auto it = candidate_locations.find(old_block);
+            RTP_LLM_CHECK(it != candidate_locations.end());
+            for (const auto& [ids, pos] : it->second) {
+                ids->setAt(pos, new_block);
+            }
+        }
+        total_upgraded += upgraded.size();
+    }
+    return total_upgraded;
+}
+
 uint32_t CoordinatorCacheManager::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
     if (model_id == 0) {
         // main model: local_layer_id is the global layer id
@@ -713,7 +785,8 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
                 0,
                 &backfilled_positions,
                 prepared.required_positions[static_cast<size_t>(group_id)],
-                cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, seq_len))) {
+                cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, seq_len),
+                malloc_info.prefer_host_for_pending_load)) {
             return false;
         }
         const auto& blocks = block_ids.blocks();
@@ -816,19 +889,20 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       group              = kv_cache_groups_[static_cast<size_t>(group_id)];
             const int   initial_seq_len =
                 malloc_info.initial_seq_len > 0 ?
-                    cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, malloc_info.initial_seq_len) :
-                    0;
-            const bool  allocated =
+                      cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, malloc_info.initial_seq_len) :
+                      0;
+            const bool allocated =
                 malloc_info.enable_remove_skipped_blocks ?
-                     group->mallocForDecode(
+                    group->mallocForDecode(
                         block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions) :
-                     group->malloc(block_ids,
+                    group->malloc(block_ids,
                                   group_seq_len,
                                   malloc_info.reuse_cache,
                                   reserve_step,
                                   &filled_positions,
                                   required_positions,
-                                  initial_seq_len);
+                                  initial_seq_len,
+                                  malloc_info.prefer_host_for_pending_load);
             if (!allocated) {
                 all_success  = false;
                 failed_batch = b;

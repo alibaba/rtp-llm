@@ -2345,4 +2345,215 @@ TEST_F(DecodeRpcLoadRoutingTest, SingleStageReceiverUsesPrefillStagesWithoutRela
     EXPECT_TRUE(store_->calls.empty());
 }
 
+TEST_F(DecodeRpcLoadRoutingTest, DeferredHbmPlacementStagesQueuedRequestsOnHostAndUpgradesBeforeLoad) {
+    class DeferredOffloadEngine final: public EngineBase {
+    public:
+        static EngineInitParams parameters() {
+            EngineInitParams params;
+            params.model_config_.max_seq_len = 64;
+            return params;
+        }
+
+        explicit DeferredOffloadEngine(std::shared_ptr<KVCacheManager> cache): EngineBase(parameters()) {
+            resource_context_.cache_manager = std::move(cache);
+            resource_context_.role_type     = RoleType::DECODE;
+        }
+
+        GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
+            const auto params = parameters();
+            return std::make_shared<NormalGenerateStream>(
+                input, params.model_config_, params.runtime_config, resource_context_, nullptr);
+        }
+        GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
+            return makeStream(input);
+        }
+        void         enqueue(GenerateStreamPtr&) override {}
+        absl::Status stop() override {
+            return absl::OkStatus();
+        }
+        absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+            return absl::UnimplementedError("unused");
+        }
+        KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+            return {};
+        }
+    };
+
+    class AllocateOnlyService final: public RpcService::Service {
+    public:
+        explicit AllocateOnlyService(DecodeRpcServer& server): server_(server) {}
+
+        grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* rpc_stream) override {
+            DecodeRpcContext             rpc_context{rpc_stream};
+            kmonitor::MetricsReporterPtr reporter;
+            auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+            DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, meta);
+            if (!rpc_stream->Read(&context.allocate_request)) {
+                return grpc::Status(grpc::StatusCode::INTERNAL, "failed to read allocate request");
+            }
+            context.request_id  = context.allocate_request.request_id();
+            context.request_key = "req-" + std::to_string(context.request_id);
+            server_.allocateResource(context);
+            last_status = context.error_status;
+            last_stream = context.getStream();
+            context.markRpcHandlingCompleted();
+            return last_status;
+        }
+
+        DecodeRpcServer&  server_;
+        grpc::Status      last_status = grpc::Status::OK;
+        GenerateStreamPtr last_stream;
+    };
+
+    auto run_allocate =
+        [](AllocateOnlyService& service, int port, int64_t request_id, int num_tokens) -> GenerateStreamPtr {
+        auto stub = RpcService::NewStub(
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+        grpc::ClientContext client_context;
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto              rpc = stub->RemoteGenerate(&client_context);
+        GenerateRequestPB req;
+        req.set_stage(RemoteStage::ALLOCATE);
+        req.set_request_id(request_id);
+        auto* input = req.mutable_input();
+        input->set_request_id(request_id);
+        for (int t = 0; t < num_tokens; ++t) {
+            input->add_token_ids(t + 1);
+        }
+        input->mutable_generate_config()->set_max_new_tokens(1);
+        EXPECT_TRUE(rpc->Write(req));
+        GenerateOutputsPB resp;
+        EXPECT_TRUE(rpc->Read(&resp));
+        EXPECT_TRUE(resp.supports_prefill_completion());
+        rpc->WritesDone();
+        EXPECT_TRUE(rpc->Finish().ok());
+        EXPECT_TRUE(service.last_status.ok());
+        return service.last_stream;
+    };
+
+    auto run_load = [&](DecodeRpcServer&         server,
+                        const GenerateStreamPtr& stream,
+                        int64_t                  request_id) -> DecodeRpcServer::LoadCacheResult {
+        DecodeRpcContext             rpc_context{nullptr};
+        kmonitor::MetricsReporterPtr reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        DecodeGenerateContext        context(rpc_context, 0, nullptr, reporter, meta);
+        context.request_id      = request_id;
+        context.request_key     = "req-" + std::to_string(request_id);
+        context.peer_addrs      = {"prefill-peer:1:2"};
+        context.prefill_cp_size = 1;
+        context.setStream(stream);
+        const auto result = server.loadCacheForAllRank(context);
+        context.markRpcHandlingCompleted();
+        return result;
+    };
+
+    // pdCacheConfig(true): default offload (HBM 1..4, Host 5..9, seq=8, 2 layers) + indexer_kv (HBM-only).
+    {
+        autil::EnvGuard denom_guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "0");
+
+        auto cache = std::make_shared<KVCacheManager>(pdCacheConfig(true));
+        ASSERT_TRUE(cache->init());
+        const auto initial_free_blocks = cache->freeBlocksNum();
+        auto       engine              = std::make_shared<DeferredOffloadEngine>(cache);
+        auto       store               = std::make_shared<RoutingCacheStore>();
+
+        DecodeRpcServer server;
+        server.engine_                                    = engine;
+        server.resource_.workers                          = {"decode-worker-0"};
+        server.resource_.cache_store                      = store;
+        server.maga_init_params_.model_id                 = 17;
+        server.maga_init_params_.model_config_.num_layers = 2;
+        server.maga_init_params_.sp_config.type           = SP_TYPE_NONE;
+        auto& pc                                          = server.maga_init_params_.parallelism_config;
+        pc.pp_size                                        = 1;
+        pc.pp_rank                                        = 0;
+        pc.tp_size                                        = 1;
+        pc.tp_rank                                        = 0;
+        pc.dp_size                                        = 1;
+        pc.dp_rank                                        = 0;
+        pc.world_size                                     = 1;
+        pc.world_rank                                     = 0;
+        pc.pp_stage_layer_counts                          = {2};
+        pc.prefill_cp_config.method                       = CPRotateMethod::DISABLED;
+
+        AllocateOnlyService service(server);
+        grpc::ServerBuilder builder;
+        int                 port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto grpc_server = builder.BuildAndStart();
+        ASSERT_NE(grpc_server, nullptr);
+
+        // Request A (3 blocks = 24 tokens) and Request B (2 blocks = 16 tokens) both stage on Host at ALLOCATE.
+        auto stream_a = run_allocate(service, port, /*request_id=*/101, /*num_tokens=*/24);
+        ASSERT_NE(stream_a, nullptr);
+        EXPECT_EQ(stream_a->kvCache().blocks(0, "default"), (BlockIndicesType{5, 6, 7}));
+
+        auto stream_b = run_allocate(service, port, /*request_id=*/102, /*num_tokens=*/16);
+        ASSERT_NE(stream_b, nullptr);
+        EXPECT_EQ(stream_b->kvCache().blocks(0, "default"), (BlockIndicesType{8, 9}));
+
+        // Request B enters LOAD first -> upgrades both blocks to HBM {1, 2}, RDMA targets GPU buffers directly.
+        store->calls.clear();
+        const auto load_b = run_load(server, stream_b, 102);
+        ASSERT_TRUE(load_b.ok()) << load_b.error_info.ToString();
+        EXPECT_EQ(stream_b->kvCache().blocks(0, "default"), (BlockIndicesType{1, 2}));
+        ASSERT_EQ(store->calls.size(), 1u);
+        {
+            const auto& keys  = stream_b->cacheKeys(0);
+            const auto& layer = store->calls[0].buffers[0];  // layer 0, tag "default"
+            for (size_t pos = 0; pos < keys.size(); ++pos) {
+                const auto key   = "kv_" + makeCacheKey(17, std::to_string(keys[pos]), 0, "default");
+                const auto block = layer->getBlock(key);
+                ASSERT_NE(block, nullptr) << key;
+                const auto parts =
+                    cache->convertIndexToBuffer(0, "default", stream_b->kvCache().blocks(0, "default")[pos]);
+                ASSERT_EQ(parts.size(), 1u);
+                EXPECT_TRUE(block->gpu_mem);
+                EXPECT_EQ(block->addr.get(), parts[0].addr);
+            }
+        }
+
+        // Request A enters LOAD while B holds HBM {1, 2} -> partially upgrades first 2 blocks to HBM {3, 4},
+        // keeping its 3rd block on Host {7}, and RDMA targets {GPU, GPU, Host} directly.
+        store->calls.clear();
+        const auto load_a = run_load(server, stream_a, 101);
+        ASSERT_TRUE(load_a.ok()) << load_a.error_info.ToString();
+        EXPECT_EQ(stream_a->kvCache().blocks(0, "default"), (BlockIndicesType{3, 4, 7}));
+        ASSERT_EQ(store->calls.size(), 1u);
+        {
+            const auto& keys  = stream_a->cacheKeys(0);
+            const auto& layer = store->calls[0].buffers[0];  // layer 0, tag "default"
+            for (size_t pos = 0; pos < keys.size(); ++pos) {
+                const auto key   = "kv_" + makeCacheKey(17, std::to_string(keys[pos]), 0, "default");
+                const auto block = layer->getBlock(key);
+                ASSERT_NE(block, nullptr) << key;
+                const auto block_id = stream_a->kvCache().blocks(0, "default")[pos];
+                const auto parts    = cache->convertIndexToBuffer(0, "default", block_id);
+                ASSERT_EQ(parts.size(), 1u);
+                EXPECT_EQ(block->gpu_mem, pos < 2);
+                EXPECT_EQ(block->addr.get(), parts[0].addr);
+            }
+        }
+
+        // Request B completes and frees HBM {1, 2}; Request C staged on Host now upgrades into {1, 2} at LOAD.
+        stream_b->releaseResource();
+        auto stream_c = run_allocate(service, port, /*request_id=*/103, /*num_tokens=*/16);
+        ASSERT_NE(stream_c, nullptr);
+        EXPECT_EQ(stream_c->kvCache().blocks(0, "default"), (BlockIndicesType{5, 6}));
+        store->calls.clear();
+        const auto load_c = run_load(server, stream_c, 103);
+        ASSERT_TRUE(load_c.ok()) << load_c.error_info.ToString();
+        EXPECT_EQ(stream_c->kvCache().blocks(0, "default"), (BlockIndicesType{1, 2}));
+
+        stream_a->releaseResource();
+        stream_c->releaseResource();
+        EXPECT_EQ(cache->freeBlocksNum(), initial_free_blocks);
+
+        grpc_server->Shutdown();
+        grpc_server->Wait();
+    }
+}
+
 }  // namespace rtp_llm

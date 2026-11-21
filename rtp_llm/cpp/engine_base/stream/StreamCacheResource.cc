@@ -204,7 +204,7 @@ void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int
 }
 
 // TODO(xinfei.sxf) 保证这个函数的原子性
-absl::Status StreamCacheResource::initKVBlock() {
+absl::Status StreamCacheResource::initKVBlock(bool prefer_host_for_pending_load) {
     RTP_LLM_PROFILE_FUNCTION();
     // Decode side: first malloc should NOT use device cache, regardless of runtime config.
     // Follow-up allocations (incrKVBlock) use enableCacheLookup().
@@ -233,6 +233,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.max_chunk_tokens =
         stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
+    malloc_info.prefer_host_for_pending_load = prefer_host_for_pending_load;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);

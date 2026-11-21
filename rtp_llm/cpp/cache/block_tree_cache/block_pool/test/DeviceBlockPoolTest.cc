@@ -255,32 +255,159 @@ TEST(DeviceBlockPoolTest, OffloadAdmissionFallsBackAtomicallyAndReusesFreedHbm) 
     EXPECT_EQ(pool.freeBlocksNum(), 19u);
 }
 
-TEST(DeviceBlockPoolTest, OffloadLengthAwareRoutingCanBeDisabledAndValidatesSetting) {
-    {
-        autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "0");
+TEST(DeviceBlockPoolTest, OffloadDefaultsToHbmFirstAndValidatesSetting) {
+    const char* key = "RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR";
+    for (const char* denominator : {"", "0"}) {
+        autil::EnvGuard guard(key, denominator);
+        if (*denominator == '\0') {
+            autil::EnvUtil::unsetEnv(key);
+        }
         DeviceBlockPool pool(makeOffloadConfig(false, 20, 10));
         ASSERT_TRUE(pool.init());
+        auto hbm = pool.mallocForRequest(8, 8);
+        ASSERT_TRUE(hbm.has_value());
+        EXPECT_EQ(*hbm, (BlockIdList{1, 2, 3, 4, 5, 6, 7, 8}));
+        pool.incRef(*hbm);
+        EXPECT_EQ(pool.mallocForRequest(2, 2).value(), (BlockIdList{9, 10}));
+        pool.decRef(*hbm);
+
         EXPECT_EQ(pool.mallocForRequest(4, 4).value(), (BlockIdList{1, 2, 3, 4}));
     }
     for (const char* value : {"", "1", "-1", "abc", "3x", "18446744073709551616"}) {
-        autil::EnvGuard guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", value);
+        autil::EnvGuard guard(key, value);
         EXPECT_ANY_THROW(DeviceBlockPool{makeOffloadConfig(false, 20, 10)});
         // A configuration for a regular HBM-only pool does not consult this knob.
         EXPECT_NO_THROW(DeviceBlockPool{makeConfig()});
     }
 }
 
+TEST(DeviceBlockPoolTest, OffloadDeferredHbmPlacementStagesOnHostAndUpgradesInPlace) {
+    const char* denom_key = "RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR";
+    {
+        autil::EnvGuard denom_guard(denom_key, "0");
+        // total=10 (usable 1..9), hbm=5 (HBM: 1..4, Host: 5..9).
+        DeviceBlockPool pool(makeOffloadConfig(false, 10, 5));
+        ASSERT_TRUE(pool.init());
+        EXPECT_TRUE(pool.hasFreeOffloadHbmBlocks());
+
+        // Queued P/D ALLOCATE prefers Host blocks and leaves HBM free.
+        auto req_a = pool.mallocForRequest(3, 3, 0, /*prefer_host_for_pending_load=*/true);
+        ASSERT_TRUE(req_a.has_value());
+        EXPECT_EQ(*req_a, (BlockIdList{5, 6, 7}));
+        pool.incRef(*req_a);
+
+        // Second queued request spills into HBM only after Host is exhausted.
+        auto req_b = pool.mallocForRequest(4, 4, 0, /*prefer_host_for_pending_load=*/true);
+        ASSERT_TRUE(req_b.has_value());
+        EXPECT_EQ(*req_b, (BlockIdList{8, 9, 1, 2}));
+        pool.incRef(*req_b);
+        (void)pool.takeOffloadVersionUpdates();
+
+        // Shared request ref on req_a[1] and CACHE tree ref on req_a[2] prevent upgrade.
+        pool.incRef((*req_a)[1]);
+        pool.incTreeRef((*req_a)[2], BlockTreeRefType::CACHE);
+
+        const size_t free_before      = pool.freeBlocksNum();
+        const size_t available_before = pool.availableBlocksNum();
+        const size_t active_before    = pool.activeBlocksNum();
+        const size_t ref_before       = pool.referencedBlocksNum();
+
+        // Upgrade req_a: only req_a[0] (block 5) is exclusively owned -> swaps to HBM block 3.
+        const auto upgraded_a =
+            pool.upgradeHostBlocksToHbm({{(*req_a)[0], 1}, {(*req_a)[1], 1}, {(*req_a)[2], 1}}, /*request_blocks=*/3);
+        ASSERT_EQ(upgraded_a.size(), 1u);
+        EXPECT_EQ(upgraded_a[0], (std::pair<BlockIdxType, BlockIdxType>{5, 3}));
+        EXPECT_FALSE(pool.isAllocated(5));
+        EXPECT_TRUE(pool.isAllocated(3));
+        EXPECT_EQ(pool.refCount(3), 1u);
+        EXPECT_EQ(pool.freeBlocksNum(), free_before);
+        EXPECT_EQ(pool.availableBlocksNum(), available_before);
+        EXPECT_EQ(pool.activeBlocksNum(), active_before);
+        EXPECT_EQ(pool.referencedBlocksNum(), ref_before);
+        const auto versions_a = pool.takeOffloadVersionUpdates();
+        ASSERT_EQ(versions_a.size(), 1u);
+        EXPECT_EQ(versions_a[0].first, 3);
+        EXPECT_EQ(versions_a[0].second, 1);
+
+        // Only 1 HBM block (block 4) remains free; req_b has two Host blocks (8, 9) and
+        // two HBM blocks (1, 2). Upgrade promotes only prefix Host block 8 -> 4.
+        // Also verify multi-ref ownership (owned_request_refs=2).
+        pool.incRef((*req_b)[0]);
+        const auto upgraded_b = pool.upgradeHostBlocksToHbm(
+            {{(*req_b)[0], 2}, {(*req_b)[1], 1}, {(*req_b)[2], 1}, {(*req_b)[3], 1}}, /*request_blocks=*/4);
+        ASSERT_EQ(upgraded_b.size(), 1u);
+        EXPECT_EQ(upgraded_b[0], (std::pair<BlockIdxType, BlockIdxType>{8, 4}));
+        EXPECT_FALSE(pool.isAllocated(8));
+        EXPECT_EQ(pool.refCount(4), 2u);
+
+        // HBM is now full -> hasFreeOffloadHbmBlocks() is false and upgrade is a zero-change no-op.
+        EXPECT_FALSE(pool.hasFreeOffloadHbmBlocks());
+        EXPECT_TRUE(pool.upgradeHostBlocksToHbm({{(*req_b)[1], 1}}, /*request_blocks=*/4).empty());
+
+        // Returned Host blocks (5, 8) are immediately reusable for the next queued request.
+        auto req_c = pool.mallocForRequest(2, 2, 0, /*prefer_host_for_pending_load=*/true);
+        ASSERT_TRUE(req_c.has_value());
+        EXPECT_EQ(*req_c, (BlockIdList{5, 8}));
+        pool.incRef(*req_c);
+
+        // Clean release leaves zero leaks and restores free HBM.
+        pool.decRef(3);
+        pool.decRef((*req_a)[1]);
+        pool.decRef((*req_a)[1]);
+        pool.decRef((*req_a)[2]);
+        pool.decTreeRef((*req_a)[2], BlockTreeRefType::CACHE);
+        pool.decRef(4);
+        pool.decRef(4);
+        pool.decRef((*req_b)[1]);
+        pool.decRef((*req_b)[2]);
+        pool.decRef((*req_b)[3]);
+        pool.decRef(*req_c);
+        EXPECT_TRUE(pool.hasFreeOffloadHbmBlocks());
+        EXPECT_EQ(pool.freeBlocksNum(), 9u);
+        EXPECT_EQ(pool.activeBlocksNum(), 0u);
+        EXPECT_EQ(pool.referencedBlocksNum(), 0u);
+    }
+
+    // Share denominator is respected at LOAD upgrade time.
+    {
+        autil::EnvGuard denom_guard(denom_key, "3");
+        // total=20 (usable 1..19), hbm=10 (9 HBM blocks, 10 Host blocks).
+        DeviceBlockPool pool(makeOffloadConfig(false, 20, 10));
+        ASSERT_TRUE(pool.init());
+        auto long_req = pool.mallocForRequest(4, 4, 0, /*prefer_host_for_pending_load=*/true);
+        ASSERT_TRUE(long_req.has_value());
+        EXPECT_EQ(*long_req, (BlockIdList{10, 11, 12, 13}));
+        pool.incRef(*long_req);
+        // 4 > 9 / 3 = 3 -> stays on Host.
+        EXPECT_TRUE(pool.upgradeHostBlocksToHbm({{10, 1}, {11, 1}, {12, 1}, {13, 1}}, /*request_blocks=*/4).empty());
+
+        auto short_req = pool.mallocForRequest(3, 3, 0, /*prefer_host_for_pending_load=*/true);
+        ASSERT_TRUE(short_req.has_value());
+        EXPECT_EQ(*short_req, (BlockIdList{14, 15, 16}));
+        pool.incRef(*short_req);
+        // 3 <= 9 / 3 = 3 -> upgrades all 3 blocks to HBM.
+        const auto upgraded = pool.upgradeHostBlocksToHbm({{14, 1}, {15, 1}, {16, 1}}, /*request_blocks=*/3);
+        ASSERT_EQ(upgraded.size(), 3u);
+        EXPECT_EQ(upgraded[0], (std::pair<BlockIdxType, BlockIdxType>{14, 1}));
+        EXPECT_EQ(upgraded[1], (std::pair<BlockIdxType, BlockIdxType>{15, 2}));
+        EXPECT_EQ(upgraded[2], (std::pair<BlockIdxType, BlockIdxType>{16, 3}));
+        pool.decRef(*long_req);
+        pool.decRef(BlockIdList{1, 2, 3});
+        EXPECT_EQ(pool.freeBlocksNum(), 19u);
+    }
+}
+
 TEST(DeviceBlockPoolTest, OffloadHotCacheCommitsAndReleasesPhysicalPagesForActiveRequests) {
-    auto config                        = makeOffloadConfig();
+    auto config = makeOffloadConfig();
     config->offload->max_selected_rows = 65536;
-    config->offload->max_requests      = 8;
+    config->offload->max_requests = 8;
     config->offload->dynamic_hot_cache = true;
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
     const auto& storages = pool.allLayerOffloadStorage();
-    const auto* address  = storages[0]->resident_planes[0].data_ptr();
-    const auto  shape    = storages[0]->resident_planes[0].sizes().vec();
-    const auto  baseline = pool.offloadDeviceSizeBytes();
+    const auto* address = storages[0]->resident_planes[0].data_ptr();
+    const auto shape = storages[0]->resident_planes[0].sizes().vec();
+    const auto baseline = pool.offloadDeviceSizeBytes();
     EXPECT_EQ(storages[0]->active_hot_rows.item<int>(), 0);
     for (const auto& storage : storages) {
         storage->resident_planes[0].narrow(0, 0, 4).fill_(17);
@@ -318,14 +445,14 @@ TEST(DeviceBlockPoolTest, OffloadHotCacheCommitsAndReleasesPhysicalPagesForActiv
 
 TEST(DeviceBlockPoolTest, StaticOffloadHotCacheKeepsPreallocatedCapacityAcrossRequestCounts) {
     for (bool device_malloc : {false, true}) {
-        auto config                        = makeOffloadConfig();
-        config->use_device_malloc_backing  = device_malloc;
+        auto config = makeOffloadConfig();
+        config->use_device_malloc_backing = device_malloc;
         config->offload->max_selected_rows = 65536;
-        config->offload->max_requests      = 8;
+        config->offload->max_requests = 8;
         DeviceBlockPool pool(config);
         ASSERT_TRUE(pool.init());
         const auto& storages = pool.allLayerOffloadStorage();
-        const auto  bytes    = pool.offloadDeviceSizeBytes();
+        const auto bytes = pool.offloadDeviceSizeBytes();
         ASSERT_GT(bytes, 0u);
         for (const auto& storage : storages) {
             EXPECT_EQ(storage->hot_cache, nullptr);

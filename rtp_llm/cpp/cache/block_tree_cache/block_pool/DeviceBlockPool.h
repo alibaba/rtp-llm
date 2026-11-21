@@ -50,7 +50,24 @@ public:
 
     // Prefer host for a request larger than its share of currently free HBM.
     // Growth follows last_block's tier; either tier may supply overflow blocks.
-    std::optional<BlockIdList> mallocForRequest(size_t n, size_t request_blocks, BlockIdxType last_block = 0);
+    // When prefer_host_for_pending_load is true on a tiered offload pool, stage
+    // newly allocated P/D blocks on Host first (falling back to HBM if Host is
+    // full) so queued requests do not pin HBM before LOAD starts.
+    std::optional<BlockIdList> mallocForRequest(size_t       n,
+                                                size_t       request_blocks,
+                                                BlockIdxType last_block                   = 0,
+                                                bool         prefer_host_for_pending_load = false);
+
+    struct HostBlockUpgradeCandidate {
+        BlockIdxType block;
+        uint32_t     owned_request_refs;
+    };
+    // Atomically swap exclusively owned Host blocks for currently free HBM blocks
+    // in-place (returning the old Host blocks to the Host free queue) before RDMA
+    // LOAD generates destination addresses. Returns {old_host_block, new_hbm_block}.
+    std::vector<std::pair<BlockIdxType, BlockIdxType>>
+         upgradeHostBlocksToHbm(const std::vector<HostBlockUpgradeCandidate>& candidates, size_t request_blocks);
+    bool hasFreeOffloadHbmBlocks() const;
 
     void incRef(BlockIdxType block);
     void incRef(const BlockIdList& blocks);

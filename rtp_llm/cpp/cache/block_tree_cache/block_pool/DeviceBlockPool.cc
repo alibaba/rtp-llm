@@ -7,6 +7,7 @@
 #include <cassert>
 #include <limits>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
@@ -51,7 +52,7 @@ DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> co
     refcounts_.assign(this->config().physical_block_count, 0);
     if (isOffload() && this->config().offload->hbm_blocks < this->config().offload->total_blocks) {
         const char*       value       = std::getenv("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR");
-        const std::string denominator = value ? value : "3";
+        const std::string denominator = value ? value : "0";
         RTP_LLM_CHECK_WITH_INFO(
             !denominator.empty()
                 && std::all_of(denominator.begin(), denominator.end(), [](unsigned char c) { return std::isdigit(c); }),
@@ -59,20 +60,112 @@ DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> co
         offload_hbm_share_denominator_ = std::stoull(denominator);
         RTP_LLM_CHECK_WITH_INFO(offload_hbm_share_denominator_ != 1,
                                 "RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR must be 0 or >= 2");
-        if (offload_hbm_share_denominator_ > 0) {
-            splitFreeBlocksNoLock(this->config().offload->hbm_blocks);
-        }
+        // Separate queues let HBM-first routing prefer recycled HBM blocks over Host blocks.
+        splitFreeBlocksNoLock(this->config().offload->hbm_blocks);
     }
 }
 
-std::optional<BlockIdList> DeviceBlockPool::mallocForRequest(size_t n, size_t request_blocks, BlockIdxType last_block) {
+std::optional<BlockIdList> DeviceBlockPool::mallocForRequest(size_t       n,
+                                                             size_t       request_blocks,
+                                                             BlockIdxType last_block,
+                                                             bool         prefer_host_for_pending_load) {
     std::lock_guard<std::mutex> lock(mutex_);
     bool                        prefer_host = false;
-    if (offload_hbm_share_denominator_ > 0 && request_blocks > 0) {
-        prefer_host = last_block > 0 ? static_cast<uint32_t>(last_block) >= config().offload->hbm_blocks :
-                                       request_blocks > freeLowerRangeBlocksNoLock() / offload_hbm_share_denominator_;
+    if (isOffload() && config().offload->hbm_blocks < config().offload->total_blocks) {
+        if (prefer_host_for_pending_load) {
+            prefer_host = true;
+        } else if (offload_hbm_share_denominator_ > 0 && request_blocks > 0) {
+            prefer_host = last_block > 0 ?
+                              static_cast<uint32_t>(last_block) >= config().offload->hbm_blocks :
+                              request_blocks > freeLowerRangeBlocksNoLock() / offload_hbm_share_denominator_;
+        }
     }
     return mallocNoLock(n, prefer_host);
+}
+
+bool DeviceBlockPool::hasFreeOffloadHbmBlocks() const {
+    if (!isOffload() || config().offload->hbm_blocks >= config().offload->total_blocks) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    return freeLowerRangeBlocksNoLock() > 0;
+}
+
+std::vector<std::pair<BlockIdxType, BlockIdxType>>
+DeviceBlockPool::upgradeHostBlocksToHbm(const std::vector<HostBlockUpgradeCandidate>& candidates,
+                                        size_t                                        request_blocks) {
+    if (!isOffload() || config().offload->hbm_blocks >= config().offload->total_blocks || candidates.empty()) {
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    const size_t free_hbm = freeLowerRangeBlocksNoLock();
+    if (free_hbm == 0) {
+        return {};
+    }
+    if (offload_hbm_share_denominator_ > 0 && request_blocks > 0
+        && request_blocks > free_hbm / offload_hbm_share_denominator_) {
+        return {};
+    }
+
+    std::unordered_set<BlockIdxType>       seen;
+    std::vector<HostBlockUpgradeCandidate> eligible;
+    seen.reserve(candidates.size());
+    eligible.reserve(std::min(candidates.size(), free_hbm));
+    const uint32_t hbm_blocks = config().offload->hbm_blocks;
+    for (const auto& candidate : candidates) {
+        RTP_LLM_CHECK(candidate.owned_request_refs > 0);
+        RTP_LLM_CHECK_WITH_INFO(seen.insert(candidate.block).second,
+                                "duplicate block [%d] in upgradeHostBlocksToHbm for pool [%s]",
+                                candidate.block,
+                                poolName().c_str());
+        checkAllocatedNoLock(candidate.block);
+        const uint32_t tree_hold    = treeRefCountNoLock(candidate.block) > 0 ? 1 : 0;
+        const uint32_t request_refs = refcounts_[candidate.block] - tree_hold;
+        RTP_LLM_CHECK_WITH_INFO(request_refs >= candidate.owned_request_refs,
+                                "upgrading more request references than owned for block %d",
+                                candidate.block);
+        if (static_cast<uint32_t>(candidate.block) >= hbm_blocks && tree_hold == 0
+            && request_refs == candidate.owned_request_refs) {
+            eligible.push_back(candidate);
+        }
+    }
+
+    const size_t upgrade_count = std::min(eligible.size(), free_hbm);
+    if (upgrade_count == 0) {
+        return {};
+    }
+
+    // Prepare all potentially allocating work before mutating ownership.
+    std::vector<std::pair<BlockIdxType, BlockIdxType>> upgraded;
+    upgraded.reserve(upgrade_count);
+    reserveReleasedBlocksNoLock(upgrade_count);
+    auto fresh_hbm = mallocNoLock(upgrade_count, /*prefer_upper_range=*/false);
+    RTP_LLM_CHECK(fresh_hbm.has_value() && fresh_hbm->size() == upgrade_count);
+
+    for (size_t i = 0; i < upgrade_count; ++i) {
+        const BlockIdxType old_block = eligible[i].block;
+        const uint32_t     refs      = eligible[i].owned_request_refs;
+        const BlockIdxType new_block = (*fresh_hbm)[i];
+        RTP_LLM_CHECK(static_cast<uint32_t>(new_block) < hbm_blocks);
+
+        const bool old_was_active    = isActiveNoLock(old_block);
+        const bool old_was_available = isAvailableNoLock(old_block);
+        refcounts_[old_block]        = 0;
+        --request_referenced_blocks_num_;
+        freeAllocatedBlockNoLock(old_block);
+        updateActiveBlocksNumNoLock(old_block, old_was_active);
+        updateAvailableBlocksNumNoLock(old_block, old_was_available);
+
+        const bool new_was_active = isActiveNoLock(new_block);
+        refcounts_[new_block]     = refs;
+        ++request_referenced_blocks_num_;
+        updateActiveBlocksNumNoLock(new_block, new_was_active);
+
+        upgraded.emplace_back(old_block, new_block);
+    }
+    return upgraded;
 }
 
 void DeviceBlockPool::incRef(BlockIdxType block) {

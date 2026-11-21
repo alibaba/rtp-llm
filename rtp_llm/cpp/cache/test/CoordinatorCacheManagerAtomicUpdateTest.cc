@@ -78,6 +78,64 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, OffloadAdmissionRoutesLongReques
     EXPECT_EQ(allocator_->groupBlockPools().front()->freeBlocksNum(), 29u);
 }
 
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, OffloadDeferredLoadUpgradePreservesReusedPrefixAndUpdatesAllBatches) {
+    autil::EnvGuard denom_guard("RTP_LLM_SPARSE_KV_OFFLOAD_HBM_SHARE_DENOMINATOR", "0");
+
+    // Hybrid topology: "default" offload (seq=8, kernel_seq=4 => 2 kernel blocks/kv block;
+    // total=10, hbm=5 => HBM 1..4, Host 5..9) + non-offload "indexer_kv".
+    auto config = makeSparseOffloadTestConfig({"default", "indexer_kv"});
+    config.tiered_cache_configs.erase("indexer_kv");
+    auto policies = std::vector<CacheGroupPolicy>{config.group("default").policy, config.group("indexer_kv").policy};
+    policies[1].offload = {};
+    setTestGroupPolicies(config, policies);
+
+    allocator_ = std::make_shared<TestAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator_->init());
+
+    auto make_request = [&](int batch_size, int seq_len, bool prefer_host) {
+        auto input       = std::make_shared<GenerateInput>();
+        input->input_ids = torch::zeros({seq_len}, torch::kInt32);
+        auto tokens      = std::make_shared<CompleteTokenIds>(batch_size, batch_size, 128, 8);
+        tokens->init(input);
+        MallocInfo info;
+        info.batch_kv_cache_resource      = createBatchKVCacheResource(batch_size, config);
+        info.complete_token_ids           = std::move(tokens);
+        info.reuse_cache                  = false;
+        info.enable_cache_lookup          = false;
+        info.prefer_host_for_pending_load = prefer_host;
+        return info;
+    };
+
+    // Multi-batch shared prompt staged on Host.
+    auto req = make_request(/*batch_size=*/2, /*seq_len=*/24, /*prefer_host=*/true);
+    ASSERT_TRUE(allocator_->malloc(req).success);
+    EXPECT_EQ(req.batch_kv_cache_resource->blocks(0, "default"), (BlockIndicesType{5, 6, 7}));
+    EXPECT_EQ(req.batch_kv_cache_resource->blocks(1, "default"), (BlockIndicesType{5, 6, 7}));
+    const auto indexer_before = req.batch_kv_cache_resource->blocks(0, "indexer_kv");
+    EXPECT_EQ(indexer_before, (BlockIndicesType{1, 2, 3}));
+
+    // Simulate 1 reused prefix block (8 tokens): pos 0 must stay on Host block 5,
+    // while pos 1 and pos 2 upgrade to HBM blocks 1 and 2 across BOTH batches and kernelBlocks.
+    const size_t upgraded = allocator_->upgradeOffloadBlocksForLoad(req.batch_kv_cache_resource, /*reuse_length=*/8);
+    EXPECT_EQ(upgraded, 2u);
+    EXPECT_EQ(req.batch_kv_cache_resource->blocks(0, "default"), (BlockIndicesType{5, 1, 2}));
+    EXPECT_EQ(req.batch_kv_cache_resource->blocks(1, "default"), (BlockIndicesType{5, 1, 2}));
+    EXPECT_EQ(req.batch_kv_cache_resource->kernelBlocks(0, "default"), (BlockIndicesType{10, 11, 2, 3, 4, 5}));
+    EXPECT_EQ(req.batch_kv_cache_resource->kernelBlocks(1, "default"), (BlockIndicesType{10, 11, 2, 3, 4, 5}));
+    EXPECT_EQ(req.batch_kv_cache_resource->blocks(0, "indexer_kv"), indexer_before);
+
+    const auto& default_pool = allocator_->groupBlockPools()[0];
+    EXPECT_EQ(default_pool->refCount(5), 2u);
+    EXPECT_EQ(default_pool->refCount(1), 2u);
+    EXPECT_EQ(default_pool->refCount(2), 2u);
+    EXPECT_FALSE(default_pool->isAllocated(6));
+    EXPECT_FALSE(default_pool->isAllocated(7));
+
+    allocator_->free(FreeInfo{req.batch_kv_cache_resource, req.complete_token_ids});
+    EXPECT_EQ(default_pool->freeBlocksNum(), 9u);
+    EXPECT_EQ(allocator_->groupBlockPools()[1]->freeBlocksNum(), 9u);
+}
+
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, BatchFreePreservesOtherRequestAndTransferHolds) {
     auto config = createSingleTypeTestConfig(2, 5, 4);
     allocator_  = std::make_shared<TestAllocator>(config, AllocationType::HOST);

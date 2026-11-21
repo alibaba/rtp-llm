@@ -452,7 +452,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         }
 
         const auto observed_generation = cache_manager->allocationGeneration();
-        auto       allocation_status   = generate_stream->streamCacheResource().initKVBlock();
+        auto       allocation_status   = generate_stream->streamCacheResource().initKVBlock(
+            /*prefer_host_for_pending_load=*/cache_manager->hasSparseKvOffload());
         ++allocation_attempts;
         decode_context.retry_times        = allocation_attempts;
         decode_context.retry_cost_time_ms = (currentTimeUs() - allocation_begin_us) / 1000;
@@ -935,10 +936,8 @@ BroadcastLoadRequestPB DecodeRpcServer::buildBroadcastLoadRequest(const LoadKVCa
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*       generate_stream = decode_context.getStream().get();
-    auto&       cache_keys      = generate_stream->cacheKeys(0);
-    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto        group_block_ids = cache_resource.groupBlockIds();
+    auto* generate_stream = decode_context.getStream().get();
+    auto& cache_keys      = generate_stream->cacheKeys(0);
 
     const bool use_stage_routing =
         maga_init_params_.parallelism_config.pp_size > 1 || !decode_context.remote_stage_peer_groups.empty();
@@ -959,6 +958,20 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
                             topology_error.ToString().c_str());
         return {topology_error, 0};
     }
+
+    if (auto cache_manager = engine_->resourceContext().cache_manager;
+        cache_manager && cache_manager->hasSparseKvOffload() && cache_manager->isAllocatorOwner()) {
+        const size_t upgraded_blocks =
+            cache_manager->upgradeOffloadBlocksForLoad(generate_stream->kvCachePtr(), generate_stream->reuseLength());
+        if (upgraded_blocks > 0) {
+            RTP_LLM_LOG_DEBUG("request:[%s] upgraded %zu offload KV blocks from Host to HBM before load",
+                              decode_context.request_key.c_str(),
+                              upgraded_blocks);
+        }
+    }
+
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     auto load_cache_timeout_ms = maga_init_params_.pd_sep_config.load_cache_timeout_ms;
     load_cache_timeout_ms      = load_cache_timeout_ms > 0 ? load_cache_timeout_ms : LOAD_TIMEOUT_MS;

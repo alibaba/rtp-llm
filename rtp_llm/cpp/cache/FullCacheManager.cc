@@ -60,7 +60,8 @@ bool FullCacheManager::malloc(BlockIds&            block_ids,
                               int                  reserve_step,
                               std::vector<size_t>* backfilled_positions,
                               const RequiredPositions& /*required_positions*/,
-                              int initial_seq_len) {
+                              int  initial_seq_len,
+                              bool prefer_host_for_pending_load) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -103,7 +104,8 @@ bool FullCacheManager::malloc(BlockIds&            block_ids,
         }
     }
     const int request_blocks = needBlocksNum(std::max(seq_len, initial_seq_len), 0, reserve_step);
-    auto      result = block_pool_->mallocForRequest(static_cast<size_t>(need_blocks_num), request_blocks, last_block);
+    auto      result         = block_pool_->mallocForRequest(
+        static_cast<size_t>(need_blocks_num), request_blocks, last_block, prefer_host_for_pending_load);
     if (!result.has_value() || result->size() != static_cast<size_t>(need_blocks_num)) {
         return false;
     }
