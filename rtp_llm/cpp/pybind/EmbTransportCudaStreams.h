@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ATen/cuda/CUDAEvent.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
@@ -14,6 +15,11 @@ namespace rtp_llm {
 
 class EmbTransportCudaStreams {
 public:
+    struct Lease {
+        cudaStream_t         stream;
+        at::cuda::CUDAEvent* headerFence;
+    };
+
     static EmbTransportCudaStreams& instance() {
         // The PyTorch allocators can retain stream identifiers after a cache
         // transport closes. Reuse the handles, but keep them alive until CUDA
@@ -22,14 +28,14 @@ public:
         return *streams;
     }
 
-    cudaStream_t acquire(c10::DeviceIndex device) {
+    Lease acquire(c10::DeviceIndex device) {
         bool createAllocation;
         {
             std::lock_guard lock(mutex_);
             for (auto& [stream, entry] : transport_) {
                 if (entry.device == device && !entry.inUse) {
                     entry.inUse = true;
-                    return stream;
+                    return {stream, &entry.headerFence};
                 }
             }
             createAllocation = allocation_.find(device) == allocation_.end();
@@ -52,11 +58,11 @@ public:
             if (allocation != nullptr && allocation_.emplace(device, allocation).second) {
                 releaseAllocation.release();
             }
-            transport_.emplace(stream, Entry{device, true});
+            auto entry = transport_.try_emplace(stream, device);
             releaseStream.release();
             initialized_.store(true, std::memory_order_release);
+            return {stream, &entry.first->second.headerFence};
         }
-        return stream;
     }
 
     void release(cudaStream_t stream) {
@@ -81,8 +87,11 @@ public:
 
 private:
     struct Entry {
-        c10::DeviceIndex device;
-        bool             inUse;
+        explicit Entry(c10::DeviceIndex index): device(index) {}
+
+        c10::DeviceIndex    device;
+        bool                inUse = true;
+        at::cuda::CUDAEvent headerFence{cudaEventBlockingSync | cudaEventDisableTiming};
     };
     std::atomic<bool>                                  initialized_{false};
     std::mutex                                         mutex_;
@@ -93,11 +102,11 @@ private:
 class EmbTransportCudaStream {
 public:
     explicit EmbTransportCudaStream(c10::DeviceIndex device):
-        stream_(EmbTransportCudaStreams::instance().acquire(device)) {}
+        lease_(EmbTransportCudaStreams::instance().acquire(device)) {}
 
     ~EmbTransportCudaStream() {
         if (reusable_) {
-            EmbTransportCudaStreams::instance().release(stream_);
+            EmbTransportCudaStreams::instance().release(lease_.stream);
         }
     }
 
@@ -108,11 +117,15 @@ public:
     EmbTransportCudaStream& operator=(const EmbTransportCudaStream&) = delete;
 
     std::uintptr_t address() const {
-        return reinterpret_cast<std::uintptr_t>(stream_);
+        return reinterpret_cast<std::uintptr_t>(lease_.stream);
     }
 
+    // The node is process-owned. Only the current stream lease may record
+    // this fence, and a quarantined lease never makes it available again.
+    at::cuda::CUDAEvent* headerFence() const { return lease_.headerFence; }
+
 private:
-    cudaStream_t stream_;
+    EmbTransportCudaStreams::Lease lease_;
     bool reusable_ = true;
 };
 

@@ -22,6 +22,7 @@ _USE_NATIVE_READ = os.environ.get("MM_EMB_NATIVE_REGISTERED_READ") == "1"
 _PROFILE_NATIVE_HEADER_TIMINGS = (
     os.environ.get("MM_EMB_NATIVE_HEADER_DETAIL_PROFILE") == "1"
 )
+_REUSE_NATIVE_HEADER_FENCE = os.environ.get("MM_EMB_REUSE_HEADER_FENCE") == "1"
 _USE_NATIVE_WRITE = os.environ.get("MM_EMB_NATIVE_REGISTERED_WRITE") == "1"
 _ISOLATED_CUDA_STREAMS = os.environ.get("MM_EMB_ISOLATED_CUDA_STREAMS") == "1"
 
@@ -694,6 +695,7 @@ class RegisteredTransportPool:
                     and _PROFILE_NATIVE_HEADER_TIMINGS
                     and random.getrandbits(3) == 0
                 ),
+                _REUSE_NATIVE_HEADER_FENCE,
             )
         state, _, _, may_be_inflight, _, _, _, _, acquire_lock_ns, release_lock_ns, *_ = result
         if sample:

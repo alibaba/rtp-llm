@@ -248,8 +248,9 @@ std::optional<std::vector<at::Tensor>> restoreObjectPayload(const at::Tensor&   
                                                             std::string&                      header,
                                                             EmbHeaderReadStats*               headerStats,
                                                             Stamp                             stamp,
-                                                            bool* payloadStarted = nullptr) {
-    header = readEmbCudaObjectHeader(input, headerHint, headerStats);
+                                                            bool*                             payloadStarted = nullptr,
+                                                            at::cuda::CUDAEvent*              headerFence = nullptr) {
+    header = readEmbCudaObjectHeader(input, headerHint, headerStats, headerFence);
     stamp(1);
     std::optional<std::vector<EmbTensorSlice>> slices;
     try {
@@ -411,6 +412,7 @@ EmbReadResult readRegisteredObject(EmbRegisteredArena&               arena,
                                    bool                              useHeaderHint,
                                    bool                              profileHeader,
                                    bool                              profileHeaderTimings,
+                                   bool                              reuseHeaderFence,
                                    int64_t                           budgetNs,
                                    bool                              sampleLocks) {
     TORCH_CHECK(root.is_cuda() && root.is_contiguous() && root.scalar_type() == at::kByte && root.dim() == 1,
@@ -489,7 +491,8 @@ EmbReadResult readRegisteredObject(EmbRegisteredArena&               arena,
                   result.headerNs = readElapsed(restoreStart);
                 }
               },
-              &cudaPayloadStarted);
+              &cudaPayloadStarted,
+              reuseHeaderFence ? transport->headerFence() : nullptr);
           if (result.decoded) {
             result.state = EmbReadState::Success;
           } else {
@@ -561,7 +564,8 @@ void registerEmbRegisteredRead(pybind11::module& module) {
                   bool                              profileHeader,
                   int64_t                           budgetNs,
            bool                              sampleLocks,
-           bool                              profileHeaderTimings) {
+           bool                              profileHeaderTimings,
+           bool                              reuseHeaderFence) {
                    const auto* meta   = loadApi(metadata);
                    const auto* client = static_cast<const KvcmObjectNativeApiV2*>(
                        PyCapsule_GetPointer(registeredClient.ptr(), KVCM_OBJECT_NATIVE_API_CAPSULE_V2));
@@ -584,6 +588,7 @@ void registerEmbRegisteredRead(pybind11::module& module) {
                                                      useHeaderHint,
                                                      profileHeader,
                                               profileHeader && profileHeaderTimings,
+                                                     reuseHeaderFence,
                                                      budgetNs,
                                                      sampleLocks);
                    }
@@ -629,7 +634,8 @@ void registerEmbRegisteredRead(pybind11::module& module) {
         py::arg("profile_header"),
         py::arg("budget_ns"),
         py::arg("sample_locks"),
-        py::arg("profile_header_timings") = false);
+        py::arg("profile_header_timings") = false,
+        py::arg("reuse_header_fence") = false);
 }
 
 }  // namespace rtp_llm

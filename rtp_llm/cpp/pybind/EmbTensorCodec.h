@@ -160,8 +160,11 @@ struct EmbHeaderReadStats {
     int64_t deviceIntervalNs   = 0;
 };
 
-inline at::Tensor
-readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, int64_t size, EmbHeaderReadStats* stats = nullptr) {
+inline at::Tensor readEmbCudaHeader(const at::Tensor&    buffer,
+                                    int64_t              offset,
+                                    int64_t              size,
+                                    EmbHeaderReadStats*  stats = nullptr,
+                                    at::cuda::CUDAEvent* fence = nullptr) {
     TORCH_CHECK(buffer.is_cuda() && buffer.dim() == 1 && buffer.is_contiguous() && buffer.scalar_type() == at::kByte,
                 "expected a contiguous CUDA byte buffer");
     TORCH_CHECK(offset >= 0 && offset <= buffer.numel() && size > 0 && size <= buffer.numel() - offset,
@@ -170,7 +173,12 @@ readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, int64_t size, EmbHea
     if (!stats || !stats->profileTimings) {
         auto header = at::empty({size}, at::TensorOptions().dtype(at::kByte).pinned_memory(true));
         header.copy_(buffer.narrow(0, offset, size), /*non_blocking=*/true);
-        waitEmbCudaStream(buffer);
+        if (fence != nullptr) {
+            fence->record(c10::cuda::getCurrentCUDAStream(buffer.get_device()));
+            fence->synchronize();
+        } else {
+            waitEmbCudaStream(buffer);
+        }
         return header;
     }
 
@@ -204,7 +212,8 @@ readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, int64_t size, EmbHea
 
 inline std::string readEmbCudaObjectHeader(const at::Tensor&      buffer,
                                            std::optional<int32_t> headerHint = std::nullopt,
-                                           EmbHeaderReadStats*    stats      = nullptr) {
+                                           EmbHeaderReadStats*    stats      = nullptr,
+                                           at::cuda::CUDAEvent*   fence      = nullptr) {
     constexpr int64_t  prefixSize    = 16;
     constexpr int64_t  alignment     = 64;
     constexpr uint64_t maxHeaderSize = 64 * 1024;
@@ -213,7 +222,7 @@ inline std::string readEmbCudaObjectHeader(const at::Tensor&      buffer,
         throw std::invalid_argument("invalid multimodal object buffer");
     }
     const auto read = [&](int64_t offset, int64_t length) {
-        auto result = readEmbCudaHeader(buffer, offset, length, stats);
+        auto result = readEmbCudaHeader(buffer, offset, length, stats, fence);
         if (stats != nullptr) {
             stats->bytes += length;
             ++stats->copies;
