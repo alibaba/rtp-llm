@@ -365,7 +365,12 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         return {};
     }
     const GroupSetPtr& group_set   = tree_->groupSets()[group_set_id];
-    const Tier         target_tier = group_set->preciseOnly() ? Tier::NONE : watermarkTargetTier(source_tier);
+    Tier               target_tier = watermarkTargetTier(source_tier);
+    if (group_set->preciseOnly()
+        && ((target_tier == Tier::HOST && !group_set->hostPool())
+            || (target_tier == Tier::DISK && !group_set->diskPool()))) {
+        target_tier = Tier::NONE;
+    }
     if (target_tier == Tier::NONE) {
         size_t     scheduled_count = 0;
         const bool direct_progress = batchDropLocked(group_set_id, source_tier, max_victim_count, scheduled_count);
@@ -579,10 +584,12 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
     GroupSetResource&  resource    = entry->node->group_set_resources[group_set_id];
     Tier               target_tier = Tier::NONE;
     const GroupSetPtr& group_set   = tree_->groupSets()[group_set_id];
-    if (!force_drop && !group_set->preciseOnly() && !tree_->isShortLeaf(entry->node)) {
-        if (tier == Tier::DEVICE && is_tier_enabled_(Tier::HOST)) {
+    const bool         requires_local_pool = group_set->preciseOnly() || tree_->isShortLeaf(entry->node);
+    if (!force_drop) {
+        if (tier == Tier::DEVICE && is_tier_enabled_(Tier::HOST) && (!requires_local_pool || group_set->hostPool())) {
             target_tier = Tier::HOST;
-        } else if ((tier == Tier::DEVICE || tier == Tier::HOST) && is_tier_enabled_(Tier::DISK)) {
+        } else if ((tier == Tier::DEVICE || tier == Tier::HOST) && is_tier_enabled_(Tier::DISK)
+                   && (!requires_local_pool || group_set->diskPool())) {
             target_tier = Tier::DISK;
         }
     }

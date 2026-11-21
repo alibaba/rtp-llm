@@ -738,10 +738,11 @@ bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tie
     return true;
 }
 
-const char* BlockTree::preciseForkRejection(const CacheKeysType& keys,
-                                     const std::vector<std::vector<GroupSetResource>>& resources,
-                                     const std::vector<std::vector<int>>& segments,
-                                     const std::vector<size_t>& ends) const {
+const char* BlockTree::preciseForkRejection(const CacheKeysType&                              keys,
+                                            const std::vector<std::vector<GroupSetResource>>& resources,
+                                            const std::vector<std::vector<int>>&              segments,
+                                            const std::vector<size_t>&                        ends,
+                                            Tier                                              target_tier) const {
     if (keys.empty() || keys.size() != resources.size() || keys.size() != segments.size()
         || keys.size() != ends.size() || resources.back().size() != group_sets_.size()) {
         return "invalid_internal_fork_path";
@@ -775,7 +776,8 @@ const char* BlockTree::preciseForkRejection(const CacheKeysType& keys,
     std::vector<TreeNode*> path(existing.begin(), existing.begin() + ancestor_count);
     path.push_back(&projected);
     for (const auto& group : group_sets_) {
-        if (!group->hasPhysicalCoverage(path, ends.back())) {
+        if (!(target_tier == Tier::DEVICE ? group->hasDeviceCoverage(path, ends.back()) :
+                                            group->hasPhysicalCoverage(path, ends.back()))) {
             return "internal_fork_not_jointly_ready";
         }
         for (const auto index : group->requiredPathIndices(path, ends.back())) {

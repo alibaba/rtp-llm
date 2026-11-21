@@ -503,8 +503,8 @@ size_t BlockTreeStorer::settleLocked(StoreTask& task, bool publish, const char* 
             }
         }
         if (task.internal_fork) {
-            fork_rejection =
-                tree_->preciseForkRejection(task.cache_keys, resources, task.token_segments, task.token_ends);
+            fork_rejection = tree_->preciseForkRejection(
+                task.cache_keys, resources, task.token_segments, task.token_ends, task.target_tier);
             fork_ready = fork_rejection == nullptr;
         }
         if (!task.internal_fork || fork_rejection == nullptr) {

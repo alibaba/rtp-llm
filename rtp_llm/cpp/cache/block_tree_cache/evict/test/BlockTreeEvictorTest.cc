@@ -2542,6 +2542,26 @@ TEST_F(BlockTreeEvictorTest, SuspendAndAdmitCandidateTrackTransferState) {
     group_->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
 }
 
+TEST_F(BlockTreeEvictorTest, ShortLeafUsesAvailableHostPool) {
+    resetGroup(makePinnedHostPool(2), makeTestDiskPool(2, "short_leaf_target"));
+    tree_    = std::make_unique<BlockTree>(groups_, 64, false);
+    evictor_ = evictor_runtime_.make(
+        tree_.get(), EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO, [](Tier tier) {
+            return tier == Tier::HOST;
+        });
+    const auto                          blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
+    const std::vector<size_t>           ends{16};
+    const std::vector<std::vector<int>> segments{std::vector<int>(16, 1)};
+    const auto                          result =
+        tree_->insertNode({100}, {{makeResource(Tier::DEVICE, blocks[0][0])}}, false, false, &segments, &ends);
+    ASSERT_EQ(result.inserted_nodes.size(), 1u);
+    evictor_->onInserted(result);
+    const auto victim = evictor_->chooseVictim(0, Tier::DEVICE);
+    ASSERT_TRUE(victim.has_value());
+    EXPECT_EQ(victim->target_tier, Tier::HOST);
+    unreferenceDeviceBlocksForTest(*group_, blocks, BlockTreeRefType::CACHE);
+}
+
 TEST_F(BlockTreeEvictorTest, ChooseVictimRejectsUnsupportedTier) {
     EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::REMOTE).has_value());
     EXPECT_FALSE(evictor_->chooseVictim(/*group_set_id=*/0, Tier::NONE).has_value());
@@ -2599,6 +2619,7 @@ TEST_F(BlockTreeEvictorTest, DropLockedDropsSelectedVictim) {
 }
 
 TEST_F(BlockTreeEvictorTest, ChooseVictimUsesNearestEnabledTargetTier) {
+    resetGroup(makePinnedHostPool(2), makeTestDiskPool(2, "nearest_target"));
     MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group_, 1, BlockTreeRefType::CACHE);
     ASSERT_EQ(device_blocks.size(), 1u);
     const BlockIdxType source = device_blocks.front().front();

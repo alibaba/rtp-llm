@@ -121,10 +121,11 @@ public:
                                      const std::vector<std::vector<int>>*              token_segments = nullptr,
                                      const std::vector<size_t>*                         token_ends = nullptr);
 
-    const char* preciseForkRejection(const CacheKeysType& keys,
-                              const std::vector<std::vector<GroupSetResource>>& resources,
-                              const std::vector<std::vector<int>>& segments,
-                              const std::vector<size_t>& ends) const;
+    const char* preciseForkRejection(const CacheKeysType&                              keys,
+                                     const std::vector<std::vector<GroupSetResource>>& resources,
+                                     const std::vector<std::vector<int>>&              segments,
+                                     const std::vector<size_t>&                        ends,
+                                     Tier target_tier = Tier::DEVICE) const;
 
     bool      isRemovable(TreeNode* node) const;
     void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);

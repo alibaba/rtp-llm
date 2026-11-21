@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -98,9 +99,10 @@ private:
     std::function<void()> observer_;
 };
 
-std::shared_ptr<LoadAsyncContext>
-makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_tiers, bool commit = true,
-                         size_t unit_tokens = 2) {
+std::shared_ptr<LoadAsyncContext> makeAllocatorLoadContext(size_t                   matched_blocks,
+                                                           const std::vector<Tier>& source_tiers,
+                                                           bool                     commit      = true,
+                                                           size_t                   unit_tokens = 2) {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     std::vector<TransferDescriptor> descriptors;
@@ -109,14 +111,14 @@ makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_
         descriptors.emplace_back(
             nullptr, /*group_set_id=*/0, path_index, source_tiers[path_index], Tier::DEVICE, BlockIndicesType{1});
         descriptors.back().token_begin = path_index * unit_tokens;
-        descriptors.back().token_end = (path_index + 1) * unit_tokens;
+        descriptors.back().token_end   = (path_index + 1) * unit_tokens;
     }
     auto context =
         coordinator->create(std::move(descriptors), std::vector<bool>(source_tiers.size(), false), matched_blocks);
     EXPECT_TRUE(coordinator->registerContext(context));
-    const size_t ready = std::find_if(source_tiers.begin(), source_tiers.end(), [](Tier tier) {
-        return tier != Tier::DEVICE;
-    }) - source_tiers.begin();
+    const size_t ready =
+        std::find_if(source_tiers.begin(), source_tiers.end(), [](Tier tier) { return tier != Tier::DEVICE; })
+        - source_tiers.begin();
     context->setLocalTokenEndpoints(ready * unit_tokens, matched_blocks * unit_tokens);
     if (commit) {
         EXPECT_TRUE(context->commit());
@@ -723,6 +725,26 @@ TEST_F(StreamCacheResourceTest, CacheOwnedLayoutDrivesStreamInitIncrementAndRele
     stream_->generate_status_->status = StreamState::FINISHED;
     stream_->releaseResource();
     EXPECT_EQ(cache_manager_->freeBlocksNum(), free_before);
+}
+
+TEST_F(StreamCacheResourceTest, PreciseReuseGateAcceptsEachLocalTierAndIndependentSwitches) {
+    prepareResourceWithInputTokens({1, 2, 3, 4, 5}, true, RoleType::PREFILL);
+    auto& resource                                           = stream_->streamCacheResource();
+    resource.resource_context_.ignore_request_cache_switches = true;
+    for (const auto tier : {Tier::NONE, Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        resource.resource_context_.enable_device_cache = tier == Tier::DEVICE;
+        resource.resource_context_.enable_memory_cache = tier == Tier::HOST;
+        resource.resource_context_.enable_disk_cache   = tier == Tier::DISK;
+        for (const bool tail : {false, true}) {
+            for (const bool fork : {false, true}) {
+                resource.resource_context_.enable_prefill_partial_tail_reuse     = tail;
+                resource.resource_context_.enable_prefill_common_prefix_recovery = fork;
+                EXPECT_EQ(resource.partialTailReuseEnabled(), tier != Tier::NONE && (tail || fork));
+            }
+        }
+    }
+    stream_->setIsContextStream(false);
+    EXPECT_FALSE(resource.partialTailReuseEnabled());
 }
 
 TEST_F(StreamCacheResourceTest, PartialTailRegistrationIsGatedAndIndependentOfObservation) {
@@ -1397,6 +1419,139 @@ TEST_F(StreamCacheResourceTest, RegisteredShortSaveOwnsOptionalBlockUntilRelease
     EXPECT_FALSE(pool->isAllocated(block));
     EXPECT_FALSE(resource.prefix_cache_registration_->prepared);
     stream_->releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, RegisteredShortLeafDemotesAndRestoresPrivateContinuation) {
+    using block_tree_cache_test::BlockTreeCacheTestPeer;
+    for (const Tier lower : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(static_cast<int>(lower));
+        block_transfer_engine_test::TempDirGuard disk_dir("registered_short_demotion");
+        KVCacheConfig tiers;
+        tiers.enable_device_cache            = true;
+        tiers.enable_memory_cache            = lower == Tier::HOST;
+        tiers.memory_cache_size_mb           = lower == Tier::HOST ? 1 : 0;
+        tiers.enable_disk_cache              = lower == Tier::DISK;
+        tiers.disk_cache_size_mb             = lower == Tier::DISK ? 1 : 0;
+        tiers.disk_cache_paths               = disk_dir.path;
+        tiers.disk_cache_buffered_io         = true;
+        tiers.disk_cache_staging_block_count = 2;
+        CacheConfig config;
+        config.dtype              = DataType::TYPE_FP16;
+        config.layer_num          = 1;
+        config.seq_size_per_block = 2;
+        config.fromGroupedSpecs(
+            {test::makeMhaSpec("full", 2, DataType::TYPE_FP16, 1, 1)}, {{0}}, {CacheGroupType::FULL}, {"full"});
+        config.finalizeBlockNums(24, RuntimeConfig{});
+        prepareResourceWithCacheConfig(config, {1, 2, 3, 9, 5}, true, RoleType::PREFILL, tiers);
+        const auto cache       = cache_manager_->blockTreeCache();
+        const auto group       = cache->groupSets().front();
+        const auto pool        = group->devicePools().front();
+        const auto free_before = pool->freeBlocksNum();
+        auto       tokens      = std::make_shared<CompleteTokenIds>(1, 1, 128, 2);
+        auto       input       = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens->init(input);
+        auto source = std::make_shared<BatchKVCacheResource>();
+        source->resetBatchSize(1);
+        source->initGroups(config.topologyPtr());
+        initCacheKeys(source, tokens, 2);
+        MallocInfo cold{source, tokens};
+        cold.enable_cache_lookup = false;
+        ASSERT_TRUE(cache_manager_->malloc(cold).success);
+        PrefixCacheRegistration saved;
+        saved.original_input_tokens       = 3;
+        saved.token_ids                   = tokens->completeTokenIdsVec(0);
+        saved.base_keys                   = source->cacheKeys(0);
+        saved.required_continuation_ready = true;
+        for (const size_t endpoint : {2u, 3u}) {
+            PrefixCacheRegistrationPoint point;
+            point.endpoint.pos = endpoint;
+            point.group_bindings.resize(1);
+            saved.points.push_back(std::move(point));
+        }
+        cache_manager_->prepareRegisteredSave(saved, *source, 0);
+        ASSERT_TRUE(saved.prepared);
+        auto payload = [&](BlockIdxType block) {
+            return torch::from_blob(cache_manager_->convertIndexToBuffer(0, "full", block).front().addr,
+                                    {8},
+                                    torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
+        };
+        std::vector<BlockIdxType> published;
+        for (auto& point : saved.points) {
+            auto& binding = point.group_bindings.front();
+            ASSERT_TRUE(binding.resource.hasCompleteDeviceValue());
+            published.push_back(binding.resource.device_blocks.front());
+            payload(published.back()).fill_(0x44);
+            binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
+        }
+        runtimeSyncAndCheck();
+        saved.content_completed = true;
+        InsertInfo insert{source, tokens, false, Tier::DEVICE};
+        insert.prefix_cache_registration = &saved;
+        size_t resident                  = 0;
+        cache_manager_->insertIntoCache(insert, resident);
+        cache_manager_->releaseRegisteredSave(saved);
+        const auto keys = source->cacheKeys(0);
+        cache_manager_->free(FreeInfo{source, tokens});
+        auto path = cache->tree()->findNode(keys);
+        ASSERT_EQ(path.size(), 2u);
+        ASSERT_TRUE(cache->tree()->isShortLeaf(path.back()));
+        ASSERT_EQ(path.back()->token_end, 3u);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.001);
+        BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
+        for (auto* node : path) {
+            EXPECT_FALSE(node->group_set_resources.front().hasTier(Tier::DEVICE));
+            ASSERT_TRUE(node->group_set_resources.front().hasTier(lower));
+        }
+        for (auto block : published)
+            EXPECT_FALSE(pool->isAllocated(block));
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+
+        auto& resource                                               = stream_->streamCacheResource();
+        resource.resource_context_.ignore_request_cache_switches     = true;
+        resource.resource_context_.enable_prefill_partial_tail_reuse = true;
+        resource.resource_context_.enable_memory_cache               = lower == Tier::HOST;
+        resource.resource_context_.enable_disk_cache                 = lower == Tier::DISK;
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_NE(resource.allocator_load_context_, nullptr);
+        resource.allocator_load_context_->waitDone();
+        ASSERT_TRUE(resource.loadCacheDone());
+        ASSERT_EQ(stream_->reuseLength(), 3);
+        const auto restored = path.back()->group_set_resources.front().device_blocks.front();
+        EXPECT_TRUE(payload(restored).cpu().eq(0x44).all().item<bool>());
+        ASSERT_TRUE(resource.prepareRequiredContinuation().ok());
+        ModelConfig model;
+        model.input_vocab_size             = 128;
+        model.attn_config.tokens_per_block = 2;
+        model.max_seq_len                  = 2048;
+        NormalBatchStreamProcessor processor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false);
+        TensorHolder               holder;
+        auto                       gathered = processor.gatherModelInput(StreamGroups({stream_}), holder);
+        ASSERT_TRUE(gathered.ok()) << gathered.status();
+        ASSERT_TRUE(gathered->kv_cache_update_mapping.defined());
+        ASSERT_GT(gathered->kv_cache_update_mapping.numel(), 0);
+        cache_manager_->blockBatchCopyForForward(
+            gathered->kv_cache_update_mapping, gathered->kv_cache_group_tags, true);
+        const auto writable = resource.kvCache().blocks(0, "full").at(1);
+        ASSERT_NE(writable, restored);
+        EXPECT_TRUE(payload(writable).slice(0, 0, 2).cpu().eq(0x44).all().item<bool>());
+        EXPECT_TRUE(payload(writable).slice(0, 4, 6).cpu().eq(0x44).all().item<bool>());
+        payload(writable).slice(0, 2, 4).fill_(0xcc);
+        payload(writable).slice(0, 6, 8).fill_(0xcc);
+        runtimeSyncAndCheck();
+        EXPECT_TRUE(payload(restored).cpu().eq(0x44).all().item<bool>());
+        EXPECT_GE(pool->refCount(restored), 1u);
+        stream_->releaseResource();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        cache->evictForGroup("full", pool->totalBlocksNum());
+        EXPECT_EQ(pool->freeBlocksNum(), free_before);
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+    }
 }
 
 TEST_F(StreamCacheResourceTest, LegacyDenseSwaContinuationPreservesLaterCachedPayload) {
@@ -3338,14 +3493,16 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
 TEST_F(StreamCacheResourceTest, ExactLowerTailPublishesTwoTokensAfterAsyncCompletion) {
     for (const Tier tier : {Tier::HOST, Tier::DISK}) {
         prepareResourceWithCacheConfig(test::makeSimpleMhaCacheConfig(3, 32, 128, DataType::TYPE_INT8),
-                                       std::vector<int>(1100, 1), true, RoleType::PREFILL);
-        auto& resource = stream_->streamCacheResource();
-        auto coordinator = std::make_shared<LoadContextCoordinator>(
+                                       std::vector<int>(1100, 1),
+                                       true,
+                                       RoleType::PREFILL);
+        auto& resource    = stream_->streamCacheResource();
+        auto  coordinator = std::make_shared<LoadContextCoordinator>(
             [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
         TransferDescriptor tail{nullptr, 0, 8, tier, Tier::DEVICE, {1}};
         tail.token_begin = 1024;
-        tail.token_end = 1026;
-        auto context = coordinator->create({tail}, {false}, 9);
+        tail.token_end   = 1026;
+        auto context     = coordinator->create({tail}, {false}, 9);
         ASSERT_TRUE(coordinator->registerContext(context));
         context->setLocalTokenEndpoints(1024, 1026);
         auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
@@ -3393,8 +3550,9 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCanonicalReuseUnit) 
     auto& resource = stream_->streamCacheResource();
     EXPECT_EQ(cache_manager_->canonicalSizePerBlock(), 4);
 
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false, /*unit_tokens=*/4);
-    auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    auto load_context =
+        makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false, /*unit_tokens=*/4);
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/4, 0, load_context}));

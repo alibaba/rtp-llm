@@ -1158,7 +1158,9 @@ bool StreamCacheResource::reuseCache() const {
 bool StreamCacheResource::partialTailReuseEnabled() const {
     if (!(resource_context_.enable_prefill_partial_tail_reuse
           || resource_context_.enable_prefill_common_prefix_recovery)
-        || resource_context_.role_type != RoleType::PREFILL || !resource_context_.enable_device_cache
+        || resource_context_.role_type != RoleType::PREFILL
+        || !(resource_context_.enable_device_cache || resource_context_.enable_memory_cache
+             || resource_context_.enable_disk_cache)
         || resource_context_.cache_manager == nullptr || !reuseCache()
         || resource_context_.cache_manager->blockTreeCache() == nullptr || !stream_->isContextStream()) {
         return false;

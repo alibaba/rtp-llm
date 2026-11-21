@@ -1755,7 +1755,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
     }
 
     const auto* registration = insert_info.prefix_cache_registration;
-    if (registration != nullptr && insert_info.target_tier == Tier::DEVICE) {
+    if (registration != nullptr) {
         publishRegisteredSpineAndFork(insert_info, *kv_cache_resource, *registration, resident_prefix_length);
         return;
     }
@@ -1877,7 +1877,7 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
     if (!keys.empty()) {
         resident_prefix_length = block_tree_cache_->insert(keys,
                                                            resources,
-                                                           Tier::DEVICE,
+                                                           insert_info.target_tier,
                                                            insert_info.is_resident,
                                                            &token_segments,
                                                            insert_info.prefix_plan_state,
@@ -1899,7 +1899,11 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
             fork_keys.push_back(keys[index]);
             fork_ends.push_back(token_ends[index]);
             fork_segments.push_back(token_segments[index]);
-            fork_resources.emplace_back(group_sets.size());  // Retained ancestors already own their blocks.
+            if (insert_info.target_tier == Tier::DEVICE) {
+                fork_resources.emplace_back(group_sets.size());
+            } else {
+                fork_resources.push_back(resources[index]);
+            }
             previous_fork_end = token_ends[index];
         }
         const size_t required_ancestor = (fork->endpoint.pos - 1) / unit;
@@ -1930,7 +1934,7 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
             fork_resources.push_back(std::move(fork_group_resources));
             block_tree_cache_->insert(fork_keys,
                                       fork_resources,
-                                      Tier::DEVICE,
+                                      insert_info.target_tier,
                                       false,
                                       &fork_segments,
                                       nullptr,
@@ -1939,7 +1943,7 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
                                       true);
         } else {
             block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id,
-                                                         Tier::DEVICE,
+                                                         insert_info.target_tier,
                                                          "internal_fork_missing_ancestor_or_group",
                                                          fork->endpoint.pos);
         }

@@ -105,6 +105,7 @@ cc_library(
     visibility = [
         "//rtp_llm/cpp/cache/block_tree_cache:__subpackages__",
         "//rtp_llm/cpp/cache/test:__pkg__",
+        "//rtp_llm/cpp/engine_base/stream/test:__pkg__",
         "//rtp_llm/cpp/engine_base/system_prompt/test:__pkg__",
     ],
     deps = [

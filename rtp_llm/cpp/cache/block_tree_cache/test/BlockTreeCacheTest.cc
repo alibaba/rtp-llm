@@ -736,6 +736,15 @@ TEST_F(BlockTreeCacheTest, InternalForkInsertSkipsAfterAncestorEvictionWithoutTa
     EXPECT_NE(skipped.find("\"internal_fork\":true,\"internal_fork_pos\":300,\"internal_fork_ready\":null"),
               std::string::npos);
     EXPECT_NE(skipped.find("\"reason\":\"missing_internal_fork_ancestor\""), std::string::npos);
+    parent[0][0].device_blocks.clear();
+    parent[0][0].host_block = 7;
+    cache->tree()->insertNode({256}, parent, false, false, &parent_segments, &parent_ends);
+    ready = true;
+    cache->insert(
+        {256, 300}, fork, Tier::DEVICE, false, &fork_segments, nullptr, &fork_ends, std::nullopt, true, &ready);
+    EXPECT_FALSE(ready);
+    EXPECT_EQ(cache->tree()->findNode({256, 300}).size(), 1u);
+    EXPECT_EQ(pool->refCount(43), 1u);
     pool->decRef(43);
     EXPECT_FALSE(pool->isAllocated(43));
 }
