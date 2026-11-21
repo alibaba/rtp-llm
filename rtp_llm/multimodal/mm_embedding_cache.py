@@ -635,12 +635,15 @@ class MMEmbeddingCacheEntry:
         *,
         before_publish: Optional[Callable[[], None]] = None,
         defer: bool = False,
+        prepared_storage: Optional[Tuple[Any, List[Any]]] = None,
     ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
             self._terminal = True
             self.result = result
+            if prepared_storage is not None:
+                self.original_devices, self.ready_events = prepared_storage
             if defer:
                 self._pending_before_publish = before_publish
         if defer:
@@ -1889,16 +1892,15 @@ class MMEmbeddingCache:
         *,
         before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
-        # Prepare reader-visible metadata BEFORE the entry publishes its event.
-        # The deferred (async publication) path wakes waiters before the
-        # publication thread runs _on_complete_sync; without this a waiter can
-        # observe original_devices=None and crash in _copy_result_to_devices.
-        entry.original_devices = _map_tensors(result, lambda tensor: tensor.device)
-        entry.ready_events = self._record_ready_events(result)
+        # Deferred readers may wake before the publication thread runs. The
+        # winning completion publishes its device tree and events with the result.
+        devices = _map_tensors(result, lambda tensor: tensor.device)
+        ready_events = self._record_ready_events(result)
         return entry.complete(
             result,
             before_publish=before_publish,
             defer=self._publish_queue is not None,
+            prepared_storage=(devices, ready_events),
         )
 
     def fail(

@@ -580,6 +580,21 @@ class EmbeddingCapacityTest(unittest.TestCase):
         self.assertEqual(called, [True])
         self.assertTrue(torch.equal(entry.wait(timeout=0), torch.ones(4)))
 
+    def test_duplicate_completion_preserves_winning_storage_layout(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = cache.try_acquire("image")
+        payload = torch.ones(4)
+        candidate = (torch.zeros(4), torch.ones(2))
+
+        def duplicate():
+            self.assertFalse(cache.complete("image", entry, candidate))
+            self.assertEqual(entry.original_devices, torch.device("cpu"))
+
+        self.assertTrue(
+            cache.complete("image", entry, payload, before_publish=duplicate)
+        )
+        torch.testing.assert_close(entry.wait(timeout=0), payload)
+
     def test_before_publish_error_rolls_back_and_wakes_waiters(self):
         cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
         _, entry = cache.try_acquire("a")
