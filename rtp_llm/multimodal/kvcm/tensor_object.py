@@ -348,38 +348,50 @@ def unpack_object(
         or not _PREFIX.size <= size <= max_bytes
     ):
         raise ValueError("invalid multimodal object buffer")
-    read_native_header = None
+    read_object_header = read_native_header = None
     if buffer.is_cuda and _USE_NATIVE_RESTORE and blocking_cuda_events:
         import librtp_compute_ops
 
-        read_native_header = getattr(librtp_compute_ops, "read_emb_cuda_header", None)
+        read_object_header = getattr(
+            librtp_compute_ops, "read_emb_cuda_object_header", None
+        )
+        if read_object_header is None:
+            read_native_header = getattr(
+                librtp_compute_ops, "read_emb_cuda_header", None
+            )
 
-    def copy_header(start, end):
+    view = None
+    if read_object_header is not None:
         with stage("d2h_header"):
-            if read_native_header is not None:
-                return read_native_header(buffer, start, end - start)
-            return buffer[start:end].cpu()
-
-    if buffer.is_cuda:
-        # Fetch the usual prefix and metadata together. Large headers still
-        # copy only the missing suffix after validating the declared length.
-        head = copy_header(0, min(size, _CUDA_HEADER_READ_BYTES))
+            raw_header = read_object_header(buffer)
+        magic = _MAGIC_V2
+        offset = _align(_PREFIX.size + len(raw_header))
     else:
-        head = buffer
-    view = memoryview(head.numpy())
-    magic, length = _PREFIX.unpack_from(view)
-    header_end = _PREFIX.size + length
-    offset = _align(header_end)
-    if (
-        (magic != _MAGIC_V2 and (magic != _MAGIC_V1 or buffer.is_cuda))
-        or length > _MAX_HEADER
-        or offset > size
-    ):
-        raise ValueError("invalid multimodal object header")
-    raw_header = bytes(view[_PREFIX.size : header_end])
-    if header_end > len(view):
-        suffix = copy_header(len(view), header_end)
-        raw_header += suffix.numpy().tobytes()
+        def copy_header(start, end):
+            with stage("d2h_header"):
+                if read_native_header is not None:
+                    return read_native_header(buffer, start, end - start)
+                return buffer[start:end].cpu()
+
+        # Fetch the usual prefix and metadata together. Large headers copy
+        # only the missing suffix after validating the declared length.
+        head = (
+            copy_header(0, min(size, _CUDA_HEADER_READ_BYTES)) if buffer.is_cuda else buffer
+        )
+        view = memoryview(head.numpy())
+        magic, length = _PREFIX.unpack_from(view)
+        header_end = _PREFIX.size + length
+        offset = _align(header_end)
+        if (
+            (magic != _MAGIC_V2 and (magic != _MAGIC_V1 or buffer.is_cuda))
+            or length > _MAX_HEADER
+            or offset > size
+        ):
+            raise ValueError("invalid multimodal object header")
+        raw_header = bytes(view[_PREFIX.size : header_end])
+        if header_end > len(view):
+            suffix = copy_header(len(view), header_end)
+            raw_header += suffix.numpy().tobytes()
     with stage("decode_header"):
         try:
             header = json.loads(raw_header)
@@ -391,6 +403,7 @@ def unpack_object(
         if not isinstance(header, dict) or set(header) != fields:
             raise ValueError("invalid multimodal object schema")
     if magic == _MAGIC_V1:
+        assert view is not None
         with stage("checksum"):
             expected_digest = header["sha256"]
             header["sha256"] = "0" * 64

@@ -81,9 +81,21 @@ class TensorObjectTest(unittest.TestCase):
 
         with patch.object(
             librtp_compute_ops,
+            "read_emb_cuda_object_header",
+            wraps=librtp_compute_ops.read_emb_cuda_object_header,
+        ) as read_object_header, torch.cuda.stream(torch.cuda.Stream()):
+            self._assert_cuda_header_reads(
+                blocking_cuda_events=True, single_binding=True
+            )
+        self.assertEqual(read_object_header.call_count, 3)
+
+        with patch.object(
+            librtp_compute_ops,
             "read_emb_cuda_header",
             wraps=librtp_compute_ops.read_emb_cuda_header,
-        ) as read_header, torch.cuda.stream(torch.cuda.Stream()):
+        ) as read_header, patch.object(
+            librtp_compute_ops, "read_emb_cuda_object_header", None
+        ), torch.cuda.stream(torch.cuda.Stream()):
             self._assert_cuda_header_reads(blocking_cuda_events=True)
         self.assertEqual(read_header.call_count, 4)
         self.assertEqual(
@@ -128,7 +140,7 @@ class TensorObjectTest(unittest.TestCase):
         torch.testing.assert_close(restored_cpu, cpu)
         stream.synchronize()
 
-    def _assert_cuda_header_reads(self, *, blocking_cuda_events):
+    def _assert_cuda_header_reads(self, *, blocking_cuda_events, single_binding=False):
         stages = []
 
         @contextmanager
@@ -138,6 +150,8 @@ class TensorObjectTest(unittest.TestCase):
 
         tensor = torch.arange(2048, device="cuda")
         for metadata_size, expected_copies in ((64, 1), (4096, 2)):
+            if single_binding:
+                expected_copies = 1
             with self.subTest(metadata_size=metadata_size):
                 value = {"cache_key": "key", "result": (tensor, "x" * metadata_size)}
                 plan = plan_object(value, checksum=False)

@@ -11,9 +11,11 @@
 #include <c10/cuda/CUDAGuard.h>
 #endif
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -111,6 +113,37 @@ inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, in
     waitEmbCudaStream(buffer);
     return header;
 }
+
+inline std::string readEmbCudaObjectHeader(const at::Tensor& buffer) {
+    constexpr int64_t prefixSize = 16;
+    constexpr int64_t firstReadSize = 1024;
+    constexpr int64_t alignment = 64;
+    constexpr uint64_t maxHeaderSize = 64 * 1024;
+    const auto size = buffer.numel();
+    if (size < prefixSize) {
+        throw std::invalid_argument("invalid multimodal object buffer");
+    }
+    const auto first = readEmbCudaHeader(buffer, 0, std::min(size, firstReadSize));
+    const auto* bytes = first.data_ptr<uint8_t>();
+    uint64_t headerSize = 0;
+    for (unsigned i = 0; i < 8; ++i) {
+        headerSize |= static_cast<uint64_t>(bytes[8 + i]) << (8 * i);
+    }
+    if (std::memcmp(bytes, "RTPMM002", 8) != 0 || headerSize > maxHeaderSize) {
+        throw std::invalid_argument("invalid multimodal object header");
+    }
+    const auto end = prefixSize + static_cast<int64_t>(headerSize);
+    if ((end + alignment - 1) / alignment * alignment > size) {
+        throw std::invalid_argument("invalid multimodal object header");
+    }
+    const auto initial = std::min(end, first.numel());
+    std::string header(reinterpret_cast<const char*>(bytes + prefixSize), initial - prefixSize);
+    if (end > initial) {
+        const auto suffix = readEmbCudaHeader(buffer, initial, end - initial);
+        header.append(reinterpret_cast<const char*>(suffix.data_ptr<uint8_t>()), end - initial);
+    }
+    return header;
+}
 #endif
 
 // Own routing hashes without keeping Python tensor wrappers or lists alive.
@@ -192,6 +225,14 @@ inline void registerEmbTensorCodec(pybind11::module& module) {
     module.def("clone_emb_hashes", &cloneEmbHashes);
 #if USING_CUDA
     module.def("read_emb_cuda_header", &readEmbCudaHeader, pybind11::call_guard<pybind11::gil_scoped_release>());
+    module.def("read_emb_cuda_object_header", [](const at::Tensor& buffer) {
+        std::string header;
+        {
+            pybind11::gil_scoped_release release;
+            header = readEmbCudaObjectHeader(buffer);
+        }
+        return pybind11::bytes(header);
+    });
     module.def(
         "pack_emb_cuda_tensor_slices_and_wait",
         [](const at::Tensor& output,
