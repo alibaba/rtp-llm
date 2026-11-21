@@ -5,6 +5,7 @@
 
 #include <pybind11/stl.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <torch/csrc/utils/pybind.h>
 #include <torch/csrc/autograd/python_variable.h>
 
@@ -12,6 +13,12 @@ namespace rtp_llm {
 namespace {
 namespace py = pybind11;
 using namespace emb_local;
+
+template<typename Function>
+auto withoutGil(Function function) {
+    py::gil_scoped_release release;
+    return function();
+}
 
 Shard::Streams streamFor(uintptr_t stream, int device) {
     if (device < 0) {
@@ -184,23 +191,38 @@ void registerEmbLocalCache(pybind11::module& m) {
     });
     py::class_<Shard>(m, "EmbLocalCacheShard")
         .def(py::init<int64_t, int64_t, int>())
-        .def("claim", [](Shard& shard, const std::string& key) { return lookupResult(shard.claim(key)); })
-        .def("peek", [](Shard& shard, const std::string& key) { return lookupResult(shard.lookup(key, false)); })
+        .def("claim",
+             [](Shard& shard, const std::string& key) {
+                 return lookupResult(withoutGil([&] { return shard.claim(key); }));
+             })
+        .def("peek",
+             [](Shard& shard, const std::string& key) {
+                 return lookupResult(withoutGil([&] { return shard.lookup(key, false); }));
+             })
         .def("is_current",
              [](Shard& shard, const std::string& key, const Cell& cell) {
                  return shard.withCurrent(key, cell.generation(), [] {});
-             })
+             },
+             py::call_guard<py::gil_scoped_release>())
         .def("with_current",
              [](Shard& shard, const std::string& key, const Cell& cell, py::function action) {
                  py::object result = py::none();
-                 // Only the metadata commit is inside the index lock. This
-                 // callback follows the existing embedding-index -> hash-index order.
-                 shard.withCurrent(key, cell.generation(), [&] { result = action(); });
+                 {
+                     // The callback commits only generation-bound hash metadata.
+                     // Index waiters must release the GIL so this callback can
+                     // finish even if Python switches threads in the commit.
+                     py::gil_scoped_release release;
+                     shard.withCurrent(key, cell.generation(), [&] {
+                         py::gil_scoped_acquire acquire;
+                         result = action();
+                     });
+                 }
                  return result;
              })
         .def("erase",
-             [](Shard& shard, const std::string& key, const Cell& cell) { return shard.erase(key, cell.generation()); })
-        .def("clear", &Shard::clear)
+             [](Shard& shard, const std::string& key, const Cell& cell) { return shard.erase(key, cell.generation()); },
+             py::call_guard<py::gil_scoped_release>())
+        .def("clear", &Shard::clear, py::call_guard<py::gil_scoped_release>())
         .def("close", &Shard::close, py::call_guard<py::gil_scoped_release>())
         .def("publish",
              [](Shard&                                     shard,
@@ -268,23 +290,28 @@ void registerEmbLocalCache(pybind11::module& m) {
                  if (limit == 0) {
                      return result;
                  }
-                 auto add = [&](const std::string& key, Tier tier) {
-                     result[py::str(key)] = tier == Tier::Gpu ? "gpu" : "cpu";
-                 };
-                 if (keys) {
+                 const auto records = withoutGil([&] {
+                     if (!keys) {
+                         return shard.residency(limit);
+                     }
+                     std::vector<std::pair<std::string, Tier>> records;
+                     std::unordered_set<std::string_view> seen;
                      for (const auto& key : *keys) {
+                         if (!seen.insert(key).second) {
+                             continue;
+                         }
                          const auto record = shard.lookup(key, false).resident;
                          if (record) {
-                             add(key, record->tier);
-                         }
-                         if (limit >= 0 && result.size() >= static_cast<size_t>(limit)) {
-                             break;
+                             records.emplace_back(key, record->tier);
+                             if (limit >= 0 && records.size() >= static_cast<size_t>(limit)) {
+                                 break;
+                             }
                          }
                      }
-                 } else {
-                     for (const auto& [key, tier] : shard.residency(limit)) {
-                         add(key, tier);
-                     }
+                     return records;
+                 });
+                 for (const auto& [key, tier] : records) {
+                     result[py::str(key)] = tier == Tier::Gpu ? "gpu" : "cpu";
                  }
                  return result;
              })
@@ -299,14 +326,16 @@ void registerEmbLocalCache(pybind11::module& m) {
              })
         .def("resident_charge",
              [](Shard& shard) {
-                 const auto snapshot = shard.charge();
+                 const auto snapshot = withoutGil([&] { return shard.charge(); });
                  return py::make_tuple(snapshot.tokens,
                                        snapshot.bytes[0] + snapshot.bytes[1],
                                        snapshot.entries[0] + snapshot.entries[1]);
              })
         .def("stats", [](Shard& shard) {
-            const auto snapshot = shard.charge();
-            py::dict   out;
+            const auto [snapshot, cpu, gpu] = withoutGil([&] {
+                return std::make_tuple(shard.charge(), shard.stats(Tier::Cpu), shard.stats(Tier::Gpu));
+            });
+            py::dict out;
             out["resident_tokens"]      = snapshot.tokens;
             out["resident_bytes"]       = snapshot.bytes[0] + snapshot.bytes[1];
             out["resident_entries"]     = snapshot.entries[0] + snapshot.entries[1];
@@ -315,8 +344,8 @@ void registerEmbLocalCache(pybind11::module& m) {
             out["gpu_resident_bytes"]   = snapshot.bytes[1];
             out["cpu_resident_bytes"]   = snapshot.bytes[0];
             out["pending_entries"]      = snapshot.pending;
-            setPoolStats(out, "cpu_pool_", shard.stats(Tier::Cpu));
-            setPoolStats(out, "gpu_pool_", shard.stats(Tier::Gpu));
+            setPoolStats(out, "cpu_pool_", cpu);
+            setPoolStats(out, "gpu_pool_", gpu);
             return out;
         });
 }

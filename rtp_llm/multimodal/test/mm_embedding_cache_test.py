@@ -1,6 +1,8 @@
 import concurrent.futures
 import gc
 import random
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -1767,6 +1769,51 @@ class ShardedEmbeddingCacheTest(unittest.TestCase):
                     0,
                     {"cache_shard": str(index)},
                 )
+
+    def test_native_hash_commit_does_not_invert_gil_order(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+
+        # An isolated process keeps a regression from wedging the test runner.
+        script = """
+import threading
+import time
+import torch
+from librtp_compute_ops import EmbLocalCacheShard
+
+operations = (
+    lambda core, cell: core.claim("other"),
+    lambda core, cell: core.peek("other"),
+    lambda core, cell: core.is_current("live", cell),
+    lambda core, cell: core.resident_tiers(["live"], 1),
+    lambda core, cell: core.resident_tiers(None, 1),
+    lambda core, cell: core.resident_charge(),
+    lambda core, cell: core.stats(),
+    lambda core, cell: core.erase("live", cell),
+    lambda core, cell: core.clear(),
+)
+for operation in operations:
+    core = EmbLocalCacheShard(0, 4096, -1)
+    cell = core.claim("live")[0]
+    entered = threading.Event()
+    committed = []
+    def commit():
+        entered.set()
+        time.sleep(.03)  # Schedule the other Python thread while the index is locked.
+        committed.append(True)
+    thread = threading.Thread(target=lambda: core.with_current("live", cell, commit))
+    thread.start()
+    assert entered.wait(1)
+    operation(core, cell)
+    thread.join(1)
+    assert committed == [True] and not thread.is_alive()
+    core.clear()
+    core.with_current("live", cell, lambda: committed.append(False))
+    assert committed == [True]
+"""
+        subprocess.run([sys.executable, "-c", script], check=True, timeout=20)
 
     def test_native_publication_releases_python_owners(self):
         try:
