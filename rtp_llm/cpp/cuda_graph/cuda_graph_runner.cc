@@ -1195,7 +1195,23 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
-            replayDecode(state.current_real_graph_bs);
+            if (state.v41_cache_proposal && std::getenv("RTP_V41_DRAFT_ROLE")) {
+                py::gil_scoped_acquire gil;
+                auto                   fixture = py::module_::import("rtp_llm.models_py.modules.v41_first_draft");
+                auto                   fixed   = fixture.attr("begin")(
+                    py_instance_, graph_instances_[getCurrentRealGraphSize(state)].mem_hold_.py_model_inputs_);
+                try {
+                    replayDecode(state.current_real_graph_bs);
+                    fixture.attr("finish")(
+                        fixed, graph_instances_[getCurrentRealGraphSize(state)].mem_hold_.decoder_layer_hidden_states_);
+                } catch (...) {
+                    fixture.attr("restore")(fixed);
+                    throw;
+                }
+                fixture.attr("restore")(fixed);
+            } else {
+                replayDecode(state.current_real_graph_bs);
+            }
         }
         outputs.hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_.slice(
@@ -1208,6 +1224,14 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     }
     // Protect replay storage even if a model bookkeeping callback fails.
     forward_event_.record(cuda_graph::graphGetCurrentStream());
+    if (state.v41_cache_proposal) {
+        py::gil_scoped_acquire gil;
+        // Read exactly the active instance's updated/static table AFTER replay,
+        // outside CUDA graph capture. Do not run a second model forward.
+        py::module_::import("rtp_llm.models_py.modules.v41_cache_model_trace")
+            .attr("first_proposal")(
+                py_instance_, graph_instances_[getCurrentRealGraphSize(state)].mem_hold_.py_model_inputs_, "graph");
+    }
     if (!py_after_replay_method_.is_none()) {
         py::gil_scoped_acquire gil;
         py_after_replay_method_(getCurrentRealGraphSize(state),

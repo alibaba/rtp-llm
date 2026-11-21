@@ -34,6 +34,91 @@ namespace rtp_llm {
 
 namespace {
 
+// Only the fixed, checked-in, cold CP fixture may export tensor digests.
+// Check the unsplit tokens before ZigzagProcessor replaces combo_tokens.
+bool isV41LayerFixture(const GptModelInputs& inputs) {
+    static const bool enabled = [] {
+        const auto* flag = std::getenv("RTP_V41_LONG_PREFILL_PROBE");
+        const auto* test = std::getenv("TEST_TARGET");
+        return flag && std::strcmp(flag, "1") == 0 && test
+               && std::strcmp(test, "//rtp_llm/test/smoke:deepseek_v41_long_prefill_logits_sm100_arm") == 0;
+    }();
+    if (!enabled || inputs.warmup || !inputs.combo_tokens.defined() || inputs.combo_tokens.numel() != 783
+        || inputs.input_lengths.numel() != 1 || inputs.sequence_lengths.numel() != 0) {
+        return false;
+    }
+    const auto ids  = inputs.combo_tokens.to(torch::kCPU, torch::kInt32).contiguous();
+    uint64_t   hash = UINT64_C(14695981039346656037);
+    for (int64_t i = 0; i < ids.numel(); ++i) {
+        hash = (hash ^ static_cast<uint32_t>(ids.data_ptr<int32_t>()[i])) * UINT64_C(1099511628211);
+    }
+    return hash == UINT64_C(0x83ef06b1e7cedebb);
+}
+
+// Dedicated diagnostic only. Validate the global, *unsplit* input on each
+// rank. Both target and DSpARK commit receive this geometry in prefillStep.
+int64_t v41CacheFixturePrefix(const GptModelInputs& inputs) {
+    static const bool enabled = [] {
+        const auto* flag = std::getenv("RTP_V41_CACHE_TRACE");
+        const auto* test = std::getenv("TEST_TARGET");
+        return flag && std::strcmp(flag, "1") == 0 && test
+               && std::strcmp(test, "//rtp_llm/test/smoke:deepseek_v41_cache_rounds_sm100_arm") == 0;
+    }();
+    if (!enabled || !inputs.v41_cache_fixture || inputs.warmup || inputs.is_fake_stream
+        || !inputs.combo_tokens.defined() || !inputs.input_lengths.defined() || inputs.input_lengths.numel() != 1
+        || !inputs.prefix_lengths.defined() || inputs.prefix_lengths.numel() != 1
+        || (inputs.sequence_lengths.defined() && inputs.sequence_lengths.numel())) {
+        return -1;
+    }
+    const auto n = inputs.combo_tokens.numel();
+    if (n != 783 && n != 271)
+        return -1;
+    const auto prefix = inputs.prefix_lengths.item<int>();
+    if ((prefix != 0 && prefix != 512) || n + prefix != 783 || inputs.input_lengths.item<int>() != n)
+        return -1;
+    const auto ids  = inputs.combo_tokens.to(torch::kCPU, torch::kInt32).contiguous();
+    uint64_t   hash = UINT64_C(14695981039346656037);
+    for (int64_t i = 0; i < n; ++i)
+        hash = (hash ^ static_cast<uint32_t>(ids.data_ptr<int32_t>()[i])) * UINT64_C(1099511628211);
+    return hash == (prefix == 0 ? UINT64_C(0x83ef06b1e7cedebb) : UINT64_C(0xeb924827a54454d3)) ? prefix : -1;
+}
+
+thread_local bool v41_layer_fixture_active = false;
+struct V41LayerFixtureScope {
+    bool previous;
+    explicit V41LayerFixtureScope(bool active): previous(v41_layer_fixture_active) {
+        v41_layer_fixture_active = active;
+    }
+    ~V41LayerFixtureScope() {
+        v41_layer_fixture_active = previous;
+    }
+};
+
+// The Python writer uses this same lock. Hold it through C++ post layers as
+// those also retain runtime tensor views. Writers drain outstanding GPU work
+// before copying and synchronize before releasing the lock.
+class RuntimeWeightReadGuard {
+public:
+    explicit RuntimeWeightReadGuard(const py::object& model) {
+        py::gil_scoped_acquire acquire;
+        if (py::hasattr(model, "_weight_update_lock")) {
+            lock_ = model.attr("_weight_update_lock");
+            lock_.attr("acquire")();
+        }
+    }
+
+    ~RuntimeWeightReadGuard() {
+        py::gil_scoped_acquire acquire;
+        if (lock_) {
+            lock_.attr("release")();
+            lock_ = py::object();
+        }
+    }
+
+private:
+    py::object lock_;
+};
+
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
 // finishes only writer submissions here and leaves actual publication for the
 // executor's pre-dispatch barrier, preserving overlap with draft computation.
@@ -173,6 +258,14 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     }
     py::object result = py_model_.attr("get_mtp_target_hidden_states")(num_tokens);
     return result.is_none() ? torch::Tensor() : result.cast<torch::Tensor>();
+}
+
+torch::Tensor PyWrappedModel::getV4SmokeVerifyRow(int64_t row, int width, int last_id) {
+    py::gil_scoped_acquire gil;
+    if (!py_model_ || !py::hasattr(py_model_, "get_v4_smoke_verify_row"))
+        return {};
+    auto selected = py_model_.attr("get_v4_smoke_verify_row")(row, width, last_id);
+    return selected.is_none() ? torch::Tensor{} : selected.cast<torch::Tensor>();
 }
 
 torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
@@ -892,6 +985,16 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
+    V41LayerFixtureScope trace_scope(dspark_model_role_ == DSparkModelRole::NONE && isV41LayerFixture(inputs));
+    const int64_t        cache_fixture_prefix =
+        dspark_model_role_ == DSparkModelRole::PROPOSE ? -1 : v41CacheFixturePrefix(inputs);
+    RuntimeWeightReadGuard weight_read(py_model_);
+    if (direct_eplb_stats_) {
+        // Eager and graph replay both write into these same address-stable
+        // buffers. Each forward publishes one batch, not a cumulative count.
+        overall_expert_stats_.stats_buf.log_stats_buf.zero_();
+        overall_expert_stats_.stats_buf.gpu_loads_buf.zero_();
+    }
 
     // Establish the cleanup guard before touching inputs: both the performance
     // wrapper and host-buffer retention can throw. A failed async prepare must
@@ -917,7 +1020,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 && has_context_request ?
             generation_prefill_cuda_graph_init_status_ :
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
+    int8_t     target_verify_graph_path                  = -1;
     const auto with_generation_prefill_cuda_graph_status = [&](GptModelOutputs outputs) {
+        outputs.target_verify_graph_path             = target_verify_graph_path;
         outputs.generation_prefill_cuda_graph_status = generation_prefill_cuda_graph_status;
         return outputs;
     };
@@ -1002,6 +1107,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
+        graph_state.v41_cache_proposal = inputs.v41_cache_fixture && dspark_model_role_ == DSparkModelRole::PROPOSE
+                                         && !inputs.warmup && !inputs.is_fake_stream;
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
@@ -1020,6 +1127,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            if (inputs.is_target_verify)
+                target_verify_graph_path = 1;
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
@@ -1027,12 +1136,26 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
+            if (inputs.is_target_verify)
+                target_verify_graph_path = 0;
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
-            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+            auto outputs =
+                v41_layer_fixture_active ?
+                    py::module_::import("rtp_llm.models_py.modules.dsv41.prefill.forward")
+                        .attr("_run_fixture_forward")(py_forward_method_, py_model_inputs, held_attn_pyobj_) :
+                cache_fixture_prefix >= 0 ?
+                    py::module_::import("rtp_llm.models_py.modules.v41_cache_model_trace")
+                        .attr("run_fixed")(
+                            cache_fixture_prefix, py_forward_method_, py_model_inputs, held_attn_pyobj_) :
+                    py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
+            if (graph_state.v41_cache_proposal) {
+                py::module_::import("rtp_llm.models_py.modules.v41_cache_model_trace")
+                    .attr("first_proposal")(py_model_, py_model_inputs, "eager");
+            }
         }
 
         cache_store_write_cycle.finish();
@@ -1147,8 +1270,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
 torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
     RTP_LLM_PROFILE_SCOPE("py_model.computeLogits");
-    const auto&   head   = *weights_.lm_head;
-    const auto&   kernel = head.kernel;
+    const auto& head   = *weights_.lm_head;
+    const auto& kernel = head.kernel;
+    if (std::getenv("RTP_V41_DRAFT_ROLE") && dspark_model_role_ == DSparkModelRole::PROPOSE) {
+        py::gil_scoped_acquire gil;
+        py::module_::import("rtp_llm.models_py.modules.v41_first_draft")
+            .attr("head_operand")(hidden, kernel, head.scales, device_props_.tp_rank, device_props_.tp_size);
+    }
+    if (v41_layer_fixture_active) {
+        py::gil_scoped_acquire gil;
+        py::module_::import("rtp_llm.models_py.modules.dsv41.prefill.forward")
+            .attr("_trace_fixture_head")(hidden, kernel, device_props_.tp_rank, device_props_.tp_size);
+    }
     torch::Tensor logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");

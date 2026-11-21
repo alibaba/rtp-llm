@@ -82,11 +82,44 @@ py::dict exerciseStage(const ParallelismConfig& config,
     return result;
 }
 
+bool exerciseDirectStep(const ParallelismConfig& config,
+                        py::object               python_balancer,
+                        torch::Tensor            log_stats,
+                        torch::Tensor            gpu_loads) {
+    const auto range = stageLayerRange(config, config.pp_rank, 4);
+    EPLBConfig options;
+    options.eplb_mode                   = EplbMode::ALL;
+    options.eplb_update_time            = 1;
+    options.eplb_control_step           = 1;
+    options.eplb_test_mode              = true;  // Join the real background load worker.
+    options.eplb_balance_layer_per_step = 1;
+    ExpertBalancer balancer(2,
+                            4,
+                            4,
+                            0,
+                            0,
+                            config,
+                            {range.begin, range.end()},
+                            python_balancer,
+                            DataType::TYPE_FP16,
+                            QuantAlgo(),
+                            nullptr,
+                            options);
+    StatsOnlyModel model;
+    model.overall_expert_stats_.stats_buf.log_stats_buf = log_stats;
+    model.overall_expert_stats_.stats_buf.gpu_loads_buf = gpu_loads;
+    RtpLLMExecutorMetricsCollector collector;
+    for (int i = 0; i < 3; ++i)
+        balancer.stepForward(model, collector, true);
+    return balancer.getPlanStatus() == EplbPlanStatus::INIT;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(libth_eplb_stage_test, m) {
     registerExecCtxOps(m);
     m.def("exercise_stage", &exerciseStage);
+    m.def("exercise_direct_step", &exerciseDirectStep);
 }
 
 }  // namespace rtp_llm

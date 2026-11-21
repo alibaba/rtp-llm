@@ -13,6 +13,7 @@ MOE_STRATEGY_CHOICES = (
     "fp8_per_block_pure_cp",
     "fp8_per_block_pure_dp",
     "fp8_per_tensor_no_dp",
+    "fp8_per_channel_no_dp",
     "fp8_per_tensor_ep_low_latency",
     "fp8_per_tensor_ep_normal",
     "w4a8_int4_per_channel_no_dp",

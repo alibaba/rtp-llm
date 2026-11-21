@@ -272,6 +272,11 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         class OtherLinear(V41MXFP8Linear):
             pass
 
+        class CheckpointOwner(V41MXFP8Linear):
+            def __init__(self):
+                super().__init__()
+                self.v41_runtime_linear = V41MXFP8Linear()
+
         packages = {}
         for name in (
             "rtp_llm",
@@ -301,6 +306,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             (V41MXFP8Linear, pair),
             (V41MXFP8Linear, None),
             (OtherLinear, pair),
+            (CheckpointOwner, pair),
         ):
             with self.subTest(
                 linear=linear_cls.__name__, shared=result_pair is not None
@@ -313,6 +319,8 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 linear.forward.return_value = linear.forward_quantized.return_value = (
                     output
                 )
+                if linear_cls is CheckpointOwner:
+                    linear.v41_runtime_linear.forward_quantized.return_value = output
                 owner = SimpleNamespace(
                     n_heads=64,
                     head_dim=512,
@@ -322,8 +330,14 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 )
                 actual = namespace["_project_output"](owner, x, freqs, out=output)
                 self.assertIs(actual, output)
-                if linear_cls is V41MXFP8Linear and result_pair is not None:
-                    linear.forward_quantized.assert_called_once_with(*pair, out=output)
+                if (
+                    linear_cls in (V41MXFP8Linear, CheckpointOwner)
+                    and result_pair is not None
+                ):
+                    consumer = getattr(linear, "v41_runtime_linear", linear)
+                    consumer.forward_quantized.assert_called_once_with(
+                        *pair, out=output
+                    )
                     linear.forward.assert_not_called()
                     projection.grouped_output_projection.assert_not_called()
                 else:
@@ -585,6 +599,52 @@ class WoAQuantCudaTest(unittest.TestCase):
             op.try_grouped_quant(a, (self.w, self.sw)),
             self.baseline(a),
         )
+
+    @torch.inference_mode()
+    def test_checkpoint_owned_wo_b_matches_native_prefill_projection(self):
+        from safetensors.torch import save_file
+
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+        from rtp_llm.models_py.new_models.deepseek_v41.linear_owner import (
+            Dsv41MXFP8Linear,
+        )
+        from rtp_llm.models_py.weight_mapper import get_all_weights
+
+        # Use a smaller output vocabulary-independent projection width, but
+        # the actual 8192-wide activation and rank-local 392-token CP grid.
+        weight = (torch.randn(128, 8192) * 0.1).to(torch.float8_e4m3fn)
+        scale = (
+            torch.arange(4 * 256, dtype=torch.int32)
+            .remainder(7)
+            .add(124)
+            .byte()
+            .view(torch.float8_e8m0fnu)
+            .reshape(4, 256)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "model.safetensors")
+            save_file({"weight": weight, "scale": scale}, path)
+            owner = Dsv41MXFP8Linear(8192, 128).cuda()
+            owner.load_weights(
+                get_all_weights([path], read_spec_resolver=owner.checkpoint_read_spec)
+            )
+            owner.process_weights_after_loading()
+        legacy = V41MXFP8Linear(weight.cuda(), scale.cuda())
+        self.assertIs(type(owner.v41_runtime_linear), type(legacy))
+        self.assertIs(owner.v41_runtime_linear.weight, owner.weight)
+        self.assertTrue(torch.equal(legacy.weight_scales, owner.weight_scales))
+        x = torch.randn(392, 64, 512, device="cuda", dtype=torch.bfloat16)
+        angles = torch.randn(392, 32, device="cuda")
+        freqs = torch.polar(torch.ones_like(angles), angles)
+        args = dict(n_heads=64, head_dim=512, _wo_a_stk_w=self.w, _wo_a_stk_s=self.sw)
+        new = AttentionV41FP8._project_output(
+            SimpleNamespace(**args, wo_b=owner), x, freqs
+        )
+        old = AttentionV41FP8._project_output(
+            SimpleNamespace(**args, wo_b=legacy), x, freqs
+        )
+        self.assertTrue(torch.equal(new, old))
 
     @torch.inference_mode()
     def test_public_bf16_api_and_explicit_wo_b_consumer(self):

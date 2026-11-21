@@ -1,4 +1,10 @@
 #include "rtp_llm/cpp/normal_engine/speculative/MtpCompute.h"
+#include "rtp_llm/cpp/normal_engine/speculative/V4SmokeWitness.h"
+#include "rtp_llm/cpp/normal_engine/speculative/V41CacheRoundTrace.h"
+#include <fstream>
+#include <functional>
+#include <iomanip>
+#include <openssl/sha.h>
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
@@ -74,6 +80,212 @@ GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs
 }
 
 namespace {
+
+struct V4AuditScores {
+    double  a, b;
+    int64_t argmax;
+};
+struct V4AuditRow {
+    int           slot, batch, col, width;
+    int64_t       row, a, b;
+    V4AuditScores raw, masked;
+    std::string   digest;
+    int64_t       num_rows;
+    bool          verify;
+    std::string   committed_chain;
+    int           history_last_id;
+};
+
+// Only the actual target sampler reaches these two sites. The verify histories
+// include proposals preceding each individual row, not just committed tokens.
+std::vector<V4AuditRow> collectV4SmokeRows(
+    const StreamGroups& streams, const SamplerInputs& in, const torch::Tensor& raw_logits, int width, bool verify) {
+    using namespace v4_smoke_witness;
+    std::vector<V4AuditRow> found;
+    if (!enabled() || width <= 0)
+        return found;
+    const auto    all     = streams.allStreams();
+    const int64_t nrows   = static_cast<int64_t>(all.size()) * width;
+    const auto    per_row = [nrows](const torch::Tensor& t) {
+        return t.defined() && t.dim() == 1 && t.numel() == nrows && t.scalar_type() == at::kInt && t.device().is_cpu()
+               && t.is_contiguous();
+    };
+    if (!raw_logits.defined() || !in.logits.defined() || raw_logits.dim() != 2 || in.logits.dim() != 2
+        || nrows != in.logits.size(0) || nrows != raw_logits.size(0) || raw_logits.size(1) < in.logits.size(1)
+        || !in.token_ids.defined() || in.token_ids.dim() != 2 || in.token_ids.size(0) != nrows
+        || in.token_ids.scalar_type() != at::kInt || !per_row(in.input_lengths) || !per_row(in.sequence_lengths)
+        || (verify && raw_logits.is_alias_of(in.logits)))
+        return found;
+    for (const auto& stream : all)
+        if (stream->maxBatchSize() != 1)
+            return found;
+    int batch = -1;
+    for (const auto& stream : all) {
+        ++batch;
+        if (stream->isMiddleChunk())
+            continue;
+        for (int col = 0; col < width; ++col) {
+            const int64_t row    = batch * width + col;
+            const int     prompt = in.input_lengths.data_ptr<int32_t>()[row];
+            const int     length = in.sequence_lengths.data_ptr<int32_t>()[row];
+            if (!((prompt == 21 && length == 21) || (verify && prompt == 18 && length == 55))
+                || length > in.token_ids.size(1))
+                continue;
+            const auto&            config  = *stream->generateConfig();
+            const std::string_view grammar = config.json_schema    ? std::string_view(*config.json_schema) :
+                                             config.structural_tag ? std::string_view(*config.structural_tag) :
+                                                                     "";
+            const auto             has     = [&](const char* s) { return grammar.find(s) != std::string_view::npos; };
+            const auto             kind    = has("advice") && has("weather") && has("city") ? Grammar::Weather :
+                                             has("anyOf") && has("array")                   ? Grammar::Object :
+                                                                                              Grammar::Other;
+            if (kind == Grammar::Other)
+                continue;
+            const auto history = in.token_ids[row].narrow(0, 0, length).cpu().contiguous();
+            const int  index   = slot(prompt, length, history.data_ptr<int32_t>(), kind, verify);
+            if (index < 0)
+                continue;
+            const int a = index == 17 ? 3315 : 24313;
+            const int b = index == 17 ? 2642 : 2054;
+            if (std::max(a, b) >= in.logits.size(1))
+                continue;
+            // The two model columns and one argmax are the ONLY data copied.
+            auto scores = [&](const torch::Tensor& matrix) -> V4AuditScores {
+                const auto t = matrix[row];
+                return {t[a].item<double>(), t[b].item<double>(), t.argmax().item<int64_t>()};
+            };
+            auto raw = scores(raw_logits.narrow(1, 0, in.logits.size(1)));
+            // Serialize int32 explicitly, independent of the host endianness.
+            unsigned char bytes[55 * 4], digest[SHA256_DIGEST_LENGTH];
+            for (int i = 0; i < length; ++i)
+                for (int j = 0; j < 4; ++j)
+                    bytes[i * 4 + j] = static_cast<uint32_t>(history.data_ptr<int32_t>()[i]) >> (j * 8);
+            auto hashed = [&](int n) {
+                SHA256(bytes, n * 4, digest);
+                std::ostringstream hex;
+                for (auto v : digest)
+                    hex << std::hex << std::setfill('0') << std::setw(2) << static_cast<unsigned>(v);
+                return hex.str();
+            };
+            std::string chain;
+            if (index == 17)
+                for (int n = prompt; n <= length; ++n)
+                    chain += (n == prompt ? "" : ",") + hashed(n);
+            found.push_back({index,
+                             batch,
+                             col,
+                             width,
+                             row,
+                             a,
+                             b,
+                             raw,
+                             verify ? scores(in.logits) : raw,
+                             hashed(length),
+                             nrows,
+                             verify,
+                             std::move(chain),
+                             history.data_ptr<int32_t>()[length - 1]});
+        }
+    }
+    return found;
+}
+
+void emitV4SmokeRows(const std::vector<V4AuditRow>&                         rows,
+                     const torch::Tensor&                                   sampled,
+                     const torch::Tensor&                                   accept_len    = {},
+                     const torch::Tensor&                                   accept_tokens = {},
+                     const torch::Tensor&                                   draft_tokens  = {},
+                     const torch::Tensor&                                   dspark_aux    = {},
+                     const torch::Tensor&                                   lm_hidden     = {},
+                     int                                                    graph_path    = -1,
+                     const std::function<torch::Tensor(int64_t, int, int)>& live_row      = {}) {
+    const auto integers = [](const torch::Tensor& t) {
+        return t.defined() && (t.scalar_type() == at::kInt || t.scalar_type() == at::kLong);
+    };
+    if (rows.empty() || !integers(sampled) || sampled.dim() != 2 || sampled.size(1) == 0)
+        return;
+    for (const auto& w : rows) {
+        const bool verify = w.verify;
+        if (sampled.size(0) != w.num_rows || w.row < 0 || w.row >= w.num_rows || w.width <= 0 || w.col < 0
+            || w.col >= w.width || w.batch < 0 || w.num_rows % w.width != 0 || w.batch >= w.num_rows / w.width)
+            continue;
+        if (verify
+            && (!integers(accept_len) || accept_len.dim() != 1 || accept_len.numel() != w.num_rows / w.width
+                || !integers(accept_tokens) || accept_tokens.dim() != 2 || accept_tokens.size(0) != accept_len.numel()
+                || accept_tokens.size(1) != w.width))
+            continue;
+        const int accepted = verify ? accept_len[w.batch].item<int>() : 1;
+        if (!v4_smoke_witness::emitted(w.col, accepted, w.width))
+            continue;
+        const int          target  = sampled[w.row][sampled.size(1) - 1].item<int>();
+        const int          emitted = verify ? accept_tokens[w.batch][w.col].item<int>() : target;
+        std::ostringstream out;
+        out << std::setprecision(10) << "v4_target_witness_v1 case=" << w.slot
+            << " phase=" << (verify ? "verify" : "prefill")
+            << " stage=raw_target_logits prefix_sha256_le_i32=" << w.digest
+            << " canonical_prefix=" << (w.digest == v4_smoke_witness::sha(w.slot))
+            << " output_token_1based=" << (w.slot == 17 ? 38 : 1) << " batch=" << w.batch << " row=" << w.row
+            << " col=" << w.col << " width=" << w.width << " a_id=" << w.a << " b_id=" << w.b << " raw_a=" << w.raw.a
+            << " raw_b=" << w.raw.b << " raw_argmax=" << w.raw.argmax;
+        if (verify)
+            out << " masked_a=" << w.masked.a << " masked_b=" << w.masked.b << " masked_argmax=" << w.masked.argmax
+                << " accept_len=" << accepted;
+        out << " sampled_target=" << target << " emitted=" << emitted;
+        if (verify && w.slot == 17) {
+            const bool bonus = w.col == w.width - 1;
+            if (!integers(draft_tokens) || draft_tokens.dim() != 2 || draft_tokens.size(0) != accept_len.numel()
+                || draft_tokens.size(1) != w.width - 1)
+                continue;
+            out << " draft_kind=" << (bonus ? "bonus" : "proposal")
+                << " draft_id=" << (bonus ? -1 : draft_tokens[w.batch][w.col].item<int>())
+                << " committed_sha_chain=" << w.committed_chain;
+            auto valid_rows = [&](const torch::Tensor& t, int64_t cols) {
+                return t.defined() && t.dim() == 2 && t.size(0) == w.num_rows && t.size(1) == cols
+                       && (t.scalar_type() == at::kBFloat16 || t.scalar_type() == at::kFloat);
+            };
+            auto hash_hidden = [](const torch::Tensor& t) {
+                auto          c = t.detach().contiguous().cpu();
+                unsigned char digest[SHA256_DIGEST_LENGTH];
+                SHA256(reinterpret_cast<const unsigned char*>(c.data_ptr()), c.numel() * c.element_size(), digest);
+                std::ostringstream h;
+                for (unsigned char v : digest)
+                    h << std::hex << std::setfill('0') << std::setw(2) << static_cast<unsigned>(v);
+                return h.str();
+            };
+            out << " verify_exec=" << (graph_path == 1 ? "graph_runner" : graph_path == 0 ? "eager" : "unobserved");
+            // Existing DSpARK target graph output: three mean-over-HC segments in
+            // checkpoint dspark_target_layer_ids order (40,41,42), never draft hidden.
+            if (valid_rows(dspark_aux, 3 * 4096)) {
+                out << " aux_dtype=" << (dspark_aux.scalar_type() == at::kBFloat16 ? "bf16" : "fp32");
+                for (int i = 0; i < 3; ++i)
+                    out << " live_aux" << (40 + i)
+                        << "_sha=" << hash_hidden(dspark_aux[w.row].narrow(0, i * 4096, 4096));
+                if (live_row) {
+                    // Only this accepted row leaves the device. Corroborate its
+                    // raw residual bytes with the independent native DSpARK export.
+                    auto layers = live_row(w.row, w.width, w.history_last_id);
+                    if (layers.defined() && layers.scalar_type() == at::kBFloat16 && layers.dim() == 3
+                        && layers.size(0) == 44 && layers.size(1) == 4 && layers.size(2) == 4096
+                        && layers.device() == dspark_aux.device()
+                        && torch::equal(layers.narrow(0, 41, 3).mean(1).reshape({3 * 4096}), dspark_aux[w.row])) {
+                        const auto single = layers.detach().contiguous().cpu();
+                        out << " live_raw_hc_sha=";
+                        for (int i = 0; i < 44; ++i)
+                            out << (i ? "," : "") << hash_hidden(single[i]);
+                    }
+                }
+            }
+            if (valid_rows(lm_hidden, 4096))
+                out << " head_dtype=" << (lm_hidden.scalar_type() == at::kBFloat16 ? "bf16" : "fp32")
+                    << " live_lm_input_sha=" << hash_hidden(lm_hidden[w.row]);
+        }
+        RTP_LLM_LOG_INFO("%s", out.str().c_str());
+        std::ofstream(std::string(std::getenv("TEST_UNDECLARED_OUTPUTS_DIR")) + "/v4-target-witness-"
+                          + std::to_string(w.slot) + "-" + (verify ? "verify" : "prefill") + ".txt",
+                      std::ios::app)
+            << out.str() << '\n';
+    }
+}
 
 bool readEnvFlag(const char* env_name, const char* log_tag, const char* label, bool default_enabled = false) {
     const char* env = std::getenv(env_name);
@@ -647,11 +859,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (params.eplb_config.enable_eplb() && params.model_config_.moe_style != 0) {
         // use first moe layer weight as moe weight type
-        int         first_moe_layer = params.model_config_.moe_layer_index.front();
-        const auto& moe_kernel      = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
-        auto        moe_weight_type = torchDTypeToDataType(moe_kernel.dtype());
-        bool        is_gated_activation = params.model_config_.isGatedActivation();
-        auto        moe_inter_size      = is_gated_activation ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+        int first_moe_layer = params.model_config_.moe_layer_index.front();
+        // Python-owned experts do not populate legacy DenseWeights.
+        DataType moe_weight_type = DataType::TYPE_FP16;
+        int64_t  moe_inter_size  = 0;
+        if (!ExpertBalancerPythonWrapper::usesDirectInstall(params.py_eplb)) {
+            const auto& moe_kernel = params.gpt_weights.layers[first_moe_layer].ffn_weights.moe_gate_weight->kernel;
+            moe_weight_type        = torchDTypeToDataType(moe_kernel.dtype());
+            moe_inter_size = params.model_config_.isGatedActivation() ? moe_kernel.size(1) / 2 : moe_kernel.size(1);
+        }
 
         expert_balancer_ =
             std::make_shared<ExpertBalancer>(params.model_config_.expert_num,
@@ -1032,6 +1248,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(tp_sync_input)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty();
+        if (v41_cache_round::enabled() && is_dspark_ && role_type_ == RoleType::PREFILL && isTpRank0() && !warm_up_
+            && streams.size() == 1 && !streams.front()->isFakeStream()) {
+            const auto input              = streams.front()->generateInput();
+            model_input.v41_cache_fixture = input && v41_cache_round::matchesDecodePrompt(input->input_ids);
+        }
         tpSyncModelInputs(model_input, parallelism_config_);
         target_only = model_input.skip_lm_head;
         if (model_input.skip_run) {
@@ -1121,7 +1342,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                     sampler_input,
                     batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+                const auto witness = collectV4SmokeRows(stream_groups, sampler_input, sampler_input.logits, 1, false);
                 sampler_output     = std::move(sampler_->forward(sampler_input));
+                emitV4SmokeRows(witness, sampler_output.token_ids);
                 update_draft_input = !is_dspark_;
             }
         }
@@ -1431,8 +1654,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return target_execution_status;
     }
 
-    mtp::DSparkRoundState                     dspark_round_state;
-    size_t                                    batch_size = 0;
+    mtp::DSparkRoundState dspark_round_state;
+    size_t                batch_size = 0;
 
     if (is_dspark_) {
         // Proposal and target verification are two model phases with different
@@ -1448,6 +1671,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     batch_stream_processor_->buildDSparkRoundState(stream_groups, model_input, buffer_holder_);
                 batch_stream_processor_->prepareDSparkProposeModelInput(
                     dspark_round_state, proposal_input, buffer_holder_);
+                if (v41_cache_round::enabled() && role_type_ == RoleType::DECODE && !warm_up_ && streams.size() == 1
+                    && !streams.front()->isFakeStream()) {
+                    const auto input                 = streams.front()->generateInput();
+                    proposal_input.v41_cache_fixture = input && v41_cache_round::matchesDecodePrompt(input->input_ids);
+                }
                 ensureModelInputsOnCuda(proposal_input, "decode.prepare_dspark_proposal");
             }
             tpSyncModelInputs(proposal_input, parallelism_config_);
@@ -1469,8 +1697,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_target_and_tp_sync)");
             if (isTpRank0()) {
+                bool fixed_candidates = false;
+                if (v41_cache_round::fixedTarget() && role_type_ == RoleType::DECODE && !warm_up_ && streams.size() == 1
+                    && !streams.front()->isFakeStream()) {
+                    const auto input = streams.front()->generateInput();
+                    fixed_candidates = input
+                                       && v41_cache_round::fixFirstCandidates(draft_sampler_output.token_ids,
+                                                                              dspark_round_state.committed_ends,
+                                                                              dspark_round_state.anchors,
+                                                                              input->input_ids);
+                }
                 batch_stream_processor_->prepareDSparkTargetVerifyModelInput(
                     dspark_round_state, model_input, draft_sampler_output.token_ids, buffer_holder_);
+                if (fixed_candidates)
+                    TORCH_CHECK(v41_cache_round::tokenArray(model_input.combo_tokens) == "[1606,11556,2521,304]",
+                                "actual target-verify input did not consume the fixed candidates");
                 draft_token_ids_t = model_input.combo_tokens.reshape(
                     {static_cast<int64_t>(batch_size), static_cast<int64_t>(propose_step_ + 1)});
                 ensureModelInputsOnCuda(model_input, "decode.prepare_dspark_target_verify");
@@ -1735,6 +1976,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 }
                 auto& sampler_input = sampler_input_status.value();
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+                const auto witness =
+                    collectV4SmokeRows(stream_groups, sampler_input, model_output.logits, propose_step_ + 1, true);
+                const auto v41_round = (is_dspark_ && role_type_ == RoleType::DECODE && v41_cache_round::enabled()) ?
+                                                    v41_cache_round::prepare(sampler_input) :
+                                                    std::nullopt;
                 sampler_output           = std::move(sampler_->forward(sampler_input));
                 sampler_output.all_probs = sampler_output.all_probs.reshape(
                     {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
@@ -1747,6 +1993,25 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                                           sampler_output,
                                           *spec_logits_result,
                                           speculative_sampler_output);
+                emitV4SmokeRows(witness,
+                                sampler_output.token_ids,
+                                speculative_sampler_output.accept_len,
+                                speculative_sampler_output.accept_tokens,
+                                draft_sampler_output.token_ids,
+                                model_output.all_hidden_states,
+                                model_output.hidden_states,
+                                model_output.target_verify_graph_path,
+                                [&](int64_t row, int width, int last_id) {
+                                    const auto py = dynamic_cast<PyWrappedModel*>(model_.get());
+                                    return py ? py->getV4SmokeVerifyRow(row, width, last_id) : torch::Tensor{};
+                                });
+                if (v41_round) {
+                    v41_cache_round::finish(*v41_round,
+                                            draft_sampler_output.token_ids,
+                                            sampler_output.token_ids,
+                                            speculative_sampler_output.accept_len,
+                                            speculative_sampler_output.accept_tokens);
+                }
             }
         }
         return absl::OkStatus();
@@ -2149,7 +2414,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     model_input.is_target_verify = false;
     return model_output;
 }
-
 
 bool MtpExecutor::asyncPrepareAllowed(bool requested, bool target_commit_hooks) {
     return requested && !target_commit_hooks;

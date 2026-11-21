@@ -56,6 +56,23 @@ py_test(
 )
 
 py_test(
+    name = "v41_startup_memory_test",
+    srcs = ["v41_startup_memory.py", "v41_startup_memory_test.py"],
+)
+
+py_test(
+    name = "v41_causal_protocol_test",
+    srcs = [
+        "scripts/compare_v41_causal.py",
+        "scripts/test_v41_causal.py",
+    ],
+    main = "scripts/test_v41_causal.py",
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:safetensors"],
+    env = {"GPU_COUNT": "0", "CUDA_VISIBLE_DEVICES": ""},
+    tags = ["manual"],
+)
+
+py_test(
     name = "comparison_utils_test",
     srcs = [
         "comparison_utils.py",
@@ -131,6 +148,7 @@ test_suite(
         ":smoke_pp_ci",
         ":smoke_h20_kimi_linear",
         ":smoke_h20_grammar_heavy",
+        ":qwen3_235b_full_vocab_eagle3",
         ":smoke_cuda_remote_cache",
         ":smoke_h20_jit_remote_cache",
         ":smoke_rocm_basic",
@@ -150,6 +168,14 @@ test_suite(
         ":smoke_ppu_qwen35_basic",
         ":smoke_ppu_qwen35_func",
     ],
+)
+
+custom_smoke_test(
+    name = "qwen3_235b_full_vocab_eagle3",
+    main = "qwen3_moe_eagle3_contract_test.py",
+    smoke_args = "--tp_size 8 --ep_size 8 --world_size 8 --act_type BF16 --load_method fastsafetensors --max_seq_len 2048 --seq_size_per_block 128 --enable_cuda_graph 0 --reuse_cache 0",
+    gpu_type = ["H20"],
+    data = ["//rtp_llm:sdk", ":smoke_framework_srcs"],
 )
 
 # Supply QWEN4_EXP_CHECKPOINT for an expert-only ModelOpt NVFP4 checkpoint.
@@ -213,6 +239,94 @@ custom_smoke_test(
     # solo cold run (~1777s) past 3600s; same cold-NAS-variance reason
     # v4_pro carries 3600 over the 1800 default.
     test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "5400"},
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_dspark_contract_test.py",
+        "v41_startup_memory.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_fixed_target_sm100_arm",
+    main = "deepseek_v41_fixed_target_test.py",
+    smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
+    gpu_type = ["SM100_ARM_CU13"],
+    tags = ["manual", "dsv41_cuda13", "v41_fixed_target"],
+    test_envs = {
+        "RTP_TEST_WATCHDOG_SECONDS": "5400",
+        "RTP_V41_CACHE_TRACE": "1",
+        "RTP_V41_FIXED_TARGET": "1",
+        "RTP_V41_EXPECTED_LOADER": "newfst",
+    },
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_dspark_contract_test.py",
+        "scripts/compare_v41_cache_rounds.py",
+        "scripts/compare_v41_fixed_target.py",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_first_draft_sm100_arm",
+    main = "deepseek_v41_first_draft_test.py",
+    smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
+    gpu_type = ["SM100_ARM_CU13"],
+    tags = ["manual", "dsv41_cuda13", "v41_first_draft"],
+    test_envs = {
+        "RTP_TEST_WATCHDOG_SECONDS": "5400",
+        "RTP_V41_CACHE_TRACE": "1",
+        "RTP_V41_EXPECTED_LOADER": "newfst",
+    },
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_dspark_contract_test.py",
+        "scripts/compare_v41_cache_rounds.py",
+        "//rtp_llm/test/smoke/arm_causal_inputs:v41draft",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_cache_rounds_sm100_arm",
+    main = "deepseek_v41_cache_rounds_test.py",
+    smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
+    gpu_type = ["SM100_ARM_CU13"],
+    tags = ["manual", "dsv41_cuda13", "v41_cache_rounds"],
+    test_envs = {
+        "RTP_TEST_WATCHDOG_SECONDS": "5400",
+        "RTP_V41_CACHE_TRACE": "1",
+        "RTP_V41_EXPECTED_LOADER": "newfst",
+    },
+    data = [
+        "//rtp_llm:sdk",
+        "data/model/deepseek_v41/full_feature_cp2_dp2.json",
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_dspark_contract_test.py",
+        "scripts/compare_v41_cache_rounds.py",
+        "//rtp_llm/test/smoke/arm_causal_inputs:v41",
+    ],
+)
+
+custom_smoke_test(
+    name = "deepseek_v41_long_prefill_logits_sm100_arm",
+    main = "deepseek_v41_long_logits_test.py",
+    smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 24576 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2 --sp_type dspark --sp_model_type deepseek_v41_dspark --sp_act_type BF16 --gen_num_per_cycle 3",
+    gpu_type = ["SM100_ARM_CU13"],
+    tags = ["manual", "dsv41_cuda13", "v41_long_logits_probe"],
+    test_envs = {
+        "RTP_TEST_WATCHDOG_SECONDS": "5400",
+        "RTP_V41_LONG_PREFILL_PROBE": "1",
+        "RTP_V41_EXPECTED_LOADER": "newfst",
+    },
     data = [
         "//rtp_llm:sdk",
         "data/model/deepseek_v41/full_feature_cp2_dp2.json",

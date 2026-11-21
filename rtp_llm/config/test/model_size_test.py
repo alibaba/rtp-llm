@@ -8,7 +8,7 @@ from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
 from rtp_llm.config.model_config import ModelConfig, build_model_config
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.model_loader.loader import ModelLoader
+from rtp_llm.models_py.model_loader import NewModelLoader
 from rtp_llm.ops import ProfilingDebugLoggingConfig, VitSeparation
 
 
@@ -455,61 +455,28 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
             self.assertEqual((config2.expert_weight_dtype or "").strip(), "")
 
 
-class WeightConvertDeviceDecisionReplayTest(unittest.TestCase):
-    """Replay the v4_pro smoke failure with the measured CI numbers.
-
-    The v4_pro_cp4_ep4_basic_sm100 case runs cp4/ep4 on SM103 (~288GB
-    cards).  Measured free device memory at load time: 265.97GiB; largest
-    of the 66 checkpoint files: 14118826460 bytes (~13.15GiB).  Before the
-    expert-width fix the estimate was 1561.85GB, i.e. 363.65GiB per rank:
-    ``_choose_weight_convert_device`` returned cpu, which short-circuited
-    the AUTO chain's fastsafetensors condition (loader.py
-    ``_load_weight``) and left the case on the scratch path (1370s loads
-    vs the fastsafetensors ~30s scale).  With experts priced at their real
-    FP4 width the estimate drops to ~850GB (197.9GiB/rank) and both gates
-    pass.
-    """
-
-    FREE_MEM_GIB = 265.97
-    MAX_FILE_BYTES = 14118826460
-
-    @staticmethod
-    def _loader(config, free_gib, max_file_bytes):
-        # Bypass ModelLoader.__init__: only the fields touched by the two
-        # decision helpers are populated, no GPU or database needed.
-        loader = object.__new__(ModelLoader)
-        loader._load_config = SimpleNamespace(
-            force_cpu_load_weights=False,
-            num_layers=config.num_layers,
-            layer_range=range(config.num_layers),
-            ep_size=4,
-            tp_size=4,
-            ffn_tp_size=4,
-            exported_device=SimpleNamespace(
-                get_mem_info=lambda: SimpleNamespace(free=free_gib * 1024**3)
-            ),
-            database=SimpleNamespace(get_max_file_size=lambda: max_file_bytes),
-        )
-        loader._weights_info = SimpleNamespace(model_config=config)
-        return loader
+class NewLoaderDeviceBudgetTest(unittest.TestCase):
+    """Replay the observed V4-Pro cp4/ep4 memory margins without a GPU."""
 
     def test_v4_pro_smoke_decision_replay(self):
+        free = int(265.97 * 1024**3)
+        largest_shard = 14118826460
         with TemporaryDirectory() as ckpt_path:
             _write_quant_config(ckpt_path)
             config = _moe_model_config(ckpt_path, V4_PRO_SHAPE, "fp4")
-            loader = self._loader(config, self.FREE_MEM_GIB, self.MAX_FILE_BYTES)
-
-            # Corrected estimate: ~850.05GB -> 197.9GiB/rank < 0.9 * 265.97.
-            self.assertEqual(loader._choose_weight_convert_device("cuda:0"), "cuda:0")
-            # fastsafetensors margin: 265.97GiB - 197.9GiB = 68.1GiB free
-            # after weights vs 3 * 13.15GiB for the largest file.
-            self.assertTrue(loader._is_memory_enough_for_fastsafetensor())
-
-            # Pre-fix estimate (experts at the model-wide 8-bit width):
-            # 363.65GiB/rank exceeds 0.9 * 265.97GiB and forces the cpu
-            # convert device -- the exact fault this fix removes.
+            resident = config.eval_model_weight_size_per_rank(4, 4)
+            self.assertLess(resident, 0.9 * free)
+            self.assertLess(
+                NewModelLoader.fst_staging_required_bytes(resident, largest_shard, 0),
+                free,
+            )
             config.expert_weight_dtype = None
-            self.assertEqual(loader._choose_weight_convert_device("cuda:0"), "cpu")
+            overestimated = config.eval_model_weight_size_per_rank(4, 4)
+            self.assertGreater(overestimated, 0.9 * free)
+            self.assertGreater(
+                NewModelLoader.fst_staging_required_bytes(overestimated, largest_shard, 0),
+                free,
+            )
 
 
 class Fp4ExpertStorageDetectionTest(unittest.TestCase):

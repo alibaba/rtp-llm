@@ -42,7 +42,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_jit_warmup im
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase
 from .mega_moe import (
@@ -129,10 +129,10 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
         self._maybe_warmup_jit_once()
 
     def _setup_shared_expert_weights(self, layer_weights, deep_gemm, D, inter):
-        w13_fp8 = layer_weights.pop(W.ffn_w13)
-        w13_scale = layer_weights.pop(W.ffn_s13)
-        w2_fp8 = layer_weights.pop(W.ffn_w2)
-        w2_scale = layer_weights.pop(W.ffn_s2)
+        w13_fp8 = take_weight(layer_weights, "shared_w13")
+        w13_scale = take_weight(layer_weights, "shared_s13")
+        w2_fp8 = take_weight(layer_weights, "shared_w2")
+        w2_scale = take_weight(layer_weights, "shared_s2")
 
         shared_inter = inter * self.cfg.n_shared_experts
         expected_w13 = (2 * shared_inter, D)

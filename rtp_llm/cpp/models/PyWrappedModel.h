@@ -91,6 +91,7 @@ public:
     PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor              getV4SmokeVerifyRow(int64_t row, int width, int last_id);
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
@@ -158,6 +159,7 @@ private:
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
     const bool                                      owns_py_model_;
+    bool                                            direct_eplb_stats_ = false;
     const size_t                                    layer_num_;
     const int64_t                                   pp_size_;
     const int64_t                                   hidden_size_;
@@ -329,11 +331,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         residual_scale_fp32_ = residual_tensor;
         residual_scale_      = residual_tensor.to(dataTypeToTorchType(description_.data_type));
     }
-    if (params.description.ffn_conf.moe_configs.has_value()) {
-        auto moe_conf         = params.description.ffn_conf.moe_configs.value();
-        overall_expert_stats_ = execCreateMoeExpertStates(
-            {layer_num_, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
-    }
 
     if (setenv("PYTHONUNBUFFERED", "TRUE", 1) != 0) {
         RTP_LLM_LOG_WARNING("Failed to set PYTHONUNBUFFERED environment variable on POSIX.");
@@ -360,6 +357,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_             = py_instance;
+    if (params.description.ffn_conf.moe_configs.has_value()) {
+        direct_eplb_stats_ = py::hasattr(py_model_, "_newloader_eplb_bind_stats");
+        auto stats_layers =
+            direct_eplb_stats_ ? py_model_.attr("_newloader_eplb_num_layers").cast<size_t>() : layer_num_;
+        auto moe_conf         = params.description.ffn_conf.moe_configs.value();
+        overall_expert_stats_ = execCreateMoeExpertStates(
+            {stats_layers, moe_conf.ep_size, moe_conf.expert_num, moe_conf.expert_num + moe_conf.extra_expert_num});
+        if (direct_eplb_stats_) {
+            py_model_.attr("_newloader_eplb_bind_stats")(overall_expert_stats_.stats_buf.log_stats_buf,
+                                                         overall_expert_stats_.stats_buf.gpu_loads_buf);
+        }
+    }
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.

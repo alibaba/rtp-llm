@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import CompressorFP8, _linear_bf16_bf16_fp32
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
-from rtp_llm.utils.model_weight import W
+# The legacy W mapping is imported only for the descriptor-backed constructor.
 
 from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import compress4, compress4_decode, norm_rope_store, paged_score, quantize_q, topk_bf16, topk_decode
 from rtp_llm.models_py.kernels.ppu.attention.ppu_fp4_indexer_cache import build_decode_plan, build_plans, gather_k
@@ -42,14 +42,17 @@ class PpuFP4Compressor(CompressorFP8):
             self._kv_eb,
         )
 
-    def __init__(self, *args, compressor_weights, **kwargs):
-        super().__init__(*args, compressor_weights=compressor_weights, **kwargs)
+    def __init__(self, *args, compressor_weights, owned=None, **kwargs):
+        super().__init__(*args, compressor_weights=compressor_weights, owned=owned, **kwargs)
         if (self.head_dim, self.rope_head_dim, self.compress_ratio) != (128, 64, 4):
             raise ValueError("FP4 Indexer compressor requires head128/rope64/C4")
         self._pool_entry_bytes = 68
-        self.norm.weight = torch.nn.Parameter(
-            compressor_weights["norm"].float().contiguous(), requires_grad=False
-        )
+        if owned is None:
+            self.norm.weight = torch.nn.Parameter(
+                compressor_weights["norm"].float().contiguous(), requires_grad=False
+            )
+        elif self.norm.weight.dtype != torch.float32:
+            raise TypeError("PPU FP4 indexer compressor requires an FP32 norm")
         # SG reorders overlap/current APE rows once after loading, privately.
         self.ape = torch.nn.Parameter(
             torch.cat(self.ape.chunk(2, dim=-1), dim=0).contiguous(),
@@ -144,10 +147,11 @@ class PpuFP4Indexer(IndexerFP8):
     _request_local_scoring = True
     _batch_mtp_queries = False
 
-    def __init__(self, *args, layer_weights, **kwargs):
+    def __init__(self, *args, layer_weights, owned=None, **kwargs):
         super().__init__(
             *args,
             layer_weights=layer_weights,
+            owned=owned,
             compressor_factory=PpuFP4Compressor,
             **kwargs,
         )
@@ -156,9 +160,15 @@ class PpuFP4Indexer(IndexerFP8):
         if not callable(getattr(deep_gemm, "fp8_fp4_mqa_logits", None)):
             raise RuntimeError("PPU DeepGEMM FP4 MQA is required")
         self._score = deep_gemm.fp8_fp4_mqa_logits
-        self.weights_proj = (
-            layer_weights[W.v4_indexer_weights_proj_w].to(torch.bfloat16).contiguous()
-        )
+        if owned is not None:
+            # Unlike the FP8 indexer, FP4 applies the scale in quantize_q().
+            self.weights_proj = owned.weights_proj.weight
+        else:
+            from rtp_llm.utils.model_weight import W
+
+            self.weights_proj = (
+                layer_weights[W.v4_indexer_weights_proj_w].to(torch.bfloat16).contiguous()
+            )
         self.weight_scale = self.softmax_scale * self.n_heads**-0.5
 
     def forward(

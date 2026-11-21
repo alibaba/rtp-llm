@@ -62,8 +62,8 @@ struct GptModelInitParams {
     RuntimeConfig                                runtime_config;
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
-    int64_t                                      max_seq_len  = 0;
-    int64_t                                      hidden_size  = 0;
+    int64_t                                      max_seq_len = 0;
+    int64_t                                      hidden_size = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -182,6 +182,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlOpaqueKvCacheStore  = 1u << 9,
     kControlShutdown            = 1u << 10,
     kControlMiddleChunkOnly     = 1u << 11,
+    kControlV41CacheFixture     = 1u << 12,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);

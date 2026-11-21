@@ -6,8 +6,10 @@ Hybrid architecture:
   - MoE FFN with sigmoid routing (layer 1+), Dense FFN (layer 0)
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -23,30 +25,6 @@ from rtp_llm.models_py.model_desc.block_map import (
 )
 from rtp_llm.models_py.model_desc.generic_moe import DecodeLayerOutput, GenericMoeLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import (
-    DenseMLP,
-    Embedding,
-    FMHAImplBase,
-    LinearFactory,
-    MlaAttention,
-    RMSResNorm,
-)
-from rtp_llm.models_py.triton_kernels.causal_conv1d import (
-    CausalConv1dMetadata,
-    causal_conv1d_fn,
-    causal_conv1d_update,
-    prepare_causal_conv1d_metadata,
-)
-from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
-from rtp_llm.models_py.triton_kernels.fla.block import (
-    load_initial_state_from_block_map,
-    store_ssm_state_to_block_map,
-)
-from rtp_llm.models_py.triton_kernels.kimi_kda import (
-    chunk_kda,
-    fused_kda_gate,
-    fused_recurrent_kda,
-)
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -55,14 +33,18 @@ from rtp_llm.ops import (
     LinearAttentionConfig,
     ParallelismConfig,
 )
-from rtp_llm.ops.compute_ops import (
-    LayerKVCache,
-    PyAttentionInputs,
-    PyModelInputs,
-    PyModelOutputs,
-)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
+
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules import FMHAImplBase
+    from rtp_llm.models_py.triton_kernels.causal_conv1d import CausalConv1dMetadata
+    from rtp_llm.ops.compute_ops import (
+        LayerKVCache,
+        PyAttentionInputs,
+        PyModelInputs,
+        PyModelOutputs,
+    )
 
 
 class KimiLinearMetadata(object):
@@ -185,6 +167,8 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             if kv_cache_tensor is not None
             else None
         )
+        from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_fn
+
         out = causal_conv1d_fn(
             x=mixed_qkv.transpose(0, 1),
             weight=self.conv_weights,
@@ -207,6 +191,12 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
     ) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.fla.block import (
+            load_initial_state_from_block_map,
+            store_ssm_state_to_block_map,
+        )
+        from rtp_llm.models_py.triton_kernels.kimi_kda import chunk_kda
+
         # Compute gate: [T, local_H*D] -> [1, T, local_H, D]
         g = forget_gate.view(
             1, forget_gate.shape[0], self.local_num_v_heads, self.head_k_dim
@@ -361,6 +351,8 @@ class KimiLinearKDADecode(KimiLinearKDABase):
 
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
+        from rtp_llm.models_py.triton_kernels.causal_conv1d import causal_conv1d_update
+
         out = causal_conv1d_update(
             mixed_qkv,
             conv_states.transpose(1, 2),
@@ -415,6 +407,8 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         beta_out = beta_out.view(batch, seq, self.local_num_v_heads)
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
+
+        from rtp_llm.models_py.triton_kernels.kimi_kda import fused_recurrent_kda
 
         core_attn_out, _ = fused_recurrent_kda(
             q=query.contiguous(),
@@ -524,6 +518,9 @@ class KimiLinearKDA(nn.Module):
         super().__init__()
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
+
+        from rtp_llm.models_py.modules import LinearFactory
+        from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 
         # Projections
         self.in_proj_qkv = LinearFactory.create_linear_from_weights(
@@ -683,6 +680,8 @@ class KimiLinearDecoderLayer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
+        from rtp_llm.models_py.modules import DenseMLP, MlaAttention, RMSResNorm
+
         self.layer_idx = layer_idx
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
@@ -795,6 +794,8 @@ class KimiLinearModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
         )
+        from rtp_llm.models_py.modules import Embedding, RMSResNorm
+
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
@@ -859,6 +860,10 @@ class KimiLinearModel(GptModelBase):
         prefill_conv1d_meta = None
         is_target_verify = attention_inputs.is_target_verify
         if attention_inputs.is_prefill and not is_target_verify:
+            from rtp_llm.models_py.triton_kernels.causal_conv1d import (
+                prepare_causal_conv1d_metadata,
+            )
+
             cu_seqlen_without_padding = attention_inputs.cu_seqlens_device
             prefill_conv1d_meta = prepare_causal_conv1d_metadata(
                 query_start_loc=cu_seqlen_without_padding,

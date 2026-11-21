@@ -21,6 +21,7 @@ from .fp8_per_block import (
     CudaFp8PerBlockPureCPStrategy,
     CudaFp8PerBlockPureDPStrategy,
 )
+from .fp8_per_channel import CudaFp8PerChannelNoDPStrategy
 from .fp8_per_tensor import (
     CudaFp8PerTensorEpLowLatencyStrategy,
     CudaFp8PerTensorEpNormalStrategy,
@@ -51,6 +52,7 @@ __all__ = [
     "CudaFp8PerBlockPureDPStrategy",
     "CudaFp8PerBlockEpLowLatencyStrategy",
     "CudaFp8PerBlockEpNormalStrategy",
+    "CudaFp8PerChannelNoDPStrategy",
     # FP8 PerTensor
     "CudaFp8PerTensorNoDPStrategy",
     "CudaFp8PerTensorEpLowLatencyStrategy",

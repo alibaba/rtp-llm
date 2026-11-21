@@ -1,17 +1,7 @@
 import json
 import logging
 import os
-from typing import (
-    Any,
-    List,
-    Optional,
-    Protocol,
-    Sequence,
-    Type,
-    Union,
-    cast,
-    runtime_checkable,
-)
+from typing import Any, List, Optional, Sequence, Union
 
 import torch
 
@@ -25,11 +15,9 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
 )
-from rtp_llm.model_loader.load_config import LoadMethod
-from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
-from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
+from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.ops import (
     FMHAConfig,
     HWKernelConfig,
@@ -38,28 +26,8 @@ from rtp_llm.ops import (
     MoeConfig,
     ParallelismConfig,
 )
-from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import sp_0_pad8_size
 from rtp_llm.utils.time_util import timer_wrapper
-
-
-@runtime_checkable
-class _MultiModalModel(Protocol):
-    def init_multimodal(
-        self,
-        mm_model_config: Any,
-        vit_config: VitConfig,
-        device: str,
-    ) -> None: ...
-
-    def load_mm_weight(
-        self,
-        model_config: ModelConfig,
-        ctype: str,
-        tp_size: int,
-        tp_rank: int,
-        device: str,
-    ) -> None: ...
 
 
 class BaseModel(object):
@@ -81,7 +49,7 @@ class BaseModel(object):
         fmha_config: FMHAConfig,
         moe_config: MoeConfig,
         max_generate_batch_size: int,
-        load_method: LoadMethod,
+        load_method: NewLoaderLoadMethod,
         vit_config: Optional[VitConfig],
         merge_lora: bool,
         force_cpu_load_weights: bool = False,
@@ -115,6 +83,7 @@ class BaseModel(object):
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
         self.weight = None
         self.weight_manager = None
+        self.rank_local_lora = None
         # Keep the owner alive for the complete lifetime of any non-owning
         # tensor aliases. The alias names are immutable construction metadata;
         # a draft must never silently become an owner during reload/update.
@@ -127,6 +96,7 @@ class BaseModel(object):
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
+        self.checkpoint_owner = None
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
@@ -185,74 +155,16 @@ class BaseModel(object):
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
+        from rtp_llm.models.direct_checkpoint import load_owned_model
+
         self.custom_module = self._init_custom_module()
-        self.model_weights_loader = self.create_model_loader()
-        self.py_eplb = self.model_weights_loader._py_eplb
-        device_str = self._get_device_str()
-        self._load(device_str)
-        from rtp_llm.model_loader.weight_manager import WeightManager
-
-        self.weight_manager = WeightManager(
-            self.device,
-            self.weight,
-            self.model_weights_loader,
-            non_owned_global_weights=self._weight_alias_names,
-        )
-        if skip_python_model:
-            return
-        logging.info(
-            f"Creating python model for {self.model_config.ckpt_path} on {device_str}"
-        )
-        self._create_python_model()
-
-    def _create_python_model(self):
-        pass
+        load_owned_model(self, publish_runtime=not skip_python_model)
 
     def support_pp(self) -> bool:
         return False
 
     def support_cuda_graph(self) -> bool:
         return False
-
-    def _load(self, device: str):
-        # set empty weights for attention service
-        # record device string for later use (e.g., WeightManager, python model init)
-        self.device = device
-        aliases = self._resolve_global_weight_aliases()
-        self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=device, global_weight_aliases=aliases
-        )
-        self._load_custom_module()
-
-        # 清理checkpoint加载过程中使用的临时资源，释放host内存
-        # Alias descriptors have already been resolved and do not depend on the
-        # draft loader retaining its database metadata.
-        self._cleanup_loader_resources()
-
-        self.model_weights_loader.force_clean_all_memory()
-
-    def _resolve_global_weight_aliases(self):
-        aliases = {}
-        if self._weight_alias_owner is not None:
-            if self._weight_alias_owner.weight is None:
-                raise RuntimeError("global weight alias owner must be loaded first")
-            aliases = {
-                name: self._weight_alias_owner.weight.get_global_weight(name)
-                for name in self._weight_alias_names
-            }
-        return aliases
-
-    def _cleanup_loader_resources(self):
-        """清理模型加载过程中使用的临时资源，释放host内存
-
-        在模型权重加载完成后调用此方法，释放以下资源：
-        1. CkptDatabase 中的 CkptFileInfo 元数据
-        2. checkpoint文件列表
-        3. 临时的LoRA缓存
-
-        这可以显著减少host内存占用，为KV cache等运行时内存需求腾出空间。
-        """
-        self.model_weights_loader.cleanup_database()
 
     @classmethod
     def create_config(cls, ckpt_path: str) -> ModelConfig:
@@ -318,6 +230,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        reserve_runtime_mem_mb: int = 0,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -352,6 +265,7 @@ class BaseModel(object):
                 "weight_alias_names require an explicit weight_alias_owner"
             )
         model._weight_alias_owner = weight_alias_owner
+        model.reserve_runtime_mem_mb = reserve_runtime_mem_mb
         model._weight_alias_names = tuple(weight_alias_names)
 
         import os
@@ -367,10 +281,6 @@ class BaseModel(object):
         model.load(skip_python_model=skip_python_model)
         logging.info(f"After loading: {get_host_memory_usage():.2f} MB")
         return model
-
-    @staticmethod
-    def get_weight_cls() -> Type[ModelDeployWeightInfo]:
-        raise NotImplementedError
 
     @property
     def dtype(self) -> Union[str, torch.dtype]:
@@ -471,49 +381,3 @@ class BaseModel(object):
 
     def is_multimodal(self) -> bool:
         return self.model_config.mm_model_config.is_multimodal
-
-    def _load_model_weights(self):
-        self.weight: ModelWeights = self.model_weights_loader.load_weights(
-            device=self._get_device_str(),
-            global_weight_aliases=self._resolve_global_weight_aliases(),
-        )
-
-    @timer_wrapper(description="load custom module")
-    def _load_custom_module(self):
-        if self.custom_module is not None:
-            self.custom_module.init(self.weight)
-
-    def create_model_loader(self) -> ModelLoader:
-        # Create database locally, only used for model loading
-        database = CkptDatabase(
-            self.model_config.ckpt_path,
-            self.model_config.ptuning_path,
-            recycle_handles=self.loader_recycle_handles,
-        )
-        lora_infos = self.model_config.lora_infos
-        static_lora: bool = len(lora_infos) == 1
-        if static_lora:
-            for name, path in lora_infos.items():
-                database.load_lora(name, path)
-            database.dump_lora_info()
-
-        weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
-            model_config=self.model_config,
-            parallelism_config=self.parallelism_config,
-            hw_kernel_config=self.hw_kernel_config,
-            kv_cache_config=self.kv_cache_config,
-            merge_lora=self.merge_lora,
-            load_method=self.load_method,
-        )
-        misc_weights_info = (
-            self.custom_module.get_custom_weight_info() if self.custom_module else []
-        )
-        return get_model_loader(
-            self.model_config,
-            weights_info,
-            misc_weights_info,
-            database,
-            load_method=self.load_method,
-            force_cpu_load_weights=self.force_cpu_load_weights,
-            moe_pure_tp_preshard=self.moe_pure_tp_preshard,
-        )

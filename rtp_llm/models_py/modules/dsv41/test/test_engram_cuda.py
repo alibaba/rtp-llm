@@ -1,8 +1,10 @@
 """Run on an explicitly reserved GPU; covers pinned host reads in graph replay."""
 
 import os
+import tempfile
 import unittest
 import uuid
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
@@ -15,7 +17,151 @@ from rtp_llm.models_py.modules.dsv41.engram import (
     _PinnedSharedTable,
     gated_engram_residual,
 )
-from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+
+class EngramViewTest(unittest.TestCase):
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.version.hip is None, "requires NVIDIA CUDA"
+    )
+    @torch.inference_mode()
+    def test_checkpoint_ownership_does_not_change_gate_dispatch(self):
+        from rtp_llm.models_py.new_models.deepseek_v41.engram import OwnedEngram
+
+        if torch.cuda.get_device_capability()[0] < 8:
+            self.skipTest("requires native BF16")
+        cfg = dict(
+            engram_layer_ids=[1],
+            engram_num_embeddings=[8],
+            engram_max_ngram_size=2,
+            engram_n_heads=1,
+            engram_head_dim=32,
+            engram_compressed_vocab_size=8,
+            engram_pad_token_id=0,
+            engram_vocab_size=7,
+            hidden_size=5120,
+            hc_mult=4,
+            rms_norm_eps=1e-20,
+        )
+        owner = OwnedEngram(cfg, 1).cuda()
+        rng = torch.Generator(device="cuda").manual_seed(427)
+
+        def sample(*shape):
+            return torch.randn(
+                shape, device="cuda", generator=rng, dtype=torch.bfloat16
+            )
+
+        owner.load_weights({"q_weight": sample(4, 5120), "k_weight": sample(4, 5120)})
+        hidden, kv = sample(97, 4, 5120), sample(97, 25600)
+        ids = torch.arange(len(kv), device="cuda")
+        mask = ids % 7 != 0
+        # Isolate the gate: both owners receive exactly the same projected KV.
+        owner.embed_tokens = lambda indices, device: kv.unsqueeze(1)
+        projection = torch.nn.Identity()
+        object.__setattr__(owner.wkv, "_executor", projection)
+        baseline = Engram(
+            owner.layout,
+            0,
+            owner.embed_tokens,
+            projection,
+            owner.q_weight.detach(),
+            owner.k_weight.detach(),
+            owner.eps,
+        )
+        for strided in (False, True):
+            with self.subTest(strided=strided):
+                x = (
+                    torch.stack((hidden, hidden), dim=-1)[..., 0]
+                    if strided
+                    else torch.empty_like(hidden)
+                )
+                x.copy_(hidden)
+                expected = baseline(x, ids, mask)
+                aliases = expected.data_ptr() == x.data_ptr()
+                expected = expected.clone()
+                x.copy_(hidden)
+                result = owner(x, ids, mask)
+                self.assertEqual(result.data_ptr() == x.data_ptr(), aliases)
+                self.assertTrue(torch.equal(result, expected))
+
+    @torch.inference_mode()
+    def test_cpu_reference_accepts_views(self):
+        h = torch.arange(24).reshape(3, 2, 4).float()[..., ::2]
+        kv = torch.ones(3, 6)
+        w = torch.ones(2, 2)
+        self.assertTrue(
+            torch.equal(
+                gated_engram_residual(h, kv, w, w, 1e-20, normalize_views=True),
+                gated_engram_residual(h.contiguous(), kv, w, w, 1e-20),
+            )
+        )
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.version.hip is None, "requires NVIDIA CUDA"
+    )
+    @torch.inference_mode()
+    def test_native_gate_matches_tight_for_each_strided_operand(self):
+        if torch.cuda.get_device_capability()[0] < 8:
+            self.skipTest("requires native BF16")
+        rng = torch.Generator(device="cuda").manual_seed(427)
+        base = [
+            torch.randn(shape, generator=rng, device="cuda", dtype=torch.bfloat16)
+            for shape in ((19, 4, 5120), (19, 25600), (4, 5120), (4, 5120))
+        ]
+        base.append(torch.arange(19, device="cuda") % 4 != 0)
+
+        def run(seq, **kwargs):
+            return gated_engram_residual(*seq[:4], 1e-20, seq[4], **kwargs)
+
+        expected = run(base)
+        for i in range(5):
+            with self.subTest(operand=i):
+                seq = base.copy()
+                seq[i] = torch.stack((seq[i], seq[i]), dim=-1)[..., 0]
+                orig = seq[0].clone()
+                self.assertTrue(torch.equal(expected, run(seq, normalize_views=True)))
+                self.assertTrue(torch.equal(orig, seq[0]))
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
+class EngramProjectionWarmupTest(unittest.TestCase):
+    @torch.inference_mode()
+    def test_loaded_wkv_is_discovered_without_registering_another_weight(self):
+        if torch.cuda.get_device_capability()[0] != 10:
+            self.skipTest("requires SM100 group32 GEMM")
+        from safetensors.torch import save_file
+
+        from rtp_llm.models_py.modules.dsv41.dsv41_kernel_jit_warmup import (
+            collect_v41_dense_shapes,
+        )
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+        from rtp_llm.models_py.new_models.deepseek_v41.engram import (
+            OwnedEngramProjection,
+        )
+        from rtp_llm.models_py.weight_mapper import get_all_weights
+
+        n, k = 640, 512
+        w = torch.randn(n, k).to(torch.float8_e4m3fn)
+        s = torch.ones(n // 32, k // 32).to(torch.float8_e8m0fnu)
+        model = torch.nn.Module()
+        model.wkv = OwnedEngramProjection(k, n).cuda()
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "model.safetensors")
+            save_file({"weight": w, "scale": s}, path)
+            model.wkv.load_weights(get_all_weights([path]))
+        self.assertEqual(collect_v41_dense_shapes(model)[0], {})
+        model.wkv.process_weights_after_loading()
+        native = model.wkv.v41_runtime_linear
+        self.assertIs(type(native), V41MXFP8Linear)
+        linears, _ = collect_v41_dense_shapes(model)
+        self.assertEqual(linears, {(n, k): ("wkv", native)})
+        self.assertEqual(
+            set(dict(model.named_parameters())), {"wkv.weight", "wkv.scale"}
+        )
+        self.assertIs(native.weight, model.wkv.weight)
+        x = torch.randn(392, k, device="cuda", dtype=torch.bfloat16)
+        self.assertTrue(
+            torch.equal(model.wkv(x), V41MXFP8Linear(w.cuda(), s.cuda())(x))
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
@@ -280,6 +426,8 @@ class EngramCudaTest(unittest.TestCase):
         )
 
     def test_complete_engram_capture_changes_input_and_preserves_mask(self):
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
         projection = V41MXFP8Linear(
             (torch.randn(640, 384, device="cuda") * 0.02).to(torch.float8_e4m3fn),
             torch.ones(20, 12, device="cuda").to(torch.float8_e8m0fnu),

@@ -48,7 +48,12 @@ public:
 
     void loadBalanceWeight(int ep_rank, int ep_size, EplbPlanTensors& eplb_plan);
 
+    static bool usesDirectInstall(const py::object& controller);
+    void        installBalancePlan(const EplbPlanTensors& plan);
+    void        finishBalancePlan(int layer_id, bool commit);
+
 private:
+    bool       direct_install_ = false;
     py::object py_eplb_;
 };
 

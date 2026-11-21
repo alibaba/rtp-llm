@@ -1,12 +1,14 @@
-from typing import Any, Dict, Optional, Tuple
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import LayerKVCache
 
 import torch
 from torch import nn
 
-from rtp_llm.models_py.modules import IndexerOp, LayerNorm
-from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
 
 
@@ -28,6 +30,9 @@ class Indexer(nn.Module):
         parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
     ):
+        from rtp_llm.models_py.modules import IndexerOp, LayerNorm
+        from rtp_llm.models_py.modules.factory import LinearFactory
+
         super().__init__()
         self.layer_idx = layer_idx
 

@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import logging
 from collections.abc import Mapping
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import nn
@@ -15,29 +17,30 @@ from rtp_llm.models_py.model_desc.block_map import (
     select_fmha_impl_for_layer,
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import (
-    CausalAttention,
-    DenseMLP,
-    Embedding,
-    FakeBalanceExpert,
-    FusedMoeFactory,
-    GroupTopK,
-    LinearFactory,
-    MlaAttention,
-    MultimodalEmbeddingInjector,
-    RMSNorm,
-    RMSResNorm,
-    SelectTopk,
-    SigmoidGateScaleAdd,
-)
+from rtp_llm.models_py import modules as runtime_modules
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+
+
 logger = logging.getLogger(__name__)
+
+
+def use_unified_moe_tp_reduce(*, has_shared_expert, ffn_tp_size, ep_size, router):
+    """Can both expert branches stay partial over exactly the same TP group?"""
+    return (
+        has_shared_expert
+        and ffn_tp_size > 1
+        and ep_size == 1
+        and router is not None
+        and getattr(router, "tp_collective_size", None) == ffn_tp_size
+        and getattr(router, "supports_skip_tp_allreduce", False)
+    )
 
 
 class GenericMoeLayer(nn.Module):
@@ -57,7 +60,7 @@ class GenericMoeLayer(nn.Module):
         linear_factory=None,
     ):
         super().__init__()
-        self.linear_factory = linear_factory or LinearFactory
+        self.linear_factory = linear_factory or runtime_modules.LinearFactory
         self.config = config
         self.parallelism_config = parallelism_config
         self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
@@ -73,9 +76,9 @@ class GenericMoeLayer(nn.Module):
         self.gate = self.linear_factory.create_linear_from_weights(
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
-        self.select_topk = SelectTopk(config=config)
+        self.select_topk = runtime_modules.SelectTopk(config=config)
         if moe_config.fake_balance_expert:
-            self.fake_balance_expert = FakeBalanceExpert(
+            self.fake_balance_expert = runtime_modules.FakeBalanceExpert(
                 expert_num=config.expert_num,
                 moe_k=config.moe_k,
                 dp_rank=parallelism_config.dp_rank,
@@ -92,7 +95,7 @@ class GenericMoeLayer(nn.Module):
             enable_cuda_graph=enable_cuda_graph,
         )
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
+        self.fused_moe = runtime_modules.FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
 
@@ -101,7 +104,7 @@ class GenericMoeLayer(nn.Module):
             config.moe_style == 2 and not self.fused_moe.includes_shared_expert
         )
         if self.add_shared_expert:
-            self.shared_expert = (self._shared_mlp_cls or DenseMLP)(
+            self.shared_expert = (self._shared_mlp_cls or runtime_modules.DenseMLP)(
                 config.activation_type,
                 parallelism_config,
                 weights,
@@ -123,7 +126,7 @@ class GenericMoeLayer(nn.Module):
                 # layout. Keep this scalar projection on the no-swizzle backend.
                 hw_kernel_config=None,
             )
-            self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
+            self.sigmoid_gate_scale_add = runtime_modules.SigmoidGateScaleAdd()
         else:
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
@@ -131,12 +134,11 @@ class GenericMoeLayer(nn.Module):
         self.use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
         )
-        self.use_unified_tp_allreduce = (
-            self.shared_expert is not None
-            and self.ffn_tp_size > 1
-            and self.ep_size == 1
-            and self.ffn_tp_size == router_tp_size
-            and router.supports_skip_tp_allreduce
+        self.use_unified_tp_allreduce = use_unified_moe_tp_reduce(
+            has_shared_expert=self.shared_expert is not None,
+            ffn_tp_size=self.ffn_tp_size,
+            ep_size=self.ep_size,
+            router=router,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -194,7 +196,7 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
+            self.group_topk = runtime_modules.GroupTopK()
             self.renormalize = self.config.has_moe_norm
             self.num_expert_group = self.config.moe_n_group
 
@@ -301,7 +303,7 @@ class GenericMoeDecoderLayer(nn.Module):
         # Get quant_config from model_config
         quant_config = config.quant_config
         if config.attn_config.use_mla:
-            self.self_attn = MlaAttention(
+            self.self_attn = runtime_modules.MlaAttention(
                 config.attn_config,
                 parallelism_config,
                 weights,
@@ -315,7 +317,7 @@ class GenericMoeDecoderLayer(nn.Module):
             attn_configs = config.getAttentionConfigs(
                 parallelism_config.get_attn_tp_size()
             )
-            self.self_attn = CausalAttention(
+            self.self_attn = runtime_modules.CausalAttention(
                 attn_configs,
                 parallelism_config,
                 weights,
@@ -327,7 +329,7 @@ class GenericMoeDecoderLayer(nn.Module):
 
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
-            self.mlp = DenseMLP(
+            self.mlp = runtime_modules.DenseMLP(
                 config.activation_type,
                 parallelism_config,
                 weights,
@@ -345,11 +347,11 @@ class GenericMoeDecoderLayer(nn.Module):
                 hw_kernel_config=hw_kernel_config,
             )
 
-        # 使用 RMSResNorm 来 fuse residual add 和 layernorm
-        self.input_layernorm = RMSResNorm(
+        # 使用 runtime_modules.RMSResNorm 来 fuse residual add 和 layernorm
+        self.input_layernorm = runtime_modules.RMSResNorm(
             weights[W.pre_ln_gamma], eps=config.layernorm_eps
         )
-        self.post_attention_layernorm = RMSResNorm(
+        self.post_attention_layernorm = runtime_modules.RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
 
@@ -397,11 +399,11 @@ class GenericMoeModel(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
         )
         # Determine attention_type from model_config.attn_config.use_mla
-        self.embed_tokens = Embedding(
+        self.embed_tokens = runtime_modules.Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
         self.multimodal_embedding_injector = (
-            MultimodalEmbeddingInjector()
+            runtime_modules.MultimodalEmbeddingInjector()
             if model_config.mm_model_config.is_multimodal
             else None
         )
@@ -427,7 +429,7 @@ class GenericMoeModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
-        self.norm = RMSResNorm(
+        self.norm = runtime_modules.RMSResNorm(
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
         self._init_capture_context(

@@ -47,11 +47,15 @@ class MegaHCAAdapter:
     def __init__(
         self,
         block: "Block",
-        layer_weights: Dict[str, torch.Tensor],
+        layer_weights: Dict[str, torch.Tensor] | None,
         runtime: MegaCSARuntime,
     ) -> None:
         self._geometry = self._validate_geometry(block)
-        self.weights = MegaHCAWeights.from_layer_weights(layer_weights, self._geometry)
+        self.weights = (
+            MegaHCAWeights.from_owned_block(block, self._geometry)
+            if layer_weights is None
+            else MegaHCAWeights.from_layer_weights(layer_weights, self._geometry)
+        )
         self.runtime = runtime
         self._runtime_checked = False
 

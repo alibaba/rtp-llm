@@ -164,18 +164,48 @@ _JIT_CACHE_SRCS = [
 ]
 _JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
 
+# safetensors.torch.save_file uses NumPy even for ordinary torch tensors.
+# The optional framework requirements are not in safetensors' wheel metadata.
+py_library(
+    name = "safetensors_torch",
+    deps = [":numpy", ":safetensors", ":torch"],
+)
+
+# database and LoRA both read checkpoint files. Give the common primitives
+# an owner below both libraries so importing database never requires the SDK.
+_CHECKPOINT_FILE_SRCS = [
+    "utils/ckpt_file_info.py",
+    "utils/dump_config_utils.py",
+    "utils/meta_pickler.py",
+    "utils/time_util.py",
+]
+
+py_library(
+    name = "checkpoint_file_utils",
+    srcs = _CHECKPOINT_FILE_SRCS,
+    deps = [":prettytable", ":safetensors_torch"],
+)
+
+py_library(
+    name = "lora_checkpoint_file",
+    srcs = ["lora/lora_file.py"],
+    deps = [":checkpoint_file_utils", ":torch"],
+)
+
 py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
-    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+    ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + _CHECKPOINT_FILE_SRCS + [
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     data = glob(["utils/moe_luts/*"]),
     deps = [
+        ":checkpoint_file_utils",
         ":jit_cache_env",
+        ":lora_checkpoint_file",
         ":torch",
         ":safetensors",
         #":decord",
@@ -243,7 +273,10 @@ py_library(
     deps = [
         ":torch",
         ":utils",
-    ],
+    ] + select({
+        "@//:using_cuda": ["//rtp_llm/models_py:scaled_rope"],
+        "//conditions:default": [],
+    }),
 )
 
 py_library(
@@ -254,11 +287,22 @@ py_library(
 )
 
 py_library(
+    name = "device_detection",
+    srcs = [
+        "device/__init__.py",
+        "device/architecture.py",
+        "device/device_type.py",
+    ],
+    deps = [":torch"],
+)
+
+py_library(
     name = "device",
     srcs = glob([
         "device/**/*.py",
-    ]),
+    ], exclude = ["device/__init__.py", "device/architecture.py", "device/device_type.py"]),
     deps = [
+        ":device_detection",
         ":torch",
         ":psutil",
         ":utils",
@@ -279,6 +323,8 @@ py_library(
         ":pillow-avif-plugin",
         ":nest_asyncio",
         ":matplotlib",
+        # The shared registry imports the registered Qwen2-Audio processor.
+        ":librosa",
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
@@ -292,12 +338,23 @@ py_library(
 )
 
 py_library(
+    name = "model_factory_register",
+    srcs = ["model_factory_register.py"],
+    deps = [":utils"],
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "models/*.py",
         "models/**/*.py",
     ], exclude=["models/test/*.py"]),
     deps = [
+        ":async_model",
+        ":config",
+        ":frontend",
+        ":model_factory_register",
+        "//rtp_llm/metrics:metrics",
         ":sentencepiece",
         ":sentence-transformers",
         ":transformers",
@@ -315,6 +372,7 @@ py_library(
         #":decord",
         "//rtp_llm/model_loader:loader",
         "//rtp_llm/models_py:models",
+        "//rtp_llm/models_py:new_weight_loader",
         ":multimodal",
     ] + select({
         "@//:using_ppu": ["//rtp_llm/models_py:ppu_entrypoint"],
@@ -394,12 +452,22 @@ py_library(
 )
 
 py_library(
+    name = "server_config",
+    srcs = ["config/server_config.py"],
+)
+
+py_library(
     name = "config",
     srcs = glob([
         "config/*.py",
         "config/**/*.py",
-    ]),
+    ], exclude = ["config/server_config.py"]),
     deps = [
+        ":server_config",
+        ":ops",
+        ":pydantic",
+        # server_config_setup resolves model types through ModelDict.
+        ":model_factory_register",
         "//rtp_llm/distribute:distribute",
         "//rtp_llm/models_py/distributed:rank_layout",
         ":multimodal"
@@ -464,6 +532,7 @@ py_library(
         ":config",
         ":structure",
         ":telemetry",
+        "//rtp_llm/server:request_headers",
     ],
     data = [
         "openai/renderers/qwen_agent/utils/qwen.tiktoken"
@@ -493,22 +562,37 @@ py_library(
 )
 
 py_library(
+    name = "model_factory",
+    srcs = ["model_factory.py"],
+    deps = [
+        ":async_model",
+        ":config",
+        ":device_detection",
+        ":model_factory_register",
+        ":models",
+        ":ops",
+        ":utils",
+        ":warmup",
+    ],
+)
+
+py_library(
     name = "sdk",
     srcs = [
         '__init__.py',
-        'model_factory.py',
         'start_server.py',
         'start_frontend_server.py',
         'start_backend_server.py',
         'start_dash_sc_server.py',
         '_ft_pickler.py',
-        'model_factory_register.py',
     ],
     deps = [
         "//rtp_llm/server:server",
         "//rtp_llm/distribute:distribute",
         "//rtp_llm/models_py/distributed:rank_layout",
+        ":model_factory",
         ":uvicorn",
+        ":model_factory_register",
         ":fastapi",
         ":psutil",
         ":oss2",
@@ -572,7 +656,8 @@ py_library(
     name = "lora",
     srcs = glob([
         "lora/*.py",
-    ])
+    ], exclude = ["lora/lora_file.py"]),
+    deps = [":lora_checkpoint_file", ":utils"],
 )
 
 py_library(

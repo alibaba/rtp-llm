@@ -258,7 +258,7 @@ TEST_F(NormalEngineTest, testMultiDpSpeculativeFakeStreamsPreserveBothPhases) {
     proposal_params.model_id      = 0;
     proposal_params.model_config_ = engine->model_config_;
 
-    for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+    for (const auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_EAGLE3, SP_TYPE_DSPARK}) {
         engine->sp_config.type    = type;
         proposal_params.sp_config = engine->sp_config;
         engine->propose_params_   = makeLocalProposalParams(proposal_params);
@@ -471,6 +471,7 @@ TEST_F(NormalEngineTest, testPrefillOnlyReservesRealKvForPpDraftAlignment) {
         {3, 2, SP_TYPE_NONE, 0, 0},
         {3, 2, SP_TYPE_MTP, 7, 7},
         {3, 2, SP_TYPE_EAGLE, 7, 7},
+        {3, 2, SP_TYPE_EAGLE3, 7, 7},
         {3, 2, SP_TYPE_DSPARK, 9, 9},
     };
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {

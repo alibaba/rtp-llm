@@ -166,12 +166,12 @@ class DraftModelLoadingTest(unittest.TestCase):
         ):
             for pp_size, pp_rank, load_method, expected_method in (
                 (1, 0, "auto", "auto"),
-                (1, 0, "fastsafetensors", "fastsafetensors"),
                 (1, 0, "scratch", "scratch"),
+                (1, 0, "fastsafetensors", "fastsafetensors"),
                 (3, 0, "fastsafetensors", None),
                 (3, 1, "fastsafetensors", None),
-                (3, 2, "auto", "scratch"),
-                (3, 2, "fastsafetensors", "scratch"),
+                (3, 2, "auto", "auto"),
+                (3, 2, "fastsafetensors", "fastsafetensors"),
                 (3, 2, "scratch", "scratch"),
             ):
                 with self.subTest(
@@ -292,9 +292,8 @@ class DraftModelLoadingTest(unittest.TestCase):
                     reject = pp_size > 1 and not is_mtp and not supports_pp
                     with patch.object(
                         model, "_init_custom_module", return_value=None
-                    ), patch.object(
-                        model,
-                        "create_model_loader",
+                    ), patch(
+                        "rtp_llm.models.direct_checkpoint.load_owned_model",
                         side_effect=RuntimeError("reached loader"),
                     ) as loader:
                         expected = (
@@ -307,7 +306,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                         if reject:
                             loader.assert_not_called()
                         else:
-                            loader.assert_called_once_with()
+                            loader.assert_called_once_with(model, publish_runtime=True)
 
 
 if __name__ == "__main__":

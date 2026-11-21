@@ -852,6 +852,9 @@ class DeepSeekV3Mtp(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
+        # A combined checkpoint's num_hidden_layers describes the score model,
+        # not the one NextN block published to the engine (and its KV cache).
+        config.num_layers = 1
         config.moe_layer_index = [i for i in range(config.num_layers)]
         config.reverse_e_h_norm = True
         config.is_mtp = True

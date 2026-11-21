@@ -93,7 +93,25 @@ custom_smoke_test(
         "//rtp_llm:sdk",
         "//rtp_llm/test/smoke:deepseek_v2_lite_task_info",
     ],
-    deps = _JIT_SMOKE_EXTRA_DEPS + [":grpcio"],
+    deps = _JIT_SMOKE_EXTRA_DEPS + [":smoke_weight_update_rpc"],
+)
+
+py_library(
+    name = "smoke_weight_update_rpc",
+    testonly = True,
+    srcs = ["smoke_weight_update_rpc.py"],
+    deps = ["//rtp_llm/RL:rl_inference_client"],
+)
+
+py_test(
+    name = "smoke_weight_update_rpc_test",
+    srcs = ["smoke_weight_update_rpc_test.py"],
+    deps = [
+        ":grpcio",
+        ":smoke_weight_update_rpc",
+        "//rtp_llm:server_config",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
 )
 
 # ROCm lifecycle coverage intentionally omits the CUDA IPC weight-update path.

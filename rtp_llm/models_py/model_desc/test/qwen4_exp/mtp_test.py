@@ -212,14 +212,12 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         model = SimpleNamespace(
             layers=[SimpleNamespace(layer_type=HybridAttentionType.NONE)]
         )
-        inputs = SimpleNamespace()
-        with patch(
-            "rtp_llm.models_py.model_desc.qwen4_exp_mtp.get_attention_inputs_value",
-            return_value={"full": SimpleNamespace(is_prefill=True)},
-        ):
-            meta = Qwen4ExpMTPModel._build_attn_meta(
-                model, inputs, torch.device("cuda"), True
-            )
+        inputs = SimpleNamespace(
+            attention_inputs={"full": SimpleNamespace(is_prefill=True)}
+        )
+        meta = Qwen4ExpMTPModel._build_attn_meta(
+            model, inputs, torch.device("cuda"), True
+        )
         self.assertTrue(meta.is_cuda_graph)
         self.assertIsNone(meta.prefill_conv1d_meta)
 

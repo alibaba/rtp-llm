@@ -169,7 +169,7 @@ def ep_scatter(
     hidden_size = recv_x.shape[1]
     # grid = (triton.cdiv(hidden_size, BLOCK_D), num_experts)
     grid = num_experts
-    scale_hidden_size = hidden_size // BLOCK_D
+    scale_hidden_size = ceil_div(hidden_size, BLOCK_D)
     if scale_ue8m0:
         # ue8m0 scales are packed here (4 scales per int32),
         # hence the effective size of this dimension is divided by 4.
@@ -345,7 +345,7 @@ def ep_scatter_v2(
     num_warps = 8
     num_experts = expert_start_loc.shape[0]
     hidden_size = recv_x.shape[1]
-    scale_hidden_size = hidden_size // BLOCK_D
+    scale_hidden_size = ceil_div(hidden_size, BLOCK_D)
     if scale_ue8m0:
         # ue8m0 scales are packed here (4 scales per int32),
         # hence the effective size of this dimension is divided by 4.
@@ -414,15 +414,22 @@ def _fwd_kernel_ep_gather(
     output_tensor,
     output_tensor_stride0,
     output_tensor_stride1,
+    hidden_size,
     topk_num: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    EVEN_D: tl.constexpr,
 ):
     cur_block = tl.program_id(0).to(tl.int64)
     start_cur_token_int32 = tl.program_id(1)
     grid_num = tl.num_programs(1)
     for cur_token_int32 in range(start_cur_token_int32, total_token_num, grid_num):
         cur_token = cur_token_int32.to(tl.int64)
-        off_d = tl.arange(0, BLOCK_D)
+        off_d = cur_block * BLOCK_D + tl.arange(0, BLOCK_D)
+        # A compile-time true mask keeps the aligned, 512-wide path unchanged.
+        if EVEN_D:
+            valid_d = True
+        else:
+            valid_d = off_d < hidden_size
         accumulator = tl.zeros([BLOCK_D], dtype=tl.float32)
         for topk_index_int32 in range(0, topk_num):
             topk_index = topk_index_int32.to(tl.int64)
@@ -443,16 +450,17 @@ def _fwd_kernel_ep_gather(
                     tmp = tl.load(
                         input_tensor
                         + source_token_index * input_tensor_stride0
-                        + cur_block * BLOCK_D
-                        + off_d
+                        + off_d,
+                        mask=valid_d,
+                        other=0,
                     )
                     accumulator += tmp.to(tl.float32) * acc_weight
         tl.store(
             output_tensor
             + cur_token * output_tensor_stride0
-            + cur_block * BLOCK_D
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
+            mask=valid_d,
         )
 
 
@@ -464,11 +472,13 @@ def ep_gather(
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
 ):
-    BLOCK_D = 512  # block size of quantization
     num_warps = 2
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
-    assert hidden_size % BLOCK_D == 0
+    assert output_tensor.shape[1] == hidden_size
+    if num_tokens == 0 or hidden_size == 0:
+        return
+    BLOCK_D = min(512, triton.next_power_of_2(hidden_size))
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
         num_tokens,
@@ -488,9 +498,11 @@ def ep_gather(
         output_tensor,
         output_tensor.stride(0),
         output_tensor.stride(1),
+        hidden_size,
         topk_num=recv_topk_ids.shape[1],
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,
+        EVEN_D=hidden_size % BLOCK_D == 0,
     )
     return
 

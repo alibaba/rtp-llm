@@ -105,6 +105,12 @@ class CudaFp8GEMMLinear(LinearBase):
             weight_scale_2=weight_scale_2,
         )
 
+    @property
+    def prequantized_input_backend(self) -> CudaFp8DeepGEMMLinear:
+        # Packed per-token activation scales are a DeepGEMM ABI. Normal
+        # forward() still chooses the backend for unquantized inputs.
+        return self._deepgemm_linear
+
     def maybe_cache_quant_scale(self, max_len: int) -> None:
         self._deepgemm_linear.maybe_cache_quant_scale(max_len)
         self.cached_scales = getattr(self._deepgemm_linear, "cached_scales", None)

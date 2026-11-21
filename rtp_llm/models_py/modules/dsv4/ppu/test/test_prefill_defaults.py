@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.ppu.moe.packed_inputs import shared_expert_inputs
+
 ROOT = Path(__file__).resolve().parents[6]
 
 
@@ -100,26 +102,19 @@ class PrefillDefaultsTest(unittest.TestCase):
             w13=SimpleNamespace(weight=torch.empty(1)),
             w2=SimpleNamespace(weight=torch.empty(1)),
         )
+        make_shared = Mock(return_value=shared)
+        operands = {name: object() for name in ("w13_w", "w13_s", "w2_w", "w2_s")}
+        owned = dict(zip(("shared_w13", "shared_s13", "shared_w2", "shared_s2"), operands.values()))
         cls = definition(
             "rtp_llm/models_py/modules/dsv4/ppu/moe/ppu_tp_moe.py",
             "PpuTPMoE",
             Gate=lambda *a, **k: Mock(),
             MoeCfg=lambda **k: k,
             PpuGroupedFP4Strategy=lambda *a, **k: strategy,
-            PpuTPSharedExpert=lambda *a, **k: shared,
+            PpuTPSharedExpert=make_shared,
+            shared_expert_inputs=shared_expert_inputs,
             all_reduce=lambda x, **k: x,
             Group=SimpleNamespace(TP="tp"),
-            W=SimpleNamespace(
-                **{
-                    k: k
-                    for k in (
-                        "v4_shared_w13_w",
-                        "v4_shared_w13_s",
-                        "v4_shared_w2_w",
-                        "v4_shared_w2_s",
-                    )
-                }
-            ),
             record_function_range=lambda _: nullcontext(),
             combine_tp_partials=lambda routed, shared, scale: routed * scale + shared,
         )
@@ -135,15 +130,7 @@ class PrefillDefaultsTest(unittest.TestCase):
             swiglu_limit=0.0,
             n_hash_layers=3,
             vocab_size=100,
-            layer_weights={
-                k: object()
-                for k in (
-                    "v4_shared_w13_w",
-                    "v4_shared_w13_s",
-                    "v4_shared_w2_w",
-                    "v4_shared_w2_s",
-                )
-            },
+            layer_weights=SimpleNamespace(take_executor_weight=owned.pop),
             tp_size=4,
             ep_size=1,
             ep_rank=0,
@@ -155,7 +142,10 @@ class PrefillDefaultsTest(unittest.TestCase):
             ),
         )
         args.update(overrides)
-        return cls(**args)
+        module = cls(**args)
+        self.assertEqual(make_shared.call_args.args[2], operands)
+        self.assertEqual(owned, {})
+        return module
 
     def test_moe_defaults_and_topology_fallback(self):
         self.assertTrue(self.moe()._shared_phases)

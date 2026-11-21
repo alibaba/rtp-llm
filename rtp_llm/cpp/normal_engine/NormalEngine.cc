@@ -1227,11 +1227,11 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 }
 
 bool NormalEngine::isMTPEagle() {
-    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK;
+    return sp_config.type == SP_TYPE_MTP || isEagle() || sp_config.type == SP_TYPE_DSPARK;
 }
 
 bool NormalEngine::isEagle() {
-    return sp_config.type == SP_TYPE_EAGLE;
+    return sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_EAGLE3;
 }
 
 bool NormalEngine::isDSpark() {

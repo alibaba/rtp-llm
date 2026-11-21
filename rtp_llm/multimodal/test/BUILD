@@ -166,8 +166,8 @@ py_test(
         ":mm_cache_test_store",
         ":process_engine_test_helpers",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -192,8 +192,8 @@ py_test(
     name = "mm_cancellation_test",
     srcs = ["mm_cancellation_test.py"],
     deps = [":process_engine_test_helpers"],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -222,6 +222,12 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_newloader_test",
+    srcs = ["deepseek_v41_newloader_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:new_loader_core"],
 )
 
 py_test(

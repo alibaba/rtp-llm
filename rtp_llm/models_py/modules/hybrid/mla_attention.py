@@ -134,12 +134,11 @@ class MlaAttention(nn.Module):
             )
         return topk_indices
 
-    def forward(
+    def _resolve_layer_routes(
         self,
-        hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
-    ) -> torch.Tensor:
+    ):
         if self.indexer is not None:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
@@ -174,6 +173,19 @@ class MlaAttention(nn.Module):
                 raise RuntimeError("dense MLA does not accept tagged cache routes")
             default_fmha_impl = cast(MlaImplBase, fmha_impl)
             default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
+            indexer_fmha_impl = indexer_kv_cache = None
+
+        return default_fmha_impl, default_kv_cache, indexer_fmha_impl, indexer_kv_cache
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
+        kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
+    ) -> torch.Tensor:
+        default_fmha_impl, default_kv_cache, indexer_fmha_impl, indexer_kv_cache = (
+            self._resolve_layer_routes(fmha_impl, kv_cache)
+        )
 
         input_shape = hidden_states.shape[:-1]
         q_c = None

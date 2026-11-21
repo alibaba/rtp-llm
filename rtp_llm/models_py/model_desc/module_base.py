@@ -1,14 +1,14 @@
+from __future__ import annotations
+
 import logging
 from collections.abc import Mapping
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch import nn
 
 from rtp_llm.config.layer_partition import local_layer_range
-from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     select_attention_inputs_for_tag,
@@ -17,15 +17,13 @@ from rtp_llm.models_py.model_desc.hidden_state_capture import (
     CanonicalHiddenHook,
     CaptureContext,
 )
-from rtp_llm.models_py.modules import AttnImplFactory
-from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
-from rtp_llm.ops.compute_ops import (
-    KVCache,
-    PyModelInitResources,
-    PyModelInputs,
-    PyModelOutputs,
-)
 from rtp_llm.utils.model_weight import W
+
+if TYPE_CHECKING:
+    from rtp_llm.config.model_config import ModelConfig
+    from rtp_llm.model_loader.model_weight_info import ModelWeights
+    from rtp_llm.models_py.modules.factory.attention.attn_factory import AttentionImpl
+    from rtp_llm.ops.compute_ops import KVCache, PyModelInitResources, PyModelInputs, PyModelOutputs
 
 
 class GptModelBase(nn.Module):
@@ -127,6 +125,8 @@ class GptModelBase(nn.Module):
         is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
+        from rtp_llm.models_py.modules import AttnImplFactory
+
         attention_inputs = get_attention_inputs_value(inputs)
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()

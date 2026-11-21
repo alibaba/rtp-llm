@@ -5,6 +5,7 @@ py_library(
     srcs = glob([
         "api/*.py",
     ]),
+    deps = ["//rtp_llm:model_factory"],
 )
 
 py_library(

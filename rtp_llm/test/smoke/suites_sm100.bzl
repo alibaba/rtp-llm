@@ -1,5 +1,16 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
+def _next_arm_smoke(name, **kwargs):
+    # This opt-in diagnostic sibling is NOT in the suite. Its GPU synchronization
+    # can change batching; ordinary golden still covers the uninstrumented sampler.
+    smoke_test(
+        name = name + "_sample_diag",
+        tags = ["manual"],
+        test_envs = {"RTP_NEXT_SMOKE_PREFIX": "1", "RTP_NEXT_SAMPLER_DIAGNOSTIC": "1"},
+        **kwargs
+    )
+    return smoke_test(name = name, test_envs = {"RTP_NEXT_SMOKE_PREFIX": "1"}, **kwargs)
+
 def sm100_suites():
     # SM100 / GB200 (SM100_ARM)
     # ============================================================================
@@ -95,13 +106,13 @@ def sm100_suites():
                 smoke_args = "--warm_up 1 --act_type BF16 --dp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 8192 --fp8_kv_cache 1 --seq_size_per_block 64 --concurrency_limit 64 --blockwise_use_fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --quantization MODELOPT_FP4",
                 gpu_type = ["SM100_ARM_CU13"],
             ),
-            smoke_test(
+            _next_arm_smoke(
                 name = "next_moe_nvfp4_deepep_ll_cudagraph_dp2_sm100",
                 task_info = "data/model/qwen35/q_r_35b_nvfp4_py_dp2_ll_cg_sm100_arm.json",
                 smoke_args = "--decode_capture_config '1,2,3,4' --warm_up 0 --enable_cuda_graph 1 --act_type BF16 --dp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 22000 --seq_size_per_block 2048 --concurrency_limit 64  --kernel_seq_size_per_block 64 --use_deepep_moe 1 --use_deepep_low_latency 1",
                 gpu_type = ["SM100_ARM_CU13"],
             ),
-            smoke_test(
+            _next_arm_smoke(
                 name = "next_moe_nvfp4_cudagraph_tp2_sm100",
                 task_info = "data/model/qwen35/q_r_35b_nvfp4_py_tp2_cg_sm100_arm.json",
                 smoke_args = "--decode_capture_config '1,2,3,4' --warm_up 0 --enable_cuda_graph 1 --act_type BF16 --tp_size 2 --world_size 2 --ep_size 2 --reserver_runtime_mem_mb 20000 --seq_size_per_block 2048 --concurrency_limit 64  --kernel_seq_size_per_block 64",

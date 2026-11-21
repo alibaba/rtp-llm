@@ -563,6 +563,7 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     async def batch_infer(self, req: dict, raw_request: Request):
+        from rtp_llm.frontend import next_smoke_prefix
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 
         # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
@@ -598,10 +599,14 @@ class FrontendServer(object):
             assert self._frontend_worker is not None
             prompts = req.get("prompt_batch", [])
             generate_config = req.get("generate_config", {})
+            prefix_file = next_smoke_prefix.approve("batch", req)
+            if prefix_file is not None:
+                next_smoke_prefix.authorize(prefix_file, request_id, (1, 2, 3))
             result = await self._frontend_worker.batch_infer(
                 prompts=prompts,
                 request_id=request_id,
                 generate_config=generate_config,
+                **({"_next_fixture_prefix_file": prefix_file} if prefix_file is not None else {}),
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
         except BaseException as error:

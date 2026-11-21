@@ -1,13 +1,16 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
-from typing import Any, Optional, Tuple
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Optional, Tuple
+
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import LayerKVCache
 
 import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
-from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
@@ -339,6 +342,8 @@ class IndexerOp(nn.Module):
             slot_mapping: Physical slot indices [num_tokens]
         """
         assert kv_cache is not None, "kv_cache is required"
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
             self._indexer_cache_view(kv_cache),
@@ -370,6 +375,8 @@ class IndexerOp(nn.Module):
         """
         # Quantize query
         query_flat = query.view(-1, self.index_head_dim)
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query_flat,
             group_size=self.block_size,
@@ -386,6 +393,8 @@ class IndexerOp(nn.Module):
 
         # Cache key
         assert kv_cache is not None, "kv_cache is required"
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
             self._indexer_cache_view(kv_cache),
@@ -427,6 +436,8 @@ class IndexerOp(nn.Module):
         gathered_key = gathered_key.reshape(-1, key.size(-1))
         restored_key = gathered_key[kv_restore_unpad_indices]  # element wise
 
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.indexer_k_quant_and_cache(
             restored_key,
             self._indexer_cache_view(kv_cache),
@@ -435,6 +446,8 @@ class IndexerOp(nn.Module):
             self.scale_fmt,
         )
         query_flat = query.view(-1, self.index_head_dim)
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query_flat,
             group_size=self.block_size,
@@ -553,6 +566,8 @@ class IndexerOp(nn.Module):
             device=q_fp8.device,
         )
 
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
             self._indexer_cache_view(kv_cache),
             k_fp8,  # output [num_tokens, index_head_dim]
@@ -663,6 +678,8 @@ class IndexerOp(nn.Module):
             dtype=torch.uint8,
             device=device,
         )
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
             self._indexer_cache_view(kv_cache),
             k_fp8,

@@ -1,15 +1,21 @@
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import VitConfig
-from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_mixin_register import (
     _multimodal_mixin_factory,
     get_multimodal_mixin_cls,
 )
 from rtp_llm.multimodal.multimodal_mixins import BaseMultiModalMixin
 from rtp_llm.ops import TaskType
+
+
+if TYPE_CHECKING:
+    from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 
 
 class MultimodalMixinFactory:
@@ -24,7 +30,12 @@ class MultimodalMixinFactory:
             logging.info("No multimodal model, skip create multimodal mixin")
             return None
         multimodal_mixin_cls = get_multimodal_mixin_cls(model_config.model_type)
-        return multimodal_mixin_cls(
+        constructor = getattr(multimodal_mixin_cls, "from_new_loader", None)
+        if not callable(constructor):
+            raise ValueError(
+                f"{model_config.model_type}: missing direct multimodal checkpoint owner"
+            )
+        return constructor(
             model_config.compute_dtype,
             device,
             model_config.mm_related_params,
@@ -42,6 +53,8 @@ class MultimodalMixinFactory:
         server_id: int = 0,
         is_proxy_mode: bool = False,
     ) -> MMProcessEngine:
+        from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
+
         mm_mixin = MultimodalMixinFactory._create_multimodal_mixin(
             model_config=model_config,
             engine_config=engine_config,

@@ -4,14 +4,16 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, Generator, List, Optional, Tuple, Union
 
 import torch
 from tqdm.auto import tqdm
 
-from rtp_llm.lora.lora_file import LoraCkpt
 from rtp_llm.utils import ckpt_file_info
 from rtp_llm.utils.ckpt_file_info import CkptFileInfo, CkptMetaCache, FinetuneType
+
+if TYPE_CHECKING:
+    from rtp_llm.lora.lora_file import LoraCkpt
 
 _LAYER_RE = re.compile(r"(?:^|\.)(?:layers|h|blocks|layer)\.(\d+)\.")
 
@@ -79,7 +81,7 @@ class CkptDatabase(BaseDatabase):
 
     pretrain_file_list: List[CkptFileInfo]
     finetune_file_list: List[CkptFileInfo]
-    lora_ckpt: LoraCkpt
+    lora_ckpt: "LoraCkpt"
 
     finetune_type: FinetuneType
 
@@ -92,6 +94,8 @@ class CkptDatabase(BaseDatabase):
 
         if path is None:
             return
+
+        from rtp_llm.lora.lora_file import LoraCkpt
 
         self.pretrain_file_list = []
         self.finetune_file_list = []

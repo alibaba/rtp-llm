@@ -45,8 +45,8 @@ struct GptModelInputs {
     };
     std::optional<RecordedLengths> record_lengths;
     int64_t                        record_execution_id = 0;
-    torch::Tensor engram_token_windows;
-    torch::Tensor mm_features_spans;
+    torch::Tensor                  engram_token_windows;
+    torch::Tensor                  mm_features_spans;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
@@ -59,11 +59,11 @@ struct GptModelInputs {
     torch::Tensor custom_output_indexes;
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor lm_output_lengths;        // [total_batch_size]
-    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor lm_output_lengths;  // [total_batch_size]
+    torch::Tensor prefix_lengths;     // [context_batch_size]
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
-    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor sequence_lengths_plus_1;           // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -112,19 +112,23 @@ struct GptModelInputs {
     bool need_all_hidden_states = false;
     bool skip_lm_head           = false;
     // PP batch contains only middle chunks; all TP ranks follow the same sampling/draft path.
-    bool is_middle_chunk_only = false;
-    bool capture_hidden_states  = false;
-    bool need_moe_gating        = false;
-    bool warmup                 = false;
-    bool skip_run               = false;
-    bool shutdown               = false;
-    bool is_fake_stream         = false;
+    bool is_middle_chunk_only  = false;
+    bool capture_hidden_states = false;
+    bool need_moe_gating       = false;
+    bool warmup                = false;
+    bool skip_run              = false;
+    bool shutdown              = false;
+    bool is_fake_stream        = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+
+    // Set only by the fixed V4.1 Aone fixture after checking the complete,
+    // immutable prompt on the stream owner; never set from request options.
+    bool v41_cache_fixture = false;
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;
@@ -166,6 +170,8 @@ struct GptModelOutputs {
 
     /** Downstream activations from a non-last target stage. */
     std::map<std::string, torch::Tensor> pp_intermediates;
+    // Observed target verify path, not the requested graph configuration.
+    int8_t target_verify_graph_path{-1};  // -1 unknown/not verify; 0 eager; 1 graph runner
 };
 
 struct CopyParams {
