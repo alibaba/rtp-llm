@@ -89,6 +89,7 @@ cc_library(
     name = "th_compute_lib",
     srcs = [
         "ComputeInit.cc",
+        "EmbTensorObjectDecode.cc",
     ],
     hdrs = [
         "EmbRegisteredArena.h",
@@ -107,6 +108,7 @@ cc_library(
         "//rtp_llm/cpp/utils:device_perf_wrapper",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
+        "@rapidjson//:rapidjson",
     ] + torch_deps() + select_py_bindings() + select({
         "@//:using_cuda12": [
             "//rtp_llm/cpp/utils:device_pin",

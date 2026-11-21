@@ -25,6 +25,7 @@ _MAX_NODES = 4096
 _MAX_DEPTH = 32
 _ALIGNMENT = 64
 _USE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE") == "1"
+_USE_NATIVE_OBJECT_RESTORE = os.environ.get("MM_EMB_NATIVE_OBJECT_RESTORE") == "1"
 _USE_NATIVE_PACK = os.environ.get("MM_EMB_NATIVE_PACK") == "1"
 _USE_NATIVE_PLAN = os.environ.get("MM_EMB_NATIVE_PLAN") == "1"
 _DTYPES = {
@@ -348,10 +349,33 @@ def unpack_object(
         or not _PREFIX.size <= size <= max_bytes
     ):
         raise ValueError("invalid multimodal object buffer")
+    raw_header = None
     read_object_header = read_native_header = None
     if buffer.is_cuda and _USE_NATIVE_RESTORE and blocking_cuda_events:
         import librtp_compute_ops
 
+        if _USE_NATIVE_OBJECT_RESTORE and payload_fence is not None:
+            restore_object = getattr(librtp_compute_ops, "restore_emb_cuda_object", None)
+            target = torch.device(cuda_device or buffer.device)
+            if (
+                restore_object is not None
+                and target.type == "cuda"
+                and (target.index is None or target == buffer.device)
+                and (consumer_stream is None or consumer_stream.device == buffer.device)
+                and (
+                    expected_key is None
+                    or (type(expected_key) is str and expected_key.isascii())
+                )
+            ):
+                with stage("native_object_restore"):
+                    value, raw_header = restore_object(
+                        buffer,
+                        expected_key,
+                        restore_devices,
+                        None if consumer_stream is None else consumer_stream.stream_id,
+                    )
+                if raw_header is None:
+                    return value
         read_object_header = getattr(
             librtp_compute_ops, "read_emb_cuda_object_header", None
         )
@@ -361,9 +385,10 @@ def unpack_object(
             )
 
     view = None
-    if read_object_header is not None:
-        with stage("d2h_header"):
-            raw_header = read_object_header(buffer)
+    if raw_header is not None or read_object_header is not None:
+        if raw_header is None:
+            with stage("d2h_header"):
+                raw_header = read_object_header(buffer)
         magic = _MAGIC_V2
         offset = _align(_PREFIX.size + len(raw_header))
     else:

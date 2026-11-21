@@ -16,10 +16,16 @@
 
 namespace rtp_llm {
 void registerExecCtxOps(pybind11::module& m);
+#if USING_CUDA
+void registerEmbTensorObjectDecode(pybind11::module& m);
+#endif
 using namespace torch_ext;
 
 PYBIND11_MODULE(librtp_compute_ops, m) {
     registerEmbTensorCodec(m);
+#if USING_CUDA
+    registerEmbTensorObjectDecode(m);
+#endif
     registerEmbTensorObjectPlan(m);
     registerEmbRegisteredArena(m);
 #if USING_CUDA || USING_ROCM

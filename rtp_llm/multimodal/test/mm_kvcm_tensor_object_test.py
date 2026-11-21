@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+from rtp_llm.multimodal.kvcm import tensor_object
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
@@ -120,11 +121,14 @@ class TensorObjectTest(unittest.TestCase):
             packed = pack_object(
                 plan, out=torch.empty(plan.nbytes, dtype=torch.uint8, device="cuda")
             )
-            with patch.object(
-                librtp_compute_ops,
-                "restore_emb_cuda_tensor_slices_and_wait",
-                wraps=librtp_compute_ops.restore_emb_cuda_tensor_slices_and_wait,
-            ) as native_fence:
+            with (
+                patch.object(tensor_object, "_USE_NATIVE_OBJECT_RESTORE", False),
+                patch.object(
+                    librtp_compute_ops,
+                    "restore_emb_cuda_tensor_slices_and_wait",
+                    wraps=librtp_compute_ops.restore_emb_cuda_tensor_slices_and_wait,
+                ) as native_fence,
+            ):
                 restored_gpu, restored_cpu, alias = unpack_object(
                     packed,
                     expected_key="key",
@@ -139,6 +143,61 @@ class TensorObjectTest(unittest.TestCase):
         torch.testing.assert_close(restored_gpu, gpu)
         torch.testing.assert_close(restored_cpu, cpu)
         stream.synchronize()
+
+    @unittest.skipUnless(torch.cuda.is_available() and torch.version.cuda, "CUDA required")
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE_RESTORE") == "1", "native restore required"
+    )
+    def test_complete_native_restore_and_python_scalar_fallback(self):
+        import librtp_compute_ops
+
+        gpu = torch.arange(1024, dtype=torch.bfloat16, device="cuda")
+        cpu = torch.arange(9, dtype=torch.int32)
+        consumer = torch.cuda.current_stream()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(consumer)
+        with (
+            patch.object(tensor_object, "_USE_NATIVE_OBJECT_RESTORE", True),
+            patch.object(
+                librtp_compute_ops,
+                "read_emb_cuda_object_header",
+                wraps=librtp_compute_ops.read_emb_cuda_object_header,
+            ) as separate_header,
+            torch.cuda.stream(stream),
+        ):
+            for scalar in ("code\x00文本", 1 << 100, 0.1):
+                value = {"cache_key": "original", "items": [gpu, cpu, gpu, scalar]}
+                plan = plan_object(value, checksum=False)
+                wire = pack_object(
+                    plan, out=torch.empty(plan.nbytes, device="cuda", dtype=torch.uint8)
+                )
+                native, fallback = librtp_compute_ops.restore_emb_cuda_object(
+                    wire, "original", True, consumer.stream_id
+                )
+                self.assertEqual(fallback is None, type(scalar) is str)
+                if native is not None:
+                    self.assertTrue(stream.query())
+                result = unpack_object(
+                    wire,
+                    expected_key="original",
+                    blocking_cuda_events=True,
+                    consumer_stream=consumer,
+                    payload_fence=lambda: self.fail("native copies are already fenced"),
+                )
+                restored_gpu, restored_cpu, alias, marker = result["items"]
+                self.assertIs(restored_gpu, alias)
+                self.assertIs(type(marker), type(scalar))
+                self.assertEqual(marker, scalar)
+                torch.testing.assert_close(restored_gpu, gpu)
+                torch.testing.assert_close(restored_cpu, cpu)
+            with self.assertRaisesRegex(ValueError, "cache key mismatch"):
+                unpack_object(
+                    wire,
+                    expected_key="wrong",
+                    blocking_cuda_events=True,
+                    payload_fence=lambda: self.fail("invalid key must not copy tensors"),
+                )
+        separate_header.assert_not_called()
 
     def _assert_cuda_header_reads(self, *, blocking_cuda_events, single_binding=False):
         stages = []
