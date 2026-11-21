@@ -23,6 +23,11 @@ public:
                                        const std::optional<WarmUpResult>&               warm_up_result = std::nullopt,
                                        const std::optional<SpeculativeExecutionConfig>& sp_config      = std::nullopt,
                                        size_t                                           transfer_memory_bytes = 0);
+    static size_t availableCacheMemory(const RuntimeConfig&                             runtime_config,
+                                       const ModelConfig&                               model_config,
+                                       const ParallelismConfig&                         parallelism_config,
+                                       const std::optional<WarmUpResult>&               warm_up_result,
+                                       const std::optional<SpeculativeExecutionConfig>& sp_config);
 
     // Helper function to update memory size if below minimum requirement
     static void updateMemoryIfNeeded(size_t& current_size, size_t min_required, const char* scenario);

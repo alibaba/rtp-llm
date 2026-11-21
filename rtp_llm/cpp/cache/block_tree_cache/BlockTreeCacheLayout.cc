@@ -94,10 +94,11 @@ size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop) {
     return checkedProduct(checkedProduct(2, workers), slots_per_loop);
 }
 
-size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheConfig& options) {
+BlockTreeCrcWorkspacePlan
+planBlockTreeCrcWorkspaces(const CacheConfig& config, const KVCacheConfig& options, size_t budget_bytes) {
     if (!options.enable_crc || (!options.enable_memory_cache && !options.enable_disk_cache)
         || !CrcCopyWorkspace::available())
-        return 0;
+        return {};
     std::vector<std::vector<std::string>> members;
     RTP_LLM_CHECK_WITH_INFO(buildBlockTreeGroupMembers(config, members), "invalid BlockTree group aggregation");
     size_t max_payload = 0, max_tiles = 0;
@@ -113,12 +114,35 @@ size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheCon
         max_tiles   = std::max(max_tiles, tiles);
     }
     if (!max_payload)
-        return 0;
-    const size_t batch = positive(options.memory_cache_max_descriptors_per_transfer_batch, "transfer batch size");
-    const auto count = crcTransferWorkspaceCount(positive(options.block_tree_transfer_worker_count, "transfer workers"),
-                                                 kDefaultCrcSlotsPerWorkLoop);
-    const auto usage = CrcCopyWorkspace::memoryUsage(batch, max_payload, checkedProduct(batch, max_tiles));
-    return checkedProduct(count, usage.device_bytes);
+        return {};
+    const auto workers               = positive(options.block_tree_transfer_worker_count, "transfer workers");
+    const auto device_bytes_per_slot = [&](size_t batch) {
+        const auto usage = CrcCopyWorkspace::memoryUsage(batch, max_payload, checkedProduct(batch, max_tiles));
+        return checkedProduct(crcTransferWorkspaceCount(workers, 1), usage.device_bytes);
+    };
+
+    auto batch      = positive(options.memory_cache_max_descriptors_per_transfer_batch, "transfer batch size");
+    auto slot_bytes = device_bytes_per_slot(batch);
+    if (slot_bytes > budget_bytes) {
+        // Find the largest batch fitting one slot on each WorkLoop. A minimum
+        // plan is returned even when it needs more than the preferred budget.
+        size_t first = 1;
+        while (first < batch) {
+            const auto mid = first + (batch - first + 1) / 2;
+            if (device_bytes_per_slot(mid) <= budget_bytes)
+                first = mid;
+            else
+                batch = mid - 1;
+        }
+        batch      = first;
+        slot_bytes = device_bytes_per_slot(batch);
+    }
+    const auto slots = std::clamp(budget_bytes / slot_bytes, size_t{1}, kDefaultCrcSlotsPerWorkLoop);
+    return {batch, slots, checkedProduct(slots, slot_bytes)};
+}
+
+size_t blockTreeTransferDeviceMemory(const CacheConfig& config, const KVCacheConfig& options) {
+    return planBlockTreeCrcWorkspaces(config, options, std::numeric_limits<size_t>::max()).device_bytes;
 }
 
 }  // namespace rtp_llm

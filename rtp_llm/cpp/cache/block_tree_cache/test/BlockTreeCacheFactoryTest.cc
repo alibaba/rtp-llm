@@ -3359,7 +3359,7 @@ TEST_F(BlockTreeCacheFactoryTest, AutomaticKvBudgetSubtractsCrcAlongsideRuntimeR
     EXPECT_ANY_THROW(CacheConfigCreator::computeLocalBlockNum(config, model, runtime, options, {}, too_small));
 }
 
-TEST_F(BlockTreeCacheFactoryTest, Qwen7bBlock64AutomaticBudgetLeavesSpaceForDefaultCrcServices) {
+TEST_F(BlockTreeCacheFactoryTest, Qwen7bBlock64FitsCrcToAutomaticAndExplicitKvBudgets) {
     if (!CrcCopyWorkspace::available())
         GTEST_SKIP() << "CRC requires CUDA13";
     // Qwen-7B TP1 BF16: 32 layers, 32 KV heads, head size 128, block 64.
@@ -3368,27 +3368,49 @@ TEST_F(BlockTreeCacheFactoryTest, Qwen7bBlock64AutomaticBudgetLeavesSpaceForDefa
     options.enable_memory_cache  = true;
     options.memory_cache_size_mb = 128;
     EXPECT_EQ(config.totalGroupBlockSizeBytes(), 32u << 20);
-    const auto crc_bytes = blockTreeTransferDeviceMemory(config, options);
-    EXPECT_GT(crc_bytes, size_t{16} << 30);
+    const auto default_crc_bytes = blockTreeTransferDeviceMemory(config, options);
+    EXPECT_GT(default_crc_bytes, size_t{16} << 30);
+    const auto two_slot_budget = default_crc_bytes / kDefaultCrcSlotsPerWorkLoop * 2;
+    const auto two_slot_plan   = planBlockTreeCrcWorkspaces(config, options, two_slot_budget);
+    EXPECT_EQ(two_slot_plan.batch_size, 32u);
+    EXPECT_EQ(two_slot_plan.slots_per_loop, 2u);
+    EXPECT_EQ(two_slot_plan.device_bytes, two_slot_budget);
+
+    const auto minimum_crc = planBlockTreeCrcWorkspaces(config, options, 0);
+    ASSERT_GT(minimum_crc.device_bytes, 0u);
+    EXPECT_EQ(minimum_crc.batch_size, 1u);
+    EXPECT_EQ(minimum_crc.slots_per_loop, 1u);
     ModelConfig      model;
     RuntimeConfig    runtime;
     const auto       runtime_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(runtime, {}, model);
     constexpr size_t kv_bytes      = 128u << 20;
-    const auto       available_bytes = getGpuExecStatus().device_memory_status.available_bytes;
-    if (available_bytes <= runtime_bytes + crc_bytes + kv_bytes)
-        GTEST_SKIP() << "requires enough free GPU memory for default Qwen-7B CRC workspaces"
-                     << " available_bytes=" << available_bytes << " crc_bytes=" << crc_bytes
-                     << " runtime_bytes=" << runtime_bytes << " kv_bytes=" << kv_bytes;
-    // Clamp available capacity without allocating model weights. The real KV
-    // backing and all default CRC slots are then created in production order.
-    const WarmUpResult measured{runtime_bytes + crc_bytes + kv_bytes, 0};
-    const auto         blocks = CacheConfigCreator::computeLocalBlockNum(config, model, runtime, options, {}, measured);
+    const WarmUpResult measured{runtime_bytes + minimum_crc.device_bytes + kv_bytes, 0};
+    if (getGpuExecStatus().device_memory_status.available_bytes < measured.device_reserved_bytes)
+        GTEST_SKIP() << "requires enough free GPU memory for minimum Qwen-7B CRC workspaces";
+    auto layout = planBlockTreeCacheLayout(config, options);
+    ASSERT_NE(layout, nullptr);
+    const auto blocks = CacheConfigCreator::computeLocalBlockNum(
+        config, model, runtime, options, {}, measured, std::nullopt, &layout->crc_workspaces);
     EXPECT_EQ(blocks, 4u);
+    EXPECT_EQ(layout->crc_workspaces.device_bytes, minimum_crc.device_bytes);
+    EXPECT_EQ(layout->crc_workspaces.batch_size, 1u);
+    EXPECT_EQ(layout->crc_workspaces.slots_per_loop, 1u);
+
+    options.kv_cache_mem_mb = 128;
+    BlockTreeCrcWorkspacePlan explicit_plan;
+    EXPECT_EQ(CacheConfigCreator::computeLocalBlockNum(
+                  config, model, runtime, options, {}, measured, std::nullopt, &explicit_plan),
+              4u);
+    EXPECT_EQ(explicit_plan.device_bytes, minimum_crc.device_bytes);
+    const WarmUpResult too_small{measured.device_reserved_bytes - 1, 0};
+    EXPECT_ANY_THROW(CacheConfigCreator::computeLocalBlockNum(
+        config, model, runtime, options, {}, too_small, std::nullopt, &explicit_plan));
+
     config.finalizeBlockNums(blocks, runtime);
     auto allocator = initAllocator<CoordinatorCacheManager>(config);
-    auto cache     = createBlockTreeCache(config, options, allocator);
+    auto cache     = createBlockTreeCache(config, options, allocator, {}, nullptr, nullptr, nullptr, layout);
     ASSERT_NE(cache, nullptr);
-    EXPECT_EQ(crcDeviceBytes(cache), crc_bytes);
+    EXPECT_EQ(crcDeviceBytes(cache), layout->crc_workspaces.device_bytes);
     EXPECT_LE(blocks * config.totalGroupBlockSizeBytes() + crcDeviceBytes(cache),
               measured.device_reserved_bytes - runtime_bytes);
 }

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -25,6 +26,7 @@ struct BlockTreeCacheLayout {
     std::vector<BackingLayout>            backing_layouts;
     BlockTreeCacheSizing                   sizing;
     std::optional<BlockTreeCacheBlockNums> block_nums;
+    BlockTreeCrcWorkspacePlan              crc_workspaces;
 };
 
 using BlockTreeCacheLayoutPtr = std::shared_ptr<BlockTreeCacheLayout>;

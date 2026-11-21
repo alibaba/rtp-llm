@@ -442,7 +442,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                           max_batch_descriptors);
         return nullptr;
     }
-    const size_t max_blocks_per_batch = static_cast<size_t>(max_batch_descriptors);
     if (layout == nullptr) {
         layout = planBlockTreeCacheLayout(cache_config, kv_cache_config);
     }
@@ -450,6 +449,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         RTP_LLM_LOG_ERROR("failed to build a consistent BlockTreeCache layout");
         return nullptr;
     }
+    const size_t max_blocks_per_batch        = layout->crc_workspaces.batch_size ? layout->crc_workspaces.batch_size :
+                                                                                   static_cast<size_t>(max_batch_descriptors);
+    const size_t crc_slots_per_loop          = layout->crc_workspaces.slots_per_loop;
     const auto&              group_members   = layout->group_members;
     const auto&              backing_layouts = layout->backing_layouts;
     std::vector<GroupSetPtr> group_sets;
@@ -675,7 +677,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                           config.transfer_worker_count);
         return nullptr;
     }
-    if (config.transfer_worker_count > std::numeric_limits<size_t>::max() / (2 * kDefaultCrcSlotsPerWorkLoop)) {
+    if (config.transfer_worker_count > std::numeric_limits<size_t>::max() / (2 * crc_slots_per_loop)) {
         RTP_LLM_LOG_ERROR("transfer worker count overflows total CRC slot count");
         return nullptr;
     }
@@ -721,7 +723,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                                         config.transfer_queue_max_size,
                                                                         cache_metrics_reporter,
                                                                         parallelism_config.world_rank,
-                                                                        kDefaultCrcSlotsPerWorkLoop);
+                                                                        crc_slots_per_loop);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(

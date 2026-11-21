@@ -64,6 +64,17 @@ BackingLayout computeBlockTreeBackingLayout(const CacheConfig&              conf
 // Shared by pre-allocation budgeting and WorkLoop construction.
 inline constexpr size_t kDefaultCrcSlotsPerWorkLoop = 8;
 
+struct BlockTreeCrcWorkspacePlan {
+    size_t batch_size{0};
+    size_t slots_per_loop{kDefaultCrcSlotsPerWorkLoop};
+    size_t device_bytes{0};
+};
+
+// Prefer the configured batch size and reduce concurrency first. The soft
+// budget may be exceeded by a single-item slot per worker and direction.
+BlockTreeCrcWorkspacePlan
+planBlockTreeCrcWorkspaces(const CacheConfig& config, const KVCacheConfig& options, size_t budget_bytes);
+
 // Shared by pre-allocation budgeting and WorkLoop construction.
 size_t crcTransferWorkspaceCount(size_t workers, size_t slots_per_loop);
 // Explicit GPU allocations for this rank's CRC services. No pools or CUDA

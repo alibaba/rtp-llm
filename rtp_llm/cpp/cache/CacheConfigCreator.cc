@@ -500,24 +500,62 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                                                   const KVCacheConfig&                             kv_cache_config,
                                                   const ParallelismConfig&                         parallelism_config,
                                                   const std::optional<WarmUpResult>&               warm_up_result,
-                                                  const std::optional<SpeculativeExecutionConfig>& sp_config) {
+                                                  const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                                  BlockTreeCrcWorkspacePlan*                       crc_plan) {
+    if (crc_plan)
+        *crc_plan = {};
     uint32_t block_num = 0;
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = static_cast<uint32_t>(kv_cache_config.test_block_num);
     } else {
-        // CRC services are created only after the KV pools. Reserve their
-        // persistent allocations before choosing automatic pool capacity.
-        const auto transfer_memory_bytes =
-            kv_cache_config.kv_cache_mem_mb > 0 ? 0 : blockTreeTransferDeviceMemory(config, kv_cache_config);
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(runtime_config,
-                                                                                    kv_cache_config,
-                                                                                    model_config,
-                                                                                    parallelism_config,
-                                                                                    warm_up_result,
-                                                                                    sp_config,
-                                                                                    transfer_memory_bytes);
-        const auto block_budget      = blockBudgetForConfig(config);
+        const auto block_budget       = blockBudgetForConfig(config);
+        const bool explicit_kv_budget = kv_cache_config.kv_cache_mem_mb > 0;
+        const auto default_crc_bytes =
+            explicit_kv_budget && !crc_plan ? 0 : blockTreeTransferDeviceMemory(config, kv_cache_config);
+        size_t kv_cache_mem_size;
+        if (crc_plan && default_crc_bytes > 0) {
+            const auto available_bytes = MemoryEvaluationHelper::availableCacheMemory(
+                runtime_config, model_config, parallelism_config, warm_up_result, sp_config);
+            auto minimum_kv_bytes = block_budget.explicit_pool_reserve_bytes;
+            addBudgetBytes(minimum_kv_bytes, block_budget.paged_block_bytes);
+            addBudgetBytes(minimum_kv_bytes, block_budget.swa_block_bytes);
+            size_t requested_kv_bytes = 0;
+            if (explicit_kv_budget) {
+                addBudgetBytes(requested_kv_bytes, 1024 * 1024, kv_cache_config.kv_cache_mem_mb);
+            }
+            const auto reserved_kv_bytes = std::max(minimum_kv_bytes, requested_kv_bytes);
+            RTP_LLM_CHECK_WITH_INFO(
+                available_bytes > reserved_kv_bytes,
+                "available cache memory %zu bytes cannot fit KV cache (%zu bytes) and CRC workspaces",
+                available_bytes,
+                reserved_kv_bytes);
+            const auto hard_limit = available_bytes - reserved_kv_bytes;
+            // Ordinary sizing leaves most of the cache budget to KV pools.
+            // An explicit pool budget takes priority over CRC concurrency.
+            constexpr size_t kAutomaticCrcBudgetDivisor = 8;
+            const auto       preferred_limit =
+                explicit_kv_budget ? hard_limit : std::min(hard_limit, available_bytes / kAutomaticCrcBudgetDivisor);
+            *crc_plan = planBlockTreeCrcWorkspaces(config, kv_cache_config, preferred_limit);
+            RTP_LLM_CHECK_WITH_INFO(crc_plan->device_bytes <= hard_limit,
+                                    "minimum CRC workspace needs %zu bytes, only %zu bytes remain after KV reservation",
+                                    crc_plan->device_bytes,
+                                    hard_limit);
+            kv_cache_mem_size = explicit_kv_budget ? requested_kv_bytes : available_bytes - crc_plan->device_bytes;
+            RTP_LLM_LOG_INFO("CRC transfer plan: batch=%zu slots_per_work_loop=%zu device_bytes=%zu kv_bytes=%zu",
+                             crc_plan->batch_size,
+                             crc_plan->slots_per_loop,
+                             crc_plan->device_bytes,
+                             kv_cache_mem_size);
+        } else {
+            kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(runtime_config,
+                                                                             kv_cache_config,
+                                                                             model_config,
+                                                                             parallelism_config,
+                                                                             warm_up_result,
+                                                                             sp_config,
+                                                                             default_crc_bytes);
+        }
         if (block_budget.explicit_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size >= block_budget.explicit_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
