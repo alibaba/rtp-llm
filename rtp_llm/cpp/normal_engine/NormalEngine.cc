@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/Stage0GapAudit.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -757,6 +758,11 @@ absl::Status NormalEngine::stop() {
     }
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     loop_thread_->join();
+    // Stage-0 gap recorder: flush only after the writer threads (executor process
+    // loop, scheduler) have quiesced — a ring slot's write_idx is reserved before its
+    // fields are populated, so flushing earlier could read a reserved-but-unwritten
+    // slot. Still before the process teardown/SIGTERM that would skip atexit handlers.
+    stage0_gap_flush();
     return absl::OkStatus();
 }
 

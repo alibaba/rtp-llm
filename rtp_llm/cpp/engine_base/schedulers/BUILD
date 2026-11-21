@@ -14,6 +14,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/models:context_parallel_layout",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:stage0_gap_audit",
     ],
     visibility = ["//visibility:public"],
 )

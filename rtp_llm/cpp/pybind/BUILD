@@ -113,6 +113,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/utils:signal_utils",
+        "//rtp_llm/cpp/utils:stage0_gap_audit",
         "//:rtp_compute_ops",
         "@xgrammar//:xgrammar",
     ] + torch_deps() + select({

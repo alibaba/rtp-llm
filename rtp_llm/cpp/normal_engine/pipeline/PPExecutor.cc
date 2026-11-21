@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
+#include "rtp_llm/cpp/utils/Stage0GapAudit.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPPrefillGuardPolicy.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPAdmission.h"
 #include "rtp_llm/cpp/models/V41InputRejected.h"
@@ -55,6 +56,119 @@ std::string head8Hex(const void* data, int64_t numel) {
         out.push_back(kHex[p[i] & 0xF]);
     }
     return out;
+}
+
+// ---- Stage-0 gap diagnosis: cpu_gpu stream markers (plan §5, stage-0 only) ----
+// Two timing-enabled CUDA events per chunk on the model stream: NEXT_HEAD(k)
+// recorded immediately before the forward submission, MODEL_TAIL(k) immediately
+// after the last queued model op. Both intervals are read at the existing
+// completion point (COMPLETE_COMMIT, after the pre-existing forward-done wait,
+// so both events are complete) and slots are released only then. The previous
+// chunk's MODEL_TAIL is also queried at three host anchors (readiness, never a
+// wait). No device/stream sync, event wait, or barrier is added; record/query
+// are non-blocking. Events are preallocated lazily at the first cpu_gpu chunk
+// (a prewarm/transition request, outside measured blocks) and logged once.
+struct S0GpuMarkPool {
+    static constexpr int SLOTS = 32;
+    cudaEvent_t          ev[SLOTS];
+    bool                 created   = false;
+    bool                 failed    = false;
+    int                  next      = 0;
+    int                  head_slot = -1;  // NEXT_HEAD of the in-flight chunk
+    int                  tail_slot = -1;  // MODEL_TAIL of the in-flight chunk
+    int                  prev_tail = -1;  // MODEL_TAIL of the previous chunk
+};
+S0GpuMarkPool g_s0gpu;
+
+inline bool s0gpu_active() {
+    return stage0_gap_mode() == 2;
+}
+
+inline void s0gpuEnsure() {
+    if (g_s0gpu.created || g_s0gpu.failed)
+        return;
+    for (int i = 0; i < S0GpuMarkPool::SLOTS; ++i) {
+        if (cudaEventCreateWithFlags(&g_s0gpu.ev[i], cudaEventDefault) != cudaSuccess) {
+            RTP_LLM_LOG_INFO("[S0GPU] event pool creation failed at slot %d; markers disabled", i);
+            for (int j = 0; j < i; ++j)
+                cudaEventDestroy(g_s0gpu.ev[j]);
+            g_s0gpu.failed = true;
+            return;
+        }
+    }
+    g_s0gpu.created = true;
+    RTP_LLM_LOG_INFO("[S0GPU] event pool created (%d slots, timing-enabled)", S0GpuMarkPool::SLOTS);
+}
+
+inline int s0gpuAlloc() {
+    int s        = g_s0gpu.next;
+    g_s0gpu.next = (g_s0gpu.next + 1) % S0GpuMarkPool::SLOTS;
+    return s;
+}
+
+// Reset per-request GPU marker state so a previous request's (or mode's) tail
+// can never be queried or paired for the new request (plan §2 defect 2).
+inline void s0gpu_reset_request() {
+    g_s0gpu.head_slot = -1;
+    g_s0gpu.tail_slot = -1;
+    g_s0gpu.prev_tail = -1;
+}
+
+// NEXT_HEAD(k): just before the forward submission, on the model stream.
+inline void s0gpuNextHead() {
+    if (!s0gpu_active())
+        return;
+    s0gpuEnsure();
+    if (!g_s0gpu.created)
+        return;
+    int slot = s0gpuAlloc();
+    if (cudaEventRecord(g_s0gpu.ev[slot], cuda_graph::graphGetCurrentStream()) == cudaSuccess)
+        g_s0gpu.head_slot = slot;
+}
+
+// MODEL_TAIL(k): just after the last queued model op, on the model stream.
+inline void s0gpuModelTail() {
+    if (!s0gpu_active() || !g_s0gpu.created || g_s0gpu.head_slot < 0)
+        return;
+    int slot = s0gpuAlloc();
+    if (cudaEventRecord(g_s0gpu.ev[slot], cuda_graph::graphGetCurrentStream()) == cudaSuccess)
+        g_s0gpu.tail_slot = slot;
+}
+
+// Readiness of the previous chunk's MODEL_TAIL at a host anchor (never waits).
+inline void s0gpuQueryPrevTail(int anchor, int32_t slot, uint32_t stage) {
+    if (!s0gpu_active() || !g_s0gpu.created)
+        return;
+    uint32_t result = 2;  // not_recorded
+    if (g_s0gpu.prev_tail >= 0) {
+        cudaError_t q = cudaEventQuery(g_s0gpu.ev[g_s0gpu.prev_tail]);
+        result        = (q == cudaSuccess) ? 0 : (q == cudaErrorNotReady ? 1 : 3);
+    }
+    stage0_gap_record(Stage0GapEvent::GPU_QUERY, slot, static_cast<uint32_t>(anchor * 8 + result), stage);
+}
+
+// At the existing completion point (COMPLETE_COMMIT, after the forward-done
+// wait): both this chunk's events are complete. Emit the forward span and the
+// inter-chunk stream gap, then release this chunk's head/tail slots.
+inline void s0gpuCommit(int32_t slot, uint32_t stage) {
+    if (!s0gpu_active() || !g_s0gpu.created)
+        return;
+    float ms = 0.f;
+    if (g_s0gpu.head_slot >= 0 && g_s0gpu.tail_slot >= 0) {
+        if (cudaEventElapsedTime(&ms, g_s0gpu.ev[g_s0gpu.head_slot], g_s0gpu.ev[g_s0gpu.tail_slot]) == cudaSuccess) {
+            stage0_gap_record(Stage0GapEvent::GPU_FWD_SPAN, slot, static_cast<uint32_t>(ms * 1000.f), stage);
+        }
+        if (g_s0gpu.prev_tail >= 0) {
+            if (cudaEventElapsedTime(&ms, g_s0gpu.ev[g_s0gpu.prev_tail], g_s0gpu.ev[g_s0gpu.head_slot])
+                == cudaSuccess) {
+                stage0_gap_record(Stage0GapEvent::GPU_STREAM_GAP, slot, static_cast<uint32_t>(ms * 1000.f), stage);
+            }
+        }
+    }
+    if (g_s0gpu.tail_slot >= 0)
+        g_s0gpu.prev_tail = g_s0gpu.tail_slot;
+    g_s0gpu.head_slot = -1;
+    g_s0gpu.tail_slot = -1;
 }
 
 // Runs `emit` only while an exception is in flight, so a V4.1 PP round that fails after admission can
@@ -1231,6 +1345,11 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     RTP_LLM_PROFILE_FUNCTION();
 
     const auto step = step_count_++;
+    const Stage0GapGuard gap_guard_process_enter(Stage0GapEvent::PROCESS_ENTER,
+                                                 Stage0GapEvent::PROCESS_EXIT,
+                                                 static_cast<int32_t>(current_slot_),
+                                                 0,
+                                                 static_cast<uint32_t>(isFirstStage() ? 0 : 1));
     if (pp_step_log_) {
         RTP_LLM_LOG_INFO("[PPSTEP] rank=%lld step=%ld first=%d last=%d root=%d streams=%ld",
                          static_cast<long long>(parallelism_config_.world_rank),
@@ -1262,6 +1381,20 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     } else {
         plan = receivePlan();
     }
+    // Stage-0 gap recorder (repaired): the per-request mode is bound by native
+    // request id at the post-sync point below (deterministic schedule map, no
+    // time-racy env read at the admission boundary). PLAN_READY is gated by the
+    // CURRENT latch (the previous plan's mode) and records a PENDING identity
+    // (rid=-2); the real (rid, chunk, generation) context is set post-sync,
+    // identically on all ranks. Identity is never forward_counter-derived.
+    if (stage0_gap_enabled()) {
+        stage0_gap_set_context(
+            -2, -1, stage0_gap_state().request_generation.load(std::memory_order_relaxed), stage0_gap_mode());
+    }
+    stage0_gap_record(Stage0GapEvent::PLAN_READY,
+                      static_cast<int32_t>(current_slot_),
+                      0,
+                      static_cast<uint32_t>(isFirstStage() ? 0 : 1));
 
     if (isLastStage() && isStageRoot()) {
         for (const auto request_id : plan.finished_request_ids) {
@@ -1272,14 +1405,65 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
     /** 2. do the sync across the all ranks in the same stage. */
     tpSyncModelInputs(plan.model_input, parallelism_config_);
 
+    // Stage-0 gap recorder (repaired): request_id is now synced on every CP rank,
+    // so the immutable (rid, chunk, generation) identity is set identically on all
+    // eight ranks, and the mode is bound deterministically by the schedule map
+    // (stage0_gap_mode_for_rid) — never a time-racy env read. New request -> bind
+    // mode + reset chunk ordinal + reset GPU marker state (no prev_tail survival).
+    // The whole identity/latch block is gated by the session cap so the default-off
+    // path never reads the tensor, touches the global state, or updates an atomic.
+    if (stage0_gap_session_cap() != 0) {
+        int64_t rid = -1;
+        if (plan.model_input.request_id.defined() && plan.model_input.request_id.numel() > 0
+            && !plan.model_input.request_id.is_cuda()) {
+            rid = plan.model_input.request_id[0].item<int64_t>();
+        }
+        auto& gst = stage0_gap_state();
+        if (rid >= 0) {
+            const int req_mode = stage0_gap_mode_for_rid(rid);
+            if (gst.active_request.load(std::memory_order_relaxed) != rid) {
+                gst.active_request.store(rid, std::memory_order_relaxed);
+                gst.active_chunk.store(0, std::memory_order_relaxed);
+                gst.request_generation.fetch_add(1, std::memory_order_relaxed);
+                if (isFirstStage()) {
+                    s0gpu_reset_request();
+                }
+            } else {
+                gst.active_chunk.fetch_add(1, std::memory_order_relaxed);
+            }
+            stage0_gap_latch().mode.store(req_mode, std::memory_order_relaxed);
+            if (req_mode != 0) {
+                stage0_gap_set_context(rid,
+                                       gst.active_chunk.load(std::memory_order_relaxed),
+                                       gst.request_generation.load(std::memory_order_relaxed),
+                                       req_mode);
+            } else {
+                // off request: no records; identity reset so nothing leaks
+                stage0_gap_set_context(-1, -1, gst.request_generation.load(std::memory_order_relaxed), 0);
+            }
+        } else if (stage0_gap_enabled()) {
+            // idle/empty round: keep the surrounding request's mode so the
+            // inter-chunk idle steps record; identity -1, never relabeled
+            stage0_gap_set_context(-1, -1, gst.request_generation.load(std::memory_order_relaxed), stage0_gap_mode());
+        }
+    }  // stage0_gap_session_cap() != 0
+
     releaseAllModelBuffers();
 
     /** 3. Wait on this slot's previous sends before resetting it. CUDA waits order subsequent operations on the current
      * stream after communication. */
     auto& inflight = slots_[current_slot_];
-    waitAll(inflight.plan_sends, "plan send completion");
-    waitAll(inflight.activation_sends, "activation send completion");
-    waitAll(inflight.execution_result_sends, "execution result send completion");
+    // round start — how many slots hold in-flight sends. Observability only.
+    {
+        const Stage0GapGuard gap_guard_slot_wait_enter(Stage0GapEvent::SLOT_WAIT_ENTER,
+                                                       Stage0GapEvent::SLOT_WAIT_EXIT,
+                                                       static_cast<int32_t>(current_slot_),
+                                                       0,
+                                                       static_cast<uint32_t>(isFirstStage() ? 0 : 1));
+        waitAll(inflight.plan_sends, "plan send completion");
+        waitAll(inflight.activation_sends, "activation send completion");
+        waitAll(inflight.execution_result_sends, "execution result send completion");
+    }
     inflight.reset();
     inflight.skip_run = plan.model_input.skip_run;
     obj_log_active_   = pp_step_log_ && (step < 256 || !inflight.skip_run || inflight.skip_run != last_step_skip_run_);
@@ -1376,6 +1560,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         [&] { v41_emit_owed_traffic("V4.1 PP round failed after admission"); });
     if (v41_pp_admission_) {
         retireV41Requests(plan.finished_request_ids);
+        stage0_gap_record(Stage0GapEvent::RETIRE,
+                          static_cast<int32_t>(current_slot_),
+                          0,
+                          static_cast<uint32_t>(isFirstStage() ? 0 : 1));
         // V4.1 fake inputs contain no request, history or physical lease.
         if (plan.model_input.is_fake_stream && !plan.model_input.combo_tokens.numel()) {
             plan.model_input.skip_run = inflight.skip_run = true;
@@ -1383,8 +1571,21 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         v41_chunk_owed = !plan.model_input.skip_run;
         if (!plan.model_input.skip_run) {
             try {
+                if (isFirstStage()) {
+                    s0gpuQueryPrevTail(1, static_cast<int32_t>(current_slot_), 0);
+                }
+                const Stage0GapGuard gap_guard_admit_prepare_enter(Stage0GapEvent::ADMIT_PREPARE_ENTER,
+                                                                   Stage0GapEvent::ADMIT_PREPARE_EXIT,
+                                                                   static_cast<int32_t>(current_slot_),
+                                                                   0,
+                                                                   static_cast<uint32_t>(isFirstStage() ? 0 : 1));
                 inflight.v41_cache_batch = v41_pp_admission_->prepareWithWorker(
                     plan.model_input, [&](const GptModelInputs& inputs, const V41PPCacheBatchPtr& batch) {
+                        const Stage0GapGuard gap_guard_py_prepare_enter(Stage0GapEvent::PY_PREPARE_ENTER,
+                                                                        Stage0GapEvent::PY_PREPARE_EXIT,
+                                                                        static_cast<int32_t>(current_slot_),
+                                                                        0,
+                                                                        static_cast<uint32_t>(isFirstStage() ? 0 : 1));
                         inflight.v41_model_inputs = model_->prepareV41PP(inputs, batch);
                     });
             } catch (const V41InputRejected& error) {
@@ -1458,6 +1659,11 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         PPIntermediateTensors output_tensors;
         int64_t               v41_transfer_round = -1;
         if (v41_pp_admission_) {
+            const Stage0GapGuard gap_guard_admit_agree_enter(Stage0GapEvent::ADMIT_AGREE_ENTER,
+                                                             Stage0GapEvent::ADMIT_AGREE_EXIT,
+                                                             static_cast<int32_t>(current_slot_),
+                                                             0,
+                                                             static_cast<uint32_t>(isFirstStage() ? 0 : 1));
             v41_pp_admission_->initializeFresh(inflight.v41_cache_batch);
             v41_transfer_round = v41_pp_admission_->beginExecution(inflight.v41_cache_batch);
         }
@@ -1475,7 +1681,14 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             } else {
                 input_tensors = receiveTensors(tensor_receives);
             }
-            waitAll(tensor_receives, "intermediate tensors from previous stage");
+            {
+                const Stage0GapGuard gap_guard_frame_recv_enter(Stage0GapEvent::FRAME_RECV_ENTER,
+                                                                Stage0GapEvent::FRAME_RECV_EXIT,
+                                                                static_cast<int32_t>(current_slot_),
+                                                                0,
+                                                                static_cast<uint32_t>(isFirstStage() ? 0 : 1));
+                waitAll(tensor_receives, "intermediate tensors from previous stage");
+            }
             if (obj_log_active_) {
                 for (const auto& tensor_entry : input_tensors.tensors) {
                     if (tensor_entry.second.numel() == 0) {
@@ -1528,6 +1741,14 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                torch::TensorOptions(torch::kInt32).pinned_memory(true));
             saved_input_lengths.copy_(local_model_input.input_lengths);
         }
+        stage0_gap_record(Stage0GapEvent::FORWARD_LAUNCH,
+                          static_cast<int32_t>(current_slot_),
+                          0,
+                          static_cast<uint32_t>(isFirstStage() ? 0 : 1));
+        if (isFirstStage()) {
+            s0gpuQueryPrevTail(2, static_cast<int32_t>(current_slot_), 0);
+            s0gpuNextHead();
+        }
         auto model_output = v41_pp_admission_ ? model_->forwardV41PP(inflight.v41_model_inputs,
                                                                      v41_transfer_round,
                                                                      isFirstStage() ? nullptr : &input_tensors,
@@ -1535,6 +1756,14 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                 model_->forwardPP(local_model_input,
                                                                   isFirstStage() ? nullptr : &input_tensors,
                                                                   isLastStage() ? nullptr : &output_tensors);
+        stage0_gap_record(Stage0GapEvent::FORWARD_LAUNCH_EXIT,
+                          static_cast<int32_t>(current_slot_),
+                          0,
+                          static_cast<uint32_t>(isFirstStage() ? 0 : 1));
+        if (isFirstStage()) {
+            s0gpuModelTail();
+        }
+
         if (v41_phase_timing && isStageRoot()) {
             v41_ph[2] = autil::TimeUtility::currentTimeInMicroSeconds();
         }
@@ -1553,6 +1782,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         // the pre-commit cudaSyncAndCheck in the admission block still drains the
         // device before completion/commit, so cross-round cache-cursor publication
         // keeps its qualified drain. One-shot announce proves engagement.
+        stage0_gap_record(Stage0GapEvent::FWD_DONE_WAIT_ENTER,
+                          static_cast<int32_t>(current_slot_),
+                          0,
+                          static_cast<uint32_t>(isFirstStage() ? 0 : 1));
         if (no_round_sync_) {
             if (!no_round_sync_announced_) {
                 no_round_sync_announced_ = true;
@@ -1593,11 +1826,19 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 }
             }
         }
+        stage0_gap_record(Stage0GapEvent::FWD_DONE_WAIT_EXIT,
+                          static_cast<int32_t>(current_slot_),
+                          0,
+                          static_cast<uint32_t>(isFirstStage() ? 0 : 1));
 
         if (v41_pp_admission_) {
             if (!isLastStage()) {
                 v41_frame_sent = true;  // this round's frame is on the lane; nothing more is owed
                 asyncSendTensors(output_tensors, inflight.activation_sends);
+                stage0_gap_record(Stage0GapEvent::FRAME_SEND,
+                                  static_cast<int32_t>(current_slot_),
+                                  0,
+                                  static_cast<uint32_t>(isFirstStage() ? 0 : 1));
                 if (!v41_pp_async_) {
                     // Synchronous contract: the WORLD completion below must not be declared
                     // before the frame has actually left this stage. Asynchronous contract:
@@ -1610,20 +1851,35 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             }
             // CUDA ticket waits establish stream ordering; drain the actual
             // hardware before WORLD completion or cursor publication.
-            if (boundary_pack_) {
-                // R31: event-wait on the producing stream instead of the
-                // device-wide drain — the ticketed sends are stream-ordered
-                // and all side/aux work joined the producing stream before
-                // the frame export, so the guarantee is unchanged.
-                auto commit_drain = cuda_graph::makeGraphEvent();
-                commit_drain.record(cuda_graph::graphGetCurrentStream());
-                commit_drain.synchronize();
-                cudaCheckLastError();
-            } else {
-                cudaSyncAndCheck();
+            {
+                const Stage0GapGuard gap_guard_commit_drain(Stage0GapEvent::COMMIT_DRAIN_ENTER,
+                                                            Stage0GapEvent::COMMIT_DRAIN_EXIT,
+                                                            static_cast<int32_t>(current_slot_),
+                                                            0,
+                                                            static_cast<uint32_t>(isFirstStage() ? 0 : 1));
+                if (boundary_pack_) {
+                    // event-wait on the producing stream instead of the
+                    // device-wide drain — the ticketed sends are stream-ordered
+                    // and all side/aux work joined the producing stream before
+                    // the frame export, so the guarantee is unchanged.
+                    auto commit_drain = cuda_graph::makeGraphEvent();
+                    commit_drain.record(cuda_graph::graphGetCurrentStream());
+                    commit_drain.synchronize();
+                    cudaCheckLastError();
+                } else {
+                    cudaSyncAndCheck();
+                }
             }
             v41_pp_admission_->completeExecution(inflight.v41_cache_batch, true);
             v41_pp_admission_->commit(inflight.v41_cache_batch);
+            stage0_gap_record(Stage0GapEvent::COMPLETE_COMMIT,
+                              static_cast<int32_t>(current_slot_),
+                              0,
+                              static_cast<uint32_t>(isFirstStage() ? 0 : 1));
+            if (isFirstStage()) {
+                s0gpuCommit(static_cast<int32_t>(current_slot_), 0);
+                s0gpuQueryPrevTail(0, static_cast<int32_t>(current_slot_), 0);
+            }
             for (const auto& binding : inflight.v41_cache_batch->bindings()) {
                 const auto& span                 = binding.span;
                 v41_request_identities_[span[0]] = {span[0], span[1], span[2]};
@@ -1687,6 +1943,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                 }
                 v41_result_sent = true;  // the slot's result is on the lane; nothing more is owed
                 asyncSendExecutionResult(execution_result, inflight.execution_result_sends);
+                stage0_gap_record(Stage0GapEvent::RESULT_SEND,
+                                  static_cast<int32_t>(current_slot_),
+                                  0,
+                                  static_cast<uint32_t>(isFirstStage() ? 0 : 1));
             }
         }
 
@@ -1706,7 +1966,14 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
 
         const auto& stream_groups            = next_batch.stream_groups;
         auto        token_counts_by_priority = stream_groups.tokenCountsByPriority();
-        RETURN_IF_STATUS_ERROR(processExecutionResult(next_batch));
+        {
+            const Stage0GapGuard gap_guard_result_recv_enter(Stage0GapEvent::RESULT_RECV_ENTER,
+                                                             Stage0GapEvent::RESULT_RECV_EXIT,
+                                                             static_cast<int32_t>(current_slot_),
+                                                             0,
+                                                             static_cast<uint32_t>(isFirstStage() ? 0 : 1));
+            RETURN_IF_STATUS_ERROR(processExecutionResult(next_batch));
+        }
 
         const int64_t tps_execute_time_us =
             autil::TimeUtility::currentTimeInMicroSeconds() - next_batch.schedule_time_us;

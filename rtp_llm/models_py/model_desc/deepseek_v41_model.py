@@ -796,6 +796,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         from rtp_llm.models_py.modules.dsv4.native_pp_prefill import (
             prepare_native_pp_prefill_dispatch,
         )
+        from rtp_llm.models_py.modules.dsv4 import _v41_stage0_gap as _gap
 
         with self._worker_lock:
             self._check_worker()
@@ -806,11 +807,14 @@ class DeepSeekV41Model(DeepSeekV4Model):
             dispatch = error = None
             try:
                 self._check_execution_config()
+                _gap.record(_gap.PY_DISPATCH_ENTER)
                 dispatch = prepare_native_pp_prefill_dispatch(self, inputs)
+                _gap.record(_gap.PY_DISPATCH_EXIT)
             except Exception as exc:
                 error = exc
             try:
                 with torch.cuda.stream(self._worker_stream):
+                    _gap.record(_gap.PY_AGREE_ENTER)
                     self._agree_dp(
                         error,
                         (
@@ -820,6 +824,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                         self._weight_device(),
                         native_dispatch=True,
                     )
+                    _gap.record(_gap.PY_AGREE_EXIT)
                 return dispatch
             finally:
                 # A validator traceback references this frame and its native
@@ -857,53 +862,66 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     )
 
     def _prepare_native_pp_engine(self, inputs):
-        with self._worker_lock:
-            self._check_worker()
-            error = None
-            try:
-                if self._native_pp_contract is None:
-                    error = ValueError("Native V4.1 PP checkpoint contract is missing")
-                self._agree_dp(
-                    error,
-                    (
-                        "native-pp-engine-contract",
-                        (
-                            None
-                            if self._native_pp_contract is None
-                            else self._native_pp_contract.fingerprint.hex()
-                        ),
-                    ),
-                    self._weight_device(),
-                    native_dispatch=True,
-                )
-            finally:
+        from rtp_llm.models_py.modules.dsv4 import _v41_stage0_gap as _gap
+
+        _gap.prepare_entry(inputs)
+        try:
+            with self._worker_lock:
+                self._check_worker()
                 error = None
-            return self.prepare_native_pp_prefill(inputs)
+                try:
+                    if self._native_pp_contract is None:
+                        error = ValueError("Native V4.1 PP checkpoint contract is missing")
+                    _gap.record(_gap.PY_AGREE_ENTER)
+                    self._agree_dp(
+                        error,
+                        (
+                            "native-pp-engine-contract",
+                            (
+                                None
+                                if self._native_pp_contract is None
+                                else self._native_pp_contract.fingerprint.hex()
+                            ),
+                        ),
+                        self._weight_device(),
+                        native_dispatch=True,
+                    )
+                    _gap.record(_gap.PY_AGREE_EXIT)
+                finally:
+                    error = None
+                return self.prepare_native_pp_prefill(inputs)
+        finally:
+            _gap.prepare_exit()
 
     @torch.inference_mode()
     def _execute_native_pp_engine(self, dispatch, transfer_round, tensors=None):
         from rtp_llm.models_py.modules.dsv4.native_pp_execution import l20_tables
+        from rtp_llm.models_py.modules.dsv4 import _v41_stage0_gap as _gap
 
-        with self._worker_lock:
-            self._check_worker()
-            receiver = self._native_pp_receiver
-            if receiver is not None:
-                for identity, tables in l20_tables(dispatch).items():
-                    if identity.request_id not in receiver._requests:
-                        receiver.begin_request(identity, tables)
-                    else:
-                        # FastGen chunked prefill grows the admitted allocation
-                        # per continuation chunk; the replica may only append
-                        # pages (extend_request enforces that), so re-admit the
-                        # grown tables instead of leaving chunk 0's snapshot.
-                        receiver.extend_request(identity, tables)
-            return self._execute_native_pp_prefill(
-                dispatch,
-                self._native_pp_contract,
-                transfer_round,
-                receiver=receiver,
-                tensors=tensors,
-            )
+        _gap.execute_entry(dispatch)
+        try:
+            with self._worker_lock:
+                self._check_worker()
+                receiver = self._native_pp_receiver
+                if receiver is not None:
+                    for identity, tables in l20_tables(dispatch).items():
+                        if identity.request_id not in receiver._requests:
+                            receiver.begin_request(identity, tables)
+                        else:
+                            # FastGen chunked prefill grows the admitted allocation
+                            # per continuation chunk; the replica may only append
+                            # pages (extend_request enforces that), so re-admit the
+                            # grown tables instead of leaving chunk 0's snapshot.
+                            receiver.extend_request(identity, tables)
+                return self._execute_native_pp_prefill(
+                    dispatch,
+                    self._native_pp_contract,
+                    transfer_round,
+                    receiver=receiver,
+                    tensors=tensors,
+                )
+        finally:
+            _gap.execute_exit()
 
     def _retire_native_pp_engine(self, identity):
         from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import V41CacheIdentity

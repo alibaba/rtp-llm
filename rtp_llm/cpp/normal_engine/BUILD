@@ -119,6 +119,7 @@ cc_library(
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:stage0_gap_audit",
         "//rtp_llm/cpp/multimodal_processor:multimodal_input_utils",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:op_data",

@@ -139,6 +139,8 @@ def prepare_native_pp_prefill_dispatch(
     worker: Any, inputs: Any
 ) -> NativePPPrefillDispatch:
     """Validate without cache writes, source publication or model collectives."""
+    from rtp_llm.models_py.modules.dsv4 import _v41_stage0_gap as _gap
+
     args, pcfg, cache = worker._v4_args, worker.parallelism_config, worker.kv_cache
     if (
         args.pp_size != 2
@@ -199,7 +201,9 @@ def prepare_native_pp_prefill_dispatch(
         raise ValueError("V4.1 PP preflight requires distinct bounded request spans")
     # The C++ API compares leases with allocator provenance rather than the
     # projected cache topology; Python receives copies, never lease constructors.
+    _gap.record(_gap.PY_D_LEASES_ENTER)
     leased = cache.native_allocation_tables(inputs)
+    _gap.record(_gap.PY_D_LEASES_EXIT)
     expected_tags = {
         b.tag for b in dsv41_cache_bindings(args.v41_config, 2, args.pp_rank)
     }
@@ -211,6 +215,7 @@ def prepare_native_pp_prefill_dispatch(
         raise ValueError("V4.1 PP preflight requires native CP metadata")
     info = attn.context_parallel_info
     cp_fields = {}
+    _gap.record(_gap.PY_D_CP_ENTER)
     for name in _CP_FIELDS:
         value = getattr(info, name, None)
         cp_fields[name] = value.clone() if isinstance(value, torch.Tensor) else value
@@ -224,6 +229,7 @@ def prepare_native_pp_prefill_dispatch(
         prefix_lengths=attn.prefix_lengths,
         kv_cache_sharded=False,
     )
+    _gap.record(_gap.PY_D_CP_EXIT)
     lengths = torch.tensor(cp.chunk_lengths_per_req, device=device, dtype=torch.int32)
     prefixes = torch.tensor([s.start for s in spans], device=device, dtype=torch.int32)
     if (
@@ -245,6 +251,7 @@ def prepare_native_pp_prefill_dispatch(
         cu = torch.cat(
             (torch.zeros(1, dtype=torch.int64), lengths.cpu().long().cumsum(0))
         )
+    _gap.record(_gap.PY_D_TAGS_ENTER)
     for tag, value in tagged.items():
         if not value.is_prefill or value.is_cuda_graph or value.is_target_verify:
             raise NotImplementedError(
@@ -345,9 +352,13 @@ def prepare_native_pp_prefill_dispatch(
                 cp.global_positions[cp.local_is_real],
             ):
                 raise ValueError(f"V4.1 {tag} CP token positions disagree")
+    _gap.record(_gap.PY_D_TAGS_EXIT)
+    _gap.record(_gap.PY_D_LEASES_ENTER)
     tables = build_block_tables_batched(cache, tagged)
+    _gap.record(_gap.PY_D_LEASES_EXIT)
     if set(tables) != expected_tags:
         raise ValueError("V4.1 PP block tables have the wrong native tag roster")
+    _gap.record(_gap.PY_D_TAGS_ENTER)
     for tag, table in tables.items():
         pages = [list(row[tag]) for row in leased]
         width = max(map(len, pages))
@@ -451,10 +462,15 @@ def prepare_native_pp_prefill_dispatch(
     # Batch-3 A1: tighten the deferred gating window — one stacked assert
     # covering every preflight predicate, ordered before the rows DtoH so a
     # violation aborts before the dispatch struct is built.
+    _gap.record(_gap.PY_D_TAGS_EXIT)
+    _gap.record(_gap.PY_D_FLUSH_ENTER)
     _pp_flush_preflight_checks()
+    _gap.record(_gap.PY_D_FLUSH_EXIT)
+    _gap.record(_gap.PY_D_ROWMAP_ENTER)
     rows = torch.stack(
         (cp.req_id_per_token.long(), cp.global_positions, cp.local_is_real.long()), -1
     ).cpu()
+    _gap.record(_gap.PY_D_ROWMAP_EXIT)
     rows[~rows[:, 2].bool()] = torch.tensor([-1, -1, 0])
     return NativePPPrefillDispatch(
         inputs,

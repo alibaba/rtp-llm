@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/Stage0GapAudit.h"
 
 using namespace std;
 
@@ -108,6 +109,7 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
     for (auto it = running_streams_.begin(); it != running_streams_.end();) {
         auto stream = *it;
         if (stream->isPPInflight()) {
+            stage0_gap_record(Stage0GapEvent::SCHED_SKIP_INFLIGHT, 0, 0, 0);
             ++it;
             continue;
         }
@@ -118,6 +120,7 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
             // Cancellation/error must not release KV while earlier chunks still use it.
             if ((outstanding > 0 && stream->hasError())
                 || (stream->isChunkStream() ? outstanding >= pp_overlap_cap_ : outstanding > 0)) {
+                stage0_gap_record(Stage0GapEvent::SCHED_SKIP_CREDIT, 0, static_cast<uint32_t>(outstanding), 0);
                 ++it;
                 continue;
             }

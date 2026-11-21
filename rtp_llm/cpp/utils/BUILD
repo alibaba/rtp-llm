@@ -55,6 +55,15 @@ cc_library(
 )
 
 cc_library(
+    name = "stage0_gap_audit",
+    hdrs = [
+        "Stage0GapAudit.h",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "device_pin",
     hdrs = [
         "DevicePin.h",
