@@ -22,8 +22,8 @@ from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
-# Terminal entries share a permanently signaled event. Pending entries still
-# own individual wait queues.
+# Terminal entries share a permanently signaled event. A pending entry only
+# needs its own wait queue if a caller actually waits.
 _SIGNALED_EVENT = threading.Event()
 _SIGNALED_EVENT.set()
 
@@ -34,7 +34,7 @@ class _PoolCapacityError(RuntimeError):
 
 def _wait_event(event, timeout, cancellation_event):
     if cancellation_event is None:
-        return event.wait(timeout=timeout)
+        return event is _SIGNALED_EVENT or event.wait(timeout=timeout)
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         if cancellation_event.is_set():
@@ -546,7 +546,9 @@ class MMEmbeddingCacheEntry:
             Callable[["MMEmbeddingCacheEntry", Optional[float]], Any]
         ] = None,
     ):
-        self._event = threading.Event()
+        self._event: Optional[threading.Event] = None
+        # Inspection future callbacks may enter a wait while _state_lock is held.
+        self._wait_lock = threading.Lock()
         self._state_lock = threading.Lock()
         # Claim completion once; _event publishes it after callbacks finish.
         self._terminal = False
@@ -576,7 +578,7 @@ class MMEmbeddingCacheEntry:
         # KVCM approval, instead of auditing the same in-flight URL again.
         self.expects_greennet = False
         self.capture_compute_streams = False
-        self._greennet_event = threading.Event()
+        self._greennet_event: Optional[threading.Event] = None
         self._greennet_verdict: Optional[GreenNetVerdict] = None
         self._greennet_error: Optional[Exception] = None
         self._greennet_checked = False
@@ -630,7 +632,9 @@ class MMEmbeddingCacheEntry:
         cancellation_event: Optional[threading.Event] = None,
     ) -> None:
         """Wait for completion without promoting an offloaded embedding."""
-        if not _wait_event(self._event, timeout, cancellation_event):
+        if not _wait_event(
+            self._waiter_event("_event"), timeout, cancellation_event
+        ):
             raise TimeoutError("Waiting for embedding result timed out")
         if self.error is not None:
             raise self.error
@@ -659,7 +663,7 @@ class MMEmbeddingCacheEntry:
             # Publish the result to waiters immediately; the cache insertion is
             # best-effort and runs on the cache's publication thread. A failed
             # insertion must never turn a successful computation into an error.
-            self._signal_ready()
+            self._signal_event("_event")
             try:
                 if on_complete is not None:
                     on_complete(self, result)
@@ -701,7 +705,7 @@ class MMEmbeddingCacheEntry:
                     owner.release()
             raise
         finally:
-            self._signal_ready()
+            self._signal_event("_event")
         return True
 
     def fail(self, error: Exception) -> bool:
@@ -716,16 +720,31 @@ class MMEmbeddingCacheEntry:
             if on_fail is not None:
                 on_fail(self, error)
         finally:
-            self._signal_ready()
+            self._signal_event("_event")
         return True
 
-    def _signal_ready(self):
-        self._event.set()
-        self._event = _SIGNALED_EVENT
+    def _waiter_event(self, attribute: str) -> threading.Event:
+        event = getattr(self, attribute)
+        if event is None:
+            with self._wait_lock:
+                event = getattr(self, attribute)
+                if event is None:
+                    event = threading.Event()
+                    setattr(self, attribute, event)
+        return event
+
+    def _signal_event(self, attribute: str) -> None:
+        # A waiter that already holds the private event must still be woken.
+        with self._wait_lock:
+            event = getattr(self, attribute)
+            if event is not _SIGNALED_EVENT:
+                setattr(self, attribute, _SIGNALED_EVENT)
+                if event is not None:
+                    event.set()
 
     @property
     def is_done(self) -> bool:
-        return self._event.is_set()
+        return self._event is _SIGNALED_EVENT
 
     def inspection_decision(self):
         """A small future which a frontend ticket may retain after eviction."""
@@ -762,9 +781,7 @@ class MMEmbeddingCacheEntry:
             self._greennet_verdict = verdict
             self._greennet_checked = checked
             self._resolve_inspection_decision()
-            if self._greennet_event is not _SIGNALED_EVENT:
-                self._greennet_event.set()
-                self._greennet_event = _SIGNALED_EVENT
+            self._signal_event("_greennet_event")
 
     def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
         with self._state_lock:
@@ -784,15 +801,13 @@ class MMEmbeddingCacheEntry:
                 return
             self._greennet_error = error
             self._resolve_inspection_decision()
-            if self._greennet_event is not _SIGNALED_EVENT:
-                self._greennet_event.set()
-                self._greennet_event = _SIGNALED_EVENT
+            self._signal_event("_greennet_event")
 
     @property
     def greennet_passed(self) -> bool:
         with self._state_lock:
             return (
-                self._greennet_event.is_set()
+                self._greennet_event is _SIGNALED_EVENT
                 and self._greennet_error is None
                 and self._greennet_checked
                 and self._greennet_verdict is not None
@@ -805,7 +820,9 @@ class MMEmbeddingCacheEntry:
         *,
         cancellation_event: Optional[threading.Event] = None,
     ) -> GreenNetVerdict:
-        if not _wait_event(self._greennet_event, timeout, cancellation_event):
+        if not _wait_event(
+            self._waiter_event("_greennet_event"), timeout, cancellation_event
+        ):
             raise TimeoutError("Waiting for greennet verdict timed out")
         with self._state_lock:
             if self._greennet_error is not None:
@@ -814,7 +831,7 @@ class MMEmbeddingCacheEntry:
 
     @property
     def is_greennet_decided(self) -> bool:
-        return self._greennet_event.is_set()
+        return self._greennet_event is _SIGNALED_EVENT
 
 
 class _HashCacheValue:
@@ -1965,7 +1982,7 @@ class MMEmbeddingCache:
                 entry = self._entries.get(key)
                 if (
                     entry is not None
-                    and entry._event.is_set()
+                    and entry.is_done
                     and entry.error is None
                     and entry.tier in ("gpu", "cpu")
                 ):

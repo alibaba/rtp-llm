@@ -521,6 +521,18 @@ class EmbeddingCacheTurnoverMetricsTest(unittest.TestCase):
 
 
 class EmbeddingCapacityTest(unittest.TestCase):
+    def test_entry_without_pending_waiters_uses_only_shared_ready_events(self):
+        entry = MMEmbeddingCacheEntry()
+        self.assertIsNone(entry._event)
+        self.assertIsNone(entry._greennet_event)
+        verdict = cache_module.GreenNetVerdict(True, 0, "")
+        entry.set_greennet_verdict(verdict)
+        self.assertTrue(entry.complete("result"))
+        self.assertIs(entry._event, cache_module._SIGNALED_EVENT)
+        self.assertIs(entry._greennet_event, cache_module._SIGNALED_EVENT)
+        self.assertIs(entry.wait_greennet(0), verdict)
+        self.assertEqual(entry.wait(0), "result")
+
     def test_terminal_entries_release_private_wait_events_and_callbacks(self):
         events = []
 
@@ -531,6 +543,10 @@ class EmbeddingCapacityTest(unittest.TestCase):
             events.append(type(error))
 
         entry = MMEmbeddingCacheEntry(on_complete=complete, on_fail=fail)
+        with self.assertRaises(TimeoutError):
+            entry.wait_ready(0)
+        with self.assertRaises(TimeoutError):
+            entry.wait_greennet(0)
         ready_event = weakref.ref(entry._event)
         inspection_event = weakref.ref(entry._greennet_event)
         complete_callback = weakref.ref(complete)
