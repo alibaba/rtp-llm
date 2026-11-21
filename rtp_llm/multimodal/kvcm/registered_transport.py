@@ -19,6 +19,9 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 from .client import USE_EMB_HEADER_HINT, save_one_with_optional_header_hint
 
 _USE_NATIVE_READ = os.environ.get("MM_EMB_NATIVE_REGISTERED_READ") == "1"
+_PROFILE_NATIVE_HEADER_TIMINGS = (
+    os.environ.get("MM_EMB_NATIVE_HEADER_DETAIL_PROFILE") == "1"
+)
 _USE_NATIVE_WRITE = os.environ.get("MM_EMB_NATIVE_REGISTERED_WRITE") == "1"
 _ISOLATED_CUDA_STREAMS = os.environ.get("MM_EMB_ISOLATED_CUDA_STREAMS") == "1"
 
@@ -686,6 +689,11 @@ class RegisteredTransportPool:
                 USE_EMB_HEADER_HINT, profile_header,
                 int((deadline - time.monotonic()) * 1_000_000_000),
                 sample,
+                (
+                    profile_header
+                    and _PROFILE_NATIVE_HEADER_TIMINGS
+                    and random.getrandbits(3) == 0
+                ),
             )
         state, _, _, may_be_inflight, _, _, _, _, acquire_lock_ns, release_lock_ns, *_ = result
         if sample:

@@ -13,6 +13,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -147,37 +148,72 @@ inline void waitEmbCudaStream(const at::Tensor& buffer) {
     ready.synchronize();
 }
 
-inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, int64_t size) {
+inline constexpr int64_t kEmbCudaHeaderFirstReadBytes = 1024;
+
+struct EmbHeaderReadStats {
+    int64_t bytes              = 0;
+    int     copies             = 0;
+    bool    profileTimings     = false;
+    int64_t pinnedAllocationNs = 0;
+    int64_t enqueueNs          = 0;
+    int64_t fenceNs            = 0;
+    int64_t deviceIntervalNs   = 0;
+};
+
+inline at::Tensor
+readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, int64_t size, EmbHeaderReadStats* stats = nullptr) {
     TORCH_CHECK(buffer.is_cuda() && buffer.dim() == 1 && buffer.is_contiguous() && buffer.scalar_type() == at::kByte,
                 "expected a contiguous CUDA byte buffer");
     TORCH_CHECK(offset >= 0 && offset <= buffer.numel() && size > 0 && size <= buffer.numel() - offset,
                 "invalid EMB header extent");
     const c10::cuda::CUDAGuard deviceGuard(buffer.device());
-    auto header = at::empty({size}, at::TensorOptions().dtype(at::kByte).pinned_memory(true));
+    if (!stats || !stats->profileTimings) {
+        auto header = at::empty({size}, at::TensorOptions().dtype(at::kByte).pinned_memory(true));
+        header.copy_(buffer.narrow(0, offset, size), /*non_blocking=*/true);
+        waitEmbCudaStream(buffer);
+        return header;
+    }
+
+    using Clock   = std::chrono::steady_clock;
+    const auto ns = [](Clock::time_point begin, Clock::time_point end) {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count();
+    };
+    const auto allocStart = Clock::now();
+    auto       header     = at::empty({size}, at::TensorOptions().dtype(at::kByte).pinned_memory(true));
+    const auto stream     = c10::cuda::getCurrentCUDAStream(buffer.get_device());
+    // Measure the interval on the copy stream. It includes stream scheduling
+    // between these marks and can include delays between host submissions.
+    at::cuda::CUDAEvent copyBegin(cudaEventDefault);
+    at::cuda::CUDAEvent copyEnd(cudaEventBlockingSync);
+    const auto          enqueueStart = Clock::now();
+    copyBegin.record(stream);
     header.copy_(buffer.narrow(0, offset, size), /*non_blocking=*/true);
-    waitEmbCudaStream(buffer);
+    copyEnd.record(stream);
+    const auto fenceStart = Clock::now();
+    copyEnd.synchronize();
+    const auto finished = Clock::now();
+    stats->pinnedAllocationNs += ns(allocStart, enqueueStart);
+    stats->enqueueNs += ns(enqueueStart, fenceStart);
+    stats->fenceNs += ns(fenceStart, finished);
+    // The transfer was fenced even if the optional hardware timing is missing.
+    try {
+        stats->deviceIntervalNs += static_cast<int64_t>(copyBegin.elapsed_time(copyEnd) * 1'000'000.0);
+    } catch (const c10::Error&) {}
     return header;
 }
 
-inline constexpr int64_t kEmbCudaHeaderFirstReadBytes = 1024;
-
-struct EmbHeaderReadStats {
-    int64_t bytes = 0;
-    int copies = 0;
-};
-
-inline std::string readEmbCudaObjectHeader(const at::Tensor& buffer,
-                                          std::optional<int32_t> headerHint = std::nullopt,
-                                          EmbHeaderReadStats* stats = nullptr) {
-    constexpr int64_t prefixSize = 16;
-    constexpr int64_t alignment = 64;
+inline std::string readEmbCudaObjectHeader(const at::Tensor&      buffer,
+                                           std::optional<int32_t> headerHint = std::nullopt,
+                                           EmbHeaderReadStats*    stats      = nullptr) {
+    constexpr int64_t  prefixSize    = 16;
+    constexpr int64_t  alignment     = 64;
     constexpr uint64_t maxHeaderSize = 64 * 1024;
     const auto size = buffer.numel();
     if (size < prefixSize) {
         throw std::invalid_argument("invalid multimodal object buffer");
     }
     const auto read = [&](int64_t offset, int64_t length) {
-        auto result = readEmbCudaHeader(buffer, offset, length);
+        auto result = readEmbCudaHeader(buffer, offset, length, stats);
         if (stats != nullptr) {
             stats->bytes += length;
             ++stats->copies;
@@ -344,7 +380,10 @@ inline void registerEmbTensorCodec(pybind11::module& module) {
     module.def("snapshot_emb_cuda_tensors",
                &snapshotEmbCudaTensors,
                pybind11::call_guard<pybind11::gil_scoped_release>());
-    module.def("read_emb_cuda_header", &readEmbCudaHeader, pybind11::call_guard<pybind11::gil_scoped_release>());
+    module.def(
+        "read_emb_cuda_header",
+        [](const at::Tensor& buffer, int64_t offset, int64_t size) { return readEmbCudaHeader(buffer, offset, size); },
+        pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def("read_emb_cuda_object_header", [](const at::Tensor& buffer) {
         std::string header;
         {

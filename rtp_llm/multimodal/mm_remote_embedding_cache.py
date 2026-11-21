@@ -1380,7 +1380,7 @@ class MMRemoteEmbeddingCache:
     def _finish_native_read(self, result, size, key, consumer_stream):
         (
             state, value, code, inflight, acquire_ns, sdk_ns, restore_ns, held_ns,
-            _, _, header_size, header_bytes, header_copies, header_ns,
+            _, _, header_size, header_bytes, header_copies, header_ns, header_timings,
         ) = result
         status = state.name
         error = self._gdr_pool.native_read_error(code, inflight) if status == "SdkFailure" else None
@@ -1410,6 +1410,21 @@ class MMRemoteEmbeddingCache:
         if header_ns:
             self._report_read_header(header_size, header_bytes, header_copies)
             self._report_stage_latency("read", "native_restore_header", stage_status, header_ns / 1e6)
+        if header_timings is not None:
+            for stage, elapsed_ns in zip(
+                (
+                    "native_header_stream_prepare",
+                    "native_header_pinned_alloc",
+                    "native_header_enqueue",
+                    "native_header_fence",
+                    "native_header_device_interval",
+                ),
+                header_timings,
+            ):
+                if elapsed_ns:
+                    self._report_stage_latency(
+                        "read", stage, stage_status, elapsed_ns / 1e6
+                    )
         if status == "Expired":
             raise TimeoutError("registered EMB read expired")
         if error is not None:

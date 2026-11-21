@@ -377,6 +377,7 @@ struct EmbReadResult {
     int64_t                                sdkNs         = 0;
     int64_t                                restoreNs     = 0;
     int64_t                                headerNs      = 0;
+    int64_t                                streamPrepareNs = 0;
     int64_t                                heldNs        = 0;
     int64_t                                acquireLockNs = 0;
     int64_t                                releaseLockNs = 0;
@@ -409,6 +410,7 @@ EmbReadResult readRegisteredObject(EmbRegisteredArena&               arena,
                                    const std::optional<int64_t>&     consumerStreamId,
                                    bool                              useHeaderHint,
                                    bool                              profileHeader,
+                                   bool                              profileHeaderTimings,
                                    int64_t                           budgetNs,
                                    bool                              sampleLocks) {
     TORCH_CHECK(root.is_cuda() && root.is_contiguous() && root.scalar_type() == at::kByte && root.dim() == 1,
@@ -475,6 +477,10 @@ EmbReadResult readRegisteredObject(EmbRegisteredArena&               arena,
                   root.get_device()));
           const int32_t hint =
               useHeaderHint && api.has_userdata1 ? api.userdata1 : 0;
+          result.headerStats.profileTimings = profileHeaderTimings;
+          if (profileHeaderTimings) {
+            result.streamPrepareNs = readElapsed(restoreStart);
+          }
           result.decoded = restoreObjectPayload(
               input, expected, true, consumerStreamId, hint, result.document,
               result.header, profileHeader ? &result.headerStats : nullptr,
@@ -541,7 +547,8 @@ void registerEmbRegisteredRead(pybind11::module& module) {
         .value("InvalidObject", EmbReadState::InvalidObject)
         .value("CudaFailure", EmbReadState::CudaFailure)
         .value("SdkFailure", EmbReadState::SdkFailure);
-    module.def("read_emb_registered_object",
+    module.def(
+        "read_emb_registered_object",
                [](EmbRegisteredArena&               arena,
                   const at::Tensor&                 root,
                   int64_t                           length,
@@ -553,7 +560,8 @@ void registerEmbRegisteredRead(pybind11::module& module) {
                   bool                              useHeaderHint,
                   bool                              profileHeader,
                   int64_t                           budgetNs,
-                  bool                              sampleLocks) {
+           bool                              sampleLocks,
+           bool                              profileHeaderTimings) {
                    const auto* meta   = loadApi(metadata);
                    const auto* client = static_cast<const KvcmObjectNativeApiV2*>(
                        PyCapsule_GetPointer(registeredClient.ptr(), KVCM_OBJECT_NATIVE_API_CAPSULE_V2));
@@ -575,6 +583,7 @@ void registerEmbRegisteredRead(pybind11::module& module) {
                                                      consumerStreamId,
                                                      useHeaderHint,
                                                      profileHeader,
+                                              profileHeader && profileHeaderTimings,
                                                      budgetNs,
                                                      sampleLocks);
                    }
@@ -584,6 +593,14 @@ void registerEmbRegisteredRead(pybind11::module& module) {
                    } else if (result.fallback.defined()) {
                        value = py::cast(std::move(result.fallback));
                    }
+            py::object headerTimings = py::none();
+            if (result.headerStats.profileTimings && result.headerNs) {
+                headerTimings = py::make_tuple(result.streamPrepareNs,
+                                               result.headerStats.pinnedAllocationNs,
+                                               result.headerStats.enqueueNs,
+                                               result.headerStats.fenceNs,
+                                               result.headerStats.deviceIntervalNs);
+            }
                    return py::make_tuple(result.state,
                                          std::move(value),
                                          result.code,
@@ -597,8 +614,22 @@ void registerEmbRegisteredRead(pybind11::module& module) {
                                          result.header.size(),
                                          result.headerStats.bytes,
                                          result.headerStats.copies,
-                                         result.headerNs);
-               });
+                                  result.headerNs,
+                                  std::move(headerTimings));
+        },
+        py::arg("arena"),
+        py::arg("root"),
+        py::arg("length"),
+        py::arg("metadata"),
+        py::arg("registered_client"),
+        py::arg("trace"),
+        py::arg("expected_key"),
+        py::arg("consumer_stream_id"),
+        py::arg("use_header_hint"),
+        py::arg("profile_header"),
+        py::arg("budget_ns"),
+        py::arg("sample_locks"),
+        py::arg("profile_header_timings") = false);
 }
 
 }  // namespace rtp_llm
