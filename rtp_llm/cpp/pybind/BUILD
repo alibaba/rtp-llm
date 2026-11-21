@@ -61,6 +61,15 @@ cc_library(
 )
 
 cc_library(
+    name = "vit_resize_coefficients",
+    srcs = ["VitResizeCoefficients.cc"],
+    hdrs = ["VitResizeCoefficients.h"],
+    # Preserve FP64 operation order before fixed-point quantization, including on ARM.
+    copts = copts() + ["-fno-fast-math", "-ffp-contract=off"],
+    deps = torch_deps(),
+)
+
+cc_library(
     name = "th_transformer_config_lib",
     srcs = [
         "common/blockUtil.cc",
@@ -73,6 +82,7 @@ cc_library(
     ],
     deps = [
         ":py_utils",
+        ":vit_resize_coefficients",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/multimodal_processor:multimodal_input_class",
         "//rtp_llm/cpp/config:config_modules",

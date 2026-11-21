@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
 #include "rtp_llm/cpp/pybind/PreprocessSharedStorage.h"
+#include "rtp_llm/cpp/pybind/VitResizeCoefficients.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
@@ -48,6 +49,7 @@ static at::Storage mapPreprocessStorage(int borrowed_fd, size_t nbytes) {
 void registerMultimodal(py::module& m) {
     m.def("map_preprocess_storage", &mapPreprocessStorage, py::call_guard<py::gil_scoped_release>());
     m.def("pack_preprocess_cpu_tensors", &packPreprocessCpuTensors, py::call_guard<py::gil_scoped_release>());
+    m.def("vit_resize_coefficients", &vitResizeCoefficients, py::call_guard<py::gil_scoped_release>());
     m.def("get_multimodal_token_spans",
           &getMultimodalTokenSpans,
           py::arg("token_ids"),

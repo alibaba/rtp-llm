@@ -1,14 +1,41 @@
 """CPU-only support-gate contracts; no CUDA or numerical tolerance changes."""
 
 import importlib.util
+import os
 import sys
 import unittest
 from unittest.mock import patch
 
+import torch
+
+from rtp_llm.models_py.modules.dsv41 import vision_preprocess_tables
 from rtp_llm.models_py.modules.dsv41 import vision_preprocess_triton
 
 
 class PreprocessShapeTest(unittest.TestCase):
+    def test_native_coefficients_are_bit_exact_and_cached(self):
+        import rtp_llm.ops  # Load the native config module as the worker does.
+        from libth_transformer_config import vit_resize_coefficients
+
+        cache = vision_preprocess_tables._coefficients
+        cache.cache_clear()
+        self.addCleanup(cache.cache_clear)
+        with (
+            patch.dict(os.environ, {"MM_VIT_NATIVE_RESIZE_TABLES": "1"}),
+            patch(
+                "libth_transformer_config.vit_resize_coefficients",
+                wraps=vit_resize_coefficients,
+            ) as native,
+        ):
+            for shape in ((1, 42), (31, 43), (33, 21), (1080, 756), (65536, 256)):
+                with self.subTest(shape=shape):
+                    actual = cache(*shape)
+                    expected = vision_preprocess_tables._python_coefficients(*shape)
+                    for lhs, rhs in zip(actual, expected):
+                        torch.testing.assert_close(lhs, rhs, rtol=0, atol=0)
+                    self.assertIs(cache(*shape), actual)
+            self.assertEqual(native.call_count, 5)
+
     def load_with_pillow_version(self, version):
         name = "v41_preprocess_version_probe"
         spec = importlib.util.spec_from_file_location(

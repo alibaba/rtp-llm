@@ -42,6 +42,7 @@ churn cannot move this work back onto the GPU scheduler thread.
 """
 
 import math
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -122,11 +123,18 @@ def _cubic(distance: float) -> float:
     return 0.0
 
 
-# The coefficient computation is a pure-Python double loop. Production sees
-# hundreds of distinct (in_size, out_size) pairs per hour and this cache is
-# per preprocess worker, so 16 entries thrashes every worker independently.
+# Keep one bounded cache per process. Only a cold resize axis crosses the
+# native boundary, and both backends return the same immutable tensor layout.
 @lru_cache(maxsize=256)
 def _coefficients(in_size: int, out_size: int):
+    if os.environ.get("MM_VIT_NATIVE_RESIZE_TABLES") == "1":
+        from libth_transformer_config import vit_resize_coefficients
+
+        return vit_resize_coefficients(in_size, out_size)
+    return _python_coefficients(in_size, out_size)
+
+
+def _python_coefficients(in_size: int, out_size: int):
     """Private read-only CPU tensors: (start,count) and signed 22-bit weights.
 
     The full-box endpoints are integer-exact in float32 under our size gate.
