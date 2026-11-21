@@ -84,13 +84,14 @@ class TargetWeightsTest(unittest.TestCase):
             load=NewLoaderConfig(device="cpu",compute_dtype=torch.bfloat16,load_method="scratch",
                 tp_size=2,tp_rank=1,ep_size=2,ep_rank=1,attn_tp_size=1,attn_tp_rank=0,
                 ffn_tp_size=1,ffn_tp_rank=0,lm_head_tp_size=1,lm_head_tp_rank=0)
-            model=NewModelLoader({"model_type":"_qwen4_whole_target_checkpoint","ckpt_path":directory,"num_experts":2,"moe_k":1},load,model_path=directory).load()
+            model=NewModelLoader({"model_type":"_qwen4_whole_target_checkpoint","ckpt_path":directory,"num_experts":2,"moe_k":1,"qwen4_ple_prefetch_mb":64},load,model_path=directory).load()
             try:
                 torch.testing.assert_close(model.embed_tokens.weight,values["model.language_model.embed_tokens.weight"],rtol=0,atol=0)
                 torch.testing.assert_close(model.lm_head.weight,values["lm_head.weight"],rtol=0,atol=0)
                 self.assertEqual(model.layers[0].linear_attn.in_proj_qkvz.weight.shape,(384,128))
                 self.assertEqual(model.layers[1].self_attn.qkv_proj.weight.shape,(192,128))
                 self.assertEqual(len(list(model.layers[0].ple.ple_embedding.ngram_embedding.parameters())),8)
+                self.assertEqual(model.layers[0].ple.prefetch_budget_mb,64)
                 self.assertEqual(model.layers[0].mlp.experts.w13.unique().item(),2)
             finally:
                 model.close()

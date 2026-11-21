@@ -38,6 +38,7 @@ class Qwen4CheckpointPlan:
             return model_config.get(name, default) if isinstance(model_config, dict) else getattr(model_config, name, default)
         self.dense_storage = option("_qwen4_dense_storage", "fp8" if self.source_fp8 else "source_bf16")
         self.vocab_storage = option("_qwen4_vocab_storage", self.dense_storage)
+        self.ple_prefetch_mb = option("qwen4_ple_prefetch_mb", 256)
         if self.dense_storage not in ("fp8", "source_bf16") or self.vocab_storage not in ("fp8", "source_bf16"):
             raise ValueError("Invalid Qwen4 dense/vocabulary storage recipe")
         self.dense_fp8 = self.source_fp8 and self.dense_storage == "fp8"
@@ -229,7 +230,8 @@ class Qwen4DecoderWeights(RtpModule):
                 heads_per_ngram=heads,shard_count=plan.positive("split_ngram_parts"),
                 embedding_dim=total//((ngram-1)*heads),conv_kernel_size=plan.positive("ple_conv_kernel_size"),
                 eos_token_id=text.get("eos_token_id"),tp_size=load.attn_tp_size,tp_rank=load.attn_tp_rank,norm_eps=eps,dtype=dtype,
-                source_fp8=plan.source_fp8,fp8_storage=plan.dense_fp8,preserve_fp8_tables=plan.source_fp8)
+                source_fp8=plan.source_fp8,fp8_storage=plan.dense_fp8,preserve_fp8_tables=plan.source_fp8,
+                prefetch_budget_mb=plan.ple_prefetch_mb)
 
 
 class Qwen4TargetWeights(RtpModule):
