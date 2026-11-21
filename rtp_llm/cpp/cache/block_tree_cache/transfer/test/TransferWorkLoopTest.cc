@@ -2340,6 +2340,45 @@ TEST_F(TransferWorkLoopCrcTest, BurstWithOneSlotCompletesEveryWaitingEntryExactl
     EXPECT_EQ(events.size(), 51u);  // Three new observations per accepted CRC batch; none per Busy retry.
 }
 
+TEST_F(TransferWorkLoopCrcTest, ExpiredWokenWaiterLeavesFreeCrcSlotForNextBatch) {
+    auto crc = std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, CrcCopyDirection::EVICT, 1, 1);
+    TransferWorkLoop owner({group}, std::move(crc), nullptr, TransferOperation::EVICT, 1, 3, {});
+    const auto       active  = owner.execute(evict(0));
+    const auto       expired = owner.execute(evict(1));
+    const auto       next    = owner.execute(evict(2));
+    owner.entries_.splice(owner.entries_.end(), owner.incoming_);
+    for (auto position = owner.entries_.begin(); position != owner.entries_.end();) {
+        auto current               = position++;
+        (*current)->position       = current;
+        (*current)->task.deadline_ = TransferTask::Clock::now() + 1h;
+        owner.tryStep(**current);
+    }
+    auto& waiting = owner.crc_waiting_.at(device->deviceIndex());
+    ASSERT_NE(waiting.head, nullptr);
+    ASSERT_NE(waiting.head, waiting.tail);
+
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    owner.pollOnce();
+    ASSERT_TRUE(active->success());
+    auto* head = owner.ready_.pop();
+    ASSERT_NE(head, nullptr);
+    head->task.deadline_ = TransferTask::Clock::now() - 1s;
+    owner.tryStep(*head);
+    ASSERT_TRUE(expired->done());
+    EXPECT_EQ(expired->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+
+    owner.pollOnce();
+    ASSERT_FALSE(next->done());
+    ASSERT_TRUE(waiting.empty());
+    auto* successor = owner.ready_.pop();
+    ASSERT_NE(successor, nullptr);
+    owner.tryStep(*successor);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    owner.pollOnce();
+    EXPECT_TRUE(next->success());
+    EXPECT_EQ(owner.outstandingBatches(), 0u);
+}
+
 TEST_F(TransferWorkLoopCrcTest, ClosingWithQueuedDiskWritesDrainsBothWrites) {
     engine = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group}, true, 8, 8, 1, 8, nullptr, 0, 1, diskOptions());

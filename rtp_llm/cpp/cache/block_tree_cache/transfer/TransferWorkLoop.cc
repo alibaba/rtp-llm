@@ -433,7 +433,7 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
     auto&       waiting = crc_waiting_.at(owner->devicePools().front()->deviceIndex());
     // Settle the stable Entry and intrusive indexes. Optional observations use
     // the existing task span and preallocated profiling buffer.
-    CrcCopyExecutor::DoneCallback done = [this, &entry, &waiting](TransferResult result) noexcept {
+    CrcCopyExecutor::DoneCallback done = [this, &entry](TransferResult result) noexcept {
         assert(entry.step == Step::CRC_LOAD || entry.step == Step::CRC_EVICT);
         const auto& timing = entry.crc_timing;
         if (timing.completed_us && result.ok()) {
@@ -467,10 +467,6 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
         }
         recordResult(entry, std::move(result));
         completed_.push(entry);
-        if (auto* next = waiting.head) {
-            removeWaiter(*next);
-            ready_.push(*next);
-        }
     };
     auto*      timing  = entry.task_timer ? &entry.crc_timing : nullptr;
     const bool handled = crc_->trySubmit(entry.hosts, entry.task.descriptors(), owner, std::move(done), timing);
@@ -620,16 +616,21 @@ void TransferWorkLoop::pollOnce() {
     auto completed   = completed_.take();
     while (auto* entry = completed.pop())
         consumeStage(*entry);
-    // Busy can only recover through a record owned by this direction. Do not
-    // sleep forever or spin retrying an unregistered resource reservation.
-    if (!has_crc_pending_ && ready_.empty() && completed_.empty())
-        for (auto& [device, waiting] : crc_waiting_)
-            while (auto* entry = waiting.head) {
-                removeWaiter(*entry);
-                fail(*entry,
-                     unsubmittedResult(
-                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC Busy without a pending direction record")));
+    if (crc_) {
+        // Retry from actual free capacity. A previously woken waiter can expire
+        // before submitting, so a completion callback alone is not a wakeup.
+        for (auto& [device, waiting] : crc_waiting_) {
+            if (waiting.empty())
+                continue;
+            auto free_slots = crc_->availableSlots(device);
+            while (free_slots > 0 && waiting.head) {
+                auto& entry = *waiting.head;
+                removeWaiter(entry);
+                ready_.push(entry);
+                --free_slots;
             }
+        }
+    }
 }
 
 void TransferWorkLoop::recordDiskResult(Entry& entry, BlockIOStatus status) noexcept {

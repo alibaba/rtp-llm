@@ -53,6 +53,7 @@ public:
     // true means undelivered work remains. Async slot access needs no mutex.
     // Result-mapping exceptions propagate from poll() and stopAndWaitForIo().
     bool poll();
+    size_t availableSlots(int device) const;
     void stopAdmission();
     void stopAndWaitForIo();
 

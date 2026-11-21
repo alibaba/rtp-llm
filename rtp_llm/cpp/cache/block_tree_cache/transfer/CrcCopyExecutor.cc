@@ -239,6 +239,13 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>& hosts,
     }
 }
 
+size_t CrcCopyExecutor::availableSlots(int device) const {
+    const auto slots = slots_.find(device);
+    if (slots == slots_.end())
+        return 0;
+    return std::count_if(slots->second.begin(), slots->second.end(), [](const Slot& slot) { return !slot.operation; });
+}
+
 void CrcCopyExecutor::advance(Slot& slot, bool deliver) {
     if (!slot.operation)
         return;
