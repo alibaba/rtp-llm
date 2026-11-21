@@ -455,8 +455,8 @@ TEST(CacheConfigCreatorTest, SparseIndexerUsesIndependentNaturalStridePool) {
     EXPECT_EQ(config.group("default").kernelSeqSizePerBlock(), 128u);
     EXPECT_EQ(config.group("indexer_kv").kernelSeqSizePerBlock(), 128u);
     EXPECT_EQ(config.group("default").kvScaleStrideBytes(), 0u);
-    EXPECT_TRUE(config.group("default").policy.enable_prefix_reuse);
-    EXPECT_TRUE(config.group("indexer_kv").policy.enable_prefix_reuse);
+    EXPECT_TRUE((config.group("default").policy.reuse_mode == CacheReuseMode::STANDARD));
+    EXPECT_TRUE((config.group("indexer_kv").policy.reuse_mode == CacheReuseMode::STANDARD));
     EXPECT_EQ(config.group("indexer_kv").kvBlockStrideBytes(), 512u * 132u);
     EXPECT_EQ(config.group("indexer_kv").kvScaleStrideBytes(), 0u);
     EXPECT_EQ(config.blockSizeBytesForGroup("indexer_kv"), 2u * 512u * 132u);
@@ -531,13 +531,15 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
     for (const auto& group : config.topology().groups()) {
         policies.push_back(group.policy);
     }
-    policies[0].enable_prefix_reuse = !policies[0].enable_prefix_reuse;
+    policies[0].reuse_mode = CacheReuseMode::DISABLED;
     test::setTestGroupPolicies(config, policies);
     const auto policy_topology = config.topologyPtr();
 
     EXPECT_NE(policy_topology.get(), initial_topology.get());
-    EXPECT_EQ(config.group("full").policy.enable_prefix_reuse, policies[0].enable_prefix_reuse);
-    EXPECT_NE(initial_topology->group("full").policy.enable_prefix_reuse, policies[0].enable_prefix_reuse);
+    EXPECT_EQ((config.group("full").policy.reuse_mode == CacheReuseMode::STANDARD),
+              (policies[0].reuse_mode == CacheReuseMode::STANDARD));
+    EXPECT_NE((initial_topology->group("full").policy.reuse_mode == CacheReuseMode::STANDARD),
+              (policies[0].reuse_mode == CacheReuseMode::STANDARD));
 
     // The fixture receives rows independently ordered from the target topology.
     EXPECT_ANY_THROW(test::setGroupBlockLayout(config, {"linear", "missing"}, {9, 17}, {256, 128}, {8, 4}));
@@ -680,7 +682,7 @@ TEST(CacheConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
     ASSERT_EQ(config.topology().groups().size(), static_cast<size_t>(config.groupNums()));
     auto expect_policy = [&](const std::string& tag, bool enable_prefix_reuse, int active_tail_blocks) {
         const auto& policy = config.group(tag).policy;
-        EXPECT_EQ(policy.enable_prefix_reuse, enable_prefix_reuse) << tag;
+        EXPECT_EQ((policy.reuse_mode == CacheReuseMode::STANDARD), enable_prefix_reuse) << tag;
         EXPECT_EQ(policy.active_tail_blocks, active_tail_blocks) << tag;
         EXPECT_EQ(policy.shared_chunk_state, tag == "hca_state") << tag;
     };
@@ -1887,17 +1889,37 @@ TEST(CacheConfigTest, LinearPolicyDefaultsPrefixReuseAndExplicitDisableOverrides
 
     auto default_policy = SpecBuilder::groupPolicy(linear_desc);
     EXPECT_EQ(default_policy.group_type, CacheGroupType::LINEAR);
-    EXPECT_TRUE(default_policy.enable_prefix_reuse);
+    EXPECT_TRUE((default_policy.reuse_mode == CacheReuseMode::STANDARD));
     EXPECT_EQ(default_policy.active_tail_blocks, 1u);
     EXPECT_EQ(default_policy.cp_mapping, CpBlockMappingMode::NONE);
 
     linear_desc.reuse                      = CacheReusePolicyDesc{};
     linear_desc.reuse->enable_prefix_reuse = false;
     auto disabled_policy                   = SpecBuilder::groupPolicy(linear_desc);
-    EXPECT_FALSE(disabled_policy.enable_prefix_reuse);
+    EXPECT_FALSE((disabled_policy.reuse_mode == CacheReuseMode::STANDARD));
     EXPECT_EQ(disabled_policy.active_tail_blocks, 1u);
     EXPECT_EQ(disabled_policy.cp_mapping, CpBlockMappingMode::NONE);
     EXPECT_FALSE(disabled_policy.shared_chunk_state);
+}
+
+TEST(CacheConfigTest, ReuseModeNormalizesLegacyAndRejectsConflictingSelections) {
+    KVCacheSpecDesc desc;
+    desc.tag   = "state";
+    desc.reuse = CacheReusePolicyDesc{false, true};
+    EXPECT_EQ(SpecBuilder::groupPolicy(desc).reuse_mode, CacheReuseMode::PRECISE_ONLY);
+    desc.reuse = CacheReusePolicyDesc{true, false};
+    EXPECT_EQ(SpecBuilder::groupPolicy(desc).reuse_mode, CacheReuseMode::STANDARD);
+    desc.reuse = CacheReusePolicyDesc{false, false};
+    EXPECT_EQ(SpecBuilder::groupPolicy(desc).reuse_mode, CacheReuseMode::DISABLED);
+    desc.reuse = CacheReusePolicyDesc{true, true};
+    EXPECT_THROW(SpecBuilder::groupPolicy(desc), std::exception);
+    desc.reuse = CacheReusePolicyDesc{true, false, CacheReuseMode::PRECISE_ONLY};
+    EXPECT_THROW(SpecBuilder::groupPolicy(desc), std::exception);
+    desc.reuse         = CacheReusePolicyDesc{std::nullopt, std::nullopt, CacheReuseMode::PRECISE_ONLY};
+    const auto precise = SpecBuilder::groupPolicy(desc);
+    EXPECT_TRUE(cacheGroupParticipatesInBlockTree(precise, true));
+    EXPECT_FALSE(cacheGroupParticipatesInBlockTree(precise, false));
+    EXPECT_FALSE(cacheGroupPublishesPrefixChain(precise));
 }
 
 TEST(CacheConfigTest, SharedChunkStateFollowsRingPolicyInsteadOfTag) {
@@ -1928,7 +1950,7 @@ TEST(CacheConfigTest, SharedChunkStateFollowsRingPolicyInsteadOfTag) {
     EXPECT_EQ(group.chunkCacheBlockCount(1024, 256, false), 2u);
     desc.state_ring_overlap         = 0;
     desc.reuse->enable_prefix_reuse = true;
-    EXPECT_FALSE(SpecBuilder::groupPolicy(desc).shared_chunk_state);
+    EXPECT_TRUE(SpecBuilder::groupPolicy(desc).shared_chunk_state);
 }
 
 TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
@@ -2546,10 +2568,10 @@ TEST(CacheConfigCreatorTest, ExternalStateEntryLayoutPreservesCpRingAndPhysicalS
             EXPECT_EQ(spec->block_size_bytes(), spec->block_payload_bytes());
             EXPECT_EQ(spec->seq_size_per_block, config.seq_size_per_block * cp_size);
         }
-        EXPECT_FALSE(config.group("hca_state").policy.enable_prefix_reuse);
+        EXPECT_FALSE((config.group("hca_state").policy.reuse_mode == CacheReuseMode::STANDARD));
         EXPECT_EQ(config.group("hca_state").policy.active_tail_blocks, 1u);
-        EXPECT_TRUE(config.group("csa_state").policy.enable_prefix_reuse);
-        EXPECT_TRUE(config.group("indexer_state").policy.enable_prefix_reuse);
+        EXPECT_TRUE((config.group("csa_state").policy.reuse_mode == CacheReuseMode::STANDARD));
+        EXPECT_TRUE((config.group("indexer_state").policy.reuse_mode == CacheReuseMode::STANDARD));
         const auto* swa_spec = dynamic_cast<const FixedStateCacheSpec*>(config.group("swa_kv").spec.get());
         ASSERT_NE(swa_spec, nullptr);
         EXPECT_FALSE(config.isStateEntryTag("swa_kv"));
@@ -2981,7 +3003,7 @@ protected:
                     for (size_t part = 0; part < buffers.size(); ++part) {
                         as_bytes(buffers[part]).fill_(pattern(gid, slot, layer, part));
                         const auto& group = config.group(tag);
-                        if (verify_shorter_state && group.policy.enable_prefix_reuse
+                        if (verify_shorter_state && (group.policy.reuse_mode == CacheReuseMode::STANDARD)
                             && group.policy.group_type != CacheGroupType::FULL) {
                             const size_t ring = tag == "swa_kv" ? 128 : 8;
                             ASSERT_EQ(buffers[part].size_bytes % (ring * sizeof(int32_t)), 0u);
@@ -3055,7 +3077,7 @@ protected:
         for (size_t gid = 0; gid < config.groupTags().size(); ++gid) {
             const auto& tag   = config.groupTags()[gid];
             const auto& group = config.group(tag);
-            if (!group.policy.enable_prefix_reuse) {
+            if (!(group.policy.reuse_mode == CacheReuseMode::STANDARD)) {
                 continue;
             }
             // Expected coordinates come from the production fixture, not canonicalBlockPosition.
@@ -3855,9 +3877,10 @@ TEST_F(DSV4AllocatorTest, HCAStateIsExcludedFromReuseCachePolicy) {
 
     for (const auto& group : config.groups()) {
         if (group.tag == "hca_state") {
-            EXPECT_EQ(group.policy.enable_prefix_reuse, false) << "HCA_STATE should skip reuse cache";
+            EXPECT_EQ((group.policy.reuse_mode == CacheReuseMode::STANDARD), false)
+                << "HCA_STATE should skip reuse cache";
         } else {
-            EXPECT_EQ(group.policy.enable_prefix_reuse, true) << "group " << group.tag;
+            EXPECT_EQ((group.policy.reuse_mode == CacheReuseMode::STANDARD), true) << "group " << group.tag;
         }
     }
 }

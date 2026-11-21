@@ -18,7 +18,7 @@ using block_transfer_engine_test::makeHostPool;
 
 block_transfer_engine_test::TestGroupConfig makeGroupBase(std::vector<int> layer_ids, bool reusable = true) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse = reusable;
+    policy.reuse_mode          = reusable ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     return makeTestGroupBase(std::move(policy), std::move(layer_ids), 64, 16);
 }
 

@@ -104,7 +104,7 @@ public:
         for (const auto& group : groups) {
             // BlockTreeStorer omits local-only groups from remote handles.
             // Keep KVCM's registered spec set in sync with those handles.
-            if (!group.policy.enable_prefix_reuse) {
+            if (!(group.policy.reuse_mode == CacheReuseMode::STANDARD)) {
                 continue;
             }
             if (group.policy.group_type == CacheGroupType::FULL) {

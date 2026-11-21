@@ -2706,7 +2706,7 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testAllAttentionChunkInputsPreser
             auto group                       = cache_config.groups().front();
             group.block_num                  = 256;
             group.policy.shared_chunk_state  = attention.shared;
-            group.policy.enable_prefix_reuse = !attention.shared;
+            group.policy.reuse_mode          = !attention.shared ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
             group.policy.active_tail_blocks  = 1;
             group.policy.sliding_window_size = attention.type == CacheGroupType::SWA ? 128 : 0;
             cache_config.setTopology({group}, {{0, {attention.tag}}});

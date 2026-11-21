@@ -22,8 +22,9 @@ bool isFullAttentionSpec(KVCacheSpecType type) {
 
 std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
     std::ostringstream os;
-    os << "{group_type=" << cacheGroupTypeName(policy.group_type) << ", prefix_reuse=" << policy.enable_prefix_reuse
-       << ", reservable=" << policy.reservable << ", explicit_block_num=" << policy.explicit_block_num
+    os << "{group_type=" << cacheGroupTypeName(policy.group_type)
+       << ", reuse_mode=" << static_cast<int>(policy.reuse_mode) << ", reservable=" << policy.reservable
+       << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks << ", shared_chunk_state=" << policy.shared_chunk_state

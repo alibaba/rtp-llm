@@ -65,7 +65,7 @@ Layout deriveLayout(const CacheConfig& config, bool full) {
     const auto type        = full ? CacheGroupType::FULL : CacheGroupType::SWA;
     size_t     pool_offset = 0, member = 0;
     for (const auto& group : config.topology().groups()) {
-        if (!group.policy.enable_prefix_reuse || group.policy.group_type != type)
+        if (group.policy.reuse_mode != CacheReuseMode::STANDARD || group.policy.group_type != type)
             continue;
         const auto  pool        = DeviceBlockPoolConfigHelper::createConfigForGroup(config, group);
         const auto& layer_ids   = config.layerIdsForGroup(group.tag);

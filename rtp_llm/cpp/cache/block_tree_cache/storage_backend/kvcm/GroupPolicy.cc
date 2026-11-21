@@ -194,7 +194,7 @@ bool DefaultLayerGroupPolicy::init() {
     std::unordered_map<std::string, int32_t> topology_group_ids;
     int32_t                                  protocol_group_id = 0;
     for (const auto& tag : topology_.groupTags()) {
-        if (topology_.group(tag).policy.enable_prefix_reuse) {
+        if ((topology_.group(tag).policy.reuse_mode == CacheReuseMode::STANDARD)) {
             topology_group_ids.emplace(tag, protocol_group_id);
         }
         ++protocol_group_id;

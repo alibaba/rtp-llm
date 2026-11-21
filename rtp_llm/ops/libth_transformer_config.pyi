@@ -1002,8 +1002,15 @@ class CpPrefillSliceLayout:
     PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
     BLOCK_STRIDE: typing.ClassVar[CpPrefillSliceLayout]
 
+class CacheReuseMode:
+    DISABLED: typing.ClassVar[CacheReuseMode]
+    STANDARD: typing.ClassVar[CacheReuseMode]
+    PRECISE_ONLY: typing.ClassVar[CacheReuseMode]
+
 class CacheReusePolicyDesc:
-    enable_prefix_reuse: typing.Any
+    enable_prefix_reuse: bool | None
+    local_only_state: bool | None
+    mode: CacheReuseMode | None
     def __init__(self) -> None: ...
 
 class CacheCapacityPolicyDesc:

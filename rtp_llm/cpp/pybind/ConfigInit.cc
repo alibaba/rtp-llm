@@ -1897,20 +1897,29 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
+    py::enum_<CacheReuseMode>(m, "CacheReuseMode")
+        .value("DISABLED", CacheReuseMode::DISABLED)
+        .value("STANDARD", CacheReuseMode::STANDARD)
+        .value("PRECISE_ONLY", CacheReuseMode::PRECISE_ONLY);
+
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")
         .def(py::init<>())
         .def_readwrite("enable_prefix_reuse", &CacheReusePolicyDesc::enable_prefix_reuse)
         .def_readwrite("local_only_state", &CacheReusePolicyDesc::local_only_state)
+        .def_readwrite("mode", &CacheReusePolicyDesc::mode)
         .def(py::pickle(
             [](const CacheReusePolicyDesc& self) {
-                return py::make_tuple(self.enable_prefix_reuse, self.local_only_state);
+                return py::make_tuple(self.enable_prefix_reuse, self.local_only_state, self.mode);
             },
             [](py::tuple t) {
                 CacheReusePolicyDesc c;
-                if (t.size() != 2)
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid CacheReusePolicyDesc state!");
                 c.enable_prefix_reuse = t[0].cast<std::optional<bool>>();
                 c.local_only_state    = t[1].cast<std::optional<bool>>();
+                if (t.size() == 3) {
+                    c.mode = t[2].cast<std::optional<CacheReuseMode>>();
+                }
                 return c;
             }));
 

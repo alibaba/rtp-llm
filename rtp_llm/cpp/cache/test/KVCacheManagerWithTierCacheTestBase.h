@@ -428,7 +428,7 @@ inline CompleteTokenIdsPtr makeBatchedTokenIdsWithCommonPrefix(
 }
 
 inline bool isReusableGroup(const CacheConfig& config, const std::string& tag) {
-    return config.group(tag).policy.enable_prefix_reuse;
+    return (config.group(tag).policy.reuse_mode == CacheReuseMode::STANDARD);
 }
 
 inline bool isFullGroup(const CacheConfig& config, const std::string& tag) {
@@ -663,7 +663,7 @@ expectDsv4TierTopology(const std::shared_ptr<KVCacheManager>& manager, const Cac
         for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
             const auto& tag = group_set->groupTags()[member_index];
             ASSERT_NE(std::find(kDsv4Tags.begin(), kDsv4Tags.end(), tag), kDsv4Tags.end());
-            EXPECT_TRUE(config.group(tag).policy.enable_prefix_reuse);
+            EXPECT_TRUE((config.group(tag).policy.reuse_mode == CacheReuseMode::STANDARD));
             const auto manager = std::find_if(coordinator_groups.begin(),
                                               coordinator_groups.end(),
                                               [&](const auto& group) { return group && group->tag() == tag; });

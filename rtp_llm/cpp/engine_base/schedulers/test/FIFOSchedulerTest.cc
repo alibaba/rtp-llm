@@ -5908,7 +5908,7 @@ makeChunkCpGroupCacheConfig(size_t group_block_size, bool prefix_reuse, size_t b
     swa.tag    = "swa";
     swa.spec   = test::makeResolvedOpaqueSpec(true, swa.tag, DataType::TYPE_FP16, group_block_size, group_block_size);
     swa.policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa.policy.enable_prefix_reuse = prefix_reuse;
+    swa.policy.reuse_mode          = (prefix_reuse) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     swa.policy.shared_chunk_state  = shared_chunk_state;
     if (shared_chunk_state) {
         swa.policy.active_tail_blocks = 1;
@@ -6113,7 +6113,8 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
                     auto spec                = group.spec->clone();
                     spec->seq_size_per_block = spec->kernel_seq_size_per_block = test_case.group_block_size;
                     group.spec                                                 = std::move(spec);
-                    group.policy.enable_prefix_reuse                           = test_case.group_reuse;
+                    group.policy.reuse_mode =
+                        (test_case.group_reuse) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
                 }
             }
             cache_config.setTopology(std::move(groups), cache_config.topology().layers());

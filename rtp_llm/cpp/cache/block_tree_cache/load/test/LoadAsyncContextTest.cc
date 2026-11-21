@@ -200,7 +200,7 @@ std::shared_ptr<const CacheTopology> makeTopology(std::vector<CacheGroupType> ty
         group.tag                        = spec->tag;
         group.spec                       = std::move(spec);
         group.policy                     = defaultCacheGroupPolicy(types[group_id]);
-        group.policy.enable_prefix_reuse = true;
+        group.policy.reuse_mode          = CacheReuseMode::STANDARD;
         if (types[group_id] == CacheGroupType::SWA) {
             group.policy.sliding_window_size = 2;
         }

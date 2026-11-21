@@ -49,13 +49,15 @@ enum class CpBlockSliceMode : int8_t {
     PAYLOAD_BYTES = 2,
 };
 
+enum class CacheReuseMode : int8_t {
+    DISABLED     = 0,
+    STANDARD     = 1,
+    PRECISE_ONLY = 2,
+};
+
 struct CacheGroupPolicy {
     CacheGroupType       group_type             = CacheGroupType::FULL;
-    bool                 enable_prefix_reuse    = true;
-    // Set from CacheReusePolicyDesc::local_only_state. Marks a state group that
-    // owns an independent local-only GroupSet rather than sharing its type's
-    // default group set and pools (e.g. DSV4 HCA state).
-    bool                 local_only_state       = false;
+    CacheReuseMode       reuse_mode             = CacheReuseMode::STANDARD;
     bool                 reservable             = true;
     uint32_t             explicit_block_num     = 0;
     bool                 charge_to_paged_budget = false;
@@ -72,11 +74,11 @@ struct CacheGroupPolicy {
 
     std::string policyFingerprint() const {
         std::ostringstream oss;
-        oss << static_cast<int>(group_type) << ':' << (enable_prefix_reuse ? 1 : 0) << ':' << (reservable ? 1 : 0)
-            << ':' << explicit_block_num << ':' << (charge_to_paged_budget ? 1 : 0) << ':'
+        oss << static_cast<int>(group_type) << ':' << static_cast<int>(reuse_mode) << ':' << (reservable ? 1 : 0) << ':'
+            << explicit_block_num << ':' << (charge_to_paged_budget ? 1 : 0) << ':'
             << static_cast<int>(memory_placement) << ':' << active_tail_blocks << ':' << (validate_tail_blocks ? 1 : 0)
             << ':' << static_cast<int>(cp_mapping) << ':' << static_cast<int>(cp_slice) << ':' << sliding_window_size
-            << ':' << (shared_chunk_state ? 1 : 0) << ':' << (local_only_state ? 1 : 0);
+            << ':' << (shared_chunk_state ? 1 : 0);
         return oss.str();
     }
 };
@@ -96,7 +98,7 @@ inline const char* cacheGroupTypeName(CacheGroupType group_type) {
 inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
     CacheGroupPolicy policy;
     policy.group_type          = group_type;
-    policy.enable_prefix_reuse = group_type == CacheGroupType::FULL || group_type == CacheGroupType::LINEAR;
+    policy.reuse_mode = group_type == CacheGroupType::SWA ? CacheReuseMode::DISABLED : CacheReuseMode::STANDARD;
     policy.active_tail_blocks  = group_type == CacheGroupType::LINEAR ? 1 : (group_type == CacheGroupType::SWA ? 2 : 0);
     if (group_type == CacheGroupType::FULL) {
         policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
@@ -110,12 +112,12 @@ inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {
 // later requests. Keep this predicate shared by layout planning and PP
 // topology capture so they cannot disagree about group-set membership.
 inline bool cacheGroupParticipatesInBlockTree(const CacheGroupPolicy& policy, bool enable_partial_tail_reuse = false) {
-    return policy.enable_prefix_reuse
-           || (enable_partial_tail_reuse && policy.local_only_state && policy.group_type == CacheGroupType::SWA);
+    return policy.reuse_mode == CacheReuseMode::STANDARD
+           || (enable_partial_tail_reuse && policy.reuse_mode == CacheReuseMode::PRECISE_ONLY);
 }
 
 inline bool cacheGroupUsesBlockTreeStorage(const CacheGroupPolicy& policy) {
-    return cacheGroupParticipatesInBlockTree(policy) && !policy.local_only_state;
+    return policy.reuse_mode == CacheReuseMode::STANDARD;
 }
 
 // A group belongs to the KV cache event publication completeness set only when
@@ -124,7 +126,7 @@ inline bool cacheGroupUsesBlockTreeStorage(const CacheGroupPolicy& policy) {
 // tail blocks) never hold full block chains, so counting them as required
 // would suppress publication for almost every key.
 inline bool cacheGroupPublishesPrefixChain(const CacheGroupPolicy& policy) {
-    return cacheGroupUsesBlockTreeStorage(policy) && policy.active_tail_blocks == 0;
+    return policy.reuse_mode == CacheReuseMode::STANDARD && policy.active_tail_blocks == 0;
 }
 
 }  // namespace rtp_llm

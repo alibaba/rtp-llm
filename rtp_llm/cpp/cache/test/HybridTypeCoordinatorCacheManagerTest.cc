@@ -597,8 +597,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateHybridConfigKeepsExplicitPhy
     ASSERT_EQ(config.groupNums(), 3);
     EXPECT_EQ(publishedGroupTags(config.topology()),
               (std::vector<std::string>{"recurrent_state", "convolution_state", "full"}));
-    EXPECT_TRUE(config.group("recurrent_state").policy.enable_prefix_reuse);
-    EXPECT_TRUE(config.group("convolution_state").policy.enable_prefix_reuse);
+    EXPECT_TRUE((config.group("recurrent_state").policy.reuse_mode == CacheReuseMode::STANDARD));
+    EXPECT_TRUE((config.group("convolution_state").policy.reuse_mode == CacheReuseMode::STANDARD));
     EXPECT_EQ(config.group("recurrent_state").spec->memoryLayoutDType(), DataType::TYPE_FP16);
     EXPECT_EQ(config.group("convolution_state").spec->memoryLayoutDType(), DataType::TYPE_FP32);
 }
@@ -2159,7 +2159,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheStopsBeforeFullHole
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
     auto config = makeTinyHybridConfig();
     ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_TRUE(config.group("linear").policy.enable_prefix_reuse);
+    EXPECT_TRUE((config.group("linear").policy.reuse_mode == CacheReuseMode::STANDARD));
 
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());

@@ -126,6 +126,7 @@ try:
         CacheMemoryPlacement,
         CacheMemoryPolicyDesc,
         CacheReusePolicyDesc,
+        CacheReuseMode,
         CacheStoreConfig,
         CacheTailPolicyDesc,
         ConcurrencyConfig,

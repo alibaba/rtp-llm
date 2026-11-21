@@ -265,7 +265,7 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
         keys->push_back(cache_keys[key_index]);
         auto& key_handles = request.handles.emplace_back();
         for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
-            if (tree_->groupSets()[group_set]->localOnly()) {
+            if (tree_->groupSets()[group_set]->preciseOnly()) {
                 continue;
             }
             const auto& resource = resources[key_index][group_set];

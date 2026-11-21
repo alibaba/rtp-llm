@@ -16,7 +16,7 @@ bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<Grou
     for (size_t key_index = 0; key_index < task.cache_keys.size(); ++key_index) {
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetPtr& group_set = group_sets_[group_set_id];
-            if (group_set->localOnly()) {
+            if (group_set->preciseOnly()) {
                 continue;
             }
             const GroupSetResource& source = resources[key_index][group_set_id];

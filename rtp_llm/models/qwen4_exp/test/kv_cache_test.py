@@ -15,6 +15,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 )
 from rtp_llm.ops import (
     CacheGroupType,
+    CacheReuseMode,
     DataType,
     HybridAttentionType,
     KVCacheSpecType,
@@ -106,7 +107,7 @@ class PleStateDescTest(unittest.TestCase):
         # Page checkpoints the model resumes from, so the chain is materialized
         # for the whole request length rather than tail-sparse.
         self.assertEqual(desc.group_type, CacheGroupType.FULL)
-        self.assertTrue(desc.reuse.enable_prefix_reuse)
+        self.assertEqual(desc.reuse.mode, CacheReuseMode.STANDARD)
         self.assertEqual(desc.tail.active_tail_blocks, 0)
 
     def test_rejects_degenerate_state_length(self):
@@ -144,7 +145,7 @@ class BuildDescsTest(unittest.TestCase):
         self.assertEqual(ctx.entry_elems, 1)
         self.assertEqual(ctx.explicit_entry_count, _NGRAM - 1)
         self.assertEqual(ctx.group_type, CacheGroupType.FULL)
-        self.assertTrue(ctx.reuse.enable_prefix_reuse)
+        self.assertEqual(ctx.reuse.mode, CacheReuseMode.STANDARD)
         self.assertEqual(ctx.tail.active_tail_blocks, 0)
 
         non_ple = [
@@ -184,7 +185,7 @@ class IndexerDescTest(unittest.TestCase):
             OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
         )
         self.assertEqual(desc.compression_ratio, self.RATIO)
-        self.assertTrue(desc.reuse.enable_prefix_reuse)
+        self.assertEqual(desc.reuse.mode, CacheReuseMode.STANDARD)
 
     def test_kv_desc_rejects_invalid_geometry(self):
         with self.assertRaisesRegex(ValueError, "indexer_head_dim"):
@@ -203,7 +204,7 @@ class IndexerDescTest(unittest.TestCase):
         self.assertEqual(desc.entry_count_mode, OpaqueBlockEntryCountMode.STATE_RING)
         self.assertEqual(desc.state_ring_overlap, 1)
         self.assertEqual(desc.group_type, CacheGroupType.FULL)
-        self.assertTrue(desc.reuse.enable_prefix_reuse)
+        self.assertEqual(desc.reuse.mode, CacheReuseMode.STANDARD)
         self.assertEqual(desc.tail.active_tail_blocks, 0)
 
 

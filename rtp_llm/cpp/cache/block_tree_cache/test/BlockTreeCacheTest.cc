@@ -150,7 +150,7 @@ void initializeTestGroupSet(const GroupSetPtr&                     group_set,
         type = CacheGroupType::LINEAR;
     }
     auto policy                = defaultCacheGroupPolicy(type);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
         policy.sliding_window_size = static_cast<int>(swa->slidingWindowSize());
     }
@@ -188,7 +188,7 @@ void initializeSingleMemberGroupSets(const std::vector<GroupSetPtr>&        grou
             type = CacheGroupType::LINEAR;
         }
         auto policy                = defaultCacheGroupPolicy(type);
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode          = CacheReuseMode::STANDARD;
         if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
             policy.sliding_window_size = static_cast<int>(swa->slidingWindowSize());
         }
@@ -450,7 +450,7 @@ TEST_F(BlockTreeCacheTest, HcaZeroPendingInteriorBoundaryNeedsNoSnapshot) {
         }
         auto cache = makeBlockTreeCacheForTest(groups, {}, nullptr, nullptr, nullptr, 256);
         for (size_t i = 1; i < groups.size(); ++i) {
-            groups[i]->initialize(i, groups[i]->topologyPtr(), groups[i]->groupTags(), {}, true);
+            block_tree_cache_test::markPreciseStateGroupForTest(groups[i]);
         }
         std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(groups.size()));
         for (size_t i = 0; i < resources.size(); ++i) {
@@ -958,7 +958,7 @@ TEST_F(BlockTreeCacheTest, Dsv4MixedSwaKvAndCompressorStateRestoresExact1300) {
             desc.cp->prefill_slice_layout = i == 0 ? CpPrefillSliceLayout::BLOCK_STRIDE : CpPrefillSliceLayout::PAYLOAD;
             desc.block_stride_bytes_alignment = i == 0 ? 576 : 0;
             auto policy                       = defaultCacheGroupPolicy(CacheGroupType::SWA);
-            policy.enable_prefix_reuse        = true;
+            policy.reuse_mode                 = CacheReuseMode::STANDARD;
             policy.sliding_window_size        = 128;  // Actual shared model attention policy.
             policy.cp_mapping                 = CpBlockMappingMode::COMPACT_LAST_RANK;
             policy.cp_slice = i == 0 ? CpBlockSliceMode::EQUAL_BYTES : CpBlockSliceMode::PAYLOAD_BYTES;
@@ -1251,7 +1251,7 @@ TEST_F(BlockTreeCacheTest, PreciseLocalMatchChoosesFarthestJointReadyEndpoint) {
     auto hca = std::make_shared<SWAGroupSet>(128, 256, std::vector<DeviceBlockPoolPtr>{hca_pool}, nullptr, nullptr);
     std::vector<GroupSetPtr> groups{full, hca};
     cache_ = makeBlockTreeCacheForTest(groups, {}, nullptr, nullptr, nullptr, 256);
-    hca->initialize(1, hca->topologyPtr(), hca->groupTags(), {}, /*local_only=*/true);
+    block_tree_cache_test::markPreciseStateGroupForTest(hca);
 
     // Structural pools reserve all logical IDs at construction; these IDs are
     // already allocated and need only request references before publication.
@@ -3788,7 +3788,7 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
 
 TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     auto topology =
         block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(policy, {0}, 1),
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {0}, 1)});

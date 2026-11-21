@@ -1400,7 +1400,7 @@ TEST_F(StreamCacheResourceTest, LegacyDenseSwaContinuationPreservesLaterCachedPa
         config.layer_num           = 1;
         config.seq_size_per_block  = 4;
         auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode          = CacheReuseMode::STANDARD;
         policy.sliding_window_size = 4;
         config.fromGroupedSpecs(
             {test::makeMhaSpec("swa", 16, DataType::TYPE_FP16, 1, 1)}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});

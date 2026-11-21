@@ -1922,7 +1922,7 @@ TEST(DecodeRpcServerTest, StateAndSwaTailSelectionsIncludeEverySlicedPeer) {
     for (int cp_size : {2, 4}) {
         for (const auto slice_mode : {CpBlockSliceMode::PAYLOAD_BYTES, CpBlockSliceMode::EQUAL_BYTES}) {
             auto policy                = makeCompactStatePolicy(/*active_tail_blocks=*/1);
-            policy.enable_prefix_reuse = false;  // HCA_STATE is still a PD obligation.
+            policy.reuse_mode          = CacheReuseMode::DISABLED;  // HCA_STATE is still a PD obligation.
             policy.cp_slice            = slice_mode;
             const size_t key_count     = 9;
             const size_t logical_page_count =

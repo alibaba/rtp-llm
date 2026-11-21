@@ -191,7 +191,7 @@ TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow)
     auto manager = engine->resourceContext().cache_manager;
     ASSERT_EQ(manager->cacheConfig().group("first").policy.group_type, CacheGroupType::FULL);
     ASSERT_EQ(manager->cacheConfig().group("second").policy.group_type, CacheGroupType::SWA);
-    ASSERT_TRUE(manager->cacheConfig().group("second").policy.enable_prefix_reuse);
+    ASSERT_TRUE((manager->cacheConfig().group("second").policy.reuse_mode == CacheReuseMode::STANDARD));
     KVCacheConfig config;
     config.multi_task_prompt_tokens = {{"both", {1, 2, 3}}};
     SystemPromptConstructor constructor;

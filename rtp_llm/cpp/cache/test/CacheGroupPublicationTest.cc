@@ -7,7 +7,7 @@ namespace {
 
 CacheGroupPolicy policyOf(CacheGroupType type, bool reuse = true) {
     auto policy                = defaultCacheGroupPolicy(type);
-    policy.enable_prefix_reuse = reuse;
+    policy.reuse_mode          = reuse ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     return policy;
 }
 

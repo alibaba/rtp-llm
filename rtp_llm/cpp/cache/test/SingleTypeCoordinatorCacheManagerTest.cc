@@ -657,7 +657,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, LegacyDenseSwaPublishesOnlySafePhy
     config.layer_num           = 1;
     config.seq_size_per_block  = 4;
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     policy.sliding_window_size = 4;
     config.fromGroupedSpecs(
         {makeMhaSpec("swa", 16, DataType::TYPE_FP16, 1, 1)}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});
@@ -812,7 +812,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, RemoteSwaCoverageClipsBeforeReadAn
         config.seq_size_per_block  = 4;
         auto spec                  = makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 1);
         auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode          = CacheReuseMode::STANDARD;
         policy.cp_mapping          = CpBlockMappingMode::NONE;
         policy.sliding_window_size = window;
         config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});
@@ -895,7 +895,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, LowerTierRejectsMissingCanonicalSw
         config.seq_size_per_block  = 4;
         auto spec                  = makeMhaSpec("swa", 4, DataType::TYPE_FP16, 1, 1);
         auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode          = CacheReuseMode::STANDARD;
         policy.cp_mapping          = CpBlockMappingMode::NONE;
         policy.sliding_window_size = 8;
         config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {"swa"}, {policy});
@@ -1239,7 +1239,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseSwaPinsPreserveUnregisteredWi
         auto swa                       = makeMhaSpec("swa", 2, DataType::TYPE_FP16, 1, 1);
         auto linear                    = makeLinearSpec("linear", 2, DataType::TYPE_FP16, 1, 1);
         auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        swa_policy.enable_prefix_reuse = true;
+        swa_policy.reuse_mode          = CacheReuseMode::STANDARD;
         swa_policy.sliding_window_size = 4;
         config.fromGroupedSpecs({full, swa, linear},
                                 {{0}, {1}, {2}},
@@ -1489,7 +1489,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, RegisteredFullCheckpointsScale) {
 TEST_F(SingleTypeCoordinatorCacheManagerTest, DenseSwaRuntimePinsYieldWithoutFreeingLivePages) {
     auto config                = createSingleTypeTestConfig(1, 12, 2);
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     policy.sliding_window_size = 4;
     setTestGroupPolicies(config, {policy});
     allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
@@ -2604,7 +2604,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, PrefixReuseDisabledSkipsMatchAndIn
         policies.push_back(group.policy);
     }
     ASSERT_EQ(policies.size(), 1u);
-    policies[0].enable_prefix_reuse = false;
+    policies[0].reuse_mode = CacheReuseMode::DISABLED;
     setTestGroupPolicies(config, policies);
 
     allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);

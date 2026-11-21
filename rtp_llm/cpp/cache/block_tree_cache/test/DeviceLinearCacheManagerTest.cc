@@ -529,7 +529,7 @@ TEST_F(DeviceLinearCacheManagerTest, NonReusableGroupIgnoresPrefillTailConfig) {
     auto pool = createDeviceBlockPool();
     ASSERT_TRUE(pool->init());
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-    policy.enable_prefix_reuse = false;
+    policy.reuse_mode          = CacheReuseMode::DISABLED;
     policy.active_tail_blocks  = 2;
     DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 10000, policy);
     BlockIds                 blocks;

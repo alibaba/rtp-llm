@@ -912,7 +912,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 bool KVCacheManager::hasTailSparseReuseGroup() const {
     const auto& groups = config_.groups();
     return std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
-        return group.policy.enable_prefix_reuse && group.policy.active_tail_blocks != 0;
+        return (group.policy.reuse_mode == CacheReuseMode::STANDARD) && group.policy.active_tail_blocks != 0;
     });
 }
 

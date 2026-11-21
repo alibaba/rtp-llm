@@ -396,7 +396,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
             type = CacheGroupType::LINEAR;
         }
         auto policy                = defaultCacheGroupPolicy(type);
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode          = CacheReuseMode::STANDARD;
         if (const auto* swa = dynamic_cast<SWAGroupSet*>(group_set.get()); swa != nullptr) {
             policy.sliding_window_size = static_cast<int>(swa->slidingWindowSize());
         }
@@ -417,6 +417,19 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
 }
 
 }  // namespace
+
+void markPreciseStateGroupForTest(const GroupSetPtr& group) {
+    auto members = group->topologyPtr()->groups();
+    for (auto& member : members) {
+        if (std::find(group->groupTags().begin(), group->groupTags().end(), member.tag) != group->groupTags().end()) {
+            member.policy.reuse_mode         = CacheReuseMode::PRECISE_ONLY;
+            member.policy.shared_chunk_state = true;
+            member.policy.active_tail_blocks = 1;
+        }
+    }
+    auto topology = CacheTopology::create(std::move(members), group->topologyPtr()->layers());
+    group->initialize(group->groupSetId(), topology, group->groupTags());
+}
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets) {
     prepareGroupSets(group_sets);
@@ -867,9 +880,9 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     }
 
     auto full_policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    full_policy.enable_prefix_reuse = true;
+    full_policy.reuse_mode          = CacheReuseMode::STANDARD;
     auto swa_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_policy.enable_prefix_reuse  = true;
+    swa_policy.reuse_mode           = CacheReuseMode::STANDARD;
     swa_policy.sliding_window_size  = 2;
     environment->topology           = block_transfer_engine_test::makeTestTopology({
         block_transfer_engine_test::makeTestGroupBase(full_policy, {0}, kGroupPayloadBytes),

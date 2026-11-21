@@ -702,7 +702,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
         ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
         const auto&  blocks = resource.kvCache().blocks(0, tag);
         const auto&  policy = config.group(tag).policy;
-        const size_t tail   = policy.enable_prefix_reuse ?
+        const size_t tail   = (policy.reuse_mode == CacheReuseMode::STANDARD) ?
                                   std::min(blocks.size(), static_cast<size_t>(config.reuse_cache_tail_blocks)) :
                                   std::min(blocks.size(), static_cast<size_t>(policy.active_tail_blocks));
         for (size_t pos = 0; pos < blocks.size(); ++pos) {

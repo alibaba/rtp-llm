@@ -56,7 +56,7 @@ GroupSetPtr makeHostDiskGroup(size_t                                  group_set_
                               std::shared_ptr<BlockTreeDiskBlockPool> disk_pool,
                               size_t                                  payload_bytes) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, payload_bytes)});
     auto device_pool = makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
     auto group       = makeTestGroupSet(group_set_id,
@@ -456,7 +456,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
 
 TEST(GroupSetPayloadTest, PayloadBytesUsesLogicalStridesAcrossLayers) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0, 1, 2}, 160, 40)});
     auto pool                  = makeTestDevicePool({{200, 40}, {220, 40}, {240, 40}}, 2, "group_set_payload_test");
     auto group                 = makeTestGroupSet(0, std::move(topology), {"group0"}, {std::move(pool)});

@@ -92,7 +92,7 @@ const CacheGroupPolicy& SingleTypeCacheManager::policy() const {
 }
 
 bool SingleTypeCacheManager::prefixReuseEnabled() const {
-    return policy().enable_prefix_reuse;
+    return (policy().reuse_mode == CacheReuseMode::STANDARD);
 }
 
 uint32_t SingleTypeCacheManager::explicitBlockNum() const {
@@ -165,7 +165,7 @@ void SingleTypeCacheManager::unreference(const BlockIndicesType& block_indices) 
 }
 
 bool SingleTypeCacheManager::prefixReusable() const {
-    return policy().enable_prefix_reuse;
+    return (policy().reuse_mode == CacheReuseMode::STANDARD);
 }
 
 bool SingleTypeCacheManager::hasSparseSlots() const {

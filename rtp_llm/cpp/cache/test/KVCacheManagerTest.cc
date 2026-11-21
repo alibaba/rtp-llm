@@ -210,7 +210,7 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
                                          const std::string&      tag,
                                          const std::string&      label,
                                          bool                    enable_reuse_cache = false) {
-    const int tail_blocks = enable_reuse_cache && config.group(tag).policy.enable_prefix_reuse ?
+    const int tail_blocks = enable_reuse_cache && (config.group(tag).policy.reuse_mode == CacheReuseMode::STANDARD) ?
                                 config.reuse_cache_tail_blocks :
                                 dsv4ActiveTailBlocks(config, tag);
     const int tail_begin  = std::max(static_cast<int>(blocks.size()) - tail_blocks, 0);
@@ -338,7 +338,7 @@ TEST_F(KVCacheManagerTest, PublicationRejectsTailSparseReuseAcrossAllGroups) {
                 tail.spec   = makeResolvedMhaSpec(config.dtype, 1, 1, config.seq_size_per_block, "tail");
                 tail.policy = defaultCacheGroupPolicy(tail_type);
                 tail.policy.active_tail_blocks  = 2;
-                tail.policy.enable_prefix_reuse = tail_reuse;
+                tail.policy.reuse_mode          = tail_reuse ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
                 std::vector<GroupBase> groups{full, tail};
                 if (reversed) {
                     std::reverse(groups.begin(), groups.end());
@@ -1337,7 +1337,7 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
         EXPECT_EQ(second_resource->blocks(0, tag)[1], first_blocks[tag][1]);
     }
     for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        if (manager_config.group(tag).policy.enable_prefix_reuse == false) {
+        if ((manager_config.group(tag).policy.reuse_mode == CacheReuseMode::STANDARD) == false) {
             continue;
         }
         ASSERT_GE(second_resource->blocksNum(0, tag), 3) << "tail group " << tag;
@@ -1392,7 +1392,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
     EXPECT_EQ(reuse_result.reuse_len, 4 * spb);
 
     for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        if (manager_config.group(tag).policy.enable_prefix_reuse == false) {
+        if ((manager_config.group(tag).policy.reuse_mode == CacheReuseMode::STANDARD) == false) {
             continue;
         }
         const auto& blocks = second_resource->blocks(0, tag);
@@ -2609,7 +2609,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     EXPECT_EQ(reuse_result.reuse_len, 2 * spb);
 
     for (const auto& tag : dsv4FixedTailGroupTags(manager_config)) {
-        if (manager_config.group(tag).policy.enable_prefix_reuse == false) {
+        if ((manager_config.group(tag).policy.reuse_mode == CacheReuseMode::STANDARD) == false) {
             continue;
         }
         const auto& blocks = reuse_res->blocks(0, tag);

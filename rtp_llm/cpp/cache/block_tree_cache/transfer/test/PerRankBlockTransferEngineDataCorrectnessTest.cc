@@ -177,7 +177,7 @@ struct TransferFixture {
         temp_dir(name.c_str()) {
         const size_t usable_count  = data_block_count + 2;
         auto         policy        = defaultCacheGroupPolicy(group_type);
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode          = CacheReuseMode::STANDARD;
         if (group_type == CacheGroupType::SWA) {
             policy.sliding_window_size = 2;
         }

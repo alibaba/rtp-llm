@@ -24,7 +24,7 @@ protected:
             nullptr,
             nullptr);
         auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode          = CacheReuseMode::STANDARD;
         policy.sliding_window_size = 128;
         auto group                 = makeTestGroupBase(std::move(policy), {0}, 1, 0, 128, 64);
         auto topology              = makeTestTopology({std::move(group)});
@@ -96,7 +96,12 @@ TEST_F(SWAGroupSetTest, WindowValidatorConnectedPath) {
 
 TEST_F(SWAGroupSetTest, LocalHcaRequiredPathIsEmptyAtCompressionBoundaries) {
     auto hca = std::make_shared<SWAGroupSet>(128, 256, std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
-    hca->initialize(0, group_->topologyPtr(), group_->groupTags(), {}, /*local_only=*/true);
+    auto policy       = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.reuse_mode = CacheReuseMode::PRECISE_ONLY;
+    policy.shared_chunk_state  = true;
+    policy.sliding_window_size = 128;
+    auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, 1, 0, 128, 256)});
+    hca->initialize(0, topology, topology->groupTags());
 
     std::vector<TreeNode> nodes(7);
     for (size_t i = 0; i < 5; ++i) {
@@ -182,7 +187,7 @@ TEST_F(SWAGroupSetTest, CanonicalWindowAndReuseCountAgreeWhenPhysicalSpanDiffers
     const auto free_before = pool_->freeBlocksNum();
     auto       swa    = std::make_shared<SWAGroupSet>(65, 32, std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
     auto       policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode      = CacheReuseMode::STANDARD;
     policy.sliding_window_size = 65;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, 1, 0, 128, 64)});
     swa->initialize(0, topology, topology->groupTags());

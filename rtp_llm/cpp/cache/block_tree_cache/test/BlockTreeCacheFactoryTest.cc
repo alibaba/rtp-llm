@@ -99,7 +99,7 @@ CacheConfig makeSwaConfig(int block_size = 4) {
     auto spec = test::makeResolvedMhaSpec(
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/block_size);
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = (true) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     policy.sliding_window_size = 128;
     const size_t stride        = spec->block_size_bytes();
     test::configureIndexedTestGroups(config, {spec}, {{0, 1}}, {CacheGroupType::SWA}, {policy});
@@ -127,7 +127,7 @@ CacheConfig makeHybridConfig(bool disable_linear_reuse = false) {
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
 
     auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-    linear_policy.enable_prefix_reuse = !disable_linear_reuse;
+    linear_policy.reuse_mode          = (!disable_linear_reuse) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
     test::configureIndexedTestGroups(config,
                                      {linear_spec, full_spec},
@@ -177,10 +177,10 @@ CacheConfig makeTierRatioConfig() {
         test::makeResolvedLinearSpec(DataType::TYPE_FP16, 1, 1, 1, 1, 2, 4, DataType::TYPE_FP16, DataType::TYPE_FP16);
     auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_policy.enable_prefix_reuse    = true;
+    swa_policy.reuse_mode             = (true) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     swa_policy.sliding_window_size    = 8;
     auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-    linear_policy.enable_prefix_reuse = false;
+    linear_policy.reuse_mode          = (false) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     test::configureIndexedTestGroups(
         config,
         {full_spec, swa_spec, swa_spec->clone(), linear_spec},
@@ -301,10 +301,10 @@ CacheConfig makeCompatibleSwaGroupsConfig(int                second_window,
         DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
     auto first_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
     first_policy.cp_mapping           = CpBlockMappingMode::COMPACT_LAST_RANK;
-    first_policy.enable_prefix_reuse  = true;
+    first_policy.reuse_mode           = (true) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     first_policy.sliding_window_size  = 128;
     auto second_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    second_policy.enable_prefix_reuse = true;
+    second_policy.reuse_mode          = (true) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     second_policy.sliding_window_size = second_window;
     second_policy.active_tail_blocks  = second_active_tail_blocks;
     second_policy.cp_mapping          = second_cp_mapping;
@@ -367,7 +367,7 @@ CacheConfig makeReusableGroupsAroundDisabledConfig() {
         specs.push_back(test::makeResolvedMhaSpec(
             DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4));
         auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        policy.enable_prefix_reuse = group_id != 1;
+        policy.reuse_mode          = (group_id != 1) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
         policies.push_back(policy);
     }
     test::configureIndexedTestGroups(
@@ -393,9 +393,9 @@ CacheConfig makeInterleavedLocalOnlySwaConfig() {
 
     auto full_policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto local_swa_policy  = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    local_swa_policy.local_only_state = true;
+    local_swa_policy.reuse_mode       = CacheReuseMode::PRECISE_ONLY;
     auto swa_policy        = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_policy.enable_prefix_reuse    = true;
+    swa_policy.reuse_mode             = (true) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     swa_policy.sliding_window_size    = 128;
 
     test::configureIndexedTestGroups(config,
@@ -949,7 +949,7 @@ TEST_F(BlockTreeCacheFactoryTest, RemoteMatchSkipsBackendWhenNoGroupSupportsPref
         policies.push_back(group.policy);
     }
     ASSERT_EQ(policies.size(), 1u);
-    policies[0].enable_prefix_reuse = false;
+    policies[0].reuse_mode = (false) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     test::setTestGroupPolicies(config, policies);
 
     auto          allocator = initAllocator<CoordinatorCacheManager>(config);
@@ -972,7 +972,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskCacheAllowsNoPrefixReusableGroups) {
         policies.push_back(group.policy);
     }
     ASSERT_EQ(policies.size(), 1u);
-    policies[0].enable_prefix_reuse = false;
+    policies[0].reuse_mode = (false) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     test::setTestGroupPolicies(config, policies);
 
     auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
@@ -2541,7 +2541,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     for (const auto& group : cache_config.topology().groups()) {
         policies.push_back(group.policy);
     }
-    policies[2].enable_prefix_reuse = true;
+    policies[2].reuse_mode          = (true) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     policies[2].sliding_window_size = 2;
     test::setTestGroupPolicies(cache_config, policies);
 

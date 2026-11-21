@@ -71,14 +71,28 @@ uint32_t SpecBuilder::kernelSeqSizePerBlock(const KVCacheSpecDesc&  desc,
 CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
     CacheGroupPolicy policy = defaultCacheGroupPolicy(groupType(desc));
     if (desc.is_state_cache) {
-        policy.enable_prefix_reuse = true;
+        policy.reuse_mode = CacheReuseMode::STANDARD;
     }
     if (desc.reuse.has_value()) {
-        if (desc.reuse->enable_prefix_reuse.has_value()) {
-            policy.enable_prefix_reuse = *desc.reuse->enable_prefix_reuse;
+        const auto& reuse = *desc.reuse;
+        RTP_LLM_CHECK_WITH_INFO(!(reuse.enable_prefix_reuse.value_or(false) && reuse.local_only_state.value_or(false)),
+                                "tag=%s has conflicting prefix and precise-only reuse",
+                                desc.tag.c_str());
+        if (reuse.enable_prefix_reuse.has_value()) {
+            policy.reuse_mode = *reuse.enable_prefix_reuse ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
         }
-        if (desc.reuse->local_only_state.has_value()) {
-            policy.local_only_state = *desc.reuse->local_only_state;
+        if (reuse.local_only_state.value_or(false)) {
+            policy.reuse_mode = CacheReuseMode::PRECISE_ONLY;
+        }
+        if (reuse.mode.has_value()) {
+            RTP_LLM_CHECK_WITH_INFO(
+                (!reuse.enable_prefix_reuse.has_value()
+                 || *reuse.enable_prefix_reuse == (*reuse.mode == CacheReuseMode::STANDARD))
+                    && (!reuse.local_only_state.has_value()
+                        || *reuse.local_only_state == (*reuse.mode == CacheReuseMode::PRECISE_ONLY)),
+                "tag=%s has conflicting legacy and explicit reuse modes",
+                desc.tag.c_str());
+            policy.reuse_mode = *reuse.mode;
         }
     }
     if (desc.capacity.has_value()) {
@@ -111,10 +125,10 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
             policy.cp_slice = *desc.cp->slice;
         }
     }
-    policy.shared_chunk_state =
-        policy.group_type == CacheGroupType::SWA && desc.cache_type == KVCacheSpecType::OpaqueState
-        && desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING && desc.state_ring_overlap == 0
-        && !policy.enable_prefix_reuse && policy.active_tail_blocks == 1;
+    policy.shared_chunk_state = policy.group_type == CacheGroupType::SWA
+                                && desc.cache_type == KVCacheSpecType::OpaqueState
+                                && desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING
+                                && desc.state_ring_overlap == 0 && policy.active_tail_blocks == 1;
     return policy;
 }
 

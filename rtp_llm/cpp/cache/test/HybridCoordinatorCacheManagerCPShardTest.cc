@@ -627,7 +627,7 @@ TEST_F(HybridCoordinatorCacheManagerCPShardTest, ExplicitSwaRoundRobinProjectsAl
     auto full_spec                 = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "full");
     auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_policy.cp_mapping          = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-    swa_policy.enable_prefix_reuse = true;
+    swa_policy.reuse_mode          = CacheReuseMode::STANDARD;
     swa_policy.sliding_window_size = 16;
     auto full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
     full_policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;

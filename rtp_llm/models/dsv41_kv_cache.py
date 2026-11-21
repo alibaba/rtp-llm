@@ -13,6 +13,7 @@ from rtp_llm.models.dsv4_kv_cache import (
 )
 from rtp_llm.ops import (
     CacheCpPolicyDesc,
+    CacheReuseMode,
     CacheReusePolicyDesc,
     CpBlockSliceMode,
     CpPrefillSliceLayout,
@@ -61,7 +62,7 @@ def build_v41_kv_cache_spec_descs(
     decoder_swa.tag = "decoder_swa_kv"
     decoder_swa.block_stride_bytes_alignment = 16896
     reuse = CacheReusePolicyDesc()
-    reuse.enable_prefix_reuse = False
+    reuse.mode = CacheReuseMode.DISABLED
     decoder_swa.reuse = reuse
     if fixed_pool_use_host_memory:
         for desc in (state, swa, decoder_swa):

@@ -31,7 +31,7 @@ using namespace block_tree_cache_test;
 
 TEST(StoreTaskRunnerTest, PrepareTaskCreatesHostTransferAndTemporaryHolds) {
     auto policy                                            = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse                             = true;
+    policy.reuse_mode                                      = CacheReuseMode::STANDARD;
     const auto                                 group       = makeTestGroupBase(policy);
     const std::shared_ptr<const CacheTopology> topology    = makeTestTopology({group});
     DeviceBlockPoolPtr                         device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner");
@@ -72,9 +72,11 @@ TEST(StoreTaskRunnerTest, PrepareTaskCreatesHostTransferAndTemporaryHolds) {
 
 TEST(StoreTaskRunnerTest, LocalOnlyGroupDoesNotBlockCompleteGroupLowerTierStore) {
     auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    full_policy.enable_prefix_reuse = true;
+    full_policy.reuse_mode         = CacheReuseMode::STANDARD;
     auto hca_policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
     hca_policy.sliding_window_size = 128;
+    hca_policy.reuse_mode          = CacheReuseMode::PRECISE_ONLY;
+    hca_policy.shared_chunk_state  = true;
     const auto topology = makeTestTopology({makeTestGroupBase(full_policy), makeTestGroupBase(hca_policy)});
     auto full_device = makeTestDevicePool({{16, 0}}, 2, "store_full_device");
     auto hca_device = makeTestDevicePool({{16, 0}}, 2, "store_hca_device");
@@ -86,7 +88,7 @@ TEST(StoreTaskRunnerTest, LocalOnlyGroupDoesNotBlockCompleteGroupLowerTierStore)
                                                    std::vector<DeviceBlockPoolPtr>{hca_device},
                                                    nullptr,
                                                    nullptr);
-    hca->initialize(1, topology, {"group1"}, {}, /*local_only=*/true);
+    hca->initialize(1, topology, {"group1"});
     const std::vector<GroupSetPtr> group_sets{full, hca};
     StoreTaskRunner runner(group_sets);
 
@@ -113,7 +115,7 @@ TEST(StoreTaskRunnerTest, LocalOnlyGroupDoesNotBlockCompleteGroupLowerTierStore)
 
 TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {
     auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse                          = true;
+    policy.reuse_mode                                   = CacheReuseMode::STANDARD;
     const auto                                 group    = makeTestGroupBase(policy);
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 4, "store_task_runner_path_index");
@@ -141,7 +143,7 @@ TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {
 
 TEST(StoreTaskRunnerTest, ReleaseTaskResourcesDropsTemporaryHolds) {
     auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse                          = true;
+    policy.reuse_mode                                   = CacheReuseMode::STANDARD;
     const auto                                 group    = makeTestGroupBase(policy);
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool          = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_release");
@@ -297,7 +299,7 @@ TEST(StoreTaskRunnerTest, SplitHostAndDiskBatchesReportOneCrcErrorAfterAllComple
 
 TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse                          = true;
+    policy.reuse_mode                                      = CacheReuseMode::STANDARD;
     const auto                                 group    = makeTestGroupBase(policy);
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
     DeviceBlockPoolPtr             device_pool = makeTestDevicePool({{16, 0}}, 2, "store_task_runner_transfer");

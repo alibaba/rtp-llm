@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 import tempfile
 from pathlib import Path
 from unittest import TestCase, main
@@ -30,6 +31,8 @@ from rtp_llm.models.dsv4_kv_cache import (
 )
 from rtp_llm.ops import (
     CacheMemoryPlacement,
+    CacheReuseMode,
+    CacheReusePolicyDesc,
     CpBlockSliceMode,
     CpPrefillSliceLayout,
     DataType,
@@ -216,6 +219,22 @@ class Dsv4KvCacheSpecTest(TestCase):
         for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
             self.assertIsNone(by_tag[tag].cp, tag)
 
+    def test_reuse_policy_pickle_preserves_modes_and_accepts_legacy_state(self):
+        for mode in (
+            CacheReuseMode.DISABLED,
+            CacheReuseMode.STANDARD,
+            CacheReuseMode.PRECISE_ONLY,
+        ):
+            policy = CacheReusePolicyDesc()
+            policy.mode = mode
+            restored = pickle.loads(pickle.dumps(policy))
+            self.assertEqual(restored.mode, mode)
+        legacy = CacheReusePolicyDesc.__new__(CacheReusePolicyDesc)
+        legacy.__setstate__((False, True))
+        self.assertFalse(legacy.enable_prefix_reuse)
+        self.assertTrue(legacy.local_only_state)
+        self.assertIsNone(legacy.mode)
+
     def test_hca_state_capacity_reuse_and_tail(self):
         by_tag = self._by_tag(self._build())
         hca_state = by_tag[HCA_STATE_TAG]
@@ -224,7 +243,7 @@ class Dsv4KvCacheSpecTest(TestCase):
             hca_state.capacity.explicit_block_num, DSV4_HCA_STATE_POOL_BLOCKS
         )
         self.assertTrue(hca_state.capacity.charge_to_paged_budget)
-        self.assertFalse(hca_state.reuse.enable_prefix_reuse)
+        self.assertEqual(hca_state.reuse.mode, CacheReuseMode.PRECISE_ONLY)
         self.assertIsNotNone(hca_state.tail)
         self.assertEqual(hca_state.tail.active_tail_blocks, 1)
         self.assertFalse(hca_state.tail.validate_tail_blocks)

@@ -27,6 +27,7 @@ from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheGroupType,
+    CacheReuseMode,
     CacheReusePolicyDesc,
     CacheTailPolicyDesc,
     DataType,
@@ -56,7 +57,7 @@ def _full_group_state_desc(desc: KVCacheSpecDesc) -> KVCacheSpecDesc:
     """
     desc.group_type = CacheGroupType.FULL
     reuse = CacheReusePolicyDesc()
-    reuse.enable_prefix_reuse = True
+    reuse.mode = CacheReuseMode.STANDARD
     desc.reuse = reuse
     tail = CacheTailPolicyDesc()
     tail.active_tail_blocks = 0
@@ -152,7 +153,7 @@ def indexer_kv_desc(indexer_head_dim: int, compress_ratio: int) -> KVCacheSpecDe
     reuse = CacheReusePolicyDesc()
     # Complete compressed-block chain: a page-aligned prefix leaves whole
     # pooled blocks in the pool, which the paged scorer reads back on reuse.
-    reuse.enable_prefix_reuse = True
+    reuse.mode = CacheReuseMode.STANDARD
     desc.reuse = reuse
     tail = CacheTailPolicyDesc()
     tail.active_tail_blocks = 0

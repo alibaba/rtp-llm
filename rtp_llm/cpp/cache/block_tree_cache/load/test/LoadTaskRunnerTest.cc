@@ -27,7 +27,7 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc 
     using namespace block_transfer_engine_test;
 
     auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse                              = true;
+    policy.reuse_mode                                       = CacheReuseMode::STANDARD;
     const auto                                 group_config = makeTestGroupBase(policy);
     const auto                                 kv_bytes     = group_config.group.kvBlockStrideBytes();
     const auto                                 scale_bytes  = group_config.group.kvScaleStrideBytes();

@@ -154,14 +154,14 @@ static std::vector<uint8_t> readDeviceLayer(const DeviceBlockPoolPtr& pool, int 
 
 static TestGroupConfig makeGroupBase(std::vector<int> layer_ids, size_t kv_bytes, size_t scale_bytes = 0) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     return makeTestGroupBase(std::move(policy), std::move(layer_ids), kv_bytes, scale_bytes);
 }
 
 static TestGroupConfig
 makeGroupBase(CacheGroupType group_type, std::vector<int> layer_ids, size_t kv_bytes, size_t scale_bytes = 0) {
     auto policy                = defaultCacheGroupPolicy(group_type);
-    policy.enable_prefix_reuse = true;
+    policy.reuse_mode          = CacheReuseMode::STANDARD;
     if (group_type == CacheGroupType::SWA) {
         policy.sliding_window_size = 2;
     }

@@ -67,7 +67,7 @@ uint32_t GroupBase::localKvHeadNum() const {
 size_t
 GroupBase::chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_cache, int reserve_tokens) const {
     if (prompt_tokens <= 0 || chunk_tokens <= 0 || policy.group_type == CacheGroupType::FULL
-        || policy.shared_chunk_state || (reuse_cache && policy.enable_prefix_reuse)) {
+        || policy.shared_chunk_state || (reuse_cache && (policy.reuse_mode == CacheReuseMode::STANDARD))) {
         return 0;
     }
     const size_t block_tokens = seqSizePerBlock();

@@ -217,9 +217,9 @@ std::vector<GroupSetPtr> makeCascadeGroups() {
     auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
     auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-    full_policy.enable_prefix_reuse   = true;
-    swa_policy.enable_prefix_reuse    = true;
-    linear_policy.enable_prefix_reuse = true;
+    full_policy.reuse_mode            = CacheReuseMode::STANDARD;
+    swa_policy.reuse_mode             = CacheReuseMode::STANDARD;
+    linear_policy.reuse_mode          = CacheReuseMode::STANDARD;
     swa_policy.sliding_window_size    = 2;
     std::vector<GroupSetPtr> groups   = {full, swa, linear};
     initializeGroups(groups,
@@ -529,8 +529,8 @@ public:
                        std::vector<DeviceBlockPoolPtr>{device_pools_[1]}, host_pools_[1], disk_pools_[1])};
         auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
         auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-        full_policy.enable_prefix_reuse   = true;
-        linear_policy.enable_prefix_reuse = true;
+        full_policy.reuse_mode            = CacheReuseMode::STANDARD;
+        linear_policy.reuse_mode          = CacheReuseMode::STANDARD;
         initializeGroups(groups_,
                          device_pools_,
                          {block_transfer_engine_test::makeTestGroupBase(full_policy, {0}, 16),
@@ -1064,9 +1064,9 @@ public:
         auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
         auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
         auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-        full_policy.enable_prefix_reuse   = true;
-        swa_policy.enable_prefix_reuse    = true;
-        linear_policy.enable_prefix_reuse = true;
+        full_policy.reuse_mode            = CacheReuseMode::STANDARD;
+        swa_policy.reuse_mode             = CacheReuseMode::STANDARD;
+        linear_policy.reuse_mode          = CacheReuseMode::STANDARD;
         swa_policy.sliding_window_size    = 2;
         initializeGroups(groups_,
                          device_pools,

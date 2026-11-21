@@ -91,11 +91,13 @@ public:
     void initialize(size_t                               group_set_id,
                     std::shared_ptr<const CacheTopology> topology,
                     std::vector<std::string>             group_tags,
-                    BackingLayout                        backing_layout = {},
-                    bool                                 local_only     = false);
+                    BackingLayout                        backing_layout = {});
 
-    bool localOnly() const {
-        return local_only_;
+    bool preciseOnly() const {
+        return group(group_tags_.front()).policy.reuse_mode == CacheReuseMode::PRECISE_ONLY;
+    }
+    bool supportsRemoteReuse() const {
+        return group(group_tags_.front()).policy.reuse_mode == CacheReuseMode::STANDARD;
     }
 
     size_t groupSetId() const {
@@ -175,7 +177,6 @@ private:
     size_t                                  storage_bytes_{0};
     bool                                    enable_crc_{false};
     bool                                    uses_physical_payload_geometry_{false};
-    bool                                    local_only_{false};
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;

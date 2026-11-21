@@ -57,8 +57,7 @@ GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
                           std::vector<std::string>             group_tags,
-                          BackingLayout                        backing_layout,
-                          bool                                 local_only) {
+                          BackingLayout                        backing_layout) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "GroupSet requires a topology");
     RTP_LLM_CHECK_WITH_INFO(!group_tags.empty(), "GroupSet requires at least one member tag");
     RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_.size() == group_tags.size(),
@@ -91,7 +90,6 @@ void GroupSet::initialize(size_t                               group_set_id,
     group_set_id_  = group_set_id;
     topology_      = std::move(topology);
     group_tags_    = std::move(group_tags);
-    local_only_    = local_only;
     payload_bytes_ = physical_payload_bytes;
     enable_crc_    = backing_layout.crc_enabled;
     storage_bytes_ = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
@@ -108,13 +106,13 @@ std::vector<size_t> GroupSet::requiredPathIndices(const std::vector<TreeNode*>& 
         start = token_end - 1;
     } else if (cache_group.policy.group_type == CacheGroupType::SWA) {
         const size_t window = static_cast<size_t>(std::max(0, cache_group.policy.sliding_window_size));
-        if (local_only_) {
+        if (cache_group.policy.shared_chunk_state) {
             RTP_LLM_CHECK_WITH_INFO(window > 0, "local HCA requires a positive compression window");
             const size_t pending = token_end % window;
             if (pending == 0) {
                 return indices;
             }
-            start = token_end - pending;
+            start = token_end - 1;
         } else if (window > 1 && token_end >= window) {
             // A continuation at G reads the previous window-1 tokens.
             start = token_end - (window - 1);
@@ -130,7 +128,7 @@ std::vector<size_t> GroupSet::requiredPathIndices(const std::vector<TreeNode*>& 
 }
 
 bool GroupSet::hasZeroStateDemand(size_t token_end) const {
-    if (!local_only_ || groupType() != CacheGroupType::SWA) {
+    if (!group(group_tags_.front()).policy.shared_chunk_state || groupType() != CacheGroupType::SWA) {
         return false;
     }
     const int window = group(group_tags_.front()).policy.sliding_window_size;
@@ -138,7 +136,7 @@ bool GroupSet::hasZeroStateDemand(size_t token_end) const {
 }
 
 bool GroupSet::requiresExactStateEndpoint() const {
-    if (groupType() == CacheGroupType::LINEAR || local_only_) {
+    if (groupType() == CacheGroupType::LINEAR || group(group_tags_.front()).policy.shared_chunk_state) {
         return true;
     }
     if (groupType() != CacheGroupType::SWA) {
@@ -199,7 +197,7 @@ bool GroupSet::hasPhysicalCoverage(const std::vector<TreeNode*>& path, size_t to
 bool GroupSet::hasCanonicalCoverage(size_t count, size_t canonical_size_per_block) const {
     RTP_LLM_CHECK(canonical_size_per_block > 0
                   && count <= std::numeric_limits<size_t>::max() / canonical_size_per_block);
-    if (groupType() != CacheGroupType::SWA || local_only_ || count == 0) {
+    if (groupType() != CacheGroupType::SWA || group(group_tags_.front()).policy.shared_chunk_state || count == 0) {
         return true;
     }
     const size_t token_end = count * canonical_size_per_block;
@@ -214,7 +212,7 @@ bool GroupSet::hasCanonicalCoverage(size_t count, size_t canonical_size_per_bloc
 }
 
 bool GroupSet::coversTokenInterval(size_t node_start, size_t node_end, size_t token_end) const {
-    if (groupType() != CacheGroupType::SWA || local_only_) {
+    if (groupType() != CacheGroupType::SWA || group(group_tags_.front()).policy.shared_chunk_state) {
         return true;
     }
     for (const auto& tag : group_tags_) {

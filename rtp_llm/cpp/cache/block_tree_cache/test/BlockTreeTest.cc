@@ -875,7 +875,7 @@ TEST(BlockTreeTest, PrefixPlanAllowsLaterLinearStateAndAlignedHcaNoDemand) {
         std::make_shared<LinearGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(2)}, nullptr, nullptr)};
     block_tree_cache_test::prepareGroupSetsForTest(groups);
-    groups[1]->initialize(1, groups[1]->topologyPtr(), groups[1]->groupTags(), {}, true);
+    block_tree_cache_test::markPreciseStateGroupForTest(groups[1]);
     BlockTree tree(groups, 256, true);
     auto      resources = make2DResources(3, 2, 20);
     resources[0][1].device_blocks.clear();

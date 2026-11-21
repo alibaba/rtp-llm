@@ -195,7 +195,7 @@ BlockTreeLoader::matchPreciseEndpoints(const ContentMatchContext&            req
     std::vector<size_t> boundary_strides{1};
     size_t              joint_boundary = 1;
     for (const auto& group : tree_->groupSets()) {
-        if (!group->localOnly() || group->groupType() != CacheGroupType::SWA) {
+        if (!group->preciseOnly() || group->groupType() != CacheGroupType::SWA) {
             continue;
         }
         const int window = group->group(group->groupTags().front()).policy.sliding_window_size;
@@ -300,7 +300,7 @@ bool BlockTreeLoader::validMatch(std::vector<TreeNode*>&            path,
         bool      all_groups_valid = true;
         for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
             bool is_group_valid = false;
-            if (tree_->groupSets()[group_set_id]->localOnly()) {
+            if (tree_->groupSets()[group_set_id]->preciseOnly()) {
                 const std::vector<TreeNode*> prefix(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(i + 1));
                 is_group_valid = tree_->groupSets()[group_set_id]->hasDeviceCoverage(prefix, node->token_end);
             } else {
@@ -527,18 +527,18 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         MultiNodeResource            matched_device_resource{group_set_id, Tier::DEVICE};
         const std::vector<TreeNode*> matched_path(
             path.begin(), path.begin() + static_cast<std::ptrdiff_t>(result.matched_device_blocks));
-        const auto   required = group_set->localOnly() && !matched_path.empty() ?
+        const auto   required = group_set->preciseOnly() && !matched_path.empty() ?
                                     group_set->requiredPathIndices(matched_path, matched_path.back()->token_end) :
                                     std::vector<size_t>{};
-        const size_t start    = group_set->localOnly() ? 0 : result.matched_device_blocks - ready_reuse_count;
+        const size_t start    = group_set->preciseOnly() ? 0 : result.matched_device_blocks - ready_reuse_count;
         for (size_t i = start; i < result.matched_device_blocks; ++i) {
-            if (group_set->localOnly() && std::find(required.begin(), required.end(), i) == required.end()) {
+            if (group_set->preciseOnly() && std::find(required.begin(), required.end(), i) == required.end()) {
                 continue;
             }
             collectReuseTimeSnapshots(
                 path[i], group_set_id, access_seq, access_time_us, result.reuse_time_metrics_snapshots);
             const GroupSetResource& resource = path[i]->group_set_resources[group_set_id];
-            matched_device_resource.node_blocks.emplace_back(group_set->localOnly() ? path[i] : nullptr,
+            matched_device_resource.node_blocks.emplace_back(group_set->preciseOnly() ? path[i] : nullptr,
                                                              resource.getBlocks(Tier::DEVICE));
         }
         if (!matched_device_resource.node_blocks.empty()) {
@@ -547,7 +547,7 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
         }
 
         const size_t logical_reuse_count =
-            group_set->localOnly() ? 0 : std::min(group_set->computeReuseBlockCount(path.size()), path.size());
+            group_set->preciseOnly() ? 0 : std::min(group_set->computeReuseBlockCount(path.size()), path.size());
         for (size_t i = std::max(path.size() - logical_reuse_count, result.matched_device_blocks); i < path.size();
              ++i) {
             GroupSetResource&  resource    = path[i]->group_set_resources[group_set_id];
@@ -622,7 +622,7 @@ StorageRequest BlockTreeLoader::makeStorageRequest(const CacheKeysType& cache_ke
                            local_matched_blocks_num};
     for (auto& key_handles : request.handles) {
         for (const auto& group_set : tree_->groupSets()) {
-            if (group_set->localOnly()) {
+            if (group_set->preciseOnly()) {
                 continue;
             }
             for (const auto& tag : group_set->groupTags()) {

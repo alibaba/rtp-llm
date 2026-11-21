@@ -260,7 +260,7 @@ bool buildGroupMembers(const CacheConfig&                     cache_config,
                        std::vector<std::vector<std::string>>& group_members) {
     group_members.clear();
     for (const GroupBase& group : cache_config.topology().groups()) {
-        const bool local_hca = enable_partial_tail_reuse && group.policy.local_only_state
+        const bool local_hca = enable_partial_tail_reuse && (group.policy.reuse_mode == CacheReuseMode::PRECISE_ONLY)
                                && group.policy.group_type == CacheGroupType::SWA;
         if (!cacheGroupParticipatesInBlockTree(group.policy, enable_partial_tail_reuse)) {
             continue;
@@ -282,7 +282,8 @@ bool buildGroupMembers(const CacheConfig&                     cache_config,
         auto it =
             std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<std::string>& members) {
                 const GroupBase& first = cache_config.topology().group(members.front());
-                return !first.policy.local_only_state && first.policy.group_type == group.policy.group_type;
+                return first.policy.reuse_mode == CacheReuseMode::STANDARD
+                       && first.policy.group_type == group.policy.group_type;
             });
         if (it == group_members.end()) {
             group_members.push_back({group.tag});
@@ -560,7 +561,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         const auto   block_counts = tier_block_counts(bytes, layout->block_nums ? &layout->block_nums->host : nullptr);
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
             const std::vector<std::string>& members = group_members[group_set_id];
-            if (cache_config.topology().group(members.front()).policy.local_only_state) {
+            if ((cache_config.topology().group(members.front()).policy.reuse_mode == CacheReuseMode::PRECISE_ONLY)) {
                 continue;
             }
             const GroupBase&  first = cache_config.topology().group(members.front());
@@ -593,7 +594,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
             const std::vector<std::string>& members = group_members[group_set_id];
-            if (cache_config.topology().group(members.front()).policy.local_only_state) {
+            if ((cache_config.topology().group(members.front()).policy.reuse_mode == CacheReuseMode::PRECISE_ONLY)) {
                 continue;
             }
             const GroupBase&  first = cache_config.topology().group(members.front());
@@ -637,11 +638,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                         std::move(device_pools),
                                         std::move(host_pools[group_set_id]),
                                         std::move(disk_pools[group_set_id]));
-        group_set->initialize(group_set_id,
-                              cache_topology,
-                              members,
-                              backing_layouts[group_set_id],
-                              cache_config.topology().group(members.front()).policy.local_only_state);
+        group_set->initialize(group_set_id, cache_topology, members, backing_layouts[group_set_id]);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));

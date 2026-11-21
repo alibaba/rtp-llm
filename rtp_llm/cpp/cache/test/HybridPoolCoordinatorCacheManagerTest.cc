@@ -105,7 +105,7 @@ static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num 
     auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
     full_policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     swa_policy.cp_mapping          = CpBlockMappingMode::COMPACT_LAST_RANK;
-    swa_policy.enable_prefix_reuse = true;
+    swa_policy.reuse_mode          = CacheReuseMode::STANDARD;
     swa_policy.sliding_window_size = 8;
     config.fromGroupedSpecs({full_spec, swa_spec},
                             {{0, 1}, {2, 3}},
@@ -1340,7 +1340,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, AllPrefixReuseDisabledPoolMetricsF
     }
     ASSERT_EQ(policies.size(), 2u);
     for (CacheGroupPolicy& policy : policies) {
-        policy.enable_prefix_reuse = false;
+        policy.reuse_mode = CacheReuseMode::DISABLED;
     }
     setTestGroupPolicies(config, policies);
 
@@ -1725,7 +1725,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, SharedReuseTailConfigControlsOnlyR
                 config.reuse_cache_tail_blocks = tail;
                 auto groups                    = config.groups();
                 for (auto& group : groups) {
-                    group.policy.enable_prefix_reuse = group_reuse;
+                    group.policy.reuse_mode = group_reuse ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
                     if (group.tag == "swa") {
                         group.policy.sliding_window_size = 8;
                     }

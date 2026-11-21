@@ -23,7 +23,7 @@ std::shared_ptr<FixedStateCacheSpec> makeDsv4StateSpec(int seq_size_per_block) {
 
 CacheGroupPolicy makePolicy(bool enable_prefix_reuse = true) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.enable_prefix_reuse = enable_prefix_reuse;
+    policy.reuse_mode          = (enable_prefix_reuse) ? CacheReuseMode::STANDARD : CacheReuseMode::DISABLED;
     if (!enable_prefix_reuse) {
         policy.active_tail_blocks   = 1;
         policy.validate_tail_blocks = false;

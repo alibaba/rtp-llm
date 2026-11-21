@@ -51,7 +51,7 @@ StageCacheSnapshot makeTierSnapshot(uint32_t full_blocks, uint32_t swa_blocks) {
     auto snapshot = makeFullSnapshot(full_blocks, 4, 2);
     snapshot.groups.push_back(makeGroupSnapshot("swa", CacheGroupType::SWA, swa_blocks));
     auto policy                           = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.enable_prefix_reuse            = true;
+    policy.reuse_mode                     = CacheReuseMode::STANDARD;
     snapshot.groups[1].policy_fingerprint = policy.policyFingerprint();
     snapshot.block_tree.group_sets.push_back({"swa", 4096});
     return snapshot;
@@ -192,7 +192,7 @@ TEST(PPTopologyValidatorTest, PrefixReuseMismatchFails) {
     auto stage1                              = makeFullSnapshot(90);
     stage1.groups[0].block_tree_group_member = false;
     auto policy                              = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse               = false;
+    policy.reuse_mode                        = CacheReuseMode::DISABLED;
     stage1.groups[0].policy_fingerprint      = policy.policyFingerprint();
 
     auto result = validatePPTopology({stage0, stage1});
@@ -312,7 +312,7 @@ TEST(PPTopologyValidatorTest, PolicyFingerprintCoversSamePolicyFields) {
     changed.group_type       = CacheGroupType::SWA;
     expect_different(changed);
     changed                     = base;
-    changed.enable_prefix_reuse = false;
+    changed.reuse_mode          = CacheReuseMode::DISABLED;
     expect_different(changed);
     changed            = base;
     changed.reservable = false;

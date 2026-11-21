@@ -434,7 +434,8 @@ TEST(KVCMInternalTest, FullAndLinearWriteSelectionKeepsEveryAvailableState) {
 
 TEST(KVCMInternalTest, LocalOnlyGroupDoesNotEnterRemoteWriteOrReadSpecs) {
     auto local = makeGroup("hca_state", 0, CacheGroupType::SWA);
-    ASSERT_FALSE(local.policy.enable_prefix_reuse);
+    local.policy.reuse_mode = CacheReuseMode::PRECISE_ONLY;
+    ASSERT_FALSE((local.policy.reuse_mode == CacheReuseMode::STANDARD));
     auto topology = CacheTopology::create(
         {makeGroup("full", 0, CacheGroupType::FULL), std::move(local), makeGroup("linear", 0, CacheGroupType::LINEAR)},
         {{0, {"full", "hca_state", "linear"}}});
