@@ -21,6 +21,7 @@ StageCacheGroupSnapshot makeGroupSnapshot(std::string    tag,
     StageCacheGroupSnapshot group;
     group.tag                       = std::move(tag);
     group.type                      = type;
+    group.group_set_identity        = metricCacheGroupTypeName(type);
     group.block_tree_group_member   = block_tree_member;
     group.seq_size_per_block        = seq;
     group.kernel_seq_size_per_block = kernel;
@@ -208,7 +209,8 @@ TEST(PPTopologyValidatorTest, CaptureLocalStageBuildsSnapshot) {
     cache_config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::FULL}, {"default"});
     cache_config.finalizeBlockNums(42, RuntimeConfig{});
 
-    auto snapshot = StageCacheSnapshot::captureLocalStage(cache_config, {{{"default", 4096}}, 1024 * 1024, 0});
+    auto snapshot =
+        StageCacheSnapshot::captureLocalStage(cache_config, {{{"default", 4096, {"default"}}}, 1024 * 1024, 0});
     ASSERT_EQ(snapshot.groups.size(), 1u);
     EXPECT_EQ(snapshot.groups[0].tag, "default");
     EXPECT_EQ(snapshot.groups[0].type, CacheGroupType::FULL);
@@ -369,7 +371,7 @@ TEST(PPTopologyValidatorTest, TierCountsUseAgreedDeviceBlocksAndSeparateBudgets)
     auto result = validatePPTopology({stage0, stage1});
     ASSERT_TRUE(result.ok) << result.error;
     EXPECT_EQ(canonicalBlockNums(result), (std::vector<uint32_t>{10, 10}));
-    for (const auto type : {CacheGroupType::FULL, CacheGroupType::SWA}) {
+    for (const auto* type : {"full", "swa"}) {
         EXPECT_EQ(result.agreed.block_tree.host.at(type), 60u);
         EXPECT_EQ(result.agreed.block_tree.disk.at(type), 30u);
     }
@@ -383,8 +385,8 @@ TEST(PPTopologyValidatorTest, TierCountsRespectStageStridesAndMissingGroupSets) 
 
     auto result = validatePPTopology({stage0, stage1});
     ASSERT_TRUE(result.ok) << result.error;
-    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 60u);
-    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::SWA), 24u);
+    EXPECT_EQ(result.agreed.block_tree.host.at("full"), 60u);
+    EXPECT_EQ(result.agreed.block_tree.host.at("swa"), 24u);
     EXPECT_TRUE(result.agreed.block_tree.disk.empty());
 }
 
@@ -400,8 +402,32 @@ TEST(PPTopologyValidatorTest, TierWeightsUseEachStageFirstMemberWithUnequalPools
 
     auto result = validatePPTopology({stage0, stage1});
     ASSERT_TRUE(result.ok) << result.error;
-    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 33u);
-    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::SWA), 40u);
+    EXPECT_EQ(result.agreed.block_tree.host.at("full"), 33u);
+    EXPECT_EQ(result.agreed.block_tree.host.at("swa"), 40u);
+}
+
+TEST(PPTopologyValidatorTest, SameTypeIndependentPoolsNegotiateByMembership) {
+    auto stage                 = makeTierSnapshot(40, 10);
+    auto precise               = makeGroupSnapshot("hca", CacheGroupType::SWA, 10);
+    precise.group_set_identity = "hca";
+    stage.groups.push_back(precise);
+    stage.block_tree.group_sets.push_back({"hca", 8192});
+    stage.block_tree.host_budget_bytes = 120 * 4096;
+    stage.block_tree.disk_budget_bytes = 240 * 4096;
+    auto peer                          = stage;
+    peer.groups.pop_back();
+    peer.block_tree.group_sets.pop_back();
+    const auto restored = StageCacheSnapshot::deserialize(stage.serialize());
+    auto       result   = validatePPTopology({restored, peer});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_NE(result.agreed.block_tree.host.find("swa"), result.agreed.block_tree.host.end());
+    EXPECT_NE(result.agreed.block_tree.host.find("hca"), result.agreed.block_tree.host.end());
+    EXPECT_LE(result.agreed.block_tree.host.at("full") * 4096 + result.agreed.block_tree.host.at("swa") * 4096
+                  + result.agreed.block_tree.host.at("hca") * 8192,
+              stage.block_tree.host_budget_bytes);
+    auto incomplete = stage;
+    incomplete.block_tree.group_sets.pop_back();
+    EXPECT_FALSE(validatePPTopology({stage, incomplete}).ok);
 }
 
 TEST(PPTopologyValidatorTest, TierSizingRejectsInconsistentEnablementAndMissingGroupSets) {

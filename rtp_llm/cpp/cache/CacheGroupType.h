@@ -117,7 +117,7 @@ inline bool cacheGroupParticipatesInBlockTree(const CacheGroupPolicy& policy, bo
 }
 
 inline bool cacheGroupUsesBlockTreeStorage(const CacheGroupPolicy& policy) {
-    return policy.reuse_mode == CacheReuseMode::STANDARD;
+    return policy.reuse_mode != CacheReuseMode::DISABLED;
 }
 
 // A group belongs to the KV cache event publication completeness set only when
