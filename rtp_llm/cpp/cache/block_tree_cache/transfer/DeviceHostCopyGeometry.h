@@ -9,19 +9,9 @@
 
 namespace rtp_llm {
 
-inline constexpr bool supportsPpuPlainHostTransfer(bool enable_disk_cache) {
-#if defined(USE_PPU) && USE_PPU
-    return !enable_disk_cache;
-#else
-    (void)enable_disk_cache;
-    return false;
-#endif
-}
-
-inline bool isPpuPlainHostTransferGroup(const GroupSet& group, bool enable_disk_cache) {
+inline bool isPlainDeviceTransferGroup(const GroupSet& group) {
     const auto& pools = group.devicePools();
-    if (!supportsPpuPlainHostTransfer(enable_disk_cache) || group.crcEnabled() || !group.hostPool()
-        || group.diskPool() || group.storageBytes() != group.payloadBytes() || pools.empty() || !pools.front()) {
+    if (group.crcEnabled() || group.storageBytes() != group.payloadBytes() || pools.empty() || !pools.front()) {
         return false;
     }
     const int device = pools.front()->deviceIndex();

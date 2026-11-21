@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <limits>
@@ -10,15 +11,16 @@
 #include <stdexcept>
 #include <utility>
 
+#include <c10/core/DeviceGuard.h>
+#if defined(USING_ROCM) && USING_ROCM
+#include <c10/core/impl/VirtualGuardImpl.h>
+#endif
+
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-
-#if defined(USE_PPU) && USE_PPU
-#include <c10/cuda/CUDAGuard.h>
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
-#endif
 
 namespace rtp_llm {
 
@@ -80,7 +82,7 @@ TransferWorkLoop::Entry::Entry(TransferTask task, BeforeCompleteCallback before_
     before_complete(std::move(before_complete)) {}
 
 bool TransferWorkLoop::isDeviceCopy(Step step) {
-    return step == Step::CRC_LOAD || step == Step::CRC_EVICT || step == Step::PPU_HOST_COPY;
+    return step == Step::CRC_LOAD || step == Step::CRC_EVICT || step == Step::PLAIN_DEVICE_COPY;
 }
 
 TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
@@ -300,13 +302,9 @@ bool TransferWorkLoop::plan(Entry& entry) {
                  first.source_tier == Tier::DEVICE ? Step::CRC_EVICT :
                  first.target_tier == Tier::DISK   ? Step::DISK_WRITE :
                                                      Step::CRC_LOAD;
-#if defined(USE_PPU) && USE_PPU
-    if (((first.source_tier == Tier::DEVICE && first.target_tier == Tier::HOST)
-         || (first.source_tier == Tier::HOST && first.target_tier == Tier::DEVICE))
-        && !group(entry)->crcEnabled()) {
-        entry.step = Step::PPU_HOST_COPY;
+    if (isDeviceCopy(entry.step) && !group(entry)->crcEnabled()) {
+        entry.step = Step::PLAIN_DEVICE_COPY;
     }
-#endif
     if (combined) {
         if (!staging_.pools[stagingIndex(entry)])
             throw std::invalid_argument("async disk staging is unavailable");
@@ -414,13 +412,9 @@ void TransferWorkLoop::tryStep(Entry& entry) {
                                     CacheCopyError::NOT_EXECUTED)));
             return;
         }
-#if defined(USE_PPU) && USE_PPU
-        if (entry.step == Step::PPU_HOST_COPY) {
-            submitPpuHostCopy(entry);
-            return;
-        }
-#endif
-        if (isDeviceCopy(entry.step))
+        if (entry.step == Step::PLAIN_DEVICE_COPY)
+            submitPlainDeviceCopy(entry);
+        else if (isDeviceCopy(entry.step))
             submitCrc(entry);
         else
             submitDisk(entry);
@@ -490,24 +484,25 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
     }
 }
 
-#if defined(USE_PPU) && USE_PPU
-void TransferWorkLoop::submitPpuHostCopy(Entry& entry) {
+void TransferWorkLoop::submitPlainDeviceCopy(Entry& entry) {
     const auto& descriptors = entry.task.descriptors();
-    const bool  to_device   = descriptors.front().target_tier == Tier::DEVICE;
-    const Tier  source      = to_device ? Tier::HOST : Tier::DEVICE;
-    const Tier  target      = to_device ? Tier::DEVICE : Tier::HOST;
+    const Tier  source      = descriptors.front().source_tier;
+    const Tier  target      = descriptors.front().target_tier;
+    const bool  to_device   = target == Tier::DEVICE;
+    const bool  valid_route =
+        to_device ? (source == Tier::HOST || source == Tier::DISK) : (source == Tier::DEVICE && target == Tier::HOST);
     const auto& owner       = *group(entry);
     const auto  reject      = [&] { fail(entry, unsubmittedResult(TransferStatus::INVALID_ARGS)); };
-    if (!isPpuPlainHostTransferGroup(owner, disk_io_executor_ != nullptr) || entry.hosts.size() != descriptors.size()) {
+    if (!valid_route || !isPlainDeviceTransferGroup(owner) || entry.hosts.size() != descriptors.size()) {
         reject();
         return;
     }
 
-    const auto                device_index = owner.devicePools().front()->deviceIndex();
-    const auto                device       = torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_index));
-    const c10::cuda::CUDAGuard device_guard(device);
-    const auto                bytes_on_host   = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-    const auto                bytes_on_device = torch::TensorOptions().dtype(torch::kUInt8).device(device);
+    const auto             device_index = owner.devicePools().front()->deviceIndex();
+    const auto             device       = torch::Device(torch::kCUDA, static_cast<c10::DeviceIndex>(device_index));
+    const c10::DeviceGuard device_guard(device);
+    const auto             bytes_on_host   = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
+    const auto             bytes_on_device = torch::TensorOptions().dtype(torch::kUInt8).device(device);
     MultiCopyParams copy;
     startStepTimer(entry, to_device ? "h2d" : "d2h");
     // Build and validate every view before enqueuing any device access.
@@ -546,15 +541,31 @@ void TransferWorkLoop::submitPpuHostCopy(Entry& entry) {
         return;
     }
 
-    // PPU's copy helper drains both success and partial submission failures.
-    // It aborts if completion cannot be proved, before this Entry can settle.
+    // CUDA and PPU drain their copy streams on failure. The ROCm implementation
+    // uses blocking tensor copies on the current stream. If a copy throws,
+    // require a confirmed drain before withEntry can release the backing.
+#if defined(USING_ROCM) && USING_ROCM
+    const auto stream = c10::impl::VirtualGuardImpl(device.type()).getStream(device);
+    try {
+        execNoBlockCopy(copy);
+    } catch (...) {
+        try {
+            stream.synchronize();
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("could not drain failed plain device copy on device %d", device_index);
+            Logger::getEngineLogger().flush();
+            std::abort();
+        }
+        throw;
+    }
+#else
     execNoBlockCopy(copy);
+#endif
     TransferResult result(TransferStatus::OK);
     result.buffer_safe = true;
     recordResult(entry, std::move(result));
     completed_.push(entry);
 }
-#endif
 
 void TransferWorkLoop::submitDisk(Entry& entry) {
     startStepTimer(entry, entry.step == Step::DISK_READ ? "disk_read" : "disk_write");
@@ -695,7 +706,7 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
     }
     const auto& descriptor = entry.task.descriptors().front();
     if (entry.step == Step::DISK_READ && descriptor.target_tier == Tier::DEVICE) {
-        entry.step = Step::CRC_LOAD;
+        entry.step = group(entry)->crcEnabled() ? Step::CRC_LOAD : Step::PLAIN_DEVICE_COPY;
         tryStep(entry);
     } else {
         entry.batch_timer.finishAtSteady(end_us, true);

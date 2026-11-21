@@ -2921,15 +2921,67 @@ void expectCrcServiceCreated(const BlockTreeCachePtr& cache, bool expected) {
     }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, LowerTiersRejectDisabledCrc) {
-    const auto    config    = makeSingleConfig();
-    auto          allocator = initAllocator<CoordinatorCacheManager>(config);
-    KVCacheConfig options;
-    options.enable_memory_cache  = true;
-    options.memory_cache_size_mb = 1;
-    options.enable_crc           = false;
-    EXPECT_EQ(planBlockTreeCacheLayout(config, options), nullptr);
-    expectFactoryRejects(config, allocator, options);
+TEST_F(BlockTreeCacheFactoryTest, LowerTiersRoundTripWithoutCrc) {
+    const auto                               config    = makeSingleConfig();
+    auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_plain_transfer");
+    KVCacheConfig                            options;
+    options.enable_memory_cache                             = true;
+    options.memory_cache_size_mb                            = 1;
+    options.enable_disk_cache                               = true;
+    options.disk_cache_size_mb                              = 1;
+    options.disk_cache_paths                                = disk_dir.path;
+    options.disk_cache_buffered_io                          = true;
+    options.memory_cache_max_descriptors_per_transfer_batch = 1;
+    options.enable_crc                                      = false;
+
+    auto cache = createBlockTreeCache(config, options, allocator);
+    ASSERT_NE(cache, nullptr);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    const auto& group = cache->groupSets().front();
+    EXPECT_FALSE(group->crcEnabled());
+    EXPECT_EQ(group->storageBytes(), group->payloadBytes());
+    expectCrcServiceCreated(cache, false);
+    auto blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
+    ASSERT_EQ(blocks.size(), 1u);
+    const auto host = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
+    const auto disk = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT);
+    ASSERT_NE(host, NULL_BLOCK_IDX);
+    ASSERT_NE(disk, NULL_BLOCK_IDX);
+
+    const auto transfer = [&](TransferDescriptor descriptor) {
+        const auto result =
+            cache->executeTransfer(block_transfer_engine_test::makeTransferTask({std::move(descriptor)}));
+        EXPECT_TRUE(result.buffer_safe);
+        return result.ok();
+    };
+    std::vector<BlockInfo> buffers;
+    const auto&            tag = group->groupTags().front();
+    for (const int layer : config.layerIdsForGroup(tag)) {
+        const auto layer_buffers = allocator->convertIndexToBuffer(layer, tag, blocks.front().front());
+        buffers.insert(buffers.end(), layer_buffers.begin(), layer_buffers.end());
+    }
+    ASSERT_FALSE(buffers.empty());
+    const auto write = [&](uint8_t pattern) {
+        for (const auto& buffer : buffers)
+            writeDevicePattern(buffer.addr, buffer.size_bytes, pattern);
+    };
+    const auto verify = [&](uint8_t pattern) {
+        for (const auto& buffer : buffers)
+            expectDevicePattern(buffer.addr, buffer.size_bytes, pattern);
+    };
+    write(0x31);
+    ASSERT_TRUE(transfer(TransferDescriptor::deviceToHost(0, blocks.front(), host)));
+    write(0);
+    ASSERT_TRUE(transfer(TransferDescriptor::hostToDevice(0, host, blocks.front())));
+    verify(0x31);
+    ASSERT_TRUE(transfer(TransferDescriptor::hostToDisk(0, host, disk)));
+    write(0);
+    ASSERT_TRUE(transfer(TransferDescriptor::diskToDevice(0, disk, blocks.front())));
+    verify(0x31);
+    group->releaseSingleBlock(Tier::DISK, disk, BlockTreeRefType::EVICT);
+    group->releaseSingleBlock(Tier::HOST, host, BlockTreeRefType::EVICT);
+    block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, blocks);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, LowerTiersRejectHostBackedDevicePool) {

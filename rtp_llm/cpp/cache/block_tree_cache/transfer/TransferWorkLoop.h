@@ -95,7 +95,7 @@ private:
         DISK_WRITE,
         CRC_LOAD,
         CRC_EVICT,
-        PPU_HOST_COPY
+        PLAIN_DEVICE_COPY
     };
     // Constructed by the submitter; otherwise owned by the WorkLoop. While a Disk
     // operation is pending, its callback exclusively writes result; the owner
@@ -134,9 +134,7 @@ private:
     size_t             stagingIndex(const Entry& entry) const;
     void               tryStep(Entry& entry);
     void               submitCrc(Entry& entry);
-#if defined(USE_PPU) && USE_PPU
-    void               submitPpuHostCopy(Entry& entry);
-#endif
+    void               submitPlainDeviceCopy(Entry& entry);
     void               submitDisk(Entry& entry);
     void               publishDisk(Entry& entry, BlockIOStatus status) noexcept;
     void               pollOnce();

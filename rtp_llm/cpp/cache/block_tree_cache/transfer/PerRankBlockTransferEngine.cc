@@ -50,7 +50,8 @@ std::array<std::shared_ptr<HostStagingBlockPool>, 2> makeLoadStaging(const std::
     size_t                max_stride = 0;
     std::array<size_t, 2> strides{};
     for (const auto& group : groups) {
-        if (!group->diskPool() || group->devicePools().empty())
+        if (!group || !group->diskPool() || group->devicePools().empty()
+            || (!group->crcEnabled() && !isPlainDeviceTransferGroup(*group)))
             continue;
         const auto required = std::max(group->storageBytes(), group->diskPool()->strideBytes());
         if (required > std::numeric_limits<size_t>::max() - 4095)
@@ -190,7 +191,7 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
         const size_t staging_blocks = device_disk_staging_block_count / transfer_worker_count
                                       + (worker < device_disk_staging_block_count % transfer_worker_count ? 1 : 0);
         auto staging = makeLoadStaging(
-            crc_groups, staging_blocks, max_descriptors_per_batch_, enable_disk_cache, world_rank, worker);
+            group_sets_, staging_blocks, max_descriptors_per_batch_, enable_disk_cache, world_rank, worker);
         load_loops_.push_back(std::make_unique<TransferWorkLoop>(group_sets_,
                                                                  make_crc(CrcCopyDirection::LOAD),
                                                                  disk_io_executor_.get(),
@@ -386,12 +387,9 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::executeBatch(T
     }
     if ((source == Tier::DISK || target == Tier::DISK) && !enable_disk_cache_)
         return invalidTransferContext(task);
-    if ((source == Tier::DEVICE || target == Tier::DEVICE) && !group_set->crcEnabled()) {
-        const bool device_host = (source == Tier::DEVICE && target == Tier::HOST)
-                                 || (source == Tier::HOST && target == Tier::DEVICE);
-        if (!device_host || !isPpuPlainHostTransferGroup(*group_set, enable_disk_cache_))
-            return invalidTransferContext(task);
-    }
+    if ((source == Tier::DEVICE || target == Tier::DEVICE) && !group_set->crcEnabled()
+        && !isPlainDeviceTransferGroup(*group_set))
+        return invalidTransferContext(task);
     auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : evict_loops_;
     auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_evict_;
     const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();

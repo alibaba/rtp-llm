@@ -35,17 +35,6 @@
 namespace rtp_llm {
 namespace {
 
-bool hasRequiredLocalTransferBackend(const KVCacheConfig& config) {
-    if ((!config.enable_memory_cache && !config.enable_disk_cache)
-        || (config.enable_memory_cache && supportsPpuPlainHostTransfer(config.enable_disk_cache)))
-        return true;
-    if (!config.enable_crc || !CrcCopyWorkspace::available()) {
-        RTP_LLM_LOG_ERROR("BlockTree HOST/DISK cache requires ENABLE_CRC=1 and the CUDA13 CRC backend");
-        return false;
-    }
-    return true;
-}
-
 void validateTransferGroups(const std::vector<GroupSetPtr>& groups, bool enable_disk_cache) {
     for (size_t index = 0; index < groups.size(); ++index) {
         const auto& group = groups[index];
@@ -69,8 +58,8 @@ void validateTransferGroups(const std::vector<GroupSetPtr>& groups, bool enable_
                 || std::any_of(pools.begin(), pools.end(), [](const auto& pool) { return !pool; })))
             throw std::invalid_argument("invalid transfer member pools");
         if (!pools.empty() && (group->hostPool() || (enable_disk_cache && group->diskPool())) && !group->crcEnabled()
-            && !isPpuPlainHostTransferGroup(*group, enable_disk_cache))
-            throw std::invalid_argument("WorkLoop Device transfers require a CRC or PPU HOST-only layout");
+            && !isPlainDeviceTransferGroup(*group))
+            throw std::invalid_argument("plain device transfers require raw storage and one accelerator per group");
     }
 }
 
@@ -318,10 +307,12 @@ BlockTreeCacheLayoutPtr planBlockTreeCacheLayout(const CacheConfig&   cache_conf
     if (!buildBlockTreeGroupMembers(cache_config, layout->group_members)) {
         return nullptr;
     }
-    if (!hasRequiredLocalTransferBackend(kv_cache_config))
-        return nullptr;
-    const bool enable_crc = (kv_cache_config.enable_memory_cache || kv_cache_config.enable_disk_cache)
-                            && kv_cache_config.enable_crc && CrcCopyWorkspace::available();
+    const bool crc_requested =
+        (kv_cache_config.enable_memory_cache || kv_cache_config.enable_disk_cache) && kv_cache_config.enable_crc;
+    const bool enable_crc = crc_requested && CrcCopyWorkspace::available();
+    if (crc_requested && !enable_crc) {
+        RTP_LLM_LOG_WARNING("CRC32C backend unavailable; local HOST/DISK cache transfers use plain copies");
+    }
     const size_t pool_alignment = kv_cache_config.enable_disk_cache && !kv_cache_config.disk_cache_buffered_io ?
                                       kDirectIOAlignment :
                                       kCopyAlignment;
@@ -426,8 +417,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                           disk_enabled);
         return nullptr;
     }
-    if (layout && !hasRequiredLocalTransferBackend(kv_cache_config))
-        return nullptr;
     // HOST buffers are also used directly for disk I/O, so both pools share the disk alignment when needed.
     const size_t pool_alignment =
         disk_enabled && !kv_cache_config.disk_cache_buffered_io ? kDirectIOAlignment : kCopyAlignment;

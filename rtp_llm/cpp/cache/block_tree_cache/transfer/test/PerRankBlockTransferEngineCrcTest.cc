@@ -862,22 +862,6 @@ TEST_F(PerRankBlockTransferEngineCrcTest, MultiBackingMemberLayerScaleRoundTripM
     }
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, DeviceRouteWithoutCrcIsRejectedBeforeCopy) {
-    ASSERT_NO_FATAL_FAILURE(initialize(true, false, 2));
-    auto ordinary = makeTestGroupSet(0, group_->topologyPtr(), group_->groupTags(), devices_, host_, disk_);
-    PerRankBlockTransferEngine engine({ordinary}, true);
-    const auto                 expect_rejection = [&](TransferDescriptor descriptor) {
-        auto context = engine.execute(makeTransferTask({std::move(descriptor)}));
-        ASSERT_TRUE(context->done());
-        EXPECT_EQ(context->result().copy_error, CacheCopyError::INVALID_REQUEST);
-        EXPECT_TRUE(context->result().buffer_safe);
-    };
-    expect_rejection(TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]));
-    expect_rejection(TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0]));
-    expect_rejection(TransferDescriptor::diskToDevice(0, disks_[0], targets_[0]));
-    expectUntouchedTargets();
-}
-
 TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAndKeepsFailureWhenIoIsUnavailable) {
     ASSERT_NO_FATAL_FAILURE(initialize(false, false, 3, 1, true));
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
