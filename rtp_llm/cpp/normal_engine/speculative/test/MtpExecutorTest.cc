@@ -4667,7 +4667,9 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
             accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
 #endif
     }
+#if USING_CUDA
     cudaDeviceSynchronize();
+#endif
 
     // Benchmark batched approach (fused kernel)
     auto start_batched = std::chrono::high_resolution_clock::now();
@@ -4677,7 +4679,9 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
             accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
 #endif
     }
+#if USING_CUDA
     cudaDeviceSynchronize();
+#endif
     auto end_batched = std::chrono::high_resolution_clock::now();
     auto us_batched  = std::chrono::duration_cast<std::chrono::microseconds>(end_batched - start_batched).count();
 
@@ -4693,7 +4697,9 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
             (void)hidden_slice;
         }
     }
+#if USING_CUDA
     cudaDeviceSynchronize();
+#endif
     auto end_scalar = std::chrono::high_resolution_clock::now();
     auto us_scalar  = std::chrono::duration_cast<std::chrono::microseconds>(end_scalar - start_scalar).count();
 
