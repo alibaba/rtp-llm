@@ -65,9 +65,11 @@ cc_library(
     srcs = [
         "common/blockUtil.cc",
         "ConfigInit.cc",
+        "PreprocessSharedStorage.cc",
     ],
     hdrs = [
         "common/blockUtil.h",
+        "PreprocessSharedStorage.h",
     ],
     deps = [
         ":py_utils",

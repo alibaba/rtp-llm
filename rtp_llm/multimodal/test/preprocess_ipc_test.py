@@ -10,6 +10,7 @@ from rtp_llm.multimodal.preprocess_ipc import (
     _rebuild_storage_fd,
     _reduce_storage,
     register_preprocess_storage_reducer,
+    share_preprocess_tensors,
 )
 
 
@@ -18,7 +19,39 @@ def _make_views():
     return data, data[1:, ::2], torch.empty(0, dtype=torch.bfloat16)
 
 
+def _mixed_cpu_tensors():
+    rgb = torch.arange(97, dtype=torch.uint8)[1:].reshape(4, 8, 3)
+    bounds = torch.arange(14, dtype=torch.int32)[2:].reshape(6, 2)
+    lut = torch.arange(256, dtype=torch.bfloat16)
+    return rgb, bounds, lut
+
+
+def _share_mixed_cpu_tensors():
+    return share_preprocess_tensors(_mixed_cpu_tensors())
+
+
 class PreprocessIpcTest(unittest.TestCase):
+    def test_spawn_worker_maps_mixed_tensor_group_once(self):
+        import rtp_llm.ops
+        from libth_transformer_config import map_preprocess_storage
+
+        ctx = multiprocessing.get_context("spawn")
+        with (
+            patch.dict(os.environ, {"MM_VIT_NATIVE_PREPROCESS_IPC": "1"}),
+            patch(
+                "libth_transformer_config.map_preprocess_storage",
+                wraps=map_preprocess_storage,
+            ) as map_fd,
+            ctx.Pool(1, initializer=register_preprocess_storage_reducer) as pool,
+        ):
+            received = pool.apply_async(_share_mixed_cpu_tensors).get(timeout=30)
+        map_fd.assert_called_once()
+        self.assertEqual(len(received), 3)
+        self.assertEqual(len({value.untyped_storage().data_ptr() for value in received}), 1)
+        for actual, expected in zip(received, _mixed_cpu_tensors()):
+            self.assertTrue(actual.is_shared())
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_spawn_worker_preserves_shared_views_after_exit(self):
         import rtp_llm.ops  # Load the native config module as a ViT parent does.
 

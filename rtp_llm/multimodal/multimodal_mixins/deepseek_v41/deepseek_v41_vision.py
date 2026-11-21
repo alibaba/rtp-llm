@@ -52,6 +52,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
+from rtp_llm.multimodal.preprocess_ipc import share_preprocess_tensors
 from rtp_llm.multimodal.vit_metrics import vit_preprocess_timer
 from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
@@ -63,6 +64,28 @@ class _DecodedImage:
 
     rgb: torch.Tensor
     resize_tables: ResizeTables | None = None
+
+    @classmethod
+    def from_preprocess(cls, rgb: torch.Tensor, tables: ResizeTables) -> "_DecodedImage":
+        tensors = [rgb, tables.normalization]
+        for axis in (tables.horizontal, tables.vertical):
+            if axis is not None:
+                tensors.extend(axis)
+        shared = share_preprocess_tensors(tensors)
+        if shared is tensors:
+            return cls(rgb, tables)
+        rgb, normalization, *axes = shared
+        horizontal = (axes[0], axes[1]) if tables.horizontal is not None else None
+        vertical = (axes[-2], axes[-1]) if tables.vertical is not None else None
+        return cls(
+            rgb,
+            replace(
+                tables,
+                horizontal=horizontal,
+                vertical=vertical,
+                normalization=normalization,
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -624,7 +647,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                                 (target_h, target_w),
                                 patch_size=processor_config.vision_patch_size,
                             )
-                            results.append(_DecodedImage(rgb, tables))
+                            results.append(_DecodedImage.from_preprocess(rgb, tables))
                         else:
                             patches, vit_h, vit_w, _, _ = preprocess_image(
                                 image, processor_config
