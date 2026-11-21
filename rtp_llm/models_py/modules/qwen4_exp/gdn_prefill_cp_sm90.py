@@ -92,7 +92,7 @@ def _run(
     assert pool.shape[1:] == (24, 128, 128) and pool.stride()[1:] == (16384, 128, 1)
     assert pool.stride(0) % 4 == 0 and table.shape[0] == 1 and cumulative.numel() == 2
     assert q.is_contiguous() and k.is_contiguous() and v.is_contiguous()
-    assert page in (64, 128)
+    assert page in (64, 128, 256)
     page_ids = table[0]
     assert page_ids.is_contiguous() and page_ids.numel() >= triton.cdiv(rows, page)
     device = q.device
@@ -312,11 +312,11 @@ def try_sm90_prefill(self, packed, b, a, cache, page, inputs, metadata):
     extended = getattr(self, "sm90_cp_extended", False)
     if not (
         cache is not None
-        and (page in (64, 128) if extended else page == 64)
+        and (page in (64, 128, 256) if extended else page == 64)
         and packed.ndim == 2
         and packed.shape[1] == 5120
         and (
-            2048 <= packed.shape[0] <= 32768
+            512 <= packed.shape[0] <= 32768
             if extended
             else packed.shape[0] in (8192, 32768)
         )

@@ -294,8 +294,10 @@ class GdnSm90CandidateTest(unittest.TestCase):
             (128, 63, 0),
             (128, 128, 0),
             (128, 129, 0),
+            (256, 257, 0),
             (64, 2049, 128),
             (128, 2049, 256),
+            (256, 2049, 256),
         ):
             with self.subTest(page=page, rows=rows, prefix=prefix):
                 q = l2norm_fwd(
@@ -442,6 +444,44 @@ class GdnSm90CandidateTest(unittest.TestCase):
             with torch.inference_mode():
                 candidate.weight = native.weight.clone()
             self.assertBytesEqual(candidate(value), native(value))
+
+    def test_strided_qkvz_slice_conv1d_stays_contiguous(self):
+        from rtp_llm.models_py.triton_kernels.causal_conv1d import (
+            causal_conv1d_fn,
+            prepare_causal_conv1d_metadata,
+        )
+
+        qkvz = torch.randn(257, 8192, device="cuda", dtype=torch.bfloat16)
+        mixed_qkv = qkvz[:, :5120]
+        self.assertFalse(mixed_qkv.is_contiguous())
+        weight = torch.randn(5120, 4, device="cuda", dtype=torch.bfloat16)
+        cu = torch.tensor([0, 257], device="cuda", dtype=torch.int32)
+        prefixes = torch.zeros(1, device="cuda", dtype=torch.int32)
+        meta = prepare_causal_conv1d_metadata(cu, device="cuda")
+        out = causal_conv1d_fn(
+            x=mixed_qkv.transpose(0, 1),
+            weight=weight,
+            bias=None,
+            conv_states=None,
+            query_start_loc=cu,
+            block_map=None,
+            seq_size_per_block=64,
+            prefix_lengths=prefixes,
+            metadata=meta,
+        ).transpose(0, 1)
+        ref = causal_conv1d_fn(
+            x=mixed_qkv.contiguous().transpose(0, 1),
+            weight=weight,
+            bias=None,
+            conv_states=None,
+            query_start_loc=cu,
+            block_map=None,
+            seq_size_per_block=64,
+            prefix_lengths=prefixes,
+            metadata=meta,
+        ).transpose(0, 1)
+        self.assertTrue(out.is_contiguous())
+        self.assertBytesEqual(out, ref)
 
 
 if __name__ == "__main__":

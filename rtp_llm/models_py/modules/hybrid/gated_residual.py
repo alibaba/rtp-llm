@@ -203,7 +203,7 @@ class GatedResidual(nn.Module):
             and x.dtype == torch.bfloat16
             and x.is_contiguous()
             and x.device == merged.device
-            and 1 <= x.numel() // self.hc_hidden_size <= 12288
+            and 1 <= x.numel() // self.hc_hidden_size <= 32768
         )
 
     def _norm(self, hyper_input: torch.Tensor) -> torch.Tensor:
@@ -224,10 +224,7 @@ class GatedResidual(nn.Module):
             and self.down_projection.use_scaled_mm
             and tuple(self.down_projection.weight.shape) == (320, 10240)
             and not self._use_bf16_down_inject(hyper_input)
-            and (
-                1 <= hyper_input.numel() // self.hc_hidden_size <= 32
-                or 8192 <= hyper_input.numel() // self.hc_hidden_size <= 12288
-            )
+            and 1 <= hyper_input.numel() // self.hc_hidden_size <= 32768
             and hyper_input.is_cuda
             and torch.version.hip is None
         ):
@@ -284,7 +281,7 @@ class GatedResidual(nn.Module):
             )
 
             collect_scale = (
-                fp8_down and rows <= 12288 and not self._use_bf16_down_inject(hyper_input)
+                fp8_down and rows <= 32768 and not self._use_bf16_down_inject(hyper_input)
             )
             fused = try_inject_grouped_norm(
                 hyper_input,

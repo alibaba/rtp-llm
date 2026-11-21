@@ -313,7 +313,7 @@ def _grouped_split_config(rows: int, kv_heads: int, selected_width: int) -> tupl
     # BLOCK_N=128 measured fastest for prefill on SM90: fewer tiles amortise
     # the per-tile gather setup, and the bf16 dot operands still fit in shared
     # memory with two pipeline stages.
-    block_n = 128 if base > 64 else 32
+    block_n = 128 if base > 256 else 64 if base > 64 else 32
     tiles = triton.cdiv(selected_width, block_n)
     # The merge kernel indexes splits with tl.arange, so the split count itself
     # must be a power of two.
@@ -800,7 +800,7 @@ def try_sm90_packed_paged_prefill(
     context_length = block_table.shape[1] * page_size
     batch = block_table.shape[0]
     if (
-        not 4096 <= rows <= 32768
+        not 512 <= rows <= 32768
         or selected.shape != (rows, 2051)
         or selected.stride(-1) != 1
         or q.stride(-1) != 1
@@ -993,13 +993,12 @@ def try_h20_direct_paged_decode(
     """Read sparse BF16 KV directly in the existing grouped split kernel."""
     batch, heads, dim = q.shape
     if (
-        not 16 <= batch <= 64
+        not 16 <= batch <= 128
         or page_size != 64
         or selected.shape != (batch, 1, 2051)
         or q.stride(-1) != 1
         or selected.stride(-1) != 1
         or not _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num)
-        or "H20" not in torch.cuda.get_device_name(q.device)
     ):
         return None
     output = sparse_paged_gqa_attn(

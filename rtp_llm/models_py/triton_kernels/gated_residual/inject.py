@@ -3,6 +3,7 @@
 import torch
 import triton
 import triton.language as tl
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 
 
 @triton.jit(do_not_specialize=["TOTAL"])
@@ -15,6 +16,7 @@ def _inject_kernel(
     HIDDEN: tl.constexpr,
     BRANCHES: tl.constexpr,
     BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     offset = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     valid = offset < TOTAL
@@ -23,12 +25,16 @@ def _inject_kernel(
     sublayer_offset = row * HIDDEN + column % HIDDEN
     gate_offset = row * BRANCHES + column // HIDDEN
     hyper = tl.load(hyper_ptr + offset, mask=valid, other=0).to(tl.float32)
+    gate = tl.load(gate_ptr + gate_offset, mask=valid, other=0).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     sublayer = tl.load(sublayer_ptr + sublayer_offset, mask=valid, other=0).to(
         tl.float32
     )
-    gate = tl.load(gate_ptr + gate_offset, mask=valid, other=0).to(tl.float32)
     # Eager PyTorch materializes the product in BF16 before the BF16 add.
     injection = (sublayer * gate).to(tl.bfloat16).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(output_ptr + offset, hyper + injection, mask=valid)
 
 
@@ -72,6 +78,7 @@ def fused_inject(
     output = torch.empty_like(hyper_input)
     total = hyper_input.numel()
     if total:
+        pdl = sm90_pdl_enabled(hyper_input.device)
         _inject_kernel[(triton.cdiv(total, 256),)](
             hyper_input,
             sublayer_out,
@@ -81,8 +88,10 @@ def fused_inject(
             HIDDEN=int(sublayer_out.shape[-1]),
             BRANCHES=4,
             BLOCK=256,
+            PDL=pdl,
             num_warps=4,
             enable_fp_fusion=False,
+            launch_pdl=pdl,
         )
     return output
 

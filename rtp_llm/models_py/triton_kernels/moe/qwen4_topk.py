@@ -1,11 +1,11 @@
 """Fused FP32 softmax and ten-expert routing for the Qwen4 MoE geometry."""
 
-import os
-
 import torch
 import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
+
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 
 
 @triton.jit
@@ -28,9 +28,18 @@ def _native_softmax_512(values):
 
 
 @triton.jit
-def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr, NATIVE_MATH: tl.constexpr = False):
+def _moe_topk(
+    logits,
+    ids,
+    weights,
+    STRIDE: tl.constexpr,
+    NATIVE_MATH: tl.constexpr = False,
+    PDL: tl.constexpr = False,
+):
     row = tl.program_id(0)
     experts = tl.arange(0, 512)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     values = tl.load(logits + row * STRIDE + experts).to(tl.float32)
     if NATIVE_MATH:
         probabilities = _native_softmax_512(values)
@@ -60,6 +69,8 @@ def _moe_topk(logits, ids, weights, STRIDE: tl.constexpr, NATIVE_MATH: tl.conste
         tl.store(ids + row * 10 + i, tl.where(invalid, native_invalid_id, expert))
         probabilities = tl.where(experts == expert, -1.0, probabilities)
     scale = tl.div_rn(1.0, norm) if NATIVE_MATH else 1.0 / norm
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(weights + row * 10 + slots, chosen * scale, slots < 10)
 
 
@@ -75,13 +86,7 @@ def is_supported(logits, ids, weights):
         and logits.stride(-1) == 1
         and logits.stride(0) > 0
         and ids.shape == weights.shape == (logits.shape[0], 10)
-        and (
-            ids.dtype == torch.int32
-            or (
-                ids.dtype == torch.int64
-                and os.environ.get("QWEN_MOE_TOPK_INT64_FUSION", "0") == "1"
-            )
-        )
+        and ids.dtype in (torch.int32, torch.int64)
         and weights.dtype == torch.float32
         and ids.device == weights.device == logits.device
         and ids.is_contiguous()
@@ -96,5 +101,4 @@ def use_native_math(logits):
     return (
         logits.shape[0] > 8192
         and torch.cuda.get_device_capability(logits.device) == (9, 0)
-        and "H20" in torch.cuda.get_device_name(logits.device)
     )

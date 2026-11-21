@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 from rtp_llm.models_py.kernels.cuda.qwen4_ple.gate import _gate_branch, try_ple_gate
 
 
@@ -54,21 +55,22 @@ def _ple_decode_gate_conv(
     POOL_ROWS: tl.constexpr,
     ADD_RESIDUAL: tl.constexpr,
     BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     batch = tl.program_id(0).to(tl.int64)
     col = tl.arange(0, BLOCK)
     valid = col < H
     hc_col = tl.program_id(1) * H + col
-    gated, normed = _gate_branch(
-        Key, Value, Hidden, GK, GQ, GC, None, None, batch, col, hc_col, valid,
-        H, EPS, KEY_STRIDE, VALUE_STRIDE, HIDDEN_STRIDE,
-    )
-
-    # Kernel size 4 and dilation 3 select history rows 0, 3 and 6.
     source_row = batch
     if POOL_ROWS:
         block = tl.load(ReadBlocks + batch)
         source_row = tl.where((block >= 0) & (block < POOL_ROWS), block, 0)
+    gated, normed = _gate_branch(
+        Key, Value, Hidden, GK, GQ, GC, None, None, batch, col, hc_col, valid,
+        H, EPS, KEY_STRIDE, VALUE_STRIDE, HIDDEN_STRIDE, False, 128, PDL,
+    )
+
+    # Kernel size 4 and dilation 3 select history rows 0, 3 and 6.
     previous = History + source_row * HISTORY_BATCH_STRIDE + hc_col
     next_row = NextHistory + batch * 9 * WIDTH + hc_col
     weight = Weight + hc_col * 4
@@ -85,6 +87,8 @@ def _ple_decode_gate_conv(
     out = _decode_output(
         gated, acc, Hidden + batch * HIDDEN_STRIDE + hc_col, valid, ADD_RESIDUAL
     )
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(Output + batch * WIDTH + hc_col, out, valid)
     tl.store(next_row + 8 * WIDTH, normed, valid)
 
@@ -105,13 +109,26 @@ def _ple_decode_conv_roll(
     BLOCK: tl.constexpr,
     ADD_RESIDUAL: tl.constexpr,
     PAGED: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     valid = col < WIDTH
+    weight = Weight + col * 4
+    f0 = tl.load(weight, valid, other=0).to(tl.float32)
+    f1 = tl.load(weight + 1, valid, other=0).to(tl.float32)
+    f2 = tl.load(weight + 2, valid, other=0).to(tl.float32)
+    f3 = tl.load(weight + 3, valid, other=0).to(tl.float32)
     if PAGED:
         source = tl.load(ReadBlocks + row)
         target = tl.load(WriteBlocks + row)
+    else:
+        source = row
+    history = History + source * 9 * WIDTH + col
+    oldest = tl.load(history, valid, other=0)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    if PAGED:
         direct = tl.load(WriteMode + row) == 1
         # Select an integer address so this does not depend on pointer-valued where.
         direct_addr = (History + target * 9 * WIDTH).to(tl.uint64)
@@ -119,29 +136,28 @@ def _ple_decode_conv_roll(
         next_addr = tl.where(direct, direct_addr, staged_addr)
         next_history = next_addr.to(tl.pointer_type(tl.bfloat16)) + col
     else:
-        source = row
         next_history = History + row * 9 * WIDTH + col
-    history = History + source * 9 * WIDTH + col
-    weight = Weight + col * 4
     offset = row * WIDTH + col
     normed = tl.load(Normed + offset, valid, other=0)
     gated = tl.load(Gated + offset, valid, other=0)
     acc = tl.full((BLOCK,), 0, tl.float32)
-    oldest = tl.load(history, valid, other=0)
-    filt = tl.load(weight, valid, other=0).to(tl.float32)
-    acc = tl.fma(oldest.to(tl.float32), filt, acc)
+    acc = tl.fma(oldest.to(tl.float32), f0, acc)
     # Each lane reads one history row and writes it back one row earlier.
     # Reuse the old values from rows 3 and 6 for convolution in the same pass.
     for pos in tl.static_range(1, 9):
         prev = tl.load(history + pos * WIDTH, valid, other=0)
-        if pos % 3 == 0:
-            filt = tl.load(weight + pos // 3, valid, other=0).to(tl.float32)
-            acc = tl.fma(prev.to(tl.float32), filt, acc)
+        if pos == 3:
+            acc = tl.fma(prev.to(tl.float32), f1, acc)
+        elif pos == 6:
+            acc = tl.fma(prev.to(tl.float32), f2, acc)
         tl.store(next_history + (pos - 1) * WIDTH, prev, valid)
-    filt = tl.load(weight + 3, valid, other=0).to(tl.float32)
-    acc = tl.fma(normed.to(tl.float32), filt, acc)
+    acc = tl.fma(normed.to(tl.float32), f3, acc)
     out = _decode_output(gated, acc, Hidden + offset, valid, ADD_RESIDUAL)
+    if PDL and not PAGED:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(Output + offset, out, valid)
+    if PDL and PAGED:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(next_history + 8 * WIDTH, normed, valid)
 
 
@@ -267,6 +283,7 @@ def try_ple_decode_fusion(
         return None
 
     output = torch.empty_like(hidden, memory_format=torch.contiguous_format)
+    pdl = sm90_pdl_enabled(hidden.device)
     # Use separate tiling for the gate reduction and the history copy.
     if paged_write or (reuse_history and batch >= 16 and history.is_contiguous()):
         pages = (
@@ -284,7 +301,9 @@ def try_ple_decode_fusion(
                 *gates, hidden, history, weight, output, history_read_blocks,
                 history_write_blocks, history_write_mode, scratch,
                 WIDTH=width, BLOCK=block, ADD_RESIDUAL=add_residual, PAGED=paged_write,
+                PDL=pdl,
                 num_warps=8 if batch < 32 else 4,
+                launch_pdl=pdl,
             )
             if paged_write:
                 context = context_write if context_write is not None else (None,) * 3
@@ -323,6 +342,8 @@ def try_ple_decode_fusion(
         POOL_ROWS=pool_rows,
         ADD_RESIDUAL=add_residual,
         BLOCK=triton.next_power_of_2(hidden_size),
+        PDL=pdl,
         num_warps=4,
+        launch_pdl=pdl,
     )
     return output, next_history

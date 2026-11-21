@@ -13,8 +13,8 @@ from rtp_llm.ops.fused_rope_kvcache_op import _get_fused_rope_kvcache
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class MainQkCacheTest(MainQkCacheFixture, unittest.TestCase):
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 native math contract")
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("SM90/SM120 required")
         torch.manual_seed(81002)
         self.init_fixture()
 
@@ -310,6 +310,47 @@ class MainQkCacheTest(MainQkCacheFixture, unittest.TestCase):
                     qk_norm=norm,
                 )
         norm.assert_called_once_with(c[2])
+
+    def test_sm90_bf16_cache_page64_and_c32_verify(self):
+        if torch.cuda.get_device_capability() != (9, 0):
+            self.skipTest("SM90 required")
+        for page_size, shape_fn in (
+            (128, lambda p: (p, 2, 1, 128, 256)),
+            (64, lambda p: (p, 32768)),
+        ):
+            c = list(self.case(6, 32, 4, [63 + i for i in range(32)]))
+            cfg, norm, source, positions, params, original, table, lens, _ = c
+            cfg.kernel_tokens_per_block = page_size
+            original = type(original)(cfg)
+            columns = (max(63 + i for i in range(32)) + 4 + page_size - 1) // page_size
+            pages = 1 + 32 * columns
+            table = torch.arange(1, pages, device="cuda", dtype=torch.int32).view(
+                32, columns
+            )
+            params.kv_cache_offset = (
+                _get_fused_rope_kvcache().convert_offset_to_block_array(table)
+            )
+            dut_backing = (
+                torch.randn(*shape_fn(pages), device="cuda", dtype=torch.bfloat16) * 0.2
+            )
+            ref_backing = dut_backing.clone()
+            ref_cache = SimpleNamespace(kv_cache_base=ref_backing, kv_scale_base=None)
+            plan = SimpleNamespace(kv_lens=lens, block_table=table, page_size=page_size)
+            op = prepare_main_qk_cache(
+                source,
+                positions,
+                norm,
+                cfg.rope_config,
+                dut_backing,
+                None,
+                plan,
+                params,
+            )
+            self.assertIsNotNone(op)
+            actual = op.run()
+            expected = original.forward(norm(source.clone()), ref_cache, params)
+            torch.testing.assert_close(actual, expected[:, :1536], rtol=0, atol=0)
+            torch.testing.assert_close(dut_backing, ref_backing, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

@@ -11,13 +11,8 @@ from rtp_llm.models_py.modules.qwen4_exp.test.support.ple_gate import (
 
 class PLEOuterResidualTest(unittest.TestCase):
     def setUp(self):
-        # fail-loud rather than skip: this target is pinned to RTX_5000_PRO_CU13.
-        self.assertTrue(torch.cuda.is_available(), "GPU test must run on SM120")
-        self.assertEqual(
-            torch.cuda.get_device_capability(),
-            (12, 0),
-            "target pool is RTX_5000_PRO_CU13 (SM120)",
-        )
+        self.assertTrue(torch.cuda.is_available(), "GPU test must run on SM90/SM120")
+        self.assertIn(torch.cuda.get_device_capability(), ((9, 0), (12, 0)))
         torch.manual_seed(20261019)
 
     def test_conv_preserves_bf16_output_boundary_and_input(self):
@@ -106,6 +101,31 @@ class PLEOuterResidualTest(unittest.TestCase):
             graph.replay()
             expected = residual + try_ple_conv(gated, normed, None, weight, 3)
             self.assertTrue(torch.equal(actual, expected))
+
+    def test_decode_chunk_and_short_prefill_add_residual(self):
+        layer = PLEProjectionFixture().layer()
+        hidden = torch.randn(3, 4, 10240, device="cuda", dtype=torch.bfloat16)
+        embedding = torch.randn(3, 4, 2560, device="cuda", dtype=torch.bfloat16)
+        tokens = torch.zeros(3, 6, device="cuda", dtype=torch.int64)
+        initial = torch.randn(3, 9, 10240, device="cuda", dtype=torch.bfloat16)
+        out_plain, cand_plain = layer.decode_chunk(
+            hidden, tokens, initial, embeddings=embedding
+        )
+        out_res, cand_res = layer.decode_chunk(
+            hidden, tokens, initial, embeddings=embedding, add_residual=True
+        )
+        self.assertTrue(torch.equal(out_res, hidden + out_plain))
+        self.assertTrue(torch.equal(cand_res, cand_plain))
+
+        short_h = torch.randn(1, 17, 10240, device="cuda", dtype=torch.bfloat16)
+        short_e = torch.randn(1, 17, 2560, device="cuda", dtype=torch.bfloat16)
+        short_t = torch.zeros(1, 19, device="cuda", dtype=torch.int64)
+        p_plain, s_plain = layer.prefill(short_h, short_t, embeddings=short_e)
+        p_res, s_res = layer.prefill(
+            short_h, short_t, embeddings=short_e, add_residual=True
+        )
+        self.assertTrue(torch.equal(p_res, short_h + p_plain))
+        self.assertTrue(torch.equal(s_res, s_plain))
 
 
 if __name__ == "__main__":

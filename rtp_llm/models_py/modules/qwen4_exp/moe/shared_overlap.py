@@ -65,7 +65,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and shared_weight.dtype == torch.bfloat16
             and shared_weight.is_cuda
             and torch.version.hip is None
-            and "H20" in torch.cuda.get_device_name(shared_weight.device)
+            and torch.cuda.get_device_capability(shared_weight.device) == (9, 0)
         ):
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
                 PureTpRouterNoQuant,
@@ -96,7 +96,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
                     )
                 self._mega_prefill_graph = QwenMegaPrefillGraph(layer_idx, admission)
         self._fuse_ep_shared_gate = (
-            os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "0") == "1"
+            os.environ.get("QWEN_MOE_SHARED_GATE_FUSION", "1") == "1"
         )
         if os.environ.get("RTP_LLM_H20_COMPACT_FP8_MOE", "1") == "1":
             self._prepare_tp_fp8_shared_overlap()
@@ -205,7 +205,6 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and shared.up_proj.weight.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(shared.up_proj.weight.device) == (9, 0)
-            and "H20" in torch.cuda.get_device_name(shared.up_proj.weight.device)
         ):
             return False
         device = shared.up_proj.weight.device
@@ -281,6 +280,17 @@ class Qwen4MoeLayer(GenericMoeLayer):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
         from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
 
+        rows = hidden_states.shape[0]
+        use_pack = (
+            self._tp_shared_pack_reduce
+            and self._sm90_mega_moe is None
+            and (self._ep_two_batch is None or not self._ep_two_batch.supports(hidden_states))
+        )
+        packed = (
+            hidden_states.new_empty((2 * rows, hidden_states.shape[1]))
+            if use_pack
+            else None
+        )
         main = torch.cuda.current_stream(hidden_states.device)
         capturing = torch.cuda.is_current_stream_capturing()
         self._ep_shared_input_ready.record(main)
@@ -291,15 +301,27 @@ class Qwen4MoeLayer(GenericMoeLayer):
                 self._ep_shared_input_ready.wait(self._ep_shared_stream)
                 try:
                     shared = self.shared_expert(hidden_states, skip_allreduce=True)
-                    shared = self._gate_shared_expert_output(hidden_states, shared)
+                    shared = self._gate_shared_expert_output(
+                        hidden_states,
+                        shared,
+                        out=packed[rows:] if packed is not None else None,
+                    )
                 finally:
                     self._ep_shared_output_ready.record(self._ep_shared_stream)
             if self._ep_two_batch is not None and self._ep_two_batch.supports(
                 hidden_states
             ):
                 experts = self._ep_two_batch.forward(self, hidden_states)
-            elif self._tp_shared_pack_reduce and self._sm90_mega_moe is None:
-                experts = super()._forward_routed(hidden_states, skip_tp_allreduce=True)
+            elif use_pack:
+                from .compact_fp8_decode import compact_moe_output_buffer
+
+                out_scope = compact_moe_output_buffer.set(packed[:rows])
+                try:
+                    experts = super()._forward_routed(
+                        hidden_states, skip_tp_allreduce=True
+                    )
+                finally:
+                    compact_moe_output_buffer.reset(out_scope)
             else:
                 experts = self._forward_routed(hidden_states)
         finally:
@@ -309,32 +331,44 @@ class Qwen4MoeLayer(GenericMoeLayer):
         if not capturing:
             shared.record_stream(main)
         reduce = getattr(self, "tp_all_reduce", all_reduce)
-        if self._tp_shared_pack_reduce and self._sm90_mega_moe is None:
+        if use_pack:
             # Retain separate BF16 rounding per branch before the final sum.
-            packed = torch.cat((experts, shared), dim=0)
+            if experts.data_ptr() != packed[:rows].data_ptr():
+                packed[:rows].copy_(experts)
+            if shared.data_ptr() != packed[rows:].data_ptr():
+                packed[rows:].copy_(shared)
             comm = self._tp_shared_packed_comm
             if comm is not None and comm.should_use(packed):
                 with record_function_range("qwen4.tp_all_reduce"):
                     packed = comm.all_reduce(packed)
             else:
                 packed = reduce(packed, group=Group.TP)
-            rows = hidden_states.shape[0]
             return packed[:rows] + packed[rows:]
         shared = reduce(shared, group=Group.TP)
         return experts + shared
 
-    def _gate_shared_expert_output(self, hidden_states, shared_expert_output):
+    def _gate_shared_expert_output(
+        self, hidden_states, shared_expert_output, *, out=None
+    ):
         if not self._fuse_ep_shared_gate or self.shared_expert_gate is None:
-            return super()._gate_shared_expert_output(
+            gated = super()._gate_shared_expert_output(
                 hidden_states, shared_expert_output
             )
+            if out is not None:
+                out.copy_(gated)
+                return out
+            return gated
         from .shared_gate_triton import try_shared_sigmoid_mul
 
         gate = self.shared_expert_gate(hidden_states)
-        fused = try_shared_sigmoid_mul(gate, shared_expert_output)
+        fused = try_shared_sigmoid_mul(gate, shared_expert_output, out=out)
         if fused is not None:
             return fused
-        return torch.sigmoid(gate) * shared_expert_output
+        gated = torch.sigmoid(gate) * shared_expert_output
+        if out is not None:
+            out.copy_(gated)
+            return out
+        return gated
 
     def _forward_ep_with_packed_reduce(self, hidden_states):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce

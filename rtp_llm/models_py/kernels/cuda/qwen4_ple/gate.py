@@ -11,6 +11,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+
 
 def _sm_supported(device: torch.device) -> bool:
     """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
@@ -39,15 +41,19 @@ def _gate_branch(
     HIDDEN_STRIDE: tl.constexpr,
     PROJECTED_FP32: tl.constexpr = False,
     PAGE: tl.constexpr = 128,
+    PDL: tl.constexpr = False,
 ):
-    k = tl.load(Key + row * KEY_STRIDE + hc_col, valid, other=0).to(tl.float32)
-    if PROJECTED_FP32:
-        k = (k * tl.load(KS + row // PAGE)).to(tl.bfloat16).to(tl.float32)
     q = tl.load(Hidden + row * HIDDEN_STRIDE + hc_col, valid, other=0).to(tl.float32)
     gk = tl.load(GK + hc_col, valid, other=0).to(tl.float32)
     gq = tl.load(GQ + hc_col, valid, other=0).to(tl.float32)
-    kn = (k * tl.rsqrt(tl.sum(k * k, 0) / H + EPS) * (1 + gk)).to(tl.bfloat16)
+    gc = tl.load(GC + hc_col, valid, other=0).to(tl.float32)
     qn = (q * tl.rsqrt(tl.sum(q * q, 0) / H + EPS) * (1 + gq)).to(tl.bfloat16)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    k = tl.load(Key + row * KEY_STRIDE + hc_col, valid, other=0).to(tl.float32)
+    if PROJECTED_FP32:
+        k = (k * tl.load(KS + row // PAGE)).to(tl.bfloat16).to(tl.float32)
+    kn = (k * tl.rsqrt(tl.sum(k * k, 0) / H + EPS) * (1 + gk)).to(tl.bfloat16)
     product = (kn.to(tl.float32) * qn.to(tl.float32)).to(tl.bfloat16).to(tl.float32)
     dot = tl.sum(product, 0).to(tl.bfloat16).to(tl.float32)
     agreement = (dot / tl.sqrt(float(H))).to(tl.bfloat16).to(tl.float32)
@@ -64,7 +70,6 @@ def _gate_branch(
         value = (value * tl.load(VS + row // PAGE)).to(tl.bfloat16).to(tl.float32)
     gated = (gate * value).to(tl.bfloat16)
     f = gated.to(tl.float32)
-    gc = tl.load(GC + hc_col, valid, other=0).to(tl.float32)
     normed = f * tl.rsqrt(tl.sum(f * f, 0) / H + EPS) * (1 + gc)
     return gated, normed.to(tl.bfloat16)
 
@@ -95,6 +100,7 @@ def _ple_gate(
     BLOCK: tl.constexpr,
     PROJECTED_FP32: tl.constexpr = False,
     PAGE: tl.constexpr = 128,
+    PDL: tl.constexpr = False,
 ):
     # The row offset can exceed int32 for long prefill sequences.
     row = tl.program_id(0).to(tl.int64)
@@ -117,8 +123,10 @@ def _ple_gate(
             tl.store(StateWriteMode + row, mode)
     gated, normed = _gate_branch(
         Key, Value, Hidden, GK, GQ, GC, KS, VS, row, col, hc_col, valid,
-        H, EPS, KEY_STRIDE, VALUE_STRIDE, HIDDEN_STRIDE, PROJECTED_FP32, PAGE,
+        H, EPS, KEY_STRIDE, VALUE_STRIDE, HIDDEN_STRIDE, PROJECTED_FP32, PAGE, PDL,
     )
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(Gated + row * WIDTH + hc_col, gated, valid)
     tl.store(Normed + row * WIDTH + hc_col, normed, valid)
 
@@ -188,6 +196,7 @@ def try_ple_gate(
     normed = torch.empty_like(gated)
     if hidden.shape[1]:
         decode_batch = hidden.shape[0] if decode_pages is not None else 0
+        pdl = sm90_pdl_enabled(hidden.device)
         # S=1 projection views may have the packed K/V row stride.
         row_dim = 0 if hidden.shape[1] == 1 else 1
         _ple_gate[(hidden.shape[0] * hidden.shape[1], 4)](
@@ -213,5 +222,7 @@ def try_ple_gate(
             num_warps=4,
             PROJECTED_FP32=projected,
             PAGE=page_size,
+            PDL=pdl,
+            launch_pdl=pdl,
         )
     return gated, normed

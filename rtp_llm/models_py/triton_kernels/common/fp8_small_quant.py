@@ -6,6 +6,8 @@ import torch
 import triton as tr
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+
 _SMALL_QUANT_MAX_ELEMENTS = 65536
 
 
@@ -40,18 +42,34 @@ def _quantize_projection_tile(x, q, scale, maximum, N: tl.constexpr, OUT: tl.con
 
 @tr.jit
 def _small_fp8_quant(
-    x, q, scale, N: tl.constexpr, OUT: tl.constexpr, BLOCK: tl.constexpr
+    x,
+    q,
+    scale,
+    N: tl.constexpr,
+    OUT: tl.constexpr,
+    BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     # Replicate the small reduction across output tiles to avoid a second launch.
     offsets = tl.arange(0, BLOCK)
     values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32)
     _quantize_projection_tile(x, q, scale, _fp8_absmax(values), N, OUT)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @tr.jit
-def _fp8_partial_amax(x, partial, N: tl.constexpr, BLOCK: tl.constexpr):
+def _fp8_partial_amax(
+    x, partial, N: tl.constexpr, BLOCK: tl.constexpr, PDL: tl.constexpr = False
+):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     # Every invocation overwrites the workspace; no atomic/reset is needed.
     tl.store(partial + tl.program_id(0), _fp8_absmax(values))
 
@@ -66,10 +84,15 @@ def _fp8_finish_quant(
     OUT: tl.constexpr,
     PARTS: tl.constexpr,
     REDUCE: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     ids = tl.arange(0, REDUCE)
     maxima = tl.load(partial + ids, ids < PARTS, other=0)
     _quantize_projection_tile(x, q, scale, tl.max(maxima, 0), N, OUT)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @tr.jit
@@ -81,7 +104,10 @@ def _silu_mul_fp8_quant(
     D: tl.constexpr,
     OUT: tl.constexpr,
     BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     offsets = tl.arange(0, BLOCK)
     row = offsets // D
     col = offsets % D
@@ -107,6 +133,8 @@ def _silu_mul_fp8_quant(
     values = activated * inverse
     values = tl.where(values == values, values, 448.0)
     values = tl.maximum(-448.0, tl.minimum(448.0, values))
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(
         q + positions,
         tl.where(positions < N, values, 0).to(tl.float8e4nv),
@@ -126,7 +154,10 @@ def _silu_mul_fp8_quant_shared(
     OUT: tl.constexpr,
     BLOCK: tl.constexpr,
     PAD: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     offsets = tl.arange(0, BLOCK)
     row = offsets // D
     col = offsets % D
@@ -142,6 +173,8 @@ def _silu_mul_fp8_quant_shared(
     values = activated * inverse
     values = tl.where(values == values, values, 448.0)
     values = tl.maximum(-448.0, tl.minimum(448.0, values))
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(q + offsets, values.to(tl.float8e4nv), offsets < N)
     if OUT > N:
         padding_positions = tl.arange(0, PAD)
@@ -156,8 +189,16 @@ def _silu_mul_fp8_quant_shared(
 # Reduce while producing BF16 activation, then reuse the small finalizer.
 @tr.jit
 def _silu_mul_fp8_partial_amax(
-    x, activated, partial, N: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr
+    x,
+    activated,
+    partial,
+    N: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     row = i // D
     col = i % D
@@ -166,6 +207,8 @@ def _silu_mul_fp8_partial_amax(
     a = ((gate * tl.sigmoid(gate)) * value).to(tl.bfloat16).to(tl.float32)
     absolute = tl.abs(a)
     maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(activated + i, a, i < N)
     tl.store(partial + tl.program_id(0), maximum)
 
@@ -182,17 +225,12 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         and (
             (gate_up.shape[0] in (4, 8, 12, 16) and gate_up.shape[1] == 1280)
             or (
-                tuple(gate_up.shape) == (64, 640)
+                1 <= gate_up.shape[0] <= 256
+                and gate_up.shape[1] == 640
                 and (
                     os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
                     or torch.cuda.is_current_stream_capturing()
                 )
-                and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
-            )
-            or (
-                os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
-                and 1 <= gate_up.shape[0] <= 32
-                and gate_up.shape[1] == 640
                 and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
             )
         )
@@ -214,8 +252,9 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
             (rows, width), device=gate_up.device, dtype=torch.float8_e4m3fn
         )
     scale = torch.empty((1,), device=gate_up.device, dtype=torch.float32)
+    pdl = sm90_pdl_enabled(gate_up.device)
     block = tr.next_power_of_2(rows * width)
-    if rows == 64 and width == 320:
+    if rows > 32 and width == 320:
         activated = torch.empty(
             (rows, width), device=gate_up.device, dtype=torch.bfloat16
         )
@@ -228,8 +267,10 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
             rows * width,
             width,
             128,
+            PDL=pdl,
             num_warps=1,
             enable_fp_fusion=False,
+            launch_pdl=pdl,
         )
         _fp8_finish_quant[(tr.cdiv(output.numel(), 4096),)](
             activated,
@@ -240,8 +281,10 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
             output.numel(),
             parts,
             tr.next_power_of_2(parts),
+            PDL=pdl,
             num_warps=4,
             enable_fp_fusion=False,
+            launch_pdl=pdl,
         )
         return output, scale
     if width == 320:
@@ -255,8 +298,10 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
             output.numel(),
             block,
             tr.next_power_of_2(output.numel()),
+            PDL=pdl,
             num_warps=warps,
             enable_fp_fusion=False,
+            launch_pdl=pdl,
         )
         return output, scale
     _silu_mul_fp8_quant[(tr.cdiv(output.numel(), 4096),)](
@@ -267,8 +312,10 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         width,
         output.numel(),
         block,
-        num_warps=16,
+        PDL=pdl,
+        num_warps=4 if block <= 8192 else 16,
         enable_fp_fusion=False,
+        launch_pdl=pdl,
     )
     return output, scale
 
@@ -292,12 +339,13 @@ def is_supported(x, output=None):
     # These shapes save GPU time on H20, but the extra dispatch costs more in eager.
     if not small and not (
         (
-            (width == 320 and rows == 64)
-            or (width == 640 and rows in (32, 64))
-            or (width == 2560 and rows in (32, 64, 256, 1024))
-            or (width == 10240 and rows in (16, 32, 64))
+            (width in (320, 640, 2560, 10240) and 1 <= rows <= 256)
+            or (width == 2560 and rows == 1024)
         )
-        and torch.cuda.is_current_stream_capturing()
+        and (
+            os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+            or torch.cuda.is_current_stream_capturing()
+        )
     ):
         return False
     capability = torch.cuda.get_device_capability(x.device)
@@ -320,6 +368,7 @@ def try_small_fp8_quant(x, *, output=None):
     if output is None:
         output = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     scale = torch.empty((1,), device=x.device, dtype=torch.float32)
+    pdl = sm90_pdl_enabled(x.device)
     numel = x.numel()
     output_numel = output.numel()
     grid = (tr.cdiv(output_numel, 4096),)
@@ -331,7 +380,9 @@ def try_small_fp8_quant(x, *, output=None):
             partial,
             numel,
             4096,
+            PDL=pdl,
             num_warps=4,
+            launch_pdl=pdl,
         )
         _fp8_finish_quant[grid](
             x,
@@ -342,8 +393,10 @@ def try_small_fp8_quant(x, *, output=None):
             output_numel,
             parts,
             tr.next_power_of_2(parts),
+            PDL=pdl,
             num_warps=4,
             enable_fp_fusion=False,
+            launch_pdl=pdl,
         )
         return output, scale
     block = tr.next_power_of_2(numel)
@@ -354,7 +407,9 @@ def try_small_fp8_quant(x, *, output=None):
         numel,
         output_numel,
         block,
+        PDL=pdl,
         num_warps=4 if block <= 8192 else 16,
         enable_fp_fusion=False,
+        launch_pdl=pdl,
     )
     return output, scale

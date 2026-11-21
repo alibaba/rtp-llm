@@ -10,6 +10,7 @@ guards decline without raising (guards always check ``is_cuda`` first, so the
 distinction is unreachable in practice).
 """
 
+import os
 from functools import lru_cache
 
 import torch
@@ -26,3 +27,12 @@ def cached_device_capability(device) -> tuple | None:
     if resolved.index is None:
         resolved = torch.device("cuda", torch.cuda.current_device())
     return torch.cuda.get_device_capability(resolved)
+
+
+def sm90_pdl_enabled(device) -> bool:
+    """Return True when Hopper Programmatic Dependent Launch is active."""
+    return (
+        torch.version.hip is None
+        and os.environ.get("RTP_LLM_DISABLE_PDL") != "1"
+        and cached_device_capability(device) == (9, 0)
+    )

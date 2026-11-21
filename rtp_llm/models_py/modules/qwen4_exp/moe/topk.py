@@ -2,6 +2,8 @@
 
 from torch import nn
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+
 from rtp_llm.models_py.triton_kernels.moe.qwen4_topk import (
     _moe_topk,
     is_supported,
@@ -26,6 +28,7 @@ class Qwen4ExpMoeTopk(nn.Module):
         ):
             return self.native(router_logits, topk_ids, topk_weights)
         native_math = use_native_math(router_logits)
+        pdl = sm90_pdl_enabled(router_logits.device)
         _moe_topk[(router_logits.shape[0],)](
             router_logits,
             topk_ids,
@@ -33,4 +36,5 @@ class Qwen4ExpMoeTopk(nn.Module):
             STRIDE=router_logits.stride(0),
             num_warps=1,
             enable_fp_fusion=False,
+            launch_pdl=pdl,
         )

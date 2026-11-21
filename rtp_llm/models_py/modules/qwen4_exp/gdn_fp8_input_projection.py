@@ -115,7 +115,7 @@ def _quantize_ba(x, partial):
     bq = torch.empty((pad, x.shape[1]), dtype=torch.float8_e4m3fn, device=x.device)
     tiles = partial.numel()
     bs = torch.empty(1, device=x.device, dtype=torch.float32)
-    if x.shape[0] > 64:
+    if x.shape[0] > 256:
         # Reduce once for long inputs and reuse the vectorized BA quantizer.
         if tiles > 65536:
             partial = partial.amax().reshape(1)
@@ -146,7 +146,7 @@ def _unmodified(module, methods):
     )
 
 
-def try_project_pair(x, qkvz, ba, *, ba_stream=None):
+def try_project_pair(x, qkvz, ba, *, ba_stream=None, defer_ba_wait=False):
     """Run the existing FP8 GEMMs using each projection's original scale."""
     if not (
         x.ndim == 2
@@ -199,7 +199,8 @@ def try_project_pair(x, qkvz, ba, *, ba_stream=None):
             projected_ba = ba._run_quantized(
                 ba_q, ba_scale, x.shape[:-1], x.shape[0]
             ).to(x.dtype)
-        main.wait_stream(ba_stream)
+        if not defer_ba_wait:
+            main.wait_stream(ba_stream)
         return projected_qkvz, projected_ba
 
     if x.shape[0] > 64:

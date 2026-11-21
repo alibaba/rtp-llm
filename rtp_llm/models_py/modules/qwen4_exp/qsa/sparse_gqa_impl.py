@@ -308,6 +308,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             raise RuntimeError("qwen4_exp draft Graph query/selection capacity changed")
         self._qsa_main_cache_mutation_started = True
         qkv = self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+        ready_stream = getattr(self, "_qsa_selection_ready_stream", None)
+        if ready_stream is not None:
+            self._qsa_selection_ready_stream = None
+            torch.cuda.current_stream(qkv.device).wait_stream(ready_stream)
         direct = try_draft_paged_attention(
             qkv,
             selected_indices,
@@ -412,7 +416,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
     ):
         if (
             norm is not None
-            and self.is_target_verify
+            and (self.is_target_verify or not getattr(self, "is_prefill", True))
             and not self._is_mtp_draft
             and not self.attn_configs.use_logn_attn
         ):
@@ -537,14 +541,14 @@ class SparseGqaFmhaImpl(FMHAImplBase):
 
         writer = self.rope_kvcache_impl
         fused_writer = None
-        if qk_norm is not None and self.is_target_verify:
+        if qk_norm is not None and (self.is_target_verify or not self.is_prefill):
             from rtp_llm.models_py.modules.qwen4_exp.qsa.main_qk_cache import (
                 prepare_main_qk_cache,
             )
 
             fused_writer = prepare_main_qk_cache(
                 qkv,
-                self.rope_params.position_ids,
+                getattr(self.rope_params, "position_ids", None),
                 qk_norm,
                 self.attn_configs.rope_config,
                 kv_cache.kv_cache_base,
@@ -612,6 +616,10 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             if fused_writer is not None
             else writer.forward(qkv, kv_cache, self.rope_params)
         )
+        ready_stream = getattr(self, "_qsa_selection_ready_stream", None)
+        if ready_stream is not None:
+            self._qsa_selection_ready_stream = None
+            torch.cuda.current_stream(qkv.device).wait_stream(ready_stream)
         # The production decode writer returns [tokens, q_heads, head_dim] while
         # the paged kernels consume the flat [tokens, width] view.
         if qkv.dim() == 3 and int(qkv.numel()) == int(qkv.shape[0]) * self.q_width:

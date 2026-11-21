@@ -508,6 +508,52 @@ class GatedResidualTest(unittest.TestCase):
         graph.replay()
         torch.testing.assert_close(replayed, reference, atol=0, rtol=0)
 
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_sm90_fp8_prefill_hc_and_down_inject(self):
+        if torch.cuda.get_device_capability() != (9, 0):
+            self.skipTest("SM90 required")
+        torch.manual_seed(79)
+        width, rank = 10240, 320
+        gamma = torch.randn(width, device="cuda", dtype=torch.bfloat16) * 0.01
+        down = (torch.randn(rank, width, device="cuda") * 8).to(torch.float8_e4m3fn)
+        down_scale = torch.tensor([0.002], device="cuda", dtype=torch.float32)
+        up = (torch.randn(width, rank, device="cuda") * 8).to(torch.float8_e4m3fn)
+        up_scale = torch.tensor([0.002], device="cuda", dtype=torch.float32)
+        inject = torch.randn(4, width, device="cuda", dtype=torch.bfloat16) * 0.005
+        model = GatedResidual(
+            gamma,
+            down,
+            up,
+            inject,
+            hc_mult=4,
+            norm_eps=_EPS,
+            weight_scales=(down_scale, up_scale, None),
+        )
+        ref = GatedResidual(
+            gamma,
+            (down.float() * down_scale).to(torch.bfloat16),
+            (up.float() * up_scale).to(torch.bfloat16),
+            inject,
+            hc_mult=4,
+            norm_eps=_EPS,
+        )
+        ref.merged_down_inject = None
+        for rows in (1, 16, 128, 512):
+            x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+            sub = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            gate = torch.randn(rows, 4, device="cuda", dtype=torch.bfloat16)
+            self.assertTrue(model._use_bf16_down_inject(x))
+            for got, want in zip(
+                model.forward_with_injection(x, sub, gate),
+                ref(inject_into_residual(x, sub, gate)),
+            ):
+                torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
+        self.assertFalse(
+            model._use_bf16_down_inject(
+                torch.empty((32769, width), device="meta", dtype=torch.bfloat16)
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

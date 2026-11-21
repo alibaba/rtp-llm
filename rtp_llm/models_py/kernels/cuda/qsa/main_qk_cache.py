@@ -25,38 +25,23 @@ def _main_qk_norm_rope_cache(
     SF,
     QUERY: tl.constexpr,
     TW: tl.constexpr,
-    CP: tl.constexpr,
+    CP,
     CKV: tl.constexpr,
     SP: tl.constexpr,
     SKV: tl.constexpr,
-    PAGES: tl.constexpr,
+    PAGES,
+    PAGE_SIZE: tl.constexpr = 128,
+    HAS_SCALES: tl.constexpr = True,
+    HAS_POS: tl.constexpr = True,
+    PDL: tl.constexpr = False,
 ):
     row, head = tl.program_id(0), tl.program_id(1)
     lane = tl.arange(0, 32)
     column = lane * 4
     base = row * STRIDE + head * 256
-    a0 = tl.load(QKV + base + column).to(tl.float32)
-    a1 = tl.load(QKV + base + column + 1).to(tl.float32)
-    a2 = tl.load(QKV + base + column + 2).to(tl.float32)
-    a3 = tl.load(QKV + base + column + 3).to(tl.float32)
-    b0 = tl.load(QKV + base + column + 128).to(tl.float32)
-    b1 = tl.load(QKV + base + column + 129).to(tl.float32)
-    b2 = tl.load(QKV + base + column + 130).to(tl.float32)
-    b3 = tl.load(QKV + base + column + 131).to(tl.float32)
-    s0, s1, s2, s3 = a0 * a0, a1 * a1, a2 * a2, a3 * a3
-    t0, t1, t2, t3 = b0 * b0, b1 * b1, b2 * b2, b3 * b3
-    # CUDA mean uses 64 reduction lanes for fewer than 16 outputs, otherwise
-    # 32. Q and K use their own output counts, including replicated KV heads.
-    wide = ((head < Q_HEADS) & (ROWS * Q_HEADS < 16)) | (
-        (head >= Q_HEADS) & (ROWS * KV_HEADS < 16)
-    )
-    sum_wide = (((s0 + s1) + s2) + s3) + (((t0 + t1) + t2) + t3)
-    sum_narrow = (((s0 + t0) + (s1 + t1)) + (s2 + t2)) + (s3 + t3)
-    variance = tl.sum(tl.where(wide, sum_wide, sum_narrow), 0) / 256
-    scale = tl.rsqrt(variance + EPS)
     length = tl.load(LENS + row)
     logical_position = length - 1
-    page = logical_position // 128
+    page = logical_position // PAGE_SIZE
     # The table lookup itself must stay inside the block table; a stale or
     # truncated LENS value must not turn into an out-of-bounds TABLE read.
     # Triton integer division truncates toward zero: (-1) // 128 is zero,
@@ -67,16 +52,21 @@ def _main_qk_norm_rope_cache(
         tl.int64
     )
     valid_page = page_in_table & (physical >= 0) & (physical < PAGES)
+    physical_i64 = physical.to(tl.int64)
+    page_slot = logical_position % PAGE_SIZE
     frequency = lane
-    axis = tl.where(
-        (frequency % 3 == 1) & (frequency < H_SECTION * 3),
-        1,
-        tl.where((frequency % 3 == 2) & (frequency < W_SECTION * 3), 2, 0),
-    )
-    position = tl.load(POS + row * 3 + axis).to(tl.float32)
-    # Native treats nonpositive per-axis coordinates as the logical
-    # row (including the committed prefix), rather than explicit zero.
-    position = tl.where(position > 0, position, logical_position.to(tl.float32))
+    if HAS_POS:
+        axis = tl.where(
+            (frequency % 3 == 1) & (frequency < H_SECTION * 3),
+            1,
+            tl.where((frequency % 3 == 2) & (frequency < W_SECTION * 3), 2, 0),
+        )
+        position = tl.load(POS + row * 3 + axis).to(tl.float32)
+        # Native treats nonpositive per-axis coordinates as the logical
+        # row (including the committed prefix), rather than explicit zero.
+        position = tl.where(position > 0, position, logical_position.to(tl.float32))
+    else:
+        position = logical_position.to(tl.float32)
     # Match the native CUDA --use_fast_math sequence, including
     # approximate division and trig. libdevice pow/sin/cos use
     # different rounding and fail BF16 KV byte parity.
@@ -113,6 +103,27 @@ def _main_qk_norm_rope_cache(
         is_pure=True,
         pack=1,
     )
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    a0 = tl.load(QKV + base + column).to(tl.float32)
+    a1 = tl.load(QKV + base + column + 1).to(tl.float32)
+    a2 = tl.load(QKV + base + column + 2).to(tl.float32)
+    a3 = tl.load(QKV + base + column + 3).to(tl.float32)
+    b0 = tl.load(QKV + base + column + 128).to(tl.float32)
+    b1 = tl.load(QKV + base + column + 129).to(tl.float32)
+    b2 = tl.load(QKV + base + column + 130).to(tl.float32)
+    b3 = tl.load(QKV + base + column + 131).to(tl.float32)
+    s0, s1, s2, s3 = a0 * a0, a1 * a1, a2 * a2, a3 * a3
+    t0, t1, t2, t3 = b0 * b0, b1 * b1, b2 * b2, b3 * b3
+    # CUDA mean uses 64 reduction lanes for fewer than 16 outputs, otherwise
+    # 32. Q and K use their own output counts, including replicated KV heads.
+    wide = ((head < Q_HEADS) & (ROWS * Q_HEADS < 16)) | (
+        (head >= Q_HEADS) & (ROWS * KV_HEADS < 16)
+    )
+    sum_wide = (((s0 + s1) + s2) + s3) + (((t0 + t1) + t2) + t3)
+    sum_narrow = (((s0 + t0) + (s1 + t1)) + (s2 + t2)) + (s3 + t3)
+    variance = tl.sum(tl.where(wide, sum_wide, sum_narrow), 0) / 256
+    scale = tl.rsqrt(variance + EPS)
     for j in tl.static_range(4):
         for half in tl.static_range(2):
             rd = column + j + half * 128
@@ -142,7 +153,7 @@ def _main_qk_norm_rope_cache(
                 tl.store(OUT + (row * Q_HEADS + head) * 256 + rd, rounded)
             else:
                 tl.store(
-                    CACHE + physical * CP + (logical_position % 128) * 256 + rd,
+                    CACHE + physical_i64 * CP + page_slot * 256 + rd,
                     rounded,
                     valid_page,
                 )
@@ -150,17 +161,19 @@ def _main_qk_norm_rope_cache(
                 v_offset = row * STRIDE + (Q_HEADS + KV_HEADS) * 256 + rd
                 v = tl.load(QKV + v_offset)
                 tl.store(
-                    CACHE + physical * CP + CKV + (logical_position % 128) * 256 + rd,
+                    CACHE + physical_i64 * CP + CKV + page_slot * 256 + rd,
                     v,
                     valid_page,
                 )
-            if (j == 0) and (half == 0):
+            if HAS_SCALES and (j == 0) and (half == 0):
                 if head == Q_HEADS:
                     tl.store(
-                        SF + physical * SP + logical_position % 128, 1.0, valid_page
+                        SF + physical_i64 * SP + page_slot, 1.0, valid_page
                     )
                     tl.store(
-                        SF + physical * SP + SKV + logical_position % 128,
+                        SF + physical_i64 * SP + SKV + page_slot,
                         1.0,
                         valid_page,
                     )
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()

@@ -5,7 +5,10 @@ import math
 import torch
 import triton
 import triton.language as tl
-from rtp_llm.models_py.utils.device_capability import cached_device_capability
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 
 @triton.jit
@@ -19,19 +22,24 @@ def _grouped_rms_norm_kernel(
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
     COLLECT_AMAX: tl.constexpr = False,
+    PDL: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     group = tl.program_id(1)
     offsets = tl.arange(0, BLOCK)
     columns = group * GROUP_SIZE + offsets
-    values = tl.load(
-        x_ptr + row * WIDTH + columns, mask=offsets < GROUP_SIZE, other=0
-    ).to(tl.float32)
     gamma = tl.load(gamma_ptr + columns, mask=offsets < GROUP_SIZE, other=0).to(
         tl.float32
     )
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    values = tl.load(
+        x_ptr + row * WIDTH + columns, mask=offsets < GROUP_SIZE, other=0
+    ).to(tl.float32)
     inv_rms = tl.rsqrt(tl.sum(values * values, axis=0) / GROUP_SIZE + EPS)
     result = values * inv_rms * (1.0 + gamma)
+    if PDL and not COLLECT_AMAX:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(out_ptr + row * WIDTH + columns, result, mask=offsets < GROUP_SIZE)
     if COLLECT_AMAX:
         # The quantizer observes the materialized BF16 norm, not its FP32 value.
@@ -39,6 +47,8 @@ def _grouped_rms_norm_kernel(
         absolute = tl.where(
             (offsets < GROUP_SIZE) & (absolute == absolute), absolute, 0.0
         )
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
         tl.store(amax_ptr + row * (WIDTH // GROUP_SIZE) + group, tl.max(absolute, 0))
 
 
@@ -69,6 +79,7 @@ def grouped_rms_norm_triton(
     width = int(x.shape[-1])
     groups = width // group_size
     rows = x.numel() // width
+    pdl = sm90_pdl_enabled(x.device)
     result = torch.empty_like(x)
     _grouped_rms_norm_kernel[(rows, groups)](
         x,
@@ -79,29 +90,43 @@ def grouped_rms_norm_triton(
         GROUP_SIZE=group_size,
         EPS=eps,
         BLOCK=triton.next_power_of_2(group_size),
+        PDL=pdl,
         num_warps=4,
+        launch_pdl=pdl,
     )
     return result
 
 
 @triton.jit
-def _norm_fp8_scale(
-    AMAX, SCALE, N, BLOCK: tl.constexpr, ROUND_DIV: tl.constexpr = False
-):
-    # Keep request-dependent N dynamic within each power-of-two BLOCK bucket.
-    offsets = tl.arange(0, BLOCK)
-    maximum = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
-    if ROUND_DIV:
-        scale = tl.div_rn(maximum, 448.0)
-    else:
-        scale = maximum * (1.0 / 448.0)
+def _norm_fp8_scale(AMAX, SCALE, N, BLOCK: tl.constexpr, ROUND_DIV: tl.constexpr = False, PDL: tl.constexpr = False):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    maximum = tl.full((), 0.0, tl.float32)
+    for base in range(0, N, BLOCK):
+        offsets = base + tl.arange(0, BLOCK)
+        tile_max = tl.max(tl.load(AMAX + offsets, offsets < N, other=0.0), 0)
+        maximum = tl.maximum(maximum, tile_max)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+    # Match the native per-tensor absmax's true division; multiplying by the
+    # rounded reciprocal diverges by 1 ULP on some amax values.
+    scale = tl.div_rn(maximum, 448.0) if ROUND_DIV else maximum * (1.0 / 448.0)
     scale = tl.where(scale < 1.1754943508222875e-38, 0.0, scale)
     tl.store(SCALE, scale)
 
 
 def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
+    capability = cached_device_capability(x.device) if x.is_cuda else None
+    rows = x.numel() // 10240 if x.dim() >= 2 and x.shape[-1] == 10240 else 0
+    if capability == (9, 0):
+        row_ok = 1 <= rows <= 32768
+    elif capability == (12, 0):
+        row_ok = 256 <= rows <= 12288
+    else:
+        row_ok = False
     if not (
-        is_supported(x, gamma, group_size)
+        row_ok
+        and is_supported(x, gamma, group_size)
         and x.shape[-1] == 10240
         and group_size == 2560
         and not (x.requires_grad or gamma.requires_grad)
@@ -110,11 +135,7 @@ def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
         and eps >= 0
     ):
         return None
-    capability = cached_device_capability(x.device)
-    rows = x.numel() // 10240
-    min_rows = 1 if capability == (9, 0) else 256
-    if capability not in ((9, 0), (12, 0)) or not min_rows <= rows <= 12288:
-        return None
+    pdl = sm90_pdl_enabled(x.device)
     result = torch.empty_like(x)
     partial = torch.empty(rows * 4, device=x.device, dtype=torch.float32)
     scale = torch.empty(1, device=x.device, dtype=torch.float32)
@@ -128,15 +149,19 @@ def try_grouped_rms_norm_with_fp8_scale(x, gamma, group_size, eps):
         EPS=eps,
         BLOCK=4096,
         COLLECT_AMAX=True,
+        PDL=pdl,
         num_warps=4,
+        launch_pdl=pdl,
     )
     _norm_fp8_scale[(1,)](
         partial,
         scale,
         N=rows * 4,
-        BLOCK=triton.next_power_of_2(rows * 4),
+        BLOCK=min(65536, triton.next_power_of_2(rows * 4)),
+        PDL=pdl,
         ROUND_DIV=capability == (9, 0),
         num_warps=4 if rows < 4096 else 16,
+        launch_pdl=pdl,
     )
     return result, scale
 

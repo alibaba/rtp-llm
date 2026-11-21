@@ -31,18 +31,16 @@ class MoeTopkTritonTest(unittest.TestCase):
     def test_large_prefill_batches_use_fused_routing_and_match_native(self):
         for rows in (8192, 12288, 16384):
             for dtype in (torch.bfloat16, torch.float32):
-                with self.subTest(rows=rows, dtype=dtype):
-                    logits = torch.randn(rows, 512, device="cuda", dtype=dtype)
-                    logits[0] = 0
-                    ids = torch.empty(rows, 10, device="cuda", dtype=torch.int32)
-                    weights = torch.empty(rows, 10, device="cuda")
-                    with patch.object(
-                        self.native,
-                        "forward",
-                        side_effect=AssertionError("large prefill fell back to native"),
-                    ):
-                        self.fused(logits, ids, weights)
-                    self.compare(logits, ids, weights)
+                for ids_dtype in (torch.int32, torch.int64):
+                    with self.subTest(rows=rows, dtype=dtype, ids_dtype=ids_dtype):
+                        logits = torch.randn(rows, 512, device="cuda", dtype=dtype)
+                        logits[0] = 0
+                        ids = torch.empty(rows, 10, device="cuda", dtype=ids_dtype)
+                        weights = torch.empty(rows, 10, device="cuda")
+                        with patch.object(self.native, "forward") as fallback:
+                            self.fused(logits, ids, weights)
+                            fallback.assert_not_called()
+                        self.compare(logits, ids, weights)
 
     def test_batches_above_prefill_limit_delegate(self):
         logits = torch.empty(32769, 512, device="cuda", dtype=torch.bfloat16)
@@ -53,8 +51,8 @@ class MoeTopkTritonTest(unittest.TestCase):
         call.assert_called_once_with(logits, ids, weights)
 
     @unittest.skipUnless(
-        torch.cuda.is_available() and "H20" in torch.cuda.get_device_name(),
-        "requires an H20",
+        torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0),
+        "requires SM90",
     )
     def test_long_prefill_preserves_native_weights_and_ids(self):
         for rows, dtype in ((8193, torch.float32), (32768, torch.bfloat16)):
@@ -139,7 +137,7 @@ class MoeTopkTritonTest(unittest.TestCase):
                     call.assert_called_once()
                 self.compare(logits, ids, weights)
         with patch.object(self.native, "forward") as call:
-            self.fused(logits, ids.long(), weights)
+            self.fused(logits, ids.to(torch.int16), weights)
             call.assert_called_once()
 
 

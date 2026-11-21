@@ -15,13 +15,23 @@ MODULE = "rtp_llm.models_py.triton_kernels.gated_residual.prefill_inject_norm"
 
 
 class ResidualPrefillInjectNormTest(unittest.TestCase):
-    def test_unsupported_prefill_uses_original(self):
-        for rows in (0, 33, 257, 2048, 16385):
-            x = torch.empty(rows, 10240, device="cuda", dtype=torch.bfloat16)
-            sub = torch.empty(rows, 2560, device="cuda", dtype=torch.bfloat16)
-            gates = torch.empty(rows, 4, device="cuda", dtype=torch.bfloat16)
-            gamma = torch.empty(10240, device="cuda", dtype=torch.bfloat16)
-            self.assertIsNone(try_inject_grouped_norm(x, sub, gates, gamma, 1e-6))
+    def test_medium_prefill_and_upper_bound_gate(self):
+        sm90 = torch.cuda.get_device_capability() == (9, 0)
+        for rows in (257, 2048):
+            x = torch.zeros(rows, 10240, device="cuda", dtype=torch.bfloat16)
+            sub = torch.zeros(rows, 2560, device="cuda", dtype=torch.bfloat16)
+            gates = torch.zeros(rows, 4, device="cuda", dtype=torch.bfloat16)
+            gamma = torch.zeros(10240, device="cuda", dtype=torch.bfloat16)
+            got = try_inject_grouped_norm(x, sub, gates, gamma, 1e-6)
+            if sm90:
+                self.assertIsNotNone(got)
+            else:
+                self.assertIsNone(got)
+        x = torch.empty(32769, 10240, device="cuda", dtype=torch.bfloat16)
+        sub = torch.empty(32769, 2560, device="cuda", dtype=torch.bfloat16)
+        gates = torch.empty(32769, 4, device="cuda", dtype=torch.bfloat16)
+        gamma = torch.empty(10240, device="cuda", dtype=torch.bfloat16)
+        self.assertIsNone(try_inject_grouped_norm(x, sub, gates, gamma, 1e-6))
 
     def test_bytes_scale_zero_and_nonfinite_values(self):
         for rows in (1, 4, 7, 24, 28, 32, 4096, 5003, 12288, 16384):

@@ -179,6 +179,16 @@ def _lazy_init_deep_gemm(symbols: List[str]) -> None:
         return
 
     import deep_gemm
+    import os
+
+    if (
+        hasattr(deep_gemm, "set_pdl")
+        and os.environ.get("RTP_LLM_DISABLE_PDL") != "1"
+        and torch.cuda.is_available()
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability()[0] >= 9
+    ):
+        deep_gemm.set_pdl(True)
 
     # resolve symbols
     for i, symbol in enumerate(symbols):

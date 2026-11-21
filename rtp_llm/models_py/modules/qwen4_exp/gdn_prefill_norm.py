@@ -54,7 +54,7 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and x.ndim == 2
             and width in (768, 1536, 3072)
             and (not sm90 or (flat_head_norm is not None and width == 3072))
-            and 2048 <= x.shape[0] <= max_rows
+            and (256 if sm90 else 2048) <= x.shape[0] <= max_rows
             and self._supports_norm_layout(x, gate)
         )
 
@@ -99,7 +99,6 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
                 and x.ndim == 2
                 and x.shape[1] == 3072
                 and 1 <= x.shape[0] <= 32768
-                and torch.cuda.get_device_properties(x.device).multi_processor_count == 78
                 and self._supports_norm_layout(x, gate)
             ):
                 return projection(self(x, gate))
@@ -156,8 +155,8 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and not torch.nn.modules.module._global_forward_hooks
         ):
             groups = 8
-            if sm90 and x.shape[0] <= 64:
-                groups = 2 if x.shape[0] >= 48 else 1
+            if sm90 and x.shape[0] <= 256:
+                groups = 1 if x.shape[0] < 48 else 2 if x.shape[0] <= 64 else 4
             quantized, scales = launch_norm_quant(
                 x,
                 gate,

@@ -160,7 +160,7 @@ def try_scatter_qkv_l2norm_sm90(
         and (num_k_heads, num_v_heads) in ((16, 48), (8, 24), (4, 12), (2, 6))
         and head_k_dim == head_v_dim == 128
         and packed.ndim == 2
-        and 2048 <= packed.shape[0] <= 32768
+        and 512 <= packed.shape[0] <= 32768
         and packed.shape[1] == (2 * num_k_heads + num_v_heads) * 128
         and packed.is_cuda
         and packed.is_contiguous()

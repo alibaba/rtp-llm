@@ -722,13 +722,29 @@ class Qwen4ExpPLELayer(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run PLE prefill and return output plus the decode conv state."""
         gated_value, gated_value_normed = self._gated_values(
             hyper_states, token_history, padding_mask, embeddings=embeddings
         )
+        if padding_mask is None and hyper_states.is_cuda and torch.version.hip is None:
+            from .ple_conv_triton import try_ple_conv
+
+            fused = try_ple_conv(
+                gated_value,
+                gated_value_normed,
+                None,
+                self.conv_weight,
+                self.conv_dilation,
+                residual=hyper_states if add_residual else None,
+            )
+            if fused is not None:
+                return fused, self.prefill_conv_state(gated_value_normed)
         output = gated_value + self._short_conv(gated_value_normed)
-        return output, self.prefill_conv_state(gated_value_normed)
+        return (
+            hyper_states + output if add_residual else output
+        ), self.prefill_conv_state(gated_value_normed)
 
     def prefill_with_state(
         self,
@@ -737,6 +753,7 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_buffer: torch.Tensor,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prefix-reuse prefill: continue the conv from a cached state buffer.
 
@@ -745,7 +762,11 @@ class Qwen4ExpPLELayer(nn.Module):
         the state the next chunk/decode must resume from.
         """
         output, candidate_inputs = self.decode_chunk(
-            hyper_states, token_history, conv_buffer, embeddings=embeddings
+            hyper_states,
+            token_history,
+            conv_buffer,
+            embeddings=embeddings,
+            add_residual=add_residual,
         )
         state = torch.cat([conv_buffer, candidate_inputs], dim=1)[
             :, -self.short_conv_state_len :
@@ -1156,6 +1177,7 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_buffer: torch.Tensor,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate a speculative decode chunk without committing its state.
 
@@ -1218,6 +1240,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 conv_buffer,
                 self.conv_weight,
                 self.conv_dilation,
+                residual=hyper_states if add_residual else None,
             )
             if fused is not None:
                 return fused, candidate_inputs
@@ -1235,4 +1258,5 @@ class Qwen4ExpPLELayer(nn.Module):
                 "qwen4_exp PLE decode chunk convolution returned "
                 f"{conv_out.shape[1]} rows, expected {query_len}"
             )
-        return gated_value + conv_out, candidate_inputs
+        output = gated_value + conv_out
+        return (hyper_states + output if add_residual else output), candidate_inputs
