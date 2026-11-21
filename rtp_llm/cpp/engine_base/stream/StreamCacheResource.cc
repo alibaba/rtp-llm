@@ -513,6 +513,9 @@ bool StreamCacheResource::loadCacheDone() {
             stream_->endCacheExposedWaitWithoutLock(completed_us);
         }
         const auto status = finalizeAllocatorLoad();
+        const bool retry_prefill_without_remote =
+            absl::IsDeadlineExceeded(status) && load_context && load_context->deadlineExceeded()
+            && resource_context_.role_type == RoleType::PREFILL && isContextStream();
         if (status.ok()) {
             // Successful pages were ready when the transfer settled, even if the
             // scheduler only observes them after another batch finishes.
@@ -522,7 +525,10 @@ bool StreamCacheResource::loadCacheDone() {
             RTP_LLM_LOG_WARNING(
                 "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
         }
-        if (absl::IsUnavailable(status)) {
+        if (absl::IsUnavailable(status) || retry_prefill_without_remote) {
+            // On an overall deadline, finalization deferred the old allocation.
+            // Re-admit with fresh blocks and allow local cache lookup.
+            skip_remote_cache_ = skip_remote_cache_ || retry_prefill_without_remote;
             ++malloc_failed_times_;
             stream_->generate_status_->clearLoadInitiated();
             reportMallocRetry();

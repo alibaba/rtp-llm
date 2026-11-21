@@ -1421,6 +1421,7 @@ TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletio
     EXPECT_NE(resource.batch_kv_cache_resource_, original_resource);
     EXPECT_EQ(resource.kvCache().curBlocksNum(), 0);
     EXPECT_FALSE(resource.allocator_load_context_);
+    EXPECT_FALSE(resource.skip_remote_cache_);
     EXPECT_GE(pool->refCount(original_blocks.front()), 1u);
     EXPECT_EQ(stream_->reuseLength(), 0);
     EXPECT_FALSE(resource.cache_reuse_metrics_.load_success);
@@ -1435,6 +1436,86 @@ TEST_F(StreamCacheResourceTest, OverallDeadlineReturnsBeforeReadAndLateCompletio
     EXPECT_EQ(resource.kvCache().curBlocksNum(), 0);
     EXPECT_FALSE(pool->isAllocated(original_blocks.front()));
     EXPECT_EQ(backend->writeCalls(), 0u);
+}
+
+TEST_F(StreamCacheResourceTest, AsyncPrefillOverallDeadlineRetriesWithLocalCacheOnly) {
+    auto  backend  = prepareStorageBackendResource(false, true, RoleType::PREFILL, false, std::chrono::seconds(1));
+    auto& resource = stream_->streamCacheResource();
+    initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+    backend->blockReads();
+    block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
+    stream_->generate_status_->status = StreamState::WAITING;
+    stream_->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream_->moveToNext(), StreamState::LOADING_CACHE);
+    ASSERT_TRUE(backend->waitForReadsFor(1));
+    auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->localMatchedBlocks(), 1u);
+    const auto original_resource = resource.batch_kv_cache_resource_;
+    const auto original_blocks   = original_resource->blocks(0, "default");
+    ASSERT_EQ(original_blocks.size(), 3u);
+    auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+
+    block_tree_cache_test::BoundedThread<void> waiter([context] { context->waitDone(); });
+    ASSERT_EQ(waiter.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    waiter.get();
+    ASSERT_TRUE(context->deadlineExceeded());
+    ASSERT_EQ(stream_->moveToNext(), StreamState::WAITING);
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_FALSE(stream_->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_TRUE(resource.skip_remote_cache_);
+    EXPECT_NE(resource.batch_kv_cache_resource_, original_resource);
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    EXPECT_TRUE(pool->isAllocated(original_blocks[1]));
+    EXPECT_EQ(stream_->reuseLength(), 0);
+
+    auto retry_state = stream_->moveToNext();
+    if (retry_state == StreamState::LOADING_CACHE) {
+        auto retry_context = resource.allocator_load_context_;
+        ASSERT_NE(retry_context, nullptr);
+        block_tree_cache_test::BoundedThread<void> local_waiter([retry_context] { retry_context->waitDone(); });
+        ASSERT_EQ(local_waiter.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+        local_waiter.get();
+        ASSERT_EQ(stream_->moveToNext(), StreamState::WAITING);
+        retry_state = stream_->moveToNext();
+    }
+    ASSERT_EQ(retry_state, StreamState::RUNNING);
+    EXPECT_FALSE(stream_->hasError());
+    EXPECT_EQ(backend->matchCalls(), 1u);
+    EXPECT_EQ(stream_->localReuseLength(), 2);
+    EXPECT_EQ(stream_->remoteReuseLength(), 0);
+    const auto retry_blocks = resource.kvCache().blocks(0, "default");
+    ASSERT_EQ(retry_blocks.size(), original_blocks.size());
+    EXPECT_NE(retry_blocks[1], original_blocks[1]);
+
+    release_read.run();
+    backend->shutdown();
+    block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_manager_->block_tree_cache_);
+    EXPECT_FALSE(pool->isAllocated(original_blocks[1]));
+    EXPECT_EQ(resource.kvCache().blocks(0, "default"), retry_blocks);
+    EXPECT_EQ(stream_->remoteReuseLength(), 0);
+}
+
+TEST_F(StreamCacheResourceTest, AsyncOverallDeadlineRemainsTerminalOutsidePrefillContext) {
+    for (const auto role : {RoleType::DECODE, RoleType::PDFUSION, RoleType::PREFILL}) {
+        SCOPED_TRACE(static_cast<int>(role));
+        auto backend = prepareStorageBackendResource(false, false, role, false, std::chrono::milliseconds(0));
+        // PREFILL can also carry a decode-phase stream after PD fallback.
+        stream_->setIsContextStream(role != RoleType::PREFILL);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
+        ASSERT_NE(context, nullptr);
+        ASSERT_TRUE(context->deadlineExceeded());
+
+        EXPECT_TRUE(resource.loadCacheDone());
+        EXPECT_TRUE(stream_->hasError());
+        EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+        EXPECT_FALSE(resource.skip_remote_cache_);
+        EXPECT_FALSE(resource.allocator_load_context_);
+        EXPECT_EQ(backend->matchCalls(), 0u);
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_manager_->block_tree_cache_);
+    }
 }
 
 TEST_F(StreamCacheResourceTest, RemoteTimeoutKeepsHostPrefixAndReplacesFrozenSuffix) {
