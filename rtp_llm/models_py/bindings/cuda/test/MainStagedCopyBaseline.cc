@@ -1,6 +1,6 @@
 // Test-only staged-copy baseline from main e73826e27a6005640bb75ce2a73f235bfa51c55b.
-// Bodies below are copied unchanged from NoBlockCopy.cc and
-// DeviceHostCopyStrategy.cc; the namespace isolates their scratch and symbols.
+// The snapshot keeps the NoBlockCopy.cc executor, scratch and kernel symbols
+// in a separate namespace.
 #include "rtp_llm/models_py/bindings/cuda/test/MainStagedCopyBaseline.h"
 #include "rtp_llm/models_py/bindings/cuda/test/MainStagedCopyKernel.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -330,96 +330,12 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
     return true;
 }
 
-static constexpr size_t kStagedAlignment = 16;
-
-static size_t alignUp(size_t value, size_t alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
+StagedCopy::~StagedCopy() {
+    releaseStagedMemoryCopyScratch(scratch_);
 }
 
-StagedSmDeviceHostCopyStrategy::~StagedSmDeviceHostCopyStrategy() {
-    for (auto& [_, scratch] : scratch_by_device_) {
-        if (scratch) {
-            releaseStagedMemoryCopyScratch(*scratch);
-        }
-    }
-}
-
-StrategyResult StagedSmDeviceHostCopyStrategy::tryExecute(const DeviceHostCopyPlan&    plan,
-                                                          const DeviceHostCopyOptions& options) {
-    if (!options.staged_sm_copy_enabled) {
-        return StrategyResult::notApplicable();
-    }
-
-    if (plan.copy_tiles.size() < options.staged_sm_min_tile_count) {
-        return StrategyResult::notApplicable();
-    }
-
-    const int device_index = plan.copy_tiles.front().device_index;
-    if (device_index < 0) {
-        return StrategyResult::notApplicable();
-    }
-
-    size_t total_bytes = 0;
-    for (const auto& tile : plan.copy_tiles) {
-        total_bytes += tile.bytes;
-    }
-
-    if (total_bytes < options.staged_sm_min_bytes) {
-        return StrategyResult::notApplicable();
-    }
-
-    // Build staged params with compact host segments
-    StagedMemoryCopyParams staged_params;
-    staged_params.host_base    = plan.host.base;
-    staged_params.device_index = device_index;
-    staged_params.direction    = plan.device_to_host ? StagedMemoryCopyDirection::D2H : StagedMemoryCopyDirection::H2D;
-
-    size_t current_staging_offset = 0;
-    staged_params.tiles.reserve(plan.copy_tiles.size());
-    staged_params.host_segments.reserve(plan.copy_tiles.size());
-
-    for (const auto& tile : plan.copy_tiles) {
-        size_t staging_offset = alignUp(current_staging_offset, kStagedAlignment);
-
-        StagedMemoryCopyTile staged_tile;
-        staged_tile.gpu         = tile.device_addr;
-        staged_tile.host_offset = staging_offset;
-        staged_tile.bytes       = tile.bytes;
-        staged_params.tiles.push_back(staged_tile);
-
-        StagedMemoryCopyHostSegment segment;
-        segment.host        = tile.host_addr;
-        segment.host_offset = staging_offset;
-        segment.bytes       = tile.bytes;
-
-        // Merge with previous segment if contiguous in both host and staging space
-        if (!staged_params.host_segments.empty()) {
-            auto& prev     = staged_params.host_segments.back();
-            auto* prev_end = static_cast<uint8_t*>(prev.host) + prev.bytes;
-            if (prev_end == tile.host_addr && prev.host_offset + prev.bytes == staging_offset) {
-                prev.bytes += tile.bytes;
-                current_staging_offset = staging_offset + tile.bytes;
-                continue;
-            }
-        }
-        staged_params.host_segments.push_back(segment);
-        current_staging_offset = staging_offset + tile.bytes;
-    }
-    staged_params.host_bytes = current_staging_offset;
-
-    std::lock_guard<std::mutex> lock(scratch_mutex_);
-    auto&                       entry = scratch_by_device_[device_index];
-    if (!entry) {
-        entry               = std::make_unique<StagedMemoryCopyScratch>();
-        entry->device_index = device_index;
-    }
-
-    bool ok = execStagedMemoryCopy(staged_params, entry.get());
-    if (!ok) {
-        // Conservatively fall back to generic
-        return StrategyResult::notApplicable();
-    }
-    return StrategyResult::done();
+bool StagedCopy::copy(const StagedMemoryCopyParams& params) {
+    return execStagedMemoryCopy(params, &scratch_);
 }
 
 }  // namespace rtp_llm::crc_copy_benchmark::main_baseline

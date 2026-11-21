@@ -1,5 +1,59 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
+def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13",
+                kvcm_envs=[], kill_remote=False, sleep_time_qr=10):
+    return smoke_test(
+        name = name,
+        task_info = task_info,
+        smoke_args = smoke_args,
+        gpu_type = [gpu_type],
+        tags = ["requires-pace", "no-remote"],
+        data = [
+            "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
+        ],
+        kvcm_envs = ["PACE_REQUIRED=true", "KVCM_LOG_LEVEL=DEBUG"] + kvcm_envs,
+        kill_remote = kill_remote,
+        sleep_time_qr = sleep_time_qr,
+    )
+
+def _pace_suites():
+    base = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS
+    tests = []
+    for suffix, task, args, config in [
+        ("basic", "q_r_l20_remote_cache.json", "", []),
+        ("tp2", "q_r_l20_remote_cache_tpsize_2.json", " --tp_size 2", []),
+        ("edge", "q_r_l20_cache_edge_case_1_remote_cache.json", " --seq_size_per_block 4", []),
+        ("match_fail", "q_r_l20_remote_cache_match_failure.json", "", ["ENABLE_DEBUG_SERVICE=true", "TEST_MATCH_FAILURE=1"]),
+        ("write_start_fail", "q_r_l20_remote_cache_start_and_finish_failure.json", "", ["ENABLE_DEBUG_SERVICE=true", "TEST_START_WRITE_FAILURE=1"]),
+        ("write_finish_fail", "q_r_l20_remote_cache_start_and_finish_failure.json", "", ["ENABLE_DEBUG_SERVICE=true", "TEST_FINISH_WRITE_FAILURE=1"]),
+    ]:
+        tests.append(_pace_smoke(
+            "remote_cache_pace_" + suffix, "data/model/qwen25/" + task,
+            base + args, kvcm_envs = config, sleep_time_qr = 20,
+        ))
+    tests.append(_pace_smoke(
+        "remote_cache_pace_kill", "data/model/qwen25/q_r_l20_remote_cache_kill_remote.json",
+        base, kill_remote = True,
+    ))
+    tests.append(_pace_smoke(
+        "remote_cache_pace_pd", "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json",
+        {
+            "prefill": base + " --role_type PREFILL",
+            "decode": base + " --role_type DECODE",
+        }, sleep_time_qr = 20,
+    ))
+    tests.append(_pace_smoke(
+        "remote_cache_pace_hybrid_tp2",
+        "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_remote_only.json",
+        "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 --enable_remote_cache 1 --kvcm_put_timeout_ms 17000 --kvcm_get_timeout_ms 17000 --kvcm_get_broadcast_timeout 20000 --kvcm_put_broadcast_timeout 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+        gpu_type = "H20_CU13", sleep_time_qr = 20,
+    ))
+    native.test_suite(name = "smoke_cuda_remote_cache_pace", tests = tests)
+    native.test_suite(
+        name = "smoke_kvcm_p1_gpu",
+        tests = [":smoke_cuda_remote_cache_pace"],
+    )
+
 # Remote uploads originate from DEVICE inserts. With no lower local tier, drop
 # every DEVICE tree entry after insertion so later queries must read the backend.
 # 500 physical blocks leave 499 usable: ceil(499 * 0.002) = 1 triggers eviction,
@@ -13,6 +67,8 @@ REMOTE_CACHE_DEVICE_STORE_ARGS = (
 )
 
 def remote_cache_suites():
+    _pace_suites()
+
     # PPU Remote Cache (with KVCM server)
     native.test_suite(
         name = "smoke_cuda_remote_cache",
@@ -52,7 +108,7 @@ def remote_cache_suites():
                 gpu_type = ["L20_CU13"],
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
-                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                smoke_args = "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --tp_size 2 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_tpsize_2.json",
             ),
             smoke_test(
@@ -62,8 +118,8 @@ def remote_cache_suites():
                 kvcm_envs = ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
                 sleep_time_qr = 20,
                 smoke_args = {
-                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
-                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --load_cache_timeout_ms 120000 --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                    "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
+                    "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --load_cache_timeout_ms 120000 --kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 --kvcm_task_timeout_ms 20000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
                 },
                 task_info = "data/model/qwen25/q_r_l20_remote_cache_pd_sep.json",
             ),

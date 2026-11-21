@@ -2,7 +2,7 @@
 
 Target: `//rtp_llm/test/smoke:smoke_v4_flash_pd_cp2ep2_dp2ep2_dspark_cprr_large_batch_crc_memory_sm103`.
 
-This CUDA13 x86 test uses four GPUs: CP2/EP2 prefill and DP2/EP2 decode. CUDA13 x86 and ARM builds automatically protect HOST/DISK cache transfers with CRC; there is no runtime CRC flag. Builds without CRC support, including PPU, ROCm and CUDA12, retain the existing copy path. In this test, the prefill server stores and reloads HOST cache, with DEVICE/DISK/remote reuse disabled. Decode receives the P/D transfer and runs DSpark with CUDA graphs. Both roles use CP page-RR (`seq_size_per_block=256`, `kernel_seq_size_per_block=128`), `--max_seq_len 12288`, and `--memory_cache_max_descriptors_per_transfer_batch 32`.
+This CUDA13 x86 test uses four GPUs: CP2/EP2 prefill and DP2/EP2 decode. CUDA13 x86 and ARM builds use CRC for HOST/DISK cache transfers by default. `ENABLE_CRC=0` disables it, and builds without the backend use plain copies. The prefill server enables DEVICE and HOST cache and uses the device eviction watermarks to promote HOST reuse. DISK and remote reuse are disabled. Decode receives the P/D transfer and runs DSpark with CUDA graphs. Both roles use CP page-RR (`seq_size_per_block=256`, `kernel_seq_size_per_block=128`), `--max_seq_len 12288`, and `--memory_cache_max_descriptors_per_transfer_batch 32`.
 
 The test uses the CI checkpoint `/mnt/nas1/hf/DeepSeek-V4-Flash-DSpark` for both target and draft, matching the existing DSpark smoke. It must include DSpark `mtp.*.markov_head` and confidence-head weights; the ordinary MTP-only checkpoint is not equivalent. Verify that this directory, all indexed weight shards, and the tokenizer are available in the test container before running.
 
@@ -14,7 +14,7 @@ The fixture combines five requests in two prefix regimes, without changing exist
 4. A long `[SEGMENTED CRC cache]` one-token request (`input_len=8349`, roughly 33 blocks at `seq_size_per_block=256`) populates HOST cache with enough descriptors to span more than one `--memory_cache_max_descriptors_per_transfer_batch 32` transfer batch.
 5. The identical long request requires `memory_reuse_len=8192`, `reuse_len=8192`, `disk_reuse_len=0`, and `input_len=8349`, proving the long HOST prefix round-trips through the batched CRC path.
 
-The HOST-cache hit must exercise the default CRC path on this CUDA13 build. Retain the `BlockTree CRC32C enabled:` startup records and the HOST-cache reuse assertions below to confirm that the test stores and reloads cache with CRC enabled. Require no unexpected checksum/compute failures and DSpark initialization in the server logs. Do not bypass CRC or replace DSpark with MTP to obtain a pass.
+The HOST-cache hit must exercise the default CRC path on this CUDA13 build. Retain the `BlockTree CRC32C:` startup records and the HOST-cache reuse assertions below to confirm that the test stores and reloads cache with CRC enabled. Require no unexpected checksum/compute failures and DSpark initialization in the server logs. Do not bypass CRC or replace DSpark with MTP to obtain a pass.
 
 ## Evidence required for the third request
 

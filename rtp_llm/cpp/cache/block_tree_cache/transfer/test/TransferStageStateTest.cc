@@ -30,6 +30,7 @@ TEST(TransferStageStateTest, EmptyStageCompletesExactlyOnce) {
     size_t             callback_count = 0;
     TransferStageState state([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
+        EXPECT_TRUE(error.buffer_safe);
         ++callback_count;
     });
 
@@ -38,8 +39,163 @@ TEST(TransferStageStateTest, EmptyStageCompletesExactlyOnce) {
     EXPECT_EQ(callback_count, 1u);
 }
 
+TEST(TransferStageStateTest, BufferSafeBatchesPreserveFailureAcrossSubmissionClosure) {
+    for (bool finish_first : {false, true}) {
+        SCOPED_TRACE(finish_first);
+        size_t             callback_count = 0;
+        TransferResult     result;
+        TransferStageState state([&](TransferResult completed) {
+            result = std::move(completed);
+            ++callback_count;
+        });
+        state.addBatch();
+        state.addBatch();
+        if (finish_first) {
+            state.finishSubmitting();
+        }
+        TransferResult success(TransferStatus::OK);
+        success.buffer_safe = true;
+        state.completeBatch(std::move(success));
+        EXPECT_EQ(callback_count, 0u);
+        TransferResult failure(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "completed copy failed"));
+        failure.buffer_safe = true;
+        state.completeBatch(std::move(failure));
+        EXPECT_EQ(callback_count, finish_first ? 1u : 0u);
+        if (!finish_first) {
+            state.finishSubmitting();
+        }
+
+        EXPECT_EQ(callback_count, 1u);
+        EXPECT_TRUE(result.buffer_safe);
+        EXPECT_FALSE(result.ok());
+        EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(result.status.ToString(), "completed copy failed");
+    }
+}
+
+TEST(TransferStageStateTest, UnprovenSuccessfulBatchPreventsSafetyProofAndStillDrains) {
+    for (bool unproven_first : {false, true}) {
+        SCOPED_TRACE(unproven_first);
+        size_t             callback_count = 0;
+        TransferResult     result;
+        TransferStageState state([&](TransferResult completed) {
+            result = std::move(completed);
+            ++callback_count;
+        });
+        state.addBatch();
+        state.addBatch();
+        state.finishSubmitting();
+        TransferResult safe(TransferStatus::OK);
+        safe.buffer_safe = true;
+        const TransferResult unproven(TransferStatus::OK);
+
+        state.completeBatch(unproven_first ? unproven : safe);
+        EXPECT_EQ(callback_count, 0u);
+        state.completeBatch(unproven_first ? safe : unproven);
+
+        EXPECT_EQ(callback_count, 1u);
+        EXPECT_TRUE(result.ok());
+        EXPECT_FALSE(result.buffer_safe);
+    }
+}
+
+TEST(TransferStageStateTest, ExplicitSubmissionFailureDoesNotGrantBufferSafety) {
+    size_t             callback_count = 0;
+    TransferResult     result;
+    TransferStageState state([&](TransferResult completed) {
+        result = std::move(completed);
+        ++callback_count;
+    });
+    state.addBatch();
+    TransferResult safe(TransferStatus::OK);
+    safe.buffer_safe = true;
+    state.completeBatch(std::move(safe));
+    EXPECT_EQ(callback_count, 0u);
+
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
+
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_FALSE(result.buffer_safe);
+    EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(result.status.ToString(), "submission failed");
+}
+
+TEST(TransferStageStateTest, SubmissionFailureWaitsForBatchesAndPreservesUnsubmittedBlocks) {
+    size_t             callback_count = 0;
+    TransferResult     result;
+    TransferStageState state(
+        [&](TransferResult completed) {
+            result = std::move(completed);
+            ++callback_count;
+        },
+        4);
+    state.addBatch();
+    state.addBatch();
+    state.completeBatch(TransferStatus::OK, {2});
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "batch preparation failed"));
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "duplicate close"));
+    EXPECT_EQ(callback_count, 0u);
+    state.completeBatch(TransferStatus::OK, {0});
+    EXPECT_EQ(callback_count, 1u);
+    EXPECT_EQ(result.status.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(result.status.ToString(), "batch preparation failed");
+    EXPECT_EQ(
+        result.block_errors,
+        (std::vector<CacheCopyError>{
+            CacheCopyError::NONE, CacheCopyError::NOT_EXECUTED, CacheCopyError::NONE, CacheCopyError::NOT_EXECUTED}));
+    state.finishSubmitting();
+    state.completeBatch(TransferStatus::OK, {1});
+    EXPECT_EQ(callback_count, 1u);
+}
+
+TEST(TransferStageStateTest, SubmissionFailurePreservesUnknownCompletionInEitherOrder) {
+    for (bool finish_first : {false, true}) {
+        SCOPED_TRACE(finish_first);
+        size_t             callback_count = 0;
+        TransferResult     result;
+        TransferStageState state(
+            [&](TransferResult completed) {
+                result = std::move(completed);
+                ++callback_count;
+            },
+            2);
+        state.addBatch();
+        auto finish = [&] { state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "preparation failed")); };
+        if (finish_first) {
+            finish();
+        }
+        state.completeBatch(
+            {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "RPC timeout"), CacheCopyError::RPC_FAILED}, {1});
+        EXPECT_EQ(callback_count, finish_first ? 1u : 0u);
+        if (!finish_first) {
+            finish();
+        }
+        EXPECT_EQ(callback_count, 1u);
+        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+        EXPECT_EQ(result.copy_error, CacheCopyError::RPC_FAILED);
+        EXPECT_NE(result.status.ToString().find("preparation failed"), std::string::npos);
+        EXPECT_NE(result.status.ToString().find("RPC timeout"), std::string::npos);
+        EXPECT_EQ(result.block_errors,
+                  (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::RPC_FAILED}));
+    }
+}
+
+TEST(TransferStageStateTest, EmptyFailedSubmissionCompletesExactlyOnce) {
+    size_t             callback_count = 0;
+    TransferStageState state(
+        [&](TransferResult completed) {
+            ++callback_count;
+            EXPECT_FALSE(completed.ok());
+            EXPECT_EQ(completed.block_errors, std::vector<CacheCopyError>(2, CacheCopyError::NOT_EXECUTED));
+        },
+        2);
+    state.finishSubmitting(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "preparation failed"));
+    state.finishSubmitting();
+    EXPECT_EQ(callback_count, 1u);
+}
+
 TEST(TransferStageStateTest, ConcurrentBatchesCompleteExactlyOnce) {
-    constexpr size_t kBatchCount = 32;
+    constexpr size_t    kBatchCount = 32;
     std::atomic<size_t> callback_count{0};
     auto                state = std::make_shared<TransferStageState>([&](TransferResult error) {
         EXPECT_TRUE(error.ok());
@@ -121,7 +277,6 @@ TEST(TransferStageStateTest, ConcurrentFailuresPreserveHighestPriority) {
                                              CacheCopyError::INVALID_REQUEST,
                                              CacheCopyError::IO_FAILED,
                                              CacheCopyError::RPC_FAILED,
-                                             CacheCopyError::CRC_COMPUTE_FAILED,
                                              CacheCopyError::CRC_MISMATCH};
     std::atomic<size_t>               calls{0};
     TransferResult                    result;
@@ -156,7 +311,7 @@ TEST(TransferStageStateTest, ConcurrentFailuresPreserveHighestPriority) {
 
 TEST(TransferStageStateTest, UnknownCompletionPreservesCrcDiagnosticsAndStillDrainsEveryBatch) {
     for (const auto known_error :
-         {CacheCopyError::COPY_FAILED, CacheCopyError::CRC_COMPUTE_FAILED, CacheCopyError::CRC_MISMATCH}) {
+         {CacheCopyError::COPY_FAILED, CacheCopyError::IO_FAILED, CacheCopyError::CRC_MISMATCH}) {
         for (bool unknown_first : {false, true}) {
             size_t             callback_count = 0;
             TransferResult     result;

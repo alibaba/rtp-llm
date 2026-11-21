@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <cstdint>
@@ -23,16 +24,23 @@ namespace telemetry {
 // One coherent GenerateStream progress snapshot plus the handler's absolute
 // synthesis endpoint. All timestamps are epoch microseconds.
 struct PhaseTiming {
-    int64_t     begin_time_us           = 0;
-    bool        running_started         = false;
-    int64_t     running_started_time_us = 0;
-    bool        first_token_committed   = false;
-    int64_t     first_token_time_us     = 0;
-    bool        generation_done         = false;
-    int64_t     generation_done_time_us = 0;
-    int64_t     synthesis_end_time_us   = 0;
-    int64_t     request_id              = -1;  // <0 = unknown (attribute skipped)
-    const char* error_type              = nullptr;
+    int64_t     begin_time_us               = 0;
+    bool        running_started             = false;
+    int64_t     running_started_time_us     = 0;
+    bool        first_token_committed       = false;
+    int64_t     first_token_time_us         = 0;
+    bool        generation_done             = false;
+    int64_t     generation_done_time_us     = 0;
+    int64_t     synthesis_end_time_us       = 0;
+    int64_t     request_id                  = -1;  // <0 = unknown (attribute skipped)
+    int64_t     scheduler_enqueue_time_us   = 0;
+    int64_t     can_run_time_us             = 0;
+    int64_t     kv_ready_time_us            = 0;
+    int64_t     prefill_previous_release_us = 0;
+    int64_t     prefill_dispatch_time_us    = 0;
+    int64_t     prefill_forward_time_us     = 0;
+    int64_t     cache_exposed_wait_us       = 0;
+    const char* error_type                  = nullptr;
 };
 
 // Deployment role determines which child spans are synthesized:
@@ -243,6 +251,56 @@ inline void synthesizePhaseSpans(const opentelemetry::nostd::shared_ptr<opentele
     const int64_t end   = timing.synthesis_end_time_us;
     if (begin <= 0 || end <= begin) {
         return;
+    }
+
+    if (role != PhaseRole::Decode && timing.cache_exposed_wait_us > 0) {
+        try {
+            parent_span->SetAttribute(kAttrRtpLlmPrefillCacheExposedWaitUs, timing.cache_exposed_wait_us);
+        } catch (...) {}
+    }
+    // Only enqueue-to-CanRun is unambiguously admission queueing.
+    // RUNNING-to-dispatch can include host preparation, so it is not queue time.
+    if (role != PhaseRole::Decode && timing.prefill_forward_time_us > 0 && timing.prefill_forward_time_us <= end
+        && timing.running_started) {
+        const auto enqueue  = timing.scheduler_enqueue_time_us;
+        const auto can_run  = timing.can_run_time_us;
+        const auto kv_ready = timing.kv_ready_time_us;
+        const auto running  = timing.running_started_time_us;
+        const auto dispatch = timing.prefill_dispatch_time_us;
+        const auto forward  = timing.prefill_forward_time_us;
+        if (enqueue >= begin && enqueue <= can_run && can_run <= running && running <= dispatch
+            && dispatch <= forward) {
+            try {
+                parent_span->SetAttribute(kAttrRtpLlmPrefillAdmissionQueueWaitUs, can_run - enqueue);
+                if (can_run <= kv_ready && kv_ready <= dispatch
+                    && (timing.prefill_previous_release_us == 0 || timing.prefill_previous_release_us <= dispatch)) {
+                    const auto release = std::max(kv_ready, timing.prefill_previous_release_us);
+                    parent_span->SetAttribute(kAttrRtpLlmPrefillKvCacheAcquireWallUs, kv_ready - can_run);
+                    parent_span->SetAttribute(kAttrRtpLlmPrefillEarlyBatchPrepareWallUs, int64_t{0});
+                    parent_span->SetAttribute(kAttrRtpLlmPrefillPreviousBatchWaitUs, release - kv_ready);
+                    parent_span->SetAttribute(kAttrRtpLlmPrefillFinalPrepareWallUs, forward - release);
+                    detail::synthesizeChildSpan(
+                        parent_span, "prefill_admission_queue", enqueue, can_run - enqueue, timing.request_id, nullptr);
+                    detail::synthesizeChildSpan(parent_span,
+                                                "prefill_kv_cache_acquire",
+                                                can_run,
+                                                kv_ready - can_run,
+                                                timing.request_id,
+                                                nullptr);
+                    detail::synthesizeChildSpan(parent_span,
+                                                "prefill_previous_batch_wait",
+                                                kv_ready,
+                                                release - kv_ready,
+                                                timing.request_id,
+                                                nullptr);
+                    detail::synthesizeChildSpan(
+                        parent_span, "prefill_final_prepare", release, forward - release, timing.request_id, nullptr);
+                }
+                if (timing.cache_exposed_wait_us == 0) {
+                    parent_span->SetAttribute(kAttrRtpLlmPrefillCacheExposedWaitUs, int64_t{0});
+                }
+            } catch (...) {}
+        }
     }
 
     constexpr auto kError = opentelemetry::trace::StatusCode::kError;

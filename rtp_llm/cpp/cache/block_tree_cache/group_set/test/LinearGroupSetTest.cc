@@ -79,18 +79,19 @@ TEST_F(LinearGroupSetTest, MatchValidatorHasData) {
     delete node_empty;
 }
 
-TEST_F(LinearGroupSetTest, MatchValidatorBusyResourceInvalidWithoutLatch) {
-    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+TEST_F(LinearGroupSetTest, MatchValidatorDetachedResourceInvalidWithoutLatch) {
+    for (GroupSetTransferState state : {GroupSetTransferState::LOAD_PENDING}) {
         auto validator = group_->createMatchValidator();
 
         auto* busy_node = makeNode(100);
         setDeviceBlock(busy_node, 0);
         busy_node->group_set_resources[0].transfer_state = state;
+        busy_node->group_set_resources[0].transfer_detached = true;
 
         auto* usable_node = makeNode(200);
         setDeviceBlock(usable_node, 0);
 
-        // Point-state semantics: a busy node is unusable on its own but must
+        // Point-state semantics: a detached node is unusable on its own but must
         // not poison later nodes.
         EXPECT_FALSE(validator->validate(busy_node->group_set_resources[0]));
         EXPECT_TRUE(validator->validate(usable_node->group_set_resources[0]));
@@ -113,4 +114,16 @@ TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingResource) {
 }
 
 }  // namespace
+
+TEST_F(LinearGroupSetTest, EvictingSourcesRemainMatchable) {
+    for (Tier tier : {Tier::DEVICE, Tier::HOST}) {
+        GroupSetResource resource;
+        resource.setBlocks(tier, {15});
+        resource.transfer_state = GroupSetTransferState::EVICTING;
+        EXPECT_TRUE(group_->createMatchValidator()->validate(resource));
+        resource.transfer_detached = true;
+        EXPECT_FALSE(group_->createMatchValidator()->validate(resource));
+    }
+}
+
 }  // namespace rtp_llm

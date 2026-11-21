@@ -190,4 +190,10 @@ inline bool cacheGroupPublishesPrefixChain(const CacheGroupPolicy& policy) {
     return cacheGroupParticipatesInBlockTree(policy) && policy.active_tail_blocks == 0;
 }
 
+// Reusable groups report their own resident components. Tag exclusions and
+// memory placement are validated before attaching to the cache tree.
+inline bool cacheGroupPublishesEvents(const CacheGroupPolicy& policy) {
+    return policy.enable_prefix_reuse;
+}
+
 }  // namespace rtp_llm

@@ -377,8 +377,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
 
     def test_no_arg_constructor_reuses_online_vip_settings(self):
         environment = {
-            "RECO_ENABLE_VIPSERVER": "1",
-            "RECO_VIPSERVER_DOMAIN": "kvcm.example.vipserver",
+            "RECO_SERVER_ADDRESS": "kvcm.example.vipserver",
             "RECO_INSTANCE_GROUP": "pace_group_m3",
             "RECO_PUT_TIMEOUT_MS": "100000",
             "RECO_GET_TIMEOUT_MS": "100000",

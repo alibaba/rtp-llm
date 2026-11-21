@@ -34,12 +34,16 @@ test_deps = [
 
 cc_test(
     name = "stream_cache_resource_test",
+    testonly = True,
     srcs = [
         "StreamCacheResourceTest.cc",
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

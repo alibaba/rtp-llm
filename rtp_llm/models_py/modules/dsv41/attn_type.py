@@ -2,8 +2,8 @@
 
 SWA_KV = "swa_kv"
 DECODER_SWA_KV = "decoder_swa_kv"
-CSA_KV = "global_kv_2"
-HCA_KV = "global_kv_1"
+CSA_KV = "csa_kv"
+HCA_KV = "hca_kv"
 INDEXER_KV = "indexer_kv"
 INDEXER_STATE = "indexer_state"
 CSA_STATE = "csa_state"

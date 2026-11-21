@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/metrics/CacheLockGuard.h"
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
@@ -37,10 +39,11 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
         *metrics_reporter_,
         mutex_,
         config_.host_cache_sync_timeout_ms,
-        config_.disk_cache_sync_timeout_ms,
+        config_.disk_cache_evict_timeout_ms,
         config_.max_descriptors_per_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
-        [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
+        [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); },
+        config_.disk_cache_evict_max_pending_bytes),
     loader_(tree_.get(),
             evictor_,
             transfer_dispatcher_.get(),
@@ -52,16 +55,13 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
             config_.enable_device_cache,
             storage_backend_,
             [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }),
-    storer_(tree_.get(),
-            evictor_,
-            transfer_dispatcher_.get(),
-            task_pool_.get(),
-            *metrics_reporter_,
-            mutex_,
-            config_.host_cache_sync_timeout_ms,
-            config_.disk_cache_sync_timeout_ms,
-            storage_backend_,
-            [this](bool check_watermark) { onWorkflowSettledLocked(check_watermark); }) {}
+    storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
+        onWorkflowSettledLocked(check_watermark);
+    }) {
+    metrics_reporter_->initEvictionMetricGroupTypes(tree_->groupSets());
+    if (storage_backend_)
+        storage_backend_->setStageMetricsReporter(metrics_reporter_);
+}
 
 bool BlockTreeCache::init() {
     if (initialized_) {
@@ -91,8 +91,8 @@ bool BlockTreeCache::init() {
                          group_set->diskPool() ? "enabled" : "null");
     }
     if (config_.full_prefix_scan_interval_ms > 0) {
-        auto scanner =
-            std::make_unique<FullPrefixInvariantScanner>(*tree_, mutex_, config_.full_prefix_scan_interval_ms);
+        auto scanner = std::make_unique<FullPrefixInvariantScanner>(
+            *tree_, mutex_, config_.full_prefix_scan_interval_ms, metrics_reporter_.get());
         if (scanner->start()) {
             full_prefix_scanner_ = std::move(scanner);
             RTP_LLM_LOG_INFO("FULL prefix invariant scanner enabled, interval_ms=%ld",
@@ -104,24 +104,21 @@ bool BlockTreeCache::init() {
 }
 
 BlockTreeCache::~BlockTreeCache() {
+    stopping_.store(true);
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     shutdownLoads();
     if (storage_backend_) {
         storage_backend_->shutdown();
     }
-    RTP_LLM_LOG_INFO("load tickets closed, stopping store admission and draining cache tasks...");
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        storer_.stopAdmissionLocked();
-    }
+    RTP_LLM_LOG_INFO("load tickets closed, draining cache tasks...");
     task_pool_->stopAdmission();
     transfer_dispatcher_->cancelPendingStagingTransfers();
     task_pool_->waitForIdle();
     // Task-body idleness does not imply asynchronous RPC/transfer completion.
     // Keep dispatcher and cache state alive until transfer callbacks return,
     // then drain the settlement tasks those callbacks submitted.
-    transfer_dispatcher_->drainTransfers();
+    transfer_dispatcher_->shutdown();
     task_pool_->waitForIdle();
     transfer_dispatcher_.reset();
     task_pool_.reset();
@@ -130,6 +127,44 @@ BlockTreeCache::~BlockTreeCache() {
 
 void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
+}
+
+void BlockTreeCache::onCapacityChanged() {
+    if (stopping_.load() || watermark_check_pending_.exchange(true)) {
+        return;
+    }
+    // Capacity callbacks can run under mutex_ while tree references are released.
+    // Queue the check and coalesce wakeups instead of reacquiring that mutex inline.
+    if (!task_pool_->submitCompletion([this] {
+            watermark_check_pending_.store(false);
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!stopping_.load()) {
+                checkWatermark();
+            }
+        })) {
+        watermark_check_pending_.store(false);
+    }
+}
+
+std::vector<std::shared_ptr<FrozenTask>> BlockTreeCache::frozenTasks() const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->frozenTasks() : std::vector<std::shared_ptr<FrozenTask>>{};
+}
+
+TransferTaskRegistry::ForgetResult BlockTreeCache::forgetLocalTransferCompletion(uint64_t trace_id) const {
+    return transfer_dispatcher_ ? transfer_dispatcher_->forgetLocalCompletion(trace_id) :
+                                  TransferTaskRegistry::ForgetResult::FAILED;
+}
+
+void BlockTreeCache::setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->setCompletionCleanup(std::move(cleanup));
+}
+
+TransferTaskRegistry::State BlockTreeCache::localTransferCompletion(uint64_t trace_id) const {
+    if (!transfer_dispatcher_) {
+        return TransferTaskRegistry::State::UNKNOWN;
+    }
+    return transfer_dispatcher_->queryLocalCompletion(trace_id);
 }
 
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
@@ -143,13 +178,15 @@ TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               cache_keys,
-                                           const std::function<bool(size_t)>& valid_prefix) {
+                                           const std::function<bool(size_t)>& valid_prefix,
+                                           bool                               enable_storage_backend,
+                                           std::optional<int64_t>             request_id) {
     BlockTreeMatchResult result;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        result = loader_.matchLocked(cache_keys, valid_prefix);
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "match");
+        result = loader_.matchLocked(cache_keys, valid_prefix, enable_storage_backend, request_id);
     }
-    metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
+    metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics);
     return result;
 }
 
@@ -162,12 +199,22 @@ void BlockTreeCache::insert(const CacheKeysType&                              ca
 size_t BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
                               const std::vector<std::vector<GroupSetResource>>& resources,
                               Tier                                              target_tier,
-                              bool                                              is_resident) {
+                              bool                                              is_resident,
+                              std::optional<int64_t>                            request_id,
+                              size_t                                            remote_reuse_begin,
+                              size_t                                            remote_reuse_end) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "insert");
+        storage_write = storer_.storeLocked(cache_keys,
+                                            resources,
+                                            target_tier,
+                                            is_resident,
+                                            resident_prefix_length,
+                                            request_id,
+                                            remote_reuse_begin,
+                                            remote_reuse_end);
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));
@@ -176,7 +223,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard lock(mutex_,
+                        "force_drop",
+                        CacheStageContext::forLock(metrics_reporter_.get(), "force_drop", Tier::DEVICE, Tier::NONE));
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }
@@ -184,28 +233,8 @@ int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks)
     if (location == nullptr) {
         return 0;
     }
-    const GroupSetPtr& group_set   = tree_->groupSets()[location->group_set_id];
-    const auto&        device_pool = group_set->devicePools()[location->member_group_id];
-
-    const size_t initial_free       = device_pool->freeBlocksNum();
-    size_t       reclaimed          = 0;
-    bool         eviction_triggered = false;
-    while (reclaimed < num_blocks) {
-        if (!evictor_.dropLocked(location->group_set_id, Tier::DEVICE, true)) {
-            break;
-        }
-        eviction_triggered        = true;
-        const size_t current_free = device_pool->freeBlocksNum();
-        reclaimed                 = current_free > initial_free ? current_free - initial_free : 0;
-    }
-    if (eviction_triggered) {
-        metrics_reporter_->reportEvictionTriggered(Tier::DEVICE, group_set->groupType(), /*force_drop=*/true);
-    }
-    metrics_reporter_->reportEvictionBlocks(Tier::DEVICE,
-                                            group_set->groupType(),
-                                            /*force_drop=*/true,
-                                            num_blocks,
-                                            std::min(reclaimed, num_blocks));
+    const size_t reclaimed =
+        evictor_.reclaimDeviceBlocksLocked(location->group_set_id, location->member_group_id, num_blocks);
     RTP_LLM_LOG_DEBUG("tag=%.*s group_set[%zu] reclaimed %zu/%zu device blocks",
                       static_cast<int>(group_tag.size()),
                       group_tag.data(),
@@ -221,8 +250,8 @@ BlockIndicesType BlockTreeCache::matchedBlocksForGroup(std::string_view         
 }
 
 CacheStats BlockTreeCache::getStats() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    CacheStats                  stats;
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
+    CacheStats     stats;
     stats.tree_node_count           = tree_->size();
     const CandidateStats candidates = evictor_.candidateStats();
     stats.device_heap_total_size    = candidates.device_candidates;
@@ -231,36 +260,51 @@ CacheStats BlockTreeCache::getStats() const {
     return stats;
 }
 
-std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
+std::vector<CachePoolMetrics> BlockTreeCache::poolMetrics() const {
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
+    return metrics_reporter_->collectPoolMetrics(tree_->groupSets());
+}
+
+void BlockTreeCache::cleanupExpiredMissing() const {
+    if (transfer_dispatcher_)
+        transfer_dispatcher_->cleanupExpiredMissing();
+}
+
+void BlockTreeCache::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const {
+    metrics_reporter_->reportUnfreezeMetrics(execution, forced);
+}
+
+void BlockTreeCache::reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const {
+    metrics_reporter_->reportUnfreezeZeroMetrics(pools);
 }
 
 void BlockTreeCache::reportMetrics() const {
-    std::vector<BlockTreeEvictableMetricsSnapshot> snapshots;
+    EvictionVictimMetrics metrics_data;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
-        snapshots = metrics_reporter_->collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
+        CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
+        metrics_data = evictor_.getAndResetEvictionVictimMetrics();
     }
-    metrics_reporter_->reportEvictableCandidateCount(snapshots);
+    metrics_reporter_->reportEvictionMetrics(metrics_data);
     metrics_reporter_->reportQueueBacklog(task_pool_->queueSizes(), "business");
     metrics_reporter_->reportQueueBacklog(transfer_dispatcher_->queueSizes(), "transfer");
+    if (storage_backend_)
+        metrics_reporter_->reportQueueBacklog(storage_backend_->queueSizes(), "remote");
 }
 
 void BlockTreeCache::setEventPublisher(KVCacheEventPublisherPtr        publisher,
                                        const std::vector<std::string>& required_group_tags) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "other");
     tree_->setEventPublisher(std::move(publisher), required_group_tags);
 }
 
 KVCacheSnapshot BlockTreeCache::logicalCacheSnapshot() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    CacheLockGuard lock(mutex_, *metrics_reporter_, "snapshot");
     return tree_->logicalCacheSnapshot();
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(int64_t latest_version) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    BlockTreeKeySnapshot        snapshot;
+    CacheLockGuard       lock(mutex_, *metrics_reporter_, "snapshot");
+    BlockTreeKeySnapshot snapshot;
     snapshot.version = tree_->keyVersion();
     if (latest_version != snapshot.version) {
         snapshot.keys = tree_->cacheKeys();
@@ -281,7 +325,7 @@ void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
 void BlockTreeCache::checkWatermark() {
     for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
         const auto watermark = config_.watermarkForTier(tier);
-        if (!config_.isTierEnabled(tier) || !watermark.enabled()) {
+        if (!config_.isTierEnabled(tier)) {
             continue;
         }
         evictor_.scheduleWatermarkEvictionsLocked(tier, watermark);

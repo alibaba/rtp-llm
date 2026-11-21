@@ -14,7 +14,7 @@
 namespace rtp_llm {
 
 class BlockTreeCache;
-struct BlockTreePoolMetricsSnapshot;
+struct CachePoolMetrics;
 
 namespace benchmark {
 
@@ -45,8 +45,8 @@ private:
     size_t                          insertTopology(BlockTreeCache& cache, const std::vector<PathKeys>& paths);
     void                            addLatencyMetrics(const std::string& prefix, const std::vector<int64_t>& samples);
     void addDistributionMetrics(const std::string& prefix, const std::vector<int64_t>& samples);
-    void writePressureMetrics(bool pressure_ready, const std::vector<BlockTreePoolMetricsSnapshot>& snapshots);
-    void writeFinalZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& snapshots);
+    void writePressureMetrics(bool pressure_ready, const std::vector<CachePoolMetrics>& metrics_list);
+    void writeFinalZeroMetrics(const std::vector<CachePoolMetrics>& metrics_list);
 
     const ModelProfile& profile_;
     TreeOptions         options_;

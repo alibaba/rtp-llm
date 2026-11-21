@@ -101,6 +101,7 @@ private:
     void evaluateWaitingGroupQueue();
     void evaluateLoadingCacheGroupQueue();
     bool loadingGroupReady() const;
+    void updateCacheExposedWait();
     void advanceLoadingGroup(StreamGroup& group);
     void moveGroupToNewStreams(StreamGroup& group);
     void moveGroupToAllocatingGroup(StreamGroup& group);

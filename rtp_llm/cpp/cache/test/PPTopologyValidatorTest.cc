@@ -1,3 +1,5 @@
+#include <cmath>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -244,6 +246,7 @@ TEST(PPTopologyValidatorTest, SnapshotSerializeRoundTrip) {
     original.groups[1].explicit_block_num = 45;
     original.block_tree.host_budget_bytes = 1024 * 1024;
     original.block_tree.disk_budget_bytes = 2 * 1024 * 1024;
+    original.block_tree.host_swa_block_ratio = std::nextafter(0.3, 1.0);
     const auto payload                    = original.serialize();
     EXPECT_EQ(payload.substr(0, payload.find('|')), "full\x1flinear");
     const auto decoded = StageCacheSnapshot::deserialize(payload);
@@ -266,14 +269,22 @@ TEST(PPTopologyValidatorTest, SnapshotSerializeRoundTrip) {
     }
     EXPECT_EQ(decoded.block_tree.host_budget_bytes, original.block_tree.host_budget_bytes);
     EXPECT_EQ(decoded.block_tree.disk_budget_bytes, original.block_tree.disk_budget_bytes);
+    EXPECT_EQ(decoded.block_tree.host_swa_block_ratio, original.block_tree.host_swa_block_ratio);
 
     const auto empty = StageCacheSnapshot::deserialize(StageCacheSnapshot{}.serialize());
     EXPECT_TRUE(empty.groups.empty());
     EXPECT_TRUE(empty.block_tree.group_sets.empty());
+    EXPECT_DOUBLE_EQ(empty.block_tree.host_swa_block_ratio, 1.0);
+
+    for (const auto* invalid : {"0", "-1", "nan", "inf", "0.5trailing"}) {
+        auto malformed = payload;
+        malformed.replace(malformed.rfind('|') + 1, std::string::npos, invalid);
+        EXPECT_THROW(StageCacheSnapshot::deserialize(malformed), std::exception);
+    }
 
     EXPECT_THROW(StageCacheSnapshot::deserialize(""), std::exception);
     EXPECT_THROW(StageCacheSnapshot::deserialize("a|1|4|4|4|1|0"), std::exception);
-    EXPECT_THROW(StageCacheSnapshot::deserialize("full|1|1|4|2|4|1,2|0|p|full|4096|1024|0"), std::exception);
+    EXPECT_THROW(StageCacheSnapshot::deserialize("full|1|1|4|2|4|1,2|0|p|full|4096|1024|0|1"), std::exception);
 }
 
 TEST(PPTopologyValidatorTest, SwaGroupPasses) {
@@ -417,6 +428,76 @@ TEST(PPTopologyValidatorTest, TierSizingRejectsInconsistentEnablementAndMissingG
     result = validatePPTopology({stage0, stage1});
     EXPECT_FALSE(result.ok);
     EXPECT_NE(result.error.find("missing BlockTreeCache group-set sizing"), std::string::npos);
+}
+
+TEST(PPTopologyValidatorTest, NonDefaultHostRatioUsesUsableSlotsAndLeavesDiskDeviceProportional) {
+    for (const double ratio : {0.5, 2.0}) {
+        SCOPED_TRACE(ratio);
+        auto stage0                         = makeTierSnapshot(10, 10);
+        auto stage1                         = makeTierSnapshot(20, 10);
+        stage0.block_tree.host_budget_bytes = stage1.block_tree.host_budget_bytes = 120 * 4096;
+        stage0.block_tree.host_swa_block_ratio = stage1.block_tree.host_swa_block_ratio = ratio;
+        stage0.block_tree.disk_budget_bytes                                             = 240 * 4096;
+        stage1.block_tree.disk_budget_bytes                                             = 60 * 4096;
+
+        const auto result = validatePPTopology({stage0, stage1});
+        ASSERT_TRUE(result.ok) << result.error;
+        EXPECT_EQ(canonicalBlockNums(result), (std::vector<uint32_t>{10, 10}));
+        // Both reserved block-zero slots consume budget; the requested ratio applies to the usable remainder.
+        EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), ratio == 0.5 ? 79u : 40u);
+        EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::SWA), ratio == 0.5 ? 40u : 79u);
+        EXPECT_EQ(result.agreed.block_tree.disk.at(CacheGroupType::FULL), 30u);
+        EXPECT_EQ(result.agreed.block_tree.disk.at(CacheGroupType::SWA), 30u);
+    }
+}
+
+TEST(PPTopologyValidatorTest, NonDefaultHostRatioUsesSmallestStageBudget) {
+    auto stage0                            = makeTierSnapshot(40, 10);
+    auto stage1                            = makeTierSnapshot(20, 10);
+    stage0.block_tree.host_swa_block_ratio = stage1.block_tree.host_swa_block_ratio = 0.5;
+    stage0.block_tree.host_budget_bytes                                             = 120 * 4096;
+    stage1.block_tree.host_budget_bytes                                             = 90 * 4096;
+
+    const auto result = validatePPTopology({stage0, stage1});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 59u);
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::SWA), 30u);
+}
+
+TEST(PPTopologyValidatorTest, NonDefaultHostRatioUsesEachStagePoolStrides) {
+    auto stage0                            = makeTierSnapshot(40, 10);
+    auto stage1                            = stage0;
+    stage0.block_tree.host_swa_block_ratio = stage1.block_tree.host_swa_block_ratio = 0.5;
+    stage0.block_tree.host_budget_bytes = stage1.block_tree.host_budget_bytes = 120 * 4096;
+    stage0.block_tree.group_sets[1].pool_stride                               = 8192;
+    stage1.block_tree.group_sets[0].pool_stride                               = 8192;
+
+    const auto result = validatePPTopology({stage0, stage1});
+    ASSERT_TRUE(result.ok) << result.error;
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::FULL), 47u);
+    EXPECT_EQ(result.agreed.block_tree.host.at(CacheGroupType::SWA), 24u);
+}
+
+TEST(PPTopologyValidatorTest, NonDefaultHostRatioRejectsBudgetWithoutUsableSlots) {
+    auto stage                            = makeTierSnapshot(10, 10);
+    stage.block_tree.host_budget_bytes    = 3 * 4096;
+    stage.block_tree.host_swa_block_ratio = 0.5;
+    const auto result                     = validatePPTopology({stage});
+    EXPECT_FALSE(result.ok);
+    EXPECT_NE(result.error.find("usable block"), std::string::npos);
+}
+
+TEST(PPTopologyValidatorTest, RejectsInvalidHostRatioInSizingAndWireFormat) {
+    for (const double ratio :
+         {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        auto stage                            = makeTierSnapshot(10, 10);
+        stage.block_tree.host_budget_bytes    = 120 * 4096;
+        stage.block_tree.host_swa_block_ratio = ratio;
+        const auto result                     = validatePPTopology({stage});
+        EXPECT_FALSE(result.ok);
+        EXPECT_NE(result.error.find("HOST SWA block ratio"), std::string::npos);
+        EXPECT_THROW(stage.serialize(), std::exception);
+    }
 }
 
 }  // namespace rtp_llm

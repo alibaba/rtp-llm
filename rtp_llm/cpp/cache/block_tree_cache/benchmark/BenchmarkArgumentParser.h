@@ -57,6 +57,15 @@ inline uint64_t parseUnsigned(const std::string& key, const NextArgumentValue& n
     return value;
 }
 
+inline bool parseBoolean(const std::string& key, const NextArgumentValue& next) {
+    const auto value = next();
+    if (value == "true" || value == "1")
+        return true;
+    if (value == "false" || value == "0")
+        return false;
+    throw std::runtime_error("Invalid boolean for --" + key + ": " + value);
+}
+
 inline int parseInteger(const std::string& key, const NextArgumentValue& next) {
     const std::string text = next();
     size_t            parsed{0};

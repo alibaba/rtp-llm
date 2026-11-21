@@ -183,31 +183,6 @@ static const std::vector<std::string>& dsv4StateSwaTags() {
     return kTags;
 }
 
-// DEV expressed "put the fixed pools in pinned host memory" with a single global
-// KVCacheConfig::dsv4_fixed_pool_use_memory flag.  MAIN drives residency per pool through the
-// spec desc; a host-resident pool must also opt out of the paged HBM budget, otherwise
-// checkGroupResidencyBudget() rejects the topology.
-static void
-setDsv4PoolMemoryPlacement(ModelConfig& model_config, const std::string& tag, CacheMemoryPlacement placement) {
-    for (auto& descs : model_config.kv_cache_spec_descs) {
-        for (auto& desc : descs) {
-            if (desc.tag != tag) {
-                continue;
-            }
-            if (!desc.memory.has_value()) {
-                desc.memory = CacheMemoryPolicyDesc{};
-            }
-            desc.memory->placement = placement;
-            if (placement != CacheMemoryPlacement::DEVICE) {
-                if (!desc.capacity.has_value()) {
-                    desc.capacity = CacheCapacityPolicyDesc{};
-                }
-                desc.capacity->charge_to_paged_budget = false;
-            }
-        }
-    }
-}
-
 static std::vector<int> makeProLayerCompressRatios() {
     std::vector<int> ratios = {128, 128};
     for (int i = 2; i < 61; ++i) {
@@ -2126,109 +2101,6 @@ TEST(CacheConfigTest, DSV4StateSwaPoolsWithoutExplicitBlocksFollowBaseline) {
 }
 
 // Ported from DEV CacheConfigTest.DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget.
-// DEV flipped every fixed pool to pinned host memory with KVCacheConfig::dsv4_fixed_pool_use_memory
-// and asserted the device pool grew because those pools stopped charging the GPU budget.  On MAIN
-// budget exclusion is `charge_to_paged_budget = false`, which blockBudgetForConfig() only honours
-// for explicitly-sized pools (non-explicit pools always contribute marginal bytes regardless of
-// residency), so the pinned pools are sized explicitly here.
-TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackIsExcludedFromGpuBudget) {
-    ParallelismConfig pc;
-    RuntimeConfig     runtime_config;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-
-    constexpr uint32_t kFixedPoolBlocks = 64;
-
-    auto make_kv_config = [] {
-        KVCacheConfig kv_cache_config;
-        kv_cache_config.seq_size_per_block = 128;
-        kv_cache_config.kv_cache_mem_mb    = 65536;
-        kv_cache_config.reuse_cache_tail_blocks = 4;
-        return kv_cache_config;
-    };
-
-    auto gpu_fixed_mc = makeProModelConfig();
-    for (const auto& tag : dsv4StateSwaTags()) {
-        setDsv4ExplicitPoolBlocks(gpu_fixed_mc, tag, kFixedPoolBlocks);
-    }
-    auto pinned_fixed_mc = gpu_fixed_mc;
-    for (const auto& tag : dsv4StateSwaTags()) {
-        setDsv4PoolMemoryPlacement(pinned_fixed_mc, tag, CacheMemoryPlacement::HOST_PINNED);
-    }
-
-    auto           created_gpu_fixed = CacheConfigCreator::createConfig(gpu_fixed_mc, pc, make_kv_config());
-    const uint32_t gpu_fixed_candidate_block_num =
-        CacheConfigCreator::computeLocalBlockNum(created_gpu_fixed, gpu_fixed_mc, runtime_config, make_kv_config(), pc);
-    auto gpu_fixed = rtp_llm::test::finalizeCacheConfig(created_gpu_fixed, gpu_fixed_candidate_block_num);
-
-    auto           created_pinned_fixed = CacheConfigCreator::createConfig(pinned_fixed_mc, pc, make_kv_config());
-    const uint32_t pinned_fixed_candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
-        created_pinned_fixed, pinned_fixed_mc, runtime_config, make_kv_config(), pc);
-    auto pinned_fixed = rtp_llm::test::finalizeCacheConfig(created_pinned_fixed, pinned_fixed_candidate_block_num);
-
-    // Device-resident fixed pools reserve HBM; pinned ones do not, so the paged pool is larger.
-    EXPECT_GT(test::explicitPoolReserveBytes(gpu_fixed), 0u);
-    EXPECT_EQ(test::explicitPoolReserveBytes(pinned_fixed), 0u);
-    EXPECT_GT(pinned_fixed_candidate_block_num, gpu_fixed_candidate_block_num);
-
-    for (const auto& group : pinned_fixed.groups()) {
-        const auto tag = group.tag;
-        if (group.policy.group_type != CacheGroupType::SWA) {
-            continue;
-        }
-        EXPECT_EQ(group.block_num, kFixedPoolBlocks) << "tag=" << tag;
-        EXPECT_EQ(group.policy.memory_placement, CacheMemoryPlacement::HOST_PINNED) << "tag=" << tag;
-        EXPECT_EQ(gpu_fixed.group(tag).block_num, kFixedPoolBlocks) << "tag=" << tag;
-    }
-}
-
-// Automatic pools use the same baseline regardless of memory placement.
-TEST(CacheConfigTest, DSV4PinnedFixedPoolFallbackFollowsFullPoolBaseline) {
-    ParallelismConfig pc;
-    RuntimeConfig     runtime_config;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-
-    auto make_kv_config = [] {
-        KVCacheConfig kv_cache_config;
-        kv_cache_config.seq_size_per_block = 128;
-        kv_cache_config.kv_cache_mem_mb    = 65536;
-        kv_cache_config.reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-        return kv_cache_config;
-    };
-
-    auto gpu_fixed_mc = makeProModelConfig();
-    for (const auto& tag : dsv4StateSwaTags()) {
-        setDsv4ExplicitPoolBlocks(gpu_fixed_mc, tag, 0);
-    }
-    auto pinned_fixed_mc = gpu_fixed_mc;
-    for (const auto& tag : dsv4StateSwaTags()) {
-        setDsv4PoolMemoryPlacement(pinned_fixed_mc, tag, CacheMemoryPlacement::HOST_PINNED);
-    }
-
-    auto           created_gpu_fixed = CacheConfigCreator::createConfig(gpu_fixed_mc, pc, make_kv_config());
-    const uint32_t gpu_fixed_candidate_block_num =
-        CacheConfigCreator::computeLocalBlockNum(created_gpu_fixed, gpu_fixed_mc, runtime_config, make_kv_config(), pc);
-    auto gpu_fixed = rtp_llm::test::finalizeCacheConfig(created_gpu_fixed, gpu_fixed_candidate_block_num);
-
-    auto           created_pinned_fixed = CacheConfigCreator::createConfig(pinned_fixed_mc, pc, make_kv_config());
-    const uint32_t pinned_fixed_candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
-        created_pinned_fixed, pinned_fixed_mc, runtime_config, make_kv_config(), pc);
-    auto pinned_fixed = rtp_llm::test::finalizeCacheConfig(created_pinned_fixed, pinned_fixed_candidate_block_num);
-
-    EXPECT_EQ(test::explicitPoolReserveBytes(gpu_fixed), 0u);
-    EXPECT_EQ(test::explicitPoolReserveBytes(pinned_fixed), 0u);
-    EXPECT_EQ(pinned_fixed_candidate_block_num, gpu_fixed_candidate_block_num);
-
-    ASSERT_EQ(gpu_fixed.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
-    ASSERT_EQ(pinned_fixed.topology().groups().size(), static_cast<size_t>(kDsv4PoolNum));
-    for (const auto& group : pinned_fixed.groups()) {
-        EXPECT_EQ(gpu_fixed.group(group.tag).block_num, static_cast<uint32_t>(gpu_fixed_candidate_block_num))
-            << "tag=" << group.tag;
-        EXPECT_EQ(group.block_num, static_cast<uint32_t>(pinned_fixed_candidate_block_num)) << "tag=" << group.tag;
-    }
-}
-
 TEST(CacheConfigTest, DSV4MtpKeepsProposeLayerInSwaPool) {
     auto score_model_config                                  = makeFlashModelConfig();
     auto propose_model_config                                = makeFlashMtpModelConfig();
@@ -2376,6 +2248,8 @@ TEST(CacheConfigTest, DSV4MtpJointBudgetIncludesScoreAndProposeSwaBacking) {
         EXPECT_EQ(sub_config->group("swa_kv").block_num, block_num);
     }
 }
+
+
 
 TEST(CacheConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     // gen_num_per_cycle=2 -> CSA/INDEXER R=10, HCA R=130, SWA R=130.

@@ -1,7 +1,12 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
+#include <chrono>
+#include <future>
+#include <limits>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -19,11 +24,13 @@
 
 #include <cuda_runtime.h>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcTransferService.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/CrcCopyExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 
 namespace rtp_llm {
@@ -46,7 +53,7 @@ uint32_t softwareCrc32c(const uint8_t* data, size_t size) {
 class PerRankBlockTransferEngineCrcTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        if (!CrcBlockCopyBatch::available()) {
+        if (!CrcCopyWorkspace::available()) {
             GTEST_SKIP() << "CUDA13 CRC backend unavailable";
         }
         int count = 0;
@@ -58,8 +65,16 @@ protected:
 
     void TearDown() override {
         engine_.reset();
+        if (dump_root_restore_) {
+            auto                        writer = CrcDumpWriter::forRank(0);
+            std::lock_guard<std::mutex> lock(writer->mutex_);
+            writer->rank_dir_ = *dump_root_restore_;
+        }
         for (auto& [pool, block] : owned_) {
-            releasePoolBlock(*pool, block);
+            if (async_caller_references_)
+                pool->decTreeRef(block, BlockTreeRefType::CACHE);
+            else
+                releasePoolBlock(*pool, block);
         }
         owned_.clear();
         group_.reset();
@@ -68,6 +83,13 @@ protected:
         disk_.reset();
         temp_dir_.reset();
     }
+
+    void retainAsyncAllocations() {
+        for (const auto& entry : owned_)
+            entry.first->incTreeRef(entry.second, BlockTreeRefType::CACHE);
+        async_caller_references_ = true;
+    }
+    bool async_caller_references_{false};
 
     BlockIdxType allocate(const std::shared_ptr<IBlockPool>& pool) {
         const auto block = poolMalloc(*pool);
@@ -135,13 +157,16 @@ protected:
                                   true,
                                   physical_geometry ? payload_ : 0);
         // Keep every corruption case in one executor batch.
-        // Disk staging reserves half its slots for FULL.
         engine_ = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_},
                                                                true,
-                                                               DeviceHostCopyOptions{},
-                                                               std::max<size_t>(8, 2 * item_count),
+                                                               std::max<size_t>(8, 4 * item_count),
                                                                std::max<size_t>(8, item_count),
-                                                               1);
+                                                               1,
+                                                               10000,
+                                                               nullptr,
+                                                               0,
+                                                               4);
+
         for (size_t item = 0; item < item_count; ++item) {
             std::vector<BlockIdxType> source, target;
             for (const auto& device : devices_) {
@@ -210,21 +235,6 @@ protected:
             descriptors.push_back(makeDescriptor(
                 from, to, from == Tier::DEVICE ? sources_[item] : targets_[item], hosts_[item], disks_[item]));
         }
-        // DEVICE->DISK stages one backing per task; keep load directions batched
-        // so corruption in the final backing still exercises all-item validation.
-        if (from == Tier::DEVICE && to == Tier::DISK) {
-            std::shared_ptr<TransferAsyncContext> context;
-            for (auto& descriptor : descriptors) {
-                context = engine_->execute(makeTransferTask({std::move(descriptor)}));
-                context->waitDone();
-                EXPECT_TRUE(context->done());
-                if (!context->success()) {
-                    ADD_FAILURE() << "DEVICE->DISK fixture setup failed: " << context->errorInfo().ToString();
-                    return context;
-                }
-            }
-            return context;
-        }
         auto context = engine_->execute(makeTransferTask(std::move(descriptors)));
         context->waitDone();
         EXPECT_TRUE(context->done());
@@ -253,12 +263,11 @@ protected:
 
     std::filesystem::path captureDumps(const char* name) {
         const auto root = std::filesystem::path(temp_dir_->path) / name;
-        engine_->device_host_executor_->crc_service_ =
-            std::make_shared<CrcTransferService>(std::vector<GroupSetPtr>{group_},
-                                                 std::max<size_t>(8, hosts_.size()),
-                                                 1,
-                                                 0,
-                                                 std::make_shared<CrcDumpWriter>(0, root.string()));
+        auto                        writer = CrcDumpWriter::forRank(0);
+        std::lock_guard<std::mutex> lock(writer->mutex_);
+        if (!dump_root_restore_)
+            dump_root_restore_ = writer->rank_dir_;
+        writer->rank_dir_ = (root / "rank_0").string();
         return root / "rank_0";
     }
 
@@ -292,9 +301,10 @@ protected:
         EXPECT_EQ(read_bytes(dumps[0] / "checked_footer.bin"), footer);
     }
 
+    std::optional<std::string>                                        dump_root_restore_;
     std::unique_ptr<TempDirGuard>                                     temp_dir_;
     std::shared_ptr<HostBlockPool>                                    host_;
-    std::shared_ptr<BlockTreeDiskBlockPool>                           disk_;
+    std::shared_ptr<DiskBlockPool>                                    disk_;
     std::vector<DeviceBlockPoolPtr>                                   devices_;
     GroupSetPtr                                                       group_;
     std::shared_ptr<PerRankBlockTransferEngine>                       engine_;
@@ -305,6 +315,535 @@ protected:
     std::vector<std::vector<uint8_t>>                                 expected_;
     size_t                                                            payload_{0}, encoded_{0}, layers_{0};
 };
+
+// Test-owned descriptors and result storage are not a backend operation handle. Service poll
+// delivers all callbacks, including those whose test result owner was dropped.
+struct ServiceCompletion {
+    std::vector<TransferDescriptor> descriptors;
+    std::optional<TransferResult>   result;
+    size_t                          callbacks{0};
+};
+using ServiceCompletionPtr = std::shared_ptr<ServiceCompletion>;
+
+ServiceCompletionPtr submitService(CrcCopyExecutor&                       service,
+                                   const std::vector<HostBufferView>&     hosts,
+                                   const std::vector<TransferDescriptor>& descriptors,
+                                   const GroupSetPtr&                     group) {
+    auto completion = std::make_shared<ServiceCompletion>();
+    completion->descriptors = descriptors;
+    if (!service.trySubmit(hosts, completion->descriptors, group, [completion](TransferResult result) {
+            EXPECT_EQ(++completion->callbacks, 1u);
+            EXPECT_TRUE(result.buffer_safe);
+            completion->result = std::move(result);
+        }))
+        return nullptr;
+    return completion;
+}
+
+std::optional<TransferResult> waitService(CrcCopyExecutor& service, const ServiceCompletionPtr& completion) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!completion->result) {
+        service.poll();
+        if (std::chrono::steady_clock::now() >= deadline)
+            throw std::runtime_error("CRC service completion deadline exceeded");
+        std::this_thread::yield();
+    }
+    return completion->result;
+}
+
+TransferResult runService(CrcCopyExecutor&                       service,
+                          const std::vector<HostBufferView>&     hosts,
+                          const std::vector<TransferDescriptor>& descriptors,
+                          const GroupSetPtr&                     group) {
+    auto completion = submitService(service, hosts, descriptors, group);
+    if (!completion)
+        throw std::runtime_error("CRC slot unexpectedly busy");
+    return waitService(service, completion).value();
+}
+
+void expectRejected(CrcCopyExecutor& service, const ServiceCompletionPtr& completion) {
+    ASSERT_TRUE(completion);
+    ASSERT_TRUE(completion->result);  // Immediate rejection must precede return.
+    EXPECT_EQ(completion->result->copy_error, CacheCopyError::INVALID_REQUEST);
+    service.poll();
+    EXPECT_EQ(completion->callbacks, 1u);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, BufferBoundsFailuresDoNotCopyOrConsumeSlots) {
+    ASSERT_NO_FATAL_FAILURE(initialize());
+    retainAsyncAllocations();
+    CrcCopyExecutor            service({group_}, CrcCopyDirection::EVICT, 1, 1);
+    const auto                 buffer = host_->blockBuffer(hosts_[0]);
+    const HostBufferView       view{buffer.addr, payload_, buffer.stride_bytes};
+    const auto                 descriptor = TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0]);
+    const std::vector<uint8_t> guard(encoded_, 0x5a);
+    std::memcpy(buffer.addr, guard.data(), guard.size());
+    const auto reject = [&](const HostBufferView& host, const TransferDescriptor& desc) {
+        SCOPED_TRACE(desc.debugString());
+        const auto submitted = submitService(service, {host}, {desc}, group_);
+        expectRejected(service, submitted);
+    };
+    // Raw buffer limits belong to the CUDA workspace; descriptor validation is
+    // covered through the PerRank entry below.
+    reject({nullptr, payload_, buffer.stride_bytes}, descriptor);
+    reject({buffer.addr, payload_, encoded_ - 1}, descriptor);
+    expectRejected(service, submitService(service, {view, view}, {descriptor, descriptor}, group_));
+    EXPECT_EQ(std::memcmp(buffer.addr, guard.data(), guard.size()), 0);
+    expectUntouchedTargets();
+    auto accepted = submitService(service, {view}, {descriptor}, group_);
+    ASSERT_TRUE(accepted);
+    EXPECT_TRUE(waitService(service, accepted)->ok());
+    EXPECT_EQ(std::memcmp(buffer.addr, expected_[0].data(), payload_), 0);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncPendingAndBusyDoNotPublishSafety) {
+    ASSERT_NO_FATAL_FAILURE(initialize());
+    retainAsyncAllocations();
+    const auto           buffer = host_->blockBuffer(hosts_[0]);
+    const HostBufferView view{buffer.addr, payload_, buffer.stride_bytes};
+    const auto           descriptor = TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0]);
+    CrcCopyExecutor      service({group_}, CrcCopyDirection::EVICT, 1, 1);
+    auto                 submitted = submitService(service, {view}, {descriptor}, group_);
+    ASSERT_TRUE(submitted);
+    EXPECT_FALSE(submitted->result.has_value());
+    EXPECT_EQ(submitted->callbacks, 0u);
+
+    size_t busy_callbacks = 0;
+    EXPECT_FALSE(
+        service.trySubmit({view}, DescriptorView(&descriptor, 1), group_, [&](TransferResult) { ++busy_callbacks; }));
+    EXPECT_EQ(busy_callbacks, 0u);
+    const auto completed = waitService(service, submitted);
+    ASSERT_TRUE(completed.has_value());
+    EXPECT_TRUE(completed->ok());
+    EXPECT_TRUE(completed->buffer_safe);
+    EXPECT_EQ(submitted->callbacks, 1u);
+    EXPECT_EQ(busy_callbacks, 0u);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncDirectionQuotasAndIndependentBytes) {
+    initialize(false, false, 17);
+    retainAsyncAllocations();
+    for (size_t parallel : {1u, 4u, 8u}) {
+        CrcCopyExecutor evict_service({group_}, CrcCopyDirection::EVICT, 8, parallel);
+        CrcCopyExecutor load_service({group_}, CrcCopyDirection::LOAD, 8, parallel);
+        ASSERT_EQ(evict_service.slots_.at(0).size(), parallel);
+        ASSERT_EQ(load_service.slots_.at(0).size(), parallel);
+        std::vector<ServiceCompletionPtr> evictions, loads;
+        for (size_t i = 0; i < parallel; ++i) {
+            const auto buffer    = host_->blockBuffer(hosts_[i]);
+            auto       submitted = submitService(evict_service,
+                                                 {{buffer.addr, payload_, buffer.stride_bytes}},
+                                                 {TransferDescriptor::deviceToHost(0, sources_[i], hosts_[i])},
+                                           group_);
+            ASSERT_TRUE(submitted);
+            evictions.push_back(std::move(submitted));
+        }
+        for (size_t i = parallel; i < 2 * parallel; ++i) {
+            const auto buffer = host_->blockBuffer(hosts_[i]);
+            std::memcpy(buffer.addr, expected_[i].data(), payload_);
+            const auto checksum = softwareCrc32c(expected_[i].data(), payload_);
+            std::memcpy(static_cast<uint8_t*>(buffer.addr) + encoded_ - 4, &checksum, 4);
+            auto submitted = submitService(load_service,
+                                           {{buffer.addr, payload_, buffer.stride_bytes}},
+                                           {TransferDescriptor::hostToDevice(0, hosts_[i], targets_[i])},
+                                           group_);
+            ASSERT_TRUE(submitted);
+            loads.push_back(std::move(submitted));
+        }
+        const size_t extra  = 2 * parallel;
+        const auto   buffer = host_->blockBuffer(hosts_[extra]);
+        EXPECT_EQ(submitService(evict_service,
+                                {{buffer.addr, payload_, buffer.stride_bytes}},
+                                {TransferDescriptor::deviceToHost(0, sources_[extra], hosts_[extra])},
+                                group_),
+                  nullptr);
+        EXPECT_EQ(submitService(load_service,
+                                {{buffer.addr, payload_, buffer.stride_bytes}},
+                                {TransferDescriptor::hostToDevice(0, hosts_[extra], targets_[extra])},
+                                group_),
+                  nullptr);
+        for (size_t i = 0; i < parallel; ++i) {
+            auto result = waitService(evict_service, evictions[i]);
+            ASSERT_TRUE(result->ok()) << result->status.ToString();
+            EXPECT_EQ(std::memcmp(hostData(i), expected_[i].data(), payload_), 0);
+            uint32_t checksum;
+            std::memcpy(&checksum, hostData(i) + encoded_ - 4, 4);
+            EXPECT_EQ(checksum, softwareCrc32c(expected_[i].data(), payload_));
+            ASSERT_TRUE(waitService(load_service, loads[i])->ok());
+            EXPECT_EQ(readTarget(i + parallel), expected_[i + parallel]);
+            EXPECT_EQ(host_->treeRefCount(hosts_[i]), 1u);
+            EXPECT_EQ(host_->treeRefCount(hosts_[i + parallel]), 1u);
+            for (size_t member = 0; member < devices_.size(); ++member) {
+                EXPECT_EQ(devices_[member]->treeRefCount(sources_[i][member]), 1u);
+                EXPECT_EQ(devices_[member]->treeRefCount(targets_[i + parallel][member]), 1u);
+            }
+            EXPECT_EQ(evictions[i]->callbacks, 1u);
+        }
+    }
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncFixedWorkspaceSwitchesFullAndSwaFullAndTailBatches) {
+    initialize();
+    auto policy                         = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.sliding_window_size          = 128;
+    constexpr size_t     swa_payload    = 4096;
+    auto                 swa_device     = makeTestDevicePool({{swa_payload, 0}}, 2, "async_swa");
+    auto                 swa_host       = makeHostPool(swa_payload, 2, true);
+    auto                 swa            = makeTestGroupSet(1,
+                                makeTestTopology({makeTestGroupBase(policy, {0}, swa_payload, 0)}),
+                                                           {"group0"},
+                                                           {swa_device},
+                                swa_host,
+                                nullptr,
+                                true);
+    const auto           swa_block      = allocate(swa_device);
+    const auto           swa_host_block = allocate(swa_host);
+    std::vector<uint8_t> swa_bytes(swa_payload);
+    for (size_t i = 0; i < swa_bytes.size(); ++i)
+        swa_bytes[i] = static_cast<uint8_t>(i * 29 + 97);
+    const auto swa_buffer = swa_device->convertIndexToBuffer(0, swa_block).front();
+    ASSERT_EQ(cudaMemcpy(swa_buffer.addr, swa_bytes.data(), swa_payload, cudaMemcpyHostToDevice), cudaSuccess);
+    retainAsyncAllocations();
+    CrcCopyExecutor                                   evict_service({group_, swa}, CrcCopyDirection::EVICT, 3, 1);
+    CrcCopyExecutor                                   load_service({group_, swa}, CrcCopyDirection::LOAD, 3, 1);
+    const std::vector<std::pair<GroupSetPtr, size_t>> turns{{group_, 3}, {swa, 1}, {group_, 1}, {swa, 1}, {group_, 3}};
+    for (const auto& [group, count] : turns) {
+        for (bool evict : {true, false}) {
+            std::vector<HostBufferView>     views;
+            std::vector<TransferDescriptor> descriptors;
+            for (size_t i = 0; i < count; ++i) {
+                const bool is_swa     = group == swa;
+                const auto host_block = is_swa ? swa_host_block : hosts_[i];
+                const auto buffer     = group->hostPool()->blockBuffer(host_block);
+                views.push_back({buffer.addr, group->payloadBytes(), buffer.stride_bytes});
+                const auto blocks = is_swa ? std::vector<BlockIdxType>{swa_block} : (evict ? sources_[i] : targets_[i]);
+                descriptors.push_back(evict ?
+                                          TransferDescriptor::deviceToHost(group->groupSetId(), blocks, host_block) :
+                                          TransferDescriptor::hostToDevice(group->groupSetId(), host_block, blocks));
+            }
+            auto& service   = evict ? evict_service : load_service;
+            auto  submitted = submitService(service, views, descriptors, group);
+            ASSERT_TRUE(submitted);
+            EXPECT_TRUE(waitService(service, submitted)->ok());
+            for (size_t i = 0; i < count; ++i) {
+                const auto& expected = group == swa ? swa_bytes : expected_[i];
+                EXPECT_EQ(std::memcmp(views[i].base, expected.data(), expected.size()), 0);
+                uint32_t checksum;
+                std::memcpy(&checksum, static_cast<uint8_t*>(views[i].base) + group->storageBytes() - 4, 4);
+                EXPECT_EQ(checksum, softwareCrc32c(expected.data(), expected.size()));
+                if (!evict && group != swa) {
+                    EXPECT_EQ(readTarget(i), expected);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncCompletedCallbackCannotAffectReusedSlot) {
+    ASSERT_NO_FATAL_FAILURE(initialize());
+    retainAsyncAllocations();
+    CrcCopyExecutor service({group_}, CrcCopyDirection::EVICT, 3, 1);
+    const auto      submit = [&](size_t index) {
+        const auto buffer = host_->blockBuffer(hosts_[index]);
+        return submitService(service,
+                                  {{buffer.addr, payload_, buffer.stride_bytes}},
+                                  {TransferDescriptor::deviceToHost(0, sources_[index], hosts_[index])},
+                             group_);
+    };
+    auto first = submit(0);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(waitService(service, first)->ok());
+    auto second = submit(1);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(first->callbacks, 1u);
+    EXPECT_EQ(submit(2), nullptr);
+    first.reset();
+    EXPECT_EQ(submit(2), nullptr);
+    ASSERT_TRUE(waitService(service, second)->ok());
+    EXPECT_EQ(std::memcmp(hostData(1), expected_[1].data(), payload_), 0);
+    auto third = submit(2);
+    ASSERT_TRUE(third);
+    ASSERT_TRUE(waitService(service, third)->ok());
+    EXPECT_EQ(std::memcmp(hostData(2), expected_[2].data(), payload_), 0);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncDroppedResultOwnerDrainsWithCallerOwnedReferences) {
+    initialize();
+    retainAsyncAllocations();
+    CrcCopyExecutor service({group_}, CrcCopyDirection::EVICT, 3, 1);
+    const auto      buffer    = host_->blockBuffer(hosts_[0]);
+    auto            submitted = submitService(service,
+                                              {{buffer.addr, payload_, buffer.stride_bytes}},
+                                              {TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0])},
+                                   group_);
+    ASSERT_TRUE(submitted);
+    EXPECT_EQ(host_->treeRefCount(hosts_[0]), 1u);
+    for (size_t member = 0; member < devices_.size(); ++member)
+        EXPECT_EQ(devices_[member]->treeRefCount(sources_[0][member]), 1u);
+    std::weak_ptr<ServiceCompletion> weak = submitted;
+    submitted.reset();
+    EXPECT_FALSE(weak.expired());
+    // Dropping the handle does not retire CUDA work or release caller-owned
+    // business references. Keep those references until drain proves completion.
+    service.stopAndWaitForIo();
+    EXPECT_FALSE(weak.expired());
+    EXPECT_FALSE(service.poll());
+    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(std::memcmp(hostData(0), expected_[0].data(), payload_), 0);
+    auto releaseCaller = [&](const std::shared_ptr<IBlockPool>& pool, BlockIdxType block) {
+        const auto found = std::find(owned_.begin(), owned_.end(), std::make_pair(pool, block));
+        ASSERT_NE(found, owned_.end());
+        EXPECT_EQ(pool->treeRefCount(block), 1u);
+        pool->decTreeRef(block, BlockTreeRefType::CACHE);
+        owned_.erase(found);
+        EXPECT_FALSE(pool->isAllocated(block));
+    };
+    for (size_t member = 0; member < devices_.size(); ++member)
+        releaseCaller(devices_[member], sources_[0][member]);
+    releaseCaller(host_, hosts_[0]);
+    const auto rejected = submitService(service,
+                                        {{buffer.addr, payload_, buffer.stride_bytes}},
+                                        {TransferDescriptor::deviceToHost(0, sources_[1], hosts_[1])},
+                                        group_);
+    expectRejected(service, rejected);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncBatchFailurePreservesIndicesAndRejectsInvalidAdmission) {
+    initialize();
+    retainAsyncAllocations();
+    CrcCopyExecutor                 service({group_}, CrcCopyDirection::LOAD, 3, 1);
+    std::vector<HostBufferView>     views;
+    std::vector<TransferDescriptor> descriptors;
+    for (size_t i = 0; i < hosts_.size(); ++i) {
+        const auto buffer = host_->blockBuffer(hosts_[i]);
+        std::memcpy(buffer.addr, expected_[i].data(), payload_);
+        const auto checksum = softwareCrc32c(expected_[i].data(), payload_);
+        std::memcpy(hostData(i) + encoded_ - 4, &checksum, 4);
+        views.push_back({buffer.addr, payload_, buffer.stride_bytes});
+        descriptors.push_back(TransferDescriptor::hostToDevice(0, hosts_[i], targets_[i]));
+    }
+    const auto capacity         = views.back().capacity_bytes;
+    views.back().capacity_bytes = encoded_ - 1;
+    expectRejected(service, submitService(service, views, descriptors, group_));
+    views.back().capacity_bytes = capacity;
+    hostData(2)[encoded_ - 1] ^= 1;
+    auto submitted = submitService(service, views, descriptors, group_);
+    ASSERT_TRUE(submitted);
+    // All operation metadata must survive destruction of the submission inputs.
+    views.clear();
+    descriptors.clear();
+    auto result = waitService(service, submitted);
+    EXPECT_EQ(result->copy_error, CacheCopyError::CRC_MISMATCH);
+    EXPECT_TRUE(result->buffer_safe);
+    EXPECT_EQ(result->block_errors,
+              (std::vector<CacheCopyError>{
+                  CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH}));
+    EXPECT_THROW((CrcCopyExecutor({group_}, CrcCopyDirection::LOAD, 3, 0)), std::invalid_argument);
+    EXPECT_THROW((CrcCopyExecutor({group_}, CrcCopyDirection::LOAD, 3, std::numeric_limits<size_t>::max())),
+                 std::overflow_error);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncDeviceErrorsPreserveCallerReferencesAndReuseSlots) {
+    initialize();
+    retainAsyncAllocations();
+    const auto buffer     = host_->blockBuffer(hosts_[0]);
+    const auto descriptor = TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0]);
+    // Cover the service's immediate submit error and accepted-operation error.
+    // Per-CUDA-boundary injection and drain counts belong to CrcBlockCopyBatchTest.
+    for (const char* phase : {"metadata", "query"}) {
+        SCOPED_TRACE(phase);
+        CrcCopyExecutor service({group_}, CrcCopyDirection::EVICT, 3, 1);
+        for (auto& slot : service.slots_.begin()->second)
+            slot.copy->setTestHook([phase](const char* point, void*, void*) {
+                return int(std::strcmp(point, phase) == 0 ? cudaErrorInvalidValue : cudaSuccess);
+            });
+        auto submitted = submitService(service, {{buffer.addr, payload_, buffer.stride_bytes}}, {descriptor}, group_);
+        ASSERT_TRUE(submitted);
+        const bool immediate = std::strcmp(phase, "metadata") == 0;
+        if (!immediate) {
+            EXPECT_EQ(waitService(service, submitted)->copy_error, CacheCopyError::COPY_FAILED);
+        }
+        EXPECT_EQ(host_->treeRefCount(hosts_[0]), 1u);
+        for (size_t member = 0; member < devices_.size(); ++member)
+            EXPECT_EQ(devices_[member]->treeRefCount(sources_[0][member]), 1u);
+        for (auto& slot : service.slots_.begin()->second)
+            slot.copy->setTestHook({});
+        auto healthy = submitService(service, {{buffer.addr, payload_, buffer.stride_bytes}}, {descriptor}, group_);
+        ASSERT_TRUE(healthy);
+        // An immediate error retains its result after the slot is reused.
+        if (immediate) {
+            EXPECT_EQ(waitService(service, submitted)->copy_error, CacheCopyError::COPY_FAILED);
+        }
+        EXPECT_EQ(submitted->callbacks, 1u);
+        EXPECT_TRUE(waitService(service, healthy)->ok());
+    }
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncDrainPreservesUnconsumedResultAndCallerReferences) {
+    initialize();
+    retainAsyncAllocations();
+    const auto      buffer     = host_->blockBuffer(hosts_[0]);
+    const auto      descriptor = TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0]);
+    CrcCopyExecutor service({group_}, CrcCopyDirection::EVICT, 3, 1);
+    auto submitted = submitService(service, {{buffer.addr, payload_, buffer.stride_bytes}}, {descriptor}, group_);
+    ASSERT_TRUE(submitted);
+    EXPECT_EQ(host_->treeRefCount(hosts_[0]), 1u);
+    service.stopAndWaitForIo();
+    EXPECT_EQ(host_->treeRefCount(hosts_[0]), 1u);
+    EXPECT_FALSE(submitted->result);
+    EXPECT_FALSE(service.poll());
+    auto result = submitted->result;
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->ok());
+    EXPECT_EQ(submitted->callbacks, 1u);
+    for (size_t member = 0; member < devices_.size(); ++member)
+        EXPECT_EQ(devices_[member]->treeRefCount(sources_[0][member]), 1u);
+    // Business settlement can recycle a safe block while a consumed handle
+    // still exists. Destroying that handle must not touch the recycled block.
+    const auto owned =
+        std::find(owned_.begin(), owned_.end(), std::make_pair(std::shared_ptr<IBlockPool>(host_), hosts_[0]));
+    ASSERT_NE(owned, owned_.end());
+    host_->decTreeRef(hosts_[0], BlockTreeRefType::CACHE);
+    owned_.erase(owned);
+    EXPECT_FALSE(host_->isAllocated(hosts_[0]));
+    submitted.reset();
+    EXPECT_FALSE(host_->isAllocated(hosts_[0]));
+    for (size_t member = 0; member < devices_.size(); ++member)
+        EXPECT_EQ(devices_[member]->treeRefCount(sources_[0][member]), 1u);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncUsesCallerOwnedStagingLeases) {
+    initialize();
+    retainAsyncAllocations();
+    HostStagingBlockPool pool(1, group_->diskPool()->strideBytes());
+    auto                 leases = pool.tryMallocBatch(1);
+    ASSERT_TRUE(leases.has_value());
+    // Drain the service before the caller-owned leases/pool on assertion failure.
+    CrcCopyExecutor service({group_}, CrcCopyDirection::EVICT, 3, 1);
+    const auto      view = leases->front().blockBuffer(payload_);
+    auto            submitted =
+        submitService(service, {view}, {TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0])}, group_);
+    ASSERT_TRUE(submitted);
+    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
+    const auto result = waitService(service, submitted);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(result->ok());
+    EXPECT_EQ(std::memcmp(view.base, expected_[0].data(), payload_), 0);
+    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
+    leases.reset();
+    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncExecutionSelectsDeviceOnForeignThread) {
+    int count = 0;
+    ASSERT_EQ(cudaGetDeviceCount(&count), cudaSuccess);
+    if (count < 2)
+        GTEST_SKIP() << "requires two locked GPUs to check a different initial device";
+    initialize();
+    retainAsyncAllocations();
+    CrcCopyExecutor    service({group_}, CrcCopyDirection::EVICT, 3, 1);
+    const auto         buffer = host_->blockBuffer(hosts_[0]);
+    std::exception_ptr error;
+    std::thread        owner([&] {
+        try {
+            if (cudaSetDevice(1) != cudaSuccess)
+                throw std::runtime_error("cannot select foreign CUDA device");
+            auto submitted = submitService(service,
+                                                  {{buffer.addr, payload_, buffer.stride_bytes}},
+                                                  {TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0])},
+                                           group_);
+            if (!submitted || !waitService(service, submitted)->ok())
+                throw std::runtime_error("CRC from foreign CUDA thread failed");
+        } catch (...) {
+            error = std::current_exception();
+        }
+    });
+    owner.join();
+    if (error)
+        std::rethrow_exception(error);
+    EXPECT_EQ(std::memcmp(hostData(0), expected_[0].data(), payload_), 0);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncInlineDiagnosticsAndTeardownSelectNonDefaultDevice) {
+    int count = 0;
+    ASSERT_EQ(cudaGetDeviceCount(&count), cudaSuccess);
+    if (count < 2)
+        GTEST_SKIP() << "requires two locked GPUs for inline diagnostics device binding";
+    ASSERT_EQ(cudaSetDevice(1), cudaSuccess);
+    initialize();
+    ASSERT_EQ(devices_.front()->deviceIndex(), 1);
+    retainAsyncAllocations();
+    const auto buffer = host_->blockBuffer(hosts_[0]);
+    std::memcpy(buffer.addr, expected_[0].data(), payload_);
+    const auto checksum = softwareCrc32c(expected_[0].data(), payload_);
+    std::memcpy(hostData(0) + encoded_ - 4, &checksum, 4);
+    hostData(0)[0] ^= 1;
+    int snapshot_device{-1}, drain_device{-1};
+    {
+        auto            writer = std::make_shared<CrcDumpWriter>(0, temp_dir_->path + "/device_1");
+        CrcCopyExecutor load_service({group_}, CrcCopyDirection::LOAD, 3, 1, 0, writer);
+        CrcCopyExecutor evict_service({group_}, CrcCopyDirection::EVICT, 3, 1, 0, writer);
+        for (auto& slot : load_service.slots_.at(1))
+            slot.copy->setTestHook([&](const char* point, void*, void*) {
+                if (std::strcmp(point, "snapshot") == 0)
+                    cudaGetDevice(&snapshot_device);
+                return int(cudaSuccess);
+            });
+        for (auto& slot : evict_service.slots_.at(1))
+            slot.copy->setTestHook([&](const char* point, void*, void*) {
+                if (std::strcmp(point, "drain") == 0)
+                    cudaGetDevice(&drain_device);
+                return int(std::strcmp(point, "metadata") == 0 ? cudaErrorInvalidValue : cudaSuccess);
+            });
+        ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+        auto load = submitService(load_service,
+                                  {{buffer.addr, payload_, buffer.stride_bytes}},
+                                  {TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0])},
+                                  group_);
+        ASSERT_TRUE(load);
+        ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+        EXPECT_EQ(waitService(load_service, load)->copy_error, CacheCopyError::CRC_MISMATCH);
+        EXPECT_EQ(snapshot_device, 1);
+        ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+        auto evict = submitService(evict_service,
+                                   {{buffer.addr, payload_, buffer.stride_bytes}},
+                                   {TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0])},
+                                   group_);
+        ASSERT_TRUE(evict);
+        ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+        EXPECT_FALSE(waitService(evict_service, evict)->ok());
+        EXPECT_EQ(drain_device, 1);
+        ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+    }
+    int device = -1;
+    ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+    EXPECT_EQ(device, 1);
+}
+
+TEST_F(PerRankBlockTransferEngineCrcTest, AsyncCallbackRunsOnOwnerAfterSlotRetirement) {
+    initialize();
+    retainAsyncAllocations();
+    const std::vector<TransferDescriptor> descriptors{TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0])};
+    CrcCopyExecutor                       service({group_}, CrcCopyDirection::EVICT, 3, 1);
+    const auto                            buffer = host_->blockBuffer(hosts_[0]);
+    bool                                  called = false, retired = false;
+    const auto                            owner = std::this_thread::get_id();
+    ASSERT_TRUE(service.trySubmit(
+        {{buffer.addr, payload_, buffer.stride_bytes}}, descriptors, group_, [&](TransferResult result) {
+            called  = true;
+            retired = std::all_of(service.slots_.at(0).begin(), service.slots_.at(0).end(), [](const auto& slot) {
+                return !slot.operation;
+            });
+            EXPECT_TRUE(result.ok());
+            EXPECT_EQ(std::this_thread::get_id(), owner);
+        }));
+    service.stopAndWaitForIo();
+    EXPECT_FALSE(called);
+    EXPECT_FALSE(service.poll());
+    EXPECT_TRUE(called);
+    EXPECT_TRUE(retired);
+    service.poll();
+}
 
 TEST_F(PerRankBlockTransferEngineCrcTest, MultiBackingMemberLayerScaleRoundTripMatchesIndependentCrc) {
     ASSERT_NO_FATAL_FAILURE(initialize());
@@ -323,60 +862,18 @@ TEST_F(PerRankBlockTransferEngineCrcTest, MultiBackingMemberLayerScaleRoundTripM
     }
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, MixedRpcBatchIsRejectedBeforeCopy) {
-    ASSERT_NO_FATAL_FAILURE(initialize(true, false, 2));
-    ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
-    engine_.reset();
-    auto topology = makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_),
-                                      makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {1}, payload_)});
-    group_->initialize(0, topology, {"group0"}, makeTestBackingLayout(payload_, true));
-    auto                           ordinary = makeTestGroupSet(1, topology, {"group1"}, devices_, host_);
-    const std::vector<GroupSetPtr> groups{group_, ordinary};
-    engine_ = std::make_shared<PerRankBlockTransferEngine>(groups, false, DeviceHostCopyOptions{}, 8, 8, 1);
-
-    MemoryOperationRequestPB request;
-    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
-        request,
-        makeTransferTask({TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]),
-                          TransferDescriptor::hostToDevice(1, hosts_[1], targets_[1])}),
-        groups));
-    EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2D);
-    // The ordinary GroupSet uses only its payload, even when the pool has room for a footer.
-    hostData(1)[encoded_ - 1] ^= 1;
-    std::vector<TransferDescriptor> decoded;
-    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, decoded, groups));
-    for (const bool reverse : {false, true}) {
-        SCOPED_TRACE(reverse);
-        if (reverse) {
-            std::reverse(decoded.begin(), decoded.end());
-        }
-        auto failed = engine_->execute(makeTransferTask(decoded));
-        failed->waitDone();
-        EXPECT_FALSE(failed->success());
-        EXPECT_EQ(failed->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-
-        expectUntouchedTargets();
-    }
-
-    // Each uniform batch still works on the same engine, which owns a CRC service.
-    for (size_t index = 0; index < groups.size(); ++index) {
-        auto recovered = engine_->execute(
-            makeTransferTask({TransferDescriptor::hostToDevice(index, hosts_[index], targets_[index])}));
-        recovered->waitDone();
-        ASSERT_TRUE(recovered->success()) << recovered->errorInfo().ToString();
-        EXPECT_EQ(readTarget(index), expected_[index]);
-    }
-}
-
 TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAndKeepsFailureWhenIoIsUnavailable) {
     ASSERT_NO_FATAL_FAILURE(initialize(false, false, 3, 1, true));
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
     hostData(0)[1] ^= 1;
     const auto           root = std::filesystem::path(temp_dir_->path) / "diagnostics";
-    CrcTransferService   service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string()));
+    CrcCopyExecutor      service(
+        {group_}, CrcCopyDirection::LOAD, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string()));
     const HostBufferView host{hostData(0), payload_, host_->strideBytes()};
     auto                 descriptor = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
-    EXPECT_EQ(service.copy({host}, {descriptor}, {group_.get()}).copy_error, CacheCopyError::CRC_MISMATCH);
+    const auto           corrupt    = runService(service, {host}, {descriptor}, group_);
+    EXPECT_EQ(corrupt.copy_error, CacheCopyError::CRC_MISMATCH);
+    EXPECT_TRUE(corrupt.buffer_safe);
 
     expectScatteredTargets(1);
     std::vector<std::filesystem::path> dumps;
@@ -409,10 +906,11 @@ TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAn
     std::ofstream(outside / "keep.bin") << "keep";
     const auto linked = root / "rank_17" / "crc_symlink";
     std::filesystem::create_directory_symlink(outside, linked);
-    const auto         old_dump = dumps.front();
-    CrcTransferService rotated_service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string(), 1));
-    auto               rotated = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
-    EXPECT_EQ(rotated_service.copy({host}, {rotated}, {group_.get()}).copy_error, CacheCopyError::CRC_MISMATCH);
+    const auto      old_dump = dumps.front();
+    CrcCopyExecutor rotated_service(
+        {group_}, CrcCopyDirection::LOAD, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string(), 1));
+    auto rotated = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
+    EXPECT_EQ(runService(rotated_service, {host}, {rotated}, group_).copy_error, CacheCopyError::CRC_MISMATCH);
 
     expectScatteredTargets(1);
     EXPECT_FALSE(std::filesystem::exists(old_dump));
@@ -436,14 +934,17 @@ TEST_F(PerRankBlockTransferEngineCrcTest, CorruptionDumpIncludesPhysicalLayoutAn
     // and release the slot for the next operation.
     const auto blocked = std::filesystem::path(temp_dir_->path) / "blocked_diagnostics";
     std::ofstream(blocked) << "not a directory";
-    CrcTransferService blocked_service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, blocked.string()));
-    auto               next = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
-    EXPECT_EQ(blocked_service.copy({host}, {next}, {group_.get()}).copy_error, CacheCopyError::CRC_MISMATCH);
+    CrcCopyExecutor blocked_service(
+        {group_}, CrcCopyDirection::LOAD, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, blocked.string()));
+    auto       next           = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
+    const auto blocked_result = runService(blocked_service, {host}, {next}, group_);
+    EXPECT_EQ(blocked_result.copy_error, CacheCopyError::CRC_MISMATCH);
+    EXPECT_TRUE(blocked_result.buffer_safe);
 
     expectScatteredTargets(1);
     hostData(0)[1] ^= 1;
     auto healthy = TransferDescriptor::hostToDevice(0, hosts_[0], targets_[0]);
-    EXPECT_TRUE(blocked_service.copy({host}, {healthy}, {group_.get()}).ok());
+    EXPECT_TRUE(runService(blocked_service, {host}, {healthy}, group_).ok());
 
     EXPECT_EQ(readTarget(0), expected_[0]);
 }
@@ -453,17 +954,18 @@ TEST_F(PerRankBlockTransferEngineCrcTest, SlotWriterRotatesCompleteDumpsWithinBa
     ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
     hostData(0)[1] ^= 1;
     hostData(1)[1] ^= 1;
-    const auto                      root = std::filesystem::path(temp_dir_->path) / "slot_diagnostics";
-    CrcTransferService              service({group_}, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string(), 1));
+    const auto      root = std::filesystem::path(temp_dir_->path) / "slot_diagnostics";
+    CrcCopyExecutor service(
+        {group_}, CrcCopyDirection::LOAD, 3, 1, 17, std::make_shared<CrcDumpWriter>(17, root.string(), 1));
     std::vector<HostBufferView>     hosts;
     std::vector<TransferDescriptor> descriptors;
     for (size_t index = 0; index < hosts_.size(); ++index) {
         hosts.push_back({hostData(index), payload_, host_->strideBytes()});
         descriptors.push_back(TransferDescriptor::hostToDevice(0, hosts_[index], targets_[index]));
     }
-    const std::vector<const GroupSet*> groups(hosts.size(), group_.get());
-    const auto                         result = service.copy(hosts, descriptors, groups);
+    const auto result = runService(service, hosts, descriptors, group_);
     EXPECT_EQ(result.copy_error, CacheCopyError::CRC_MISMATCH);
+    EXPECT_TRUE(result.buffer_safe);
     ASSERT_EQ(result.block_errors.size(), 3u);
     EXPECT_EQ(result.block_errors[0], CacheCopyError::CRC_MISMATCH);
     EXPECT_EQ(result.block_errors[1], CacheCopyError::CRC_MISMATCH);
@@ -474,7 +976,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, SlotWriterRotatesCompleteDumpsWithinBa
         root / "rank_17", std::vector<uint8_t>(hostData(1), hostData(1) + encoded_), {"\"copy_item_index\": \"1\""});
     hostData(0)[1] ^= 1;
     hostData(1)[1] ^= 1;
-    EXPECT_TRUE(service.copy(hosts, descriptors, groups).ok());
+    EXPECT_TRUE(runService(service, hosts, descriptors, group_).ok());
     for (size_t index = 0; index < targets_.size(); ++index)
         EXPECT_EQ(readTarget(index), expected_[index]);
 }
@@ -503,7 +1005,8 @@ TEST_F(PerRankBlockTransferEngineCrcTest, Dsv4Cp16ShardedSwaRoundtripPreservesOp
     ASSERT_TRUE(group_->crcEnabled());
     ASSERT_TRUE(group_->usesPhysicalPayloadGeometry());
     ASSERT_EQ(group_->storageBytes(), encoded_);
-    engine_  = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_});
+    engine_ = std::make_shared<PerRankBlockTransferEngine>(
+        std::vector<GroupSetPtr>{group_}, false, 128, 8, 4, 10000, nullptr, 0, 4);
     sources_ = {{allocate(devices_[0])}};
     targets_ = {{allocate(devices_[0])}};
     hosts_   = {allocate(host_)};
@@ -578,20 +1081,29 @@ TEST_F(PerRankBlockTransferEngineCrcTest, LastPhysicalLayerCorruptionRejectsScat
     expectScatteredTargets(targets_.size());
 }
 
-TEST_F(PerRankBlockTransferEngineCrcTest, FailurePreservesCompletedBatchesAndMarksUnsubmittedBlocks) {
+TEST_F(PerRankBlockTransferEngineCrcTest, LocalRequestPreservesIndependentBatchResultsOnFailure) {
     ASSERT_NO_FATAL_FAILURE(initialize());
     engine_ = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group_}, false, DeviceHostCopyOptions{}, 8, 1, 1);
-    ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
+        std::vector<GroupSetPtr>{group_}, false, 8, 1, 1, 10000, nullptr, 0, 4);
+    BlockTransferDispatcher dispatcher(engine_, nullptr);
+    const auto              execute_request = [&](Tier from, Tier to) {
+        std::vector<TransferDescriptor> descriptors;
+        for (size_t item = 0; item < sources_.size(); ++item)
+            descriptors.push_back(makeDescriptor(
+                from, to, from == Tier::DEVICE ? sources_[item] : targets_[item], hosts_[item], disks_[item]));
+        auto context = dispatcher.executePerRank(makeTransferTask(std::move(descriptors)));
+        context->waitDone();
+        return context;
+    };
+    ASSERT_TRUE(execute_request(Tier::DEVICE, Tier::HOST)->success());
     hostData(1)[payload_ - 1] ^= 1;
-    const auto context = execute(Tier::HOST, Tier::DEVICE);
+    const auto context = execute_request(Tier::HOST, Tier::DEVICE);
     expectIntegrityFailure(context);
     EXPECT_EQ(context->result().block_errors,
-              (std::vector<CacheCopyError>{
-                  CacheCopyError::NONE, CacheCopyError::CRC_MISMATCH, CacheCopyError::NOT_EXECUTED}));
+              (std::vector<CacheCopyError>{CacheCopyError::NONE, CacheCopyError::CRC_MISMATCH, CacheCopyError::NONE}));
     EXPECT_EQ(readTarget(0), expected_[0]);
     EXPECT_EQ(readTarget(1), std::vector<uint8_t>(hostData(1), hostData(1) + payload_));
-    EXPECT_EQ(readTarget(2), std::vector<uint8_t>(payload_, 0xa5));
+    EXPECT_EQ(readTarget(2), expected_[2]);
 }
 
 TEST_F(PerRankBlockTransferEngineCrcTest, RpcWorkerUsesValidDeviceIndicesWithoutLocalAllocation) {
@@ -625,8 +1137,8 @@ TEST_F(PerRankBlockTransferEngineCrcTest, RpcWorkerUsesValidDeviceIndicesWithout
         context->waitDone();
         return context;
     };
-    auto stored = rpcExecute(Tier::DEVICE, Tier::HOST);
-    ASSERT_TRUE(stored->success()) << stored->errorInfo().ToString();
+    auto evicted = rpcExecute(Tier::DEVICE, Tier::HOST);
+    ASSERT_TRUE(evicted->success()) << evicted->errorInfo().ToString();
     for (size_t item = 0; item < hosts_.size(); ++item) {
         EXPECT_EQ(std::vector<uint8_t>(hostData(item), hostData(item) + payload_), expected_[item]);
         uint32_t footer = 0;
@@ -656,7 +1168,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, InvalidDeviceIndicesAndMemberCountsNev
         {targets_[0][0], targets_[0][1], targets_[0][0]},
     };
     for (const auto& blocks : invalid) {
-        for (const auto direction :
+        for (const auto& direction :
              {std::make_pair(Tier::DEVICE, Tier::HOST), std::make_pair(Tier::HOST, Tier::DEVICE)}) {
             std::memset(hostData(0), 0x6b, host_->strideBytes());
             if (direction.first == Tier::HOST) {
@@ -717,7 +1229,9 @@ TEST_F(PerRankBlockTransferEngineCrcTest, HostDiskPreservesCorruptRecordUntilDev
     for (size_t item = 0; item < hosts_.size(); ++item) {
         std::memset(hostData(item), 0xcc, host_->strideBytes());
     }
-    ASSERT_TRUE(execute(Tier::DISK, Tier::HOST)->success());
+    for (size_t item = 0; item < hosts_.size(); ++item) {
+        ASSERT_EQ(disk_->read(disks_[item], hostData(item), disk_->strideBytes()), BlockIOStatus::OK);
+    }
     for (size_t item = 0; item < hosts_.size(); ++item) {
         EXPECT_EQ(std::vector<uint8_t>(hostData(item), hostData(item) + encoded_), sealed[item]);
     }
@@ -731,7 +1245,9 @@ TEST_F(PerRankBlockTransferEngineCrcTest, HostDiskPreservesCorruptRecordUntilDev
         EXPECT_EQ(std::vector<uint8_t>(raw.begin(), raw.begin() + encoded_), item == 2 ? corrupt : sealed[item]);
         std::memset(hostData(item), 0xcc, host_->strideBytes());
     }
-    ASSERT_TRUE(execute(Tier::DISK, Tier::HOST)->success());
+    for (size_t item = 0; item < hosts_.size(); ++item) {
+        ASSERT_EQ(disk_->read(disks_[item], hostData(item), disk_->strideBytes()), BlockIOStatus::OK);
+    }
     for (size_t item = 0; item < hosts_.size(); ++item) {
         EXPECT_EQ(std::vector<uint8_t>(hostData(item), hostData(item) + encoded_), item == 2 ? corrupt : sealed[item]);
     }
@@ -741,18 +1257,21 @@ TEST_F(PerRankBlockTransferEngineCrcTest, HostDiskPreservesCorruptRecordUntilDev
     ASSERT_NO_FATAL_FAILURE(
         expectDump(dumps,
                    corrupt,
-                   {"\"cpu_backing\": \"memory_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
+                   {"\"cpu_backing\": \"host_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
 }
 
 TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedAfterDeviceScatter) {
     ASSERT_NO_FATAL_FAILURE(initialize());
-    ASSERT_TRUE(execute(Tier::DEVICE, Tier::DISK)->success());
+    ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
+    ASSERT_TRUE(execute(Tier::HOST, Tier::DISK)->success());
     std::vector<uint8_t> raw(disk_->strideBytes());
     ASSERT_EQ(disk_->read(disks_[2], raw.data(), raw.size()), BlockIOStatus::OK);
     raw[payload_ / 2] ^= 0x40;
     ASSERT_EQ(disk_->write(disks_[2], raw.data(), raw.size()), BlockIOStatus::OK);
     const auto host_dumps = captureDumps("disk_to_host_dump");
-    ASSERT_TRUE(execute(Tier::DISK, Tier::HOST)->success());
+    for (size_t item = 0; item < hosts_.size(); ++item) {
+        ASSERT_EQ(disk_->read(disks_[item], hostData(item), disk_->strideBytes()), BlockIOStatus::OK);
+    }
     EXPECT_EQ(std::vector<uint8_t>(hostData(2), hostData(2) + encoded_),
               std::vector<uint8_t>(raw.begin(), raw.begin() + encoded_));
     EXPECT_FALSE(std::filesystem::exists(host_dumps));
@@ -761,7 +1280,7 @@ TEST_F(PerRankBlockTransferEngineCrcTest, DiskCorruptionIsRejectedAfterDeviceSca
     ASSERT_NO_FATAL_FAILURE(
         expectDump(host_dumps,
                    raw,
-                   {"\"cpu_backing\": \"memory_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
+                   {"\"cpu_backing\": \"host_pool\"", "\"operation\": \"load\"", "\"direction\": \"HOST->DEVICE\""}));
     const auto device_dumps      = captureDumps("disk_to_device_dump");
     const auto read_bytes_before = disk_->readBytes();
     const auto failed            = execute(Tier::DISK, Tier::DEVICE);
@@ -800,7 +1319,8 @@ TEST_F(PerRankBlockTransferEngineCrcTest, PageBoundaryPayloadUsesExtraPageAndDev
     ASSERT_EQ(encoded_, 4112u);
     EXPECT_EQ(host_->strideBytes(), 8192u);
     EXPECT_EQ(disk_->strideBytes(), 8192u);
-    ASSERT_TRUE(execute(Tier::DEVICE, Tier::DISK)->success());
+    ASSERT_TRUE(execute(Tier::DEVICE, Tier::HOST)->success());
+    ASSERT_TRUE(execute(Tier::HOST, Tier::DISK)->success());
     ASSERT_TRUE(execute(Tier::DISK, Tier::DEVICE)->success());
     for (size_t item = 0; item < targets_.size(); ++item) {
         EXPECT_EQ(readTarget(item), expected_[item]);
@@ -865,7 +1385,9 @@ TEST_F(PerRankBlockTransferEngineCrcTest, LargeBatchHostDiskPreservesCorruptionU
     for (size_t item = 0; item < hosts_.size(); ++item) {
         std::memset(hostData(item), 0xcc, host_->strideBytes());
     }
-    ASSERT_TRUE(execute(Tier::DISK, Tier::HOST)->success());
+    for (size_t item = 0; item < hosts_.size(); ++item) {
+        ASSERT_EQ(disk_->read(disks_[item], hostData(item), disk_->strideBytes()), BlockIOStatus::OK);
+    }
     for (size_t item = 0; item < hosts_.size(); ++item) {
         EXPECT_EQ(std::vector<uint8_t>(hostData(item), hostData(item) + encoded_),
                   item == 31 ? corrupt : records[item]);
@@ -878,189 +1400,13 @@ TEST_F(PerRankBlockTransferEngineCrcTest, LargeBatchHostDiskPreservesCorruptionU
 }
 
 // DSV4 production shapes contending for 2/4/8 parallel service slots. Each
-// slot owns private streams and staging, so concurrent store->load round-trips
+// slot owns private streams and staging, so concurrent evict->load round-trips
 // from eight threads must stay isolated: with fewer slots than threads the
 // condition-variable wait path is exercised, and every host record, footer,
 // and restored target is re-checked after the threads join. The full shape
 // (62 tiles, 510,912 B) stays on the serial launch path; the prefill shape
 // (85 tiles, 1,235,040 B) crosses the 4 MiB wave threshold at 4 items per
 // batch, so both load paths run under slot contention.
-TEST_F(PerRankBlockTransferEngineCrcTest, MultiSlotParallelDsv4ShapeRoundTripsStayIsolated) {
-    constexpr size_t kItemsPerThread = 4;
-    constexpr size_t kMaxWorkers     = 8;
-    struct Shape {
-        const char*                            name;
-        std::vector<std::pair<size_t, size_t>> layers;
-        size_t                                 tiles;
-    };
-    const auto dsv4Layers = [](bool full) {
-        std::vector<std::pair<size_t, size_t>> layers;
-        if (full) {
-            // 21 scaled layers then 20 kv-only layers: 62 tiles, 510,912 B.
-            layers.insert(layers.end(), 21, std::make_pair<size_t, size_t>(19008, 4224));
-            layers.insert(layers.end(), 20, std::make_pair<size_t, size_t>(1152, 0));
-        } else {
-            // 21 scaled layers, 22 more 18,720 B kv layers, then 21 16,384 B kv
-            // layers: 85 tiles, 1,235,040 B.
-            layers.insert(layers.end(), 21, std::make_pair<size_t, size_t>(18720, 4096));
-            layers.insert(layers.end(), 22, std::make_pair<size_t, size_t>(18720, 0));
-            layers.insert(layers.end(), 21, std::make_pair<size_t, size_t>(16384, 0));
-        }
-        return layers;
-    };
-    const Shape shapes[] = {{"dsv4_full", dsv4Layers(true), 62}, {"dsv4_prefill_cp4", dsv4Layers(false), 85}};
-
-    TempDirGuard slot_dumps("crc_parallel_slots");
-    auto         dump_writer = std::make_shared<CrcDumpWriter>(0, slot_dumps.path, 1);
-    for (const auto& shape : shapes) {
-        payload_ = 0;
-        for (const auto& [kv, scale] : shape.layers) {
-            payload_ += kv + scale;
-        }
-        encoded_ = ((payload_ + 4 + 15) / 16) * 16;
-        layers_  = shape.layers.size();
-        devices_ = {
-            makeTestDevicePool(shape.layers, 2 * kItemsPerThread * kMaxWorkers, "crc_slot_" + std::string(shape.name))};
-        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-        host_ = makeHostPool(payload_, kItemsPerThread * kMaxWorkers, true);
-        std::vector<int> layer_ids(layers_);
-        std::iota(layer_ids.begin(), layer_ids.end(), 0);
-        // The logical spec describes only the first layer; the pool's physical
-        // per-layer geometry is authoritative, as in MTP-style production pools.
-        group_ = makeTestGroupSet(0,
-                                  makeTestTopology({makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL),
-                                                                      layer_ids,
-                                                                      shape.layers.front().first,
-                                                                      shape.layers.front().second)}),
-                                  {"group0"},
-                                  devices_,
-                                  host_,
-                                  nullptr,
-                                  /*enable_crc=*/true,
-                                  /*physical_payload_bytes=*/payload_);
-        ASSERT_TRUE(group_->crcEnabled());
-        ASSERT_EQ(group_->storageBytes(), encoded_);
-        ASSERT_EQ(getDeviceHostCopyTiles(*group_, std::vector<BlockIdxType>(group_->devicePools().size(), 0)).size(),
-                  shape.tiles);
-
-        sources_.clear();
-        targets_.clear();
-        hosts_.clear();
-        expected_.clear();
-        for (size_t item = 0; item < kItemsPerThread * kMaxWorkers; ++item) {
-            sources_.push_back({allocate(devices_[0])});
-            targets_.push_back({allocate(devices_[0])});
-            hosts_.push_back(allocate(host_));
-            std::vector<uint8_t> expected;
-            for (size_t layer = 0; layer < layers_; ++layer) {
-                const auto buffers = devices_[0]->convertIndexToBuffer(static_cast<int>(layer), sources_[item][0]);
-                for (size_t kind = 0; kind < buffers.size(); ++kind) {
-                    std::vector<uint8_t> bytes(buffers[kind].size_bytes);
-                    for (size_t i = 0; i < bytes.size(); ++i) {
-                        bytes[i] = static_cast<uint8_t>((i * 29 + item * 71 + layer * 17 + kind * 13) & 255);
-                    }
-                    ASSERT_EQ(cudaMemcpy(buffers[kind].addr, bytes.data(), bytes.size(), cudaMemcpyHostToDevice),
-                              cudaSuccess);
-                    expected.insert(expected.end(), bytes.begin(), bytes.end());
-                }
-            }
-            expected_.push_back(std::move(expected));
-        }
-        ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-        for (size_t workers : {2, 4, 8}) {
-            SCOPED_TRACE(::testing::Message() << shape.name << " slots=" << workers);
-            CrcTransferService service({group_}, kItemsPerThread, workers, 0, dump_writer);
-            fillTargets(0xa5);
-            std::vector<std::exception_ptr> failures(kMaxWorkers);
-            std::mutex                      start_mutex;
-            std::condition_variable         start_condition;
-            size_t                          ready  = 0;
-            bool                            start  = false;
-            auto                            worker = [&](size_t thread) {
-                {
-                    std::unique_lock<std::mutex> lock(start_mutex);
-                    ++ready;
-                    start_condition.notify_all();
-                    start_condition.wait(lock, [&] { return start; });
-                }
-                try {
-                    if (cudaSetDevice(0) != cudaSuccess) {
-                        throw std::runtime_error("cudaSetDevice failed");
-                    }
-                    std::vector<HostBufferView>     thread_hosts;
-                    std::vector<TransferDescriptor> thread_descriptors;
-                    std::vector<const GroupSet*>    thread_groups;
-                    for (size_t offset = 0; offset < kItemsPerThread; ++offset) {
-                        const size_t item = thread * kItemsPerThread + offset;
-                        thread_hosts.push_back({hostData(item), payload_, host_->strideBytes()});
-                        thread_descriptors.push_back(TransferDescriptor::deviceToHost(0, sources_[item], hosts_[item]));
-                        thread_groups.push_back(group_.get());
-                    }
-                    if (!service.copy(thread_hosts, thread_descriptors, thread_groups).ok()) {
-                        throw std::runtime_error("concurrent store failed");
-                    }
-                    for (size_t offset = 0; offset < kItemsPerThread; ++offset) {
-                        const size_t item = thread * kItemsPerThread + offset;
-                        thread_descriptors[offset] = TransferDescriptor::hostToDevice(0, hosts_[item], targets_[item]);
-                    }
-                    if (!service.copy(thread_hosts, thread_descriptors, thread_groups).ok()) {
-                        throw std::runtime_error("concurrent load failed");
-                    }
-                    // Each caller owns disjoint targets. A mismatch must release
-                    // its slot and preserve per-item status under contention.
-                    const size_t damaged = thread % kItemsPerThread;
-                    auto*        damaged_host = static_cast<uint8_t*>(thread_hosts[damaged].base);
-                    damaged_host[thread] ^= 1;
-                    const auto rejected = service.copy(thread_hosts, thread_descriptors, thread_groups);
-                    if (rejected.copy_error != CacheCopyError::CRC_MISMATCH
-                        || rejected.block_errors.size() != kItemsPerThread) {
-                        throw std::runtime_error("concurrent mismatch lost its result");
-                    }
-                    for (size_t offset = 0; offset < kItemsPerThread; ++offset) {
-                        const auto expected_error =
-                            offset == damaged ? CacheCopyError::CRC_MISMATCH : CacheCopyError::NOT_EXECUTED;
-                        if (rejected.block_errors[offset] != expected_error) {
-                            throw std::runtime_error("concurrent mismatch changed another item's result");
-                        }
-                    }
-                    damaged_host[thread] ^= 1;
-                    if (!service.copy(thread_hosts, thread_descriptors, thread_groups).ok()) {
-                        throw std::runtime_error("concurrent recovery failed");
-                    }
-                } catch (...) {
-                    failures[thread] = std::current_exception();
-                }
-            };
-            std::vector<std::thread> threads;
-            threads.reserve(kMaxWorkers);
-            for (size_t thread = 0; thread < kMaxWorkers; ++thread) {
-                threads.emplace_back(worker, thread);
-            }
-            {
-                std::unique_lock<std::mutex> lock(start_mutex);
-                start_condition.wait(lock, [&] { return ready == kMaxWorkers; });
-                start = true;
-            }
-            start_condition.notify_all();
-            for (auto& thread : threads) {
-                thread.join();
-            }
-            for (const auto& failure : failures) {
-                if (failure) {
-                    std::rethrow_exception(failure);
-                }
-            }
-            for (size_t item = 0; item < kItemsPerThread * kMaxWorkers; ++item) {
-                EXPECT_EQ(std::vector<uint8_t>(hostData(item), hostData(item) + payload_), expected_[item]);
-                uint32_t footer = 0;
-                std::memcpy(&footer, hostData(item) + encoded_ - sizeof(footer), sizeof(footer));
-                EXPECT_EQ(footer, softwareCrc32c(expected_[item].data(), expected_[item].size()));
-                EXPECT_EQ(readTarget(item), expected_[item]);
-            }
-        }
-    }
-}
 
 }  // namespace
 }  // namespace rtp_llm
