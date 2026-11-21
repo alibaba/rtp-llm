@@ -2253,6 +2253,33 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertTrue(waited.is_set())
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_native_snapshot_orders_caller_and_producer_reuse(self):
+        import librtp_compute_ops
+
+        if not hasattr(librtp_compute_ops, "snapshot_emb_cuda_tensors"):
+            self.skipTest("requires native CUDA snapshot")
+        producer, caller = torch.cuda.Stream(), torch.cuda.Stream()
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache._USE_NATIVE_SNAPSHOT",
+            True,
+        ):
+            for blocking in (False, True):
+                with self.subTest(blocking=blocking), patch(
+                    "rtp_llm.multimodal.mm_remote_embedding_cache._BLOCKING_CUDA_EVENTS",
+                    blocking,
+                ), torch.cuda.stream(producer):
+                    value = torch.full((512, 512), 11.0, device="cuda")
+                    with torch.cuda.stream(caller):
+                        caller.wait_stream(producer)
+                        value.add_(26)
+                        plan = SimpleNamespace(tensors=[value])
+                        (ready,) = MMRemoteEmbeddingCache._snapshot(plan, (producer,))
+                        value.zero_()
+                    ready.synchronize()
+                    caller.synchronize()
+                    self.assertTrue(torch.all(plan.tensors[0] == 37).item())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_deferred_gpu_snapshot_waits_for_producer_and_is_submitted_once(self):
         from rtp_llm.multimodal.mm_work_item import MMWorkItem
 

@@ -898,8 +898,26 @@ class MMRemoteEmbeddingCache:
                 )
 
         events = []
+        native_snapshot = None
+        if cuda_indices and _USE_NATIVE_SNAPSHOT:
+            import librtp_compute_ops
+
+            native_snapshot = getattr(
+                librtp_compute_ops, "snapshot_emb_cuda_tensors", None
+            )
         for device, indices in cuda_indices.items():
             with cuda_graph_gate.operation():
+                if native_snapshot is not None:
+                    producer = streams.get(device)
+                    snapshots, ready = native_snapshot(
+                        [plan.tensors[i] for i in indices],
+                        producer.stream_id if producer is not None else None,
+                        _BLOCKING_CUDA_EVENTS,
+                    )
+                    for i, snapshot in zip(indices, snapshots):
+                        plan.tensors[i] = snapshot
+                    events.append(ready)
+                    continue
                 caller = torch.cuda.current_stream(device)
                 producer = streams.get(device, caller)
                 # Inspection can finish on a different stream. Order later

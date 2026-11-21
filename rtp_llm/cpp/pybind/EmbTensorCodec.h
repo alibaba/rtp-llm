@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -96,6 +97,49 @@ inline void packEmbTensorSlices(const at::Tensor& output,
 }
 
 #if USING_CUDA
+class EmbCudaSnapshotReady {
+public:
+    EmbCudaSnapshotReady(c10::cuda::CUDAStream producer, c10::cuda::CUDAStream caller, bool blocking):
+        event_(cudaEventDisableTiming | (blocking ? cudaEventBlockingSync : 0)) {
+        event_.record(producer);
+        if (producer != caller) {
+            event_.block(caller);
+        }
+    }
+
+    void synchronize() const {
+        event_.synchronize();
+    }
+
+private:
+    at::cuda::CUDAEvent event_;
+};
+
+inline auto snapshotEmbCudaTensors(const std::vector<at::Tensor>& inputs,
+                                   std::optional<c10::StreamId> producerId,
+                                   bool blocking) {
+    TORCH_CHECK(!inputs.empty() && inputs.front().is_cuda(), "expected CUDA EMB tensors");
+    const auto device = inputs.front().device();
+    for (const auto& input : inputs) {
+        TORCH_CHECK(input.device() == device, "expected CUDA EMB tensors on one device");
+    }
+    const auto caller = c10::cuda::getCurrentCUDAStream(device.index());
+    const auto producer = producerId
+        ? c10::cuda::CUDAStream(c10::Stream::unpack3(*producerId, device.index(), c10::kCUDA))
+        : caller;
+    // Include caller-side preparation, then order reuse on either stream
+    // after cloning without blocking the submitting thread.
+    if (producer != caller) {
+        at::cuda::CUDAEvent dependency(cudaEventDisableTiming);
+        dependency.record(caller);
+        dependency.block(producer);
+    }
+    const c10::cuda::CUDAStreamGuard streamGuard(producer);
+    auto snapshots = snapshotEmbTensors(inputs);
+    auto ready = std::make_unique<EmbCudaSnapshotReady>(producer, caller, blocking);
+    return std::make_pair(std::move(snapshots), std::move(ready));
+}
+
 inline void waitEmbCudaStream(const at::Tensor& buffer) {
     at::cuda::CUDAEvent ready(cudaEventBlockingSync | cudaEventDisableTiming);
     ready.record(c10::cuda::getCurrentCUDAStream(buffer.get_device()));
@@ -224,6 +268,11 @@ inline void registerEmbTensorCodec(pybind11::module& module) {
     module.def("store_emb_hashes", &storeEmbHashes);
     module.def("clone_emb_hashes", &cloneEmbHashes);
 #if USING_CUDA
+    pybind11::class_<EmbCudaSnapshotReady>(module, "EmbCudaSnapshotReady")
+        .def("synchronize", &EmbCudaSnapshotReady::synchronize, pybind11::call_guard<pybind11::gil_scoped_release>());
+    module.def("snapshot_emb_cuda_tensors",
+               &snapshotEmbCudaTensors,
+               pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def("read_emb_cuda_header", &readEmbCudaHeader, pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def("read_emb_cuda_object_header", [](const at::Tensor& buffer) {
         std::string header;
