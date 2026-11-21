@@ -521,6 +521,43 @@ class EmbeddingCacheTurnoverMetricsTest(unittest.TestCase):
 
 
 class EmbeddingCapacityTest(unittest.TestCase):
+    def test_completed_entry_does_not_retain_its_publication_callback(self):
+        class Publisher:
+            def __init__(self, entry, calls):
+                self.entry = entry
+                self.calls = calls
+
+            def publish(self):
+                self.calls.append(self.entry.generation)
+
+        for deferred in (False, True):
+            with self.subTest(deferred=deferred):
+                cache = MMEmbeddingCache(
+                    gpu_max_bytes=0,
+                    cpu_max_bytes=256,
+                    async_publication=deferred,
+                )
+                try:
+                    _, entry = cache.try_acquire("image")
+                    calls = []
+                    publisher = Publisher(entry, calls)
+                    owner = weakref.ref(publisher)
+                    self.assertTrue(
+                        cache.complete(
+                            "image",
+                            entry,
+                            torch.ones(4),
+                            before_publish=publisher.publish,
+                        )
+                    )
+                    del publisher
+                    cache.flush()
+                    self.assertEqual(calls, [entry.generation])
+                    self.assertIs(cache.peek("image"), entry)
+                    self.assertIsNone(owner())
+                finally:
+                    cache.close()
+
     def test_before_publish_runs_once_after_storage_before_ready(self):
         cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
         _, entry = cache.try_acquire("a")

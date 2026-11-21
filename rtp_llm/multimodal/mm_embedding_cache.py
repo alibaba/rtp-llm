@@ -641,7 +641,8 @@ class MMEmbeddingCacheEntry:
                 return False
             self._terminal = True
             self.result = result
-            self._pending_before_publish = before_publish
+            if defer:
+                self._pending_before_publish = before_publish
         if defer:
             # Publish the result to waiters immediately; the cache insertion is
             # best-effort and runs on the cache's publication thread. A failed
@@ -657,6 +658,10 @@ class MMEmbeddingCacheEntry:
                         self._on_fail(self, error)
                 except Exception:
                     logging.exception("Failed to remove unqueued ViT cache entry")
+            finally:
+                # The queue owns the callback after handoff. A bound method on
+                # the work item would otherwise keep that whole request alive.
+                self._pending_before_publish = None
             return True
         try:
             if self._on_complete is not None:
@@ -1706,6 +1711,8 @@ class MMEmbeddingCache:
                 )
                 self._remove_if_same(cache_key, entry)
             finally:
+                # The blocking get below must not retain the previous work item.
+                del item, entry, result, before_publish
                 with self._publish_cond:
                     self._publish_pending -= 1
                     self._publish_cond.notify_all()
