@@ -390,6 +390,26 @@ class Fp4MoETest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Missing EPLB"):
                 layer.validate_eplb_reload_weights(missing)
 
+    def test_eplb_scales_follow_backend_activation_granularity(self):
+        for backend in ("trtllm", "cutedsl"):
+            source = _weights()
+            for projection in ("gate_proj", "up_proj"):
+                source[f"experts.1.{projection}.input_scale"] = torch.tensor(4.0)
+            # Permuting packed bytes needs FlashInfer; scale derivation is real.
+            with mock.patch(
+                "rtp_llm.models_py.quant_methods.fp4_moe._prepare_trtllm",
+                side_effect=lambda weight, scale, gate_up: (weight, scale),
+            ):
+                layer = self._load(source, backend=backend)
+            input_scale = torch.tensor([4.0] if backend == "trtllm" else [1.0, 4.0])
+            torch.testing.assert_close(layer.nvfp4_w13_input_scale_inv, 1 / input_scale)
+            torch.testing.assert_close(
+                layer.nvfp4_w13_alpha, input_scale * layer.w13_scale_2
+            )
+            torch.testing.assert_close(
+                layer.nvfp4_g1_scale_c, layer.nvfp4_w13_alpha / layer.w2_input_scale
+            )
+
     def test_eplb_derived_scales_install_and_rollback_in_place(self):
         layer = self._load(_weights())
         layer._dynamic_eplb_enabled = True

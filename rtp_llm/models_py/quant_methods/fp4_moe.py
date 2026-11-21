@@ -370,14 +370,18 @@ class ModelOptFp4MoEMethod(FusedMoEMethodBase):
                 )
                 self._replace_parameter(layer, stem, weight)
                 setattr(layer, stem + "_scale", scale)
+        # TRTLLM quantizes activations once per rank; CuteDSL quantizes per expert.
+        # Compute from the newly loaded local experts, including on EPLB reload.
+        input_scale = layer.w13_input_scale
+        if self._backend == "trtllm":
+            input_scale = input_scale.max().reshape(1)
+        g1_alpha = input_scale * layer.w13_scale_2
         derived = {
-            "nvfp4_w13_alpha": layer.w13_input_scale * layer.w13_scale_2,
+            "nvfp4_w13_alpha": g1_alpha,
             "nvfp4_w2_alpha": layer.w2_input_scale * layer.w2_scale_2,
-            "nvfp4_w13_input_scale_inv": layer.w13_input_scale.reciprocal(),
+            "nvfp4_w13_input_scale_inv": input_scale.reciprocal(),
             "nvfp4_w2_input_scale_inv": layer.w2_input_scale.reciprocal(),
-            "nvfp4_g1_scale_c": layer.w13_input_scale
-            * layer.w13_scale_2
-            / layer.w2_input_scale,
+            "nvfp4_g1_scale_c": g1_alpha / layer.w2_input_scale,
         }
         for name, value in derived.items():
             if not torch.isfinite(value).all():

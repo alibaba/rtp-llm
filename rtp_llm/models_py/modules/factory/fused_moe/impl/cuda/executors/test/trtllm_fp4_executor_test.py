@@ -984,6 +984,25 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
             (shared_input_scale * w13_weight_scale) / w2_input_scale,
         )
 
+        # NewLoader supplies mutable buffers: an already-built executor must
+        # see the new scales without changing captured addresses.
+        for name, attr in (
+            ("nvfp4_w13_input_scale_inv", "expert_x_scale"),
+            ("nvfp4_w13_alpha", "g1_alphas"),
+            ("nvfp4_w2_alpha", "g2_alphas"),
+            ("nvfp4_g1_scale_c", "g1_scale_c"),
+        ):
+            weights[name] = getattr(executor, attr).clone()
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor.device_support_pdl",
+            return_value=False,
+        ):
+            bound = TrtllmFp4Executor(config, FusedMoEQuantConfig(), weights)
+        self.assertIs(bound.expert_x_scale, weights["nvfp4_w13_input_scale_inv"])
+        self.assertIs(bound.g1_alphas, weights["nvfp4_w13_alpha"])
+        self.assertIs(bound.g2_alphas, weights["nvfp4_w2_alpha"])
+        self.assertIs(bound.g1_scale_c, weights["nvfp4_g1_scale_c"])
+
     @staticmethod
     def _prepare_static_weights_list_stack(weight, scale, shape, findices, cache):
         # Reference the legacy list/stack path independently of production allocation.
@@ -1115,7 +1134,11 @@ class TrtllmFp4ExecutorTest(unittest.TestCase):
                                 0, 256, cols // 2, dtype=torch.uint8, device=device
                             ),
                             torch.empty(
-                                0, 256, cols // 16, dtype=torch.float8_e4m3fn, device=device
+                                0,
+                                256,
+                                cols // 16,
+                                dtype=torch.float8_e4m3fn,
+                                device=device,
                             ),
                             (0, 256, cols),
                             findices,
