@@ -38,8 +38,10 @@ flash-attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1
 
 # Wheels built against torch 2.11+cu130.
 # Preserve the GLM5 kernel versions used by the validated inference path.
-deep-gemm==2.8.0+6d6aaad.cu132
-flash-mla==1.0.0+49e2000.cu132
+# Re-pinned from 2.8.0+6d6aaad.cu132 / 1.0.0+49e2000.cu132: those wheels were
+# removed from the wheel index and cold-cache builds could no longer resolve them.
+deep-gemm==2.8.0+122e18b.cu132
+flash-mla==1.0.0+9241ae3
 
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 deep-ep==2.1.0+a56d615

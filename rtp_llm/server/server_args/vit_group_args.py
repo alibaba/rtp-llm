@@ -248,6 +248,16 @@ def init_vit_group_args(parser, vit_config):
         default="round_robin",
         help="VIT代理服务器的负载均衡策略，可选值: 'round_robin' 或 'least_connections'",
     )
+    vit_group.add_argument(
+        "--vit_proxy_min_healthy_workers",
+        env_name="VIT_PROXY_MIN_HEALTHY_WORKERS",
+        bind_to=(vit_config, "vit_proxy_min_healthy_workers"),
+        type=_non_negative_int,
+        default=0,
+        help="VIT proxy 最少健康 worker 数：默认 0 视为 1（任一健康 worker 存活即端点健康、保持降级服务）；"
+        "设为 >1 即显式启用多数派仲裁：健康数低于该值时 gRPC 状态面报 UNAVAILABLE、FlexLB 会摘除端点；"
+        "显式值必须在 1..N",
+    )
     transport_config = vit_config.output_transport
     control_config = transport_config.control
     rdma_config = transport_config.rdma

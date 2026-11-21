@@ -1046,7 +1046,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
     const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+    const auto confirmed_block_num =
+        CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config, config);
     if (parallelism_config.pp_size > 1) {
         PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
         const auto                capacity =
@@ -1417,7 +1418,11 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 }
 
 bool NormalEngine::isMTPEagle() {
-    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || sp_config.type == SP_TYPE_DSPARK;
+    // These queries describe the configured algorithm, independently of local
+    // draft ownership (EngineBase contract): a PP decode instance admits
+    // requests on its first stage, where no local draft model exists, so they
+    // must read the global sp_config instead of propose_params_.
+    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || isBlockDraftType(sp_config.type);
 }
 
 bool NormalEngine::isEagle() {
@@ -1425,7 +1430,7 @@ bool NormalEngine::isEagle() {
 }
 
 bool NormalEngine::isDSpark() {
-    return sp_config.type == SP_TYPE_DSPARK;
+    return isBlockDraftType(sp_config.type);
 }
 
 size_t NormalEngine::reserveStepForStream(bool is_prefill_only) const {

@@ -3,6 +3,12 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "test_load_quant_w8a8_int8",
+    srcs = ["test_load_quant_w8a8_int8.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,

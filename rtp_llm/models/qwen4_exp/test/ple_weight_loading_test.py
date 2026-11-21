@@ -214,6 +214,7 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
             exported_device=SimpleNamespace(support_dio_load=True),
         )
         database.get_pretrain_tensor_names.return_value = []
+        database.preshuffled_keys = frozenset()
         prefix = ModelWeights.layer_weight_prefix(0, 0, 0)
         table_name = f"{W.qwen4_ple_ngram_shards}.0"
         database.load_tensors_by_prefix.return_value = {
