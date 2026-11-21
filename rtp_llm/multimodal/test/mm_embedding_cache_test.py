@@ -1723,9 +1723,55 @@ class ShardedEmbeddingCacheTest(unittest.TestCase):
         tiers = cache.resident_tiers(keys)
         self.assertEqual(set(tiers), set(keys))
         for key in keys:
-            self.assertIs(cache.peek(key), cache._shard(key).peek(key))
+            entry = cache._shard(key).peek(key)
+            self.assertTrue(cache.is_current(key, entry))
         cache.clear()
         self.assertEqual(cache.stats()["resident_entries"], 0)
+
+    def test_native_publication_releases_python_owners(self):
+        try:
+            import librtp_compute_ops
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        if not hasattr(librtp_compute_ops, "EmbLocalCacheShard"):
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        with patch.dict("os.environ", {"MM_EMB_NATIVE_LOCAL_CACHE": "1"}):
+            cache = ShardedMMEmbeddingCache(0, 8192, shards=1, async_publication=True)
+        self.addCleanup(cache.close)
+
+        def put():
+            state, producer = cache.try_acquire("key")
+            self.assertEqual(state, "miss")
+            self.assertIs(cache.try_acquire("key")[1], producer)
+            source = torch.arange(64, dtype=torch.bfloat16)
+
+            def before_publish():
+                source.numel()
+
+            self.assertTrue(cache.complete(
+                "key", producer, (source, {"alias": source}),
+                before_publish=before_publish,
+            ))
+            return weakref.ref(producer), weakref.ref(source), weakref.ref(before_publish)
+
+        owners = put()
+        cache.flush()
+        gc.collect()
+        self.assertTrue(all(owner() is None for owner in owners))
+        self.assertEqual(cache.stats()["resident_entries"], 1)
+        state, reader = cache.try_acquire("key")
+        self.assertEqual(state, "complete")
+        result = reader.wait()
+        self.assertIs(result[0], result[1]["alias"])
+        cache.remove("key")
+        self.assertFalse(cache.is_current("key", reader))
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 128)
+        self.assertTrue(torch.equal(result[0], torch.arange(64, dtype=torch.bfloat16)))
+        del reader
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 0)
+
 
     def test_budget_split_is_exact(self):
         from rtp_llm.multimodal.mm_embedding_cache import (

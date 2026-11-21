@@ -51,6 +51,7 @@ class MetricReporterTest(unittest.TestCase):
                 if metric
                 not in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,

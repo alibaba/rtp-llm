@@ -326,6 +326,7 @@ class GaugeMetrics(Enum):
     VIT_IMAGE_COUNT_METRIC = "py_rtp_vit_image_count"
     VIT_EMBEDDING_QUEUE_SIZE_METRIC = "py_rtp_vit_embedding_queue_size"
     VIT_EMBEDDING_QUEUE_WAIT_RT_METRIC = "py_rtp_vit_embedding_queue_wait_rt"
+    VIT_EMBEDDING_CACHE_HIT_RT_METRIC = "py_rtp_vit_embedding_cache_hit_rt_ms"
     VIT_EMBEDDING_CACHE_TOKENS_METRIC = "py_rtp_vit_embedding_cache_tokens"
     VIT_EMBEDDING_CACHE_BYTES_METRIC = "py_rtp_vit_embedding_cache_bytes"
     # Configured GPU + CPU capacity / successful new admission bytes per second.
@@ -392,6 +393,7 @@ class MetricReporter(object):
                     )
                 elif metric in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,

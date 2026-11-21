@@ -102,6 +102,7 @@ cc_library(
     srcs = [
         "ComputeInit.cc",
         "EmbTensorObjectDecode.cc",
+        "emb_local/EmbLocalBindings.cc",
     ],
     hdrs = [
         "EmbNativeObjectApi.h",
@@ -110,6 +111,11 @@ cc_library(
         "EmbTensorCodec.h",
         "EmbTensorObjectPlan.h",
         "EmbTransportCudaStreams.h",
+        "emb_local/EmbLocalArena.h",
+        "emb_local/EmbLocalIndex.h",
+        "emb_local/EmbLocalShard.h",
+        "emb_local/EmbLocalTransfer.h",
+        "emb_local/EmbLocalTree.h",
     ],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",

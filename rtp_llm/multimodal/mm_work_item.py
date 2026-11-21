@@ -15,6 +15,7 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     _current_cuda_streams,
+    is_current_cache_entry,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.multimodal.multimodal_util import maybe_tensor_to_list
@@ -205,7 +206,9 @@ class MMWorkItem:
                 if (
                     self.hash_key_cache is not None
                     and self.embedding_cache is not None
-                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
+                    and is_current_cache_entry(
+                        self.embedding_cache, self.cache_key, self.cache_entry
+                    )
                 ):
                     self.feature_hashes = self.hash_key_cache.get(
                         self.cache_key, self.cache_entry.generation
@@ -218,7 +221,9 @@ class MMWorkItem:
                 self.embedding_result = self.cache_entry.wait()
                 if (
                     self.hash_key_cache is not None
-                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
+                    and is_current_cache_entry(
+                        self.embedding_cache, self.cache_key, self.cache_entry
+                    )
                 ):
                     self.feature_hashes = self.hash_key_cache.get(
                         self.cache_key, self.cache_entry.generation

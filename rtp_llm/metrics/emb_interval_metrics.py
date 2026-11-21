@@ -1,4 +1,4 @@
-"""Interval telemetry for the remote embedding cache's hot path."""
+"""Interval telemetry for embedding cache hot paths."""
 
 import time
 from bisect import bisect_left
@@ -48,6 +48,9 @@ STAGE_RT = PREFIX + "stage_rt_ms"
 QUEUE_RT = PREFIX + "queue_wait_ms"
 GDR_LOCK_HOLD_RT = PREFIX + "gdr_lock_hold_ms"
 OPERATION_QPS = PREFIX + "operation_qps"
+LOCAL_HIT_RT = "py_rtp_vit_embedding_cache_hit_rt_ms"
+LOCAL_HIT_BOUNDS_MS = (0.025, 0.05, 0.075, 0.1, 0.125, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 500, 1000)
+LOCAL_HIT_BUCKET_LABELS = tuple(map(str, LOCAL_HIT_BOUNDS_MS)) + ("+Inf",)
 OBJECT_RT_BOUNDS_MS = (10, 25, 50, 75, 100, 150, 250, 500, 1000, 3000)
 OBJECT_RT_BUCKET_LABELS = tuple(map(str, OBJECT_RT_BOUNDS_MS)) + ("+Inf",)
 OBJECT_RT_OUTCOMES = {PREFIX + "read_rt": ("hit",), PREFIX + "write_rt": ("success",)}
@@ -202,6 +205,7 @@ class EmbLatencyMetric(MetricBase):
         self._is_stage = name == STAGE_RT
         self._is_queue = name == QUEUE_RT
         self._is_gdr_lock_hold = name == GDR_LOCK_HOLD_RT
+        self._is_local_hit = name == LOCAL_HIT_RT
         self._object_outcome = OBJECT_RT_OUTCOMES.get(name)
         if self._is_stage:
             self._tag_names = ("operation", "stage", "status")
@@ -209,6 +213,8 @@ class EmbLatencyMetric(MetricBase):
             self._tag_names = ("operation",)
         elif self._is_gdr_lock_hold:
             self._tag_names = ("operation", "phase")
+        elif self._is_local_hit:
+            self._tag_names = ("tier", "implementation")
         else:
             self._tag_names = ("status",)
         self._lock = Lock()
@@ -225,13 +231,22 @@ class EmbLatencyMetric(MetricBase):
             key = (tags["operation"],)
         elif self._is_gdr_lock_hold:
             key = tags["operation"], tags["phase"]
+        elif self._is_local_hit:
+            key = tags["tier"], tags["implementation"]
         else:
             key = (tags["status"],)
         with self._lock:
             entry = self._samples.get(key)
             if entry is None:
-                if key == self._object_outcome:
+                if self._is_local_hit:
+                    bounds = LOCAL_HIT_BOUNDS_MS
+                elif key == self._object_outcome:
                     bounds = OBJECT_RT_BOUNDS_MS
+                elif self._is_stage and key[:2] in (
+                    ("read", "native_restore_header"),
+                    ("read", "d2h_header"),
+                ):
+                    bounds = BOUNDS_MS
                 elif key in (("read",), ("read_transfer",)) or key[:2] == (
                     "read",
                     "metadata",
@@ -263,11 +278,12 @@ class EmbLatencyMetric(MetricBase):
             points.append(MetricDataPoint(entry.maximum, tags, self.name + "_max"))
             if entry.buckets is not None:
                 running = 0
-                labels = (
-                    OBJECT_RT_BUCKET_LABELS
-                    if key == self._object_outcome
-                    else BUCKET_LABELS
-                )
+                if self._is_local_hit:
+                    labels = LOCAL_HIT_BUCKET_LABELS
+                elif key == self._object_outcome:
+                    labels = OBJECT_RT_BUCKET_LABELS
+                else:
+                    labels = BUCKET_LABELS
                 for label, count in zip(labels, entry.buckets):
                     running += count
                     points.append(

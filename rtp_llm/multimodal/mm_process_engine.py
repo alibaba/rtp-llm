@@ -31,6 +31,7 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     ShardedMMEmbeddingCache,
+    is_current_cache_entry,
 )
 from rtp_llm.multimodal.mm_inspection import (
     MMInspectionCoordinator,
@@ -1805,7 +1806,9 @@ class MMProcessEngine:
                         )
                     if (
                         state == "complete"
-                        and self._embedding_cache.peek(cache_key) is entry
+                        and is_current_cache_entry(
+                            self._embedding_cache, cache_key, entry
+                        )
                     ):
                         self._hash_key_cache.get(cache_key, entry.generation)
                     if state in ("miss", "in_progress"):
