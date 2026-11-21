@@ -107,6 +107,13 @@ class OssPayloadObserverTest(unittest.TestCase):
         self.oss2.Bucket.assert_not_called()
         self.observer.observe_oss_payload.assert_not_called()
 
+    def test_observer_process_control_exceptions_are_not_swallowed(self):
+        for kind in (KeyboardInterrupt, SystemExit):
+            with self.subTest(kind=kind):
+                self.observer.observe_oss_payload.side_effect = kind()
+                with self.assertRaises(kind):
+                    self.subject.get_bytes_io_from_oss_path("oss://bucket/media")
+
 
 if __name__ == "__main__":
     unittest.main()

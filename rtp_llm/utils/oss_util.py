@@ -7,6 +7,10 @@ from rtp_llm.config.py_config_modules import StaticConfig
 
 
 def get_bytes_io_from_oss_path(url: str):
+    """Read one body; optional observers only record into preinitialized metrics.
+
+    Ordinary telemetry errors are ignored. Process-control exceptions propagate.
+    """
     if not url.startswith("oss://"):
         raise Exception(f"oss path format expect start with oss://, actual: {url}")
     url = url.replace("oss://", "")
