@@ -35,6 +35,7 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 # Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
 _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
 _USE_NATIVE_SNAPSHOT = os.environ.get("MM_EMB_NATIVE_SNAPSHOT") == "1"
+_BLOCKING_CUDA_EVENTS = os.environ.get("MM_EMB_BLOCKING_CUDA_EVENTS") == "1"
 
 
 def _is_write_in_progress(error):
@@ -892,7 +893,10 @@ class MMRemoteEmbeddingCache:
                                 memory_format=torch.contiguous_format
                             )
                             tensor.record_stream(producer)
-                    ready = producer.record_event()
+                    event = (
+                        torch.cuda.Event(blocking=True) if _BLOCKING_CUDA_EVENTS else None
+                    )
+                    ready = producer.record_event(event)
                 if producer != caller:
                     caller.wait_event(ready)
                 events.append(ready)
