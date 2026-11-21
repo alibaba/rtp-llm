@@ -48,6 +48,9 @@ STAGE_RT = PREFIX + "stage_rt_ms"
 QUEUE_RT = PREFIX + "queue_wait_ms"
 GDR_LOCK_HOLD_RT = PREFIX + "gdr_lock_hold_ms"
 OPERATION_QPS = PREFIX + "operation_qps"
+OBJECT_RT_BOUNDS_MS = (10, 25, 50, 75, 100, 150, 250, 500, 1000, 3000)
+OBJECT_RT_BUCKET_LABELS = tuple(map(str, OBJECT_RT_BOUNDS_MS)) + ("+Inf",)
+OBJECT_RT_OUTCOMES = {PREFIX + "read_rt": ("hit",), PREFIX + "write_rt": ("success",)}
 
 
 def outcome_rates(counts, tags, interval):
@@ -175,13 +178,14 @@ class EmbSampleMetric(MetricBase):
 
 
 class _Latency:
-    __slots__ = ("count", "total", "maximum", "buckets")
+    __slots__ = ("count", "total", "maximum", "bounds", "buckets")
 
-    def __init__(self, histogram):
+    def __init__(self, bounds):
         self.count = 0
         self.total = 0.0
         self.maximum = 0.0
-        self.buckets = [0] * len(BUCKET_LABELS) if histogram else None
+        self.bounds = bounds
+        self.buckets = [0] * (len(bounds) + 1) if bounds else None
 
     def add(self, milliseconds):
         self.count += 1
@@ -189,7 +193,7 @@ class _Latency:
         if milliseconds > self.maximum:
             self.maximum = milliseconds
         if self.buckets is not None:
-            self.buckets[bisect_left(BOUNDS_MS, milliseconds)] += 1
+            self.buckets[bisect_left(self.bounds, milliseconds)] += 1
 
 
 class EmbLatencyMetric(MetricBase):
@@ -198,6 +202,7 @@ class EmbLatencyMetric(MetricBase):
         self._is_stage = name == STAGE_RT
         self._is_queue = name == QUEUE_RT
         self._is_gdr_lock_hold = name == GDR_LOCK_HOLD_RT
+        self._object_outcome = OBJECT_RT_OUTCOMES.get(name)
         if self._is_stage:
             self._tag_names = ("operation", "stage", "status")
         elif self._is_queue:
@@ -225,11 +230,16 @@ class EmbLatencyMetric(MetricBase):
         with self._lock:
             entry = self._samples.get(key)
             if entry is None:
-                histogram = key in (("read",), ("read_transfer",)) or key[:2] == (
+                if key == self._object_outcome:
+                    bounds = OBJECT_RT_BOUNDS_MS
+                elif key in (("read",), ("read_transfer",)) or key[:2] == (
                     "read",
                     "metadata",
-                )
-                entry = self._samples[key] = _Latency(histogram)
+                ):
+                    bounds = BOUNDS_MS
+                else:
+                    bounds = ()
+                entry = self._samples[key] = _Latency(bounds)
             entry.add(value)
 
     def fetch_reported_data(self):
@@ -253,7 +263,12 @@ class EmbLatencyMetric(MetricBase):
             points.append(MetricDataPoint(entry.maximum, tags, self.name + "_max"))
             if entry.buckets is not None:
                 running = 0
-                for label, count in zip(BUCKET_LABELS, entry.buckets):
+                labels = (
+                    OBJECT_RT_BUCKET_LABELS
+                    if key == self._object_outcome
+                    else BUCKET_LABELS
+                )
+                for label, count in zip(labels, entry.buckets):
                     running += count
                     points.append(
                         MetricDataPoint(

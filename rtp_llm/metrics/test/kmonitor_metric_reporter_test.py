@@ -253,6 +253,34 @@ class MetricReporterTest(unittest.TestCase):
         self.assertEqual(rates, dict(total=3, success=0, error=3, skipped=0))
         self.assertTrue(all(p.tags["worker"] == "a" for p in first + second))
 
+    def test_emb_object_latency_counts_the_100_ms_boundary_for_successes(self):
+        for name, status, excluded in (
+            (GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC, "hit", "miss"),
+            (GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC, "success", "timeout"),
+        ):
+            with self.subTest(metric=name):
+                reporter, _ = self.make_reporter()
+                reporter.init(acc_metrics=(), gauge_metrics=(name,))
+                for value in (9.0, 75.0, 100.0, 100.001, 700.0):
+                    reporter.report(name, value, {"status": status})
+                reporter.report(name, 1.0, {"status": excluded})
+                points = reporter._matic_map[name.value].fetch_reported_data()
+                buckets = {
+                    p.tags["le"]: p.value
+                    for p in points
+                    if p.metric_name == name.value + "_bucket"
+                }
+                self.assertEqual(buckets["100"], 3)
+                self.assertEqual(buckets["+Inf"], 5)
+                self.assertEqual(buckets["1000"], 5)
+                self.assertTrue(
+                    all(
+                        p.tags["status"] == status
+                        for p in points
+                        if p.metric_name == name.value + "_bucket"
+                    )
+                )
+
     def test_emb_concurrent_flush_keeps_every_outcome_and_wait_sample(self):
         qps = AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC.value
         rt = GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC.value
