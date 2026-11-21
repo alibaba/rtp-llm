@@ -35,7 +35,7 @@ def _flash_attention_backends():
     except ImportError as error:
         logging.info("Qwen3.5 ViT FA4 unavailable: %s", error)
     try:
-        from flash_attn import flash_attn_varlen_func
+        from flash_attn.flash_attn_interface import flash_attn_varlen_func
 
         fa2 = flash_attn_varlen_func
     except ImportError:
