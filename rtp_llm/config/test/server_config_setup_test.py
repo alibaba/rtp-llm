@@ -12,6 +12,7 @@ from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
     configure_kv_cache_event_host_ip_port,
+    fetch_model_files_to_local,
     set_parallelism_config,
     setup_and_configure_server,
 )
@@ -142,6 +143,52 @@ class KVCacheEventHostIdentityTest(TestCase):
         configs.parallelism_config.tp_rank = 1
         configure_kv_cache_event_host_ip_port(configs)
         self.assertEqual(configs.kv_cache_config.kv_cache_event_host_ip_port, "")
+
+
+class CheckpointPathEnvironmentTest(TestCase):
+    def test_identity_uses_resolved_effective_path_except_nas(self):
+        cases = [
+            ("direct", "oss://models/target", "/mnt/fuse/a", "oss://models/target", "/mnt/fuse/a"),
+            ("pre_resolved", "/mnt/fuse/a", "/mnt/fuse/a", "/mnt/fuse/a", "/mnt/fuse/a"),
+            ("other_source", "oss://models/other", "/mnt/fuse/b", "oss://models/other", "/mnt/fuse/b"),
+            ("local", "/models/local", "/models/local", "/models/local", "/models/local"),
+            ("config_over_env", "oss://models/target", "/mnt/fuse/a", "oss://models/stale", "/mnt/fuse/a"),
+            ("no_env", "/models/cli", "/models/cli", None, "/models/cli"),
+            ("nas", "nas://host/models", "/mnt/ft_123_nfs_x/models", "nas://host/models", "nas://host/models"),
+            ("empty", "", "", "unchanged", "unchanged"),
+        ]
+        for name, source, resolved, original, expected in cases:
+            with self.subTest(name=name):
+                configs = PyEnvConfigs()
+                configs.model_args.ckpt_path = source
+                env = dict(_PINNED_DEVICES)
+                if original is not None:
+                    env["CHECKPOINT_PATH"] = original
+                with patch.dict("os.environ", env, clear=True), patch(
+                    "rtp_llm.config.server_config_setup.fetch_remote_file_to_local",
+                    return_value=resolved,
+                ) as fetch:
+                    fetch_model_files_to_local(configs)
+                    self.assertEqual(configs.model_args.ckpt_path, resolved)
+                    self.assertEqual(os.environ.get("CHECKPOINT_PATH"), expected)
+                    if source:
+                        fetch.assert_called_once_with(source)
+                    else:
+                        fetch.assert_not_called()
+
+    def test_failed_fetch_preserves_checkpoint_environment(self):
+        source = "oss://models/target"
+        configs = PyEnvConfigs()
+        configs.model_args.ckpt_path = source
+        with patch.dict("os.environ", {**_PINNED_DEVICES, "CHECKPOINT_PATH": source}, clear=True), patch(
+            "rtp_llm.config.server_config_setup.fetch_remote_file_to_local",
+            side_effect=RuntimeError("mount failed"),
+        ) as fetch:
+            with self.assertRaisesRegex(RuntimeError, "mount failed"):
+                fetch_model_files_to_local(configs)
+            self.assertEqual(os.environ["CHECKPOINT_PATH"], source)
+            self.assertEqual(configs.model_args.ckpt_path, source)
+            fetch.assert_called_once_with(source)
 
 
 class SingleGpuBackendRankTest(TestCase):

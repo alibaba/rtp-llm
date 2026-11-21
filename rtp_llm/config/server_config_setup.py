@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 from typing import Optional
+from urllib.parse import urlparse
 
 import torch
 
@@ -470,11 +471,16 @@ def setup_default_args(py_env_configs):
 
 
 def fetch_model_files_to_local(py_env_configs: PyEnvConfigs):
-    """Fetch remote model files to local and update py_env_configs in place."""
+    """Fetch model files and align CHECKPOINT_PATH with the resolved load path."""
     # Fetch checkpoint_path from model_args
     model_args = py_env_configs.model_args
     if model_args.ckpt_path:
-        model_args.ckpt_path = fetch_remote_file_to_local(model_args.ckpt_path)
+        checkpoint_source = model_args.ckpt_path
+        model_args.ckpt_path = fetch_remote_file_to_local(checkpoint_source)
+        # Match the supervisor's identity without another mount. NAS mounts
+        # contain a PID, so preserve their existing raw-URI identity.
+        if urlparse(checkpoint_source).scheme != "nas":
+            os.environ["CHECKPOINT_PATH"] = model_args.ckpt_path
 
     # Fetch tokenizer_path from model_args
     tokenizer_path = model_args.tokenizer_path
