@@ -6,6 +6,7 @@ import time
 import unittest
 import weakref
 from enum import Enum
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 
@@ -30,7 +31,10 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCacheEntry,
 )
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
-from rtp_llm.multimodal.mm_remote_embedding_cache import MMRemoteEmbeddingCache
+from rtp_llm.multimodal.mm_remote_embedding_cache import (
+    MMRemoteEmbeddingCache,
+    _SnapshotSubmitTiming,
+)
 from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.multimodal.test.multimodal_process_engine_test import (
     FakeEmbeddingLengthInterface,
@@ -2334,6 +2338,29 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertTrue(store.saved.wait(2))
             self.assertTrue(waited.is_set())
 
+    def test_slow_snapshot_logs_timing_without_key_and_preserves_write(self):
+        store = Store()
+        remote = self.remote(store)
+        self.addCleanup(remote.close)
+        module = "rtp_llm.multimodal.mm_remote_embedding_cache"
+        with (
+            patch(module + "._TRACE_SLOW_SNAPSHOT", True),
+            patch(module + "._SLOW_SNAPSHOT_NS", 0),
+            self.assertLogs(level="WARNING") as logs,
+        ):
+            for key in ("private-key-first", "private-key-second"):
+                remote.submit_result(key, (torch.ones(8), None))
+            remote._write_executor.shutdown(wait=True)
+        output = [entry for entry in logs.output if "MM_EMB_SNAPSHOT_SLOW" in entry]
+        self.assertEqual(len(output), 1)
+        self.assertNotIn("private-key", output[0])
+        self.assertRegex(output[0], r"total_ns=\d+ thread_cpu_ns=\d+")
+        self.assertIn(
+            "gate_ns=0 cuda_submit_ns=0 binding_ns=0 native_submit_ns=0 native_devices=0",
+            output[0],
+        )
+        self.assertEqual(remote.stats()["write_success"], 2)
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_native_snapshot_orders_caller_and_producer_reuse(self):
         import librtp_compute_ops
@@ -2345,8 +2372,14 @@ class RemoteCacheTest(unittest.TestCase):
             "rtp_llm.multimodal.mm_remote_embedding_cache._USE_NATIVE_SNAPSHOT",
             True,
         ):
-            for blocking in (False, True):
-                with self.subTest(blocking=blocking), patch(
+            observation_modes = (
+                (False, True)
+                if hasattr(librtp_compute_ops, "profile_emb_cuda_snapshot")
+                else (False,)
+            )
+            for blocking, observe in product((False, True), observation_modes):
+                timing = _SnapshotSubmitTiming() if observe else None
+                with self.subTest(blocking=blocking, observe=observe), patch(
                     "rtp_llm.multimodal.mm_remote_embedding_cache._BLOCKING_CUDA_EVENTS",
                     blocking,
                 ), torch.cuda.stream(producer):
@@ -2355,11 +2388,18 @@ class RemoteCacheTest(unittest.TestCase):
                         caller.wait_stream(producer)
                         value.add_(26)
                         plan = SimpleNamespace(tensors=[value])
-                        (ready,) = MMRemoteEmbeddingCache._snapshot(plan, (producer,))
+                        (ready,) = MMRemoteEmbeddingCache._snapshot(
+                            plan, (producer,), timing
+                        )
                         value.zero_()
                     ready.synchronize()
                     caller.synchronize()
                     self.assertTrue(torch.all(plan.tensors[0] == 37).item())
+                    if timing is not None:
+                        self.assertEqual(timing.native_devices, 1)
+                        self.assertGreater(timing.native_ns, 0)
+                        self.assertGreaterEqual(timing.binding_ns, timing.native_ns)
+                        self.assertGreaterEqual(timing.cuda_ns, timing.binding_ns)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_deferred_gpu_snapshot_waits_for_producer_and_is_submitted_once(self):

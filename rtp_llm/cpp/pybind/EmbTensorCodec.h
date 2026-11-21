@@ -390,6 +390,16 @@ inline void registerEmbTensorCodec(pybind11::module& module) {
                &snapshotEmbCudaTensors,
                pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def(
+        "profile_emb_cuda_snapshot",
+        [](const std::vector<at::Tensor>& inputs, std::optional<c10::StreamId> producerId, bool blocking) {
+            const auto started = std::chrono::steady_clock::now();
+            auto [snapshots, ready] = snapshotEmbCudaTensors(inputs, producerId, blocking);
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started);
+            return std::make_tuple(std::move(snapshots), std::move(ready), elapsed.count());
+        },
+        pybind11::call_guard<pybind11::gil_scoped_release>());
+    module.def(
         "read_emb_cuda_header",
         [](const at::Tensor& buffer, int64_t offset, int64_t size) { return readEmbCudaHeader(buffer, offset, size); },
         pybind11::call_guard<pybind11::gil_scoped_release>());

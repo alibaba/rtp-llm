@@ -45,6 +45,8 @@ _BLOCKING_CUDA_EVENTS = os.environ.get("MM_EMB_BLOCKING_CUDA_EVENTS") == "1"
 _RETRY_METADATA_TRANSPORT = os.environ.get("MM_EMB_METADATA_TRANSPORT_RETRY") == "1"
 _TRACE_SLOW_METADATA = os.environ.get("MM_EMB_TRACE_SLOW_METADATA") == "1"
 _SLOW_METADATA_MS = 100
+_TRACE_SLOW_SNAPSHOT = os.environ.get("MM_EMB_TRACE_SLOW_SNAPSHOT") == "1"
+_SLOW_SNAPSHOT_NS = 100_000_000
 _META_TRACE = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}")
 _OBSERVE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE_TIMINGS") == "1"
 _OBSERVE_OBJECT_HEADER = os.environ.get("MM_EMB_NATIVE_HEADER_PROFILE") == "1"
@@ -55,6 +57,33 @@ _SLOW_RESTORE_COMPONENTS = (
     "slow_restore_host_resume",
     "slow_restore_python_object",
 )
+
+
+class _SnapshotSubmitTiming:
+    def __init__(self):
+        self.started_ns = time.perf_counter_ns()
+        self.cpu_started_ns = time.thread_time_ns()
+        self.gate_ns = 0
+        self.cuda_ns = 0
+        self.binding_ns = 0
+        self.native_ns = 0
+        self.native_devices = 0
+
+    def finish(self):
+        self.finished_ns = time.perf_counter_ns()
+        self.cpu_ns = time.thread_time_ns() - self.cpu_started_ns
+        self.ended_ns = time.time_ns()
+
+    @contextmanager
+    def cuda_operation(self, gate):
+        waiting_at = time.perf_counter_ns()
+        with gate:
+            acquired_at = time.perf_counter_ns()
+            self.gate_ns += acquired_at - waiting_at
+            try:
+                yield
+            finally:
+                self.cuda_ns += time.perf_counter_ns() - acquired_at
 
 
 def _is_write_in_progress(error):
@@ -180,6 +209,7 @@ class MMRemoteEmbeddingCache:
         self._stats_lock = threading.Lock()
         self._stats = Counter()
         self._next_slow_metadata_log = 0.0
+        self._next_slow_snapshot_log_ns = 0
         self._audit_enabled = (
             os.environ.get("MM_EMB_REMOTE_AUDIT") == "1"
             if audit_enabled is None
@@ -978,8 +1008,35 @@ class MMRemoteEmbeddingCache:
         if entry is not None and key is not None:
             entry.remote_cache_context = dict(key=key, trace_id=trace_id)
 
+    def _trace_slow_snapshot(self, timing):
+        elapsed_ns = timing.finished_ns - timing.started_ns
+        if elapsed_ns < _SLOW_SNAPSHOT_NS:
+            return
+        with self._stats_lock:
+            if timing.finished_ns < self._next_slow_snapshot_log_ns:
+                return
+            self._next_slow_snapshot_log_ns = timing.finished_ns + 1_000_000_000
+        try:
+            logging.warning(
+                "MM_EMB_SNAPSHOT_SLOW pid=%d thread=%d ended_ns=%d total_ns=%d "
+                "thread_cpu_ns=%d gate_ns=%d cuda_submit_ns=%d binding_ns=%d "
+                "native_submit_ns=%d native_devices=%d",
+                os.getpid(),
+                threading.get_native_id(),
+                timing.ended_ns,
+                elapsed_ns,
+                timing.cpu_ns,
+                timing.gate_ns,
+                timing.cuda_ns,
+                timing.binding_ns,
+                timing.native_ns,
+                timing.native_devices,
+            )
+        except Exception:
+            pass  # Diagnostics must not change cache behavior.
+
     @staticmethod
-    def _snapshot(plan, producer_streams):
+    def _snapshot(plan, producer_streams, timing=None):
         """Detach from reusable encoder output before returning it to the caller."""
         streams = {stream.device: stream for stream in producer_streams}
         cuda_indices = {}
@@ -993,21 +1050,36 @@ class MMRemoteEmbeddingCache:
 
         events = []
         native_snapshot = None
+        profile_snapshot = None
         if cuda_indices and _USE_NATIVE_SNAPSHOT:
             import librtp_compute_ops
 
             native_snapshot = getattr(
                 librtp_compute_ops, "snapshot_emb_cuda_tensors", None
             )
+            if timing is not None:
+                profile_snapshot = getattr(
+                    librtp_compute_ops, "profile_emb_cuda_snapshot", None
+                )
         for device, indices in cuda_indices.items():
-            with cuda_graph_gate.operation():
+            gate = cuda_graph_gate.operation()
+            with gate if timing is None else timing.cuda_operation(gate):
                 if native_snapshot is not None:
                     producer = streams.get(device)
-                    snapshots, ready = native_snapshot(
-                        [plan.tensors[i] for i in indices],
-                        producer.stream_id if producer is not None else None,
-                        _BLOCKING_CUDA_EVENTS,
-                    )
+                    submit = profile_snapshot or native_snapshot
+                    inputs = [plan.tensors[i] for i in indices]
+                    producer_id = producer.stream_id if producer is not None else None
+                    if timing is not None:
+                        binding_started_ns = time.perf_counter_ns()
+                    result = submit(inputs, producer_id, _BLOCKING_CUDA_EVENTS)
+                    if timing is not None:
+                        timing.binding_ns += time.perf_counter_ns() - binding_started_ns
+                    if profile_snapshot is None:
+                        snapshots, ready = result
+                    else:
+                        snapshots, ready, native_ns = result
+                        timing.native_ns += native_ns
+                        timing.native_devices += 1
                     for i, snapshot in zip(indices, snapshots):
                         plan.tensors[i] = snapshot
                     events.append(ready)
@@ -1109,8 +1181,15 @@ class MMRemoteEmbeddingCache:
             self._release(cost)
 
         try:
+            snapshot_timing = _SnapshotSubmitTiming() if _TRACE_SLOW_SNAPSHOT else None
             with self._observe_stage("write", "snapshot_submit"):
-                ready_events = self._snapshot(plan, producer_streams)
+                if snapshot_timing is not None:
+                    ready_events = self._snapshot(plan, producer_streams, snapshot_timing)
+                    snapshot_timing.finish()
+                else:
+                    ready_events = self._snapshot(plan, producer_streams)
+            if snapshot_timing is not None:
+                self._trace_slow_snapshot(snapshot_timing)
         except Exception as error:
             self.record(
                 "write_error",
