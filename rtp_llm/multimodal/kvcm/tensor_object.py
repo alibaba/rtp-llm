@@ -329,6 +329,7 @@ def unpack_object(
     payload_fence=None,
     observe_restore_timing=None,
     observe_header=None,
+    header_hint=None,
 ):
     """Validate the layout before materializing any destination tensor.
 
@@ -382,21 +383,18 @@ def unpack_object(
                 stream_id = (
                     None if consumer_stream is None else consumer_stream.stream_id
                 )
+                args = (buffer, expected_key, restore_devices, stream_id)
+                if type(header_hint) is int and 0 < header_hint <= _MAX_HEADER:
+                    args += (header_hint,)
                 with stage("native_object_restore"):
                     if restore_profiled is not None:
                         value, raw_header, timing, length, d2h_bytes, copies = (
-                            restore_profiled(
-                                buffer, expected_key, restore_devices, stream_id
-                            )
+                            restore_profiled(*args)
                         )
                     elif restore_observed is not None:
-                        value, raw_header, timing = restore_observed(
-                            buffer, expected_key, restore_devices, stream_id
-                        )
+                        value, raw_header, timing = restore_observed(*args)
                     else:
-                        value, raw_header = restore_object(
-                            buffer, expected_key, restore_devices, stream_id
-                        )
+                        value, raw_header = restore_object(*args)
                         timing = None
                 if restore_profiled is not None:
                     observe_header(length, d2h_bytes, copies)

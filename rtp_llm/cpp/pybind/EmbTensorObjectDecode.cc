@@ -237,7 +237,8 @@ template<bool observe, bool profileHeader = false>
 pybind11::tuple restoreObject(const at::Tensor&                 input,
                               const std::optional<std::string>& expected,
                               bool                              restoreDevices,
-                              const std::optional<int64_t>&     consumerStreamId) {
+                              const std::optional<int64_t>&     consumerStreamId,
+                              std::optional<int32_t>            headerHint) {
     using Clock = std::chrono::steady_clock;
     std::array<Clock::time_point, 6> ticks;
     const auto stamp = [&](size_t index) {
@@ -248,11 +249,12 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
     stamp(0);
     rapidjson::Document                    document;
     std::string                            header;
+    EmbHeaderReadStats                     headerStats;
     std::optional<std::vector<at::Tensor>> decoded;
     {
         pybind11::gil_scoped_release release;
         const c10::cuda::CUDAGuard   deviceGuard(input.device());
-        header = readEmbCudaObjectHeader(input);
+        header = readEmbCudaObjectHeader(input, headerHint, profileHeader ? &headerStats : nullptr);
         stamp(1);
         std::optional<std::vector<EmbTensorSlice>> slices;
         try {
@@ -292,14 +294,12 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
                 timing = pybind11::cast(nanoseconds);
             }
             if constexpr (profileHeader) {
-                const auto logicalBytes = 16 + static_cast<int64_t>(header.size());
-                const auto firstBytes   = std::min(input.numel(), kEmbCudaHeaderFirstReadBytes);
                 return pybind11::make_tuple(std::move(value),
                                             std::move(fallback),
                                             std::move(timing),
                                             static_cast<int64_t>(header.size()),
-                                            std::max(logicalBytes, firstBytes),
-                                            logicalBytes > firstBytes ? 2 : 1);
+                                            headerStats.bytes,
+                                            headerStats.copies);
             }
             return pybind11::make_tuple(std::move(value), std::move(fallback), std::move(timing));
         } else {
@@ -320,9 +320,19 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
 }  // namespace
 
 void registerEmbTensorObjectDecode(pybind11::module& module) {
-    module.def("restore_emb_cuda_object", &restoreObject<false>);
-    module.def("restore_emb_cuda_object_observed", &restoreObject<true>);
-    module.def("restore_emb_cuda_object_profiled", &restoreObject<true, true>);
+    namespace py = pybind11;
+    const auto bind = [&](const char* name, auto restore) {
+        module.def(name,
+                   restore,
+                   py::arg("buffer"),
+                   py::arg("expected_key"),
+                   py::arg("restore_devices"),
+                   py::arg("consumer_stream_id"),
+                   py::arg("header_hint") = py::none());
+    };
+    bind("restore_emb_cuda_object", &restoreObject<false>);
+    bind("restore_emb_cuda_object_observed", &restoreObject<true>);
+    bind("restore_emb_cuda_object_profiled", &restoreObject<true, true>);
 }
 
 }  // namespace rtp_llm

@@ -16,6 +16,8 @@ import torch
 
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
+from .client import USE_EMB_HEADER_HINT, save_one_with_optional_header_hint
+
 _ISOLATED_CUDA_STREAMS = os.environ.get("MM_EMB_ISOLATED_CUDA_STREAMS") == "1"
 
 
@@ -341,7 +343,10 @@ class RegisteredObjectTransport:
             self._handle_failure(error, operation="write", stage="pack")
             raise
 
-    def save_one(self, key, buffer, **kwargs):
+    def save_one_with_header_hint(self, key, buffer, header_hint, *, trace_id=None):
+        return self.save_one(key, buffer, header_hint=header_hint, trace_id=trace_id)
+
+    def save_one(self, key, buffer, *, header_hint=None, **kwargs):
         with self._serialized("write"):
             direct = self._owner.direct_payload
             if direct:
@@ -374,7 +379,12 @@ class RegisteredObjectTransport:
                 # Exact-object native IO returns after completion on success.
                 failure_stage = "sdk_transfer"
                 with self._stage("write", "native_save"):
-                    self._client.save_one(key, transfer, **kwargs)
+                    if header_hint is None:
+                        self._client.save_one(key, transfer, **kwargs)
+                    else:
+                        save_one_with_optional_header_hint(
+                            self._client, key, transfer, header_hint, **kwargs
+                        )
                 if not direct:
                     failure_stage = "gpu_ready_wait"
                     with self._stage("write", "gpu_ready_wait"):
@@ -431,6 +441,9 @@ class RegisteredObjectTransport:
                     observe_stage=self._observe_stage,
                     consumer_stream=consumer_stream,
                     expected_key=expected_key,
+                    header_hint=(
+                        getattr(meta, "userdata1", None) if USE_EMB_HEADER_HINT else None
+                    ),
                     blocking_cuda_events=self._owner.blocking_cuda_events,
                     payload_fence=self._wait_for_stream_completion,
                     observe_restore_timing=self._owner._observe_restore_timing,

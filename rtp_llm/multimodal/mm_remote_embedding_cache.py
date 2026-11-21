@@ -21,6 +21,10 @@ import torch
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.kvcm.client import (
+    USE_EMB_HEADER_HINT,
+    save_one_with_optional_header_hint,
+)
 from rtp_llm.multimodal.kvcm.lookup import (
     KvMetaLookupError,
     KvMetaLookupTimeout,
@@ -1160,7 +1164,13 @@ class MMRemoteEmbeddingCache:
                 with self._observe_stage("write", "transfer", buffer.numel()):
                     try:
                         target = slot if slot is not None else client
-                        target.save_one(key, buffer, trace_id=trace_id)
+                        save_one_with_optional_header_hint(
+                            target,
+                            key,
+                            buffer,
+                            len(plan.header_bytes) if USE_EMB_HEADER_HINT else None,
+                            trace_id=trace_id,
+                        )
                     except Exception as error:
                         self._retire_client(client, error)
                         raise

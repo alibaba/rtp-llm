@@ -161,7 +161,14 @@ inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, in
 
 inline constexpr int64_t kEmbCudaHeaderFirstReadBytes = 1024;
 
-inline std::string readEmbCudaObjectHeader(const at::Tensor& buffer) {
+struct EmbHeaderReadStats {
+    int64_t bytes = 0;
+    int copies = 0;
+};
+
+inline std::string readEmbCudaObjectHeader(const at::Tensor& buffer,
+                                          std::optional<int32_t> headerHint = std::nullopt,
+                                          EmbHeaderReadStats* stats = nullptr) {
     constexpr int64_t prefixSize = 16;
     constexpr int64_t alignment = 64;
     constexpr uint64_t maxHeaderSize = 64 * 1024;
@@ -169,23 +176,45 @@ inline std::string readEmbCudaObjectHeader(const at::Tensor& buffer) {
     if (size < prefixSize) {
         throw std::invalid_argument("invalid multimodal object buffer");
     }
-    const auto first = readEmbCudaHeader(buffer, 0, std::min(size, kEmbCudaHeaderFirstReadBytes));
+    const auto read = [&](int64_t offset, int64_t length) {
+        auto result = readEmbCudaHeader(buffer, offset, length);
+        if (stats != nullptr) {
+            stats->bytes += length;
+            ++stats->copies;
+        }
+        return result;
+    };
+    const auto decodeSize = [](const uint8_t* bytes) {
+        uint64_t headerSize = 0;
+        for (unsigned i = 0; i < 8; ++i) {
+            headerSize |= static_cast<uint64_t>(bytes[8 + i]) << (8 * i);
+        }
+        return headerSize;
+    };
+    const auto fits = [size](uint64_t headerSize) {
+        if (headerSize > maxHeaderSize) {
+            return false;
+        }
+        const auto end = prefixSize + static_cast<int64_t>(headerSize);
+        return end <= size && (end + alignment - 1) / alignment * alignment <= size;
+    };
+    const auto firstBytes = headerHint && *headerHint > 0 && fits(*headerHint)
+                                ? prefixSize + *headerHint
+                                : std::min(size, kEmbCudaHeaderFirstReadBytes);
+    const auto first = read(0, firstBytes);
     const auto* bytes = first.data_ptr<uint8_t>();
-    uint64_t headerSize = 0;
-    for (unsigned i = 0; i < 8; ++i) {
-        headerSize |= static_cast<uint64_t>(bytes[8 + i]) << (8 * i);
-    }
-    if (std::memcmp(bytes, "RTPMM002", 8) != 0 || headerSize > maxHeaderSize) {
+    const auto headerSize = decodeSize(bytes);
+    if (std::memcmp(bytes, "RTPMM002", 8) != 0 || !fits(headerSize)) {
         throw std::invalid_argument("invalid multimodal object header");
     }
+    // A hint selects only the first copy length. The verified on-buffer
+    // length controls parsing and the payload offset. On a mismatch, reuse
+    // the bytes already copied and fetch only the remaining suffix.
     const auto end = prefixSize + static_cast<int64_t>(headerSize);
-    if ((end + alignment - 1) / alignment * alignment > size) {
-        throw std::invalid_argument("invalid multimodal object header");
-    }
     const auto initial = std::min(end, first.numel());
     std::string header(reinterpret_cast<const char*>(bytes + prefixSize), initial - prefixSize);
     if (end > initial) {
-        const auto suffix = readEmbCudaHeader(buffer, initial, end - initial);
+        const auto suffix = read(initial, end - initial);
         header.append(reinterpret_cast<const char*>(suffix.data_ptr<uint8_t>()), end - initial);
     }
     return header;

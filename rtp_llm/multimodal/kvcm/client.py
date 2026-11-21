@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import weakref
 from collections.abc import Mapping, Sequence
@@ -20,10 +21,21 @@ from .lookup import KvMetaLookupError, KvMetaLookupTimeout
 _MISSING_WHEEL_MESSAGE = (
     "KVCM EMB storage requires the kvcm_py_client wheel with KVMeta object support"
 )
-_INCOMPATIBLE_WHEEL_MESSAGE = "KVCM EMB storage requires KVMeta object API version 2"
-_REQUIRED_KVCM_OBJECT_API_VERSION = 2
+_INCOMPATIBLE_WHEEL_MESSAGE = "KVCM EMB storage requires KVMeta object API version 2 or 3"
+_SUPPORTED_KVCM_OBJECT_API_VERSIONS = (2, 3)
+USE_EMB_HEADER_HINT = os.environ.get("MM_EMB_NATIVE_HEADER_HINT") == "1"
 _ENDPOINT_REFRESH_SECONDS = 1.0
 _TensorT = TypeVar("_TensorT")
+
+
+def save_one_with_optional_header_hint(target, key, tensor, header_hint, *, trace_id=None):
+    if header_hint is not None and callable(
+        getattr(type(target), "save_one_with_header_hint", None)
+    ):
+        return target.save_one_with_header_hint(
+            key, tensor, header_hint, trace_id=trace_id
+        )
+    return target.save_one(key, tensor, trace_id=trace_id)
 
 
 def _load_kvcm_client_types(
@@ -44,7 +56,7 @@ def _load_kvcm_client_types(
     # rather than silently running an older, source-compatible but unsafe wheel.
     if (
         type(KV_META_OBJECT_API_VERSION) is not int
-        or KV_META_OBJECT_API_VERSION != _REQUIRED_KVCM_OBJECT_API_VERSION
+        or KV_META_OBJECT_API_VERSION not in _SUPPORTED_KVCM_OBJECT_API_VERSIONS
     ):
         raise RuntimeError(_INCOMPATIBLE_WHEEL_MESSAGE)
     try:
@@ -284,6 +296,15 @@ class RtpKvMetaObjectClient:
 
         self.save((key,), (tensor,), trace_id=trace_id)
 
+    def save_one_with_header_hint(self, key, tensor, header_hint, *, trace_id=None):
+        self._ensure_open()
+        if callable(getattr(type(self._client), "save_with_user_data", None)):
+            self._client.save_with_user_data(
+                (key,), (tensor,), ((header_hint, None),), trace_id=trace_id
+            )
+        else:
+            self.save_one(key, tensor, trace_id=trace_id)
+
     def load(
         self,
         keys: Sequence[str],
@@ -361,7 +382,13 @@ class RtpKvMetaObjectClient:
         plan = plan_object(
             value, devices=devices, max_bytes=self._config.max_object_bytes
         )
-        self.save_one(key, pack_object(plan), trace_id=trace_id)
+        save_one_with_optional_header_hint(
+            self,
+            key,
+            pack_object(plan),
+            len(plan.header_bytes) if USE_EMB_HEADER_HINT else None,
+            trace_id=trace_id,
+        )
 
     def load_object(
         self,
