@@ -9,6 +9,12 @@ filegroup(
 )
 
 py_test(
+    name = "oss_payload_observer_test",
+    srcs = ["oss_payload_observer_test.py"],
+    data = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",
