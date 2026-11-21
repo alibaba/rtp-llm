@@ -354,7 +354,7 @@ def start_vit_server_impl(
 
     try:
         return _start_vit_server_impl(
-            py_env_configs, process_manager, started_processes
+            py_env_configs, process_manager, started_processes, service_draining
         )
     except Exception:
         if process_manager is None:
@@ -400,6 +400,7 @@ def _start_vit_server_impl(
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager,
     started_processes: list,
+    service_draining=None,
 ):
     """
     启动 VIT 服务器
@@ -408,6 +409,7 @@ def _start_vit_server_impl(
         py_env_configs: 配置对象
         process_manager: 进程管理器
         started_processes: successfully started children for failure cleanup
+        service_draining: shared draining Event forwarded to each VIT child
     """
     from rtp_llm.multimodal.vit_proxy_start_server import vit_proxy_start_server
     from rtp_llm.multimodal.vit_start_server import vit_start_server

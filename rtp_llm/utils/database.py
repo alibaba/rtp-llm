@@ -380,9 +380,6 @@ class CkptDatabase(BaseDatabase):
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
         from fastsafetensors.parallel_loader import PipelineParallel
-        from rtp_llm.model_loader.per_expert_parallel_loader import (
-            PerExpertParallelLoader,
-        )
 
         def iterator(device: str, use_tqdm_on_load: bool):
             if torch.distributed.is_initialized():

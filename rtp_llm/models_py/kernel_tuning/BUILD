@@ -6,7 +6,12 @@ py_library(
     ]),
     data = glob([
         "aiter/configs/*.csv",
-    ]),
+    ]) + [
+        # py_config_modules imports rtp_llm.ops, whose loader resolves
+        # libth_transformer_config.so from the runfiles tree; without it the
+        # import chain dies on CPU workers (no .so anywhere in the tree).
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
     deps = [
         "//rtp_llm:config_ops",
         "//rtp_llm:torch",

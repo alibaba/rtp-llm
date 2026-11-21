@@ -156,7 +156,9 @@ class StartServerFailureTest(unittest.TestCase):
         child = _VitFakeProcess("vit_worker_0")
         captured = {}
 
-        def fail_after_registering_child(_, manager):
+        def fail_after_registering_child(_, manager, service_draining=None):
+            # Mirrors the real start_vit_server_impl(py_env_configs,
+            # process_manager, service_draining) call site.
             manager.add_process(child)
             captured["manager"] = manager
             raise RuntimeError("vit proxy start failed")
