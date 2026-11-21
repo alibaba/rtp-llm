@@ -31,6 +31,10 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
     by the base class and shared with the model's captured attention kernels.
     """
 
+    # CudaGraphRunner may leave host mirrors and aggregate host scalars stale:
+    # this implementation validates and consumes only device positions/tables.
+    uses_device_only_cuda_graph_metadata = True
+
     def __init__(
         self,
         config,
@@ -44,11 +48,13 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
         device = torch.device(device)
         if (
             device.type != "cuda"
-            or config.q_len not in (1, 2, 3, 4)
+            or config.q_len not in (1, 2, 3, 4, 5, 6)
             or not 0 < config.max_batch_size <= 128
             or not config.paged_pool_specs
         ):
-            raise ValueError("PPU metadata Graph requires paged PPU Decode q_len=1/2/3/4")
+            raise ValueError(
+                "PPU metadata Graph requires paged PPU Decode q_len=1..6"
+            )
         super().__init__(config, device, attn_inputs)
         self.metadata.active_token_mask = None
         self._metadata_graph = None

@@ -6,6 +6,8 @@
 #include <functional>
 #include <vector>
 #include <atomic>
+#include <deque>
+#include <unordered_map>
 
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
@@ -37,6 +39,17 @@ public:
 
 protected:
     virtual bool doCall(const std::shared_ptr<RequestBlockBuffer>& request_block_buffer, int64_t timeout_ms) = 0;
+
+private:
+    void dispatchPendingCalls();
+    struct PendingCall {
+        std::shared_ptr<RequestBlockBuffer> buffer;
+        int64_t                             ready_ms;
+    };
+    std::deque<PendingCall>                           pending_calls_;
+    std::unordered_map<RequestBlockBuffer*, unsigned> retry_counts_;
+    size_t                                            in_flight_ = 0;
+    bool                                              stopped_   = false;
 
 protected:
     std::weak_ptr<CacheStore> cache_store_;

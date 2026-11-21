@@ -145,15 +145,25 @@ def _require_n_shared_experts(config_json: dict) -> int:
     return raw_value
 
 
+_PPU_FLASH_LAYERS = {
+    "deepseek_v4": 43,
+    # V4-Flash MTP is a single SWA block; the 0731 DSpARK checkpoint stores
+    # three of them (mtp.0/1/2) behind a trailing zeroed compress ratio.
+    "deepseek_v4_mtp": 1,
+    "deepseek_v4_dspark": 3,
+}
+
+
 def _is_ppu_flash(config):
-    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp"):
+    expected_layers = _PPU_FLASH_LAYERS.get(config.model_type)
+    if expected_layers is None:
         return False
     from rtp_llm.device.device_type import is_ppu
 
     return (
         is_ppu()
         and config.hidden_size == 4096
-        and config.num_layers == (1 if config.model_type == "deepseek_v4_mtp" else 43)
+        and config.num_layers == expected_layers
     )
 
 
@@ -194,6 +204,19 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
 
     def get_weight_info(self):
         info = super().get_weight_info()
+        if os.environ.get("RTP_LLM_DSV4_FP8_LM_HEAD", "").lower() in _TRUTHY_ENV_VALUES:
+            from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
+
+            matches = [i for i, weight in enumerate(info.weights) if weight.name == W.lm_head]
+            if len(matches) != 1:
+                raise ValueError(
+                    "RTP_LLM_DSV4_FP8_LM_HEAD requires exactly one lm_head descriptor, "
+                    f"got {len(matches)}"
+                )
+            index = matches[0]
+            if not isinstance(info.weights[index], Fp8StorageWeight):
+                info.weights[index] = Fp8StorageWeight(info.weights[index])
+            logging.info("DeepSeek-V4 FP8 LM head storage enabled")
         if _is_ppu_flash(self.model_config) and self._moe_pure_tp_mode:
             from rtp_llm.models_py.modules.dsv4.ppu.resources import (
                 configure_weight_splits,
@@ -1235,7 +1258,10 @@ class DeepSeekV4DSpark(DeepSeekV4):
                 "DeepSeek-V4 DSpark cannot alias semantically incompatible "
                 f"target weights: {details}"
             )
-        return (W.embedding, W.lm_head)
+        aliases = (W.embedding, W.lm_head)
+        if os.environ.get("RTP_LLM_DSV4_FP8_LM_HEAD", "").lower() in _TRUTHY_ENV_VALUES:
+            aliases += (W.lm_head_s,)
+        return aliases
 
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -1266,9 +1292,14 @@ class DeepSeekV4DSpark(DeepSeekV4):
         return config
 
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
-            DeepSeekV4DSparkModel,
-        )
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.dspark_model import (
+                PpuDeepSeekV4DSparkModel as DeepSeekV4DSparkModel,
+            )
+        else:
+            from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
+                DeepSeekV4DSparkModel,
+            )
 
         self.py_model = DeepSeekV4DSparkModel(
             self.model_config,

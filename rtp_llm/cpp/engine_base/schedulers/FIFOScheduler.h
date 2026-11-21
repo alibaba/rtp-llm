@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <list>
@@ -38,6 +39,10 @@ public:
     int64_t waitingStreamsSize();
     using FIFOSchedulerBase::runningStreamsSize;
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
+
+    static int normalizeFakeStreamPollMs(int value) {
+        return std::min(std::max(value, 0), 100);
+    }
 
 private:
     using StreamGroup      = std::list<GenerateStreamPtr>;
@@ -125,6 +130,14 @@ private:
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
+    // DP keepalive pacing for the pure fake-round wait path: a rank with
+    // need_fill_fake_stream_, no running stream and no backlog wakes at this
+    // interval to pace its fake rounds. Env RTP_FIFO_FAKE_STREAM_POLL_MS
+    // (0..100, default 10 = historical quantum) only tightens this path; zero
+    // deliberately busy-polls pure fake rounds for latency-sensitive DP/EP
+    // decode. The retryable-queue quanta are untouched.
+    const int            fake_stream_poll_ms_     = 10;
+    std::atomic<int64_t> keepalive_timeout_count_ = 0;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;

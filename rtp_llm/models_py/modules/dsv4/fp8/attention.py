@@ -29,7 +29,6 @@ import deep_gemm  # noqa: E402
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
@@ -819,6 +818,7 @@ class PrefillQKV(NamedTuple):
     qr: torch.Tensor
     q: Optional[torch.Tensor]
     kv_full: torch.Tensor
+    cache_rope: Optional[torch.Tensor] = None
 
 
 class AttentionFP8(nn.Module):
@@ -5212,6 +5212,9 @@ class AttentionFP8(nn.Module):
         x: torch.Tensor,
         common: PrefillMeta,
         shared_input_quant: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        *,
+        cache_rope: Optional[torch.Tensor] = None,
+        round_before_rope: bool = False,
     ) -> PrefillQKV:
         """Q/KV path — RMSNorm + LoRA Q + KV linears + fused RMSNorm-RoPE.
 
@@ -5254,7 +5257,13 @@ class AttentionFP8(nn.Module):
                 else:
                     kv_in = self._lin(self.wkv, x_3d)
                 return fused_rmsnorm_rope(
-                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+                    kv_in,
+                    self.kv_norm,
+                    common.freqs_cis,
+                    rd,
+                    eps=self.eps,
+                    cache_rope_out=cache_rope,
+                    round_before_rope=round_before_rope,
                 )
 
         qr = compute_qr()
@@ -5281,6 +5290,7 @@ class AttentionFP8(nn.Module):
             qr=qr.squeeze(0),
             q=None,  # deferred to _materialize_prefill_q
             kv_full=kv_full.squeeze(0),
+            cache_rope=cache_rope,
         )
 
     def _materialize_prefill_q(
@@ -5323,7 +5333,11 @@ class AttentionFP8(nn.Module):
     # FP8 SWA-only fast path: paged write + concat-from-cache
     # ------------------------------------------------------------------
     def _prefill_write_swa_fp8_paged(
-        self, common: PrefillMeta, kv_full: torch.Tensor
+        self,
+        common: PrefillMeta,
+        kv_full: torch.Tensor,
+        *,
+        cache_rope: Optional[torch.Tensor] = None,
     ) -> None:
         """Single-launch quantize + insert into the FP8 SWA pool, using
         the paged ``slot_mapping`` pre-built in ``common.swa_meta``.
@@ -5365,7 +5379,9 @@ class AttentionFP8(nn.Module):
                     compaction=meta.slot_compaction,
                 )
             else:
-                _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+                _ins.quantize_and_insert_k_cache(
+                    k_bf16, packed_3d, meta.slot_mapping, cache_rope=cache_rope
+                )
 
     def _flash_mla_sparse_fwd_chunked_projected(
         self,

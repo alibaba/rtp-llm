@@ -1,7 +1,9 @@
 """PPU overrides; unchanged behavior is inherited from the shared DSV4 implementation."""
 
 from __future__ import annotations
+
 from typing import TYPE_CHECKING
+
 import torch
 from rtp_llm.models_py.kernels.cuda.quant_layouts import dequantize_fp8_weight
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
@@ -14,6 +16,7 @@ from rtp_llm.models_py.modules.dsv4.rope import (
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8
+
 
 def decode_output_proj(
     attn: "AttentionFP8",
@@ -65,7 +68,6 @@ def decode_output_proj(
     if attn.tp_size > 1:
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
-        reduced = all_reduce(out, Group.TP, inplace=True)
-        if reduced is not out:
-            out.copy_(reduced)
+        reduced = all_reduce(out.float(), Group.TP, inplace=True)
+        out.copy_(reduced)
     return out

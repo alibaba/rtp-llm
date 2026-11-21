@@ -331,9 +331,10 @@ def topk_bf16(scores, starts, ends, out):
     _module(
         "topk", torch.cuda.get_device_capability(scores.device), out.shape[1]
     ).forward(scores, starts, ends, pages, out, 2**31, None)
-    # Atomic scatter preserves the set but not its order. Sparse attention's
-    # finite-precision reduction must see a repeatable candidate order.
-    return canonicalize_topk_indices(out)
+    # K=512 is sorted in shared memory before the final store. Keep the
+    # standalone canonicalizer for K=1024, whose register kernel has fewer
+    # threads than output indices.
+    return out if out.shape[1] == 512 else canonicalize_topk_indices(out)
 
 
 def _checked_bf16_topk(scores, starts, ends, out):

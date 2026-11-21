@@ -1,0 +1,2257 @@
+diff --git a/csrc/apis/activation.hpp b/csrc/apis/activation.hpp
+index 3ca2ed8..b2808e9 100644
+--- a/csrc/apis/activation.hpp
++++ b/csrc/apis/activation.hpp
+@@ -54,7 +54,8 @@ static py::object dispatch_activation(
+         const std::optional<torch::Tensor>& masked_m, const std::optional<int>& expected_m,
+         float limit, float inverse, const std::optional<bool>& reorder_scale,
+         ActivationSoftcapArgs softcap = {},
+-        const std::optional<torch::Tensor>& route_ids = std::nullopt) {
++        const std::optional<torch::Tensor>& route_ids = std::nullopt,
++        const std::optional<torch::Tensor>& route_weights = std::nullopt) {
+     TORCH_CHECK(masked_m || !expected_m, "expected_m requires masked_m");
+     TORCH_CHECK(mode == QuantMode::FP8_CHANNEL || inverse == 1.0f,
+                 "weight_inv_scale is only supported for FP8_CHANNEL");
+@@ -63,6 +64,15 @@ static py::object dispatch_activation(
+     auto mask = masked_m ? check_mask(input, *masked_m, expected_m) : ActivationMaskArgs{};
+     const auto [n, rows] = check_input(input, limit);
+     check_route_ids(input, rows, route_ids, mask);
++    const float* route_weight_ptr = nullptr;
++    if (route_weights) {
++        TORCH_CHECK(mode == QuantMode::BF16 || mode == QuantMode::FP8_BLOCK,
++                    "route_weights require BF16 or FP8_BLOCK output");
++        TORCH_CHECK(route_weights->device() == input.device() && route_weights->is_contiguous() &&
++                    route_weights->scalar_type() == torch::kFloat32 && route_weights->numel() == rows,
++                    "route_weights must be contiguous FP32 with one value per input row");
++        route_weight_ptr = route_weights->data_ptr<float>();
++    }
+     if (mode == QuantMode::FP8_CHANNEL)
+         TORCH_CHECK(std::isfinite(inverse) && inverse > 0, "inverse scale must be finite and positive");
+     if (mode == QuantMode::MXFP4) {
+@@ -74,13 +84,13 @@ static py::object dispatch_activation(
+         TORCH_CHECK(n % 128 == 0, "FP8_BLOCK requires output N divisible by 128");
+     switch (mode) {
+         case QuantMode::BF16:
+-            return py::cast(run_activation(input, n, rows, limit, mask, softcap));
++            return py::cast(run_activation(input, n, rows, limit, mask, softcap, route_weight_ptr));
+         case QuantMode::FP8_CHANNEL:
+             return py::cast(run_activation_fp8_channel(input, n, rows, limit, inverse, mask, softcap));
+         case QuantMode::MXFP4:
+             return py::cast(run_activation_mxfp4(input, n, rows, limit, reorder_scale.value_or(true), mask, softcap));
+         case QuantMode::FP8_BLOCK:
+-            return py::cast(run_activation_tiled<true>(input, n, rows, limit, mask, softcap));
++            return py::cast(run_activation_tiled<true>(input, n, rows, limit, mask, softcap, route_weight_ptr));
+         case QuantMode::MXFP8:
+             return py::cast(run_activation_mx<false>(input, n, rows, limit, mask, softcap));
+     }
+@@ -93,7 +103,8 @@ static py::object dispatch_activation_mode(ActivationMode activation_mode, Quant
+         const std::optional<int>& hint, const std::optional<float>& limit,
+         const std::optional<float>& beta, const std::optional<float>& linear_beta,
+         float inverse, const std::optional<bool>& reorder,
+-        const std::optional<torch::Tensor>& route_ids = std::nullopt) {
++        const std::optional<torch::Tensor>& route_ids = std::nullopt,
++        const std::optional<torch::Tensor>& route_weights = std::nullopt) {
+     ActivationSoftcapArgs activation;
+     if (activation_mode == ActivationMode::SITU) {
+         TORCH_CHECK(!limit, "swiglu_limit is only supported for SILU and SILU_STEP");
+@@ -105,7 +116,8 @@ static py::object dispatch_activation_mode(ActivationMode activation_mode, Quant
+         TORCH_CHECK(!beta && !linear_beta, "beta and linear_beta are only supported for SITU");
+         activation.mode = activation_mode;
+     }
+-    return dispatch_activation(quant_mode, input, mask, hint, limit.value_or(0.0f), inverse, reorder, activation, route_ids);
++    return dispatch_activation(quant_mode, input, mask, hint, limit.value_or(0.0f), inverse, reorder,
++                               activation, route_ids, route_weights);
+ }
+
+ static void register_apis(pybind11::module_& m) {
+@@ -149,5 +161,14 @@ static void register_apis(pybind11::module_& m) {
+        py::arg("expected_m") = std::nullopt, py::arg("swiglu_limit") = std::nullopt,
+        py::arg("beta") = std::nullopt, py::arg("linear_beta") = std::nullopt,
+        py::arg("weight_inv_scale") = 1.0f, py::arg("reorder_scale") = std::nullopt, doc);
++    m.def("activation_and_mul_routed_masked", [](ActivationMode activation_mode, QuantMode quant_mode,
++            const torch::Tensor& input, const torch::Tensor& masked_m,
++            const torch::Tensor& route_weights, Hint expected_m, Limit limit) {
++        return dispatch_activation_mode(activation_mode, quant_mode, input, masked_m, expected_m,
++                                        limit, std::nullopt, std::nullopt, 1.0f, std::nullopt,
++                                        std::nullopt, route_weights);
++    }, py::arg("activation_mode"), py::arg("quant_mode"), py::arg("input"),
++       py::arg("masked_m"), py::arg("route_weights"), py::kw_only(),
++       py::arg("expected_m") = std::nullopt, py::arg("swiglu_limit") = std::nullopt);
+ }
+ } // namespace deep_gemm::activation
+diff --git a/csrc/apis/mega_moe.hpp b/csrc/apis/mega_moe.hpp
+index c55f69d..10e614a 100644
+--- a/csrc/apis/mega_moe.hpp
++++ b/csrc/apis/mega_moe.hpp
+@@ -198,8 +198,8 @@ get_symm_buffer_size_for_mega_moe(
+     const std::optional<std::string>& quantization = std::nullopt) {
+     const auto activation_kind = parse_gated_activation(activation);
+     TORCH_CHECK(num_shared_experts == 0, "MegaMoE shared experts are not supported yet");
+-    TORCH_CHECK(mma_type == "fp8xfp8" || !quantization,
+-                "quantization applies only to fp8xfp8 workspaces");
++    TORCH_CHECK(mma_type == "fp8xfp8" || mma_type == "fp8xfp4" || !quantization,
++                "quantization applies only to FP8 activation workspaces");
+     if (is_fp4_mma_type(mma_type))
+         return get_mega_moe_buffer_slices<layout::MegaMoEBuffer>(
+             num_ranks, num_experts, num_max_tokens_per_rank, num_topk, hidden, intermediate_hidden, staging_config);
+@@ -211,7 +211,8 @@ get_symm_buffer_size_for_mega_moe(
+         if (mma_type == "fp8xfp8")
+             precision = fp8_mega_moe_precision(quantization.value_or("channelwise"));
+         else if (mma_type == "fp8xfp4")
+-            precision = "w4a8";
++            precision = quantization.value_or("channelwise") == "blockwise"
++                ? "w4a8_blockwise" : "w4a8";
+         else
+             precision = "w4a16";
+         return get_mega_moe_buffer_slices_for_precision(
+@@ -223,9 +224,10 @@ get_symm_buffer_size_for_mega_moe(
+ static void routed_mega_moe_pre_dispatch(
+     const torch::Tensor& hidden_states, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
+     const torch::Tensor& x, const torch::Tensor& x_sf, const torch::Tensor& staged_topk_idx,
+-    const torch::Tensor& staged_topk_weights, const std::optional<int>& num_tokens);
++    const torch::Tensor& staged_topk_weights, const std::optional<int>& num_tokens,
++    bool ue8m0 = false);
+
+-static void mega_moe_pre_dispatch(
++static void mega_moe_pre_dispatch_checked(
+     const torch::Tensor& x,
+     const torch::Tensor& topk_idx,
+     const torch::Tensor& topk_weights,
+@@ -235,7 +237,8 @@ static void mega_moe_pre_dispatch(
+     const torch::Tensor& buf_topk_weights,
+     const int& num_tokens,
+     const int& group_size,
+-    const std::string& mma_type) {
++    const std::string& mma_type,
++    bool ue8m0 = false) {
+     TORCH_CHECK(x.dim() == 2, "x must be a 2D tensor");
+     TORCH_CHECK(num_tokens >= 0 && num_tokens == x.size(0), "num_tokens must match x.shape[0]");
+     // Fused peer publication needs the workspace metadata behind the output views.
+@@ -252,13 +255,16 @@ static void mega_moe_pre_dispatch(
+         !same_view("topk_idx", buf_topk_idx) || !same_view("topk_weights", buf_topk_weights))
+         throw pybind11::value_error("output views must belong to the same live MegaMoE SymmBuffer");
+     const auto owner_mma_type = owner.attr("mma_type").cast<std::string>();
+-    if (owner_mma_type != mma_type && !(is_fp4_mma_type(owner_mma_type) && is_fp4_mma_type(mma_type)))
++    const bool ue8m0_fp8_owner = ue8m0 &&
++        (owner_mma_type == "fp8xfp8" || owner_mma_type == "fp8xfp4");
++    if (owner_mma_type != mma_type && !ue8m0_fp8_owner &&
++        !(is_fp4_mma_type(owner_mma_type) && is_fp4_mma_type(mma_type)))
+         throw pybind11::value_error("mma_type must match the output views' MegaMoE SymmBuffer");
+     if (!is_fp4_mma_type(mma_type) && mma_type != "int8xint8") {
+         TORCH_CHECK(mma_type == "fp8xfp8" || mma_type == "fp8xfp4" || mma_type == "bf16xfp4",
+                     "Unsupported MegaMoE mma_type: ", mma_type);
+         routed_mega_moe_pre_dispatch(x, topk_idx, topk_weights, buf_x, buf_x_sf,
+-                                    buf_topk_idx, buf_topk_weights, num_tokens);
++                                    buf_topk_idx, buf_topk_weights, num_tokens, ue8m0);
+         return;
+     }
+     const bool int8 = mma_type == "int8xint8";
+@@ -300,6 +306,26 @@ static void mega_moe_pre_dispatch(
+     }
+ }
+
++static void mega_moe_pre_dispatch(
++    const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
++    const torch::Tensor& buf_x, const torch::Tensor& buf_x_sf,
++    const torch::Tensor& buf_topk_idx, const torch::Tensor& buf_topk_weights,
++    const int& num_tokens, const int& group_size, const std::string& mma_type) {
++    mega_moe_pre_dispatch_checked(
++        x, topk_idx, topk_weights, buf_x, buf_x_sf, buf_topk_idx,
++        buf_topk_weights, num_tokens, group_size, mma_type, false);
++}
++
++static void mega_moe_pre_dispatch_ue8m0(
++    const torch::Tensor& x, const torch::Tensor& topk_idx, const torch::Tensor& topk_weights,
++    const torch::Tensor& buf_x, const torch::Tensor& buf_x_sf,
++    const torch::Tensor& buf_topk_idx, const torch::Tensor& buf_topk_weights,
++    const int& num_tokens) {
++    mega_moe_pre_dispatch_checked(
++        x, topk_idx, topk_weights, buf_x, buf_x_sf, buf_topk_idx,
++        buf_topk_weights, num_tokens, 128, "fp8xfp8", true);
++}
++
+ // Python owns one symmetric allocation; C++ slices it and submits computation.
+ static void fp4_fp4_mega_moe(
+     const torch::Tensor& y,
+@@ -441,6 +467,8 @@ static Precision routed_precision(const std::string& precision) {
+         return P::W4A16;
+     if (precision == "w4a8")
+         return P::W4A8;
++    if (precision == "w4a8_blockwise")
++        return P::W4A8;
+     if (precision == "fp8_channelwise")
+         return P::FP8Channelwise;
+     TORCH_CHECK(precision == "fp8_blockwise", "Unsupported MegaMoE precision: ", precision);
+@@ -475,7 +503,8 @@ static layout::RoutedMoEBuffer checked_routed_layout(
+         routing_bytes = owner_bytes;
+     }
+     return {uint32_t(num_ranks), uint32_t(num_experts), uint32_t(num_max_tokens_per_rank), uint32_t(num_topk),
+-            uint32_t(hidden), uint32_t(intermediate_hidden), p != P::W4A16, p == P::FP8Blockwise, routing_bytes};
++            uint32_t(hidden), uint32_t(intermediate_hidden), p != P::W4A16,
++            p == P::FP8Blockwise || precision == "w4a8_blockwise", routing_bytes};
+ }
+
+ static void check_routed_buffer(const Tensor& buffer, const layout::RoutedMoEBuffer& layout) {
+@@ -496,7 +525,8 @@ static std::tuple<int64_t, pybind11::function> get_mega_moe_buffer_slices_for_pr
+             const auto transport = make_sym_buffer(pointers, rank_idx, num_ranks);
+             TORCH_CHECK(transport.base == reinterpret_cast<int64_t>(buffer.data_ptr()),
+                         "Invalid local symmetric pointer");
+-            const bool fp8 = precision != "w4a16", blockwise = precision == "fp8_blockwise";
++            const bool fp8 = precision != "w4a16";
++            const bool blockwise = precision == "fp8_blockwise" || precision == "w4a8_blockwise";
+             auto x = mega_moe_slice(buffer, layout.input_tokens, {num_max_tokens_per_rank, hidden},
+                                     fp8 ? torch::kFloat8_e4m3fn : torch::kBFloat16);
+             auto sf = mega_moe_slice(buffer, layout.input_scales,
+@@ -516,7 +546,8 @@ static std::tuple<int64_t, pybind11::function> get_mega_moe_buffer_slices_for_pr
+ static void fp8_w4a16_mega_moe_pre_dispatch_checked(const Tensor& hidden_states, const Tensor& topk_idx,
+                                          const Tensor& topk_weights, const Tensor& x, const Tensor& x_sf,
+                                          const Tensor& staged_topk_idx, const Tensor& staged_topk_weights,
+-                                         const std::optional<int>& requested_num_tokens) {
++                                         const std::optional<int>& requested_num_tokens,
++                                         bool ue8m0 = false) {
+     check_device();
+     check_tensor(hidden_states, torch::kBFloat16);
+     TORCH_CHECK(topk_idx.scalar_type() == torch::kInt32 || topk_idx.scalar_type() == torch::kInt64,
+@@ -542,6 +573,8 @@ static void fp8_w4a16_mega_moe_pre_dispatch_checked(const Tensor& hidden_states,
+     check_tensor(staged_topk_idx, torch::kInt64);
+     check_tensor(staged_topk_weights, torch::kFloat32);
+     check_tensor(x_sf, torch::kFloat32);
++    TORCH_CHECK(!ue8m0 || x_sf.size(1) == hidden / 128,
++                "UE8M0 pre-dispatch requires blockwise FP8 workspace scales");
+     const auto device = x.device();
+     for (const auto& t : {hidden_states, topk_idx, topk_weights, x_sf, staged_topk_idx, staged_topk_weights})
+         TORCH_CHECK(t.device() == device, "pre-dispatch tensors must share the workspace device");
+@@ -557,7 +590,11 @@ static void fp8_w4a16_mega_moe_pre_dispatch_checked(const Tensor& hidden_states,
+         check_shape(x_sf, {num_max_tokens_per_rank, blockwise ? hidden / 128 : 1});
+         if (blockwise)
+             fp8_blockwise_mega_moe_pre_dispatch_impl(
+-                hidden, num_topk, hidden_states, topk_idx, topk_weights, x, x_sf, staged_topk_idx, staged_topk_weights, num_tokens);
++                hidden, num_topk, hidden_states, topk_idx, topk_weights, x, x_sf,
++                staged_topk_idx, staged_topk_weights, num_tokens,
++                ue8m0 ? "fp8_blockwise_ue8m0_mega_moe_pre_dispatch"
++                       : "fp8_blockwise_mega_moe_pre_dispatch",
++                ue8m0);
+         else
+             fp8_channelwise_mega_moe_pre_dispatch_impl(
+                 hidden, num_topk, hidden_states, topk_idx, topk_weights, x,
+@@ -568,9 +605,9 @@ static void fp8_w4a16_mega_moe_pre_dispatch_checked(const Tensor& hidden_states,
+ static void routed_mega_moe_pre_dispatch(
+     const Tensor& hidden_states, const Tensor& topk_idx, const Tensor& topk_weights,
+     const Tensor& x, const Tensor& x_sf, const Tensor& staged_topk_idx, const Tensor& staged_topk_weights,
+-    const std::optional<int>& num_tokens) {
++    const std::optional<int>& num_tokens, bool ue8m0) {
+     fp8_w4a16_mega_moe_pre_dispatch_checked(hidden_states, topk_idx, topk_weights, x, x_sf,
+-                                           staged_topk_idx, staged_topk_weights, num_tokens);
++                                           staged_topk_idx, staged_topk_weights, num_tokens, ue8m0);
+ }
+
+ template <bool kFp8>
+@@ -584,7 +621,8 @@ static void checked_mega_moe(const Tensor& y, const WeightPair& l1_weights, cons
+                             const std::optional<float>& activation_alpha_opt,
+                             const std::optional<WeightPair>& l1_weights_replicas,
+                             const std::optional<WeightPair>& l2_weights_replicas,
+-                            const std::array<int, 3>& staging_config) {
++                            const std::array<int, 3>& staging_config,
++                            bool preweighted_fp32 = false) {
+     check_device();
+     const auto kind = routed_precision(precision);
+     const bool fp8 = precision != "w4a16", blockwise = precision == "fp8_blockwise";
+@@ -592,7 +630,9 @@ static void checked_mega_moe(const Tensor& y, const WeightPair& l1_weights, cons
+     const auto activation_kind = parse_gated_activation(activation);
+     const auto activation_params = check_mega_moe_activation(
+         activation_kind, activation_clamp_opt, situ_beta_opt, situ_linear_beta_opt, activation_alpha_opt);
+-    check_tensor(y, torch::kBFloat16);
++    TORCH_CHECK(!preweighted_fp32 || (kFp8 && blockwise),
++                "FP32 preweighted MegaMoE requires blockwise FP8");
++    check_tensor(y, preweighted_fp32 ? torch::kFloat32 : torch::kBFloat16);
+     TORCH_CHECK(y.dim() == 2, "output must be [num_tokens, hidden]");
+     const auto& [w1, s1] = l1_weights;
+     const auto& [w2, s2] = l2_weights;
+@@ -647,7 +687,7 @@ static void checked_mega_moe(const Tensor& y, const WeightPair& l1_weights, cons
+             y, l1_weights, l2_weights, l1_replicas, l2_replicas, sym_buffer.data_ptr<uint8_t>(), l, transport, rank_idx, num_tokens,
+             activation_kind, activation_clamp_opt && std::isfinite(*activation_clamp_opt) ? *activation_clamp_opt : -1.0f,
+             fast_math, activation_params.alpha, activation_params.beta, activation_params.linear_beta,
+-            configs, kind, cumulative_local_expert_recv_stats);
++            configs, kind, preweighted_fp32, cumulative_local_expert_recv_stats);
+     } else {
+         bf16_fp4_mega_moe_impl(
+             y, l1_weights, l2_weights, l1_replicas, l2_replicas, sym_buffer.data_ptr<uint8_t>(), l, transport, rank_idx, num_tokens,
+@@ -674,6 +714,28 @@ void fp8_fp8_mega_moe(
+         situ_beta_opt, situ_linear_beta_opt, activation_alpha_opt, l1_weights_replicas, l2_weights_replicas, staging_config);
+ }
+
++void fp8_fp8_mega_moe_fp32(
++    const Tensor& y, const WeightPair& l1_weights_tuple, const WeightPair& l2_weights_tuple,
++    const OptTensor& cumulative_local_expert_recv_stats, const Tensor& sym_buffer,
++    const std::vector<int64_t>& sym_buffer_ptrs, const int& rank_idx,
++    const int& num_max_tokens_per_rank, const int& num_experts, const int& num_topk,
++    const std::string& activation, const std::optional<float>& activation_clamp_opt,
++    const bool& fast_math, const std::optional<float>& activation_alpha_opt,
++    const std::optional<WeightPair>& l1_weights_replicas,
++    const std::optional<WeightPair>& l2_weights_replicas,
++    const std::string& quantization, const std::optional<float>& situ_beta_opt,
++    const std::optional<float>& situ_linear_beta_opt,
++    const std::array<int, 3>& staging_config) {
++    TORCH_CHECK(quantization == "blockwise",
++                "fp8_fp8_mega_moe_fp32 requires blockwise activation quantization");
++    checked_mega_moe<true>(
++        y, l1_weights_tuple, l2_weights_tuple, cumulative_local_expert_recv_stats,
++        sym_buffer, sym_buffer_ptrs, rank_idx, num_max_tokens_per_rank,
++        num_experts, num_topk, "fp8_blockwise", activation, activation_clamp_opt,
++        fast_math, situ_beta_opt, situ_linear_beta_opt, activation_alpha_opt,
++        l1_weights_replicas, l2_weights_replicas, staging_config, true);
++}
++
+ void bf16_fp4_mega_moe(
+     const Tensor& y, const WeightPair& l1_weights_tuple, const WeightPair& l2_weights_tuple,
+     const OptTensor& cumulative_local_expert_recv_stats, const Tensor& sym_buffer,
+@@ -691,7 +753,7 @@ void bf16_fp4_mega_moe(
+ }
+
+
+-void fp8_fp4_mega_moe(
++static void fp8_fp4_mega_moe_checked(
+     const Tensor& y, const W4A8Weights& l1_weights_tuple, const W4A8Weights& l2_weights_tuple,
+     const OptTensor& cumulative_local_expert_recv_stats, const Tensor& sym_buffer,
+     const std::vector<int64_t>& sym_buffer_ptrs, const int& rank_idx, const int& num_max_tokens_per_rank,
+@@ -700,17 +762,17 @@ void fp8_fp4_mega_moe(
+     const std::optional<float>& situ_beta_opt, const std::optional<float>& situ_linear_beta_opt,
+     const std::optional<float>& activation_alpha_opt,
+     const std::optional<W4A8Weights>& l1_weights_replicas, const std::optional<W4A8Weights>& l2_weights_replicas,
+-    const std::array<int, 3>& staging_config) {
++    const std::array<int, 3>& staging_config, bool exact) {
+     check_device();
+     const auto activation_kind = parse_gated_activation(activation);
+     const auto activation_params = check_mega_moe_activation(
+         activation_kind, activation_clamp_opt, situ_beta_opt, situ_linear_beta_opt, activation_alpha_opt);
+-    check_tensor(y, torch::kBFloat16);
++    check_tensor(y, exact ? torch::kFloat32 : torch::kBFloat16);
+     TORCH_CHECK(y.dim() == 2 && std::get<0>(l1_weights_tuple).dim() == 3, "Invalid output or GEMM1 weight rank");
+     const int hidden = y.size(1), intermediate = std::get<0>(l1_weights_tuple).size(1) / 2;
+     const int tokens = y.size(0), ranks = sym_buffer_ptrs.size();
+     const auto l = checked_routed_layout(ranks, num_experts, num_max_tokens_per_rank, num_topk,
+-                                         hidden, intermediate, "w4a8", staging_config);
++                                         hidden, intermediate, exact ? "w4a8_blockwise" : "w4a8", staging_config);
+     TORCH_CHECK(tokens <= num_max_tokens_per_rank, "output token count exceeds workspace capacity");
+     TORCH_CHECK(y.device() == sym_buffer.device(), "output and workspace must share a device");
+     const auto transport = make_sym_buffer(sym_buffer_ptrs, rank_idx, ranks);
+@@ -726,6 +788,9 @@ void fp8_fp4_mega_moe(
+         check_shape(w, {experts, n, k / 2});
+         check_shape(s, {experts, n / 64, int64_t(k) * 2});
+         TORCH_CHECK(std::isfinite(inv) && inv > 0, "weight_inv_scale must be finite and positive");
++        int exponent = 0;
++        TORCH_CHECK(!exact || std::frexp(inv, &exponent) == 0.5f,
++                    "exact W4A8 requires a power-of-two weight_inv_scale from weight preprocessing");
+     };
+     check(l1_weights_tuple, 2 * intermediate, hidden, masters);
+     check(l2_weights_tuple, hidden, intermediate, masters);
+@@ -744,14 +809,42 @@ void fp8_fp4_mega_moe(
+     check_routed_buffer(sym_buffer, l);
+     const auto& configs = get_mega_moe_precision_configs(
+         Precision::W4A8, ranks, num_experts, num_topk, hidden, intermediate,
+-        num_max_tokens_per_rank, tokens, masters, activation, y.device().index());
++        num_max_tokens_per_rank, tokens, masters, activation, y.device().index(), exact);
+     fp8_fp4_mega_moe_impl(y, l1_weights_tuple, l2_weights_tuple,
+         l1_weights_replicas ? *l1_weights_replicas : l1_weights_tuple,
+         l2_weights_replicas ? *l2_weights_replicas : l2_weights_tuple,
+         sym_buffer.data_ptr<uint8_t>(), l, transport, rank_idx, tokens, activation_kind,
+         activation_clamp_opt && std::isfinite(*activation_clamp_opt) ? *activation_clamp_opt : -1.0f,
+         fast_math, activation_params.alpha, activation_params.beta, activation_params.linear_beta,
+-        configs, cumulative_local_expert_recv_stats);
++        configs, cumulative_local_expert_recv_stats, exact);
++}
++
++void fp8_fp4_mega_moe(
++    const Tensor& y, const W4A8Weights& l1, const W4A8Weights& l2,
++    const OptTensor& stats, const Tensor& buffer, const std::vector<int64_t>& pointers,
++    const int& rank, const int& capacity, const int& experts, const int& topk,
++    const std::string& activation, const std::optional<float>& clamp, const bool& fast_math,
++    const std::optional<float>& situ_beta, const std::optional<float>& situ_linear_beta,
++    const std::optional<float>& activation_alpha, const std::optional<W4A8Weights>& l1_replicas,
++    const std::optional<W4A8Weights>& l2_replicas, const std::array<int, 3>& staging) {
++    fp8_fp4_mega_moe_checked(
++        y, l1, l2, stats, buffer, pointers, rank, capacity, experts, topk,
++        activation, clamp, fast_math, situ_beta, situ_linear_beta, activation_alpha,
++        l1_replicas, l2_replicas, staging, false);
++}
++
++void fp8_fp4_mega_moe_fp32(
++    const Tensor& y, const W4A8Weights& l1, const W4A8Weights& l2,
++    const OptTensor& stats, const Tensor& buffer, const std::vector<int64_t>& pointers,
++    const int& rank, const int& capacity, const int& experts, const int& topk,
++    const std::string& activation, const std::optional<float>& clamp, const bool& fast_math,
++    const std::optional<float>& situ_beta, const std::optional<float>& situ_linear_beta,
++    const std::optional<float>& activation_alpha, const std::optional<W4A8Weights>& l1_replicas,
++    const std::optional<W4A8Weights>& l2_replicas, const std::array<int, 3>& staging) {
++    fp8_fp4_mega_moe_checked(
++        y, l1, l2, stats, buffer, pointers, rank, capacity, experts, topk,
++        activation, clamp, fast_math, situ_beta, situ_linear_beta, activation_alpha,
++        l1_replicas, l2_replicas, staging, true);
+ }
+
+ static void int8_int8_mega_moe(
+@@ -806,11 +899,14 @@ static void int8_int8_mega_moe(
+
+ static void register_apis(pybind11::module_& m) {
+     m.def("fp8_fp4_mega_moe", &fp8_fp4_mega_moe);
++    m.def("fp8_fp4_mega_moe_fp32", &fp8_fp4_mega_moe_fp32);
+     m.def("bf16_fp4_mega_moe", &bf16_fp4_mega_moe);
+     m.def("fp8_fp8_mega_moe", &fp8_fp8_mega_moe);
++    m.def("fp8_fp8_mega_moe_fp32", &fp8_fp8_mega_moe_fp32);
+     m.def("fp4_fp4_mega_moe", &fp4_fp4_mega_moe);
+     m.def("int8_int8_mega_moe", &int8_int8_mega_moe);
+     m.def("mega_moe_pre_dispatch", &mega_moe_pre_dispatch);
++    m.def("mega_moe_pre_dispatch_ue8m0", &mega_moe_pre_dispatch_ue8m0);
+     m.def("get_token_alignment_for_mega_moe", &get_token_alignment_for_mega_moe);
+     m.def("get_symm_buffer_size_for_mega_moe", &get_symm_buffer_size_for_mega_moe,
+           pybind11::arg("num_ranks"), pybind11::arg("num_experts"),
+diff --git a/csrc/jit/device_runtime.hpp b/csrc/jit/device_runtime.hpp
+index 99b973b..7a0c680 100644
+--- a/csrc/jit/device_runtime.hpp
++++ b/csrc/jit/device_runtime.hpp
+@@ -15,7 +15,9 @@
+ #include "../utils/exception.hpp"
+ #include "../utils/lazy_init.hpp"
+
+-#define PYTORCH_SUPPORTS_GET_ACBLASLT_HANDLE (TORCH_VERSION_MAJOR > 2 or (TORCH_VERSION_MAJOR == 2 and TORCH_VERSION_MINOR >= 3))
++// CUDA-named Torch exposes a cublasLt handle, not native acblasLt; use the
++// library-owned native handle in this private PPU wheel build.
++#define PYTORCH_SUPPORTS_GET_ACBLASLT_HANDLE 0
+
+ namespace deep_gemm {
+
+diff --git a/csrc/jit_kernels/heuristics/mega_moe.hpp b/csrc/jit_kernels/heuristics/mega_moe.hpp
+index 0785040..d2c7b3a 100644
+--- a/csrc/jit_kernels/heuristics/mega_moe.hpp
++++ b/csrc/jit_kernels/heuristics/mega_moe.hpp
+@@ -693,11 +693,12 @@ struct MegaMoEPrecisionConfigs {
+
+ inline const MegaMoEPrecisionConfigs& get_mega_moe_precision_configs(
+     Precision precision, int ranks, int experts, int topk, int hidden, int intermediate,
+-    int capacity, int tokens, int masters, const std::string& activation, int device) {
+-    using Key = std::tuple<Precision, int, int, int, int, int, int, int, int, std::string, int, int>;
++    int capacity, int tokens, int masters, const std::string& activation, int device,
++    bool exact_w4a8 = false) {
++    using Key = std::tuple<Precision, int, int, int, int, int, int, int, int, std::string, int, int, bool>;
+     static thread_local std::map<Key, MegaMoEPrecisionConfigs> cache;
+     const Key key{precision, ranks, experts, topk, hidden, intermediate,
+-                  capacity, tokens, masters, activation, device, get_num_sms()};
++                  capacity, tokens, masters, activation, device, get_num_sms(), exact_w4a8};
+     if (const auto found = cache.find(key); found != cache.end())
+         return found->second;
+     const auto tuning = tuning_config({precision, ranks, experts, topk, hidden, intermediate, tokens, activation});
+@@ -719,7 +720,8 @@ inline const MegaMoEPrecisionConfigs& get_mega_moe_precision_configs(
+         g2.smem_size = w4a16_scatter_smem_size(tile);
+     } else if (precision == Precision::W4A8) {
+         const auto g1 = w4a8_gemm_config(expected, 2 * intermediate, hidden, groups, tuning.gemm1.tile);
+-        auto c = make_gemm1_config(ranks, experts, topk, capacity, hidden, sizeof(float));
++        const int scale_bytes = exact_w4a8 ? hidden / 128 * int(sizeof(float)) : int(sizeof(float));
++        auto c = make_gemm1_config(ranks, experts, topk, capacity, hidden, scale_bytes);
+         c.dispatch.block_m = g1.tile.block_m;
+         c.tile.block_m = g1.tile.block_m; c.tile.block_n = g1.tile.block_n; c.tile.block_k = g1.tile.block_k;
+         c.tile.warp_m = g1.tile.warp_m; c.tile.warp_n = g1.tile.warp_n; c.warp_k = g1.tile.warp_k;
+@@ -731,7 +733,12 @@ inline const MegaMoEPrecisionConfigs& get_mega_moe_precision_configs(
+         c.dispatch.pull_ctas = tuning.gemm1.pull_ctas.value_or(6);
+         TORCH_CHECK(c.dispatch.pull_ctas > 0 && c.dispatch.pull_ctas < c.tile.num_sms && c.dispatch.pull_ctas % 3 == 0,
+                     "W4A8 pull CTAs must be a positive multiple of 3 below num_sms");
+-        c.tile.smem_size = std::max<int64_t>(w4fa8::get_smem_size(g1.tile, hidden), pull_smem);
++        const int64_t exact_epilogue_smem = exact_w4a8
++            ? int64_t(g1.tile.block_m) * (g1.tile.block_n / 2) * sizeof(float) + sizeof(uint32_t) : 0;
++        c.tile.smem_size = std::max({int64_t(w4fa8::get_smem_size(g1.tile, hidden)),
++                                    pull_smem, exact_epilogue_smem});
++        TORCH_CHECK(c.tile.smem_size <= 256 * 1024,
++                    "W4A8 MegaMoE G1 shared memory exceeds device capacity");
+         const int resident = int(device_runtime->get_prop()->sharedMemPerMultiprocessor / c.tile.smem_size);
+         c.num_ctas = c.tile.num_sms * std::clamp(resident, 1, 8);
+         result.l1 = c;
+diff --git a/csrc/jit_kernels/impls/activation_quant.hpp b/csrc/jit_kernels/impls/activation_quant.hpp
+index 8792152..34ff4f8 100644
+--- a/csrc/jit_kernels/impls/activation_quant.hpp
++++ b/csrc/jit_kernels/impls/activation_quant.hpp
+@@ -60,8 +60,8 @@ public:
+ #include <deep_gemm/impls/activation_quant.cuh>
+ static_assert(sizeof(deep_gemm::ActivationParams) == {}, "activation argument size mismatch");
+ extern "C" __global__ __launch_bounds__({})
+-void {}(const void* input, void* output, void* scales, const int32_t* masked_m, int rows_per_batch, int row_slots, float limit, float weight_inv_scale, float beta, float linear_beta) {{
+-    deep_gemm::ActivationParams params{{input, output, scales, masked_m, rows_per_batch, row_slots, limit, weight_inv_scale, beta, linear_beta}};
++void {}(const void* input, void* output, void* scales, const int32_t* masked_m, int rows_per_batch, int row_slots, float limit, float weight_inv_scale, float beta, float linear_beta, const float* route_weights) {{
++    deep_gemm::ActivationParams params{{input, output, scales, masked_m, rows_per_batch, row_slots, limit, weight_inv_scale, beta, linear_beta, route_weights}};
+     deep_gemm::activation_quant<{}, deep_gemm::QuantMode::{}, {}, {}, {}, {}, {}, {}, {}>(params);
+ }}
+ )", sizeof(ActivationParams), args.mode == QuantMode::FP8_CHANNEL ? activation_fp8_channel_threads(args.n) : 32, activation_kernel_name(args),
+@@ -72,7 +72,7 @@ void {}(const void* input, void* output, void* scales, const int32_t* masked_m,
+     }
+     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
+         auto& p = args.params;
+-        DG_HGGC_UNIFIED_CHECK(launch_kernel(kernel, config, p.input, p.output, p.scales, p.masked_m, p.rows_per_batch, p.row_slots, p.limit, p.weight_inv_scale, p.beta, p.linear_beta));
++        DG_HGGC_UNIFIED_CHECK(launch_kernel(kernel, config, p.input, p.output, p.scales, p.masked_m, p.rows_per_batch, p.row_slots, p.limit, p.weight_inv_scale, p.beta, p.linear_beta, p.route_weights));
+     }
+ };
+ namespace activation {
+@@ -89,10 +89,10 @@ inline ActivationMaskArgs make_activation_mask(const torch::Tensor& input,
+ inline ActivationLaunchArgs make_activation_args(int n, const torch::Tensor& input,
+         const torch::Tensor& output, void* scales, float limit, const ActivationMaskArgs& mask,
+         const ActivationSoftcapArgs& softcap, LaunchArgs launch, int rows_per_batch = 0,
+-        float inverse = 1.0f) {
++        float inverse = 1.0f, const float* route_weights = nullptr) {
+     ActivationParams params{input.data_ptr(), output.data_ptr(), scales, mask.masked_m,
+         rows_per_batch ? rows_per_batch : mask.rows_per_batch,
+-        mask.row_slots, limit, inverse, softcap.beta, softcap.linear_beta};
++        mask.row_slots, limit, inverse, softcap.beta, softcap.linear_beta, route_weights};
+     return {n, false, mask, softcap, launch, params};
+ }
+ static int64_t launch_rows(const torch::Tensor& input, int64_t rows, const ActivationMaskArgs& mask) {
+@@ -102,7 +102,8 @@ static int64_t launch_rows(const torch::Tensor& input, int64_t rows, const Activ
+ template<bool FP8Block>
+ static std::pair<torch::Tensor, torch::Tensor> run_activation_tiled(
+         const torch::Tensor& input, int n, int64_t rows, float limit,
+-        const ActivationMaskArgs& mask = {}, const ActivationSoftcapArgs& softcap = {}) {
++        const ActivationMaskArgs& mask = {}, const ActivationSoftcapArgs& softcap = {},
++        const float* route_weights = nullptr) {
+     const int rows_per_batch = input.size(-2);
+     const int64_t batches = rows_per_batch ? rows / rows_per_batch : 0;
+     const int slots = mask.masked() ? mask.row_slots : std::min<int64_t>(rows_per_batch,
+@@ -127,7 +128,7 @@ static std::pair<torch::Tensor, torch::Tensor> run_activation_tiled(
+         LaunchArgs launch_args;
+         launch_args = LaunchArgs{dim3(blocks, slots), dim3(32), 0};
+         auto args = make_activation_args(n, input, output, FP8Block ? scales.data_ptr() : nullptr,
+-            limit, mask, softcap, launch_args, rows_per_batch);
++            limit, mask, softcap, launch_args, rows_per_batch, 1.0f, route_weights);
+         args.mode = FP8Block ? QuantMode::FP8_BLOCK : QuantMode::BF16;
+         args.params.row_slots = slots;
+         const auto& runtime = compiler->build(activation_kernel_name(args),
+@@ -138,8 +139,9 @@ static std::pair<torch::Tensor, torch::Tensor> run_activation_tiled(
+ }
+
+ static torch::Tensor run_activation(const torch::Tensor& input, int n, int64_t rows, float limit,
+-        const ActivationMaskArgs& mask = {}, const ActivationSoftcapArgs& softcap = {}) {
+-    return run_activation_tiled<false>(input, n, rows, limit, mask, softcap).first;
++        const ActivationMaskArgs& mask = {}, const ActivationSoftcapArgs& softcap = {},
++        const float* route_weights = nullptr) {
++    return run_activation_tiled<false>(input, n, rows, limit, mask, softcap, route_weights).first;
+ }
+
+ // Output row scales include GEMM2's inverse weight scale; quantization codes do not.
+diff --git a/csrc/jit_kernels/impls/mega_moe_combine.hpp b/csrc/jit_kernels/impls/mega_moe_combine.hpp
+index 949b223..09c9c1f 100644
+--- a/csrc/jit_kernels/impls/mega_moe_combine.hpp
++++ b/csrc/jit_kernels/impls/mega_moe_combine.hpp
+@@ -11,7 +11,7 @@ class MegaMoECombineRuntime final : public LaunchRuntime<MegaMoECombineRuntime>
+ public:
+     struct LaunchInfo {
+         int num_topk;
+-        bool fp8, scaled;
++        bool fp8, scaled, preweighted_fp32;
+     };
+
+     struct KernelParams {
+@@ -19,7 +19,7 @@ public:
+         const uint64_t* combine_scales;
+         const float* topk_weights;
+         const int64_t* topk_idx;
+-        at::BFloat16* y;
++        void* y;
+         int num_tokens, hidden, num_max_tokens_per_rank, num_experts;
+         int scale_tiles, scale_block_n, shift;
+         layout::SymBuffer<> sym_buffer;
+@@ -38,9 +38,9 @@ public:
+         return fmt::format(R"(
+ #include <deep_gemm/impls/mega_moe_combine.cuh>
+ static void __instantiate_kernel() {{
+-    auto ptr = reinterpret_cast<void*>(&deep_gemm::mega_moe::detail::sm89_mega_moe_barrier_reduce<{}, {}, {}, {}>);
++    auto ptr = reinterpret_cast<void*>(&deep_gemm::mega_moe::detail::sm89_mega_moe_barrier_reduce<{}, {}, {}, {}, {}>);
+ }}
+-)", info.num_topk, info.fp8, info.scaled, args.launch_args.block_dim.x);
++)", info.num_topk, info.fp8, info.scaled, info.preweighted_fp32, args.launch_args.block_dim.x);
+     }
+
+     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
+@@ -59,20 +59,26 @@ inline void reset_done(int32_t* barrier_done) {
+
+ inline MegaMoECombineRuntime::Args make_mega_moe_combine_args(
+     uint8_t* base, const layout::RoutedMoEBuffer& buffer, const DispatchConfig& config,
+-    const layout::SymBuffer<>& sym_buffer, const torch::Tensor& y, int rank_idx, int num_tokens) {
++    const layout::SymBuffer<>& sym_buffer, const torch::Tensor& y, int rank_idx, int num_tokens,
++    bool preweighted_fp32 = false) {
+     const int hidden = y.size(1), threads = combine_num_threads(num_tokens, hidden);
+     return {
+-        {config.num_topk, false, false}, {dim3(std::max(num_tokens, 1), 1), dim3(threads), 0},
++        {config.num_topk, false, false, preweighted_fp32},
++        {dim3(std::max(num_tokens, 1), 1), dim3(threads), 0},
+         {base + buffer.combine, nullptr, math::advance_ptr<float>(base, buffer.topk_weights),
+-         math::advance_ptr<int64_t>(base, buffer.topk_idx), y.data_ptr<at::BFloat16>(),
++         math::advance_ptr<int64_t>(base, buffer.topk_idx),
++         preweighted_fp32 ? static_cast<void*>(y.data_ptr<float>())
++                           : static_cast<void*>(y.data_ptr<at::BFloat16>()),
+          num_tokens, hidden, config.nmtpr, config.num_experts, 0, 0, 0,
+          sym_buffer, rank_idx, config.num_ranks, reinterpret_cast<layout::RoutedMoESignals*>(base)}};
+ }
+
+ inline void combine_mega_moe(
+     uint8_t* base, const layout::RoutedMoEBuffer& buffer, const DispatchConfig& config,
+-    const layout::SymBuffer<>& sym_buffer, const torch::Tensor& y, int rank_idx, int num_tokens) {
+-    auto args = make_mega_moe_combine_args(base, buffer, config, sym_buffer, y, rank_idx, num_tokens);
++    const layout::SymBuffer<>& sym_buffer, const torch::Tensor& y, int rank_idx, int num_tokens,
++    bool preweighted_fp32 = false) {
++    auto args = make_mega_moe_combine_args(
++        base, buffer, config, sym_buffer, y, rank_idx, num_tokens, preweighted_fp32);
+     const auto runtime = compiler->build("ppu_mega_moe_barrier_reduce", MegaMoECombineRuntime::generate(args));
+     reset_done(&args.kernel_params.signals->combine_done);
+     MegaMoECombineRuntime::launch(runtime, args);
+diff --git a/csrc/jit_kernels/impls/mega_moe_dispatch.hpp b/csrc/jit_kernels/impls/mega_moe_dispatch.hpp
+index 8f921d8..67191b6 100644
+--- a/csrc/jit_kernels/impls/mega_moe_dispatch.hpp
++++ b/csrc/jit_kernels/impls/mega_moe_dispatch.hpp
+@@ -86,6 +86,7 @@ public:
+         PreDispatchConfig launch_info;
+         LaunchArgs launch_args;
+         Params kernel_params;
++        bool ue8m0 = false;
+     };
+
+     static std::string generate_impl(const Args& args) {
+@@ -93,10 +94,10 @@ public:
+         return fmt::format(R"DGMEGA(#include <deep_gemm/impls/fp8_blockwise_mega_moe_pre_dispatch.cuh>
+ using TopkIndex = {};
+ static void __instantiate_kernel() {{
+-    auto ptr = reinterpret_cast<void*>(&deep_gemm::mega_moe::fp8_blockwise::sm89_fp8_blockwise_mega_moe_pre_dispatch<{}, {}, TopkIndex>);
++    auto ptr = reinterpret_cast<void*>(&deep_gemm::mega_moe::fp8_blockwise::sm89_fp8_blockwise_mega_moe_pre_dispatch<{}, {}, TopkIndex, {}>);
+ }}
+ )DGMEGA",
+-            c.int32_indices ? "int32_t" : "int64_t", c.hidden, c.num_topk);
++            c.int32_indices ? "int32_t" : "int64_t", c.hidden, c.num_topk, int(args.ue8m0));
+     }
+
+     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, const Args& args) {
+@@ -111,7 +112,7 @@ inline void fp8_blockwise_mega_moe_pre_dispatch_impl(
+     int hidden, int num_topk, const torch::Tensor& hidden_states, const torch::Tensor& topk_ids,
+     const torch::Tensor& topk_weights, const torch::Tensor& input_token, const torch::Tensor& input_scale,
+     const torch::Tensor& input_topk_idx, const torch::Tensor& input_topk_weights, int num_tokens,
+-    const std::string& entry = "fp8_blockwise_mega_moe_pre_dispatch") {
++    const std::string& entry = "fp8_blockwise_mega_moe_pre_dispatch", bool ue8m0 = false) {
+     PreDispatchConfig config;
+     config.hidden = hidden;
+     config.num_topk = num_topk;
+@@ -122,7 +123,8 @@ inline void fp8_blockwise_mega_moe_pre_dispatch_impl(
+     const FP8BlockwiseMegaMoEPreDispatchRuntime::Args args{
+         entry.c_str(), config, {dim3(num_tokens + tail_blocks), dim3(block_threads), 0},
+         {device_pointer(hidden_states), device_pointer(topk_ids), device_pointer(topk_weights), device_pointer(input_token),
+-         device_pointer(input_scale), device_pointer(input_topk_idx), device_pointer(input_topk_weights), num_tokens, capacity}};
++         device_pointer(input_scale), device_pointer(input_topk_idx), device_pointer(input_topk_weights), num_tokens, capacity},
++        ue8m0};
+     launch_mega_moe_kernel<FP8BlockwiseMegaMoEPreDispatchRuntime>(args);
+ }
+
+diff --git a/csrc/jit_kernels/impls/ppuxx_acblaslt.hpp b/csrc/jit_kernels/impls/ppuxx_acblaslt.hpp
+index bb1f6ed..b3d00e0 100644
+--- a/csrc/jit_kernels/impls/ppuxx_acblaslt.hpp
++++ b/csrc/jit_kernels/impls/ppuxx_acblaslt.hpp
+@@ -97,6 +97,19 @@ static void call_acblaslt_api(const acblasOperation_t& trans_a,
+     DG_ACBLASLT_CHECK(acblasLtMatmulDescDestroy(desc));
+ }
+
++static hggcDataType host_scalar_type_to_hggc(at::ScalarType type) {
++    switch (type) {
++        case at::kFloat: return HGGC_R_32F;
++        case at::kDouble: return HGGC_R_64F;
++        case at::kHalf: return HGGC_R_16F;
++        case at::kBFloat16: return HGGC_R_16BF;
++        case at::kChar: return HGGC_R_8I;
++        case at::kByte: return HGGC_R_8U;
++        case at::kInt: return HGGC_R_32I;
++        default: TORCH_CHECK(false, "Unsupported native acblasLt scalar type in CUDA Torch host adapter");
++    }
++}
++
+ static void acblaslt_gemm(const torch::Tensor& lhs, const torch::Tensor& rhs,
+                           const torch::Tensor& out,
+                           const int& m, const int& n, const int& k,
+@@ -106,9 +119,9 @@ static void acblaslt_gemm(const torch::Tensor& lhs, const torch::Tensor& rhs,
+     const auto trans_b = a_major == MajorType::K ? ACBLAS_OP_N : ACBLAS_OP_T;
+
+     // Matrix layouts
+-    const auto hggc_type_a = at::cuda::ScalarTypeToCudaDataType(rhs.scalar_type());
+-    const auto hggc_type_b = at::cuda::ScalarTypeToCudaDataType(lhs.scalar_type());
+-    const auto hggc_type_d = at::cuda::ScalarTypeToCudaDataType(out.scalar_type());
++    const auto hggc_type_a = host_scalar_type_to_hggc(rhs.scalar_type());
++    const auto hggc_type_b = host_scalar_type_to_hggc(lhs.scalar_type());
++    const auto hggc_type_d = host_scalar_type_to_hggc(out.scalar_type());
+     const auto layout_a = b_major == MajorType::K ? get_acblaslt_layout(hggc_type_a, k, n, rhs.stride(0))
+                                                            : get_acblaslt_layout(hggc_type_a, n, k, rhs.stride(1));
+     const auto layout_b = a_major == MajorType::K ? get_acblaslt_layout(hggc_type_b, k, m, lhs.stride(0))
+diff --git a/csrc/jit_kernels/impls/sm89_fp8_fp4_mega_moe.hpp b/csrc/jit_kernels/impls/sm89_fp8_fp4_mega_moe.hpp
+index 0c20acf..64f9f22 100644
+--- a/csrc/jit_kernels/impls/sm89_fp8_fp4_mega_moe.hpp
++++ b/csrc/jit_kernels/impls/sm89_fp8_fp4_mega_moe.hpp
+@@ -19,7 +19,8 @@ struct FP8FP4Linear1Params {
+     const uint8_t *replicas, *replica_scales;
+     float replica_inv_scale;
+     int master_experts;
+-    at::BFloat16* output;
++    uint8_t* output;
++    float* output_scales;
+     float activation_clamp, activation_alpha, situ_beta, situ_linear_beta;
+     uint4* block_info;
+ };
+@@ -55,6 +56,7 @@ public:
+         LaunchArgs launch_args;
+         Params kernel_params{};
+         uint64_t routing_bytes = 0;
++        bool exact = false;
+     };
+
+     static std::string generate_impl(const Args& args) {
+@@ -64,12 +66,14 @@ public:
+             const auto& tile = c.tile;
+             TORCH_CHECK(dispatch.num_ranks > 0 && dispatch.num_experts % dispatch.num_ranks == 0,
+                         "invalid MegaMoE layout");
+-            const layout::RoutedMoEInputLayout inputs(dispatch.num_ranks, dispatch.num_experts, dispatch.nmtpr,
+-                                                     dispatch.num_topk, dispatch.token_bytes, dispatch.sf_bytes, args.routing_bytes);
++            const layout::RoutedMoEBuffer buffer(
++                dispatch.num_ranks, dispatch.num_experts, dispatch.nmtpr,
++                dispatch.num_topk, dispatch.token_bytes, c.n / 2,
++                true, args.exact, args.routing_bytes);
+             return fmt::format(R"(
+ #define DG_MOE_FAST_MATH {}
+ #include <deep_gemm/impls/sm89_fp8_fp4_mega_moe.cuh>
+-using Builder = deep_gemm::MegaMoEFp8Fp4Gemm1Kernel<{}, {}, {}, {}, {}, {}, deep_gemm::GatedActivation({}), deep_gemm::w4fa8::FragmentPolicy::{}, deep_gemm::w4fa8::ALoadPolicy::{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>;
++using Builder = deep_gemm::MegaMoEFp8Fp4Gemm1Kernel<{}, {}, {}, {}, {}, {}, deep_gemm::GatedActivation({}), deep_gemm::w4fa8::FragmentPolicy::{}, deep_gemm::w4fa8::ALoadPolicy::{}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}>;
+ static_assert(Builder::shared_memory_bytes() == {}, "MegaMoE shared storage size differs from host");
+ static void __instantiate_kernel() {{
+     auto ptr = reinterpret_cast<void*>(&deep_gemm::sm89_fp8_fp4_mega_moe_l1<Builder>);
+@@ -80,13 +84,14 @@ static void __instantiate_kernel() {{
+                 c.fragment == w4fa8::FragmentPolicy::FullK ? "FullK" : "RollingK32",
+                 !w4fa8::uses_ring_a(tile.warp_m) ? "Bulk" : "Ring2", dispatch.num_experts, c.num_threads,
+                 dispatch.num_ranks, c.num_ctas, dispatch.num_experts_per_rank, dispatch.num_topk, c.n, dispatch.pull_ctas,
+-                dispatch.pull_group_size, c.metadata.block_m, c.metadata.valid_rows, inputs.topk_idx, inputs.input_tokens,
+-                inputs.input_scales, inputs.dispatched_tokens, inputs.dispatched_scales, inputs.gemm2_metadata,
+-                dispatch.nmtpr, args.routing_bytes, args.launch_args.smem_size);
++                dispatch.pull_group_size, c.metadata.block_m, c.metadata.valid_rows, buffer.topk_idx, buffer.input_tokens,
++                buffer.input_scales, buffer.dispatched_tokens, buffer.dispatched_scales, buffer.gemm2_metadata,
++                dispatch.nmtpr, args.routing_bytes, buffer.topk_weights, buffer.route_weights, int(args.exact),
++                args.launch_args.smem_size);
+         } else {
+             return fmt::format(R"(
+ #include <deep_gemm/impls/sm89_fp8_fp4_mega_moe.cuh>
+-using Builder = deep_gemm::MegaMoEFp8Fp4Gemm2Kernel<{}, {}, {}, {}, {}, {}, {}, {}, deep_gemm::w4fa8::FragmentPolicy::{}, deep_gemm::w4fa8::ALoadPolicy::{}, {}, {}>;
++using Builder = deep_gemm::MegaMoEFp8Fp4Gemm2Kernel<{}, {}, {}, {}, {}, {}, {}, {}, deep_gemm::w4fa8::FragmentPolicy::{}, deep_gemm::w4fa8::ALoadPolicy::{}, {}, {}, {}>;
+ using Kernel = typename Builder::Kernel;
+ static_assert(Builder::shared_memory_bytes() == {}, "MegaMoE shared storage size differs from host");
+ static void __instantiate_kernel() {{
+@@ -95,7 +100,7 @@ static void __instantiate_kernel() {{
+ )",
+                 c.n, c.k, c.block_m, c.block_n, c.warp_m, c.warp_n, c.num_groups, c.num_stages,
+                 c.fragment == w4fa8::FragmentPolicy::FullK ? "FullK" : "RollingK32",
+-                !w4fa8::uses_ring_a(c.warp_m) ? "Bulk" : "Ring2", c.num_threads, c.num_ranks,
++                !w4fa8::uses_ring_a(c.warp_m) ? "Bulk" : "Ring2", c.num_threads, c.num_ranks, int(args.exact),
+                 args.launch_args.smem_size);
+         }
+     }
+@@ -105,7 +110,8 @@ static void __instantiate_kernel() {{
+         if constexpr (kIsLinear1) {
+             DG_HGGC_UNIFIED_CHECK(launch_kernel(kernel, config,
+                 p.sym_buffer, p.num_tokens, p.weights, p.scales, p.inv_scale, p.replicas, p.replica_scales,
+-                p.replica_inv_scale, p.master_experts, p.output, p.activation_clamp, p.activation_alpha,
++                p.replica_inv_scale, p.master_experts, p.output, p.output_scales,
++                p.activation_clamp, p.activation_alpha,
+                 p.situ_beta, p.situ_linear_beta, p.block_info));
+         } else {
+             DG_HGGC_UNIFIED_CHECK(launch_kernel(kernel, config,
+@@ -121,35 +127,39 @@ static auto make_fp8_fp4_linear1_args(
+     const W4A8Weights& weights, const W4A8Weights& replicas,
+     uint8_t* base, const layout::RoutedMoEBuffer& buffer, const layout::SymBuffer<>& sym_buffer,
+     int num_tokens, float activation_clamp, float activation_alpha, float situ_beta, float situ_linear_beta,
+-    const Gemm1Config& config) {
++    const Gemm1Config& config, bool exact = false) {
+     using Runtime = FP8FP4MegaMoEGemmRuntime<MegaMoEPhaseKind::Linear1, Activation>;
+     const auto& [w, s, inv] = weights;
+     const auto& [rw, rs, rinv] = replicas;
+     return typename Runtime::Args{
+-        .kernel_name = "w4a8_mega_moe_dispatch_gemm1", .launch_info = config,
++        .kernel_name = exact ? "w4a8_exact_mega_moe_dispatch_gemm1" : "w4a8_mega_moe_dispatch_gemm1",
++        .launch_info = config,
+         .launch_args = {dim3(config.num_ctas), dim3(config.num_threads), config.tile.smem_size},
+         .kernel_params = {
+             .sym_buffer = sym_buffer, .num_tokens = num_tokens,
+             .weights = device_pointer<uint8_t>(w), .scales = device_pointer<uint8_t>(s), .inv_scale = inv,
+             .replicas = device_pointer<uint8_t>(rw), .replica_scales = device_pointer<uint8_t>(rs), .replica_inv_scale = rinv,
+             .master_experts = static_cast<int>(w.size(0)),
+-            .output = math::advance_ptr<at::BFloat16>(base, buffer.bf16_scratch),
++            .output = exact ? base + buffer.l2_acts : base + buffer.bf16_scratch,
++            .output_scales = exact ? math::advance_ptr<float>(base, buffer.l2_scales) : nullptr,
+             .activation_clamp = activation_clamp, .activation_alpha = activation_alpha,
+             .situ_beta = situ_beta, .situ_linear_beta = situ_linear_beta,
+             .block_info = math::advance_ptr<uint4>(base, buffer.block_info)},
+-        .routing_bytes = buffer.dispatch.routing_bytes};
++        .routing_bytes = buffer.dispatch.routing_bytes,
++        .exact = exact};
+ }
+
+ static auto make_fp8_fp4_linear2_args(
+     const W4A8Weights& weights, const W4A8Weights& replicas,
+     uint8_t* base, const layout::RoutedMoEBuffer& buffer, int rank_idx,
+-    const DispatchConfig& dispatch, const ScatterConfig& config) {
++    const DispatchConfig& dispatch, const ScatterConfig& config, bool exact = false) {
+     using Runtime = FP8FP4MegaMoEGemmRuntime<MegaMoEPhaseKind::Linear2>;
+     const auto& [w, s, inv] = weights;
+     const auto& [rw, rs, rinv] = replicas;
+     const layout::Gemm2Metadata meta(base + buffer.gemm2_metadata, config.num_groups);
+     return Runtime::Args{
+-        .kernel_name = "w4a8_mega_moe_scatter", .launch_info = config,
++        .kernel_name = exact ? "w4a8_exact_mega_moe_scatter" : "w4a8_mega_moe_scatter",
++        .launch_info = config,
+         .launch_args = {dim3(config.num_sms), dim3(config.num_threads), config.smem_size},
+         .kernel_params = {
+             .acts = base + buffer.l2_acts, .act_scales = math::advance_ptr<float>(base, buffer.l2_scales),
+@@ -161,7 +171,8 @@ static auto make_fp8_fp4_linear2_args(
+             .output = math::advance_ptr<at::BFloat16>(base, buffer.combine),
+             .peer_offsets = math::advance_ptr<int64_t>(base, buffer.peer_offsets),
+             .capacity = dispatch.nmtpr, .pool_rows = static_cast<int>(buffer.dispatch.num_max_pool_tokens),
+-            .rank_idx = rank_idx}};
++            .rank_idx = rank_idx},
++        .exact = exact};
+ }
+
+ inline void fp8_fp4_mega_moe_impl(
+@@ -170,19 +181,20 @@ inline void fp8_fp4_mega_moe_impl(
+     uint8_t* base, const layout::RoutedMoEBuffer& buffer, const layout::SymBuffer<>& sym_buffer,
+     int rank_idx, int num_tokens, GatedActivation activation, float activation_clamp, bool fast_math,
+     float activation_alpha, float situ_beta, float situ_linear_beta,
+-    const MegaMoEPrecisionConfigs& configs, const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats) {
++    const MegaMoEPrecisionConfigs& configs, const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats,
++    bool exact = false) {
+     using Linear2Runtime = FP8FP4MegaMoEGemmRuntime<MegaMoEPhaseKind::Linear2>;
+     auto config = configs.l1;
+     config.fast_math = fast_math;
+     const int rows = buffer.dispatch.num_max_pool_tokens;
+     const auto l2_args = make_fp8_fp4_linear2_args(
+-        l2_weights, l2_weights_replicas, base, buffer, rank_idx, config.dispatch, configs.l2);
++        l2_weights, l2_weights_replicas, base, buffer, rank_idx, config.dispatch, configs.l2, exact);
+     auto launch_linear1 = [&](auto activation_tag) {
+         constexpr auto kind = decltype(activation_tag)::value;
+         using Runtime = FP8FP4MegaMoEGemmRuntime<MegaMoEPhaseKind::Linear1, kind>;
+         const auto args = make_fp8_fp4_linear1_args<kind>(
+             l1_weights, l1_weights_replicas, base, buffer, sym_buffer, num_tokens,
+-            activation_clamp, activation_alpha, situ_beta, situ_linear_beta, config);
++            activation_clamp, activation_alpha, situ_beta, situ_linear_beta, config, exact);
+         launch_mega_moe_kernel<Runtime, true>(
+             args, gemm_profile("w4fa8_mma", rows, configs.expected_m, config));
+     };
+@@ -194,11 +206,12 @@ inline void fp8_fp4_mega_moe_impl(
+         launch_linear1(std::integral_constant<GatedActivation, GatedActivation::SwiGLUOAI>{});
+     else
+         launch_linear1(std::integral_constant<GatedActivation, GatedActivation::SwiGLU>{});
+-    fp8_channelwise_mega_moe_quantize_local_pool_kernel(config, sym_buffer, base, buffer);
++    if (!exact)
++        fp8_channelwise_mega_moe_quantize_local_pool_kernel(config, sym_buffer, base, buffer);
+     update_recv_stats(base, buffer, config.dispatch.num_experts_per_rank, cumulative_local_expert_recv_stats);
+     launch_mega_moe_kernel<Linear2Runtime, false, 8>(
+         l2_args, gemm_profile("w4fa8_mma", rows, configs.expected_m, configs.l2));
+-    combine_mega_moe(base, buffer, config.dispatch, sym_buffer, y, rank_idx, num_tokens);
++    combine_mega_moe(base, buffer, config.dispatch, sym_buffer, y, rank_idx, num_tokens, exact);
+ }
+
+ } // namespace deep_gemm::mega
+diff --git a/csrc/jit_kernels/impls/sm89_fp8_fp8_mega_moe.hpp b/csrc/jit_kernels/impls/sm89_fp8_fp8_mega_moe.hpp
+index a129fbd..03433af 100644
+--- a/csrc/jit_kernels/impls/sm89_fp8_fp8_mega_moe.hpp
++++ b/csrc/jit_kernels/impls/sm89_fp8_fp8_mega_moe.hpp
+@@ -34,6 +34,9 @@ struct FP8BlockwiseLinear1Params {
+     const float* scales;
+     uint8_t* output;
+     float* output_scales;
++    const float* source_topk_weights;
++    float* pool_route_weights;
++    bool preweighted;
+     float activation_clamp, activation_alpha, situ_beta, situ_linear_beta;
+     const uint8_t* replicas;
+     const float* replica_scales;
+@@ -230,7 +233,10 @@ static void __instantiate_kernel() {{
+             if constexpr (kIsBlockwise) {
+                 DG_HGGC_UNIFIED_CHECK(launch_kernel(kernel, config,
+                     p.sym_buffer, p.local_pool, p.rank_idx, p.num_tokens, p.weights, p.scales, p.output,
+-                    p.output_scales, p.activation_clamp, p.activation_alpha, p.situ_beta, p.situ_linear_beta, p.replicas, p.replica_scales, p.block_info));
++                    p.output_scales, p.source_topk_weights, p.pool_route_weights,
++                    p.preweighted,
++                    p.activation_clamp, p.activation_alpha, p.situ_beta, p.situ_linear_beta,
++                    p.replicas, p.replica_scales, p.block_info));
+             } else {
+                 DG_HGGC_UNIFIED_CHECK(launch_kernel(kernel, config,
+                     p.sym_buffer, p.rank_idx, p.num_tokens, p.weights, p.scales, p.replicas, p.replica_scales,
+@@ -249,7 +255,8 @@ static auto make_fp8_fp8_linear1_args(
+     const std::tuple<torch::Tensor, torch::Tensor>& weights,
+     const std::tuple<torch::Tensor, torch::Tensor>& replicas,
+     uint8_t* base, const layout::RoutedMoEBuffer& buffer, const layout::SymBuffer<>& sym_buffer,
+-    int rank_idx, int num_tokens, float activation_clamp, float activation_alpha, float situ_beta, float situ_linear_beta, const Gemm1Config& config) {
++    int rank_idx, int num_tokens, float activation_clamp, float activation_alpha,
++    float situ_beta, float situ_linear_beta, bool preweighted, const Gemm1Config& config) {
+     using Runtime = FP8MegaMoEGemmRuntime<MegaMoEPhaseKind::Linear1, Quantization>;
+     const auto& [weight, scale] = weights;
+     const auto& [replica_weight, replica_scale] = replicas;
+@@ -275,6 +282,9 @@ static auto make_fp8_fp8_linear1_args(
+         p.local_pool = base + buffer.dispatched_tokens;
+         p.output = base + buffer.l2_acts;
+         p.output_scales = math::advance_ptr<float>(base, buffer.l2_scales);
++        p.source_topk_weights = math::advance_ptr<float>(base, buffer.topk_weights);
++        p.pool_route_weights = math::advance_ptr<float>(base, buffer.route_weights);
++        p.preweighted = preweighted;
+     } else {
+         p.master_experts = weight.size(0);
+         p.output = math::advance_ptr<at::BFloat16>(base, buffer.bf16_scratch);
+@@ -341,7 +351,7 @@ inline void fp8_fp8_mega_moe_impl(
+     const std::tuple<torch::Tensor, torch::Tensor>& l2_weights_replicas,
+     uint8_t* base, const layout::RoutedMoEBuffer& buffer, const layout::SymBuffer<>& sym_buffer,
+     int rank_idx, int num_tokens, GatedActivation activation, float activation_clamp, bool fast_math, float activation_alpha, float situ_beta, float situ_linear_beta,
+-    const MegaMoEPrecisionConfigs& configs, Precision precision,
++    const MegaMoEPrecisionConfigs& configs, Precision precision, bool preweighted_fp32,
+     const std::optional<torch::Tensor>& cumulative_local_expert_recv_stats) {
+     auto config = configs.l1;
+     config.activation = activation;
+@@ -352,7 +362,8 @@ inline void fp8_fp8_mega_moe_impl(
+         using Linear2Runtime = FP8MegaMoEGemmRuntime<MegaMoEPhaseKind::Linear2, kind>;
+         const auto l1_args = make_fp8_fp8_linear1_args<kind>(
+             l1_weights, l1_weights_replicas, base, buffer, sym_buffer, rank_idx, num_tokens,
+-            activation_clamp, activation_alpha, situ_beta, situ_linear_beta, config);
++            activation_clamp, activation_alpha, situ_beta, situ_linear_beta,
++            preweighted_fp32, config);
+         const auto l2_args = make_fp8_fp8_linear2_args<kind>(
+             l2_weights, l2_weights_replicas, base, buffer, rank_idx, config.dispatch, configs.l2);
+         const int rows = buffer.dispatch.num_max_pool_tokens;
+@@ -369,7 +380,8 @@ inline void fp8_fp8_mega_moe_impl(
+         launch(std::integral_constant<Precision, Precision::FP8Blockwise>{});
+     else
+         launch(std::integral_constant<Precision, Precision::FP8Channelwise>{});
+-    combine_mega_moe(base, buffer, config.dispatch, sym_buffer, y, rank_idx, num_tokens);
++    combine_mega_moe(
++        base, buffer, config.dispatch, sym_buffer, y, rank_idx, num_tokens, preweighted_fp32);
+ }
+
+ } // namespace deep_gemm::mega
+diff --git a/csrc/python_api.cpp b/csrc/python_api.cpp
+index 006c10c..37147fa 100644
+--- a/csrc/python_api.cpp
++++ b/csrc/python_api.cpp
+@@ -1,3 +1,4 @@
++#include "host_torch_cuda_compat.hpp"
+ #include <pybind11/pybind11.h>
+ #include <torch/python.h>
+
+diff --git a/deep_gemm/__init__.py b/deep_gemm/__init__.py
+index 07b4910..651a9fc 100644
+--- a/deep_gemm/__init__.py
++++ b/deep_gemm/__init__.py
+@@ -79,7 +79,7 @@ from ._C import (
+     moe_align_block_size,
+     # SiLU / SiTU activation with explicit output mode and optional quantization
+     ActivationMode, QuantMode,
+-    activation_and_mul, activation_and_mul_masked,
++    activation_and_mul, activation_and_mul_masked, activation_and_mul_routed_masked,
+     # Unified weight preprocessing
+     preprocess_weights_and_scales,
+     # deprecated scale-only alias of preprocess_weights_and_scales(MXFP4, False)
+@@ -242,7 +242,9 @@ from .mega import (
+     mega_moe_pre_dispatch,
+     transform_weights_for_fp8_mega_moe, transform_weights_for_w4a16_mega_moe,
+     fp8_fp8_mega_moe, bf16_fp4_mega_moe,
+-    transform_weights_for_w4a8_mega_moe, fp8_fp4_mega_moe,
++    transform_weights_for_w4a8_mega_moe, fp8_fp4_mega_moe, fp8_fp4_mega_moe_fp32,
++    fp8_fp8_mega_moe_fp32, mega_moe_pre_dispatch_ue8m0,
++    MEGA_MOE_CAPABILITIES,
+ )
+
+ # Some utils
+diff --git a/deep_gemm/include/deep_gemm/epilogue/activation_quant_ops.cuh b/deep_gemm/include/deep_gemm/epilogue/activation_quant_ops.cuh
+index 8600584..50fdfc8 100644
+--- a/deep_gemm/include/deep_gemm/epilogue/activation_quant_ops.cuh
++++ b/deep_gemm/include/deep_gemm/epilogue/activation_quant_ops.cuh
+@@ -19,6 +19,16 @@ CUTLASS_DEVICE FP8Scale fp8_block_scale(float amax) {
+     return {amax * (1.0f / 448.0f), math::fp32_divide<FastMath>(448.0f, amax)};
+ }
+
++// Official DSV4 activation contract: one E4M3 scale per 128 values,
++// stored as FP32 but restricted to the positive UE8M0 (power-of-two) grid.
++template <bool FastMath>
++CUTLASS_DEVICE FP8Scale fp8_block_scale_ue8m0(float amax) {
++    const float raw = fmaxf(amax, 1e-4f) * (1.0f / 448.0f);
++    const uint32_t bits = (__float_as_uint(raw) + 0x007FFFFFu) & 0x7F800000u;
++    const float scale = __uint_as_float(bits);
++    return {scale, math::fp32_divide<FastMath>(1.0f, scale)};
++}
++
+ template <int Lanes = 32>
+ CUTLASS_DEVICE float warp_amax(float value) {
+     static_assert(Lanes > 0 && Lanes <= 32 && (Lanes & (Lanes - 1)) == 0);
+diff --git a/deep_gemm/include/deep_gemm/impls/activation_arguments.hpp b/deep_gemm/include/deep_gemm/impls/activation_arguments.hpp
+index 1d69032..c7c6d7c 100644
+--- a/deep_gemm/include/deep_gemm/impls/activation_arguments.hpp
++++ b/deep_gemm/include/deep_gemm/impls/activation_arguments.hpp
+@@ -22,5 +22,6 @@ struct ActivationParams {
+     float weight_inv_scale;
+     float beta;
+     float linear_beta;
++    const float* route_weights = nullptr;
+ };
+ } // namespace deep_gemm
+diff --git a/deep_gemm/include/deep_gemm/impls/activation_quant.cuh b/deep_gemm/include/deep_gemm/impls/activation_quant.cuh
+index 14ac332..b37410b 100644
+--- a/deep_gemm/include/deep_gemm/impls/activation_quant.cuh
++++ b/deep_gemm/include/deep_gemm/impls/activation_quant.cuh
+@@ -105,22 +105,42 @@ __device__ void activation_tiled(const ActivationParams& p) {
+         float maximum = 0.0f;
+         #pragma unroll
+         for (int i = 0; i < 8; ++i) {
+-            values[i] = Situ ? situ_and_mul_value(float(gate[i]), float(up[i]), p.beta, p.linear_beta)
+-                             : silu_and_mul_value<Clamp && Step, Step>(float(gate[i]), float(up[i]), p.limit);
++            if (p.route_weights != nullptr && !Situ) {
++                float g = float(gate[i]);
++                float u = float(up[i]);
++                if constexpr (Clamp && !Step) g = fminf(g, p.limit);
++                if constexpr (Clamp) u = fminf(fmaxf(u, -p.limit), p.limit);
++                float activated = g / (1.0f + expf(-g));
++                if constexpr (Clamp && Step) activated = fminf(activated, p.limit);
++                values[i] = activated * u;
++            } else {
++                values[i] = Situ ? situ_and_mul_value(float(gate[i]), float(up[i]), p.beta, p.linear_beta)
++                                 : silu_and_mul_value<Clamp && Step, Step>(float(gate[i]), float(up[i]), p.limit);
++            }
++            if (p.route_weights != nullptr)
++                values[i] = __bfloat162float(__float2bfloat16_rn(
++                    values[i] * p.route_weights[row]));
+             if constexpr (FP8Block) maximum = fmaxf(maximum, fabsf(values[i]));
+         }
+         if constexpr (FP8Block) {
+             #pragma unroll
+             for (int delta = 8; delta > 0; delta /= 2)
+                 maximum = fmaxf(maximum, __shfl_xor_sync(0xffffffffu, maximum, delta, 16));
+-            const float amax = fmaxf(maximum, 1e-10f);
++            const float amax = fmaxf(maximum, p.route_weights != nullptr ? 1e-4f : 1e-10f);
++            float scale = amax * (1.0f / 448.0f);
++            float inverse = __fdividef(448.0f, amax);
++            if (p.route_weights != nullptr) {
++                const uint32_t bits = (__float_as_uint(scale) + 0x007fffffu) & 0x7f800000u;
++                scale = __uint_as_float(bits);
++                inverse = __fdividef(1.0f, scale);
++            }
+             if (tid % 16 == 0 && col < N) {
+                 const int64_t index = Masked ? (int64_t(expert) * Groups + group) * aligned_rows + local_row
+                                             : row * Groups + group;
+-                scales[index] = amax * (1.0f / 448.0f);
++                scales[index] = scale;
+             }
+             alignas(8) uint16_t packed[4];
+-            activation_pack_fp8_eight(values, __fdividef(448.0f, amax), packed);
++            activation_pack_fp8_eight(values, inverse, packed);
+             if (col < N)
+                 *reinterpret_cast<uint2*>(static_cast<uint8_t*>(p.output) + row * N + col) =
+                     *reinterpret_cast<const uint2*>(packed);
+diff --git a/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_dispatch_gemm1.cuh b/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_dispatch_gemm1.cuh
+index 0f8cf81..282ad28 100644
+--- a/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_dispatch_gemm1.cuh
++++ b/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_dispatch_gemm1.cuh
+@@ -45,9 +45,26 @@ struct Gemm1 {
+     }
+ };
+
++template <GatedActivation Activation>
++__device__ __forceinline__ float official_preweighted_activation(
++        float gate, float up, float limit, float activation_alpha,
++        float situ_beta, float situ_linear_beta) {
++    if constexpr (Activation == GatedActivation::SwiGLU) {
++        if (limit >= 0.0f) {
++            const float bound = __bfloat162float(__float2bfloat16(limit));
++            gate = fminf(gate, bound);
++            up = fminf(fmaxf(up, -bound), bound);
++        }
++        return (gate / (1.0f + expf(-gate))) * up;
++    }
++    return routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
++        gate, up, limit, activation_alpha, situ_beta, situ_linear_beta);
++}
++
+ template <int kN, int kNumThreads, bool kClamp, GatedActivation Activation, class Accum, class Coordinates>
+ __device__ __forceinline__ void swiglu_quant_epilogue(
+         Accum& accum, const Coordinates& coords, uint8_t* output, float* scales,
++        const float* route_weights, bool preweighted,
+         int pool_rows, int valid_rows, int n_block, int thread, char* smem,
+         float swiglu_limit, float activation_alpha, float situ_beta, float situ_linear_beta, int writable_rows) {
+     using namespace cute;
+@@ -93,18 +110,42 @@ __device__ __forceinline__ void swiglu_quant_epilogue(
+                     tile + row * kStride + lane * 16 + i * 2);
+                 float2 u = *reinterpret_cast<const float2*>(
+                     tile + row * kStride + 128 + lane * 16 + i * 2);
+-                activated = make_float2(
+-                    routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
+-                        g.x, u.x, kClamp ? swiglu_limit : -1.0f, activation_alpha, situ_beta, situ_linear_beta),
+-                    routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
+-                        g.y, u.y, kClamp ? swiglu_limit : -1.0f, activation_alpha, situ_beta, situ_linear_beta));
++                if (preweighted) {
++                    // The official layer contract materializes both projections
++                    // in BF16 before activation, then applies the FP32 route
++                    // weight and materializes BF16 before G2 quantization.
++                    g = make_float2(__bfloat162float(__float2bfloat16_rn(g.x)),
++                                    __bfloat162float(__float2bfloat16_rn(g.y)));
++                    u = make_float2(__bfloat162float(__float2bfloat16_rn(u.x)),
++                                    __bfloat162float(__float2bfloat16_rn(u.y)));
++                    const float route_weight = route_weights[row];
++                    activated = make_float2(
++                        __bfloat162float(__float2bfloat16_rn(
++                            official_preweighted_activation<Activation>(
++                                g.x, u.x, kClamp ? swiglu_limit : -1.0f,
++                                activation_alpha, situ_beta, situ_linear_beta) * route_weight)),
++                        __bfloat162float(__float2bfloat16_rn(
++                            official_preweighted_activation<Activation>(
++                                g.y, u.y, kClamp ? swiglu_limit : -1.0f,
++                                activation_alpha, situ_beta, situ_linear_beta) * route_weight)));
++                } else {
++                    activated = make_float2(
++                        routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
++                            g.x, u.x, kClamp ? swiglu_limit : -1.0f,
++                            activation_alpha, situ_beta, situ_linear_beta),
++                        routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
++                            g.y, u.y, kClamp ? swiglu_limit : -1.0f,
++                            activation_alpha, situ_beta, situ_linear_beta));
++                }
+             }
+             values[2 * i] = activated.x;
+             values[2 * i + 1] = activated.y;
+             amax = fmaxf(amax, fmaxf(fabsf(activated.x), fabsf(activated.y)));
+         }
+         amax = epilogue::quant::warp_amax<8>(amax);
+-        const auto quant_scale = epilogue::quant::fp8_block_scale<bool(DG_MOE_FAST_MATH)>(amax);
++        const auto quant_scale = preweighted
++            ? epilogue::quant::fp8_block_scale_ue8m0<bool(DG_MOE_FAST_MATH)>(amax)
++            : epilogue::quant::fp8_block_scale<bool(DG_MOE_FAST_MATH)>(amax);
+         if (lane == 0)
+             scales[int64_t(n_block) * pool_rows + row] = quant_scale.scale;
+         __align__(16) uint16_t packed[8];
+@@ -121,7 +162,8 @@ __device__ __forceinline__ void swiglu_quant_epilogue(
+ template <int kN, int kK, bool kClamp, GatedActivation Activation = GatedActivation::SwiGLU, int kComputeM = 128>
+ __device__ __forceinline__ void gemm1_block(
+         const uint8_t* a, const float* sa, const uint8_t* b, const float* sb,
+-        uint8_t* output, float* output_scales, int pool_rows, int valid_rows, int n_block,
++        uint8_t* output, float* output_scales, const float* route_weights, bool preweighted,
++        int pool_rows, int valid_rows, int n_block,
+         int thread, char* smem, float swiglu_limit, float activation_alpha, float situ_beta, float situ_linear_beta, int writable_rows) {
+     using namespace cute;
+     using G = Gemm1<kN, kK, kComputeM>;
+@@ -153,7 +195,8 @@ __device__ __forceinline__ void gemm1_block(
+     auto t_coord = mma.get_thread_slice(thread).partition_C(c_tile);
+     static_assert(kComputeM * 258 * sizeof(float) <= sizeof(typename Mainloop::SharedStorage));
+     swiglu_quant_epilogue<kN, G::kNumThreads, kClamp, Activation>(accum, t_coord, output,
+-        output_scales, pool_rows, valid_rows, n_block, thread, smem, swiglu_limit, activation_alpha, situ_beta, situ_linear_beta, writable_rows);
++        output_scales, route_weights, preweighted, pool_rows, valid_rows, n_block, thread, smem,
++        swiglu_limit, activation_alpha, situ_beta, situ_linear_beta, writable_rows);
+ }
+
+ template <uint32_t kRanks, uint32_t kCTAs, uint32_t kExperts,
+@@ -169,6 +212,8 @@ CUTLASS_DEVICE void dispatch_gemm1_kernel_device(
+         uint8_t* output, float* output_scales,
+         uint32_t num_tokens, uint32_t cap, float swiglu_limit = 0.0f, float activation_alpha = 1.0f, float situ_beta = 4.0f, float situ_linear_beta = 25.0f,
+         const uint8_t* w1_replicas = nullptr, const float* s1_replicas = nullptr,
++        const float* source_topk_weights = nullptr, float* pool_route_weights = nullptr,
++        bool preweighted = false,
+         uint64_t routing_bytes = 0) {
+     static_assert(kRanks > 0 && kRanks <= 64 && kExperts % kRanks == 0);
+     constexpr uint32_t kEpr = kExperts / kRanks;
+@@ -237,6 +282,9 @@ CUTLASS_DEVICE void dispatch_gemm1_kernel_device(
+                 if (lane == 0) {
+                     *ws.get_token_src_metadata_ptr(dst) = {src, token, topk_slot};
+                     gemm2_meta.store_route(dst, src, token, topk_slot);
++                    if (preweighted)
++                        pool_route_weights[dst] = *sym_buffer.map(
++                            source_topk_weights + uint64_t(token) * kTopk + topk_slot, src);
+                 }
+                 cute::cp_async_wait<0>();
+                 __syncwarp();
+@@ -291,7 +339,7 @@ CUTLASS_DEVICE void dispatch_gemm1_kernel_device(
+                 pool + uint64_t(base) * kHidden, pool_scales + base,
+                 weight_base + uint64_t(weight_expert) * kN * kHidden,
+                 scale_base + uint64_t(weight_expert) * (kN / 128) * kScales,
+-                tile_output, output_scales + base,
++                tile_output, output_scales + base, pool_route_weights + base, preweighted,
+                 ws.num_max_pool_tokens, valid, n, thread, reinterpret_cast<char*>(smem),
+                 swiglu_limit, activation_alpha, situ_beta, situ_linear_beta, writable);
+             if (++work == batch_end) {
+diff --git a/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_pre_dispatch.cuh b/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_pre_dispatch.cuh
+index 166ddf4..58391a8 100644
+--- a/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_pre_dispatch.cuh
++++ b/deep_gemm/include/deep_gemm/impls/fp8_blockwise_mega_moe_pre_dispatch.cuh
+@@ -6,7 +6,7 @@
+
+ namespace deep_gemm::mega_moe::fp8_blockwise {
+
+-template <int kHidden, int kTopk, typename Index = int64_t>
++template <int kHidden, int kTopk, typename Index = int64_t, bool kUe8m0 = false>
+ CUTLASS_DEVICE void pre_dispatch_kernel_device(
+         const __ppu_bfloat16* input, const Index* ids, const float* weights,
+         __hg_fp8_e4m3* output, float* scales,
+@@ -24,8 +24,12 @@ CUTLASS_DEVICE void pre_dispatch_kernel_device(
+         #pragma unroll
+         for (int i = 0; i < 4; ++i)
+             values[i] = __bfloat162float(input[base + lane * 4 + i]);
+-        quantize_group(values, output + base,
+-                       scales + int64_t(row) * kScales + group, lane);
++        if constexpr (kUe8m0)
++            quantize_group_ue8m0(values, output + base,
++                                 scales + int64_t(row) * kScales + group, lane);
++        else
++            quantize_group(values, output + base,
++                           scales + int64_t(row) * kScales + group, lane);
+     }
+     for (int slot = threadIdx.x; slot < kTopk; slot += kThreads) {
+         const int64_t index = int64_t(row) * kTopk + slot;
+@@ -46,7 +50,7 @@ __global__ __launch_bounds__(kThreads) void pre_dispatch_kernel(
+
+ namespace deep_gemm::mega_moe::fp8_blockwise {
+
+-template <int Hidden, int TopK, typename TopkIndex>
++template <int Hidden, int TopK, typename TopkIndex, bool Ue8m0 = false>
+ __global__ __launch_bounds__(256, 1) void sm89_fp8_blockwise_mega_moe_pre_dispatch(
+     __ppu_bfloat16* hidden_states, const TopkIndex* topk_ids, float* topk_weights, __hg_fp8_e4m3* input_token,
+     float* input_scale, int64_t* input_topk_idx, float* input_topk_weights, int num_tokens, int capacity) {
+@@ -54,9 +58,9 @@ __global__ __launch_bounds__(256, 1) void sm89_fp8_blockwise_mega_moe_pre_dispat
+         detail::invalidate_unused_routes<TopK>(input_topk_idx, input_topk_weights, num_tokens, capacity, num_tokens);
+         return;
+     }
+-    mega_moe::fp8_blockwise::pre_dispatch_kernel_device<Hidden, TopK>(hidden_states, topk_ids, topk_weights,
+-                                                                      input_token, input_scale, input_topk_idx,
+-                                                                      input_topk_weights, (uint32_t)num_tokens);
++    mega_moe::fp8_blockwise::pre_dispatch_kernel_device<Hidden, TopK, TopkIndex, Ue8m0>(
++        hidden_states, topk_ids, topk_weights, input_token, input_scale,
++        input_topk_idx, input_topk_weights, (uint32_t)num_tokens);
+ }
+
+ } // namespace deep_gemm::mega_moe::fp8_blockwise
+diff --git a/deep_gemm/include/deep_gemm/impls/fp8_blockwise_moe_utils.cuh b/deep_gemm/include/deep_gemm/impls/fp8_blockwise_moe_utils.cuh
+index bd6d51d..7503c2f 100644
+--- a/deep_gemm/include/deep_gemm/impls/fp8_blockwise_moe_utils.cuh
++++ b/deep_gemm/include/deep_gemm/impls/fp8_blockwise_moe_utils.cuh
+@@ -37,4 +37,23 @@ __device__ __forceinline__ void quantize_group(
+         output[lane * 4 + i] = __hg_fp8_e4m3(values[i] * inv_sf);
+ }
+
++__device__ __forceinline__ void quantize_group_ue8m0(
++        const float (&values)[4], __hg_fp8_e4m3* output,
++        float* scale, int lane) {
++    float amax = 0.0f;
++    #pragma unroll
++    for (int i = 0; i < 4; ++i)
++        amax = fmaxf(amax, fabsf(values[i]));
++    amax = warp_absmax(amax);
++    const float raw = fmaxf(amax, 1e-4f) * (1.0f / 448.0f);
++    const uint32_t bits = (__float_as_uint(raw) + 0x007FFFFFu) & 0x7F800000u;
++    const float sf = __uint_as_float(bits);
++    const float inv_sf = 1.0f / sf;
++    if (lane == 0)
++        *scale = sf;
++    #pragma unroll
++    for (int i = 0; i < 4; ++i)
++        output[lane * 4 + i] = __hg_fp8_e4m3(values[i] * inv_sf);
++}
++
+ }  // namespace deep_gemm::mega_moe::fp8_blockwise
+diff --git a/deep_gemm/include/deep_gemm/impls/fp8_channelwise_mega_moe_dispatch_gemm1.cuh b/deep_gemm/include/deep_gemm/impls/fp8_channelwise_mega_moe_dispatch_gemm1.cuh
+index e60cf8b..027f36e 100644
+--- a/deep_gemm/include/deep_gemm/impls/fp8_channelwise_mega_moe_dispatch_gemm1.cuh
++++ b/deep_gemm/include/deep_gemm/impls/fp8_channelwise_mega_moe_dispatch_gemm1.cuh
+@@ -151,7 +151,8 @@ template <
+     uint32_t kBlockN, uint32_t kBlockK, uint32_t kWarpM,
+     uint32_t kWarpN, uint32_t kStages, uint32_t kNumPullCTAs,
+     GatedActivation Activation = GatedActivation::SwiGLU, class Gemm1Backend = void,
+-    uint32_t kPullGroupSize = kNumPullCTAs / 3, uint32_t kGemm2BlockM = 0, bool kGemm2ValidRows = true>
++    uint32_t kPullGroupSize = kNumPullCTAs / 3, uint32_t kGemm2BlockM = 0,
++    bool kGemm2ValidRows = true, bool kBlockwiseScale = false>
+ CUTLASS_DEVICE void dispatch_gemm1_device(
+         void* workspace_base,
+         const layout::SymBuffer<>& sym_buffer,
+@@ -174,7 +175,11 @@ CUTLASS_DEVICE void dispatch_gemm1_device(
+         const uint32_t num_max_tokens_per_rank,
+         const float weight_inv_scale = 1.0f, const float replica_inv_scale = 1.0f,
+         const float situ_beta = 4.0f, const float situ_linear_beta = 25.0f,
+-        uint64_t routing_bytes = 0) {
++        uint64_t routing_bytes = 0,
++        const float* source_topk_weights = nullptr,
++        float* pool_route_weights = nullptr,
++        uint8_t* blockwise_output = nullptr,
++        float* blockwise_output_scales = nullptr) {
+     using Cfg = mega_moe::fp8_channelwise::Gemm1MmaConfig<
+         kBlockM, kBlockN, kBlockK, kWarpM, kWarpN, kStages>;
+     static_assert(kNumExpertsPerRank > 0 && kNumExpertsPerRank <= 128,
+@@ -197,6 +202,7 @@ CUTLASS_DEVICE void dispatch_gemm1_device(
+     const uint32_t warp_idx = thread_idx / 32;
+     const uint32_t lane_idx = thread_idx % 32;
+     constexpr uint32_t kNumWarps = kNumThreads / 32;
++    constexpr uint32_t kScaleCount = kBlockwiseScale ? kTokenBytes / 128 : 1;
+     const layout::Workspace workspace(
+         workspace_base, kNumRanks, kNumExperts, num_max_tokens_per_rank,
+         kNumTopk, routing_bytes);
+@@ -228,11 +234,13 @@ CUTLASS_DEVICE void dispatch_gemm1_device(
+     auto* queue_counter = workspace.get_gemm1_work_count_ptr();
+     // Mainloop returns after its final CTA barrier; its storage is free
+     // until the next tile. The register-only activation leaves this word intact.
+-    // The scale copy occupies the first M*sizeof(float) bytes of one A stage.
+-    // Keep the ticket outside that range. MMA can overwrite it only after all
+-    // threads consumed its value and passed the epilogue rendezvous.
+-    static_assert(kBlockM * sizeof(float) + sizeof(uint32_t) <= kBlockM * kBlockK);
+-    auto& queue_ticket = *reinterpret_cast<uint32_t*>(smem_buf + kBlockM * sizeof(float));
++    // Ordinary G1 only stages one scale per row. Exact G1 materializes the
++    // whole FP32 activation tile, so its queue ticket must live after that
++    // tile or the epilogue overwrites the next work id.
++    constexpr uint32_t kQueueTicketOffset = kBlockwiseScale
++        ? kBlockM * (kBlockN / 2) * sizeof(float)
++        : kBlockM * sizeof(float);
++    auto& queue_ticket = *reinterpret_cast<uint32_t*>(smem_buf + kQueueTicketOffset);
+     const mega_moe::WorkQueue queue{queue_counter, &queue_ticket};
+
+     struct BlockInfo {
+@@ -310,24 +318,29 @@ CUTLASS_DEVICE void dispatch_gemm1_device(
+                         input_token +
+                             static_cast<uint64_t>(src_token) * kTokenBytes,
+                         src_rank);
+-                    float token_scale = 0.0f;
+                     const uint32_t pool_row = bi.pool_base + row_in_block;
+                     auto* pool_token_row = token_pool + uint64_t(pool_row) * kTokenBytes;
+                     mega_moe::detail::warp_async_copy_global_to_shared(
+                         smem_token, src_token_ptr, kTokenBytes, lane_idx);
+-                    if (lane_idx == 0) {
+-                        token_scale = *sym_buffer.map(input_scale + src_token, src_rank);
+-                    }
++                    if constexpr (kBlockwiseScale)
++                        for (uint32_t sf = lane_idx; sf < kScaleCount; sf += 32)
++                            scale_pool[uint64_t(pool_row) * kScaleCount + sf] =
++                                *sym_buffer.map(input_scale + uint64_t(src_token) * kScaleCount + sf, src_rank);
+                     asm volatile("" ::: "memory");
+                     cute::cp_async_wait<0>();
+                     __syncwarp();
+                     mega_moe::detail::warp_copy_bytes(
+                         pool_token_row, smem_token, kTokenBytes, lane_idx);
+                     if (lane_idx == 0) {
+-                        scale_pool[pool_row] = token_scale;
++                        if constexpr (!kBlockwiseScale)
++                            scale_pool[pool_row] = *sym_buffer.map(input_scale + src_token, src_rank);
+                         *workspace.get_token_src_metadata_ptr(pool_row) = {
+                             src_rank, src_token, src_topk};
+                         gemm2_meta.store_route(pool_row, src_rank, src_token, src_topk);
++                        if constexpr (kBlockwiseScale)
++                            pool_route_weights[pool_row] = *sym_buffer.map(
++                                source_topk_weights + uint64_t(src_token) * kNumTopk + src_topk,
++                                src_rank);
+                     }
+                     __syncwarp();
+                 }
+@@ -369,17 +382,30 @@ CUTLASS_DEVICE void dispatch_gemm1_device(
+             const auto* weight_scale_base = use_replica
+                 ? gemm1_weight_scale_replicas : gemm1_weight_scale;
+             if constexpr (!cute::is_same_v<Gemm1Backend, void>) {
++                void* gemm1_output;
++                if constexpr (kBlockwiseScale)
++                    gemm1_output = blockwise_output + uint64_t(pool_base) * (kGemm1N / 2) +
++                                   n_block * (kBlockN / 2);
++                else
++                    gemm1_output = swiglu_output + uint64_t(pool_base) * (kGemm1N / 2) +
++                                   n_block * (kBlockN / 2);
+                 Gemm1Backend::run(
+-                    token_pool + uint64_t(pool_base) * kTokenBytes, scale_pool + pool_base,
++                    token_pool + uint64_t(pool_base) * kTokenBytes,
++                    scale_pool + uint64_t(pool_base) * kScaleCount,
+                     reinterpret_cast<const uint8_t*>(weight_base)
+                         + (uint64_t(weight_expert) * kGemm1N + n_block * kBlockN) * (kTokenBytes / 2),
+                     reinterpret_cast<const uint8_t*>(weight_scale_base)
+                         + (uint64_t(weight_expert) * kGemm1N + n_block * kBlockN) * (kTokenBytes / 32),
+-                    swiglu_output + uint64_t(pool_base) * (kGemm1N / 2) + n_block * (kBlockN / 2),
++                    gemm1_output,
++                    kBlockwiseScale
++                        ? blockwise_output_scales + uint64_t(pool_base) * ((kGemm1N / 2) / 128)
++                        : blockwise_output_scales,
++                    n_block,
+                     kGemm1N / 2, valid_m, reinterpret_cast<char*>(smem_buf),
+                     swiglu_limit, activation_alpha, use_replica ? replica_inv_scale : weight_inv_scale,
+                     situ_beta, situ_linear_beta,
+-                    queue_counter, &queue_ticket);
++                    queue_counter, &queue_ticket,
++                    kBlockwiseScale ? pool_route_weights + pool_base : nullptr);
+                 prefetched_work = queue.current();
+             } else {
+                 mega_moe::fp8_channelwise::gemm1_swiglu_mma_block<Cfg, Activation>(
+diff --git a/deep_gemm/include/deep_gemm/impls/mega_moe_combine.cuh b/deep_gemm/include/deep_gemm/impls/mega_moe_combine.cuh
+index 87c83c4..ef96bd9 100644
+--- a/deep_gemm/include/deep_gemm/impls/mega_moe_combine.cuh
++++ b/deep_gemm/include/deep_gemm/impls/mega_moe_combine.cuh
+@@ -112,9 +112,9 @@ __device__ __forceinline__ void load_combine_vector(
+     }
+ }
+
+-template <int kTopk, bool kFp8, bool kScaled, int kThreads>
++template <int kTopk, bool kFp8, bool kScaled, bool kPreweightedFp32, int kThreads>
+ __device__ __forceinline__ void barrier_reduce_kernel(
+-    const void* buf, const uint64_t* scales, const float* weights, const int64_t* ids, __ppu_bfloat16* output,
++    const void* buf, const uint64_t* scales, const float* weights, const int64_t* ids, void* output,
+     int tokens, int hidden, int capacity, int num_experts, int scale_tiles, int scale_block_n, int fp8_exp_shift,
+     const layout::SymBuffer<>& sym_buffer, int rank, int world, layout::RoutedMoESignals* signals) {
+     combine_barrier(sym_buffer, rank, world, signals, num_experts);
+@@ -126,7 +126,8 @@ __device__ __forceinline__ void barrier_reduce_kernel(
+     for (int slot = 0; slot < kTopk; ++slot) {
+         const int64_t offset = static_cast<int64_t>(token) * kTopk + slot;
+         const int64_t expert = __ldg(ids + offset);
+-        route_weights[slot] = expert >= 0 && expert < num_experts ? __ldg(weights + offset) : 0.0f;
++        route_weights[slot] = expert >= 0 && expert < num_experts
++            ? (kPreweightedFp32 ? 1.0f : __ldg(weights + offset)) : 0.0f;
+         if constexpr (kFp8 && !kScaled)
+             route_weights[slot] *= ldexpf(1.0f, fp8_exp_shift);
+     }
+@@ -149,12 +150,22 @@ __device__ __forceinline__ void barrier_reduce_kernel(
+                 acc[i].y += weight * values[i].y;
+             }
+         }
+-        float4 packed;
+-        auto* pairs = reinterpret_cast<__ppu_bfloat162*>(&packed);
+-        #pragma unroll
+-        for (int i = 0; i < 4; ++i)
+-            pairs[i] = __float22bfloat162_rn(acc[i]);
+-        store_bf16x8(output + static_cast<int64_t>(token) * hidden + vector * 8, packed);
++        if constexpr (kPreweightedFp32) {
++            auto* fp32_output = static_cast<float*>(output) +
++                static_cast<int64_t>(token) * hidden + vector * 8;
++            *reinterpret_cast<float4*>(fp32_output) =
++                make_float4(acc[0].x, acc[0].y, acc[1].x, acc[1].y);
++            *reinterpret_cast<float4*>(fp32_output + 4) =
++                make_float4(acc[2].x, acc[2].y, acc[3].x, acc[3].y);
++        } else {
++            float4 packed;
++            auto* pairs = reinterpret_cast<__ppu_bfloat162*>(&packed);
++            #pragma unroll
++            for (int i = 0; i < 4; ++i)
++                pairs[i] = __float22bfloat162_rn(acc[i]);
++            store_bf16x8(static_cast<__ppu_bfloat16*>(output) +
++                static_cast<int64_t>(token) * hidden + vector * 8, packed);
++        }
+     }
+ }
+
+@@ -162,13 +173,13 @@ __device__ __forceinline__ void barrier_reduce_kernel(
+
+ namespace deep_gemm::mega_moe::detail {
+
+-template <int TopK, bool Fp8, bool Scaled, int Threads>
++template <int TopK, bool Fp8, bool Scaled, bool PreweightedFp32, int Threads>
+ __global__ __launch_bounds__(Threads)
+ void sm89_mega_moe_barrier_reduce(
+-        const void* b, const uint64_t* s, const float* w, const int64_t* ids, __ppu_bfloat16* y,
++        const void* b, const uint64_t* s, const float* w, const int64_t* ids, void* y,
+         int t, int h, int c, int e, int st, int sn, int shift, layout::SymBuffer<> sym,
+         int r, int ws, layout::RoutedMoESignals* signals) {
+-    barrier_reduce_kernel<TopK, Fp8, Scaled, Threads>(
++    barrier_reduce_kernel<TopK, Fp8, Scaled, PreweightedFp32, Threads>(
+         b, s, w, ids, y, t, h, c, e, st, sn, shift, sym, r, ws, signals);
+ }
+
+diff --git a/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp4_mega_moe.cuh b/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp4_mega_moe.cuh
+index 8e17e8e..5cddb86 100644
+--- a/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp4_mega_moe.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp4_mega_moe.cuh
+@@ -4,12 +4,29 @@
+ #include <deep_gemm/epilogue/gated_activation.cuh>
+ #include <deep_gemm/epilogue/activation_quant_ops.cuh>
+ #include <deep_gemm/impls/mega_moe_io.cuh>
++#include <deep_gemm/impls/fp8_blockwise_moe_utils.cuh>
+ #include <deep_gemm/layout/mega_moe.cuh>
+ #include <deep_gemm/impls/fp8_channelwise_mega_moe_dispatch_gemm1.cuh>
+ #include <deep_gemm/scheduler/sm89_mega_moe.cuh>
+
+ namespace deep_gemm::mega_moe::w4a8 {
+
++template <GatedActivation Activation>
++CUTLASS_DEVICE float exact_preweighted_activation(
++        float gate, float up, float limit, float alpha,
++        float situ_beta, float situ_linear_beta) {
++    if constexpr (Activation == GatedActivation::SwiGLU) {
++        if (limit >= 0.0f) {
++            const float bound = __bfloat162float(__float2bfloat16(limit));
++            gate = fminf(gate, bound);
++            up = fminf(fmaxf(up, -bound), bound);
++        }
++        return (gate / (1.0f + expf(-gate))) * up;
++    }
++    return routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
++        gate, up, limit, alpha, situ_beta, situ_linear_beta);
++}
++
+ struct SingleTile {
+     int curr_group_m;
+     int curr_group_idx = 0;
+@@ -25,18 +42,21 @@ struct SingleTile {
+ };
+
+ template <int BlockM, int BlockN, int K, int WarpM, int WarpN, int Stages, GatedActivation Activation,
+-          w4fa8::FragmentPolicy Fragment, w4fa8::ALoadPolicy ALoad>
++          w4fa8::FragmentPolicy Fragment, w4fa8::ALoadPolicy ALoad, bool Exact = false>
+ struct Gemm1 {
+     using Kernel = cutlass::gemm::kernel::W4A8GEMM_MMA<
+         BlockN, K, BlockM, BlockN, 128, WarpM, WarpN, 128,
+-        1, Stages, GemmType::MGroupedNoPad, 1, false, Fragment, ALoad>;
++        1, Stages, GemmType::MGroupedNoPad, 1, false, Fragment, ALoad, Exact>;
+
+     struct Epilogue {
+-        __ppu_bfloat16* output;
++        uint8_t* output;
++        float* output_scales;
+         const float* row_scales;
+-        int stride;
++        const float* route_weights;
++        int stride, n_block;
+         float limit, alpha, inv_scale, situ_beta, situ_linear_beta;
+         uint32_t *queue_counter, *next_ticket;
++        char* smem;
+         CUTLASS_DEVICE const uint8_t* weight(const uint8_t* p, int, int) const { return p; }
+         CUTLASS_DEVICE const uint8_t* scale(const uint8_t* p, int, int) const { return p; }
+         CUTLASS_DEVICE int valid_rows(int, int m) const { return m; }
+@@ -45,6 +65,7 @@ struct Gemm1 {
+         CUTLASS_DEVICE void store(Accum& acc, const Coords& coords, const Scheduler&,
+                                   int, int, int valid) const {
+             using namespace cute;
++            auto* exact_tile = reinterpret_cast<float*>(smem);
+             // The last mainloop barrier retired operand reads. Claim the next
+             // tile while the current activation epilogue stores its result.
+             if (queue_counter && threadIdx.x == 0)
+@@ -57,7 +78,7 @@ struct Gemm1 {
+                 for (int r = 0; r < 2; ++r) {
+                     const int row = get<0>(coords(2 * r, m, 0));
+                     if (row >= valid) continue;
+-                    const float sf = row_scales[row] * inv_scale;
++                    const float sf = Exact ? inv_scale : row_scales[row] * inv_scale;
+                     CUTE_UNROLL
+                     for (int n = 0; n < size<2>(acc); ++n) {
+                         const int col = get<1>(coords(2 * r, m, n));
+@@ -66,35 +87,76 @@ struct Gemm1 {
+                         for (int v = 0; v < 2; ++v) {
+                             float gate = acc(2*r+v, m, n) * sf;
+                             float up = acc(2*r+v+4, m, n) * sf;
+-                            const float value = routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
+-                                gate, up, limit, alpha, situ_beta, situ_linear_beta);
+-                            output[int64_t(row) * stride + dst + v] = epilogue::quant::bf16(value);
++                            if constexpr (Exact) {
++                                gate = __bfloat162float(__float2bfloat16_rn(gate));
++                                up = __bfloat162float(__float2bfloat16_rn(up));
++                            }
++                            float value = Exact
++                                ? exact_preweighted_activation<Activation>(
++                                      gate, up, limit, alpha, situ_beta, situ_linear_beta)
++                                : routed_gated_activation<Activation, bool(DG_MOE_FAST_MATH)>(
++                                      gate, up, limit, alpha, situ_beta, situ_linear_beta);
++                            if constexpr (Exact)
++                                value *= route_weights[row];
++                            if constexpr (Exact)
++                                exact_tile[int64_t(row) * (BlockN / 2) + dst + v] =
++                                    __bfloat162float(__float2bfloat16_rn(value));
++                            else
++                                reinterpret_cast<__ppu_bfloat16*>(output)[int64_t(row) * stride + dst + v] =
++                                    epilogue::quant::bf16(value);
+                         }
+                     }
+                 }
+             }
++            if constexpr (Exact) {
++                __syncthreads();
++                const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
++                constexpr int Warps = Kernel::MaxThreadsPerBlock / 32;
++                for (int row = warp; row < valid; row += Warps) {
++                    float values[4];
++#pragma unroll
++                    for (int i = 0; i < 4; ++i)
++                        values[i] = exact_tile[int64_t(row) * (BlockN / 2) + lane * 4 + i];
++                    mega_moe::fp8_blockwise::quantize_group_ue8m0(
++                        values,
++                        reinterpret_cast<__hg_fp8_e4m3*>(output) + int64_t(row) * stride,
++                        output_scales + int64_t(row) * (stride / 128) + n_block,
++                        lane);
++                }
++                __syncthreads();
++            }
+         }
+     };
+
++    // The exact G1 epilogue materializes a BlockM x (BlockN / 2) FP32 tile.
++    // Reserve one additional word for the distributed work-queue ticket: the
++    // scheduler reads it again after the epilogue has consumed the tile.
++    static constexpr uint32_t ExactEpilogueSharedBytes =
++        BlockM * (BlockN / 2) * sizeof(float) + sizeof(uint32_t);
++
+     CUTLASS_DEVICE static void run(const uint8_t* a, const float* a_scale,
+-        const uint8_t* b, const uint8_t* b_scale, __ppu_bfloat16* out,
++        const uint8_t* b, const uint8_t* b_scale, void* out, float* out_scales,
++        int n_block,
+         int stride, int valid_m, char* smem, float limit, float alpha, float inv_scale,
+-        float situ_beta, float situ_linear_beta, uint32_t* queue_counter, uint32_t* next_ticket) {
++        float situ_beta, float situ_linear_beta, uint32_t* queue_counter, uint32_t* next_ticket,
++        const float* route_weights = nullptr) {
+         typename Kernel::Params params{};
+         params.ptr_a = reinterpret_cast<const cutlass::float_e4m3_t*>(a);
+         params.ptr_b = b;
+         params.ptr_scale = b_scale;
+         params.ptr_d = reinterpret_cast<cutlass::bfloat16_t*>(out);
+         params.ptr_a_scale = a_scale;
++        params.inv_scale = Exact ? inv_scale : 1.0f;
+         SingleTile scheduler{valid_m};
+         Kernel{}.run(params, smem, scheduler,
+-                     Epilogue{out, a_scale, stride, limit, alpha, inv_scale, situ_beta, situ_linear_beta,
+-                              queue_counter, next_ticket});
++                     Epilogue{reinterpret_cast<uint8_t*>(out), out_scales, a_scale, route_weights,
++                              stride, n_block, limit, alpha, inv_scale, situ_beta, situ_linear_beta,
++                              queue_counter, next_ticket, smem});
+         __syncthreads();
+     }
+ };
+
+-template <int N, int K, int BlockM, int BlockN>
++template <int N, int K, int BlockM, int BlockN, bool Exact = false>
+ struct Scatter {
+     // A bulk store covers 256 BF16 columns with all 32 lanes on one peer.
+     static_assert(N % 256 == 0 && BlockN % 256 == 0);
+@@ -134,8 +196,10 @@ struct Scatter {
+                 const int row = get<0>(coords(2*r, m, 0));
+                 if (row >= residual_m) continue;
+                 const int64_t pool_row = scheduler.curr_offset_a()/K + m_block*BlockM + row;
+-                const float sf = row_scales[pool_row] *
+-                    (scheduler.curr_group_idx < masters ? inv_scale : replica_inv_scale);
++                const float sf = Exact
++                    ? (scheduler.curr_group_idx < masters ? inv_scale : replica_inv_scale)
++                    : row_scales[pool_row] *
++                          (scheduler.curr_group_idx < masters ? inv_scale : replica_inv_scale);
+                 CUTE_UNROLL
+                 for (int n = 0; n < size<2>(acc); ++n) {
+                     CUTE_UNROLL
+@@ -179,7 +243,9 @@ template <int BLOCK_M_, int GEMM1_BLOCK_N_, int TOKEN_BYTES_, int GEMM1_WARP_M_,
+           int NUM_EXPERTS_PER_RANK_, int NUM_TOPK_, int GEMM1_N_, int PULL_CTAS_, int PULL_GROUP_SIZE_,
+           int GEMM2_BLOCK_M_, bool GEMM2_VALID_ROWS_, uint64_t LAYOUT_OFF_ITI_, uint64_t LAYOUT_OFF_IT_,
+           uint64_t LAYOUT_OFF_ISF_, uint64_t LAYOUT_OFF_PT_, uint64_t LAYOUT_OFF_PSF_,
+-          uint64_t LAYOUT_OFF_GEMM2_META_, int NMTPR_, uint64_t RoutingBytes_>
++          uint64_t LAYOUT_OFF_GEMM2_META_, int NMTPR_, uint64_t RoutingBytes_,
++          uint64_t LAYOUT_OFF_ITW_ = 0, uint64_t LAYOUT_OFF_ROUTE_WEIGHTS_ = 0,
++          bool EXACT_ = false>
+ struct MegaMoEFp8Fp4Gemm1Kernel {
+     static constexpr uint64_t routing_bytes = RoutingBytes_;
+     static constexpr int BLOCK_M = BLOCK_M_, GEMM1_BLOCK_N = GEMM1_BLOCK_N_, TOKEN_BYTES = TOKEN_BYTES_;
+@@ -192,19 +258,24 @@ struct MegaMoEFp8Fp4Gemm1Kernel {
+     static constexpr int GEMM1_N = GEMM1_N_, PULL_CTAS = PULL_CTAS_, PULL_GROUP_SIZE = PULL_GROUP_SIZE_;
+     static constexpr int GEMM2_BLOCK_M = GEMM2_BLOCK_M_;
+     static constexpr bool GEMM2_VALID_ROWS = GEMM2_VALID_ROWS_;
++    static constexpr bool EXACT = EXACT_;
+     static constexpr uint64_t LAYOUT_OFF_ITI = LAYOUT_OFF_ITI_, LAYOUT_OFF_IT = LAYOUT_OFF_IT_;
+     static constexpr uint64_t LAYOUT_OFF_ISF = LAYOUT_OFF_ISF_, LAYOUT_OFF_PT = LAYOUT_OFF_PT_;
+     static constexpr uint64_t LAYOUT_OFF_PSF = LAYOUT_OFF_PSF_, LAYOUT_OFF_GEMM2_META = LAYOUT_OFF_GEMM2_META_;
++    static constexpr uint64_t LAYOUT_OFF_ITW = LAYOUT_OFF_ITW_;
++    static constexpr uint64_t LAYOUT_OFF_ROUTE_WEIGHTS = LAYOUT_OFF_ROUTE_WEIGHTS_;
+     static constexpr int NMTPR = NMTPR_;
+
+     using Backend =
+         mega_moe::w4a8::Gemm1<BLOCK_M, GEMM1_BLOCK_N, TOKEN_BYTES, GEMM1_WARP_M, GEMM1_WARP_N,
+-                              GEMM1_STAGES, ACTIVATION, FRAGMENT_POLICY, A_LOAD_POLICY>;
++                              GEMM1_STAGES, ACTIVATION, FRAGMENT_POLICY, A_LOAD_POLICY, EXACT>;
+     static constexpr uint32_t compute_bytes = sizeof(typename Backend::Kernel::SharedStorage);
++    static constexpr uint32_t exact_epilogue_bytes = EXACT ? Backend::ExactEpilogueSharedBytes : 0;
+     static constexpr uint32_t dispatch_bytes =
+         ((NUM_EXPERTS * 4 + 15) & ~15u) + NUM_THREADS / 32 * TOKEN_BYTES;
+     static constexpr uint32_t shared_memory_bytes() {
+-        return compute_bytes > dispatch_bytes ? compute_bytes : dispatch_bytes;
++        const uint32_t compute = compute_bytes > exact_epilogue_bytes ? compute_bytes : exact_epilogue_bytes;
++        return compute > dispatch_bytes ? compute : dispatch_bytes;
+     }
+     static constexpr int kNumThreads = NUM_THREADS;
+     static constexpr int kMinBlocks = 1;
+@@ -213,7 +284,7 @@ struct MegaMoEFp8Fp4Gemm1Kernel {
+ template <typename Builder>
+ __global__ __launch_bounds__(Builder::kNumThreads, Builder::kMinBlocks) void sm89_fp8_fp4_mega_moe_l1(
+     layout::SymBuffer<> sb, int tokens, const uint8_t* w, const uint8_t* s, float inv, const uint8_t* rw,
+-    const uint8_t* rs, float rinv, int masters, __ppu_bfloat16* out, float limit, float alpha,
++    const uint8_t* rs, float rinv, int masters, uint8_t* out, float* out_scales, float limit, float alpha,
+     float situ_beta, float situ_linear_beta, uint4* gemm2_block_info) {
+     using Backend = typename Builder::Backend;
+     auto p = [&](int64_t off) { return reinterpret_cast<uint8_t*>(sb.base + off); };
+@@ -223,29 +294,35 @@ __global__ __launch_bounds__(Builder::kNumThreads, Builder::kMinBlocks) void sm8
+         Builder::TOKEN_BYTES, Builder::GEMM1_N, Builder::GEMM1_BLOCK_N, 128, Builder::GEMM1_WARP_M, Builder::GEMM1_WARP_N,
+             Builder::GEMM1_STAGES,
+         Builder::PULL_CTAS, Builder::ACTIVATION, Backend, Builder::PULL_GROUP_SIZE, Builder::GEMM2_BLOCK_M,
+-            Builder::GEMM2_VALID_ROWS>(
++            Builder::GEMM2_VALID_ROWS, Builder::EXACT>(
+         p(0), sb, reinterpret_cast<int64_t*>(p(Builder::LAYOUT_OFF_ITI)), p(Builder::LAYOUT_OFF_IT),
+         reinterpret_cast<float*>(p(Builder::LAYOUT_OFF_ISF)), p(Builder::LAYOUT_OFF_PT),
+         reinterpret_cast<float*>(p(Builder::LAYOUT_OFF_PSF)), reinterpret_cast<int32_t*>(p(Builder::LAYOUT_OFF_GEMM2_META)),
+         gemm2_block_info, reinterpret_cast<const cutlass::float_e4m3_t*>(w), reinterpret_cast<const float*>(s),
+-        reinterpret_cast<const cutlass::float_e4m3_t*>(rw), reinterpret_cast<const float*>(rs), masters, out, limit,
+-        alpha, tokens, Builder::NMTPR, inv, rinv, situ_beta, situ_linear_beta, Builder::routing_bytes);
++        reinterpret_cast<const cutlass::float_e4m3_t*>(rw), reinterpret_cast<const float*>(rs), masters,
++        Builder::EXACT ? nullptr : reinterpret_cast<__ppu_bfloat16*>(out), limit,
++        alpha, tokens, Builder::NMTPR, inv, rinv, situ_beta, situ_linear_beta, Builder::routing_bytes,
++        Builder::EXACT ? reinterpret_cast<const float*>(p(Builder::LAYOUT_OFF_ITW)) : nullptr,
++        Builder::EXACT ? reinterpret_cast<float*>(p(Builder::LAYOUT_OFF_ROUTE_WEIGHTS)) : nullptr,
++        Builder::EXACT ? out : nullptr,
++        Builder::EXACT ? out_scales : nullptr);
+ }
+
+ template <int N_, int K_, int BLOCK_M_, int BLOCK_N_, int WARP_M_, int WARP_N_, int NUM_GROUPS_, int NUM_STAGES_,
+           w4fa8::FragmentPolicy FRAGMENT_POLICY_, w4fa8::ALoadPolicy A_LOAD_POLICY_, int NUM_THREADS_,
+-          int NUM_RANKS_>
++          int NUM_RANKS_, bool EXACT_ = false>
+ struct MegaMoEFp8Fp4Gemm2Kernel {
+     static constexpr int N = N_, K = K_, BLOCK_M = BLOCK_M_, BLOCK_N = BLOCK_N_, WARP_M = WARP_M_;
+     static constexpr int WARP_N = WARP_N_, NUM_GROUPS = NUM_GROUPS_, NUM_STAGES = NUM_STAGES_;
+     static constexpr w4fa8::FragmentPolicy FRAGMENT_POLICY = FRAGMENT_POLICY_;
+     static constexpr w4fa8::ALoadPolicy A_LOAD_POLICY = A_LOAD_POLICY_;
+     static constexpr int NUM_THREADS = NUM_THREADS_, NUM_RANKS = NUM_RANKS_;
++    static constexpr bool EXACT = EXACT_;
+
+     using Kernel = cutlass::gemm::kernel::W4A8GEMM_MMA<N, K, BLOCK_M, BLOCK_N, 128, WARP_M, WARP_N,
+                                                        128, NUM_GROUPS, NUM_STAGES, GemmType::MGroupedNoPad, 1,
+-                                                       false, FRAGMENT_POLICY, A_LOAD_POLICY>;
+-    using Epilogue = mega_moe::w4a8::Scatter<N, K, BLOCK_M, BLOCK_N>;
++                                                       false, FRAGMENT_POLICY, A_LOAD_POLICY, EXACT>;
++    using Epilogue = mega_moe::w4a8::Scatter<N, K, BLOCK_M, BLOCK_N, EXACT>;
+
+     // Keep the thread bound without a minimum-residency hint: HGGC's two-argument
+     // launch bound can miscompile this shared-memory scatter epilogue.
+diff --git a/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp8_mega_moe_blockwise.cuh b/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp8_mega_moe_blockwise.cuh
+index f34d6e6..616eb9a 100644
+--- a/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp8_mega_moe_blockwise.cuh
++++ b/deep_gemm/include/deep_gemm/impls/sm89_fp8_fp8_mega_moe_blockwise.cuh
+@@ -34,7 +34,10 @@ struct MegaMoEFp8BlockwiseGemm1Kernel {
+ template <typename Builder>
+ __global__ __launch_bounds__(Builder::kNumThreads, Builder::kMinBlocks) void sm89_fp8_blockwise_mega_moe_l1(
+     layout::SymBuffer<> sb, uint8_t* local_pool, int rank_idx, int num_tokens, __hg_fp8_e4m3* weight,
+-    float* weight_scales, uint8_t* output, float* output_scales, float activation_clamp, float activation_alpha, float situ_beta, float situ_linear_beta,
++    float* weight_scales, uint8_t* output, float* output_scales,
++    const float* source_topk_weights, float* pool_route_weights,
++    bool preweighted,
++    float activation_clamp, float activation_alpha, float situ_beta, float situ_linear_beta,
+     __hg_fp8_e4m3* weight_replicas, float* scale_replicas, uint4* gemm2_block_info) {
+     constexpr uint64_t off_ws = 0, off_it = Builder::LAYOUT_OFF_IT, off_isf = Builder::LAYOUT_OFF_ISF;
+     constexpr uint64_t off_iti = Builder::LAYOUT_OFF_ITI;
+@@ -52,8 +55,10 @@ __global__ __launch_bounds__(Builder::kNumThreads, Builder::kMinBlocks) void sm8
+                                                           Builder::ACTIVATION, Builder::GEMM1_COMPUTE_M, Builder::GEMM2_BLOCK_M>(
+         P(off_ws), sb, (int64_t*)P(off_iti), (const uint8_t*)P(off_it), (const float*)P(off_isf),
+         (uint8_t*)P(off_pt), (float*)P(off_psf), (int32_t*)P(off_meta), gemm2_block_info, (const uint8_t*)weight,
+-        weight_scales, output, output_scales, (uint32_t)num_tokens, Builder::NMTPR, activation_clamp, activation_alpha, situ_beta, situ_linear_beta,
+-        (const uint8_t*)weight_replicas, scale_replicas, Builder::routing_bytes);
++        weight_scales, output, output_scales, (uint32_t)num_tokens, Builder::NMTPR,
++        activation_clamp, activation_alpha, situ_beta, situ_linear_beta,
++        (const uint8_t*)weight_replicas, scale_replicas, source_topk_weights,
++        pool_route_weights, preweighted, Builder::routing_bytes);
+ }
+
+ template <int N, int K, int GROUPS, int MASTER_GROUPS, int NUM_STAGES, int BLOCK_M, int SCRATCH_ROWS,
+diff --git a/deep_gemm/include/deep_gemm/impls/w4fa8_gemm.cuh b/deep_gemm/include/deep_gemm/impls/w4fa8_gemm.cuh
+index 7aa3e1c..b8ddf2d 100644
+--- a/deep_gemm/include/deep_gemm/impls/w4fa8_gemm.cuh
++++ b/deep_gemm/include/deep_gemm/impls/w4fa8_gemm.cuh
+@@ -31,7 +31,8 @@ using deep_gemm::GemmType;
+ template <int ShapeN, int ShapeK, int BlockM, int BlockN, int BlockK, int WarpM, int WarpN, int WarpK, int kNumGroups,
+           int kNumStages, GemmType kGemmType, int N_EXPAND = 1, bool ApplyInvScale = false,
+           deep_gemm::w4fa8::FragmentPolicy Fragment = deep_gemm::w4fa8::FragmentPolicy::FullK,
+-          deep_gemm::w4fa8::ALoadPolicy ALoad = deep_gemm::w4fa8::ALoadPolicy::Bulk>
++          deep_gemm::w4fa8::ALoadPolicy ALoad = deep_gemm::w4fa8::ALoadPolicy::Bulk,
++          bool BlockwiseAScale = false>
+ class W4A8GEMM_MMA {
+ public:
+   static constexpr bool WideM = deep_gemm::w4fa8::uses_ring_a(WarpM);
+@@ -49,6 +50,10 @@ public:
+   static_assert(N_EXPAND >= 1 && N_EXPAND <= 4);
+   static_assert(N_EXPAND == 1 || (kGemmType == GemmType::MGroupedNoPad && kNumStages == 2));
+   static_assert(N_EXPAND == 1 || ShapeN % (BlockN * N_EXPAND) == 0);
++  static_assert(!BlockwiseAScale || BlockK == 128,
++                "exact W4A8 activation scales require one K128 tile per scale");
++  static_assert(!BlockwiseAScale || N_EXPAND == 1,
++                "exact W4A8 activation scales use the fixed N_EXPAND=1 path");
+   using ElementA = cutlass::float_e4m3_t;
+   using ElementB = cutlass::float4_t; // fp4
+   using ElementD = cutlass::bfloat16_t;
+@@ -58,7 +63,7 @@ public:
+   // A fourth slot reduces CTA residency for the default N256 tile.
+   static constexpr bool ResidentA = N_EXPAND > 1 && WarpM == 64 && ShapeK <= 384;
+   static constexpr int ASlots = ResidentA && ShapeK / BlockK > kNumStages ? ShapeK / BlockK : kNumStages;
+-  static constexpr bool CacheRowScale = N_EXPAND > 1 && WarpM >= 32 && ShapeK <= 512;
++  static constexpr bool CacheRowScale = !BlockwiseAScale && N_EXPAND > 1 && WarpM >= 32 && ShapeK <= 512;
+   // basic
+   static constexpr bool E8M0_scale = true;
+   static constexpr bool scale_use_ld_matrix = true;
+@@ -451,7 +456,7 @@ public:
+       // The prologue commit/wait covers these 4-byte asynchronous copies too.
+       // A buffer is reused only after every warp has crossed the intervening
+       // work item's prologue CTA barrier, completing its old epilogue reads.
+-      if constexpr (WideM)
++      if constexpr (WideM && !BlockwiseAScale)
+         if (thread_idx < BlockM) {
+           const bool valid = thread_idx < residual_m;
+           int64_t scale_row = 0;
+@@ -663,7 +668,9 @@ public:
+             } else
+               scale_row = deep_scheduler.curr_offset_a() / K + m_block_idx * BlockM + local_row;
+             const float a_scale = [&]() {
+-              if constexpr (WideM)
++              if constexpr (BlockwiseAScale)
++                return 1.0f;
++              else if constexpr (WideM)
+                 return apply_inv_scale(storage.row_scales[scale_buffer][local_row]);
+               else
+                 return CacheRowScale ? cached_row_scale(m, row) : apply_inv_scale(params.ptr_a_scale[scale_row]);
+@@ -711,6 +718,48 @@ public:
+         auto process_active_rows = [&](auto active_m) {
+           constexpr int UsedM = decltype(active_m)::value;
+           clear(accum);
++          auto scaled_accum = [&]() {
++            if constexpr (BlockwiseAScale)
++              return partition_fragment_C(tiled_mma, take<0, 2>(TileShape{}));
++            else
++              return NoTensor{};
++          }();
++          if constexpr (BlockwiseAScale)
++            clear(scaled_accum);
++
++          auto accumulate_scaled_k128 = [&](int k_tile_idx) {
++            if constexpr (BlockwiseAScale) {
++              Tensor row_coords = thr_mma.partition_C(cD);
++              CUTE_UNROLL
++              for (int m = 0; m < UsedM; ++m) {
++                CUTE_UNROLL
++                for (int row = 0; row < 2; ++row) {
++                  const int local_row = get<0>(row_coords(2 * row, m, 0));
++                  if (local_row >= residual_m)
++                    continue;
++                  int64_t scale_row;
++                  if constexpr (Fused)
++                    scale_row = params.sorted_token_ids[
++                        deep_scheduler.cumsum_m_block_idx * BlockM + local_row];
++                  else
++                    scale_row = deep_scheduler.curr_offset_a() / K +
++                                m_block_idx * BlockM + local_row;
++                  const float scale = params.ptr_a_scale[
++                      scale_row * (K / 128) + k_tile_idx];
++                  CUTE_UNROLL
++                  for (int n = 0; n < size<2>(accum); ++n) {
++                    CUTE_UNROLL
++                    for (int col_half = 0; col_half < 2; ++col_half) {
++                      const int v = 2 * row + 4 * col_half;
++                      scaled_accum(v, m, n) += accum(v, m, n) * scale;
++                      scaled_accum(v + 1, m, n) += accum(v + 1, m, n) * scale;
++                    }
++                  }
++                }
++              }
++              clear(accum);
++            }
++          };
+           auto process_k_tile_iteration = [&](int k_tile_idx) {
+             int stage_idx = (k_tile_idx + n_iter * k_tile_count) % kNumStages;
+             int next_k_tile_idx = k_tile_idx + kNumStages - 1;
+@@ -832,6 +881,8 @@ public:
+               });
+             }
+
++            accumulate_scaled_k128(k_tile_idx);
++
+             cp_async_wait<kNumStages - 2>();
+             __syncthreads();
+           };
+@@ -850,6 +901,16 @@ public:
+             }
+           }
+
++          if constexpr (BlockwiseAScale) {
++            CUTE_UNROLL
++            for (int v = 0; v < size<0>(accum); ++v)
++              CUTE_UNROLL
++              for (int m = 0; m < size<1>(accum); ++m)
++                CUTE_UNROLL
++                for (int n = 0; n < size<2>(accum); ++n)
++                  accum(v, m, n) = scaled_accum(v, m, n);
++          }
++
+           if (n_iter > 0) {
+             n_block_idx++;
+             gD.data() = gD.data() + BlockN;
+diff --git a/deep_gemm/include/deep_gemm/layout/routed_moe.cuh b/deep_gemm/include/deep_gemm/layout/routed_moe.cuh
+index f474920..5ebcdd8 100644
+--- a/deep_gemm/include/deep_gemm/layout/routed_moe.cuh
++++ b/deep_gemm/include/deep_gemm/layout/routed_moe.cuh
+@@ -265,7 +265,7 @@ struct RoutedMoEInputLayout {
+ struct RoutedMoEBuffer : RoutedMoEInputLayout {
+     uint64_t packed_routes, l2_acts, l2_scales, bf16_scratch;
+     uint64_t block_info, block_info_elements;
+-    uint64_t combine, num_bytes;
++    uint64_t combine, route_weights, num_bytes;
+     static constexpr uint64_t peer_offsets = offsetof(RoutedMoESignals, peer_offsets);
+
+     CUTLASS_HOST_DEVICE
+@@ -282,7 +282,8 @@ struct RoutedMoEBuffer : RoutedMoEInputLayout {
+         block_info = align128(bf16_scratch + (fp8 && !blockwise ? pool * intermediate * 2 : 0));
+         block_info_elements = groups >= 128 ? 4 * (1 + groups + pool / kMinCandidateBlockM) : 0;
+         combine = align128(block_info + block_info_elements * sizeof(int32_t));
+-        num_bytes = align128(combine + uint64_t(topk) * capacity * hidden * 2);
++        route_weights = align128(combine + uint64_t(topk) * capacity * hidden * 2);
++        num_bytes = align128(route_weights + (blockwise ? pool * sizeof(float) : 0));
+     }
+
+     CUTLASS_HOST_DEVICE uint64_t get_num_bytes() const { return num_bytes; }
+diff --git a/deep_gemm/mega/__init__.py b/deep_gemm/mega/__init__.py
+index 28c9044..0e3a40b 100644
+--- a/deep_gemm/mega/__init__.py
++++ b/deep_gemm/mega/__init__.py
+@@ -15,13 +15,37 @@ from ..utils.math import align, ceil_div
+
+ __all__ = [
+     "SymmBuffer", "get_symm_buffer_for_mega_moe", "transform_weights_for_mega_moe",
+-    "fp4_fp4_mega_moe", "mega_moe_pre_dispatch",
++    "fp4_fp4_mega_moe", "mega_moe_pre_dispatch", "mega_moe_pre_dispatch_ue8m0",
+     "transform_weights_for_fp8_mega_moe", "transform_weights_for_w4a16_mega_moe",
+     "fp8_fp8_mega_moe", "bf16_fp4_mega_moe",
+     "transform_weights_for_w4a8_mega_moe", "fp8_fp4_mega_moe",
++    "fp8_fp4_mega_moe_fp32", "fp8_fp8_mega_moe_fp32", "MEGA_MOE_CAPABILITIES",
+     "int8_int8_mega_moe",
+ ]
+
++MEGA_MOE_CAPABILITIES = {
++    "fp8_fp4_mega_moe_fp32": {
++        "output_dtype": "float32",
++        "preweighted": True,
++        "weight_dtype": "mxfp4_k32_ue8m0",
++        "route_weight_stage": "before_l2_quant",
++        "g1_rounding": "bf16",
++        "activation_quantization": "block128_ue8m0_eps1e-4",
++        "input_activation_scale": "block128_ue8m0_fp32_storage",
++        "g2_activation_scale": "block128_ue8m0_fp32_storage",
++    },
++    "fp8_fp8_mega_moe_fp32": {
++        "output_dtype": "float32",
++        "preweighted": True,
++        "route_weight_stage": "before_l2_quant",
++        "g1_rounding": "bf16",
++        "activation_quantization": "block128_ue8m0_eps1e-4",
++        "activation_scale_storage": "block128_ue8m0_fp32_storage",
++        "input_activation_scale": "block128_ue8m0_fp32_storage",
++        "g2_activation_scale": "block128_ue8m0_fp32_storage",
++    },
++}
++
+ def _normalize_activation(activation: str) -> str:
+     if activation not in ('swiglu', 'swiglu_step', 'situ', 'swiglu_oai'):
+         raise ValueError(f'Unsupported MegaMoE activation: {activation}')
+@@ -70,7 +94,7 @@ class SymmBuffer:
+                  base: Optional['SymmBuffer'] = None,
+                  *, quantization: Optional[str] = None):
+         mma_type = _normalize_mma_type(mma_type)
+-        if mma_type == 'fp8xfp8':
++        if mma_type in ('fp8xfp8', 'fp8xfp4'):
+             quantization = 'channelwise' if quantization is None else quantization
+             if quantization not in ('channelwise', 'blockwise'):
+                 raise ValueError("FP8 quantization must be 'channelwise' or 'blockwise'")
+@@ -178,8 +202,8 @@ def get_symm_buffer_for_mega_moe(
+
+     The workspace is filled by mega_moe_pre_dispatch and consumed by
+     the corresponding complete compute entry. MMA modes are 'fp4xfp4' (alias 'mxfp4xmxfp4'),
+-    'int8xint8', 'fp8xfp4', 'bf16xfp4' and 'fp8xfp8'. Only fp8xfp8 accepts quantization,
+-    selecting channelwise (default) or blockwise scales.
++    'int8xint8', 'fp8xfp4', 'bf16xfp4' and 'fp8xfp8'. FP8 activation modes accept
++    quantization, selecting channelwise (default) or blockwise scales.
+     """
+     if use_fp8_dispatch is not None:
+         assert use_fp8_dispatch == (mma_type.split('x')[0] == 'fp8')
+@@ -284,6 +308,27 @@ def mega_moe_pre_dispatch(
+         num_tokens, group_size, _normalize_mma_type(mma_type))
+
+
++def mega_moe_pre_dispatch_ue8m0(
++    x: torch.Tensor,
++    topk_idx: torch.Tensor,
++    topk_weights: torch.Tensor,
++    buf_x: torch.Tensor,
++    buf_x_sf: torch.Tensor,
++    buf_topk_idx: torch.Tensor,
++    buf_topk_weights: torch.Tensor,
++    num_tokens: int,
++) -> None:
++    """Publish block128 E4M3 inputs with FP32-stored UE8M0 scales.
++
++    This explicit entry is paired with the FP32 FP8xFP8 and FP8xFP4 entries.
++    It does not change the continuous-scale contract of mega_moe_pre_dispatch.
++    """
++    _C.mega_moe_pre_dispatch_ue8m0(
++        x, topk_idx, topk_weights,
++        buf_x, buf_x_sf, buf_topk_idx, buf_topk_weights,
++        num_tokens)
++
++
+ def fp4_fp4_mega_moe(
+     y: torch.Tensor,
+     l1_weights: Tuple[torch.Tensor, torch.Tensor],
+@@ -569,6 +614,53 @@ def fp8_fp8_mega_moe(
+     )
+
+
++def fp8_fp8_mega_moe_fp32(
++    y: torch.Tensor,
++    l1_weights: Tuple[torch.Tensor, torch.Tensor],
++    l2_weights: Tuple[torch.Tensor, torch.Tensor],
++    sym_buffer: SymmBuffer,
++    cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
++    activation: str = "swiglu",
++    activation_clamp: Optional[float] = None,
++    fast_math: bool = True,
++    *,
++    l1_weights_replicas: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
++    l2_weights_replicas: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
++    activation_alpha: Optional[float] = None,
++    situ_beta: Optional[float] = 4.0,
++    situ_linear_beta: Optional[float] = 25.0,
++) -> None:
++    """Official-contract blockwise FP8 MegaMoE with FP32 routed output.
++
++    Inputs must be published with mega_moe_pre_dispatch_ue8m0. G1 gate/up
++    projections round to BF16; the FP32 route weight is applied before the
++    routed activation rounds to BF16 and is quantized for G2. G2 scatters BF16
++    route rows and final combine accumulates them in route order into FP32 y
++    without applying routing weights a second time.
++    """
++    if (not isinstance(sym_buffer, SymmBuffer)
++            or sym_buffer.mma_type != 'fp8xfp8'
++            or sym_buffer.quantization != 'blockwise'):
++        raise TypeError(
++            "fp8_fp8_mega_moe_fp32 requires SymmBuffer("
++            "mma_type='fp8xfp8', quantization='blockwise')")
++    _check_routed_buffer(y, l1_weights, sym_buffer)
++    if y.dtype != torch.float32:
++        raise TypeError("fp8_fp8_mega_moe_fp32 output must be float32")
++    activation = _normalize_activation(activation)
++    if activation != 'situ':
++        situ_beta = None if situ_beta == 4.0 else situ_beta
++        situ_linear_beta = None if situ_linear_beta == 25.0 else situ_linear_beta
++    _C.fp8_fp8_mega_moe_fp32(
++        y, l1_weights, l2_weights, cumulative_local_expert_recv_stats,
++        sym_buffer.buffer, sym_buffer.handle.buffer_ptrs, sym_buffer.group.rank(),
++        sym_buffer.num_max_tokens_per_rank, sym_buffer.num_experts, sym_buffer.num_topk,
++        activation, activation_clamp, fast_math, activation_alpha,
++        l1_weights_replicas, l2_weights_replicas, sym_buffer.quantization,
++        situ_beta, situ_linear_beta, sym_buffer.staging_config,
++    )
++
++
+ def bf16_fp4_mega_moe(
+     y: torch.Tensor,
+     l1_weights: Tuple[torch.Tensor, torch.Tensor],
+@@ -660,3 +752,42 @@ def fp8_fp4_mega_moe(
+         sym_buffer.num_max_tokens_per_rank, sym_buffer.num_experts, sym_buffer.num_topk,
+         activation, activation_clamp, fast_math, situ_beta, situ_linear_beta, activation_alpha,
+         l1_weights_replicas, l2_weights_replicas, sym_buffer.staging_config)
++
++
++def fp8_fp4_mega_moe_fp32(
++    y: torch.Tensor,
++    l1_weights: Tuple[torch.Tensor, torch.Tensor, float],
++    l2_weights: Tuple[torch.Tensor, torch.Tensor, float],
++    sym_buffer: SymmBuffer,
++    cumulative_local_expert_recv_stats: Optional[torch.Tensor] = None,
++    activation: str = "swiglu",
++    activation_clamp: Optional[float] = None,
++    fast_math: bool = True,
++    *,
++    l1_weights_replicas: Optional[Tuple[torch.Tensor, torch.Tensor, float]] = None,
++    l2_weights_replicas: Optional[Tuple[torch.Tensor, torch.Tensor, float]] = None,
++    situ_beta: Optional[float] = 4.0,
++    situ_linear_beta: Optional[float] = 25.0,
++    activation_alpha: Optional[float] = None,
++) -> None:
++    """Official-contract FP8 x MXFP4 routed MoE with FP32 output."""
++    if (not isinstance(sym_buffer, SymmBuffer)
++            or sym_buffer.mma_type != 'fp8xfp4'
++            or sym_buffer.quantization != 'blockwise'):
++        raise TypeError(
++            "fp8_fp4_mega_moe_fp32 requires SymmBuffer("
++            "mma_type='fp8xfp4', quantization='blockwise')")
++    _check_routed_buffer(y, l1_weights, sym_buffer, weight_components=3)
++    if y.dtype != torch.float32:
++        raise TypeError("fp8_fp4_mega_moe_fp32 output must be float32")
++    activation = _normalize_activation(activation)
++    if activation != 'situ':
++        situ_beta = None if situ_beta == 4.0 else situ_beta
++        situ_linear_beta = None if situ_linear_beta == 25.0 else situ_linear_beta
++    _C.fp8_fp4_mega_moe_fp32(
++        y, l1_weights, l2_weights, cumulative_local_expert_recv_stats,
++        sym_buffer.buffer, sym_buffer.handle.buffer_ptrs, sym_buffer.group.rank(),
++        sym_buffer.num_max_tokens_per_rank, sym_buffer.num_experts, sym_buffer.num_topk,
++        activation, activation_clamp, fast_math, situ_beta, situ_linear_beta,
++        activation_alpha, l1_weights_replicas, l2_weights_replicas,
++        sym_buffer.staging_config)
+diff --git a/setup.py b/setup.py
+index bb9d910..8968425 100644
+--- a/setup.py
++++ b/setup.py
+@@ -38,10 +38,12 @@ if not os.path.isfile(os.path.join(ppu_sdk, 'bin', 'hgcc')):
+     if compiler:
+         ppu_sdk = os.path.dirname(os.path.dirname(os.path.realpath(compiler)))
+ ppu_include = os.path.join(ppu_sdk, 'targets', 'x86_64-linux', 'include')
++cuda_sdk_include = os.path.join(ppu_sdk, 'CUDA_SDK', 'targets', 'x86_64-linux', 'include')
+
+ sources = ['csrc/python_api.cpp']
+ build_include_dirs = [path for path in (
+     ppu_include,
++    cuda_sdk_include,
+     os.path.join(ppu_sdk, 'include'),
+     os.path.join(ppu_sdk, 'include', 'cccl'),
+ ) if os.path.isdir(path)] + [
+@@ -147,6 +149,9 @@ RELEASE_VERSION = 'v1.1.0'  # Release version
+
+
+ def get_package_version(ppu_sdk_version):
++    override = os.environ.get('DG_PACKAGE_VERSION_OVERRIDE')
++    if override:
++        return override
+     try:
+         from setuptools_scm import Configuration
+         from setuptools_scm.git import parse
+@@ -171,7 +176,7 @@ def get_package_version(ppu_sdk_version):
+
+
+ if __name__ == '__main__':
+-    extra_cxx_args = ["-O3", "-std=c++17", "-DUSE_HGGC"]
++    extra_cxx_args = ["-O3", "-std=c++17", "-DUSE_HGGC", "-fvisibility=hidden", "-fno-gnu-unique"]
+     extra_hgcc_args = ["-O3", "-std=c++17", "--use_fast_math", "-DUSE_HGGC"]
+
+     ppu_sdk_version = get_ppu_sdk_version()
+@@ -194,7 +199,7 @@ if __name__ == '__main__':
+     setuptools.setup(
+         name='deep_gemm',
+         version=package_version,
+-        setup_requires=['setuptools-scm'],
++        setup_requires=[] if os.environ.get('DG_PACKAGE_VERSION_OVERRIDE') else ['setuptools-scm'],
+         packages=find_packages('.'),
+         package_data={
+             'deep_gemm': [
+diff --git a/tests/test_mega_moe_precisions.py b/tests/test_mega_moe_precisions.py
+index 0304282..eda1aa7 100644
+--- a/tests/test_mega_moe_precisions.py
++++ b/tests/test_mega_moe_precisions.py
+@@ -115,6 +115,32 @@ CASES = (
+ SMOKE_CASES = tuple(c for c in CASES if c.name.startswith("smoke_"))
+
+
++def test_fp8_fp32_capability_contract():
++    assert dg.MEGA_MOE_CAPABILITIES["fp8_fp8_mega_moe_fp32"] == {
++        "output_dtype": "float32",
++        "preweighted": True,
++        "route_weight_stage": "before_l2_quant",
++        "g1_rounding": "bf16",
++        "activation_quantization": "block128_ue8m0_eps1e-4",
++        "activation_scale_storage": "block128_ue8m0_fp32_storage",
++        "input_activation_scale": "block128_ue8m0_fp32_storage",
++        "g2_activation_scale": "block128_ue8m0_fp32_storage",
++    }
++
++
++def test_w4a8_fp32_capability_contract():
++    assert dg.MEGA_MOE_CAPABILITIES["fp8_fp4_mega_moe_fp32"] == {
++        "output_dtype": "float32",
++        "preweighted": True,
++        "weight_dtype": "mxfp4_k32_ue8m0",
++        "route_weight_stage": "before_l2_quant",
++        "g1_rounding": "bf16",
++        "activation_quantization": "block128_ue8m0_eps1e-4",
++        "input_activation_scale": "block128_ue8m0_fp32_storage",
++        "g2_activation_scale": "block128_ue8m0_fp32_storage",
++    }
++
++
+ def check_output(actual, expected, max_diff=0.001):
+     """Make every rank report the same numerical pass/fail decision."""
+     # Use grouped FP8's normalized squared-error metric and 0.001 threshold;
+@@ -152,6 +178,80 @@ def dequantize(q, s, blockwise=False):
+     return q.float() * s
+
+
++def quantize_rows_ue8m0(x):
++    """Official block128 E4M3 quantization with FP32-stored power-of-two scales."""
++    original = x.shape
++    values = x.float().reshape(*original[:-1], -1, 128)
++    raw = values.abs().amax(-1).clamp_min(1e-4) / 448.0
++    scale = torch.pow(2.0, torch.ceil(torch.log2(raw)))
++    q = (values * scale.reciprocal().unsqueeze(-1)).to(torch.float8_e4m3fn).reshape(original)
++    return q, scale
++
++
++def reference_w4a8_exact(c, source, ids, weights, w1, w2, rank, tokens):
++    q, s = quantize_rows_ue8m0(source)
++    source = dequantize(q, s, True)
++    result = torch.zeros((source.size(0), source.size(1), c.hidden), device="cuda", dtype=torch.float32)
++    local_experts = c.experts // dist.get_world_size()
++    clamp = None if c.clamp is None else source.new_tensor(c.clamp, dtype=torch.bfloat16).float()
++    for local_expert in range(local_experts):
++        expert = rank * local_experts + local_expert
++        src, row, slot = (ids == expert).nonzero(as_tuple=True)
++        if not row.numel():
++            continue
++        projected = (source[src, row].float() @ w1[local_expert].float().T).bfloat16().float()
++        gate, up = projected.chunk(2, -1)
++        if clamp is not None:
++            gate = gate.clamp(max=clamp)
++            up = up.clamp(-clamp, clamp)
++        activated = (F.silu(gate) * up * weights[src, row, slot, None]).bfloat16()
++        q2, s2 = quantize_rows_ue8m0(activated)
++        down = (dequantize(q2, s2, True) @ w2[local_expert].float().T).bfloat16().float()
++        result.view(-1, c.hidden).index_add_(0, src * source.size(1) + row, down)
++    dist.all_reduce(result)
++    return result[rank, :tokens]
++
++
++def test_w4a8_exact_smoke(mega_moe_group):
++    """Fix the official W4A8 arithmetic chain independently of ordinary W4A8."""
++    group = mega_moe_group
++    base = next(c for c in CASES if c.name == "smoke_w4a8")
++    c = replace(base, experts=4 * group.size(), worlds=DISTRIBUTED_WORLDS,
++                capacity=8, tokens=(8,))
++    c.require_world()
++    rng = torch.Generator(device="cuda").manual_seed(20261120 + group.rank())
++    local_experts = c.experts // group.size()
++    raw1, ref1 = make_weights(local_experts, 2 * c.intermediate, c.hidden, "w4a8", rng)
++    raw2, ref2 = make_weights(local_experts, c.hidden, c.intermediate, "w4a8", rng)
++    w1, w2 = dg.transform_weights_for_w4a8_mega_moe(raw1, raw2)
++    buffer = dg.SymmBuffer(group, c.experts, c.capacity, c.topk, c.hidden, c.intermediate,
++                           mma_type="fp8xfp4", quantization="blockwise")
++    source = torch.randn((c.capacity, c.hidden), device="cuda", dtype=torch.bfloat16,
++                         generator=rng) * .1
++    ids = _make_routes(c, c.capacity, rng)
++    weights = torch.rand((c.capacity, c.topk), device="cuda", generator=rng)
++    weights[:, 0] = 0
++    y = torch.empty((c.capacity, c.hidden), device="cuda", dtype=torch.float32)
++    try:
++        dg.mega_moe_pre_dispatch_ue8m0(
++            source, ids, weights, buffer.x, buffer.x_sf,
++            buffer.topk_idx, buffer.topk_weights, c.capacity)
++        dg.fp8_fp4_mega_moe_fp32(y, w1, w2, buffer, fast_math=False)
++        expected = reference_w4a8_exact(
++            c, _all_gather(source), _all_gather(ids), _all_gather(weights),
++            ref1, ref2, group.rank(), c.capacity)
++        check_output(y, expected, max_diff=.0015)
++        first = y.clone()
++        for _ in range(2):
++            dg.mega_moe_pre_dispatch_ue8m0(
++                source, ids, weights, buffer.x, buffer.x_sf,
++                buffer.topk_idx, buffer.topk_weights, c.capacity)
++            dg.fp8_fp4_mega_moe_fp32(y, w1, w2, buffer, fast_math=False)
++            torch.testing.assert_close(y, first, rtol=0, atol=0)
++    finally:
++        buffer.destroy()
++
++
+ def make_weights(e, n, k, precision, rng):
+     """Build quantized weights with FP8 temporaries bounded to one expert."""
+     if precision in ("w4a16", "w4a8"):
+diff --git a/csrc/host_torch_cuda_compat.hpp b/csrc/host_torch_cuda_compat.hpp
+new file mode 100644
+--- /dev/null
++++ b/csrc/host_torch_cuda_compat.hpp
+@@ -0,0 +1,9 @@
++#pragma once
++// Host-only bridge for CUDA-named Torch headers alongside native HGGC SDK.
++// Device/JIT compilation does not include this header.
++#include <hggc_fp16.h>
++#include <hggc_bf16.h>
++#define __CUDA_FP16_H__
++#define __CUDA_BF16_H__
++using __nv_bfloat16 = __ppu_bfloat16;
++using __nv_bfloat162 = __ppu_bfloat162;

@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import torch
 from rtp_llm.device.device_type import is_ppu
-from rtp_llm.models_py.modules.dsv4.ppu.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS
+from rtp_llm.models_py.modules.dsv4.ppu.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
     PpuFp8Linear,
     concatenate_ppu_fp8_linears,
@@ -43,9 +43,181 @@ class DecodeQKVContractTest(unittest.TestCase):
 )
 class DecodeQKVGpuTest(unittest.TestCase):
     @torch.inference_mode()
+    def test_q_norm_official_fixture(self):
+        import hashlib
+        import os
+        from pathlib import Path
+
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_q_norm_rope import q_norm_rope
+
+        path = os.environ.get("RTP_Q_NORM_FIXTURE")
+        if not path:
+            self.skipTest("RTP_Q_NORM_FIXTURE required for official all-layer replay")
+        data = Path(path).read_bytes()
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(), os.environ["RTP_Q_NORM_FIXTURE_SHA256"]
+        )
+        fixture = torch.load(path, map_location="cpu", weights_only=True)
+        self.assertEqual([c["layer"] for c in fixture["cases"]], list(range(43)))
+        for case in fixture["cases"]:
+            with self.subTest(layer=case["layer"]):
+                actual = q_norm_rope(case["q_b"].cuda(), case["freq"].cuda())
+                self.assertTrue(torch.equal(actual.cpu(), case["q"]), case["layer"])
+        print("Q_NORM_OFFICIAL_43_LAYERS_EXACT", flush=True)
+
+    @torch.inference_mode()
+    def test_q_norm_fixture_reaches_prefill_and_decode_entries(self):
+        """Verify post-q_b dispatch with a captured operand, not a fake GEMM claim."""
+        import hashlib
+        import os
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillQKV
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import (
+            AttentionFP8,
+        )
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.compute_qkv import (
+            decode_compute_q_b,
+        )
+
+        path = os.environ.get("RTP_Q_NORM_FIXTURE")
+        if not path:
+            self.skipTest("RTP_Q_NORM_FIXTURE required for dispatch qualification")
+        self.assertEqual(
+            hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+            os.environ["RTP_Q_NORM_FIXTURE_SHA256"],
+        )
+        case = torch.load(path, map_location="cpu", weights_only=True)["cases"][0]
+        self.assertEqual(case["layer"], 0)
+        raw, expected, freq = (case[k].cuda() for k in ("q_b", "q", "freq"))
+        raw = raw.reshape(1, 1, 64, 512)
+        expected = expected.reshape_as(raw)
+        # Prefill TP4 rank0 owns 16 heads; target Decode EP8 owns all 64.
+        checked_heads = []
+        for heads in (16, 64):
+            with self.subTest(heads=heads):
+                operand = raw[:, :, :heads].contiguous()
+                oracle = expected[:, :, :heads].contiguous()
+                output = torch.empty_like(operand)
+                seen = []
+
+                def linear(weight, qr, out=None):
+                    seen.append(out is not None)
+                    value = operand.flatten(2)
+                    if out is not None:
+                        out.copy_(value.reshape_as(out))
+                        return out.view_as(value)
+                    return value.clone()
+
+                attn = SimpleNamespace(
+                    wq_b=object(),
+                    _lin=linear,
+                    n_heads=heads,
+                    head_dim=512,
+                    rope_head_dim=64,
+                    eps=1e-6,
+                )
+                qr = raw.new_zeros((1, 1, 1024))
+                decode = decode_compute_q_b(attn, qr, freq)
+                qkv = PrefillQKV(qr=qr[0], q=None, kv_full=None, cache_rope=None)
+                common = SimpleNamespace(
+                    rd=64,
+                    freqs_cis=freq,
+                    workspace=SimpleNamespace(prefill_q=lambda rows: output),
+                )
+                prefill = AttentionFP8._materialize_prefill_q(attn, qkv, common)
+                self.assertTrue(torch.equal(decode, oracle))
+                self.assertTrue(torch.equal(prefill.q, oracle[0]))
+                self.assertEqual(prefill.q.data_ptr(), output.data_ptr())
+                self.assertEqual(seen, [False, True])
+                # Already-materialized Q must stay passive and retain workspace.
+                self.assertIs(
+                    AttentionFP8._materialize_prefill_q(attn, prefill, common), prefill
+                )
+                self.assertEqual(seen, [False, True])
+                checked_heads.append(heads)
+        self.assertEqual(checked_heads, [16, 64])
+        print("Q_NORM_LAYER0_PREFILL_DECODE_ENTRY_EXACT", flush=True)
+
+    @torch.inference_mode()
+    def test_q_norm_graph_and_shapes(self):
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_q_norm_rope import q_norm_rope
+        from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
+
+        torch.manual_seed(7311199)
+        for rows, heads in ((0, 64), (1, 16), (6, 64), (8, 64)):
+            x = torch.randn(1, rows, heads, 512, device="cuda", dtype=torch.bfloat16)
+            f = torch.polar(
+                torch.ones(rows, 32, device="cuda"),
+                torch.randn(rows, 32, device="cuda"),
+            )
+            if not rows:
+                self.assertEqual(q_norm_rope(x, f).shape, x.shape)
+                continue
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    q_norm_rope(x, f)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = q_norm_rope(x, f)
+            torch.cuda.current_stream().wait_stream(stream)
+            for magnitude in (0, 0.001, 1, 100):
+                x.normal_(std=magnitude)
+                expected = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-6)
+                apply_rotary_emb(expected[..., -64:], f)
+                eager = q_norm_rope(x, f)
+                graph.replay()
+                self.assertTrue(torch.equal(actual, eager))
+                torch.testing.assert_close(actual, expected, rtol=1 / 128, atol=1e-6)
+
+    @torch.inference_mode()
+    def test_prefill_q_norm_inplace_workspace(self):
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_q_norm_rope import q_norm_rope
+        from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
+
+        torch.manual_seed(731185)
+        for rows, heads in ((0, 16), (185, 16), (512, 8)):
+            raw = torch.randn(1, rows, heads, 512, device="cuda", dtype=torch.bfloat16)
+            f = torch.polar(
+                torch.ones(rows, 32, device="cuda"),
+                torch.randn(rows, 32, device="cuda"),
+            )
+            expected = raw * torch.rsqrt(raw.square().mean(-1, keepdim=True) + 1e-6)
+            if rows:
+                apply_rotary_emb(expected[..., -64:], f)
+            inplace = raw.clone()
+            actual = q_norm_rope(inplace, f, out=inplace)
+            self.assertEqual(actual.data_ptr(), inplace.data_ptr())
+            self.assertTrue(torch.equal(actual, q_norm_rope(raw, f)))
+            torch.testing.assert_close(actual, expected, rtol=1 / 128, atol=1e-6)
+            if not rows:
+                continue
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    q_norm_rope(inplace, f, out=inplace)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    q_norm_rope(inplace, f, out=inplace)
+            torch.cuda.current_stream().wait_stream(stream)
+            for magnitude in (0, 0.001, 1, 100):
+                raw.normal_(std=magnitude)
+                eager = q_norm_rope(raw, f)
+                inplace.copy_(raw)
+                graph.replay()
+                self.assertTrue(torch.equal(inplace, eager))
+
+    @torch.inference_mode()
     def test_bound_compressor_linear_preserves_fp32_and_leading_dimensions(self):
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import _linear_bf16_bf16_fp32
         from functools import partial
+
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import (
+            _linear_bf16_bf16_fp32,
+        )
 
         def unexpected_fallback(*args):
             self.fail("PPU operation was not bound")
@@ -89,15 +261,16 @@ class DecodeQKVGpuTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_dynamic_normalization_graph_and_empty_batch(self):
-        for width in (1, 2, 3, 4):
+        # 5/6 are the DSpARK proposal block and its gamma+1 verify span.
+        for width in (1, 2, 3, 4, 5, 6):
             with self.subTest(query_len=width):
                 self._check_dynamic_normalization(width)
 
     def _check_dynamic_normalization(self, width):
-        from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import (
-            fused_rmsnorm_rope,
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_qkv_norm import (
+            normalize_decode_qkv,
         )
-        from rtp_llm.models_py.kernels.ppu.attention.ppu_qkv_norm import normalize_decode_qkv
+        from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
         torch.manual_seed(890438)
         wq = torch.linspace(0.5, 1.5, 1024, device="cuda", dtype=torch.bfloat16)
@@ -136,14 +309,19 @@ class DecodeQKVGpuTest(unittest.TestCase):
                     * torch.rsqrt(q64.square().mean(-1, keepdim=True) + 1e-6)
                     * wq.double()
                 ).bfloat16()
-                expected_k = fused_rmsnorm_rope(
-                    raw[..., 1024:].contiguous(), wk, freqs, 64, eps=1e-6
+                # Official inference rounds weighted RMSNorm to BF16 before RoPE.
+                k = raw[..., 1024:].float()
+                expected_k = (
+                    k * torch.rsqrt(k.square().mean(-1, keepdim=True) + 1e-6) * wk
+                ).bfloat16()
+                apply_rotary_emb(
+                    expected_k[..., -64:].reshape(1, batch * width, 64), freqs
                 )
                 self.assertTrue(
                     bool(torch.isfinite(qr).all()) and bool(torch.isfinite(kv).all())
                 )
                 torch.testing.assert_close(qr, expected_q, rtol=1 / 128, atol=0)
-                torch.testing.assert_close(kv, expected_k, rtol=0, atol=0)
+                torch.testing.assert_close(kv, expected_k, rtol=1 / 128, atol=1e-6)
             with self.assertRaises(ValueError):
                 normalize_decode_qkv(raw, wq, wk, freqs, float("nan"))
 
