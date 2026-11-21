@@ -103,12 +103,16 @@ public:
     void onLoaded(TreeNode* node, size_t group_set_id);
 
 private:
-    // Reuse only within one eviction pass for the same group, tier and mode,
-    // while holding the cache mutex, with only synchronous drops mutating the tree.
-    // A new pass must recheck released references and matchability.
+    // Rejections are remembered for one eviction pass under the cache mutex.
     struct EvictionBatchContext {
-        std::unordered_set<TreeNode*>       rejected_candidates;
-        std::unordered_map<TreeNode*, bool> endpoint_matchable;
+        std::unordered_set<TreeNode*>                    rejected_candidates;
+        std::unordered_map<TreeNode*, bool>              endpoint_matchable;
+        std::optional<EvictionHeap::RejectedPrefixScope> rejected_prefix;
+    };
+
+    struct PreparedVictims {
+        std::vector<TransferDescriptor>    descriptors;
+        std::vector<EvictionTimingMetrics> timings;
     };
 
     struct BatchEvictResult {
@@ -140,12 +144,19 @@ private:
 
     EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
-    std::optional<TransferDescriptor> chooseVictim(size_t                group_set_id,
-                                                   Tier                  tier,
-                                                   bool                  force_drop             = false,
-                                                   EvictionBatchContext* eviction_batch_context = nullptr,
-                                                   EvictionVictimTrigger trigger = EvictionVictimTrigger::WATERMARK);
-    bool canReclaimDeviceDrop(const TransferDescriptor& desc, EvictionBatchContext* eviction_batch_context) const;
+    std::optional<TransferDescriptor>
+    chooseDropVictim(size_t                group_set_id,
+                     Tier                  tier,
+                     EvictionBatchContext* eviction_batch_context = nullptr,
+                     EvictionVictimTrigger trigger                = EvictionVictimTrigger::FORCE_DROP);
+    // Caller holds the cache mutex. Select and immediately reserve a demote
+    // batch in one ordered pass; return aligned descriptors and timing snapshots.
+    // Target allocation, submission and rollback happen after this call returns.
+    PreparedVictims chooseAndReserveVictims(size_t group_set_id, Tier source_tier, size_t max_victim_count);
+    // Check demote protections before deciding whether a heap entry is stale.
+    std::optional<EvictionVictimSkipReason>
+    demoteRejectionReason(TreeNode* node, size_t group_set_id, Tier tier, const GroupSet& group_set) const;
+    bool canReclaimDeviceDrop(TreeNode* node, size_t group_set_id, EvictionBatchContext* eviction_batch_context) const;
     void logZeroDeviceReclaimLocked(size_t group_set_id,
                                     size_t member_group_id,
                                     size_t required_blocks,
@@ -157,7 +168,8 @@ private:
                     Tier                  source_tier,
                     bool                  notify_settled,
                     EvictionVictimTrigger trigger                = EvictionVictimTrigger::FORCE_DROP,
-                    EvictionBatchContext* eviction_batch_context = nullptr);
+                    EvictionBatchContext* eviction_batch_context = nullptr,
+                    bool                  may_drop_again         = true);
     // Builds the drop closure without reserving or detaching its resources.
     EvictionDropTask planDropTask(TransferDescriptor                         eviction_desc,
                                   std::vector<std::pair<TreeNode*, size_t>>& detached_resources,
