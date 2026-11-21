@@ -168,6 +168,7 @@ cc_library(
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
         ":model_inputs_logger",
+        "//rtp_llm/cpp/utils:serving_device_health",
         ":sample_infos",
         ":logits_processor",
         ":dfa_utils",
@@ -183,6 +184,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
+        "//rtp_llm/cpp/utils:error_code",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
@@ -192,12 +194,18 @@ cc_library(
         "//rtp_llm/cpp/cuda_graph:prepared_attention_inputs_guard",
         "//rtp_llm/models_py/bindings/common:fuse_copy_op",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
-    ] + select({
+    ] + torch_deps() + select({
         "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp8_quant",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
         ],
         "//conditions:default": [],
     }),

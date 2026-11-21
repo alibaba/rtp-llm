@@ -87,6 +87,9 @@ public:
     bool                          return_incremental        = false;
     bool                          return_hidden_states      = false;
     bool                          return_all_hidden_states  = false;
+    // Zero-token opt-in requires capture admission; positive generation and bare zero remain best-effort.
+    // Explicit prompt capture requires reuse_cache=false.
+    bool                          capture_hidden_states     = false;
     bool                          normalized_hidden_states  = false;
     bool                          return_output_ids         = false;
     bool                          return_input_ids          = false;
@@ -144,6 +147,10 @@ public:
 
     bool isPrefillOnly() const {
         return max_new_tokens == 0;
+    }
+
+    bool requiresHiddenStateCaptureAdmission() const {
+        return isPrefillOnly() && capture_hidden_states;
     }
 
     void enforcePromptScoringConstraints() {
@@ -251,6 +258,7 @@ public:
                      << ", return_logits:" << return_logits << ", return_incremental: " << return_incremental
                      << ", return_hidden_states:" << return_hidden_states
                      << ", return_all_hidden_states:" << return_all_hidden_states
+                     << ", capture_hidden_states:" << capture_hidden_states
                      << ", hidden_states_cut_dim:" << hidden_states_cut_dim
                      << ", normalized_hidden_states:" << normalized_hidden_states
                      << ", return_output_ids:" << return_output_ids << ", return_input_ids:" << return_input_ids
@@ -340,6 +348,7 @@ public:
         JSONIZE(return_incremental);
         JSONIZE(return_hidden_states);
         JSONIZE(return_all_hidden_states);
+        JSONIZE(capture_hidden_states);
         JSONIZE(hidden_states_cut_dim);
         JSONIZE(normalized_hidden_states);
         JSONIZE(return_output_ids);

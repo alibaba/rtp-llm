@@ -131,7 +131,9 @@ bool HttpApiServer::registerHealthService() {
         return false;
     }
 
-    health_service_.reset(new HealthService());
+    health_service_.reset(new HealthService([engine = engine_]() {
+        return !engine || engine->checkHealth().ok();
+    }));
     return registerHealthServiceStatic(*http_server_, health_service_);
 }
 

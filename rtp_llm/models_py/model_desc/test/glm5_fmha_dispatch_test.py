@@ -198,17 +198,21 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 "rtp_llm.models_py.model_desc.glm5.should_enable_glm5_cmp",
                 return_value=False,
             ):
-                output = model(inputs, fmha).hidden_states
-            expected = torch.cat([embedded + 6, embedded + 2, final], dim=-1)
-            torch.testing.assert_close(output, expected)
+                output = model(inputs, fmha)
+            expected_capture = torch.cat([embedded + 6, embedded + 2, final], dim=-1)
+            torch.testing.assert_close(output.hidden_states, final)
+            torch.testing.assert_close(output.captured_hidden_states, expected_capture)
+            self.assertIsNone(output.capture_error)
             self.assertEqual(model.norm.calls, step + 1)
             torch.testing.assert_close(
                 model.get_mtp_target_hidden_states(len(token_ids)), final
             )
             if first_output is None:
                 first_output = output
-                first_expected = expected.clone()
-        torch.testing.assert_close(first_output, first_expected)
+                first_final = final.clone()
+                first_capture = expected_capture.clone()
+        torch.testing.assert_close(first_output.hidden_states, first_final)
+        torch.testing.assert_close(first_output.captured_hidden_states, first_capture)
 
     def test_capture_disabled_or_unconfigured_returns_only_final_hidden(self):
         for layer_ids, requested in (([1, 0], False), ([], True)):
@@ -223,9 +227,10 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 ):
                     output = model(
                         inputs, {"default": object(), "indexer_kv": object()}
-                    ).hidden_states
+                    )
                 expected = (model.embed_tokens(inputs.input_ids) + 6) / 2
-                torch.testing.assert_close(output, expected)
+                torch.testing.assert_close(output.hidden_states, expected)
+                self.assertIsNone(output.captured_hidden_states)
                 self.assertEqual(model.norm.calls, 1)
 
     def test_dense_layer_honors_explicit_fusion_config(self):

@@ -373,6 +373,58 @@ class GpuRealIdleCheckTest(unittest.TestCase):
         with patch("rtp_llm.test.utils.device_resource._nvidia_smi", return_value=None):
             self.assertEqual(resource._gpu_group_idle_problems(["0", "1"]), [])
 
+    def test_nvidia_smi_queries_use_60_second_timeout(self):
+        resource = _make_resource()
+        queries = (
+            ("memory", lambda: resource._get_gpu_used_memory_mib("0")),
+            ("compute_apps", lambda: resource._get_gpu_compute_apps("0")),
+            ("pids", lambda: resource._get_gpu_pids("0")),
+            ("topology", resource._get_topology_numa_groups),
+            ("uuid", _log_test_placement),
+        )
+        completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        for name, query in queries:
+            with self.subTest(query=name), patch.dict(
+                os.environ, {"CUDA_VISIBLE_DEVICES": "0"}
+            ), patch(
+                "rtp_llm.test.utils.device_resource._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ), patch(
+                "rtp_llm.test.utils.device_resource.subprocess.run",
+                return_value=completed,
+            ) as run:
+                query()
+                run.assert_called_once()
+                self.assertEqual(run.call_args.kwargs["timeout"], 60)
+
+    def test_nvidia_smi_timeout_never_makes_gpu_idle(self):
+        resource = _make_resource()
+        for failed_query, expected in (
+            ("--query-gpu=memory.used", "memory.used=unknown"),
+            ("--query-compute-apps=", "compute-apps query failed"),
+        ):
+            def query(cmd, **kwargs):
+                self.assertEqual(kwargs["timeout"], 60)
+                if cmd[1].startswith(failed_query):
+                    raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+                stdout = "0\n" if cmd[1] == "--query-gpu=memory.used" else ""
+                return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+            with self.subTest(query=failed_query), patch.dict(
+                os.environ, {"RTP_GPU_FREE_MEMORY_MIB": "1024"}
+            ), patch(
+                "rtp_llm.test.utils.device_resource._nvidia_smi",
+                return_value="/usr/bin/nvidia-smi",
+            ), patch(
+                "rtp_llm.test.utils.device_resource.subprocess.run", side_effect=query
+            ) as run, self.assertLogs(level="WARNING"):
+                problems = resource._gpu_group_idle_problems(["0"])
+            self.assertEqual(len(problems), 1)
+            self.assertIn(expected, problems[0])
+            if failed_query == "--query-compute-apps=":
+                self.assertEqual(run.call_count, 3)
+                self.assertEqual(run.call_args.args[0][1], "--query-compute-apps=pid")
+
     def test_memory_query_parses_nvidia_smi_output(self):
         resource = _make_resource()
         completed = subprocess.CompletedProcess([], 0, stdout="267392 MiB\n", stderr="")

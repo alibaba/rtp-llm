@@ -6,10 +6,13 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -59,7 +62,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(lock_);
             stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
-            waiting_streams_.emplace_back(stream);
+            addStreamToNewState(stream, StreamState::WAITING);
             if (waiting_streams_.size() % 16 == 0) {
                 RTP_LLM_LOG_DEBUG("BatchDecodeScheduler::enqueue: waiting_streams_.size() = %d",
                                   waiting_streams_.size());
@@ -105,7 +108,9 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
-            waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
+            for (const auto& stream : stream_enqueued) {
+                addStreamToNewState(stream, StreamState::WAITING);
+            }
         }
         cond_.notify_all();
         return {std::move(enqueue_successes), streams};
@@ -127,6 +132,9 @@ public:
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
         switch (new_state) {
             case StreamState::WAITING:
+                if (stream->hasHiddenStateCaptureReservation()) {
+                    waiting_reservations_.insert(stream);
+                }
                 waiting_streams_.push_back(stream);
                 break;
             case StreamState::LOADING_CACHE:
@@ -150,6 +158,10 @@ public:
             auto state     = (*it)->getStatus();
             auto new_state = (*it)->moveToNext();
             if (new_state != state) {
+                if (state == StreamState::LOADING_CACHE && new_state == StreamState::FINISHED) {
+                    capture_batch_.remove(*it);
+                    (*it)->cancelHiddenStateCapture();
+                }
                 addStreamToNewState(*it, new_state);
                 it = streams.erase(it);
             } else {
@@ -158,7 +170,20 @@ public:
         }
     }
 
-    void evaluateWaitingStreams() {
+    static bool isReservedStrictCapture(const GenerateStreamPtr& stream) {
+        return stream->generateConfig()->requiresHiddenStateCaptureAdmission()
+               && stream->canExecuteReservedHiddenStateCapture();
+    }
+
+    bool waitingBatchReady() const {
+        return waiting_streams_.size() >= batch_size_
+               || (!waiting_streams_.empty() && (draining_mixed_modes_ || !capture_batch_.empty()))
+               || std::any_of(waiting_reservations_.begin(), waiting_reservations_.end(), [](const auto& stream) {
+                      return stream->hasError() || isReservedStrictCapture(stream);
+                  });
+    }
+
+    bool evaluateWaitingStreams() {
         // Finalize errored streams before selecting a batch so they cannot count toward its size.
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
             if (!(*it)->hasError()) {
@@ -166,52 +191,84 @@ public:
                 continue;
             }
             (*it)->moveToNext();
+            (*it)->cancelHiddenStateCapture();
+            waiting_reservations_.erase(*it);
+            capture_batch_.remove(*it);
             it = waiting_streams_.erase(it);
         }
 
-        // The outer gate counted entries that may just have been removed. Only an already-draining
-        // mixed-mode tail may bypass the batch-size gate after errors are reaped.
-        if (waiting_streams_.size() < batch_size_ && !draining_mixed_modes_) {
-            return;
+        std::list<GenerateStreamPtr> selected_streams;
+        selected_streams.swap(capture_batch_);
+        const bool continuing = !selected_streams.empty();
+        const bool strict_only = !continuing && waiting_streams_.size() < batch_size_ && !draining_mixed_modes_;
+        if (!continuing) {
+            // Select main's batch before considering capture; only a native zero/positive mix opens the tail gate.
+            bool has_other_mode = false;
+            for (const auto& stream : waiting_streams_) {
+                if (strict_only && !isReservedStrictCapture(stream)) {
+                    continue;
+                }
+                if (!selected_streams.empty() && isPrefillOnly(selected_streams.front()) != isPrefillOnly(stream)) {
+                    has_other_mode = true;
+                } else if (selected_streams.size() < batch_size_) {
+                    selected_streams.push_back(stream);
+                }
+            }
+            draining_mixed_modes_ = has_other_mode;
+        }
+        if (selected_streams.empty()) {
+            return false;
         }
 
-        // Homogeneous queues run exactly batch_size_ streams; a mixed queue may yield a smaller
-        // mode-homogeneous batch and drain its remaining tail in subsequent rounds.
-        std::list<GenerateStreamPtr> selected_streams;
-        bool                         has_execution_mode = false;
-        bool                         prefill_only       = false;
-        bool                         has_other_mode     = false;
-        for (const auto& stream : waiting_streams_) {
-            const bool stream_prefill_only = isPrefillOnly(stream);
-            if (!has_execution_mode) {
-                has_execution_mode = true;
-                prefill_only       = stream_prefill_only;
-            }
-            if (stream_prefill_only != prefill_only) {
-                has_other_mode = true;
+        const auto reserved = [](const auto& stream) { return stream->canExecuteReservedHiddenStateCapture(); };
+        const bool single_step = continuing || strict_only
+                                 || (isPrefillOnly(selected_streams.front()) && !waiting_reservations_.empty()
+                                     && std::any_of(selected_streams.begin(), selected_streams.end(), reserved));
+        const bool capture = single_step && reserved(selected_streams.front());
+        std::list<GenerateStreamPtr> deferred;
+        bool retry = false;
+        for (const auto& stream : selected_streams) {
+            if (strict_only && !isReservedStrictCapture(stream)) {
                 continue;
             }
-            if (selected_streams.size() < batch_size_) {
-                selected_streams.push_back(stream);
+            if (single_step && reserved(stream) != capture) {
+                deferred.push_back(stream);
+                continue;
             }
-        }
-
-        // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
-        // but later homogeneous arrivals must go through the normal batch-size gate.
-        draining_mixed_modes_ = has_other_mode;
-        for (auto& stream : selected_streams) {
+            if (continuing && stream->getStatus() == StreamState::LOADING_CACHE) {
+                capture_batch_.push_back(stream);
+                continue;
+            }
             stream->reportEvent(StreamEvents::CanRun);
-            // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
-            while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            auto state = stream->moveToNext();
+            if (single_step) {
+                if (state == StreamState::WAITING || state == StreamState::LOADING_CACHE) {
+                    stream->clearCanRun();
+                    retry = true;
+                    if (!strict_only) {
+                        capture_batch_.push_back(stream);
+                    }
+                }
+                if (state == StreamState::WAITING) {
+                    continue;
+                }
+            } else {
+                // Ordinary fixed batches still wait synchronously for all selected streams.
+                while (state != StreamState::FINISHED && state != StreamState::RUNNING) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    state = stream->moveToNext();
+                }
             }
-        }
-        for (const auto& stream : selected_streams) {
             waiting_streams_.remove(stream);
-            if (stream->getStatus() == StreamState::RUNNING) {
-                running_streams_.push_back(stream);
+            waiting_reservations_.erase(stream);
+            addStreamToNewState(stream, state);
+            if (state == StreamState::FINISHED) {
+                stream->cancelHiddenStateCapture();
             }
         }
+        // Finish this partition (including any KV-owning loads) before starting its incompatible peers.
+        capture_batch_.splice(capture_batch_.end(), deferred);
+        return retry;
     }
 
     void initRunningStreams() {
@@ -225,6 +282,8 @@ public:
                 (*it)->setGenTimeline(false);
             }
             if (scheduler_type_ == SchedulerType::kBatchDecode && !isPrefillOnly(*it)) {
+                // Forced decode bypasses the context gather that would consume this reservation.
+                (*it)->cancelHiddenStateCapture();
                 (*it)->setIsContextStream(false);
                 // for linear attn, incrKVBlock to clear unused linear block
                 (*it)->moveToNext();
@@ -234,10 +293,19 @@ public:
 
     absl::StatusOr<ScheduleOutput> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
-                   || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
-        });
+        using Clock = std::chrono::steady_clock;
+        const auto deadline = Clock::now() + std::chrono::seconds(30);
+        while (running_streams_.empty() && loading_cache_streams_.empty() && !waitingBatchReady()) {
+            const auto now = Clock::now();
+            if (now >= deadline) {
+                break;
+            }
+            // Enqueue can introduce the first reservation during a long wait. Its later RPC error
+            // won't notify cond_, so choose the next wait again after every wakeup.
+            const auto wake = waiting_reservations_.empty() ? deadline :
+                                  std::min(deadline, now + std::chrono::milliseconds(10));
+            cond_.wait_until(lock, wake);
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
@@ -248,9 +316,9 @@ public:
             draining_mixed_modes_ = false;
         }
 
-        if (running_streams_.empty()
-            && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
-            evaluateWaitingStreams();
+        bool retry = false;
+        if (running_streams_.empty() && waitingBatchReady()) {
+            retry = evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
                 RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
@@ -258,6 +326,11 @@ public:
             }
         }
 
+        if (running_streams_.empty() && (retry || !loading_cache_streams_.empty())) {
+            // Only single-step admission parks a load here. KV release doesn't notify cond_,
+            // and the normal work predicate stays true for a blocked reservation/full batch.
+            cond_.wait_for(lock, std::chrono::milliseconds(10), [] { return false; });
+        }
         return ScheduleOutput{running_streams_};
     }
 
@@ -290,6 +363,10 @@ private:
     bool                         reorder_request_;
     uint32_t                     current_step_ = 0;
     bool                         draining_mixed_modes_ = false;
+    // Index reservations at queue entry, not by rescanning ordinary underfilled queues on wakeup.
+    std::unordered_set<GenerateStreamPtr> waiting_reservations_;
+    // Outstanding members of one normally admitted capture-bearing zero-token batch (at most B).
+    std::list<GenerateStreamPtr> capture_batch_;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
     kmonitor::MetricsReporterPtr    metrics_reporter_;

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPExecutor.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTransport.h"
@@ -37,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <thread>
 #include <random>
@@ -351,6 +353,7 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             false,
             dynamic_decode_gate_enabled_));
     }
+    serving_device_health_ = executor_->servingDeviceHealth();
 }
 
 void NormalEngine::initScheduler() {
@@ -1119,8 +1122,14 @@ absl::Status NormalEngine::stop() {
     CpuTpBroadcaster::instance().requestStop();
     loop_thread_->join();
     scheduler_->finalizeCancelledStreams();
-    // Join the async dispatch runner and release the dispatcher-owned worker pool.
-    executor_.reset();
+    std::unique_ptr<Executor> executor;
+    {
+        std::lock_guard<std::mutex> lock(capture_admission_mutex_);
+        executor = std::move(executor_);
+    }
+    // Destruction joins async workers and may acquire the GIL. Keep it on the
+    // stop thread, outside the admission lock, with subsequent admissions disabled.
+    executor.reset();
     resource_context_.cache_manager->stopMetricsReporter();
     return scheduler_status;
 }
@@ -1155,8 +1164,20 @@ absl::Status NormalEngine::trySaveStepError() const {
     return absl::UnimplementedError("can not save yet!");
 }
 
+ErrorInfo NormalEngine::checkHealth() const {
+    if (serving_device_health_ && !serving_device_health_->healthy()) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "local serving device context is unavailable"};
+    }
+    return ErrorInfo::OkStatus();
+}
+
 bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) const {
     if (stream->hasError()) {
+        return false;
+    }
+    const auto health = checkHealth();
+    if (!health.ok()) {
+        stream->reportError(health.code(), health.ToString());
         return false;
     }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
@@ -1167,6 +1188,19 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr<GenerateInput>& input) {
+    const auto health = checkHealth();
+    if (!health.ok()) {
+        // Build an error-only response without invoking custom output, capture
+        // admission, grammar setup or a request-seeded CUDA generator.
+        auto safe_input             = std::make_shared<GenerateInput>(*input);
+        safe_input->generate_config = std::make_shared<GenerateConfig>();
+        safe_input->generate_config->max_new_tokens = 1;
+        auto stream = std::make_shared<NormalGenerateStream>(
+            safe_input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+        stream->reportError(health.code(), health.ToString());
+        return stream;
+    }
+
     try {
         input->generate_config->validatePrefillOnly();
     } catch (const std::invalid_argument& error) {
@@ -1209,6 +1243,87 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
     if (selection_error.hasError()) {
         stream->reportError(selection_error.code(), selection_error.ToString());
     }
+
+    // Only zero-token explicit opt-in requires admission. Ordinary generation
+    // and legacy bare-zero prefill keep their best-effort serving contract.
+    const auto& config = *stream->generateConfig();
+    const auto  reject_required = [&](ErrorCode code, const std::string& message) {
+        if (config.requiresHiddenStateCaptureAdmission() && !stream->hasError()) {
+            stream->cancelHiddenStateCapture();
+            stream->reportError(code, message);
+        }
+    };
+    if (stream->hasError() || (!config.capture_hidden_states && !config.isPrefillOnly())) {
+        return stream;
+    }
+    if (pd_sep_config.role_type != RoleType::PREFILL && pd_sep_config.role_type != RoleType::PDFUSION) {
+        reject_required(ErrorCode::INVALID_PARAMS, "required hidden-state capture needs a target prefill role");
+        return stream;
+    }
+    if (model_config_.hidden_state_capture_layer_ids.empty()) {
+        reject_required(ErrorCode::EXECUTION_EXCEPTION, "required hidden-state capture is not configured");
+        return stream;
+    }
+    // Warmup constructs streams directly in preRun, not here. Exclude fake traffic
+    // too; runtime_config.warm_up is a startup option, not a per-request flag.
+    // Publisher rejections are counted there, never again by this caller.
+    const auto record_eligibility_skip = [&](RtpLLMHiddenStateCaptureMetricsCollector::SkipReason reason) {
+        if (parallelism_config.tp_rank == 0 && !input->fake_query && !stream->isFakeStream() && metrics_reporter_) {
+            RtpLLMHiddenStateCaptureMetricsCollector collector;
+            collector.eligibility_skip_qps = true;
+            collector.skip_reason          = reason;
+            metrics_reporter_->report<RtpLLMHiddenStateCaptureMetrics, RtpLLMHiddenStateCaptureMetricsCollector>(
+                nullptr, &collector);
+        }
+    };
+    if (config.capture_hidden_states && config.reuse_cache) {
+        record_eligibility_skip(RtpLLMHiddenStateCaptureMetricsCollector::SkipReason::CONFIG);
+        reject_required(ErrorCode::INVALID_PARAMS, "required hidden-state capture conflicts with reuse_cache");
+        return stream;
+    }
+    if (!stream->isHiddenStateCaptureCandidate()) {
+        record_eligibility_skip(RtpLLMHiddenStateCaptureMetricsCollector::SkipReason::CONFIG);
+        reject_required(ErrorCode::INVALID_PARAMS,
+                        stream->chunkedPrefillEnabled() ? "required hidden-state capture needs PREFILL_CHUNK_SIZE=0" :
+                                                          "request is ineligible for required full-context hidden-state capture");
+        return stream;
+    }
+    const int64_t request_id = stream->streamId();
+    // TP0 owns the publisher quota. Other TP ranks install a logical marker so
+    // the gather gate has identical request semantics on every rank; the
+    // synchronized model-input capture bit still follows TP0's real admission.
+    HiddenStateCaptureReservationPtr reservation;
+    try {
+        if (parallelism_config.tp_rank != 0) {
+            reservation = std::make_shared<HiddenStateCaptureReservation>([]() noexcept {});
+        } else {
+            std::lock_guard<std::mutex> lock(capture_admission_mutex_);
+            if (executor_) {
+                auto admission = executor_->tryReserveHiddenStateCapture(request_id, stream->inputLength());
+                if (!admission.ok()) {
+                    reject_required(admission.status().code(), admission.status().ToString());
+                } else {
+                    reservation = std::move(admission.value());
+                    if (!reservation || !reservation->active()) {
+                        reject_required(ErrorCode::EXECUTION_EXCEPTION,
+                                        "hidden-state capture admission returned no active reservation");
+                    }
+                }
+            } else {
+                record_eligibility_skip(RtpLLMHiddenStateCaptureMetricsCollector::SkipReason::UNAVAILABLE);
+                reject_required(ErrorCode::CANCELLED, "hidden-state capture executor has stopped");
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const std::exception& error) {
+        if (isTorchCudaOom(error)) {
+            throw;
+        }
+        RTP_LLM_LOG_WARNING("skip hidden-state capture admission for request %ld: %s", request_id, error.what());
+        reject_required(ErrorCode::EXECUTION_EXCEPTION, error.what());
+    }
+    stream->setHiddenStateCaptureReservation(std::move(reservation));
     return stream;
 }
 
@@ -1216,16 +1331,21 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
     auto stream = createStream(input);
     // DecodeRpcServer allocates the destination KV table before enqueue/P-D handoff.
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
-    (void)validateStreamForScheduling(stream);
+    if (!validateStreamForScheduling(stream)) {
+        stream->cancelHiddenStateCapture();
+    }
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
     if (!validateStreamForScheduling(stream)) {
+        stream->cancelHiddenStateCapture();
         return;
     }
-    (void)scheduler_->enqueue(stream);
+    if (!scheduler_->enqueue(stream).ok()) {
+        stream->cancelHiddenStateCapture();
+    }
 }
 
 std::shared_ptr<GenerateStream> NormalEngine::enqueue(const std::shared_ptr<GenerateInput>& input) {
@@ -1261,6 +1381,7 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
             if (!stream->hasError()) {
                 stream->reportError(ErrorCode::INVALID_PARAMS, kMixedForceBatchGroupError);
             }
+            stream->cancelHiddenStateCapture();
         }
         return {std::vector<bool>(streams.size(), false), std::move(streams)};
     }
@@ -1269,6 +1390,8 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
         if (validateStreamForScheduling(streams[i])) {
             schedulable_indexes.push_back(i);
             schedulable_streams.push_back(streams[i]);
+        } else {
+            streams[i]->cancelHiddenStateCapture();
         }
     }
 
@@ -1276,6 +1399,9 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     std::vector<bool> enqueue_successes(streams.size(), false);
     for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
         enqueue_successes[schedulable_indexes[i]] = schedulable_result.first[i];
+        if (!schedulable_result.first[i]) {
+            schedulable_streams[i]->cancelHiddenStateCapture();
+        }
     }
     return {std::move(enqueue_successes), std::move(streams)};
 }

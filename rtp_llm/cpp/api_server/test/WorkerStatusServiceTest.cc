@@ -89,6 +89,20 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_DoesNotRequestCacheKeys) {
     writer_ptr.release();
 }
 
+TEST_F(WorkerStatusServiceTest, UnhealthyEngineIsNotAliveAndDoesNotQueryCache) {
+    EXPECT_CALL(*mock_engine_base_, checkHealth())
+        .WillOnce(Return(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device unavailable")));
+    EXPECT_CALL(*mock_engine_base_, getCacheStatusInfo(_, _)).Times(0);
+    EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_THAT(data, HasSubstr("\"alive\":false"));
+        return true;
+    }));
+    std::unique_ptr<http_server::HttpResponseWriter> writer = std::move(mock_writer_);
+    http_server::HttpRequest request;
+    worker_status_service_->workerStatus(writer, request);
+    EXPECT_EQ(writer->_statusCode, 503);
+}
+
 TEST_F(WorkerStatusServiceTest, Stop) {
     WorkerStatusService worker_status_service(nullptr, nullptr);
     EXPECT_FALSE(worker_status_service.is_stopped_.load());

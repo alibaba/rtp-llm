@@ -30,24 +30,25 @@ class TpPrefillWorkspaceDimsTest(unittest.TestCase):
         fixed = torch.full((2, 4), -1.0)
         model = SimpleNamespace(_mtp_hidden_buffer=fixed, _mtp_hidden_valid_tokens=1)
         scope = dict(torch=torch, v4=model, input_ids=torch.zeros(5, dtype=torch.long),
-                     PyModelOutputs=lambda hidden, mtp=None: (hidden, mtp))
+                     PyModelOutputs=lambda hidden, mtp=None: SimpleNamespace(
+                         hidden_states=hidden, mtp_target_hidden_states=mtp))
         scope.update(dict.fromkeys(("kv_cache", "positions", "cu_seqlens", "block_tables_by_type",
                                     "attn", "attn_inputs", "prepare_hidden_fn", "capture_context")))
 
         def write(*args, **kwargs):
             model._mtp_hidden_buffer.fill_(7)
             model._mtp_hidden_valid_tokens = scope["input_ids"].numel()
-            return torch.ones(1)
+            return scope["PyModelOutputs"](torch.ones(1))
 
         scope["forward_layers"] = write
         exec(compile(ast.Module(body=[method], type_ignores=[]), str(path), "exec"), scope)
-        _, output = scope["forward_prefill"]()
+        output = scope["forward_prefill"]().mtp_target_hidden_states
         self.assertEqual(tuple(output.shape), (5, 4))
         self.assertIs(model._mtp_hidden_buffer, fixed)
         self.assertEqual(model._mtp_hidden_valid_tokens, 1)
         self.assertTrue(torch.all(fixed == -1))
         scope["input_ids"] = torch.zeros(2, dtype=torch.long)
-        self.assertIsNone(scope["forward_prefill"]()[1])
+        self.assertIsNone(scope["forward_prefill"]().mtp_target_hidden_states)
         fixed.zero_()
         self.assertTrue(torch.all(output == 7))
 

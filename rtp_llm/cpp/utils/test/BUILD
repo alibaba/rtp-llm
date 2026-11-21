@@ -10,6 +10,14 @@ google_test_deps = [
     "@com_google_googletest//:gtest_main",
 ]
 
+cc_test(
+    name = "serving_device_health_test",
+    srcs = ["ServingDeviceHealthTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:serving_device_health"],
+    linkopts = ["-pthread"],
+)
+
 test_deps = [
     "//rtp_llm/cpp/utils:core_utils",
     "//rtp_llm/cpp/utils:kv_cache_utils",

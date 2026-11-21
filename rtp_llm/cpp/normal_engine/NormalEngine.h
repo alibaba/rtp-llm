@@ -3,6 +3,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/engine_base/TorchProfiler.h"
@@ -12,6 +13,7 @@
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/cache/WarmUpResult.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
+#include "rtp_llm/cpp/utils/ServingDeviceHealth.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerBase.h"
@@ -35,6 +37,7 @@ public:
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
+    ErrorInfo checkHealth() const override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -102,7 +105,11 @@ private:
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     bool                                          dynamic_decode_gate_enabled_ = false;
+    // Serializes request-thread capture admission with stop's executor detachment.
+    std::mutex                                   capture_admission_mutex_;
     std::unique_ptr<Executor>                     executor_;
+    // Published once before serving; stays valid after executor detachment.
+    ServingDeviceHealthPtr                        serving_device_health_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
     ParallelismConfig                             parallelism_config;

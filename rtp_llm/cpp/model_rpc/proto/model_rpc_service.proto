@@ -168,6 +168,12 @@ message GenerateConfigPB {
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
     bool frontend_metric_streaming = 77;
+    // Prompt capture requires reuse_cache=false. Effective max_new_tokens == 0 with capture=true
+    // requires admission and this forward's synchronous capture success;
+    // transient admission rejection precedes any reservation/publication.
+    // Success does not guarantee publication completion; consumers must confirm ready.
+    // Bare zero-token prefill and positive-token capture remain best-effort (fail-open).
+    bool capture_hidden_states = 78;
 }
 
 message MMPreprocessConfigPB {
@@ -443,6 +449,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
     INVALID_PARAMS = 26;
     EXECUTION_EXCEPTION = 27;
+    // Transient strict capture admission rejection; no reservation/publication is possible.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 28;
     GENERATE_TIMEOUT = 603;
     GET_CONNECTION_FAILED = 8201;
     RPC_FINISH_FAILED = 8210;

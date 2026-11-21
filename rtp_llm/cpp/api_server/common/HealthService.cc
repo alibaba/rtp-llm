@@ -14,6 +14,11 @@ void HealthService::healthCheck(const std::unique_ptr<http_server::HttpResponseW
         writer->Write(R"({"detail":"this server has been shutdown"})");
         return;
     }
+    if (is_healthy_ && !is_healthy_()) {
+        writer->SetStatus(503, "Service Unavailable");
+        writer->Write(R"({"detail":"local serving device context is unavailable"})");
+        return;
+    }
     writer->Write(R"("ok")");
 }
 
@@ -26,6 +31,11 @@ void HealthService::healthCheck2(const std::unique_ptr<http_server::HttpResponse
         RTP_LLM_LOG_WARNING("called root route, but server has been shutdown");
         writer->SetStatus(503, "Service Unavailable");
         writer->Write(R"({"detail":"this server has been shutdown"})");
+        return;
+    }
+    if (is_healthy_ && !is_healthy_()) {
+        writer->SetStatus(503, "Service Unavailable");
+        writer->Write(R"({"detail":"local serving device context is unavailable"})");
         return;
     }
     writer->Write(R"({"status":"home"})");

@@ -23,17 +23,21 @@ void WorkerStatusService::workerStatus(const std::unique_ptr<http_server::HttpRe
         return;
     }
 
+    const bool healthy = !engine_ || engine_->checkHealth().ok();
     KVCacheInfo cache_status;
-    if (engine_) {
+    if (engine_ && healthy) {
         // /worker_status is a high-frequency health/LB probe; skip collecting the
         // full cache key list which walks the whole cache under lock.
         cache_status = engine_->getCacheStatusInfo(-1, false);
-    } else {
+    } else if (!engine_) {
         RTP_LLM_LOG_WARNING("worker status service call worker status error, engine is null");
     }
     WorkerStatusResponse worker_status_response;
     worker_status_response.cache_status = std::move(cache_status);
-    worker_status_response.alive        = true;
+    worker_status_response.alive        = healthy;
+    if (!healthy) {
+        writer->SetStatus(503, "Service Unavailable");
+    }
     auto response_json_str              = ToJsonString(worker_status_response, /*isCompact=*/true);
     writer->Write(response_json_str);
 }

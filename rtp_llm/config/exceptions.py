@@ -73,6 +73,8 @@ class ExceptionType(IntEnum):
     FINISHED = 8104
     OUTPUT_QUEUE_NO_UPDATE = 8105
     GRAMMAR_COMPILE_OVERLOADED = 8106, ExceptionCategory.CAPACITY
+    # Transient strict capture rejection before any reservation or publication.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 8107, ExceptionCategory.CAPACITY
 
     # rpc error
     GET_HOST_FAILED = 8200

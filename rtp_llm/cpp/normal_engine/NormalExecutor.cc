@@ -58,6 +58,18 @@ NormalExecutor::~NormalExecutor() {
     cudaProfilerEnd();
 }
 
+HiddenStateCaptureAdmissionResult NormalExecutor::tryReserveHiddenStateCapture(int64_t request_id,
+                                                                               int64_t valid_tokens) {
+    if (!model_) {
+        return {ErrorCode::EXECUTION_EXCEPTION, "hidden-state capture model is unavailable"};
+    }
+    return model_->tryReserveHiddenStateCapture(request_id, valid_tokens);
+}
+
+ServingDeviceHealthPtr NormalExecutor::servingDeviceHealth() const {
+    return model_ ? model_->servingDeviceHealth() : nullptr;
+}
+
 NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                const std::shared_ptr<KVCacheManager>& cache_manager,
                                bool                                   warm_up,
@@ -181,10 +193,21 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         role_type_,
         warm_up_,
         params.model_config_.hidden_state_capture_layer_ids);
-    if (accuracy_check_mode) {
+    model_init_params.accuracy_check_mode = accuracy_check_mode_;
+    if (model_init_params.accuracy_check_mode) {
         model_init_params.hidden_state_capture_layer_ids.clear();
     }
     model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_max_inflight_samples =
+        params.model_config_.hidden_state_capture_max_inflight_samples;
+    model_init_params.hidden_state_capture_max_inflight_bytes =
+        params.model_config_.hidden_state_capture_max_inflight_bytes;
+    model_init_params.hidden_state_capture_max_inflight_tokens =
+        params.model_config_.hidden_state_capture_max_inflight_tokens;
+    model_init_params.hidden_state_capture_max_pending_batches =
+        params.model_config_.hidden_state_capture_max_pending_batches;
+    model_init_params.hidden_state_capture_poll_interval_ms =
+        params.model_config_.hidden_state_capture_poll_interval_ms;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -253,7 +276,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                                  params.profiling_debug_logging_config,
                                                                  cache_config,
                                                                  warm_up_,
-                                                                 async_worker_count));
+                                                                 async_worker_count,
+                                                                 tp_rank_ == 0 && !warm_up_ && !is_propose_ && !accuracy_check_mode_ ?
+                                                                     metrics_reporter_ : nullptr));
     LogitsProcessorFactory::init(
         params.model_config_,
         params.grammar_config,
@@ -414,18 +439,6 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
-        cudaSyncAndCheck();
-        model_->releaseBuffers();
-        for (const auto& stream : streams) {
-            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
-        }
-        if (profile_step_finish_) {
-            profile_step_finish_();
-        }
-        return absl::OkStatus();
-    }
-
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
@@ -434,6 +447,8 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         }
         return absl::OkStatus();
     }
+
+    reportHiddenStateCaptureError(streams, model_output.hidden_state_capture_error);
 
     // Gather selects the execution mode from non-errored streams in model order.
     // Use that same decision: streams.front() may already have failed or be reordered.

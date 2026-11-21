@@ -27,6 +27,16 @@ public:
     static void updateMemoryIfNeeded(size_t& current_size, size_t min_required, const char* scenario);
 
     static rtp_llm::DataType getDataTypeForCache(const ModelConfig& model_config);
+
+private:
+    // Keep sampled device/default-runtime budgets separate from the deterministic sizing policy.
+    static size_t getKVCacheMemorySizeForBudget(const RuntimeConfig&               runtime_config,
+                                               const KVCacheConfig&               kv_cache_config,
+                                               const ModelConfig&                 model_config,
+                                               const ParallelismConfig&           parallelism_config,
+                                               size_t                             device_reserved_memory_bytes,
+                                               size_t                             env_runtime_required_bytes,
+                                               const std::optional<WarmUpResult>& warm_up_result);
 };
 
 }  // namespace rtp_llm

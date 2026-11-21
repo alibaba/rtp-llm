@@ -832,6 +832,12 @@ LocalRpcServer::GetCacheStatus(grpc::ServerContext* context, const CacheVersionP
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s, request cache version: [%d]",
                       context->peer().c_str(),
                       request->latest_cache_version());
+    if (engine_) {
+        const auto health = engine_->checkHealth();
+        if (!health.ok()) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, health.ToString());
+        }
+    }
     KVCacheInfo cache_status = getCacheStatusInfo(request->latest_cache_version(), request->need_cache_keys());
     response->set_available_kv_cache(cache_status.available_kv_cache);
     response->set_total_kv_cache(cache_status.total_kv_cache);
@@ -918,7 +924,7 @@ grpc::Status LocalRpcServer::GetWorkerStatus(grpc::ServerContext*   context,
     response->set_dp_rank(status_info.dp_rank);
     response->set_max_seq_len(maga_init_params_.model_config_.max_seq_len);
     response->set_max_batch_tokens_size(maga_init_params_.runtime_config.fifo_scheduler_config.max_batch_tokens_size);
-    auto kv_info = engine_->getCacheStatusInfo(-1, false);
+    auto kv_info = status_info.alive ? engine_->getCacheStatusInfo(-1, false) : KVCacheInfo{};
     response->set_available_kv_cache(kv_info.available_kv_cache);
     response->set_total_kv_cache(kv_info.total_kv_cache);
     reportWorkerStatusTime(request_begin_time_us, request_after_ws_time_us);
@@ -934,7 +940,7 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
     status_info.dp_rank                 = maga_init_params_.parallelism_config.dp_rank;
     status_info.status_version          = currentTimeUs();
     status_info.latest_finished_version = status_info.engine_schedule_info.latest_finished_version;
-    status_info.alive                   = true;
+    status_info.alive                   = !engine_ || engine_->checkHealth().ok();
     auto quant_method                   = maga_init_params_.model_config_.quant_algo.getQuantMethod();
 
     switch (quant_method) {
@@ -1314,6 +1320,13 @@ grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*    
 grpc::Status
 LocalRpcServer::CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive cacheStatus rpc request from client: %s", context->peer().c_str());
+    if (engine_) {
+        const auto health = engine_->checkHealth();
+        if (!health.ok()) {
+            response->set_health("UNHEALTHY");
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, health.ToString());
+        }
+    }
     response->set_health("OK");
     return grpc::Status::OK;
 }

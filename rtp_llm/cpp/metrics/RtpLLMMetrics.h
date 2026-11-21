@@ -405,6 +405,25 @@ private:
 
 class RtpLLMHiddenStateCaptureMetricsCollector final {
 public:
+    // CAPACITY includes permanent oversize and occupied quota; CONFIG includes
+    // invalid/duplicate requests; UNAVAILABLE includes disabled/stopping owners.
+    enum class SkipReason { CAPACITY, CONFIG, UNAVAILABLE };
+
+    // Disjoint request events: publisher rejection, pre-admission eligibility,
+    // or cancellation of an already admitted reservation by the batch gate.
+    // Set only one event per report. skip_reason classifies the first two;
+    // batch cancellation is already attributed to the batch gate.
+    bool       admission_rejected_qps   = false;
+    bool       eligibility_skip_qps     = false;
+    int64_t    batch_cancelled_requests = 0;
+    SkipReason skip_reason              = SkipReason::CONFIG;
+
+    // Occupied quota, not configured limits. Zero is a meaningful sample.
+    bool    has_quota     = false;
+    int64_t quota_samples = 0;
+    int64_t quota_bytes   = 0;
+    int64_t quota_tokens  = 0;
+
     bool batch_qps                  = false;
     bool publish_success_qps        = false;
     bool failure_qps                = false;
@@ -447,6 +466,16 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMHiddenStateCaptureMetricsCollector* collector);
 
 public:
+    kmonitor::MutableMetric* admission_rejected_qps_metric   = nullptr;
+    kmonitor::MutableMetric* eligibility_skip_qps_metric     = nullptr;
+    kmonitor::MutableMetric* batch_cancelled_requests_metric = nullptr;
+    kmonitor::MutableMetric* skip_capacity_qps_metric        = nullptr;
+    kmonitor::MutableMetric* skip_config_qps_metric          = nullptr;
+    kmonitor::MutableMetric* skip_unavailable_qps_metric     = nullptr;
+    kmonitor::MutableMetric* quota_samples_metric            = nullptr;
+    kmonitor::MutableMetric* quota_bytes_metric              = nullptr;
+    kmonitor::MutableMetric* quota_tokens_metric             = nullptr;
+
     kmonitor::MutableMetric* batch_qps_metric                  = nullptr;
     kmonitor::MutableMetric* publish_success_qps_metric        = nullptr;
     kmonitor::MutableMetric* failure_qps_metric                = nullptr;

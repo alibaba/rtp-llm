@@ -22,6 +22,7 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         // ErrorDetailsPB trailing metadata.
         {ErrorCode::PRIORITY_PREEMPTED, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::GRAMMAR_COMPILE_OVERLOADED, grpc::StatusCode::RESOURCE_EXHAUSTED},
+        {ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE, grpc::StatusCode::RESOURCE_EXHAUSTED},
         {ErrorCode::GENERATE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::CONNECT_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::DEADLINE_EXCEEDED, grpc::StatusCode::DEADLINE_EXCEEDED},
@@ -102,6 +103,7 @@ inline constexpr std::pair<ErrorCodePB, ErrorCode> kErrorCodePairs[] = {
      ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
     {ErrorCodePB::INVALID_PARAMS, ErrorCode::INVALID_PARAMS},
     {ErrorCodePB::EXECUTION_EXCEPTION, ErrorCode::EXECUTION_EXCEPTION},
+    {ErrorCodePB::HIDDEN_STATE_CAPTURE_BACKPRESSURE, ErrorCode::HIDDEN_STATE_CAPTURE_BACKPRESSURE},
     {ErrorCodePB::GENERATE_TIMEOUT, ErrorCode::GENERATE_TIMEOUT},
     {ErrorCodePB::GET_CONNECTION_FAILED, ErrorCode::GET_CONNECTION_FAILED},
     {ErrorCodePB::RPC_FINISH_FAILED, ErrorCode::RPC_FINISH_FAILED},

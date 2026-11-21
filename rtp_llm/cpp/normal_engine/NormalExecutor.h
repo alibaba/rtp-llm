@@ -38,6 +38,8 @@ public:
         return model_.get();
     }
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
+    HiddenStateCaptureAdmissionResult tryReserveHiddenStateCapture(int64_t request_id, int64_t valid_tokens) override;
+    ServingDeviceHealthPtr servingDeviceHealth() const override;
     void         reportMetrics(const StreamGroups&                        stream_groups,
                                RtpLLMExecutorMetricsCollector&            executor_collector,
                                RtpLLMTokenPSMetricsCollector&             tps_collector,

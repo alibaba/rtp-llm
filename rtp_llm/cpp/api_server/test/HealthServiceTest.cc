@@ -21,6 +21,32 @@ private:
     std::shared_ptr<HealthService>                       health_service_;
 };
 
+TEST_F(HealthServiceTest, EngineHealthGatesBothResponseFormats) {
+    for (const bool home : {false, true}) {
+        for (const bool healthy : {true, false}) {
+            SCOPED_TRACE(home);
+            SCOPED_TRACE(healthy);
+            HealthService service([healthy] { return healthy; });
+            auto mock = std::make_unique<http_server::MockHttpResponseWriter>();
+            EXPECT_CALL(*mock, Write).WillOnce(Invoke([&](const std::string& data) {
+                EXPECT_EQ(data, healthy ? (home ? R"({"status":"home"})" : R"("ok")") :
+                                          R"({"detail":"local serving device context is unavailable"})");
+                return true;
+            }));
+            std::unique_ptr<http_server::HttpResponseWriter> writer = std::move(mock);
+            http_server::HttpRequest request;
+            if (home) {
+                service.healthCheck2(writer, request);
+            } else {
+                service.healthCheck(writer, request);
+            }
+            if (!healthy) {
+                EXPECT_EQ(writer->_statusCode, 503);
+            }
+        }
+    }
+}
+
 TEST_F(HealthServiceTest, HealthCheck_ServerNotStopped) {
     EXPECT_CALL(*mock_writer_, Write).WillOnce(Invoke([](const std::string& data) {
         EXPECT_EQ(data, R"("ok")");

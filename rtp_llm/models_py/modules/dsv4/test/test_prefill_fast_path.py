@@ -1,5 +1,6 @@
 import inspect
 import unittest
+import weakref
 from collections import namedtuple
 from contextlib import nullcontext
 from contextvars import Context, copy_context
@@ -18,6 +19,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.prefill import forward as prefill_forward
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 from rtp_llm.models_py.utils import profiler as moe_profiler
+from rtp_llm.ops.compute_ops import PyModelOutputs
 
 _FakePrefillMeta = namedtuple("_FakePrefillMeta", ["workspace"])
 
@@ -109,6 +111,9 @@ class _FakeLayer(Block):
 
 
 class _FakeV4:
+    set_cp_info = V4Transformer.set_cp_info
+    _write_mtp_hidden_buffer = V4Transformer._write_mtp_hidden_buffer
+
     def __init__(self):
         self.calls = []
         self.fp8_kv_cache = True
@@ -157,7 +162,7 @@ class _PrefillForwardTestBase(unittest.TestCase):
         ), patch.object(
             prefill_forward,
             "forward_layers",
-            return_value=torch.zeros(4, 2, device=device),
+            return_value=PyModelOutputs(torch.zeros(4, 2, device=device)),
         ) as forward_layers:
             prefill_forward.forward_prefill(
                 _FakeV4(),
@@ -184,7 +189,7 @@ class _PrefillForwardTestBase(unittest.TestCase):
         ), patch.object(
             prefill_forward,
             "forward_layers",
-            return_value=torch.zeros(input_ids.numel(), 2),
+            return_value=PyModelOutputs(torch.zeros(input_ids.numel(), 2)),
         ) as forward_layers:
             prefill_forward.forward_prefill(
                 _FakeV4(),
@@ -216,6 +221,178 @@ class _PrefillForwardTestBase(unittest.TestCase):
 
 
 class PrefillFastPathTest(_PrefillForwardTestBase):
+    def test_prefill_capture_output_contract(self):
+        from rtp_llm.models_py.modules.dsv4.ppu.prefill import (
+            forward as ppu_prefill_forward,
+        )
+
+        # One case per distinct boundary, not a backend x MTP x capture product.
+        for forward, mtp_mode, capture_mode in (
+            (prefill_forward, "none", "disabled"),
+            (prefill_forward, "none", "success"),
+            (prefill_forward, "none", "missing_layer"),
+            (prefill_forward, "none", "fatal_final"),
+            (ppu_prefill_forward, "fixed", "success"),
+            (ppu_prefill_forward, "temporary", "success"),
+            (ppu_prefill_forward, "temporary", "disabled"),
+            (ppu_prefill_forward, "temporary", "layer_error"),
+            (ppu_prefill_forward, "temporary", "fatal_final"),
+        ):
+            with self.subTest(backend=forward.__name__, mtp=mtp_mode, capture=capture_mode):
+                v4 = _FakeV4()
+                v4._prefill_ws_q_rows = 2
+                v4._prefill_ws_q_dim = 4
+                v4.hc_mult = 2
+                v4._hc_head_reduce = lambda h: h.mean(dim=-2)
+                norm_attr = "norm"
+                if forward is ppu_prefill_forward:
+                    # These fixture layers have no PPU fast callable.
+                    setattr(v4, forward._PREFILL_FAST_LAYER_CALLS_ATTR, None)
+                    v4._norm = v4.norm
+                    norm_attr = "_norm"
+                v4._mtp_hidden_valid_tokens = 1
+                fixed_buffer = (
+                    None
+                    if mtp_mode == "none"
+                    else torch.full((1 if mtp_mode == "temporary" else 4, 4), -7.0)
+                )
+                v4._mtp_hidden_buffer = fixed_buffer
+                input_ids = torch.tensor([3, 4])
+                embedded = v4.embed(input_ids)
+                canonical = embedded + 121
+                attn = SimpleNamespace(
+                    cu_seqlens=torch.tensor([0, 2], dtype=torch.int32),
+                    cu_seqlens_device=None,
+                    input_lengths=torch.tensor([2], dtype=torch.int32),
+                    input_lengths_device=None,
+                    prefix_lengths=torch.tensor([7], dtype=torch.int32),
+                    prefix_lengths_device=None,
+                    combo_position_ids=torch.tensor([7, 8]),
+                )
+                inputs = SimpleNamespace(input_ids=input_ids, attention_inputs=attn)
+                fatal_error = MemoryError("canonical final failure")
+                workspace_refs = []
+                workspace_type = forward.PrefillWorkspace
+                original_cat = torch.cat
+                pack_calls = []
+
+                def make_workspace(device, **kwargs):
+                    workspace = workspace_type(device, align_bytes=1, **kwargs)
+                    workspace_refs.extend(
+                        (weakref.ref(workspace), weakref.ref(workspace._union))
+                    )
+                    return workspace
+
+                def assert_workspace_alive():
+                    self.assertEqual(len(workspace_refs), 2)
+                    for ref in workspace_refs:
+                        self.assertIsNotNone(ref())
+                    for layer in v4.layers:
+                        self.assertIsNone(layer.attn._prefill_meta_shared)
+
+                def pack(tensors, dim):
+                    assert_workspace_alive()
+                    norm.assert_called_once()
+                    torch.testing.assert_close(tensors[-1], canonical)
+                    pack_calls.append(dim)
+                    return original_cat(tensors, dim=dim)
+
+                def canonical_layer(hidden, residual):
+                    self.assertIsNone(residual)
+                    self.assertEqual(tuple(hidden.shape), (2, 2, 2))
+                    if capture_mode == "layer_error":
+                        raise ValueError("capture failure")
+                    return DeepSeekV4Model._capture_canonical_layer(None, hidden, residual)
+
+                def canonical_final_hook(hidden, residual):
+                    assert_workspace_alive()
+                    norm.assert_called_once()
+                    self.assertIsNone(residual)
+                    torch.testing.assert_close(hidden, canonical)
+                    if capture_mode == "fatal_final":
+                        raise fatal_error
+                    return DeepSeekV4Model._capture_canonical_final(None, hidden, residual)
+
+                canonical_final = Mock(wraps=canonical_final_hook)
+                capture = CaptureContext.configured(
+                    [1, 0, 2] if capture_mode == "missing_layer" else [1, 0],
+                    canonical_layer,
+                    canonical_final,
+                ).for_forward(capture_mode != "disabled")
+                # Real forward, metadata cleanup, workspace and CaptureContext;
+                # shrink only workspace alignment and observe the real pack call.
+                with patch.object(
+                    forward, "PrefillWorkspace", make_workspace
+                ), patch.dict(
+                    forward.os.environ, {"DSV4_PREFILL_FAST_PATH": "0"}
+                ), patch.object(torch, "cat", pack), patch.object(
+                    v4, norm_attr, wraps=getattr(v4, norm_attr)
+                ) as norm, (
+                    self.assertRaises(MemoryError)
+                    if capture_mode == "fatal_final"
+                    else nullcontext()
+                ) as raised:
+                    outputs = forward.forward_prefill(
+                        v4, None, None, inputs, capture_context=capture
+                    )
+                norm.assert_called_once()
+                self.assertEqual(pack_calls, [-1] if capture_mode == "success" else [])
+                self.assertEqual(len(workspace_refs), 2)
+                for ref in workspace_refs:
+                    self.assertIsNone(ref())
+                self.assertEqual(
+                    [(call[0], call[1]) for call in v4.calls],
+                    [("normal", 0), ("normal", 1)],
+                )
+                self.assertEqual(
+                    canonical_final.call_count, int(capture_mode != "disabled")
+                )
+                if capture_mode == "fatal_final":
+                    self.assertIs(raised.exception, fatal_error)
+                    self.assertIs(v4._mtp_hidden_buffer, fixed_buffer)
+                    if mtp_mode == "temporary":
+                        self.assertEqual(v4._mtp_hidden_valid_tokens, 1)
+                        torch.testing.assert_close(fixed_buffer, torch.full((1, 4), -7.0))
+                    continue
+                self.assertIsInstance(outputs, PyModelOutputs)
+                torch.testing.assert_close(outputs.hidden_states, canonical)
+                if capture_mode == "success":
+                    torch.testing.assert_close(
+                        outputs.captured_hidden_states,
+                        torch.cat([embedded + 21, embedded + 10, canonical], dim=-1),
+                    )
+                    self.assertIsNone(outputs.capture_error)
+                else:
+                    self.assertIsNone(outputs.captured_hidden_states)
+                    if capture_mode == "layer_error":
+                        self.assertEqual(
+                            outputs.capture_error, "ValueError: capture failure"
+                        )
+                    elif capture_mode == "missing_layer":
+                        self.assertIn(
+                            "did not visit configured layers [2]", outputs.capture_error
+                        )
+                    else:
+                        self.assertIsNone(outputs.capture_error)
+                self.assertIs(v4._mtp_hidden_buffer, fixed_buffer)
+                if mtp_mode == "temporary":
+                    torch.testing.assert_close(
+                        outputs.mtp_target_hidden_states, (embedded + 21).repeat(1, 2)
+                    )
+                    self.assertEqual(v4._mtp_hidden_valid_tokens, 1)
+                    torch.testing.assert_close(fixed_buffer, torch.full((1, 4), -7.0))
+                else:
+                    self.assertIsNone(outputs.mtp_target_hidden_states)
+                    if mtp_mode == "fixed":
+                        target = DeepSeekV4Model.get_mtp_target_hidden_states(
+                            SimpleNamespace(v4=v4), 2
+                        )
+                        torch.testing.assert_close(target, (embedded + 21).repeat(1, 2))
+                        self.assertEqual(v4._mtp_hidden_valid_tokens, 2)
+                        torch.testing.assert_close(
+                            fixed_buffer[2:], torch.full((2, 4), -7.0)
+                        )
+
     def test_capture_ranges_survive_fast_path_suppression(self):
         for ranges_enabled, outer_disabled, fail_capture in (
             (True, False, False),
@@ -248,19 +425,22 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 model._capture_context = plan
                 inputs = SimpleNamespace(
                     input_ids=torch.tensor([3, 4]),
-                    attention_inputs=SimpleNamespace(is_prefill=True),
+                    attention_inputs=SimpleNamespace(
+                        is_prefill=True,
+                        cu_seqlens=torch.tensor([0, 2]),
+                        cu_seqlens_device=None,
+                        input_lengths=torch.tensor([2]),
+                        input_lengths_device=None,
+                        prefix_lengths=torch.tensor([7]),
+                        prefix_lengths_device=None,
+                        combo_position_ids=torch.tensor([7, 8]),
+                    ),
                     capture_hidden_states=True,
                 )
 
                 def forward_prefill(v4, kv_cache, parallelism, inputs, **kwargs):
-                    return prefill_forward.forward_layers(
-                        v4,
-                        kv_cache=None,
-                        input_ids=inputs.input_ids,
-                        positions=torch.tensor([7, 8]),
-                        cu_seqlens=torch.tensor([0, 2]),
-                        block_tables_by_type=None,
-                        capture_context=kwargs["capture_context"],
+                    return prefill_forward.forward_prefill(
+                        v4, None, parallelism, inputs, **kwargs
                     )
 
                 with patch.object(
@@ -287,12 +467,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                         if outer_disabled
                         else nullcontext()
                     ):
-                        with (
-                            self.assertRaisesRegex(RuntimeError, "capture failure")
-                            if fail_capture
-                            else nullcontext()
-                        ):
-                            result = model.forward(inputs)
+                        result = model.forward(inputs)
                     self.assertTrue(moe_profiler.record_function_ranges_enabled())
                 events = [
                     e
@@ -311,10 +486,15 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 self.assertTrue(all(not e.is_user_annotation for e in events))
                 self.assertTrue(hook_gates)
                 self.assertFalse(any(hook_gates))
-                if not fail_capture:
-                    embedded = v4.embed(torch.tensor([3, 4]))
+                embedded = v4.embed(torch.tensor([3, 4]))
+                torch.testing.assert_close(result.hidden_states, embedded + 103)
+                if fail_capture:
+                    self.assertIsNone(result.captured_hidden_states)
+                    self.assertEqual(result.capture_error, "RuntimeError: capture failure")
+                else:
+                    self.assertIsNone(result.capture_error)
                     torch.testing.assert_close(
-                        result,
+                        result.captured_hidden_states,
                         torch.cat([embedded + 3, embedded + 1, embedded + 103], dim=-1),
                     )
 
@@ -344,7 +524,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             [call[0] for call in v4.calls], ["fast", "fast", "head_reduce"]
         )
         torch.testing.assert_close(
-            result, torch.tensor([[106.0, 106.5], [107.0, 107.5]])
+            result.hidden_states, torch.tensor([[106.0, 106.5], [107.0, 107.5]])
         )
         layers = [
             event for event in prof.events() if event.name.startswith("forward(layer=")
@@ -721,7 +901,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         torch.testing.assert_close(v4.calls[0][5], cu_seqlens)
         self.assertIs(v4.calls[0][7], block_tables)
         torch.testing.assert_close(
-            out,
+            out.hidden_states,
             torch.tensor([[106.0, 106.5], [107.0, 107.5]]),
         )
         build_meta.assert_called_once()
@@ -752,9 +932,9 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         ), patch.object(
             prefill_forward,
             "forward_layers",
-            return_value=torch.zeros(2, 2),
+            return_value=PyModelOutputs(torch.zeros(2, 2)),
         ) as forward_layers:
-            for capture_context in (None, object()):
+            for capture_context in (None, CaptureContext.unsupported()):
                 prefill_forward.forward_prefill(
                     v4,
                     None,
@@ -865,8 +1045,8 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             )
 
         expected = v4.embed(input_ids)
-        torch.testing.assert_close(out, expected + 100)
-        self.assertEqual(tuple(out.shape), (2, 2))
+        torch.testing.assert_close(out.hidden_states, expected + 100)
+        self.assertEqual(tuple(out.hidden_states.shape), (2, 2))
 
     def test_forward_layers_capture_context_final_norm_paths(self):
         input_ids = torch.tensor([3, 4], dtype=torch.long)
@@ -920,16 +1100,18 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
                 self.assertEqual(norm_calls, 1)
                 self.assertEqual(canonical_layer.call_count, int(enabled))
                 self.assertEqual(canonical_final.call_count, int(enabled))
+                self.assertIsInstance(out, PyModelOutputs)
+                torch.testing.assert_close(out.hidden_states, expected + 100)
+                self.assertEqual(tuple(out.hidden_states.shape), (2, 2))
                 if enabled:
                     torch.testing.assert_close(
-                        out, torch.cat((expected, expected + 100), dim=-1)
+                        out.captured_hidden_states, torch.cat((expected, expected + 100), dim=-1)
                     )
-                    self.assertEqual(tuple(out.shape), (2, 4))
                 else:
-                    torch.testing.assert_close(out, expected + 100)
-                    self.assertEqual(tuple(out.shape), (2, 2))
+                    self.assertIsNone(out.captured_hidden_states)
+                self.assertIsNone(out.capture_error)
 
-    def test_forward_layers_keeps_aux_and_output_capture_independent(self):
+    def test_forward_prefill_keeps_aux_and_output_capture_independent(self):
         class LaneAwareLayer:
             def __init__(self, lane_increments):
                 self.lane_increments = torch.tensor(lane_increments).reshape(1, -1, 1)
@@ -967,8 +1149,13 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         cu_seqlens = torch.tensor([0, 2], dtype=torch.long)
         attn_inputs = SimpleNamespace(
             input_lengths=torch.tensor([2], dtype=torch.int32),
+            input_lengths_device=None,
             prefix_lengths=torch.tensor([7], dtype=torch.int32),
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_device=None,
+            combo_position_ids=positions,
         )
+        inputs = SimpleNamespace(input_ids=input_ids, attention_inputs=attn_inputs)
 
         # Layer 0 overlaps both transports, but only the legacy hook writes
         # the fixed buffer. Final hidden uses the distinct HC-head reduction.
@@ -984,20 +1171,20 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             ), patch.object(
                 v4, "norm", wraps=v4.norm
             ) as norm:
-                out = prefill_forward.forward_layers(
+                out = prefill_forward.forward_prefill(
                     v4,
-                    kv_cache=None,
-                    input_ids=input_ids,
-                    positions=positions,
-                    cu_seqlens=cu_seqlens,
-                    block_tables_by_type=None,
-                    attn_inputs=attn_inputs,
+                    None,
+                    None,
+                    inputs,
                     capture_context=capture_context.for_forward(enabled),
                 )
                 norm.assert_called_once()
-                torch.testing.assert_close(
-                    out, expected if enabled else expected[:, -2:]
-                )
+                torch.testing.assert_close(out.hidden_states, expected[:, -2:])
+                self.assertIsNone(out.capture_error)
+                if enabled:
+                    torch.testing.assert_close(out.captured_hidden_states, expected)
+                else:
+                    self.assertIsNone(out.captured_hidden_states)
                 self.assertIs(v4._mtp_hidden_buffer, aux_buffer)
                 torch.testing.assert_close(aux_buffer[:2], expected[:, 2:4])
                 self.assertTrue(torch.isnan(aux_buffer[2:]).all())
@@ -1052,7 +1239,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         )
         self.assertEqual(kwargs["max_seqlen_q"], 2)
         torch.testing.assert_close(
-            out,
+            out.hidden_states,
             torch.tensor(
                 [[106.0, 106.5], [107.0, 107.5], [108.0, 108.5], [109.0, 109.5]]
             ),
@@ -1126,7 +1313,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
         self.assertEqual(
             [call[0] for call in v4.calls], ["fast", "fast", "head_reduce"]
         )
-        self.assertEqual(tuple(out.shape), (0, 2))
+        self.assertEqual(tuple(out.hidden_states.shape), (0, 2))
         build_meta.assert_not_called()
         clear_meta.assert_called_once_with(v4)
 
@@ -1193,7 +1380,7 @@ class PrefillFastPathTest(_PrefillForwardTestBase):
             [call[0] for call in v4.calls], ["normal", "normal", "head_reduce"]
         )
         torch.testing.assert_close(
-            out,
+            out.hidden_states,
             torch.tensor([[124.0, 124.5], [125.0, 125.5]]),
         )
 

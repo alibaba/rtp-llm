@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 
 namespace rtp_llm {
 
@@ -8,7 +9,8 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
     const CacheConfig&                 cache_config,
     bool                               warm_up,
-    int                                async_worker_count) {
+    int                                async_worker_count,
+    kmonitor::MetricsReporterPtr        capture_metrics_reporter) {
     model_input_gatherer_config_.num_layers              = model_config.num_layers;
     model_input_gatherer_config_.vocab_size              = model_config.vocab_size;
     model_input_gatherer_config_.input_vocab_size        = model_config.input_vocab_size;
@@ -44,6 +46,14 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
         }
     }
     model_input_gatherer_config_.warm_up                 = warm_up;
+    model_input_gatherer_config_.enable_hidden_state_capture =
+        !selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::TARGET,
+                                          pd_sep_config.role_type,
+                                          warm_up,
+                                          model_config.hidden_state_capture_layer_ids)
+             .empty();
+    model_input_gatherer_config_.capture_metrics_reporter =
+        model_input_gatherer_config_.enable_hidden_state_capture ? capture_metrics_reporter : nullptr;
     model_input_gatherer_config_.enable_detail_log       = profiling_debug_logging_config.enable_detail_log;
     model_input_gatherer_config_.enable_model_inputs_log = profiling_debug_logging_config.enable_model_inputs_log;
 
