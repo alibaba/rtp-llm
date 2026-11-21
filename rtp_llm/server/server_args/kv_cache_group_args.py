@@ -113,8 +113,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_crc"),
         type=str2bool,
         default=True,
-        help="本地 HOST/DISK KV cache 使用 CUDA13 CRC 校验。PPU 的 HOST-only 缓存使用普通拷贝。"
-        "启动时配置。",
+        help="本地 HOST/DISK KV cache 默认使用 CUDA13 CRC 校验。当前构建不支持 CRC 或关闭时，使用普通拷贝。",
     )
     kv_cache_group.add_argument(
         "--reuse_cache",
@@ -130,7 +129,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_device_cache"),
         type=str2bool,
         default=True,
-        help="控制是否启用显存Cache的重用机制, 默认开启。设置为 True 启用 , False 关闭",
+        help="控制是否启用显存 KV cache（L1），默认开启。启用 L2 或 L3 时必须开启 L1。",
     )
     kv_cache_group.add_argument(
         "--reserve_block_ratio",
@@ -278,7 +277,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_memory_cache"),
         type=str2bool,
         default=False,
-        help="Memory KVCache 开关。开启时必须通过 MEMORY_CACHE_SIZE_MB 设置容量",
+        help="主机内存 KV cache（L2）开关。开启时必须启用 ENABLE_DEVICE_CACHE，并设置 MEMORY_CACHE_SIZE_MB。",
     )
     kv_cache_group.add_argument(
         "--enable_disk_cache",
@@ -286,8 +285,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_disk_cache"),
         type=str2bool,
         default=False,
-        help="磁盘 KVCache (L3) 开关。开启时必须配置 DISK_CACHE_SIZE_MB 和 "
-        "DISK_CACHE_PATHS。",
+        help="磁盘 KV cache（L3）开关。开启时必须启用 L1 和 L2，并设置 DISK_CACHE_SIZE_MB 和 DISK_CACHE_PATHS。",
     )
     kv_cache_group.add_argument(
         "--memory_cache_size_mb",
@@ -364,8 +362,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
             "每 rank 的磁盘 staging 参考块数 B，必须为不小于 2 的偶数。"
             "异步模式以 SWA 块为参考，load worker 数为 W。"
             "仅 load WorkLoop 分配私有 FULL/SWA 池；SWA 容量按 B/W 分配，余数依次分给前几个 loop，"
-            "FULL 使用等量字节预算并按自身 stride 换算容量；每个 loop 的两类池容量均须不小于 "
-            "memory_cache_max_descriptors_per_transfer_batch，否则初始化失败，不会自动缩小 batch。"
+            "FULL 使用等量字节预算并按自身 stride 换算容量；每个 loop 的两类池容量均须容纳实际传输批大小，"
+            "否则初始化失败；磁盘 staging 容量不会降低该批大小。"
             "stride 覆盖对应 group 的存储大小和磁盘 stride，并按 4096 字节对齐；"
             "无 SWA 时以 FULL stride 为参考，无 FULL 时使用 SWA stride。总预算不随 worker 数增加。"
             "legacy 按 B×最大 stride 的总字节预算平分 FULL/SWA 池。"
@@ -388,7 +386,10 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "memory_cache_max_descriptors_per_transfer_batch"),
         type=int,
         default=32,
-        help="各传输方向共用的最大 descriptor 批大小；Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。",
+        help=(
+            "各传输方向共用的最大 descriptor 批大小；启用 CRC 时，显存预算可能降低实际批大小。"
+            "Disk->Device 还受 staging 容量限制，Device->Disk 保留单项提交。"
+        ),
     )
     kv_cache_group.add_argument(
         "--block_tree_frozen_force_release_timeout_ms",
