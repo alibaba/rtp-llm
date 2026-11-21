@@ -672,6 +672,7 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         return {
             "processor_config": self.processor_config,
             "gpu_preprocess": self._device.type == "cuda",
+            "deadline": None,
         }
 
     def validate_inputs(self, mm_inputs):

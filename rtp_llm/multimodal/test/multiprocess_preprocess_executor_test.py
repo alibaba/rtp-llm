@@ -1,6 +1,7 @@
 import io
 import pickle
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -38,6 +39,45 @@ class _WorkItem:
 
 
 class MultiprocessPreprocessExecutorTest(unittest.TestCase):
+    def test_worker_honors_deadline_for_backends_that_declare_it(self):
+        deadline = time.monotonic() + 60
+        for defaults, expected in (
+            ({"deadline": None}, {"deadline": deadline}),
+            ({"deadline": deadline - 1}, {"deadline": deadline - 1}),
+            ({}, {}),
+        ):
+            with self.subTest(defaults=defaults):
+                preprocess = Mock(return_value="image")
+                config = SimpleNamespace()
+                with patch.multiple(
+                    mm_preprocess,
+                    _worker_preprocess_func=preprocess,
+                    _worker_vit_config=config,
+                    _worker_preprocess_params=defaults,
+                ):
+                    result = _worker_process_task([], deadline=deadline)
+                self.assertEqual(result.result, "image")
+                preprocess.assert_called_once_with([], config, **expected)
+
+    def test_local_propagates_deadline_without_inspection(self):
+        deadline = time.monotonic() + 60
+        preprocess = Mock(return_value="image")
+        config = SimpleNamespace()
+        executor = mm_preprocess.LocalPreprocessExecutor(
+            preprocess, config, {"deadline": None}
+        )
+        item = SimpleNamespace(
+            should_preprocess=True,
+            capture_inspection_sources=False,
+            deadline=deadline,
+            mm_inputs=[],
+            region=None,
+            preprocess_ready_event=threading.Event(),
+        )
+        executor.submit(item)
+        self.assertTrue(item.preprocess_ready)
+        preprocess.assert_called_once_with([], config, deadline=deadline)
+
     def test_image_pixel_limit_survives_worker_transport_as_input_error(self):
         data = io.BytesIO()
         Image.new("RGB", (8, 8)).save(data, format="PNG")

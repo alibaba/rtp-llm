@@ -70,6 +70,17 @@ def _reset_download_region(token) -> None:
     current_download_region.reset(token)
 
 
+def _preprocess_task_params(defaults, capture_inspection_sources, deadline):
+    params = dict(defaults)
+    if capture_inspection_sources:
+        params.update(capture_inspection_sources=True, deadline=deadline)
+    elif deadline is not None and "deadline" in params:
+        # The backend declares support in get_preprocess_params().
+        configured = params["deadline"]
+        params["deadline"] = deadline if configured is None else min(configured, deadline)
+    return params
+
+
 class _PreprocessTaskError(Exception):
     """Keep task I/O failures distinct from broken pool communication."""
 
@@ -231,9 +242,9 @@ def _worker_process_task(
     """
     if _worker_preprocess_func is None:
         raise RuntimeError("Worker process has not been initialized correctly.")
-    params = dict(_worker_preprocess_params)
-    if capture_inspection_sources:
-        params.update(capture_inspection_sources=True, deadline=deadline)
+    params = _preprocess_task_params(
+        _worker_preprocess_params, capture_inspection_sources, deadline
+    )
     try:
         if inspection_task is not None:
             if _worker_inspection is None:
@@ -404,11 +415,11 @@ class LocalPreprocessExecutor(PreprocessExecutor):
             return
 
         try:
-            params = dict(self.preprocess_params)
-            if work_item.capture_inspection_sources:
-                params.update(
-                    capture_inspection_sources=True, deadline=work_item.deadline
-                )
+            params = _preprocess_task_params(
+                self.preprocess_params,
+                work_item.capture_inspection_sources,
+                getattr(work_item, "deadline", None),
+            )
             work_item.preprocess_submitted_at = time.monotonic()
             payload = _run_preprocess_task(
                 self.preprocess_func,
