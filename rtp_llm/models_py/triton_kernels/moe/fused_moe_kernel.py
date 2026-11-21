@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+
 
 @triton.jit
 def fused_moe_kernel(
@@ -56,6 +58,8 @@ def fused_moe_kernel(
     even_Ks: tl.constexpr,
     REMOTE_EXPERT: tl.constexpr = None,
     SWAP_AB: tl.constexpr = False,
+    PDL: tl.constexpr = False,
+    PRE_READY_ROUTING: tl.constexpr = False,
 ):
     """
     Fused MoE GEMM kernel.
@@ -78,9 +82,16 @@ def fused_moe_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
+    if PDL and not PRE_READY_ROUTING:
+        tl.extra.cuda.gdc_wait()
+
     # Early exit for padding blocks
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
+        if PDL and PRE_READY_ROUTING:
+            tl.extra.cuda.gdc_wait()
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
         return
 
     # Load sorted token ids and expert id for this block
@@ -95,8 +106,15 @@ def fused_moe_kernel(
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     # EP reserves one alignment bin for routes owned by another rank.
     if REMOTE_EXPERT is not None and off_experts == REMOTE_EXPERT:
+        if PDL and PRE_READY_ROUTING:
+            tl.extra.cuda.gdc_wait()
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
         tl.store(c_ptrs, 0, mask=c_mask)
         return
+
+    if PDL and PRE_READY_ROUTING:
+        tl.extra.cuda.gdc_wait()
 
     # Pointers for A and B
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
@@ -191,6 +209,8 @@ def fused_moe_kernel(
         accumulator *= moe_weight[:, None]
 
     accumulator = accumulator.to(compute_type)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
@@ -215,6 +235,7 @@ def invoke_fused_moe_kernel(
     *,
     skip_remote_experts: bool = False,
     swap_ab: bool = False,
+    pre_ready_routing: bool = False,
 ) -> None:
     assert sorted_token_ids.stride(0) == 1
 
@@ -260,6 +281,7 @@ def invoke_fused_moe_kernel(
         assert A_scale is None and B_scale is None
         block_n, block_k = 0, 0
 
+    pdl = sm90_pdl_enabled(A.device)
     fused_moe_kernel[grid](
         A,
         B,
@@ -296,6 +318,9 @@ def invoke_fused_moe_kernel(
         even_Ks=even_Ks,
         REMOTE_EXPERT=B.shape[0] if skip_remote_experts else None,
         SWAP_AB=swap_ab,
+        PDL=pdl,
+        PRE_READY_ROUTING=pre_ready_routing,
+        launch_pdl=pdl,
         **config,
     )
 

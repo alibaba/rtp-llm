@@ -31,13 +31,16 @@ class MoeTopkTritonTest(unittest.TestCase):
     def test_native_parity_for_ties_and_small_and_large_batches(self):
         for rows in (1, 7, 17, 32, 127, 4093):
             for dtype in (torch.bfloat16, torch.float32):
-                with self.subTest(rows=rows, dtype=dtype):
-                    logits = torch.randn(rows, 512, device="cuda", dtype=dtype)
-                    logits[0] = 0
-                    ids = torch.empty(rows, 10, device="cuda", dtype=torch.int32)
-                    weights = torch.empty(rows, 10, device="cuda")
-                    self.fused(logits, ids, weights)
-                    self.compare(logits, ids, weights)
+                for ids_dtype in (torch.int32, torch.int64):
+                    with self.subTest(rows=rows, dtype=dtype, ids_dtype=ids_dtype):
+                        logits = torch.randn(rows, 512, device="cuda", dtype=dtype)
+                        logits[0] = 0
+                        ids = torch.empty(rows, 10, device="cuda", dtype=ids_dtype)
+                        weights = torch.empty(rows, 10, device="cuda")
+                        with patch.object(self.native, "forward") as fallback:
+                            self.fused(logits, ids, weights)
+                            fallback.assert_not_called()
+                        self.compare(logits, ids, weights)
 
     def test_graph_replay_refreshes_strided_logits(self):
         logits = torch.randn(17, 1024, device="cuda", dtype=torch.bfloat16)[:, :512]
@@ -54,8 +57,8 @@ class MoeTopkTritonTest(unittest.TestCase):
             self.compare(logits, ids, weights)
 
     @unittest.skipUnless(
-        torch.cuda.is_available() and "H20" in torch.cuda.get_device_name(),
-        "requires an H20",
+        torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0),
+        "requires SM90",
     )
     def test_long_prefill_preserves_native_weights_and_ids(self):
         for rows, dtype in ((8193, torch.float32), (32768, torch.bfloat16)):
@@ -140,7 +143,7 @@ class MoeTopkTritonTest(unittest.TestCase):
                     call.assert_called_once()
                 self.compare(logits, ids, weights)
         with patch.object(self.native, "forward") as call:
-            self.fused(logits, ids.long(), weights)
+            self.fused(logits, ids.to(torch.int16), weights)
             call.assert_called_once()
 
 

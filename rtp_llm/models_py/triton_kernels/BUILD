@@ -57,7 +57,8 @@ py_library(
 py_library(
     name = "common",
     srcs = glob(["common/*.py"]),
-    visibility = ["//visibility:public"]
+    deps = ["//rtp_llm/models_py:utils"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(

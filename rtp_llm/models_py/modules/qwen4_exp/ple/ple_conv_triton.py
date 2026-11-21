@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+
 
 def _sm_supported(device: torch.device) -> bool:
     """SM90 (compute capability major 9) or the original SM120 (12, 0)."""
@@ -31,6 +33,7 @@ def _ple_conv(
     INITIAL_BATCH_STRIDE: tl.constexpr,
     INITIAL_ROW_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     # The linear offset covers gated.numel() elements; past ~2^31/10240 rows
     # (reachable with max_seq_len=262144 in one unchunked prefill step) an
@@ -40,7 +43,43 @@ def _ple_conv(
     batch, token = row // LENGTH, row % LENGTH
     valid = row < ROWS
     state_len: tl.constexpr = (KERNEL - 1) * DILATION
+    w0 = tl.load(Weight + col * KERNEL + 0, valid, other=0).to(tl.float32)
+    w1 = tl.load(Weight + col * KERNEL + 1, valid, other=0).to(tl.float32)
+    w2 = tl.load(Weight + col * KERNEL + 2, valid, other=0).to(tl.float32)
+    w3 = tl.load(Weight + col * KERNEL + 3, valid, other=0).to(tl.float32)
+    if HAS_RESIDUAL:
+        residual = tl.load(Residual + offset, valid, other=0).to(tl.float32)
     acc = tl.full((BLOCK,), 0, tl.float32)
+    if HAS_INITIAL:
+        p0 = token - state_len
+        p1 = token - state_len + DILATION
+        p2 = token - state_len + 2 * DILATION
+        init0 = tl.load(
+            Initial
+            + batch * INITIAL_BATCH_STRIDE
+            + (p0 + state_len) * INITIAL_ROW_STRIDE
+            + col,
+            valid & (p0 < 0),
+            other=0,
+        ).to(tl.float32)
+        init1 = tl.load(
+            Initial
+            + batch * INITIAL_BATCH_STRIDE
+            + (p1 + state_len) * INITIAL_ROW_STRIDE
+            + col,
+            valid & (p1 < 0),
+            other=0,
+        ).to(tl.float32)
+        init2 = tl.load(
+            Initial
+            + batch * INITIAL_BATCH_STRIDE
+            + (p2 + state_len) * INITIAL_ROW_STRIDE
+            + col,
+            valid & (p2 < 0),
+            other=0,
+        ).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     for k in tl.static_range(KERNEL):
         position = token - state_len + k * DILATION
         value = tl.load(
@@ -49,16 +88,13 @@ def _ple_conv(
             other=0,
         ).to(tl.float32)
         if HAS_INITIAL:
-            previous = tl.load(
-                Initial
-                + batch * INITIAL_BATCH_STRIDE
-                + (position + state_len) * INITIAL_ROW_STRIDE
-                + col,
-                valid & (position < 0),
-                other=0,
-            ).to(tl.float32)
-            value = tl.where(position < 0, previous, value)
-        weight = tl.load(Weight + col * KERNEL + k, valid, other=0).to(tl.float32)
+            if k == 0:
+                value = tl.where(position < 0, init0, value)
+            elif k == 1:
+                value = tl.where(position < 0, init1, value)
+            elif k == 2:
+                value = tl.where(position < 0, init2, value)
+        weight = w0 if k == 0 else (w1 if k == 1 else (w2 if k == 2 else w3))
         acc = tl.fma(value, weight, acc)
     conv = acc.to(tl.bfloat16).to(tl.float32)
     activated = (conv * tl.sigmoid(conv)).to(tl.bfloat16).to(tl.float32)
@@ -67,10 +103,13 @@ def _ple_conv(
     if HAS_RESIDUAL:
         # Preserve the original BF16 PLE output before the outer residual add.
         output = output.to(tl.bfloat16).to(tl.float32)
-        residual = tl.load(Residual + offset, valid, other=0).to(tl.float32)
         output = residual + output
+    if PDL and not ROLL_STATE:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(Output + offset, output, valid)
     if ROLL_STATE:
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
         # S=1: retain old rows 1..8 and append the new normed token. This
         # publishes a fresh buffer, never an overlapping persistent cache row.
         for state_row in tl.static_range(state_len - 1):
@@ -172,6 +211,7 @@ def try_ple_conv(
         and torch.cuda.get_device_capability(gated.device) == (9, 0)
         else 1024
     )
+    pdl = sm90_pdl_enabled(gated.device)
     _ple_conv[(triton.cdiv(gated.numel(), block),)](
         gated,
         normed,
@@ -191,6 +231,8 @@ def try_ple_conv(
         INITIAL_BATCH_STRIDE=initial.stride(0) if initial is not None else 0,
         INITIAL_ROW_STRIDE=initial.stride(1) if initial is not None else 0,
         BLOCK=block,
+        PDL=pdl,
         num_warps=4,
+        launch_pdl=pdl,
     )
     return (output, rolled_state) if roll_state else output

@@ -44,9 +44,6 @@ class Fp8SM90SharedB64Test(unittest.TestCase):
         if torch.cuda.get_device_capability() != (9, 0):
             self.skipTest("SM90 required")
         torch.manual_seed(20261116)
-        self.env = patch.dict(os.environ, {"QWEN_MOE_FP8_SMALL_ROWS_FUSION": "0"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
 
     def exact(self, a, b):
         self.assertTrue(
@@ -134,7 +131,11 @@ class Fp8SM90SharedB64Test(unittest.TestCase):
                 ):
                     self.assertIsNone(quant.try_silu_mul_fp8_quant(x))
                     self.assertIsNone(mlp.down_proj.forward_silu_and_mul(x))
-            for rows in (33, 63, 65, 128):
+            for rows in (1, 4, 32, 64, 96, 128, 256):
+                value = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
+                self.assertIsNotNone(quant.try_silu_mul_fp8_quant(value))
+                self.assertIsNotNone(mlp.down_proj.forward_silu_and_mul(value))
+            for rows in (0, 257, 512):
                 value = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
                 self.assertIsNone(quant.try_silu_mul_fp8_quant(value))
                 self.assertIsNone(mlp.down_proj.forward_silu_and_mul(value))

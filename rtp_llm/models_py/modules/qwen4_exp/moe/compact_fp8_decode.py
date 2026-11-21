@@ -11,6 +11,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import ep_gather_global_rou
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     invoke_fused_moe_kernel,
 )
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 
 from .moe_align_triton import moe_align_decode, moe_align_large_decode
 
@@ -18,6 +19,9 @@ from .moe_align_triton import moe_align_decode, moe_align_large_decode
 h20_compact_moe_phase: ContextVar[
     Literal["eager", "decode", "target_verify"] | None
 ] = ContextVar("h20_compact_moe_phase", default=None)
+compact_moe_output_buffer: ContextVar[torch.Tensor | None] = ContextVar(
+    "compact_moe_output_buffer", default=None
+)
 
 _STABLE_ALIGNMENT_MAX_ROUTES = 2560
 _DENSE_EXPERT_ROWS = 128
@@ -44,11 +48,15 @@ def _silu_mul_quantize(
     GROUPS: tl.constexpr,
     GLOBAL_START: tl.constexpr = 0,
     EXPERTS: tl.constexpr = 256,
+    PDL: tl.constexpr = False,
 ):
     route = tl.program_id(0)
     group = tl.program_id(1)
     expert = tl.load(ids + route)
-    if (expert >= GLOBAL_START) & (expert < GLOBAL_START + EXPERTS):
+    local = (expert >= GLOBAL_START) & (expert < GLOBAL_START + EXPERTS)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    if local:
         col = group * 128 + tl.arange(0, 128)
         row = up_gate + route * (GROUPS * 256)
         up = tl.load(row + col)
@@ -58,6 +66,8 @@ def _silu_mul_quantize(
         q = tl.clamp(value / scale, -448.0, 448.0)
         tl.store(quantized + route * (GROUPS * 128) + col, q)
         tl.store(scales + route * GROUPS + group, scale)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit
@@ -71,6 +81,7 @@ def _silu_mul_quantize_tiles(
     ROWS: tl.constexpr,
     GLOBAL_START: tl.constexpr = 0,
     EXPERTS: tl.constexpr = 256,
+    PDL: tl.constexpr = False,
 ):
     row = tl.program_id(0) * ROWS + tl.arange(0, ROWS)
     group = tl.program_id(1)
@@ -78,17 +89,32 @@ def _silu_mul_quantize_tiles(
     live = (expert >= GLOBAL_START) & (expert < GLOBAL_START + EXPERTS)
     col = group * 128 + tl.arange(0, 128)
     offset = row[:, None] * (GROUPS * 256) + col[None, :]
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     up = tl.load(up_gate + offset, live[:, None], 0)
     gate = tl.load(up_gate + offset + GROUPS * 128, live[:, None], 0).to(tl.float32)
     value = up * (gate / (1.0 + tl.exp(-gate)))
     scale = tl.maximum(tl.max(tl.abs(value), axis=1), 1e-10) / 448.0
     q = tl.clamp(value / scale[:, None], -448.0, 448.0)
     offset = row[:, None] * (GROUPS * 128) + col[None, :]
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(quantized + offset, q, live[:, None])
     tl.store(scales + row * GROUPS + group, scale, live)
 
 
-def _project(x, x_scale, weights, out, ids, route_weights, top_k, plans):
+def _project(
+    x,
+    x_scale,
+    weights,
+    out,
+    ids,
+    route_weights,
+    top_k,
+    plans,
+    *,
+    pre_ready_routing: bool = False,
+):
     for config, swap_ab, (sorted_ids, expert_ids, padded) in plans:
         invoke_fused_moe_kernel(
             x,
@@ -107,6 +133,7 @@ def _project(x, x_scale, weights, out, ids, route_weights, top_k, plans):
             B_scale=weights[1],
             block_shape=_SCALE_BLOCK,
             swap_ab=swap_ab,
+            pre_ready_routing=pre_ready_routing,
         )
 
 
@@ -165,6 +192,7 @@ def compact_fp8_decode(
     groups = intermediate // _SCALE_BLOCK[0]
     down_input = x.new_empty((routes, intermediate))
     down_scale = x.new_empty((routes, groups), dtype=torch.float32)
+    pdl = sm90_pdl_enabled(x.device)
     if large:
         _silu_mul_quantize_tiles[(triton.cdiv(routes, 4), groups)](
             up,
@@ -176,7 +204,9 @@ def compact_fp8_decode(
             4,
             GLOBAL_START=global_start,
             EXPERTS=experts,
+            PDL=pdl,
             num_warps=4,
+            launch_pdl=pdl,
         )
     else:
         _silu_mul_quantize[(routes, groups)](
@@ -187,13 +217,33 @@ def compact_fp8_decode(
             groups,
             GLOBAL_START=global_start,
             EXPERTS=experts,
+            PDL=pdl,
             num_warps=1,
+            launch_pdl=pdl,
         )
     down = x.new_empty((routes, hidden), dtype=torch.bfloat16)
     _project(
-        down_input, down_scale, down_weights, down, flat_ids, flat_weights, 1, plans
+        down_input,
+        down_scale,
+        down_weights,
+        down,
+        flat_ids,
+        flat_weights,
+        1,
+        plans,
+        pre_ready_routing=True,
     )
 
-    out = x.new_empty((tokens, hidden), dtype=torch.bfloat16)
+    staged_out = compact_moe_output_buffer.get()
+    if (
+        staged_out is not None
+        and staged_out.shape == (tokens, hidden)
+        and staged_out.dtype == torch.bfloat16
+        and staged_out.device == x.device
+        and staged_out.is_contiguous()
+    ):
+        out = staged_out
+    else:
+        out = x.new_empty((tokens, hidden), dtype=torch.bfloat16)
     ep_gather_global_routes(down, ids, route_weights, out, global_start, experts)
     return out

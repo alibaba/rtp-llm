@@ -12,6 +12,12 @@ import torch
 import torch.distributed as dist
 
 _COMMUNICATORS = {}
+_DEVICE_COMMUNICATORS = {}
+
+
+def get_prepared_moe_communicator(device):
+    index = getattr(device, "index", None)
+    return None if index is None else _DEVICE_COMMUNICATORS.get(index)
 
 
 def prepare_moe_communicator(device: torch.device, max_decode_rows: int = 128):
@@ -60,6 +66,7 @@ def prepare_moe_communicator(device: torch.device, max_decode_rows: int = 128):
             return None
         comm.all_reduce(probe)  # Initialize/JIT on both ranks before capture.
     _COMMUNICATORS[key] = comm
+    _DEVICE_COMMUNICATORS[device.index] = comm
     logging.getLogger(__name__).info(
         "MoE private custom AR ready: backend=FlashInfer/TRTLLM device=%s "
         "packed_rows=1..%s hidden=2560; other module backends unchanged",

@@ -7,6 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 from rtp_llm.models_py.utils.math import ceil_div
 
 logger = logging.getLogger(__name__)
@@ -48,9 +49,12 @@ def _fwd_kernel_ep_scatter_1(
     SKIP_GEMM_PADDING: tl.constexpr = False,
     gemm_m_indices=None,
     valid_tokens_per_expert=None,
+    PDL: tl.constexpr = False,
 ):
     cur_expert = tl.program_id(0).to(tl.int64)
     offset_cumsum = tl.arange(0, BLOCK_EXPERT_NUM)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     tokens_per_expert = tl.load(
         num_recv_tokens_per_expert + offset_cumsum,
         mask=offset_cumsum < num_experts,
@@ -63,6 +67,9 @@ def _fwd_kernel_ep_scatter_1(
     cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
     if SKIP_GEMM_PADDING:
         valid = tl.load(valid_tokens_per_expert + cur_expert)
+        cur_expert_token_num = (
+            (cur_expert_token_num + ALIGN_M - 1) // ALIGN_M
+        ) * ALIGN_M
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E).to(tl.int64)
     for start_m in tl.range(0, cur_expert_token_num, BLOCK_E, num_stages=4):
@@ -78,6 +85,8 @@ def _fwd_kernel_ep_scatter_1(
                 tl.where(offs < valid, cur_expert.to(tl.int32), -1),
                 mask=in_bounds,
             )
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit
@@ -109,6 +118,7 @@ def _fwd_kernel_ep_scatter_2(
     HIDDEN_SIZE_PAD: tl.constexpr,
     SCALE_HIDDEN_SIZE: tl.constexpr,
     SCALE_HIDDEN_SIZE_PAD: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     start_token_id = tl.program_id(0)
     grid_num = tl.num_programs(0)
@@ -116,6 +126,8 @@ def _fwd_kernel_ep_scatter_2(
     mask = offset_in < HIDDEN_SIZE
     index_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
     mask_s = index_in_s < SCALE_HIDDEN_SIZE
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     for token_id_int32 in range(start_token_id, total_token_num, grid_num):
         token_id = token_id_int32.to(tl.int64)
         to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
@@ -153,6 +165,8 @@ def _fwd_kernel_ep_scatter_2(
                     to_copy_s,
                     mask=mask_s & dest_is_valid,
                 )
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 # copy from https://github.com/ModelTC/lightllm/blob/main/lightllm/common/fused_moe/deepep_scatter_gather.py
@@ -212,6 +226,7 @@ def ep_scatter(
     gemm_m_indices, valid_counts = (
         gemm_padding_indices if gemm_padding_indices is not None else (None, None)
     )
+    pdl = sm90_pdl_enabled(recv_x.device)
     _fwd_kernel_ep_scatter_1[(grid,)](
         layout_num_tokens_per_expert,
         expert_start_loc,
@@ -225,6 +240,8 @@ def ep_scatter(
         SKIP_GEMM_PADDING=gemm_padding_indices is not None,
         gemm_m_indices=gemm_m_indices,
         valid_tokens_per_expert=valid_counts,
+        PDL=pdl,
+        launch_pdl=pdl,
     )
     grid = min(recv_topk.shape[0], 1024 * 8)
     _fwd_kernel_ep_scatter_2[(grid,)](
@@ -256,6 +273,8 @@ def ep_scatter(
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
         SCALE_HIDDEN_SIZE=scale_hidden_size,
         SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
+        PDL=pdl,
+        launch_pdl=pdl,
     )
     return
 
@@ -433,10 +452,13 @@ def _fwd_kernel_ep_gather(
     output_tensor_stride1,
     topk_num: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     cur_block = tl.program_id(0).to(tl.int64)
     start_cur_token_int32 = tl.program_id(1)
     grid_num = tl.num_programs(1)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     for cur_token_int32 in range(start_cur_token_int32, total_token_num, grid_num):
         cur_token = cur_token_int32.to(tl.int64)
         off_d = tl.arange(0, BLOCK_D)
@@ -471,6 +493,8 @@ def _fwd_kernel_ep_gather(
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
         )
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit
@@ -493,10 +517,13 @@ def _fwd_kernel_ep_gather_global_routes(
     output_tensor_stride1,
     topk_num: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     cur_block = tl.program_id(0).to(tl.int64)
     start_cur_token_int32 = tl.program_id(1)
     grid_num = tl.num_programs(1)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     for cur_token_int32 in range(start_cur_token_int32, total_token_num, grid_num):
         cur_token = cur_token_int32.to(tl.int64)
         off_d = tl.arange(0, BLOCK_D)
@@ -530,6 +557,8 @@ def _fwd_kernel_ep_gather_global_routes(
             + off_d,
             accumulator.to(output_tensor.dtype.element_ty),
         )
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @torch.no_grad()
@@ -546,6 +575,7 @@ def ep_gather_global_routes(
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
     assert hidden_size % BLOCK_D == 0
+    pdl = sm90_pdl_enabled(input_tensor.device)
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather_global_routes[grid](
         num_tokens,
@@ -567,6 +597,8 @@ def ep_gather_global_routes(
         topk_num=global_ids.shape[1],
         num_warps=2,
         BLOCK_D=BLOCK_D,
+        PDL=pdl,
+        launch_pdl=pdl,
     )
 
 
@@ -583,6 +615,7 @@ def ep_gather(
     num_tokens = output_tensor.shape[0]
     hidden_size = input_tensor.shape[1]
     assert hidden_size % BLOCK_D == 0
+    pdl = sm90_pdl_enabled(input_tensor.device)
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](
         num_tokens,
@@ -605,6 +638,8 @@ def ep_gather(
         topk_num=recv_topk_ids.shape[1],
         num_warps=num_warps,
         BLOCK_D=BLOCK_D,
+        PDL=pdl,
+        launch_pdl=pdl,
     )
     return
 

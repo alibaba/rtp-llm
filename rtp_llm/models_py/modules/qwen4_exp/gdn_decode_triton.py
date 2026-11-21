@@ -12,7 +12,10 @@ import triton.language as tl
 
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import _gdn_gate_values
 from rtp_llm.models_py.triton_kernels.fla.op import exp
-from rtp_llm.models_py.utils.device_capability import cached_device_capability
+from rtp_llm.models_py.utils.device_capability import (
+    cached_device_capability,
+    sm90_pdl_enabled,
+)
 
 
 @triton.jit
@@ -38,6 +41,7 @@ def _packed_decode(
     VALUE_TILE: tl.constexpr,
     SEQ: tl.constexpr,
     HEADS_FIRST: tl.constexpr,
+    PDL: tl.constexpr = False,
 ):
     if HEADS_FIRST:
         row_head, value_tile = tl.program_id(0), tl.program_id(1)
@@ -49,6 +53,8 @@ def _packed_decode(
     value_row = value_tile * VALUE_TILE + tl.arange(0, VALUE_TILE)
     length = tl.load(lengths + row).to(tl.int64)
     if length <= 0:
+        if PDL:
+            tl.extra.cuda.gdc_wait()
         for step in range(SEQ):
             output_ptr = (
                 output
@@ -56,6 +62,8 @@ def _packed_decode(
                 + value_row
             )
             tl.store(output_ptr, 0.0)
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
         return
 
     # A page boundary may require separate source and destination state pages.
@@ -63,6 +71,8 @@ def _packed_decode(
         block_map + row * map_stride + tl.maximum(length - 2, 0) // PAGE_SIZE
     )
     if source_page <= 0:
+        if PDL:
+            tl.extra.cuda.gdc_wait()
         for step in range(SEQ):
             output_ptr = (
                 output
@@ -70,11 +80,17 @@ def _packed_decode(
                 + value_row
             )
             tl.store(output_ptr, 0.0)
+        if PDL:
+            tl.extra.cuda.gdc_launch_dependents()
         return
     state_offsets = value_head * DIM * DIM + value_row[:, None] * DIM + feature[None, :]
     state = tl.load(
         states + source_page.to(tl.int64) * state_stride + state_offsets
     ).to(tl.float32)
+    alog_val = tl.load(alog + value_head)
+    bias_val = tl.load(bias + value_head)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     for step in range(SEQ):
         token = row * SEQ + step
         packed = qkv + token * qkv_stride
@@ -88,10 +104,10 @@ def _packed_decode(
         query = query * (DIM**-0.5)
 
         gate, beta = _gdn_gate_values(
-            tl.load(alog + value_head),
+            alog_val,
             tl.load(a + token * a_stride + value_head),
             tl.load(b + token * b_stride + value_head),
-            tl.load(bias + value_head),
+            bias_val,
             1.0,
             20.0,
         )
@@ -104,6 +120,8 @@ def _packed_decode(
         result = tl.sum(state * query[None, :], 1)
         output_ptr = output + (token * VALUE_HEADS + value_head) * DIM + value_row
         tl.store(output_ptr, result.to(output.dtype.element_ty))
+        if PDL and step == SEQ - 1:
+            tl.extra.cuda.gdc_launch_dependents()
         # MTP reserves one consecutive table entry per candidate state.
         destination_page = tl.load(
             block_map + row * map_stride + (length - 1) // PAGE_SIZE + step
@@ -138,6 +156,7 @@ def _run_packed_decode(
         device=qkv.device,
         dtype=qkv.dtype,
     )
+    pdl = sm90_pdl_enabled(qkv.device)
     grid = (triton.cdiv(dimension, value_tile), batch * value_heads)
     _packed_decode[grid[::-1] if heads_first else grid](
         qkv,
@@ -161,8 +180,10 @@ def _run_packed_decode(
         value_tile,
         sequence_length,
         heads_first,
+        PDL=pdl,
         num_warps=num_warps,
         num_stages=3,
+        launch_pdl=pdl,
     )
     return output
 
@@ -234,7 +255,7 @@ def try_packed_decode(
         block_map,
         lengths,
         page_size,
-        value_tile=4 if heads_first or batch in (16, 32) else 8,
+        value_tile=4 if heads_first or batch >= 16 else 8,
         sequence_length=sequence_length,
         heads_first=heads_first,
     )

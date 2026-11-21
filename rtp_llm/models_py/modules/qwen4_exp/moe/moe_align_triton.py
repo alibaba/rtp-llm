@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+
 
 def sm120_decode_gemm_configs(rows, up, down):
     """Opt-in tiles for BF16 E512/K2560/inter80, with M=1 unchanged."""
@@ -38,7 +40,14 @@ def _offsets_and_padding(
     MAX_BLOCKS,
     BLOCK_TILE: tl.constexpr,
     GLOBAL_START: tl.constexpr = 0,
+    PDL: tl.constexpr = False,
 ):
+    slot = tl.arange(0, SLOT_TILE)
+    tl.store(sorted_ids + slot, ROUTES, mask=slot < MAX_SLOTS)
+    block = tl.arange(0, BLOCK_TILE)
+    tl.store(experts + block, EXPERTS, mask=block < MAX_BLOCKS)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     r = tl.arange(0, ROUTE_TILE)
     raw_ids = tl.load(ids + r, mask=r < ROUTES, other=-1)
     adjusted = raw_ids - GLOBAL_START
@@ -48,14 +57,12 @@ def _offsets_and_padding(
     padded_counts = tl.cdiv(counts, BLOCK) * BLOCK
     inclusive = tl.cumsum(padded_counts, 0)
     e = tl.arange(0, EXPERT_TILE)
-    tl.store(offsets + e, inclusive - padded_counts, e < EXPERTS)
     total = tl.sum(padded_counts, 0)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+    tl.store(offsets + e, inclusive - padded_counts, e < EXPERTS)
     tl.store(offsets + EXPERTS, total)
     tl.store(padded, total)
-    slot = tl.arange(0, SLOT_TILE)
-    tl.store(sorted_ids + slot, ROUTES, mask=slot < MAX_SLOTS)
-    block = tl.arange(0, BLOCK_TILE)
-    tl.store(experts + block, EXPERTS, mask=block < MAX_BLOCKS)
 
 
 @triton.jit
@@ -68,8 +75,11 @@ def _stable_scatter(
     ROUTE_TILE: tl.constexpr,
     EXPERTS: tl.constexpr,
     GLOBAL_START: tl.constexpr = 0,
+    PDL: tl.constexpr = False,
 ):
     route = tl.program_id(0)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     expert = tl.load(ids + route) - GLOBAL_START
     if expert >= 0 and expert < EXPERTS:
         local_expert = expert.to(tl.int32)
@@ -80,6 +90,8 @@ def _stable_scatter(
         tl.store(sorted_ids + destination, route)
         if ordinal % BLOCK == 0:
             tl.store(experts + destination // BLOCK, local_expert)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.jit
@@ -98,7 +110,15 @@ def _align_one_cta_kernel(
     MAX_BLOCKS: tl.constexpr,
     BLOCK_TILE: tl.constexpr,
     GLOBAL_START: tl.constexpr = 0,
+    PDL: tl.constexpr = False,
 ):
+    slot = tl.arange(0, SLOT_TILE)
+    tl.store(sorted_ids + slot, ROUTES, mask=slot < MAX_SLOTS)
+    block = tl.arange(0, BLOCK_TILE)
+    tl.store(experts + block, EXPERTS, mask=block < MAX_BLOCKS)
+    tl.debug_barrier()
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     r = tl.arange(0, ROUTE_TILE)
     raw_ids = tl.load(ids + r, mask=r < ROUTES, other=-1)
     adjusted = raw_ids - GLOBAL_START
@@ -108,12 +128,6 @@ def _align_one_cta_kernel(
     padded_counts = tl.cdiv(counts, BLOCK) * BLOCK
     offsets = tl.cumsum(padded_counts, 0) - padded_counts
     total = tl.sum(padded_counts, 0)
-    slot = tl.arange(0, SLOT_TILE)
-    tl.store(sorted_ids + slot, ROUTES, mask=slot < MAX_SLOTS)
-    block = tl.arange(0, BLOCK_TILE)
-    tl.store(experts + block, EXPERTS, mask=block < MAX_BLOCKS)
-    tl.store(padded, total)
-    tl.debug_barrier()
     same_valid_expert = (
         valid[:, None]
         & valid[None, :]
@@ -122,6 +136,9 @@ def _align_one_cta_kernel(
     )
     ordinal = tl.sum(same_valid_expert.to(tl.int32), 1)
     destination = tl.gather(offsets, local_ids, 0) + ordinal
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+    tl.store(padded, total)
     tl.store(sorted_ids + destination, r, mask=valid)
     tl.store(
         experts + destination // BLOCK,
@@ -161,6 +178,7 @@ def moe_align_decode(
     expert_tile = max(2, triton.next_power_of_2(num_experts))
     slot_tile = max(16, triton.next_power_of_2(max_slots))
     block_tile = max(16, triton.next_power_of_2(max_blocks))
+    pdl = sm90_pdl_enabled(topk_ids.device)
     if routes <= 80:
         _align_one_cta_kernel[(1,)](
             topk_ids,
@@ -177,7 +195,9 @@ def moe_align_decode(
             MAX_BLOCKS=max_blocks,
             BLOCK_TILE=block_tile,
             GLOBAL_START=global_start,
+            PDL=pdl,
             num_warps=4,
+            launch_pdl=pdl,
         )
         return sorted_ids, experts, padded
     offsets = torch.empty(num_experts + 1, device=topk_ids.device, dtype=torch.int32)
@@ -198,7 +218,9 @@ def moe_align_decode(
         MAX_BLOCKS=max_blocks,
         BLOCK_TILE=block_tile,
         GLOBAL_START=global_start,
+        PDL=pdl,
         num_warps=4,
+        launch_pdl=pdl,
     )
     _stable_scatter[(routes,)](
         topk_ids,
@@ -209,7 +231,9 @@ def moe_align_decode(
         ROUTE_TILE=route_tile,
         EXPERTS=num_experts,
         GLOBAL_START=global_start,
+        PDL=pdl,
         num_warps=4,
+        launch_pdl=pdl,
     )
     return sorted_ids, experts, padded
 

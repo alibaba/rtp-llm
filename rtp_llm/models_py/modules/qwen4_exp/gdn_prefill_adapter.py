@@ -179,13 +179,6 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
             and mixed_qkv.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(mixed_qkv.device) == (9, 0)
-            and (
-                self.sm90_cp_extended
-                or torch.cuda.get_device_properties(
-                    mixed_qkv.device
-                ).multi_processor_count
-                == 78
-            )
             and _sm90_cp_available()
         ):
             from .gdn_prefill_cp_sm90 import try_sm90_prefill
