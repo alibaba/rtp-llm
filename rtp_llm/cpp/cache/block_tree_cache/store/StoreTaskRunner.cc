@@ -3,6 +3,7 @@
 #include <exception>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
@@ -12,7 +13,9 @@ namespace rtp_llm {
 
 StoreTaskRunner::StoreTaskRunner(const std::vector<GroupSetPtr>& group_sets): group_sets_(group_sets) {}
 
-bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<GroupSetResource>>& resources) {
+bool StoreTaskRunner::prepareTask(Task&                                             task,
+                                  const std::vector<std::vector<GroupSetResource>>& resources,
+                                  const std::vector<TreeNode*>&                     stored_ancestors) {
     if (resources.size() != task.cache_keys.size()
         || (!task.token_ends.empty() && task.token_ends.size() != task.cache_keys.size())) {
         return false;
@@ -29,6 +32,12 @@ bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<Grou
             const GroupSetResource& source = resources[key_index][group_set_id];
             if (!source.hasCompleteDeviceValue()) {
                 continue;
+            }
+            if (key_index < stored_ancestors.size()) {
+                const auto& stored = stored_ancestors[key_index]->group_set_resources[group_set_id];
+                if (stored.isValidSteadyState() && stored.hasTier(task.target_tier)) {
+                    continue;
+                }
             }
             if ((task.target_tier == Tier::HOST && !group_set->hostPool())
                 || (task.target_tier == Tier::DISK && !group_set->diskPool())) {

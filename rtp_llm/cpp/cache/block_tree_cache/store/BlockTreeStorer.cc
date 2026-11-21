@@ -160,13 +160,14 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                                               const std::vector<std::vector<GroupSetResource>>& resources,
                                               Tier                                              target_tier,
                                               bool                                              is_resident,
-                                              size_t& resident_prefix_length,
-                                              const std::vector<std::vector<int>>* token_segments,
-                                              PrefixCachePlanState* prefix_plan_state,
-                                              const std::vector<size_t>* token_ends,
-                                              std::optional<int64_t> observation_request_id,
-                                              bool internal_fork,
-                                              bool* ready_after_insert) {
+                                              size_t&                                           resident_prefix_length,
+                                              const std::vector<std::vector<int>>*              token_segments,
+                                              PrefixCachePlanState*                             prefix_plan_state,
+                                              const std::vector<size_t>*                        token_ends,
+                                              std::optional<int64_t>                            observation_request_id,
+                                              bool                                              internal_fork,
+                                              bool*                                             ready_after_insert,
+                                              std::optional<Fork>                               followup_fork) {
     resident_prefix_length = 0;
     assert(!is_resident || target_tier == Tier::DEVICE);
     RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK,
@@ -191,7 +192,8 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                               prefix_plan_state,
                               observation_request_id,
                               token_ends,
-                              internal_fork);
+                              internal_fork,
+                              std::move(followup_fork));
         return {};
     }
     return storage_backend_ && !internal_fork ?
@@ -295,7 +297,8 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
                                             PrefixCachePlanState*                             prefix_plan_state,
                                             std::optional<int64_t>                            observation_request_id,
                                             const std::vector<size_t>*                        token_ends,
-                                            bool                                              internal_fork) {
+                                            bool                                              internal_fork,
+                                            std::optional<Fork>                               followup_fork) {
     if (token_ends != nullptr
         && (token_ends->size() != cache_keys.size() || token_segments == nullptr
             || token_segments->size() != cache_keys.size())) {
@@ -341,7 +344,22 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     block_tree_cache_detail::ScopeRollback prepare_guard(
         [this, &task, &failure_reason]() { settleLocked(*task, /*publish=*/false, failure_reason); });
 
-    if (!store_task_runner_.prepareTask(*task, resources)) {
+    if (followup_fork) {
+        deferForkLocked(*task, std::move(*followup_fork));
+    }
+    std::vector<TreeNode*> stored_ancestors;
+    if (internal_fork) {
+        stored_ancestors = tree_->findNode(cache_keys);
+        stored_ancestors.resize(std::min(stored_ancestors.size(), cache_keys.size() - 1));
+        for (size_t index = 0; index < stored_ancestors.size(); ++index) {
+            const auto* ancestor = stored_ancestors[index];
+            if (ancestor->token_end != (*token_ends)[index] || ancestor->token_ids != (*token_segments)[index]) {
+                stored_ancestors.resize(index);
+                break;
+            }
+        }
+    }
+    if (!store_task_runner_.prepareTask(*task, resources, stored_ancestors)) {
         task->error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store task preparation failed");
         return;
     }
@@ -382,6 +400,38 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         return;
     }
     prepare_guard.dismiss();
+}
+
+void BlockTreeStorer::deferForkLocked(StoreTask& task, Fork fork) {
+    std::vector<MultiNodeResource> pins;
+    for (const auto& group : tree_->groupSets()) {
+        const size_t      group_id = group->groupSetId();
+        MultiNodeResource pin{group_id, Tier::DEVICE};
+        for (const auto& row : fork.resources) {
+            if (row[group_id].hasCompleteDeviceValue()) {
+                pin.node_blocks.emplace_back(nullptr, row[group_id].device_blocks);
+            }
+        }
+        if (!pin.node_blocks.empty()) {
+            pins.push_back(std::move(pin));
+        }
+    }
+    for (const auto& pin : pins) {
+        tree_->groupSets()[pin.group_set_id]->referenceBlocks(pin, BlockTreeRefType::STORE);
+    }
+    task.followup_locked = [this,
+                            tier       = task.target_tier,
+                            request_id = task.observation_request_id,
+                            fork       = std::move(fork),
+                            pins       = std::move(pins)] {
+        block_tree_cache_detail::ScopeRollback release_pins([&] {
+            for (const auto& pin : pins) {
+                tree_->groupSets()[pin.group_set_id]->unreferenceBlocks(pin, BlockTreeRefType::STORE);
+            }
+        });
+        submitLowerTierLocked(
+            fork.keys, fork.resources, tier, &fork.token_segments, nullptr, request_id, &fork.token_ends, true);
+    };
 }
 
 void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
@@ -546,6 +596,9 @@ size_t BlockTreeStorer::settleLocked(StoreTask& task, bool publish, const char* 
 
     if (insert_result.accepted_resource_count > 0) {
         evictor_.onInserted(insert_result);
+    }
+    if (auto followup = std::exchange(task.followup_locked, {})) {
+        followup();
     }
     if (!task.descriptors().empty()) {
         settled_(true);

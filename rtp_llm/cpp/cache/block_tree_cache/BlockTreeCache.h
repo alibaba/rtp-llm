@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -141,12 +142,13 @@ public:
                   const std::vector<std::vector<GroupSetResource>>& resources,
                   Tier                                              target_tier,
                   bool                                              is_resident,
-                  const std::vector<std::vector<int>>*              token_segments = nullptr,
-                  PrefixCachePlanState*                             prefix_plan_state = nullptr,
-                  const std::vector<size_t>*                         token_ends = nullptr,
-                  std::optional<int64_t> observation_request_id = std::nullopt,
-                  bool internal_fork = false,
-                  bool* ready_after_insert = nullptr);
+                  const std::vector<std::vector<int>>*              token_segments         = nullptr,
+                  PrefixCachePlanState*                             prefix_plan_state      = nullptr,
+                  const std::vector<size_t>*                        token_ends             = nullptr,
+                  std::optional<int64_t>                            observation_request_id = std::nullopt,
+                  bool                                              internal_fork          = false,
+                  bool*                                             ready_after_insert     = nullptr,
+                  std::optional<BlockTreeStorer::Fork>              followup_fork          = std::nullopt);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Atomically protect existing complete per-group histories with one request

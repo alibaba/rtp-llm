@@ -178,10 +178,11 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                               bool                                              is_resident,
                               const std::vector<std::vector<int>>*              token_segments,
                               PrefixCachePlanState*                             prefix_plan_state,
-                              const std::vector<size_t>*                         token_ends,
-                              std::optional<int64_t> observation_request_id,
-                              bool internal_fork,
-                              bool* ready_after_insert) {
+                              const std::vector<size_t>*                        token_ends,
+                              std::optional<int64_t>                            observation_request_id,
+                              bool                                              internal_fork,
+                              bool*                                             ready_after_insert,
+                              std::optional<BlockTreeStorer::Fork>              followup_fork) {
     size_t           resident_prefix_length = 0;
     StorageWriteTask storage_write;
     if (ready_after_insert != nullptr) {
@@ -196,9 +197,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
             // Recheck the proposed branch under the same mutation lock as the
             // existing storer. A short endpoint cannot become visible with
             // only a subset of the required group histories.
-            if (target_tier != Tier::DEVICE || token_ends == nullptr || token_segments == nullptr
-                || cache_keys.empty() || cache_keys.size() != resources.size()
-                || cache_keys.size() != token_ends->size() || cache_keys.size() != token_segments->size()) {
+            if (token_ends == nullptr || token_segments == nullptr || cache_keys.empty()
+                || cache_keys.size() != resources.size() || cache_keys.size() != token_ends->size()
+                || cache_keys.size() != token_segments->size()) {
                 storer_.observePublicationSkipped(observation_request_id, target_tier, "invalid_internal_fork_path",
                                                   fork_endpoint);
                 return 0;
@@ -208,18 +209,18 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                 return 0;
             }
         }
-        storage_write =
-            storer_.storeLocked(cache_keys,
-                                resources,
-                               target_tier,
-                               is_resident,
-                               resident_prefix_length,
-                               token_segments,
-                               prefix_plan_state,
-                               token_ends,
-                                observation_request_id,
-                                internal_fork,
-                                ready_after_insert);
+        storage_write = storer_.storeLocked(cache_keys,
+                                            resources,
+                                            target_tier,
+                                            is_resident,
+                                            resident_prefix_length,
+                                            token_segments,
+                                            prefix_plan_state,
+                                            token_ends,
+                                            observation_request_id,
+                                            internal_fork,
+                                            ready_after_insert,
+                                            std::move(followup_fork));
     }
     if (storage_write) {
         storage_backend_->write(std::move(storage_write));

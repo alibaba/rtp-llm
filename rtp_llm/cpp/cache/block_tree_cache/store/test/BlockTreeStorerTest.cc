@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -579,6 +580,101 @@ TEST(BlockTreeStorerTest, ExactSpineAndForkPublishToLocalTiersAfterCompletion) {
         EXPECT_EQ(env.storeRefCount(), 0u);
         for (const auto& blocks : holder) {
             releaseDeviceBlocks(*env.cache, env.device_pools[0], blocks);
+        }
+    }
+}
+
+TEST(BlockTreeStorerTest, ExactForkReusesPublishedSpineAtPoolCapacity) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        auto env = makeStoreEnvironment(
+            "shared_spine", false, tier == Tier::HOST, tier == Tier::DISK, {3}, 2, nullptr, {}, false, 10000, 64);
+        installStoreTransferEngine(env, TransferCopyAction::Succeed);
+        const auto holder = allocateDeviceBlocksForTest(*env.groups[0], 3);
+        ASSERT_EQ(holder.size(), 3u);
+        const std::vector<size_t>                  main_ends{64, 128};
+        const std::vector<size_t>                  fork_ends{64, 80};
+        const std::vector<std::vector<int>>        main_tokens{std::vector<int>(64, 1), std::vector<int>(64, 2)};
+        const std::vector<std::vector<int>>        fork_tokens{main_tokens.front(), std::vector<int>(16, 2)};
+        std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+        resources[0][0].device_blocks = holder[0];
+        resources[1][0].device_blocks = holder[1];
+        env.cache->insert({100, 200}, resources, tier, false, &main_tokens, nullptr, &main_ends);
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+        EXPECT_EQ(env.poolFor(tier).freeBlocksNum(), 1u);
+        resources[1][0].device_blocks = holder[2];
+        env.cache->insert({100, 300}, resources, tier, false, &fork_tokens, nullptr, &fork_ends, std::nullopt, true);
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+        const auto path = env.cache->tree()->findNode({100, 300});
+        EXPECT_EQ(path.size(), 2u);
+        if (path.size() == 2) {
+            EXPECT_EQ(path.back()->token_end, 80u);
+            EXPECT_TRUE(path.back()->group_set_resources[0].hasTier(tier));
+        }
+        EXPECT_EQ(env.poolFor(tier).freeBlocksNum(), 0u);
+        EXPECT_EQ(env.storeRefCount(), 0u);
+        for (const auto& blocks : holder) {
+            releaseDeviceBlocks(*env.cache, env.device_pools[0], blocks);
+        }
+    }
+}
+
+TEST(BlockTreeStorerTest, ExactForkUsesMainStoreOutcomeBeforeAllocatingAncestors) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        for (const bool fail_main : {false, true}) {
+            SCOPED_TRACE(tierName(tier));
+            SCOPED_TRACE(fail_main);
+            auto env = makeStoreEnvironment(
+                "pending_spine", false, tier == Tier::HOST, tier == Tier::DISK, {3}, 2, nullptr, {}, false, 10000, 64);
+            auto engine = std::make_shared<ScriptedPerRankBlockTransferEngine>(env.groups, true, tier == Tier::DISK);
+            BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*env.cache, engine);
+            if (fail_main) {
+                engine->enqueue(false);
+            }
+            const auto holder = allocateDeviceBlocksForTest(*env.groups[0], 3);
+            ASSERT_EQ(holder.size(), 3u);
+            const std::vector<size_t>                  main_ends{64, 128};
+            const std::vector<std::vector<int>>        main_tokens{std::vector<int>(64, 1), std::vector<int>(64, 2)};
+            std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+            resources[0][0].device_blocks      = holder[0];
+            resources[1][0].device_blocks      = holder[1];
+            auto fork_resources                = resources;
+            fork_resources[1][0].device_blocks = holder[2];
+            BlockTreeStorer::Fork fork{
+                {100, 300}, std::move(fork_resources), {main_tokens.front(), std::vector<int>(16, 2)}, {64, 80}};
+            env.cache->insert({100, 200},
+                              resources,
+                              tier,
+                              false,
+                              &main_tokens,
+                              nullptr,
+                              &main_ends,
+                              std::nullopt,
+                              false,
+                              nullptr,
+                              std::move(fork));
+            for (const auto& blocks : holder) {
+                releaseDeviceBlocks(*env.cache, env.device_pools[0], blocks);
+            }
+            BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*env.cache);
+            EXPECT_EQ(env.cache->tree()->findNode({100, 200}).size(), fail_main ? 1u : 2u);
+            const auto path = env.cache->tree()->findNode({100, 300});
+            ASSERT_EQ(path.size(), 2u);
+            EXPECT_EQ(path.back()->token_end, 80u);
+            EXPECT_TRUE(path.back()->group_set_resources[0].hasTier(tier));
+            const auto transfers = engine->descriptors();
+            EXPECT_EQ(std::count_if(transfers.begin(),
+                                    transfers.end(),
+                                    [&](const TransferDescriptor& desc) { return desc.source_blocks == holder[0]; }),
+                      fail_main ? 2 : 1);
+            EXPECT_EQ(env.poolFor(tier).freeBlocksNum(), fail_main ? 1u : 0u);
+            EXPECT_EQ(env.storeRefCount(), 0u);
         }
     }
 }

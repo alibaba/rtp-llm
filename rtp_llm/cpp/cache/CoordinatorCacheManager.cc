@@ -1874,40 +1874,26 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
             break;
         }
     }
-    if (!keys.empty()) {
-        resident_prefix_length = block_tree_cache_->insert(keys,
-                                                           resources,
-                                                           insert_info.target_tier,
-                                                           insert_info.is_resident,
-                                                           &token_segments,
-                                                           insert_info.prefix_plan_state,
-                                                           &token_ends,
-                                                           insert_info.observation_request_id);
-    } else {
-        block_tree_cache_->observePublicationSkipped(
-            insert_info.observation_request_id, insert_info.target_tier, "no_publishable_full_prefix");
-    }
+    const bool                           on_device = insert_info.target_tier == Tier::DEVICE;
+    std::optional<BlockTreeStorer::Fork> fork_publication;
     if (fork != nullptr && fork->endpoint.pos > registration.prepared_resume_endpoint
         && fork->endpoint.pos <= completed_endpoint) {
-        CacheKeysType                              fork_keys;
-        std::vector<size_t>                        fork_ends;
-        std::vector<std::vector<int>>              fork_segments;
-        std::vector<std::vector<GroupSetResource>> fork_resources;
+        BlockTreeStorer::Fork                      publication;
         size_t                                     previous_fork_end = 0;
         bool                                       ancestors_ready   = true;
         for (size_t index = 0; index < token_ends.size() && token_ends[index] < fork->endpoint.pos; ++index) {
-            fork_keys.push_back(keys[index]);
-            fork_ends.push_back(token_ends[index]);
-            fork_segments.push_back(token_segments[index]);
-            if (insert_info.target_tier == Tier::DEVICE) {
-                fork_resources.emplace_back(group_sets.size());
+            publication.keys.push_back(keys[index]);
+            publication.token_ends.push_back(token_ends[index]);
+            publication.token_segments.push_back(token_segments[index]);
+            if (on_device) {
+                publication.resources.emplace_back(group_sets.size());
             } else {
-                fork_resources.push_back(resources[index]);
+                publication.resources.push_back(resources[index]);
             }
             previous_fork_end = token_ends[index];
         }
         const size_t required_ancestor = (fork->endpoint.pos - 1) / unit;
-        ancestors_ready                = fork_ends.size() == required_ancestor;
+        ancestors_ready                = publication.token_ends.size() == required_ancestor;
         std::vector<GroupSetResource> fork_group_resources(group_sets.size());
         for (size_t group_id = 0; group_id < group_sets.size() && ancestors_ready; ++group_id) {
             if (group_id >= fork->group_bindings.size()) {
@@ -1926,27 +1912,48 @@ void CoordinatorCacheManager::publishRegisteredSpineAndFork(const InsertInfo&   
             }
         }
         if (ancestors_ready && fork->endpoint.pos <= registration.token_ids.size()) {
-            fork_keys.push_back(fork->endpoint.key);
-            fork_ends.push_back(fork->endpoint.pos);
-            fork_segments.emplace_back(registration.token_ids.begin() + static_cast<std::ptrdiff_t>(previous_fork_end),
-                                       registration.token_ids.begin()
-                                           + static_cast<std::ptrdiff_t>(fork->endpoint.pos));
-            fork_resources.push_back(std::move(fork_group_resources));
-            block_tree_cache_->insert(fork_keys,
-                                      fork_resources,
-                                      insert_info.target_tier,
-                                      false,
-                                      &fork_segments,
-                                      nullptr,
-                                      &fork_ends,
-                                      insert_info.observation_request_id,
-                                      true);
+            publication.keys.push_back(fork->endpoint.key);
+            publication.token_ends.push_back(fork->endpoint.pos);
+            publication.token_segments.emplace_back(
+                registration.token_ids.begin() + static_cast<std::ptrdiff_t>(previous_fork_end),
+                registration.token_ids.begin() + static_cast<std::ptrdiff_t>(fork->endpoint.pos));
+            publication.resources.push_back(std::move(fork_group_resources));
+            fork_publication = std::move(publication);
         } else {
             block_tree_cache_->observePublicationSkipped(insert_info.observation_request_id,
                                                          insert_info.target_tier,
                                                          "internal_fork_missing_ancestor_or_group",
                                                          fork->endpoint.pos);
         }
+    }
+    if (!keys.empty()) {
+        resident_prefix_length =
+            block_tree_cache_->insert(keys,
+                                      resources,
+                                      insert_info.target_tier,
+                                      insert_info.is_resident,
+                                      &token_segments,
+                                      insert_info.prefix_plan_state,
+                                      &token_ends,
+                                      insert_info.observation_request_id,
+                                      false,
+                                      nullptr,
+                                      on_device ? std::nullopt : std::exchange(fork_publication, std::nullopt));
+    } else {
+        block_tree_cache_->observePublicationSkipped(
+            insert_info.observation_request_id, insert_info.target_tier, "no_publishable_full_prefix");
+    }
+    if (fork_publication) {
+        const auto& publication = *fork_publication;
+        block_tree_cache_->insert(publication.keys,
+                                  publication.resources,
+                                  insert_info.target_tier,
+                                  false,
+                                  &publication.token_segments,
+                                  nullptr,
+                                  &publication.token_ends,
+                                  insert_info.observation_request_id,
+                                  true);
     }
 }
 

@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -21,6 +22,13 @@ class BlockTreeTaskPool;
 
 class BlockTreeStorer {
 public:
+    struct Fork {
+        CacheKeysType                              keys;
+        std::vector<std::vector<GroupSetResource>> resources;
+        std::vector<std::vector<int>>              token_segments;
+        std::vector<size_t>                        token_ends;
+    };
+
     // Invoked with the shared cache mutex held.
     using SettledFn = std::function<void(bool check_watermark)>;
 
@@ -40,12 +48,13 @@ public:
                                  Tier                                              target_tier,
                                  bool                                              is_resident,
                                  size_t&                                           resident_prefix_length,
-                                 const std::vector<std::vector<int>>*              token_segments = nullptr,
+                                 const std::vector<std::vector<int>>*              token_segments    = nullptr,
                                  PrefixCachePlanState*                             prefix_plan_state = nullptr,
-                                 const std::vector<size_t>*                         token_ends = nullptr,
-                  std::optional<int64_t> observation_request_id = std::nullopt,
-                  bool internal_fork = false,
-                  bool* ready_after_insert = nullptr);
+                                 const std::vector<size_t>*                        token_ends        = nullptr,
+                                 std::optional<int64_t> observation_request_id                       = std::nullopt,
+                                 bool                   internal_fork                                = false,
+                                 bool*                  ready_after_insert                           = nullptr,
+                                 std::optional<Fork>    followup_fork                                = std::nullopt);
     void             stopAdmissionLocked();
     void observePublicationSkipped(std::optional<int64_t> request_id,
                                    Tier tier,
@@ -76,7 +85,9 @@ private:
                                            PrefixCachePlanState*                             prefix_plan_state,
                                            std::optional<int64_t>                            observation_request_id,
                                            const std::vector<size_t>*                        token_ends,
-                                           bool                                              internal_fork);
+                                           bool                                              internal_fork,
+                                           std::optional<Fork>                               followup_fork = std::nullopt);
+    void             deferForkLocked(StoreTask& task, Fork fork);
     void             runStoreTask(const StoreTaskPtr& task);
     void             scheduleStoreSettlement(const StoreTaskPtr& task,
                                              ErrorInfo            error,

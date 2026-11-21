@@ -55,6 +55,7 @@ public:
         std::optional<int64_t> observation_request_id{std::nullopt};
         ErrorInfo     error;
         TransferTask  transfer_task;
+        std::function<void()>             followup_locked;
         bool markTransferring() {
             Phase expected = Phase::CREATED;
             return phase.compare_exchange_strong(expected,
@@ -84,7 +85,9 @@ public:
 
     explicit StoreTaskRunner(const std::vector<GroupSetPtr>& group_sets);
 
-    bool prepareTask(Task& task, const std::vector<std::vector<GroupSetResource>>& resources);
+    bool prepareTask(Task&                                             task,
+                     const std::vector<std::vector<GroupSetResource>>& resources,
+                     const std::vector<TreeNode*>&                     stored_ancestors = {});
     void runTransfer(TaskPtr                        task,
                      const BlockTransferDispatcher& transfer_dispatcher,
                      BlockTreeCacheMetricsReporter& metrics_reporter,
