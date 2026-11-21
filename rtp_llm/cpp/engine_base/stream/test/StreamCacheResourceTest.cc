@@ -99,7 +99,8 @@ private:
 };
 
 std::shared_ptr<LoadAsyncContext>
-makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_tiers, bool commit = true) {
+makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_tiers, bool commit = true,
+                         size_t unit_tokens = 2) {
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
     std::vector<TransferDescriptor> descriptors;
@@ -107,10 +108,16 @@ makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_
     for (size_t path_index = 0; path_index < source_tiers.size(); ++path_index) {
         descriptors.emplace_back(
             nullptr, /*group_set_id=*/0, path_index, source_tiers[path_index], Tier::DEVICE, BlockIndicesType{1});
+        descriptors.back().token_begin = path_index * unit_tokens;
+        descriptors.back().token_end = (path_index + 1) * unit_tokens;
     }
     auto context =
         coordinator->create(std::move(descriptors), std::vector<bool>(source_tiers.size(), false), matched_blocks);
     EXPECT_TRUE(coordinator->registerContext(context));
+    const size_t ready = std::find_if(source_tiers.begin(), source_tiers.end(), [](Tier tier) {
+        return tier != Tier::DEVICE;
+    }) - source_tiers.begin();
+    context->setLocalTokenEndpoints(ready * unit_tokens, matched_blocks * unit_tokens);
     if (commit) {
         EXPECT_TRUE(context->commit());
     }
@@ -3328,6 +3335,38 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     EXPECT_EQ(stream_->deviceReuseLength(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, ExactLowerTailPublishesTwoTokensAfterAsyncCompletion) {
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        prepareResourceWithCacheConfig(test::makeSimpleMhaCacheConfig(3, 32, 128, DataType::TYPE_INT8),
+                                       std::vector<int>(1100, 1), true, RoleType::PREFILL);
+        auto& resource = stream_->streamCacheResource();
+        auto coordinator = std::make_shared<LoadContextCoordinator>(
+            [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
+        TransferDescriptor tail{nullptr, 0, 8, tier, Tier::DEVICE, {1}};
+        tail.token_begin = 1024;
+        tail.token_end = 1026;
+        auto context = coordinator->create({tail}, {false}, 9);
+        ASSERT_TRUE(coordinator->registerContext(context));
+        context->setLocalTokenEndpoints(1024, 1026);
+        auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+        cache_manager_->coordinator_manager_ = allocator;
+        EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+            .WillOnce(testing::Return(MallocResult{true, 1024, 0, context}));
+        EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        EXPECT_EQ(stream_->reuseLength(), 1024);
+        EXPECT_EQ(stream_->hostReuseLength(), 0);
+        EXPECT_EQ(stream_->diskReuseLength(), 0);
+        ASSERT_TRUE(context->completeTransfers(1, true));
+        ASSERT_TRUE(resource.loadCacheDone());
+        EXPECT_EQ(stream_->reuseLength(), 1026);
+        EXPECT_EQ(stream_->deviceReuseLength(), 1024);
+        EXPECT_EQ(stream_->hostReuseLength(), tier == Tier::HOST ? 2 : 0);
+        EXPECT_EQ(stream_->diskReuseLength(), tier == Tier::DISK ? 2 : 0);
+        EXPECT_EQ(stream_->initialReuseLength(), 1026);
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext) {
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
@@ -3354,7 +3393,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCanonicalReuseUnit) 
     auto& resource = stream_->streamCacheResource();
     EXPECT_EQ(cache_manager_->canonicalSizePerBlock(), 4);
 
-    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false);
+    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false, /*unit_tokens=*/4);
     auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
     cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))

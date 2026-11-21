@@ -668,7 +668,7 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
                                 "allocator reuse token count exceeds int range: blocks=%zu tokens=%d",
                                 total,
                                 tokens);
-        const size_t backend  = total - local;
+        const size_t backend  = load_context->backendMatchedBlocks();
         auto&        resource = batch_kv_cache_resource_->cacheResource(0);
         // A remote miss can select a pinned local short leaf after the remote
         // query started from an empty path. In that case the context's legacy
@@ -679,7 +679,10 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         resource.setMemoryReuseBlockNum(host);
         resource.setDiskReuseBlockNum(disk);
         resource.setStorageBackendReuseBlockNum(backend);
-        publishReuseLengths(static_cast<int>(exact_total), host * tokens, disk * tokens, backend * tokens);
+        publishReuseLengths(static_cast<int>(exact_total),
+                            load_context->matchedTokens(Tier::HOST, tokens),
+                            load_context->matchedTokens(Tier::DISK, tokens),
+                            load_context->matchedTokens(Tier::REMOTE, tokens));
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         stream_->setHostReuseLength(0);
         stream_->setDiskReuseLength(0);

@@ -59,6 +59,10 @@ public:
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
     size_t   matchedTokenEndpoint(size_t reuse_unit_tokens) const;
+    size_t   backendMatchedBlocks() const;
+    size_t   matchedTokens(Tier tier, size_t reuse_unit_tokens) const;
+    void     setLocalTokenEndpoints(size_t ready_endpoint, size_t target_endpoint);
+    size_t   targetTokenEndpoint(size_t reuse_unit_tokens) const;
     bool     localFallbackSelected() const {
         return local_fallback_selected_.load(std::memory_order_acquire);
     }
@@ -99,6 +103,7 @@ public:
 private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
+    void rebuildMatchedTokensByTier();
     void onBackendMatch(size_t matched_blocks_num,
                          std::shared_ptr<StorageBackendMatchMeta> match_meta,
                          bool success,
@@ -119,7 +124,11 @@ private:
     const size_t                            local_matched_blocks_{0};
     size_t                                  matched_blocks_{0};
     size_t                                  backend_matched_blocks_{0};
+    size_t                                  ready_token_endpoint_{0};
+    size_t                                  local_token_endpoint_{0};
+
     std::array<size_t, 3>                   matched_blocks_by_tier_{};
+    std::array<size_t, 3>                   matched_tokens_by_tier_{};
 
     std::shared_ptr<StorageBackend> storage_backend_;
     StorageRequest                  storage_request_;

@@ -78,8 +78,76 @@ size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
     return tier >= Tier::DEVICE && tier <= Tier::DISK ? matched_blocks_by_tier_[static_cast<size_t>(tier)] : 0;
 }
 
+void LoadAsyncContext::setLocalTokenEndpoints(size_t ready_endpoint, size_t target_endpoint) {
+    RTP_LLM_CHECK(!commit_started_ && !backend_started_ && ready_endpoint <= target_endpoint);
+    ready_token_endpoint_ = ready_endpoint;
+    local_token_endpoint_ = target_endpoint;
+    rebuildMatchedTokensByTier();
+}
+
+size_t LoadAsyncContext::targetTokenEndpoint(size_t reuse_unit_tokens) const {
+    if (localFallbackSelected()) {
+        return local_fallback_endpoint_;
+    }
+    const size_t blocks = std::max(matchedBlocks(), backend_matched_blocks_);
+    return blocks <= local_matched_blocks_ ? local_token_endpoint_ : blocks * reuse_unit_tokens;
+}
+
 size_t LoadAsyncContext::matchedTokenEndpoint(size_t reuse_unit_tokens) const {
-    return localFallbackSelected() ? local_fallback_endpoint_ : matchedBlocks() * reuse_unit_tokens;
+    if (!success()) {
+        return ready_token_endpoint_;
+    }
+    if (localFallbackSelected()) {
+        return local_fallback_endpoint_;
+    }
+    const size_t blocks = matchedBlocks();
+    return blocks <= local_matched_blocks_ ? local_token_endpoint_ : blocks * reuse_unit_tokens;
+}
+
+size_t LoadAsyncContext::matchedTokens(Tier tier, size_t reuse_unit_tokens) const {
+    if (tier == Tier::REMOTE) {
+        return success() ? backendMatchedBlocks() * reuse_unit_tokens : 0;
+    }
+    return success() && tier >= Tier::DEVICE && tier <= Tier::DISK ?
+               matched_tokens_by_tier_[static_cast<size_t>(tier)] :
+               0;
+}
+
+void LoadAsyncContext::rebuildMatchedTokensByTier() {
+    const size_t endpoint = local_token_endpoint_;
+    matched_tokens_by_tier_.fill(0);
+    struct Boundary {
+        size_t token;
+        Tier   tier;
+        int    delta;
+    };
+    std::vector<Boundary> boundaries;
+    for (const auto& desc : load_descs_) {
+        if (desc.token_end <= desc.token_begin || desc.source_tier < Tier::DEVICE || desc.source_tier > Tier::DISK) {
+            continue;
+        }
+        boundaries.push_back({std::min(desc.token_begin, endpoint), desc.source_tier, 1});
+        boundaries.push_back({std::min(desc.token_end, endpoint), desc.source_tier, -1});
+    }
+    std::sort(boundaries.begin(), boundaries.end(), [](const auto& left, const auto& right) {
+        return left.token < right.token;
+    });
+    std::array<int, 3> active{};
+    size_t             previous = 0;
+    for (const auto& boundary : boundaries) {
+        const Tier deepest = active[static_cast<size_t>(Tier::DISK)] > 0 ? Tier::DISK :
+                             active[static_cast<size_t>(Tier::HOST)] > 0 ? Tier::HOST :
+                                                                           Tier::DEVICE;
+        matched_tokens_by_tier_[static_cast<size_t>(deepest)] += boundary.token - previous;
+        active[static_cast<size_t>(boundary.tier)] += boundary.delta;
+        previous = boundary.token;
+    }
+    matched_tokens_by_tier_[static_cast<size_t>(Tier::DEVICE)] += endpoint - previous;
+}
+
+size_t LoadAsyncContext::backendMatchedBlocks() const {
+    return !localFallbackSelected() && backend_matched_blocks_ > local_matched_blocks_ ?
+               backend_matched_blocks_ - local_matched_blocks_ : 0;
 }
 
 void LoadAsyncContext::setLocalFallback(size_t token_endpoint, size_t reuse_unit_tokens) {

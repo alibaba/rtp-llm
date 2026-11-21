@@ -275,6 +275,7 @@ BlockTreeLoader::resolvePreciseReuseLocked(const ContentMatchContext&           
         }
         result.matched_device_blocks   = (endpoint + request.reuse_unit_tokens - 1) / request.reuse_unit_tokens;
         result.matched_device_endpoint = endpoint;
+        result.target_token_endpoint   = endpoint;
         result.precise_local           = true;
         result.short_leaf              = endpoint % request.reuse_unit_tokens != 0;
         evictor_.onMatchedResources(matched_nodes);
@@ -555,6 +556,8 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             TreeNode* const    source_node = source_tier == Tier::DEVICE ? nullptr : path[i];
             TransferDescriptor desc{
                 source_node, group_set_id, i, source_tier, Tier::DEVICE, resource.getBlocks(source_tier)};
+            desc.token_begin = path[i]->parent->token_end;
+            desc.token_end   = path[i]->token_end;
             const bool is_joined = resource.transfer_state == GroupSetTransferState::LOADING;
             if (!is_joined) {
                 const MultiNodeResource source_resource{group_set_id, source_tier, {{source_node, desc.source_blocks}}};
@@ -603,7 +606,9 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
             }
         }
     }
+    result.target_token_endpoint = path.empty() ? 0 : path.back()->token_end;
     if (result.async_context) {
+        result.async_context->setLocalTokenEndpoints(result.matched_device_endpoint, result.target_token_endpoint);
         result.async_context->setValidPrefix(
             [valid_prefix, groups = tree_->groupSets(), canonical = tree_->reuseUnitTokens()](size_t count) {
                 return (!valid_prefix || valid_prefix(count))

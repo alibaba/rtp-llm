@@ -562,6 +562,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&               cache
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.matched_device_endpoint               = match_result.matched_device_endpoint;
+    prepared.target_token_endpoint                 = match_result.target_token_endpoint;
     prepared.precise_local                         = match_result.precise_local;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -764,9 +765,10 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                 return LoadMatchResult{success, invocation_prepared->materialize_status};
             });
         MallocResult result{true,
-                            static_cast<int>(deferred_prepared->matched_device_blocks) * reuse_unit_tokens,
+                            static_cast<int>(deferred_prepared->matched_device_endpoint),
                             match_cost_time_us,
                             load_context};
+        result.target_reuse_len  = static_cast<int>(deferred_prepared->target_token_endpoint);
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
         result.match_observation = std::move(match_observation);
@@ -782,6 +784,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                                                  static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens,
                         match_cost_time_us,
                         load_context};
+    result.target_reuse_len  = static_cast<int>(prepared.target_token_endpoint);
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
     result.match_observation = prepared.match_observation;

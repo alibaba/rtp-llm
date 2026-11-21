@@ -248,6 +248,7 @@ protected:
         std::optional<PrefixCacheMatchObservation> match_observation;
         size_t                                     matched_device_blocks   = 0;
         size_t                                     matched_device_endpoint = 0;
+        size_t                                     target_token_endpoint   = 0;
         bool                                       precise_local           = false;
         std::shared_ptr<PinnedLocalFallback>       local_fallback;
         size_t                                     total_logical_blocks = 0;

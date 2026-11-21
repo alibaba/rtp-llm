@@ -27,6 +27,7 @@ struct BlockTreeMatchResult {
     std::optional<PrefixCacheMatchObservation>          match_observation;
     size_t                                              matched_device_blocks{0};
     size_t                                              matched_device_endpoint{0};
+    size_t                                              target_token_endpoint{0};
     bool                                                precise_local{false};
     bool                                                short_leaf{false};
     std::vector<MultiNodeResource>                      matched_device_resources;

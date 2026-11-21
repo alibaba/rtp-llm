@@ -223,6 +223,7 @@ struct MallocResult {
 
     bool         success            = false;
     int          reuse_len          = 0;
+    int          target_reuse_len   = 0;
     int64_t      match_cost_time_us = 0;
     MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 

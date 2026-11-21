@@ -300,6 +300,8 @@ struct TransferDescriptor {
     TreeNode*                 node{nullptr};
     size_t                    group_set_id{0};
     size_t                    path_index{0};
+    size_t                    token_begin{0};
+    size_t                    token_end{0};
     Tier                      source_tier{Tier::NONE};
     Tier                      target_tier{Tier::NONE};
     std::vector<BlockIdxType> source_blocks;

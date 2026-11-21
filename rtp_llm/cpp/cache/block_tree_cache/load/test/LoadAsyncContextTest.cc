@@ -918,6 +918,49 @@ TEST(LoadAsyncContextTest, FullKeyMatchKeepsLocalPrefixVisibleAndReadsOnlyRemote
     coordinator->shutdown();
 }
 
+TEST(LoadAsyncContextTest, ExactShortTailAttributionWaitsForCompletionAndDeduplicatesIntervals) {
+    for (const Tier lower : {Tier::HOST, Tier::DISK}) {
+        size_t commits = 0;
+        size_t aborts = 0;
+        auto coordinator = makeCoordinator(commits, aborts);
+        TransferDescriptor tail{nullptr, 0, 8, lower, Tier::DEVICE, {1}};
+        tail.token_begin = 1024;
+        tail.token_end = 1026;
+        TransferDescriptor overlap = tail;
+        overlap.group_set_id = 1;
+        overlap.source_tier = Tier::HOST;
+        auto context = coordinator->create({tail, overlap}, {false, false}, 9);
+        ASSERT_TRUE(coordinator->registerContext(context));
+        context->setLocalTokenEndpoints(1024, 1026);
+        ASSERT_TRUE(context->commit());
+        EXPECT_EQ(context->targetTokenEndpoint(128), 1026u);
+        EXPECT_EQ(context->matchedTokenEndpoint(128), 1024u);
+        EXPECT_EQ(context->matchedTokens(lower, 128), 0u);
+        ASSERT_TRUE(context->completeTransfers(2, true));
+        ASSERT_TRUE(context->success());
+        EXPECT_EQ(context->matchedTokenEndpoint(128), 1026u);
+        EXPECT_EQ(context->matchedTokens(lower, 128), 2u);
+        EXPECT_EQ(context->matchedTokens(Tier::DEVICE, 128), 1024u);
+        EXPECT_EQ(context->matchedBlocks(lower), 1u);
+        coordinator->shutdown();
+    }
+}
+
+TEST(LoadAsyncContextTest, FailedShortTailDoesNotPublishTargetEndpoint) {
+    size_t commits = 0;
+    size_t aborts = 0;
+    auto coordinator = makeCoordinator(commits, aborts);
+    auto context = coordinator->create({{nullptr, 0, 8, Tier::HOST, Tier::DEVICE, {1}}}, {false}, 9);
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setLocalTokenEndpoints(1024, 1026);
+    ASSERT_TRUE(context->commit());
+    ASSERT_TRUE(context->completeTransfers(1, false));
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->matchedTokenEndpoint(128), 1024u);
+    EXPECT_EQ(context->matchedTokens(Tier::HOST, 128), 0u);
+    coordinator->shutdown();
+}
+
 TEST(LoadAsyncContextTest, RemoteMissSelectsExactLocalEndpointWithoutRemoteRead) {
     size_t commits     = 0;
     size_t aborts      = 0;
