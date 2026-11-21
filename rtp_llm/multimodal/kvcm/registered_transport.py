@@ -158,6 +158,7 @@ class RegisteredObjectTransport:
         self._owner = owner
         self._buffer = buffer
         self._extent = extent
+        self._native_ticket = 0
         self._capacity = buffer.numel() if extent is None else extent[1]
         self._device = device
         self._observe_stage = observe_stage
@@ -264,6 +265,7 @@ class RegisteredObjectTransport:
         # Legacy SDKs and unclassified CUDA/native exceptions remain unsafe.
         if context.get("stage") != "sdk_transfer":
             self.device_failed = True
+            self._owner._mark_device_failure()
         elif self.is_transfer_quiescent(error):
             return
         self._quarantine(error, **context)
@@ -517,7 +519,11 @@ class RegisteredTransportPool:
         self._pending_gc_success = []
         self._arena_bytes = arena_bytes
         self._min_block_bytes = min_block_bytes
+        self._sized = arena_bytes is not None or min_block_bytes is not None
         self._free_ranges = None
+        self._native_arena = None
+        self._native_device_failed = False
+        self._native_quarantined_bytes = 0
         self._idle_streams = []
         self._create_slots(factory, slots, max_object_bytes, device, observe_stage)
         self.instance_id = self._client.instance_id
@@ -538,7 +544,7 @@ class RegisteredTransportPool:
         # when the configured maximum object size is not a multiple of 64.
         stride = (capacity + 63) // 64 * 64 if self.direct_payload else capacity
         capacity_bytes = slots * stride
-        if self._arena_bytes is not None or self._min_block_bytes is not None:
+        if self._sized:
             block = (
                 self._min_block_bytes
                 if self._min_block_bytes is not None
@@ -572,11 +578,19 @@ class RegisteredTransportPool:
                 raise ValueError(
                     "GDR arena must be block-aligned and fit the largest object"
                 )
-            self._free_ranges = [(self._GUARD_BYTES, capacity_bytes)]
             # Leave a contiguous range for a maximum-sized read when the arena
             # has capacity for at least one maximum-sized read and write.
             reserve = max_extent if capacity_bytes >= 2 * max_extent else 0
             self._write_end = self._GUARD_BYTES + capacity_bytes - reserve
+            if os.environ.get("MM_EMB_NATIVE_GDR_ARENA") == "1":
+                from librtp_compute_ops import EmbRegisteredArena
+
+                self._native_capacity = capacity_bytes
+                self._native_arena = EmbRegisteredArena(
+                    self._GUARD_BYTES, capacity_bytes, block, self._write_end
+                )
+            else:
+                self._free_ranges = [(self._GUARD_BYTES, capacity_bytes)]
         with cuda_graph_gate.operation(), RegisteredObjectTransport._quarantine_lock:
             held = RegisteredObjectTransport._quarantined_transports
             if held:
@@ -604,7 +618,7 @@ class RegisteredTransportPool:
                         device,
                         observe_stage,
                     )
-                    for i in range(slots if self._free_ranges is None else 0)
+                    for i in range(0 if self._sized else slots)
                 ]
                 try:
                     # Register the allocation root exactly once. IO passes only
@@ -616,7 +630,7 @@ class RegisteredTransportPool:
                     raise
 
     def _quarantine_registration(self, error, stage):
-        if self._free_ranges is not None:
+        if self._sized:
             # Registration failure can affect the entire MR, including free space.
             self._slots.append(
                 RegisteredObjectTransport(
@@ -655,6 +669,12 @@ class RegisteredTransportPool:
                 elapsed = 0
 
     def _report_arena(self):
+        if self._native_arena is not None:
+            arena = self._arena
+            if arena is not None:
+                free, largest = self._native_arena.free_space()
+                self._observe_arena(arena.numel() - self._GUARD_BYTES, free, largest)
+            return
         with self._condition:
             if self._arena is None:
                 return
@@ -693,12 +713,22 @@ class RegisteredTransportPool:
 
     @property
     def quarantined(self):
+        if self._native_arena is not None:
+            return (
+                self._native_device_failed
+                or self._native_quarantined_bytes >= self._native_capacity
+            )
         return any(slot.device_failed is True for slot in self._slots) or (
             not self._free_ranges and all(slot.quarantined for slot in self._slots)
         )
 
+    def _mark_device_failure(self):
+        if self._native_arena is not None:
+            self._native_device_failed = True
+            self._native_arena.fail_device()
+
     def object_size(self, key, **kwargs):
-        if self._free_ranges is not None:
+        if self._sized:
             client = self._client
             return None if client is None else client.object_size(key, **kwargs)
         for slot in self._slots:
@@ -761,9 +791,76 @@ class RegisteredTransportPool:
             self._idle_streams.append(slot._stream)
         slot._buffer = slot._stream = None
 
+    def _acquire_native(self, nbytes, for_write, wait_seconds, deadline, sample):
+        arena = self._native_arena
+        root = self._arena
+        if root is None:
+            self._report_acquire_failure(for_write, "closed")
+            return None
+        timeout_ns = max(1, int(wait_seconds * 1e9)) if wait_seconds else 0
+        result, ticket, offset, capacity, held_ns, view = arena.acquire(
+            root, nbytes, for_write, timeout_ns, sample
+        )
+        if not ticket:
+            if sample and held_ns:
+                self._observe_lock_hold(for_write, "acquire", held_ns)
+            self._report_acquire_failure(for_write, result.name)
+            return None
+
+        published = False
+        try:
+            slot = RegisteredObjectTransport(
+                self,
+                view,
+                self._device,
+                self._observe_stage,
+                lazy_stream=True,
+                extent=(offset, capacity),
+            )
+            slot._native_ticket = ticket
+            with self._condition:
+                if not self._accepting:
+                    failure = "closed"
+                elif self.quarantined:
+                    failure = "quarantined"
+                elif wait_seconds and time.monotonic() >= deadline:
+                    failure = "python_bookkeeping_deadline"
+                else:
+                    if self._idle_streams:
+                        slot._stream = self._idle_streams.pop()
+                    self._in_use[slot] = for_write
+                    try:
+                        self._slots.append(slot)
+                    except BaseException:
+                        del self._in_use[slot]
+                        raise
+                    published = True
+        finally:
+            if not published:
+                arena.release(ticket, offset, True, False)
+
+        if sample:
+            self._observe_lock_hold(for_write, "acquire", held_ns)
+        if not published:
+            self._report_acquire_failure(for_write, failure)
+            return None
+        if self._observe_lease is not None:
+            self._observe_lease(for_write, 1, capacity)
+        return slot
+
+    def _materialize_slot(self, slot):
+        # The active lease keeps the arena and this extent alive during view creation.
+        offset, capacity = slot._extent
+        try:
+            slot._buffer = self._arena.narrow(0, offset, capacity)
+        except BaseException:
+            self.release(slot)
+            raise
+        return slot
+
     def acquire(self, *, nbytes=None, for_write=False, timeout=0):
         """Lease a transfer buffer, optionally waiting up to timeout seconds."""
-        sized = self._free_ranges is not None
+        sized = self._sized
         if sized and (
             type(nbytes) is not int or not 0 < nbytes <= self._max_object_bytes
         ):
@@ -774,6 +871,8 @@ class RegisteredTransportPool:
         sample = (
             self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
         )
+        if self._native_arena is not None:
+            return self._acquire_native(nbytes, for_write, wait_seconds, deadline, sample)
         if not self._condition.acquire(timeout=wait_seconds):
             self._report_acquire_failure(for_write, "lock_timeout")
             return None
@@ -835,22 +934,15 @@ class RegisteredTransportPool:
             return None
         if self._observe_lease is not None:
             self._observe_lease(for_write, 1, slot._capacity)
-        if sized:
-            # The in-use entry keeps the arena and this extent alive until
-            # release. PyTorch dispatcher work need not hold the pool lock.
-            offset, capacity = slot._extent
-            try:
-                slot._buffer = self._arena.narrow(0, offset, capacity)
-            except BaseException:
-                self.release(slot)
-                raise
-        return slot
+        return self._materialize_slot(slot) if sized else slot
 
     def _report_acquire_failure(self, for_write, reason):
         if self._observe_acquire_failure is not None:
             self._observe_acquire_failure(for_write, reason)
 
     def stop_acquiring(self):
+        if self._native_arena is not None:
+            self._native_arena.stop()
         with self._condition:
             self._accepting = False
             self._condition.notify_all()
@@ -863,7 +955,17 @@ class RegisteredTransportPool:
         with self._condition:
             held_since = time.perf_counter_ns() if sample else 0
             for_write = self._in_use.pop(slot)
-            if self._free_ranges is not None and not slot.quarantined:
+            reusable = not slot.quarantined
+            if slot._native_ticket:
+                if reusable:
+                    self._slots.remove(slot)
+                    if slot._stream is not None:
+                        self._idle_streams.append(slot._stream)
+                    retired_view = slot._buffer
+                    slot._buffer = slot._stream = None
+                else:
+                    self._native_quarantined_bytes += slot._capacity
+            elif self._free_ranges is not None and reusable:
                 # Keep the view alive until the extent and stream have been
                 # returned so PyTorch teardown runs outside the arena lock.
                 retired_view = slot._buffer
@@ -871,6 +973,10 @@ class RegisteredTransportPool:
             self._condition.notify_all()
             held_ns = time.perf_counter_ns() - held_since if sample else 0
         del retired_view
+        if slot._native_ticket:
+            held_ns = self._native_arena.release(
+                slot._native_ticket, slot._extent[0], reusable, sample
+            )
         if sample:
             self._observe_lock_hold(for_write, "release", held_ns)
         if self._observe_lease is not None:
@@ -878,6 +984,8 @@ class RegisteredTransportPool:
 
     def close(self):
         self.stop_acquiring()
+        if self._native_arena is not None:
+            self._native_arena.wait_drained()
         with self._condition:
             self._condition.wait_for(lambda: not self._in_use)
             if not self._closed:

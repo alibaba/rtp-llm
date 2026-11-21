@@ -91,6 +91,7 @@ cc_library(
         "ComputeInit.cc",
     ],
     hdrs = [
+        "EmbRegisteredArena.h",
         "EmbTensorCodec.h",
         "EmbTensorObjectPlan.h",
     ],

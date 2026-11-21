@@ -1,5 +1,6 @@
 import ctypes
 import json
+import os
 import threading
 import time
 import unittest
@@ -284,6 +285,12 @@ class RegisteredTransportFailureTest(unittest.TestCase):
     def transport(self):
         return self.pool()._slots[0]
 
+    def assert_single_free_range(self, pool, start, size):
+        if pool._native_arena is None:
+            self.assertEqual(pool._free_ranges, [(start, size)])
+        else:
+            self.assertEqual(pool._native_arena.free_space(), (size, size))
+
     def test_one_client_registers_root_and_transfers_disjoint_slices_concurrently(self):
         factory = Mock()
         pool = self.pool(slots=3, factory=factory)
@@ -413,6 +420,8 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             arena_bytes=256,
             min_block_bytes=64,
         )
+        if pool._native_arena is not None:
+            self.skipTest("native view construction is covered by the ticket tests")
         view_started, resume_view = threading.Event(), threading.Event()
         narrow = pool._arena.narrow
 
@@ -441,8 +450,87 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                     resume_view.set()
                 with self.assertRaisesRegex(RuntimeError, "cannot materialize"):
                     first.result(timeout=1)
-        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 256)])
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
         self.assertFalse(pool._in_use)
+
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE_GDR_ARENA") == "1", "native sized arena"
+    )
+    def test_native_pending_ticket_blocks_close_without_blocking_other_leases(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        client = pool._client
+        started = threading.Event()
+        resume = threading.Event()
+        stopped = threading.Event()
+        make_slot = RegisteredObjectTransport
+        stop = pool.stop_acquiring
+
+        def delayed_slot(*args, **kwargs):
+            if kwargs["extent"][0] == pool._GUARD_BYTES:
+                started.set()
+                self.assertTrue(resume.wait(3))
+            return make_slot(*args, **kwargs)
+
+        def stopping():
+            stop()
+            stopped.set()
+
+        with patch(
+            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
+            side_effect=delayed_slot,
+        ), patch.object(pool, "stop_acquiring", side_effect=stopping):
+            with ThreadPoolExecutor(2) as workers:
+                first = workers.submit(pool.acquire, nbytes=64)
+                try:
+                    self.assertTrue(started.wait(1))
+                    second = workers.submit(pool.acquire, nbytes=64, timeout=0.025)
+                    slot = second.result(timeout=1)
+                    self.assertIsNotNone(slot)
+                    try:
+                        self.assertEqual(
+                            slot._buffer.storage_offset(), pool._GUARD_BYTES + 64
+                        )
+                    finally:
+                        pool.release(slot)
+                    closing = workers.submit(pool.close)
+                    self.assertTrue(stopped.wait(1))
+                    self.assertFalse(closing.done())
+                    client.close.assert_not_called()
+                finally:
+                    resume.set()
+                self.assertIsNone(first.result(timeout=1))
+                closing.result(timeout=1)
+        client.close.assert_called_once()
+
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE_GDR_ARENA") == "1", "native sized arena"
+    )
+    def test_native_invalid_view_and_stale_ticket_do_not_consume_extents(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        arena = pool._native_arena
+        with self.assertRaises(RuntimeError):
+            arena.acquire(torch.empty(1, dtype=torch.uint8), 64, False, 0, False)
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
+        original = pool.acquire(nbytes=64)
+        pool.release(original)
+        replacement = pool.acquire(nbytes=64)
+        try:
+            self.assertEqual(original._extent, replacement._extent)
+            with self.assertRaisesRegex(ValueError, "stale"):
+                arena.release(original._native_ticket, original._extent[0], True, False)
+        finally:
+            pool.release(replacement)
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
 
     def test_sized_release_destroys_its_view_outside_the_allocator_lock(self):
         pool = self.pool(
@@ -462,7 +550,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         pool.release(slot)
         self.assertIsNone(slot._buffer)
         self.assertEqual(destroyed_under_lock, [False])
-        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 256)])
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
 
     def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
         pool = self.pool(
@@ -499,7 +587,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             pool.release(merged)
         finally:
             pool.release(reader)
-        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 512)])
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 512)
         with self.assertRaises(ValueError):
             pool.acquire(nbytes=257)
 
@@ -537,7 +625,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         for (_, end), (start, _) in zip(ranges, ranges[1:]):
             self.assertLessEqual(end, start)
         factory.assert_called_once_with(gpu_tensors=(pool._arena,))
-        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 512)])
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 512)
 
     def test_slow_lease_metrics_do_not_block_another_lease(self):
         for delayed_delta in (1, -1):
@@ -599,7 +687,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 )
         finally:
             pool.release(safe)
-        self.assertEqual(pool._free_ranges, [(start + 64, 192)])
+        self.assert_single_free_range(pool, start + 64, 192)
         pool.close()
         client.close.assert_not_called()
 
