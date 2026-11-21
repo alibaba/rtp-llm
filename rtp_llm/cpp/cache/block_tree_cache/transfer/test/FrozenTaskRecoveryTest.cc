@@ -62,7 +62,6 @@ TEST(FrozenTaskRecoveryTest, StopDuringQueryWaitsForExitAndDiscardsSafeReleasePe
     auto released = release->get_future().share();
     auto calls = std::make_shared<std::atomic<size_t>>(0);
     auto recovery = std::make_shared<FrozenTaskRecovery>(coordinator,
-        [task] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
         [entered, released, calls](const auto& execution, const auto&, int) {
             ++*calls;
             entered->set_value();

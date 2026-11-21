@@ -72,7 +72,7 @@ TEST(TransferCompletionQueryTest, RecoveryRequiresEvidenceForTheOriginalTraceAnd
         TransferResult failure(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "lost read reply"), CacheCopyError::RPC_FAILED);
         coordinator.freezeTargetBlocksWithTraceIDAndStillIOWorkerID({key, {true, addresses.size()}, failure}, {}, {0, 1});
         auto task = coordinator.frozenTasks().front();
-        FrozenTaskRecovery recovery(coordinator, [&] { return coordinator.frozenTasks(); },
+        FrozenTaskRecovery recovery(coordinator,
             [&](const auto& original, const auto& pending_workers, int timeout) {
                 TransferCompletionIdentity identity;
                 identity.trace_id = original.trace_id;

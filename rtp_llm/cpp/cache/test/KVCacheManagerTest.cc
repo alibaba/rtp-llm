@@ -2322,19 +2322,22 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
         EXPECT_EQ(registry.size(), 0u);
     };
     ASSERT_NO_FATAL_FAILURE(check_cleanup(1001));
+    const TransferResult failure(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O pending"));
+    reclaimer.coordinator_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(
+        {uint64_t{1003}, {false, 1}, failure}, {}, {0});
     std::promise<void> entered;
     auto entered_future = entered.get_future();
     std::promise<void> release;
     auto released = release.get_future();
     std::atomic<bool> first{true};
     reclaimer.frozen_task_recovery_ = std::make_unique<FrozenTaskRecovery>(
-        *reclaimer.coordinator_, [&] {
+        *reclaimer.coordinator_, [&](const auto& execution, const auto& pending, int timeout) {
             if (first.exchange(false)) {
                 entered.set_value();
                 released.wait_for(std::chrono::seconds(5));
             }
-            return std::vector<std::shared_ptr<FrozenTask>>{};
-        }, FrozenTaskRecovery::Query{});
+            return reclaimer.queryTransferCompletion(execution, pending, timeout);
+        });
     ASSERT_TRUE(reclaimer.frozen_task_recovery_->start(1000, 1000));
     block_tree_cache_detail::ScopeRollback stop([&] {
         release.set_value();

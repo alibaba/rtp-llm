@@ -62,7 +62,6 @@ bool BlockTreeReclaimer::startFrozenTaskRecovery() {
     if (rank_ != 0 || interval_ms_ == 0 || frozen_task_recovery_)
         return true;
     auto recovery = std::make_unique<FrozenTaskRecovery>(*coordinator_,
-        [this] { return frozenTasks(); },
         [this](const auto& execution, const auto& pending, int timeout) { return queryTransferCompletion(execution, pending, timeout); },
         FrozenTaskRecovery::Cleanup{},
         [this](const auto& execution, bool forced) { tree_.reportUnfreezeMetrics(execution, forced); },

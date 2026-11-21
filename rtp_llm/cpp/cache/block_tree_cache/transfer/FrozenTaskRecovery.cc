@@ -85,9 +85,9 @@ void logReleased(const FrozenTask& task, bool forced) noexcept {
 
 }  // namespace
 
-FrozenTaskRecovery::FrozenTaskRecovery(FrozenTaskReclaimer& coordinator, TaskSource source, Query query, Cleanup cleanup, OnReleased on_released,
-                                     int force_release_timeout_ms):
-    coordinator_(coordinator), source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)),
+FrozenTaskRecovery::FrozenTaskRecovery(FrozenTaskReclaimer& coordinator, Query query, Cleanup cleanup, OnReleased on_released,
+                                       int force_release_timeout_ms):
+    coordinator_(coordinator), query_(std::move(query)), cleanup_(std::move(cleanup)),
     on_released_(std::move(on_released)),
     force_release_timeout_us_(static_cast<int64_t>(force_release_timeout_ms) * 1000) {
     if (force_release_timeout_ms < 0) {
@@ -186,7 +186,7 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
     }
     std::vector<std::shared_ptr<FrozenTask>> tasks;
     try {
-        tasks = source_();
+        tasks = coordinator_.frozenTasks();
     } catch (...) {
         summary.source_failed = true;
         logPending(summary);

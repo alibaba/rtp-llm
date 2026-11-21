@@ -20,7 +20,6 @@ namespace rtp_llm {
 // cleanup phase. Neither phase changes the original business failure.
 class FrozenTaskRecovery {
 public:
-    using TaskSource = std::function<std::vector<std::shared_ptr<FrozenTask>>()>;
     using Query = std::function<TransferCompletionQueryResult(const FrozenTask::ExecutionInfo&, const std::vector<size_t>&, int)>;
     using Cleanup = std::function<TransferCompletionCleanup::Summary(int, const std::function<bool()>&)>;
     using OnReleased = std::function<void(const FrozenTask::ExecutionInfo&, bool)>;
@@ -38,7 +37,7 @@ public:
         bool   cleanup_failed{false};
     };
 
-    FrozenTaskRecovery(FrozenTaskReclaimer& coordinator, TaskSource source, Query query, Cleanup cleanup = {}, OnReleased on_released = {},
+    FrozenTaskRecovery(FrozenTaskReclaimer& coordinator, Query query, Cleanup cleanup = {}, OnReleased on_released = {},
                        int force_release_timeout_ms = 300000);
     ~FrozenTaskRecovery();
 
@@ -60,7 +59,6 @@ private:
     void logPending(const Summary& summary) noexcept;
 
     FrozenTaskReclaimer& coordinator_;
-    TaskSource source_;
     Query      query_;
     Cleanup    cleanup_;
     OnReleased on_released_;
