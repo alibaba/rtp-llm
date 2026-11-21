@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 
 namespace rtp_llm {
 namespace transfer {
@@ -153,6 +154,7 @@ bool RdmaKVCacheSender::setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo*
         return false;
     }
 
+    block_info.indexer_layout.toWire(block_buffer_info);
     block_buffer_info->set_len(static_cast<uint32_t>(block_info.size_bytes));
     auto* rdma_info = block_buffer_info->mutable_rdma_info();
     rdma_info->set_addr(remote_buffer->addr);
@@ -166,7 +168,8 @@ bool RdmaKVCacheSender::setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo*
 
 std::shared_ptr<::rdma_transfer::RdmaLayerBlockTransferRequest>
 RdmaKVCacheSender::makeTransferRequest(const transfer::SendRequest&                           request,
-                                       const std::shared_ptr<TransferClientMetricsCollector>& collector) {
+                                       const std::shared_ptr<TransferClientMetricsCollector>& collector,
+                                       std::vector<std::shared_ptr<void>>&                    transfer_owners) {
     auto transfer_request = std::make_shared<::rdma_transfer::RdmaLayerBlockTransferRequest>();
     transfer_request->set_unique_key(request.unique_key);
 
@@ -185,7 +188,22 @@ RdmaKVCacheSender::makeTransferRequest(const transfer::SendRequest&             
         auto        cache_key_block_info = transfer_request->add_blocks();
         cache_key_block_info->set_key(kbi.cache_key);
 
-        for (const auto& block : kbi.blocks) {
+        for (const auto& source : kbi.blocks) {
+            auto block = source;
+            if (!request.supports_indexer_layout && source.indexer_layout.format == IndexerScaleFormat::UE8M0) {
+                auto copy =
+                    legacyIndexerTransfer(source, std::max<uint64_t>(1, rdma_memory_manager_->minRegistrationSize()));
+                auto registration       = copy.block;
+                registration.size_bytes = copy.allocation_bytes;
+                if (!rdma_memory_manager_->regUserMr(registration, copy.allocation_bytes))
+                    return nullptr;
+                auto owner = std::shared_ptr<void>(
+                    copy.block.addr, [storage = copy.owner, manager = rdma_memory_manager_, registration](void*) {
+                        manager->deregUserMr(registration);
+                    });
+                transfer_owners.push_back(std::move(owner));
+                block = copy.block;
+            }
             if (block.addr == nullptr || block.size_bytes == 0) {
                 continue;
             }
@@ -258,12 +276,26 @@ void RdmaKVCacheSender::send(const transfer::SendRequest&                       
         callback(error_code, error_msg);
     };
 
-    auto transfer_request = makeTransferRequest(request, collector);
+    std::vector<std::shared_ptr<void>>                              transfer_owners;
+    std::shared_ptr<::rdma_transfer::RdmaLayerBlockTransferRequest> transfer_request;
+    try {
+        transfer_request = makeTransferRequest(request, collector, transfer_owners);
+    } catch (const std::exception& e) {
+        callback2(TransferErrorCode::BUILD_REQUEST_FAILED, e.what());
+        return;
+    }
     if (!transfer_request) {
         callback2(TransferErrorCode::BUILD_REQUEST_FAILED, "make rdma transfer request failed");
         return;
     }
-    loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms);
+    loadToRemote(
+        request.ip,
+        request.port,
+        transfer_request,
+        [callback2, transfer_owners = std::move(transfer_owners)](TransferErrorCode code, const std::string& error) {
+            callback2(code, error);
+        },
+        request.deadline_ms);
 }
 
 }  // namespace barex_rdma

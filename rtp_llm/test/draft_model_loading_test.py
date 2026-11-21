@@ -58,6 +58,7 @@ class DraftModelLoadingTest(unittest.TestCase):
                     prefill_chunk_size=0,
                 )
                 model = SimpleNamespace(
+                    model_type="test_target",
                     num_layers=12,
                     max_seq_len=128,
                     model_name="target",

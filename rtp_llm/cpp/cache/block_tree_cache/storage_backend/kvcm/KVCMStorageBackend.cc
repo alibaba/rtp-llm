@@ -473,6 +473,12 @@ private:
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
                  + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
+        for (const auto& group : cache_config_.topology().groups()) {
+            if (group.spec->indexer_scale_format != IndexerScaleFormat::NONE) {
+                extra += "/indexer:" + group.tag + ":"
+                         + std::to_string(static_cast<uint32_t>(group.spec->indexer_scale_format));
+            }
+        }
         std::string draft_info;
         if (!cache_config_.mtp_sub_configs.empty()) {
             draft_info = '{' + sp_config_.to_string() + '}';

@@ -20,6 +20,9 @@ public:
     ~RdmaMemoryManager();
 
 public:
+    uint64_t minRegistrationSize() const override {
+        return min_reg_mem_size_;
+    }
     bool regUserMr(const BlockInfo& block_info, uint64_t aligned_size = 0) override;
     bool deregUserMr(const BlockInfo& block_info) override;
     std::shared_ptr<RemoteBuffer> findMemoryMr(const BlockInfo& block_info) override;

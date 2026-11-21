@@ -8,8 +8,12 @@ mysql-connector-python
 flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
+# MiniMax M3.1 CP Prefill FMHA; universal Python/JIT source wheel.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl
+quack-kernels==0.4.1
+
 # Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
-deep-gemm==2.8.1+057ca59
+deep-gemm==2.8.2+522942a.cu132
 flash-mla==1.0.0+2e5429f
 # Preserve existing model KV formats through a separate namespace.
 flash-mla-legacy==1.0.0+92fd68b.rtp1
@@ -37,5 +41,5 @@ av==16.1.0
 
 fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_aarch64.whl
 
-nvidia-cutlass-dsl==4.5.0
-nvidia-cutlass-dsl-libs-base==4.5.0
+nvidia-cutlass-dsl==4.5.3
+nvidia-cutlass-dsl-libs-base==4.5.3

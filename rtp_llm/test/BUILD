@@ -86,6 +86,12 @@ py_test(
 )
 
 py_test(
+    name = "minimax_m31_renderer_test",
+    srcs = ["minimax_m31_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "deepseekv4_renderer_test",
     srcs = [
         "deepseekv4_renderer_test.py",

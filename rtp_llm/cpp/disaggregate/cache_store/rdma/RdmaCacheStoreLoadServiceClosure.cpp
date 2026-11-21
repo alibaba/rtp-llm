@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 
 namespace rtp_llm {
 
@@ -55,6 +56,32 @@ void RdmaCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
+    try {
+        std::unordered_map<std::string, const BlockBufferInfo*> descriptors;
+        for (const auto& info : response_->blocks()) {
+            if (!descriptors.emplace(info.key(), &info).second) {
+                throw std::runtime_error("duplicate indexer block metadata");
+            }
+        }
+        std::vector<IndexerScaleConversion> conversions;
+        for (const auto& [key, block] : request_block_buffer_->getBlocks()) {
+            const auto it = descriptors.find(key);
+            if (it == descriptors.end()) {
+                conversions.push_back({block->blockInfo(), {}});
+                continue;
+            }
+            if (it->second->len() != block->len) {
+                throw std::runtime_error("missing or invalid indexer block metadata");
+            }
+            conversions.push_back({block->blockInfo(), IndexerCacheLayout::fromWire(*it->second)});
+        }
+        convertIndexerCacheScales(conversions);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("indexer cache conversion failed: %s", e.what());
+        recycleRdmaConnection(false);
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
+    }
     recycleRdmaConnection(true);
     end(true, CacheStoreErrorCode::None);
 }

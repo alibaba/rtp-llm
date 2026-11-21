@@ -36,6 +36,7 @@ struct P2PWorkerRoutePlan {
     std::vector<P2PWorkerRoute> routes;
     /// 计划摘要，进入传输 key。两侧 plan 分歧时 key 不匹配 ⇒ 退化为 recv 超时而非拷错字节。
     uint64_t plan_digest = 0;
+    bool     supports_indexer_layout = false;
 
     bool empty() const {
         return routes.empty();

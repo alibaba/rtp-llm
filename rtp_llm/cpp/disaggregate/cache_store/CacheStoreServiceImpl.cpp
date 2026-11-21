@@ -123,6 +123,7 @@ void CacheStoreServiceImpl::blockRead(::google::protobuf::RpcController* control
                                       ::BlockReadResponse*               response,
                                       ::google::protobuf::Closure*       done) {
     RTP_LLM_PROFILE_FUNCTION();
+    response->set_supports_indexer_layout(true);
     blockReadImpl(controller, request, response, done);
 }
 

@@ -19,6 +19,7 @@ cc_library(
     hdrs = ["TcpTaskContext.h"],
     srcs = ["TcpTaskContext.cc"],
     deps = [
+        "//rtp_llm/cpp/cache:indexer_cache_scale",
         ":cuda_copy_util",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_metric",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -55,6 +56,7 @@ cc_library(
         "TcpKVCacheReceiver.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:indexer_cache_scale",
         ":cuda_copy_util",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_metric",
         ":tcp_transfer_service",

@@ -19,6 +19,7 @@ CacheLoadRequest* Messager::makeLoadRequest(const std::shared_ptr<LoadRequest>& 
 
     for (auto& [key, block] : blocks) {
         auto block_msg = load_request->add_blocks();
+        block->indexer_layout.toWire(block_msg);
         block_msg->set_key(block->key);
         block_msg->set_len(block->len);
     }
@@ -26,6 +27,10 @@ CacheLoadRequest* Messager::makeLoadRequest(const std::shared_ptr<LoadRequest>& 
 }
 
 void Messager::transfer(const std::shared_ptr<TransferRequest>& request) {
+    transferWithLayout(request, false);
+}
+
+void Messager::transferWithLayout(const std::shared_ptr<TransferRequest>& request, bool legacy_peer) {
     RTP_LLM_LOG_DEBUG("transfer engine start to transfer, ip %s:%u", request->ip.c_str(), request->port);
 
     auto channel = tcp_client_->getChannel(request->ip, request->port);
@@ -38,7 +43,13 @@ void Messager::transfer(const std::shared_ptr<TransferRequest>& request) {
         return;
     }
 
-    auto transfer_request = makeTransferRequest(request);
+    std::vector<std::shared_ptr<BlockBuffer>> transfer_owners;
+    CacheTransferRequest*                     transfer_request = nullptr;
+    try {
+        transfer_request = makeTransferRequest(request, legacy_peer, &transfer_owners);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("legacy indexer transfer preparation failed: %s", e.what());
+    }
     if (transfer_request == nullptr) {
         RTP_LLM_LOG_WARNING("messager client generate read request failed, request %s", request->request_id.c_str());
         request->callback(false, CacheStoreErrorCode::LoadSendRequestFailed, request->buffer_pairs);
@@ -48,15 +59,18 @@ void Messager::transfer(const std::shared_ptr<TransferRequest>& request) {
     auto                     transfer_response = new CacheTransferResponse;
     arpc::ANetRPCController* controller        = new arpc::ANetRPCController();
     controller->SetExpireTime(request->timeout_ms);
-    auto closure = new CacheTransferServiceClosure(request, transfer_request, transfer_response, controller);
+    auto closure = new CacheTransferServiceClosure(
+        request, transfer_request, transfer_response, controller, std::move(transfer_owners));
 
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                   ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request, transfer_response, closure);
 }
 
-CacheTransferRequest* Messager::makeTransferRequest(const std::shared_ptr<TransferRequest>& request) {
-    auto transfer_request = new CacheTransferRequest;
+CacheTransferRequest* Messager::makeTransferRequest(const std::shared_ptr<TransferRequest>&    request,
+                                                    bool                                       legacy_peer,
+                                                    std::vector<std::shared_ptr<BlockBuffer>>* transfer_owners) {
+    auto transfer_request = std::make_unique<CacheTransferRequest>();
 
     auto transfer_info = transfer_request->mutable_transfer_info();
 
@@ -74,13 +88,15 @@ CacheTransferRequest* Messager::makeTransferRequest(const std::shared_ptr<Transf
             RTP_LLM_LOG_WARNING("messager client find user buffer failed or len not match, local key %s, len %d",
                                 local_key.c_str(),
                                 block_buffer->len);
-            delete transfer_request;
             return nullptr;
         }
 
+        if (legacy_peer && block_buffer->indexer_layout.format == IndexerScaleFormat::UE8M0) {
+            block_buffer = legacyIndexerBlock(block_buffer, memory_util_);
+            transfer_owners->push_back(block_buffer);
+        }
         auto block_info = transfer_request->add_blocks();
         if (!generateBlockInfo(block_info, block_buffer, request->local_partition_count, request->local_partition_id)) {
-            delete transfer_request;
             return nullptr;
         }
     }
@@ -90,7 +106,7 @@ CacheTransferRequest* Messager::makeTransferRequest(const std::shared_ptr<Transf
     transfer_request->set_client_port(init_params_.server_port);
     transfer_request->set_rdma_client_port(init_params_.rdma_server_port);
     transfer_request->set_timeout_ms(request->timeout_ms - 10);
-    return transfer_request;
+    return transfer_request.release();
 }
 
 }  // namespace rtp_llm

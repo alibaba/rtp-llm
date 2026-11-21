@@ -180,7 +180,12 @@ bool RdmaTaskContext::startTransfer() {
         return false;
     }
     transfer_started_ = task_->startTransfer();
-    return transfer_started_;
+    if (!transfer_started_)
+        return false;
+    if (!needs_cache_write_guard_)
+        return true;
+    cache_write_acquired_ = task_->beginCacheWrite(converting_cache_, static_cast<int64_t>(getDeadlineMs()));
+    return cache_write_acquired_;
 }
 
 std::string RdmaTaskContext::getUniqueKey() const {
@@ -320,7 +325,20 @@ RdmaTaskContext::buildRdmaBlockPairs(const std::shared_ptr<RdmaStagingBufferPool
                             + ", sub_block=" + std::to_string(i) + ", expected=" + std::to_string(local_size)
                             + ", offered=" + std::to_string(block_info.len())};
             }
-            auto remote_buf = build_remote_buffer(block_info);
+            const auto& destination   = expected_kbi->blocks[i];
+            auto        source_layout = indexerSourceLayout(destination, IndexerCacheLayout::fromWire(block_info));
+            try {
+                validateIndexerScaleTransfer(destination, source_layout);
+            } catch (const std::exception& e) {
+                return {false, {}, e.what()};
+            }
+            needs_cache_write_guard_ =
+                needs_cache_write_guard_ || destination.indexer_layout.format != IndexerScaleFormat::NONE;
+            if (source_layout.format != destination.indexer_layout.format) {
+                converting_cache_ = true;
+                indexer_conversions_.push_back({destination, source_layout});
+            }
+            auto remote_buf                 = build_remote_buffer(block_info);
             remote_buf->partition_layer_key = unique_key_;
             result.push_back({*local_buf, remote_buf});
             collector_->total_block_size += block_info.len();
@@ -449,12 +467,27 @@ void RdmaTaskContext::run(bool               success,
 }
 
 void RdmaTaskContext::notifyTransferDone(bool success, TransferErrorCode error_code, const std::string& error_message) {
+    std::string conversion_error;
+    if (success) {
+        try {
+            convertIndexerCacheScales(indexer_conversions_);
+        } catch (const std::exception& e) {
+            success          = false;
+            error_code       = TransferErrorCode::COPY_FAILED;
+            conversion_error = e.what();
+        }
+    }
     if (task_) {
         if (success && task_->acceptsBatches()) {
             task_->notifyBatchDone(batch_keys_, transfer_started_);
         } else {
-            task_->notifyDone(success, error_code, error_message, transfer_started_);
+            task_->notifyDone(
+                success, error_code, conversion_error.empty() ? error_message : conversion_error, transfer_started_);
         }
+    }
+    if (cache_write_acquired_) {
+        cache_write_acquired_ = false;
+        task_->endCacheWrite(converting_cache_);
     }
 }
 

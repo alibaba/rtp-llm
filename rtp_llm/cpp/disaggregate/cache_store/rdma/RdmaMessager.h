@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-class RdmaMessager: public Messager {
+class RdmaMessager: public Messager, public std::enable_shared_from_this<RdmaMessager> {
 public:
     RdmaMessager(const std::shared_ptr<MemoryUtil>&              memory_util,
                  const std::shared_ptr<RequestBlockBufferStore>& request_block_buffer_store,
@@ -18,6 +18,7 @@ public:
 
 public:
     bool init(MessagerInitParams params) override;
+    void transfer(const std::shared_ptr<TransferRequest>& request) override;
     void load(const std::shared_ptr<LoadRequest>&                          request,
               const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) override;
 

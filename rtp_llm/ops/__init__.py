@@ -149,6 +149,7 @@ try:
         HybridAttentionType,
         KVCacheConfig,
         KvCacheDataType,
+        IndexerScaleFormat,
         KVCacheSpecDesc,
         KVCacheSpecType,
         LinearAttentionConfig,

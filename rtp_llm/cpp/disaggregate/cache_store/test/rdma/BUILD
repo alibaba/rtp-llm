@@ -99,3 +99,22 @@ cc_test(
         "//conditions:default": [],
     }),
 )
+
+# Receiver callback unit tests: no RDMA NIC, connection or GPU is used.
+cc_test(
+    name = "indexer_scale_conversion_test",
+    srcs = select({
+        "//:using_rdma": ["IndexerScaleConversionTest.cpp"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "@com_google_googletest//:gtest_main",
+    ] + cuda13_torch_link_deps + select({
+        "//:using_rdma": [
+            "//rtp_llm/cpp/disaggregate/cache_store/rdma:cache_store_rdma_impl",
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        ],
+        "//conditions:default": [],
+    }),
+    tags = ["manual"],
+)

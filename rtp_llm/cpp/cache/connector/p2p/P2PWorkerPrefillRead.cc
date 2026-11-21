@@ -516,6 +516,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         send_req.port        = route.dst_port;
         send_req.unique_key  = route_layer_key;
         send_req.block_info  = std::move(key_block_infos.value());
+        send_req.supports_indexer_layout = worker_plan.supports_indexer_layout;
         send_req.deadline_ms = transfer_deadline_ms;
         // The Decode transfer budget owns this window, not Prefill's local configuration.
         send_req.timeout_ms = std::min<int64_t>(std::numeric_limits<int32_t>::max(),

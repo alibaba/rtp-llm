@@ -102,15 +102,16 @@ P2PSchedulerPrefillRead::buildPrefillRankRoutes(const TransferPlan&  plan,
 
 ErrorInfo
 P2PSchedulerPrefillRead::sendKVCache(const std::string&                                   unique_key,
-                                          int64_t                                              request_id,
-                                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
-                                          int64_t                                              deadline_ms,
-                                          std::function<bool()>                                is_cancelled,
-                                          bool                                                 no_transfer,
-                                          int64_t                                              request_deadline_ms,
-                                          const std::set<int>&                                 active_route_ids,
-                                          int64_t                                              communication_timeout_ms,
-                                          int                                                  decode_tp_size) {
+                                     int64_t                                              request_id,
+                                     const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+                                     int64_t                                              deadline_ms,
+                                     std::function<bool()>                                is_cancelled,
+                                     bool                                                 no_transfer,
+                                     int64_t                                              request_deadline_ms,
+                                     const std::set<int>&                                 active_route_ids,
+                                     int64_t                                              communication_timeout_ms,
+                                     int                                                  decode_tp_size,
+                                     bool                                                 supports_indexer_layout) {
     RTP_LLM_LOG_DEBUG("sendKVCache start, request_id: %ld, unique_key: %s, decode_transfer_servers_size: %zu",
                       request_id,
                       unique_key.c_str(),
@@ -181,6 +182,7 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     params.type                = broadcast_type;
     params.communication_timeout_ms = communication_timeout_ms;
     params.peer_workers        = decode_transfer_servers;
+    params.supports_indexer_layout  = supports_indexer_layout;
     // no_transfer 时 rank_routes 为空 ⇒ 所有 worker 收到同一份不带传输计划的请求。
     params.routes      = std::move(rank_routes);
     params.plan_digest = plan_digest;

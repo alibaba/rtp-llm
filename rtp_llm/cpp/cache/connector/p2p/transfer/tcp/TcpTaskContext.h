@@ -61,8 +61,10 @@ private:
     int64_t                                         deadline_ms_ = 0;
 
     std::shared_ptr<TransferTask> task_;
-    bool                          transfer_started_ = false;
-    std::vector<int64_t> batch_keys_;
+    bool                          transfer_started_     = false;
+    bool                          converting_cache_     = false;
+    bool                          cache_write_acquired_ = false;
+    std::vector<int64_t>          batch_keys_;
     TransferErrorCode             copy_error_code_{TransferErrorCode::OK};
     std::string                   copy_error_message_;
 };

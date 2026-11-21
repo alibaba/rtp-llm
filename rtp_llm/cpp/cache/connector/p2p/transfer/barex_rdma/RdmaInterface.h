@@ -29,6 +29,9 @@ struct RemoteBuffer {
 class IRdmaMemoryManager {
 public:
     virtual ~IRdmaMemoryManager() = default;
+    virtual uint64_t minRegistrationSize() const {
+        return 1;
+    }
     virtual bool regUserMr(const BlockInfo& block_info, uint64_t aligned_size = 0) = 0;
     virtual bool deregUserMr(const BlockInfo& block_info) = 0;
     virtual std::shared_ptr<RemoteBuffer> findMemoryMr(const BlockInfo& block_info) = 0;

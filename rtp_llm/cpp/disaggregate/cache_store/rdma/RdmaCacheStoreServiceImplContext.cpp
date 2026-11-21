@@ -28,7 +28,8 @@ void RdmaCacheStoreServiceImplContext::loadBlockOnRdma(bool                     
 
     auto                                                   start_write_time_us = currentTimeUs();
     std::vector<std::shared_ptr<RdmaConnectionWriteBlock>> write_blocks;
-    for (auto& block : blocks) {
+    for (const auto& source_block : blocks) {
+        auto block      = source_block;
         auto block_info = getAndEraseUnLoadedBlock(block->key);
         if (block_info == nullptr) {
             // block already loaded
@@ -45,6 +46,26 @@ void RdmaCacheStoreServiceImplContext::loadBlockOnRdma(bool                     
                 peer_ip_.c_str());
             runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INVALID_REQ);
             return;
+        }
+
+        try {
+            if (!block_info->has_indexer_scale_format())
+                block = legacyIndexerBlock(block, rdma_connection_->memoryUtil());
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("legacy indexer transfer preparation failed: %s", e.what());
+            runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(response_mutex_);
+            if (response_ == nullptr)
+                return;
+            if (block->indexer_layout.format != IndexerScaleFormat::NONE) {
+                auto* info = response_->add_blocks();
+                info->set_key(block->key);
+                info->set_len(block_len);
+                block->indexer_layout.toWire(info);
+            }
         }
 
         std::shared_ptr<BlockBuffer> write_block = std::make_shared<BlockBuffer>(

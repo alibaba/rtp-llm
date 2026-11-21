@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
 #include <torch/torch.h>
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -46,11 +47,12 @@ void TcpCacheStoreLoadServiceClosure::Run() {
         return;
     }
 
+    std::vector<IndexerScaleConversion> conversions;
     for (int i = 0; i < response_->blocks_size(); i++) {
         const auto& block        = response_->blocks(i);
         auto        unload_block = request_block_buffer_->getBlock(block.key());
 
-        if (unload_block == nullptr || block.len() != unload_block->len) {
+        if (unload_block == nullptr || block.len() != unload_block->len || block.content().size() != block.len()) {
             RTP_LLM_LOG_WARNING("can not find match block %s from response, request is %s",
                                 block.key().c_str(),
                                 request_block_buffer_->getRequestId().c_str());
@@ -58,6 +60,7 @@ void TcpCacheStoreLoadServiceClosure::Run() {
             return;
         }
 
+        conversions.push_back({unload_block->blockInfo(), IndexerCacheLayout::fromWire(block)});
         auto dst_tensor = torch::from_blob(
             unload_block->addr.get(),
             {(int64_t)unload_block->len},
@@ -66,6 +69,13 @@ void TcpCacheStoreLoadServiceClosure::Run() {
                                            {(int64_t)block.len()},
                                            torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
         execNoBlockCopy({dst_tensor, src_tensor});
+    }
+    try {
+        convertIndexerCacheScales(conversions);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING("indexer cache conversion failed: %s", e.what());
+        end(false, CacheStoreErrorCode::LoadErrorUnknown);
+        return;
     }
     end(true, CacheStoreErrorCode::None);
 }

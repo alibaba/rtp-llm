@@ -33,7 +33,16 @@ void TcpCacheStoreServiceImplContext::loadBlockOnTcp(bool ok, const std::vector<
             return;
         }
 
-        if (!writeResponseBlock(block, unloaded_block_info)) {
+        std::shared_ptr<BlockBuffer> transfer_block = block;
+        try {
+            if (!unloaded_block_info->has_indexer_scale_format())
+                transfer_block = legacyIndexerBlock(block);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("legacy indexer transfer preparation failed: %s", e.what());
+            runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+            return;
+        }
+        if (!writeResponseBlock(transfer_block, unloaded_block_info)) {
             runFailed(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
             return;
         }
@@ -65,6 +74,7 @@ bool TcpCacheStoreServiceImplContext::writeResponseBlock(const std::shared_ptr<B
     }
 
     auto* block_info = response_->add_blocks();
+    block->indexer_layout.toWire(block_info);
     block_info->set_key(block->key);
     block_info->set_len(block_len);
     auto block_content = block_info->mutable_content();

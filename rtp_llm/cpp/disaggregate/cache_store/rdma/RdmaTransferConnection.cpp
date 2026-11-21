@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaTransferConnection.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 
 namespace rtp_llm {
 
@@ -24,6 +25,15 @@ void RdmaTransferConnection::read(const std::vector<std::shared_ptr<BlockBuffer>
         auto& remote_block = remote_blocks[i];
         auto  write_block  = std::make_shared<RdmaConnectionWriteBlock>(
             local_block, remote_block, [local_block, remote_block, callback](bool success) {
+                if (success) {
+                    try {
+                        convertIndexerCacheScales(
+                            {{local_block->blockInfo(), IndexerCacheLayout::fromWire(*remote_block)}});
+                    } catch (const std::exception& e) {
+                        RTP_LLM_LOG_WARNING("indexer cache conversion failed: %s", e.what());
+                        success = false;
+                    }
+                }
                 callback(success,
                          success ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadRdmaWriteFailed,
                          {local_block});

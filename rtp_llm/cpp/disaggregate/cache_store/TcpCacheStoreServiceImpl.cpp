@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpCacheStoreServiceImpl.h"
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStoreDevicePin.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -117,6 +118,7 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
         if (block_buffer_start_addr <= block_info.addr()
             && block_buffer_end_addr >= block_info.addr() + block_info.len()) {
             auto resp_block_info = response->add_blocks();
+            block_buffer->indexer_layout.toWire(resp_block_info);
             resp_block_info->set_key(block_info.key());
             resp_block_info->set_addr(block_info.addr());
             resp_block_info->set_len(block_info.len());
@@ -132,6 +134,23 @@ void TcpCacheStoreServiceImpl::blockReadImpl(::google::protobuf::RpcController* 
                                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
 
             execNoBlockCopy({dst_tensor, src_tensor});
+            if (!request->supports_indexer_layout()
+                && block_buffer->indexer_layout.format == IndexerScaleFormat::UE8M0) {
+                BlockInfo destination;
+                destination.addr                  = tmp_buffer;
+                destination.size_bytes            = block_info.len();
+                destination.indexer_layout        = block_buffer->indexer_layout;
+                destination.indexer_layout.format = IndexerScaleFormat::FP32;
+                try {
+                    convertIndexerCacheScales({{destination, block_buffer->indexer_layout}});
+                } catch (const std::exception& e) {
+                    free(tmp_buffer);
+                    response->set_error_code(KvCacheStoreServiceErrorCode::EC_FAILED_INTERNAL);
+                    done->Run();
+                    return;
+                }
+                destination.indexer_layout.toWire(resp_block_info);
+            }
             resp_block_info->set_content(tmp_buffer, block_info.len());
             free(tmp_buffer);
         }

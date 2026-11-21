@@ -32,6 +32,18 @@ from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
 
 
 def _fp8_mqa_logits_compat(*args, **kwargs):
+    q_sf = kwargs.pop("q_sf", None)
+    if q_sf is not None or (
+        deep_gemm is not None
+        and hasattr(deep_gemm, "fp8_fp4_mqa_logits")
+        and not hasattr(deep_gemm, "fp8_mqa_logits")
+    ):
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+            fp8_mqa_indexer_score,
+        )
+
+        q, (k, k_sf), weights, ks, ke = args
+        return fp8_mqa_indexer_score(q, weights, k, k_sf, ks, ke, q_sf=q_sf, **kwargs)
     if deep_gemm is not None and hasattr(deep_gemm, "fp8_mqa_logits"):
         return deep_gemm.fp8_mqa_logits(*args, **kwargs)
     return legacy_fp8_mqa_logits(*args, **kwargs)
@@ -45,6 +57,13 @@ def _get_paged_mqa_logits_metadata_compat(
 ) -> torch.Tensor:
     """Prepare a schedule before the logits call has resolved the vendor ABI."""
     flat = context_lens.reshape(-1).contiguous()
+    from rtp_llm.models_py.modules.indexer_mx_abi import use_mx_indexer_cache
+
+    if use_mx_indexer_cache(context_lens.device):
+        request_ids = torch.arange(flat.numel(), dtype=torch.int32, device=flat.device)
+        return deep_gemm.get_paged_mqa_logits_metadata(
+            flat.view(-1, 1), block_kv, num_sms, indices=request_ids
+        )
     cached_dim = _paged_mqa_context_lens_dim
     lengths = flat if cached_dim == 1 else flat.view(-1, 1)
     # Metadata acceptance alone does not establish the logits ABI. Only the
@@ -70,6 +89,7 @@ def _fp8_paged_mqa_logits_compat(
     max_context_len: int,
     *,
     schedule_metadata: Optional[torch.Tensor] = None,
+    q_sf: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Call paged MQA with the context shape accepted by DeepGEMM.
 
@@ -79,6 +99,26 @@ def _fp8_paged_mqa_logits_compat(
     rank only after the complete logits call succeeds, instead of coupling
     RTP-LLM to a vendor package version string.
     """
+    if q_sf is not None or (
+        deep_gemm is not None
+        and hasattr(deep_gemm, "fp8_fp4_paged_mqa_logits")
+        and not hasattr(deep_gemm, "fp8_paged_mqa_logits")
+    ):
+        from rtp_llm.models_py.modules.dsv4.fp8._indexer_score import (
+            fp8_paged_indexer_score,
+        )
+
+        return fp8_paged_indexer_score(
+            q,
+            weights,
+            kv_cache.view(-1, kv_cache.shape[-1]),
+            block_table,
+            context_lens.reshape(-1, 1),
+            block_kv,
+            max_context_len,
+            q_sf=q_sf,
+            schedule_metadata=schedule_metadata,
+        )
     if deep_gemm is None or not hasattr(deep_gemm, "fp8_paged_mqa_logits"):
         return legacy_fp8_paged_mqa_logits(
             q, kv_cache, weights, context_lens, block_table, max_context_len
@@ -552,6 +592,7 @@ class IndexerOp(nn.Module):
         key: torch.Tensor,
         kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
+        mx: bool = False,
     ) -> None:
         """
         Quantize and cache only the key tensor (fast path for decode).
@@ -567,7 +608,7 @@ class IndexerOp(nn.Module):
             self._indexer_cache_view(kv_cache),
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
-            self.scale_fmt,  # "ue8m0" for power-of-2 scaling
+            "mx_ue8m0" if mx else self.scale_fmt,
         )
 
     def quant_k_cp_only(
@@ -587,8 +628,34 @@ class IndexerOp(nn.Module):
             self._indexer_cache_view(kv_cache),
             slot_mapping,
             self.block_size,
-            self.scale_fmt,
+            "mx_ue8m0" if self._use_mx(key.device) else self.scale_fmt,
         )
+
+    def _use_mx(self, device: torch.device) -> bool:
+        from rtp_llm.models_py.modules.indexer_mx_abi import use_mx_indexer_cache
+
+        return (
+            self.index_head_dim == 128
+            and self.block_size == 128
+            and use_mx_indexer_cache(device)
+        )
+
+    def _quantize_query(
+        self, query: torch.Tensor, mx_weights: Optional[torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if mx_weights is not None:
+            from rtp_llm.models_py.modules.dsv4.fp8._indexer_q_quant_triton import (
+                indexer_q_fp8_quant_fold,
+            )
+
+            q_fp8, _, q_sf = indexer_q_fp8_quant_fold(
+                query.unsqueeze(0).contiguous(),
+                mx_weights.view(1, -1, self.index_n_heads),
+                mx=True,
+            )
+            return q_fp8.squeeze(0), q_sf.squeeze(0)
+
+        return self.quant_q_only(query)
 
     def quant_q_k(
         self,
@@ -596,6 +663,7 @@ class IndexerOp(nn.Module):
         key: torch.Tensor,
         kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
+        mx_weights: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Quantize query and key tensors, and cache the key.
@@ -609,23 +677,10 @@ class IndexerOp(nn.Module):
         Returns:
             Tuple of (q_fp8, q_scale) where:
             - q_fp8: Quantized query [num_tokens, index_n_heads, index_head_dim]
-            - q_scale: Query scale [num_tokens, index_n_heads, 1]
+            - q_scale: Legacy FP32 [tokens, heads, 1] or MX packed int32
+              [tokens, heads] when ``mx_weights`` is supplied.
         """
-        # Quantize query
-        query_flat = query.view(-1, self.index_head_dim)
-        q_fp8, q_scale = sgl_per_token_group_quant_fp8(
-            query_flat,
-            group_size=self.block_size,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
-        )
-        q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
-
-        if self.scale_fmt == "ue8m0":
-            q_scale = _unpack_ue8m0_scale(q_scale)
-        q_scale = q_scale.view(-1, self.index_n_heads, 1)
+        q_fp8, q_scale = self._quantize_query(query, mx_weights)
 
         # Cache key
         assert kv_cache is not None, "kv_cache is required"
@@ -634,7 +689,7 @@ class IndexerOp(nn.Module):
             self._indexer_cache_view(kv_cache),
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
-            self.scale_fmt,  # "ue8m0" for power-of-2 scaling
+            "mx_ue8m0" if mx_weights is not None else self.scale_fmt,
         )
 
         return q_fp8, q_scale
@@ -698,6 +753,7 @@ class IndexerOp(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         positions: torch.Tensor,
+        mx: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused QK: K(RoPE+Hadamard→bf16) + Q(RoPE+Hadamard+FP8) in one kernel.
 
@@ -709,7 +765,8 @@ class IndexerOp(nn.Module):
         Returns:
             (q_fp8, q_scale, k_out):
                 q_fp8: [num_tokens, index_n_heads, index_head_dim] float8_e4m3fn
-                q_scale: [num_tokens, index_n_heads, 1] float32
+                q_scale: FP32 [num_tokens, index_n_heads, 1], or packed
+                    int32 [num_tokens, index_n_heads] when mx=True
                 k_out: [num_tokens, index_head_dim] bf16
         """
         from rtp_llm.models_py.triton_kernels.sparse_mla.fused_q_rope_quant import (
@@ -726,7 +783,7 @@ class IndexerOp(nn.Module):
             self.index_head_dim,
             actual_rot_dim,
             is_neox_style=self.is_neox_style,
-            scale_fmt=self.scale_fmt,
+            scale_fmt="mx_ue8m0" if mx else self.scale_fmt,
         )
 
     def quant_q_k_cp(
@@ -736,6 +793,7 @@ class IndexerOp(nn.Module):
         kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
         kv_restore_unpad_indices: torch.Tensor,
+        mx_weights: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Context-parallel variant: all-gather only K from all CP ranks, restore to logical
@@ -767,22 +825,9 @@ class IndexerOp(nn.Module):
             self._indexer_cache_view(kv_cache),
             slot_mapping,
             self.block_size,
-            self.scale_fmt,
+            "mx_ue8m0" if mx_weights is not None else self.scale_fmt,
         )
-        query_flat = query.view(-1, self.index_head_dim)
-        q_fp8, q_scale = sgl_per_token_group_quant_fp8(
-            query_flat,
-            group_size=self.block_size,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=(self.scale_fmt == "ue8m0"),
-        )
-        q_fp8 = q_fp8.view(-1, self.index_n_heads, self.index_head_dim)
-        if self.scale_fmt == "ue8m0":
-            q_scale = _unpack_ue8m0_scale(q_scale)
-        q_scale = q_scale.view(-1, self.index_n_heads, 1)
-        return q_fp8, q_scale
+        return self._quantize_query(query, mx_weights)
 
     def _get_topk_paged(
         self,
@@ -791,6 +836,7 @@ class IndexerOp(nn.Module):
         kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
+        q_sf: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute TopK indices for paged attention (decode phase).
@@ -864,6 +910,7 @@ class IndexerOp(nn.Module):
             schedule_metadata=(
                 schedule_metadata if has_schedule_metadata and is_sm10x() else None
             ),
+            q_sf=q_sf.unsqueeze(1) if q_sf is not None else None,
         )
 
         assert (
@@ -896,6 +943,7 @@ class IndexerOp(nn.Module):
         kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
+        q_sf: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Compute TopK indices for ragged attention (prefill phase).
@@ -946,7 +994,8 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
+        scale_dtype = torch.int32 if q_sf is not None else torch.float32
+        kv_fp8 = (k_fp8, k_scale.view(scale_dtype).view(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -972,6 +1021,7 @@ class IndexerOp(nn.Module):
                 fmha_params.ks[row_start:row_end],
                 fmha_params.ke[row_start:row_end],
                 clean_logits=False,
+                q_sf=q_sf[row_start:row_end] if q_sf is not None else None,
             )
             topk_part = logits.new_empty(
                 (logits.shape[0], self.index_topk), dtype=torch.int32
@@ -1017,6 +1067,7 @@ class IndexerOp(nn.Module):
         indexer_copy_dst_idx: Optional[torch.Tensor] = None,
         indexer_src_for_padded: Optional[torch.Tensor] = None,
         total_local_ids_is_identity: bool = False,
+        q_sf: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Compute TopK indices for ragged attention (prefill phase) with context parallel
@@ -1069,6 +1120,14 @@ class IndexerOp(nn.Module):
         else:
             q0 = q_fp8[:0]
             weights_sq0 = weights_sq[:0]
+
+        q_sf0 = None
+        if q_sf is not None and has_local_ids:
+            q_sf0 = (
+                q_sf[: q0.shape[0]]
+                if total_local_ids_is_identity
+                else q_sf[total_local_ids].contiguous()
+            )
 
         # Full KV from cache (KV not split).
         k_fp8 = torch.empty(
@@ -1142,10 +1201,11 @@ class IndexerOp(nn.Module):
             )
         if not has_local_ids:
             return torch.empty((0, self.index_topk), dtype=torch.int32, device=device)
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).squeeze(-1))
         prefill_max_kv_len = int(
             getattr(fmha_params, "prefill_max_kv_len", total_kv_tokens)
         )
+        scale_dtype = torch.int32 if q_sf is not None else torch.float32
+        kv_fp8_full = (k_fp8, k_scale.view(scale_dtype).view(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -1153,6 +1213,7 @@ class IndexerOp(nn.Module):
             ks: torch.Tensor,
             ke: torch.Tensor,
             topk_off: torch.Tensor,
+            sf_part: Optional[torch.Tensor],
         ) -> torch.Tensor:
             nr = q_part.shape[0]
             topk_result = torch.empty(
@@ -1171,6 +1232,7 @@ class IndexerOp(nn.Module):
                     ks[row_start:row_end],
                     ke[row_start:row_end],
                     clean_logits=False,
+                    q_sf=sf_part[row_start:row_end] if sf_part is not None else None,
                 )
                 topk_part = logits_p.new_empty(
                     (logits_p.shape[0], self.index_topk), dtype=torch.int32
@@ -1197,4 +1259,5 @@ class IndexerOp(nn.Module):
             precomputed_ks,
             precomputed_ke,
             precomputed_topk_off,
+            q_sf0,
         )

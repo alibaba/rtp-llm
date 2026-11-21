@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferTask.h"
 
 #include <exception>
+#include <chrono>
 #include <limits>
 #include <mutex>
 
@@ -64,6 +65,7 @@ void TransferTask::cancel() {
             }
         }
     }
+    cache_write_cv_.notify_all();
     for (const auto& entry : cancel_callbacks) {
         invokeDoneCallback(entry.second);
     }
@@ -94,6 +96,43 @@ bool TransferTask::startTransfer() {
     return true;
 }
 
+bool TransferTask::beginCacheWrite(bool converting, int64_t rpc_deadline_ms) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    const auto                          deadline = std::min(deadline_ms_, rpc_deadline_ms);
+    if (converting)
+        ++waiting_conversions_;
+    while (!done_ && !cancel_requested_ && error_code_ == TransferErrorCode::OK
+           && (converting_cache_ || (converting ? active_cache_writes_ != 0 : waiting_conversions_ != 0))) {
+        const auto remaining = deadline - currentTimeMs();
+        if (remaining <= 0)
+            break;
+        cache_write_cv_.wait_for(lock, std::chrono::milliseconds(remaining));
+    }
+    if (converting)
+        --waiting_conversions_;
+    if (done_ || cancel_requested_ || error_code_ != TransferErrorCode::OK || currentTimeMs() >= deadline) {
+        if (error_code_ == TransferErrorCode::OK && currentTimeMs() >= deadline) {
+            error_code_ = TransferErrorCode::TIMEOUT;
+            error_msg_  = "cache write wait timed out";
+        }
+        cache_write_cv_.notify_all();
+        return false;
+    }
+    ++active_cache_writes_;
+    converting_cache_ = converting;
+    return true;
+}
+
+void TransferTask::endCacheWrite(bool converting) {
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        --active_cache_writes_;
+        if (converting)
+            converting_cache_ = false;
+    }
+    cache_write_cv_.notify_all();
+}
+
 void TransferTask::forceCancel() {
     std::function<void()> done_callback;
     {
@@ -109,6 +148,7 @@ void TransferTask::forceCancel() {
         total_cost_time_us_ = currentTimeUs() - start_time_us_;
         done_callback       = std::move(done_callback_);
     }
+    cache_write_cv_.notify_all();
     invokeDoneCallback(done_callback);
 }
 
@@ -136,6 +176,7 @@ void TransferTask::recordError(TransferErrorCode error_code, const std::string& 
         error_code_ = error_code;
         error_msg_  = error_message;
     }
+    cache_write_cv_.notify_all();
 }
 
 void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const std::string& error_msg, bool started) {

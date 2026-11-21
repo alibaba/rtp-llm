@@ -87,6 +87,7 @@ bool TcpMessager::generateBlockInfo(BlockBufferInfo*                    block_in
                                     const std::shared_ptr<BlockBuffer>& block,
                                     uint32_t                            partition_count,
                                     uint32_t                            partition_id) {
+    block->indexer_layout.toWire(block_info);
     block_info->set_key(block->key);
     block_info->set_len(block->len / partition_count);  // real len
     block_info->set_addr((int64_t)(block->addr.get()) + block_info->len() * partition_id);

@@ -146,3 +146,16 @@ cc_test(
         "//conditions:default": [],
     }),
 )
+
+# Callback/encoding contract does not require an RDMA NIC or accl.
+cc_test(
+    name = "indexer_scale_transfer_test",
+    srcs = ["IndexerScaleTransferTest.cc"],
+    copts = test_copts,
+    defines = select({"//:using_rdma": ["TEST_RDMA_SENDER"], "//conditions:default": []}),
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_task_context",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/proto:rdma_service_cc_proto",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + select({"//:using_rdma": ["//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_backend"], "//conditions:default": []}),
+)

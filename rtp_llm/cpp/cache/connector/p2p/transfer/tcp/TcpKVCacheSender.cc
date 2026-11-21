@@ -5,6 +5,7 @@
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include <algorithm>
 #include <limits>
+#include "rtp_llm/cpp/cache/IndexerCacheScale.h"
 
 namespace rtp_llm {
 namespace transfer {
@@ -125,6 +126,7 @@ bool TcpKVCacheSender::setBlockBufferInfo(::tcp_transfer::TcpBlockBufferInfo* bl
                                           int64_t                             cache_key,
                                           const BlockInfo&                    block_info,
                                           std::vector<CopyTask>&              copy_tasks) {
+    block_info.indexer_layout.toWire(block_buffer_info);
     block_buffer_info->set_len(static_cast<uint32_t>(block_info.size_bytes));
 
     auto* content = block_buffer_info->mutable_content();
@@ -171,6 +173,29 @@ TcpKVCacheSender::makeTransferRequest(const transfer::SendRequest&              
     if (!copy_tasks.empty() && !cuda_copy_util_->batchCopyToHost(copy_tasks)) {
         RTP_LLM_LOG_WARNING("TcpKVCacheSender: batchCopyToHost failed, unique_key: %s", request.unique_key.c_str());
         return nullptr;
+    }
+    if (!request.supports_indexer_layout) {
+        std::vector<IndexerScaleConversion> conversions;
+        for (auto& key : *transfer_request->mutable_blocks()) {
+            for (auto& block : *key.mutable_blocks()) {
+                auto layout = IndexerCacheLayout::fromWire(block);
+                if (layout.format != IndexerScaleFormat::UE8M0)
+                    continue;
+                BlockInfo destination;
+                destination.addr                  = block.mutable_content()->data();
+                destination.size_bytes            = block.len();
+                destination.indexer_layout        = layout;
+                destination.indexer_layout.format = IndexerScaleFormat::FP32;
+                conversions.push_back({destination, layout});
+                destination.indexer_layout.toWire(&block);
+            }
+        }
+        try {
+            convertIndexerCacheScales(conversions);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("legacy indexer send conversion failed: %s", e.what());
+            return nullptr;
+        }
     }
     return transfer_request;
 }

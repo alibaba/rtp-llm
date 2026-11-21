@@ -616,9 +616,9 @@ decord==0.6.0 \
 deep-ep==2.1.0+a56d615 \
     --hash=sha256:76c04452cfbd8acf363ceeea1b59dc95b970fc945f86dec5b39bbb1b200dfcf0
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-deep-gemm==2.8.0+6d6aaad.cu132 \
-    --hash=sha256:8ca0bce659a60b2a5c3459792b5eb4bcc46ed3b28b9b6bd94f278d670a7ffa7f
-    # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
+deep-gemm==2.8.2+522942a.cu132 \
+    --hash=sha256:806896fa0e88c5c50f5f02bc1c0c72983506a9bc079bed4d6829b184e7e83957
+    # via -r deps/requirements_torch_gpu_cuda13.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
@@ -1953,7 +1953,9 @@ nvidia-cusparselt-cu13==0.8.0 \
     # via torch
 nvidia-cutlass-dsl==4.4.2 \
     --hash=sha256:7cfb9ef19062b055b9372c7a627004724e2755e4c8b16c3cc88807d64501a4ae
-    # via flashinfer-python
+    # via
+    #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   flashinfer-python
 nvidia-cutlass-dsl-libs-base==4.4.2 \
     --hash=sha256:06acb3acff3dcf4bf6630476efac7de94de30b988ded4fa00b647bbcec4224ff \
     --hash=sha256:22e37b58f7a6f2f43bba533c4df8a088012122e0b4e9a632eca23937adeafb39 \
@@ -3985,3 +3987,19 @@ zstandard==0.25.0 \
     --hash=sha256:fd7a5004eb1980d3cefe26b2685bcb0b17989901a70a1040d1ac86f1d898c551 \
     --hash=sha256:ffef5a74088f1e09947aecf91011136665152e0b4b359c42be3373897fb39b01
     # via -r deps/requirements_base.txt
+
+fmha-sm100 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/fmha_sm100-0.1.1-py3-none-any.whl \
+    --hash=sha256:2aa4fc564a3ef2f7bb1a63207e7c43e2e71cf09a82b5140c437c2c1df437c580
+    # via -r deps/requirements_torch_gpu_cuda13.txt
+
+quack-kernels==0.4.1 \
+    --hash=sha256:9d7d6ba412bc0c8a9b1331c52a73db76280adb9dc2f2750df4851ddabef1466b \
+    --hash=sha256:c1c8df2935bf5156ec47d2c5384ac08b411fd0ee702d80ae916dbf6d6f5ae813
+    # via
+    #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   fmha-sm100
+
+pybind11==3.1.0 \
+    --hash=sha256:a1cc06b524ab3edca51f8ad3895f9c4fa20b8b19283173dff4ae781449dc9639 \
+    --hash=sha256:b8488090f8acffbcb6b5d6a85571a6827a0a2981ffb75e5a0b27b87c4a6b7dd0
+    # via fmha-sm100

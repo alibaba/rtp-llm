@@ -293,7 +293,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     };
     const std::set<int> active_route_ids(request.active_route_ids().begin(), request.active_route_ids().end());
     auto      send_start_us = currentTimeUs();
-    ErrorInfo error_info = scheduler_->sendKVCache(unique_key,
+    ErrorInfo           error_info    = scheduler_->sendKVCache(unique_key,
                                                    request_id,
                                                    decode_transfer_servers,
                                                    transfer_deadline_ms,
@@ -302,7 +302,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                                                    request_deadline_ms,
                                                    active_route_ids,
                                                    communication_timeout_ms,
-                                                   decode_tp_size);
+                                                   decode_tp_size,
+                                                   request.supports_indexer_layout());
     auto send_cost_us = currentTimeUs() - send_start_us;
     if (error_info.hasError()) {
         RTP_LLM_LOG_ERROR("[PD-DIAG] handleRead sendKVCache failed, unique_key=%s, send_cost_us=%ld, error=%s",
@@ -407,6 +408,7 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
     // 解出本 prefill worker 自己那份 route。peer_index 在此解析成具体端点，worker 不再自选目标。
     P2PWorkerRoutePlan worker_plan;
     worker_plan.plan_digest = p2p_request.plan_digest();
+    worker_plan.supports_indexer_layout = p2p_request.supports_indexer_layout();
     for (const auto& route_pb : p2p_request.routes()) {
         const auto     local = RouteCodec::decode(route_pb);
         P2PWorkerRoute worker_route;
