@@ -4831,6 +4831,67 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     EXPECT_EQ(replayed, snapshot.block_groups);
 }
 
+TEST_F(BlockTreeCacheTest, OnDemandReclaimPreservesRequestHeldFullSibling) {
+    for (const size_t target_group : {1u, 2u}) {
+        SCOPED_TRACE(target_group);
+        const auto               pools = makeStructuralDevicePools(3, "on_demand_non_full");
+        std::vector<GroupSetPtr> groups{
+            std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pools[0]}, nullptr, nullptr),
+            std::make_shared<SWAGroupSet>(1, 1, std::vector<DeviceBlockPoolPtr>{pools[1]}, nullptr, nullptr),
+            std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pools[2]}, nullptr, nullptr)};
+        initializeSingleMemberGroupSets(groups, pools);
+        const std::string target_tag = groups[target_group]->groupTags().front();
+        auto              cache      = makeBlockTreeCacheForTest(std::move(groups));
+        auto              publisher  = std::make_shared<RecordingCachePublisher>();
+        cache->setEventPublisher(publisher, {"group0", "group1", "group2"});
+
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(pools.size()));
+        for (size_t group_id = 0; group_id < pools.size(); ++group_id) {
+            resources[0][group_id].device_blocks = {pools[group_id]->malloc().value()};
+        }
+        cache->insert({100}, resources, Tier::DEVICE);
+        ASSERT_EQ(cache->logicalCacheSnapshot().block_groups,
+                  (std::map<int64_t, std::vector<size_t>>{{100, {0, 1, 2}}}));
+        auto match = cache->match({100});
+        ASSERT_EQ(match.matched_device_blocks, 1u);
+        releaseRequestRefsForTest(*cache, match.matched_device_resources);
+
+        const BlockIdxType full_block   = resources[0][0].device_blocks.front();
+        const BlockIdxType target_block = resources[0][target_group].device_blocks.front();
+        const size_t       free_before  = pools[target_group]->freeBlocksNum();
+        const size_t       event_count  = publisher->events.size();
+        pools[0]->incRef(full_block);
+        pools[target_group]->incRef(target_block);
+        EXPECT_EQ(cache->evictForGroup(target_tag, 1), 0);
+        pools[target_group]->decRef(target_block);
+        EXPECT_FALSE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*cache, target_group, Tier::DEVICE, false));
+        EXPECT_EQ(pools[target_group]->freeBlocksNum(), free_before);
+        EXPECT_EQ(publisher->events.size(), event_count);
+
+        ASSERT_EQ(cache->evictForGroup(target_tag, 1), 1);
+        EXPECT_EQ(pools[target_group]->freeBlocksNum(), free_before + 1);
+        EXPECT_FALSE(pools[target_group]->isAllocated(target_block));
+        const auto path = cache->tree()->findNode({100});
+        ASSERT_EQ(path.size(), 1u);
+        const auto&  retained    = path.front()->group_set_resources;
+        const size_t other_group = target_group == 1 ? 2 : 1;
+        EXPECT_FALSE(retained[target_group].hasTier(Tier::DEVICE));
+        EXPECT_EQ(retained[0].device_blocks, resources[0][0].device_blocks);
+        EXPECT_EQ(retained[other_group].device_blocks, resources[0][other_group].device_blocks);
+        EXPECT_EQ(pools[0]->treeRefCount(full_block), 1u);
+        EXPECT_TRUE(pools[0]->hasRequestRef(full_block));
+        EXPECT_EQ(pools[other_group]->treeRefCount(resources[0][other_group].device_blocks.front()), 1u);
+        EXPECT_EQ(cache->logicalCacheSnapshot().block_groups,
+                  (std::map<int64_t, std::vector<size_t>>{{100, {0, other_group}}}));
+        ASSERT_EQ(publisher->events.size(), event_count + 1);
+        EXPECT_EQ(publisher->events.back().type, KVCacheEventType::BLOCK_DELETE);
+        EXPECT_EQ(publisher->events.back().group_index, target_group);
+        EXPECT_EQ(publisher->events.back().block_key, 100);
+        EXPECT_EQ(cache->match({100}).matched_device_blocks, 0u);
+        pools[0]->decRef(full_block);
+    }
+}
+
 TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryMemberOfSharedGroupSet) {
     auto pools = std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
     auto group = std::make_shared<FullGroupSet>(pools, nullptr, nullptr);

@@ -101,6 +101,11 @@ public:
     void onLoaded(TreeNode* node, size_t group_set_id);
 
 private:
+    enum class DropScope {
+        CASCADE,
+        PRIMARY_ONLY
+    };
+
     // Reuse only within one eviction pass for the same group, tier and mode,
     // while holding the cache mutex, with only synchronous drops mutating the tree.
     // A new pass must recheck released references and matchability.
@@ -142,8 +147,11 @@ private:
                                                    Tier                  tier,
                                                    bool                  force_drop             = false,
                                                    EvictionBatchContext* eviction_batch_context = nullptr,
-                                                   EvictionVictimTrigger trigger = EvictionVictimTrigger::WATERMARK);
-    bool canReclaimDeviceDrop(const TransferDescriptor& desc, EvictionBatchContext* eviction_batch_context) const;
+                                                   EvictionVictimTrigger trigger = EvictionVictimTrigger::WATERMARK,
+                                                   DropScope             scope   = DropScope::CASCADE);
+    bool                              canReclaimDeviceDrop(const TransferDescriptor& desc,
+                                                           EvictionBatchContext*     eviction_batch_context,
+                                                           DropScope                 scope) const;
     void logZeroDeviceReclaimLocked(size_t group_set_id,
                                     size_t member_group_id,
                                     size_t required_blocks,
@@ -155,14 +163,17 @@ private:
                     Tier                  source_tier,
                     bool                  notify_settled,
                     EvictionVictimTrigger trigger                = EvictionVictimTrigger::FORCE_DROP,
-                    EvictionBatchContext* eviction_batch_context = nullptr);
+                    EvictionBatchContext* eviction_batch_context = nullptr,
+                    DropScope             scope                  = DropScope::CASCADE);
     // Builds the drop closure without reserving or detaching its resources.
     EvictionDropTask planDropTask(TransferDescriptor                         eviction_desc,
                                   std::vector<std::pair<TreeNode*, size_t>>& detached_resources,
-                                  EvictionBatchContext*                      eviction_batch_context) const;
+                                  EvictionBatchContext*                      eviction_batch_context,
+                                  DropScope                                  scope) const;
     EvictionDropTask createDropTask(TransferDescriptor    eviction_desc,
                                     const char*           trigger_type           = "force_drop",
-                                    EvictionBatchContext* eviction_batch_context = nullptr);
+                                    EvictionBatchContext* eviction_batch_context = nullptr,
+                                    DropScope             scope                  = DropScope::CASCADE);
     bool   batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
     bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingMetrics> timings);
     void   finishWatermarkRoundLocked(size_t group_set_id, Tier source_tier);
@@ -175,7 +186,8 @@ private:
     void             runDropTask(TransferDescriptor    eviction_desc,
                                  bool                  notify_settled         = true,
                                  const char*           trigger_type           = "force_drop",
-                                 EvictionBatchContext* eviction_batch_context = nullptr);
+                                 EvictionBatchContext* eviction_batch_context = nullptr,
+                                 DropScope             scope                  = DropScope::CASCADE);
     void             rollbackTransferLocked(DescriptorView descs);
     void updateFullCandidate(TreeNode* node, size_t group_set_id);
     void updateFullCandidate(TreeNode* parent);
