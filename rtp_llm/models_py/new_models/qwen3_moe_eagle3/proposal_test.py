@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from safetensors.torch import save_file
@@ -23,6 +24,7 @@ from rtp_llm.models_py.new_models.qwen3_moe_eagle3.draft_body_test import (
 )
 from rtp_llm.models_py.new_models.qwen3_moe_eagle3.proposal import (
     Eagle3FullVocabularyDraft,
+    target_vocabulary_loans,
 )
 from rtp_llm.models_py.registry import register_model
 
@@ -45,6 +47,15 @@ class _Draft(Eagle3FullVocabularyDraft):
 
 
 class Eagle3ProposalTest(unittest.TestCase):
+    def test_target_vocabulary_loan_checks_row_identity_not_padded_width(self):
+        self.assertEqual(target_vocabulary_loans(SimpleNamespace(output_vocab_ids=[])), ("embedding", "lm_head"))
+        for config in (
+            SimpleNamespace(enable_output_vocab_pruning=True),
+            SimpleNamespace(vocab_size=8, output_vocab_padded_size=8, output_vocab_ids=[0, 3, 7]),
+        ):
+            with self.assertRaisesRegex(ValueError, "full target LM head"):
+                target_vocabulary_loans(config)
+
     g = (8, 12, 4, 2, 4, 1e-5, torch.float32)
 
     def setUp(self):

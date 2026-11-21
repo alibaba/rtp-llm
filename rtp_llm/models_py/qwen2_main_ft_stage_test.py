@@ -81,16 +81,26 @@ class MainFTStageTest(unittest.TestCase):
                     torch.testing.assert_close(gemm.call_args.args[2], bias)
 
     def test_main_writer_to_qwen2_stage_owners(self):
+        self._check_stage_owners("qwen_2")
+
+    def test_main_writer_to_qwen1_stage_owners(self):
+        self._check_stage_owners("qwen_7b")
+
+    def _check_stage_owners(self, kind):
         # Exercise main's actual serialization and indexing with deterministic
         # already-converted records, not a mock of FT or a full HF conversion.
         with tempfile.TemporaryDirectory() as directory:
+            classifier = torch.arange(12, dtype=torch.float16).reshape(3, 4)
             for rank in (0, 1):
+                records = list(produce_records(rank))
+                if kind == "qwen_7b":
+                    records.append((None, "__custom__.score", classifier))
                 write_ft_shards(
-                    produce_records(rank), directory, tp_rank=rank, ep_rank=rank
+                    records, directory, tp_rank=rank, ep_rank=rank
                 )
             generate_ft_index(directory, {"TP_SIZE": 2, "DP_SIZE": 1, "EP_SIZE": 0})
             config = SimpleNamespace(
-                model_type="qwen_2",
+                model_type=kind,
                 num_layers=3,
                 is_mtp=False,
                 vocab_size=8,
@@ -133,6 +143,10 @@ class MainFTStageTest(unittest.TestCase):
                             load_method=method,
                             quant_config=QuantizationConfig("none"),
                             parallelism_config=pc,
+                            custom_weight_mappings=(
+                                (("__custom__.score", "classifier.weight", torch.float16),)
+                                if kind == "qwen_7b" else ()
+                            ),
                         )
                         loader = NewModelLoader(config, load, model_path=directory)
                         model = loader.load()
@@ -190,6 +204,11 @@ class MainFTStageTest(unittest.TestCase):
                                     x, qkv_proj.weight, reference_bias
                                 ),
                             )
+                        if kind == "qwen_7b":
+                            torch.testing.assert_close(
+                                model.handler_heads.exports()["__custom__.score"], classifier
+                            )
+                            continue
                         # A non-generating consumer of this exact generation
                         # archive needs the final norm, but not its LM projection.
                         from rtp_llm.ops import TaskType

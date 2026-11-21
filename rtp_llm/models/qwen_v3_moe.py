@@ -203,7 +203,9 @@ class Qwen3MoeEagle3(QWenV2):
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_config):
-        return ("embedding", "lm_head")
+        from rtp_llm.models_py.new_models.qwen3_moe_eagle3.proposal import target_vocabulary_loans
+
+        return target_vocabulary_loans(target_model.model_config)
 
     @staticmethod
     def get_weight_cls():

@@ -144,6 +144,23 @@ class ReplicatedHandlerHeads(nn.Module):
         _mark_loaded(self.params, key)
         return tensor
 
+    def ft_bindings(self, checkpoint):
+        """The FT writer stores replicated handler tensors under their runtime role."""
+        from rtp_llm.models_py.ft_checkpoint import RuntimeTensorBinding
+
+        bindings = []
+        for source, (slot, role) in self.sources.items():
+            key = "global." + role
+            if key not in checkpoint.entries:
+                raise ValueError(f"Missing FT handler tensor: {key}")
+            value = checkpoint.read(key)
+            if value.dtype != self.dtypes[source]:
+                raise ValueError(f"FT handler dtype mismatch for {key}: {value.dtype} vs {self.dtypes[source]}")
+            self.capture(source, value)
+            bindings.append(RuntimeTensorBinding((key,), f"handler_heads.params.{slot}", lambda values: values[0]))
+        self.validate()
+        return bindings
+
     def validate(self):
         missing = [
             name for name, (key, _) in self.sources.items() if key not in self.params

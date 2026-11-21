@@ -14,6 +14,16 @@ class Eagle3Proposal(NamedTuple):
     recurrent_hidden: torch.Tensor
 
 
+def target_vocabulary_loans(target):
+    # NormalEngine excludes speculative decoding with output vocabulary pruning.
+    # Padding can make a compact head look full-sized; shape checks are insufficient.
+    if getattr(target, "enable_output_vocab_pruning", False) or len(
+        getattr(target, "output_vocab_ids", ())
+    ):
+        raise ValueError("EAGLE3 requires a full target LM head; output vocabulary pruning is incompatible")
+    return ("embedding", "lm_head")
+
+
 class Eagle3FullVocabularyDraft(Eagle3DraftBody):
     """Full-width release draft with target-owned embedding and vocabulary head.
 

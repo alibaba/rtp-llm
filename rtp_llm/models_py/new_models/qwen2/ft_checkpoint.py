@@ -28,7 +28,9 @@ def _bias(values):
 
 
 def load_dense_ft_checkpoint(model, checkpoint):
-    if type(model).__name__ not in ("Qwen2ForCausalLM", "LlamaForCausalLM"):
+    if type(model).__name__ not in (
+        "Qwen1ForCausalLM", "Qwen2ForCausalLM", "Qwen2EmbeddingBackbone", "LlamaForCausalLM"
+    ):
         raise ValueError("No dense FT adapter for this model")
     return load_gqa_ffn_ft_checkpoint(model, checkpoint)
 
@@ -482,6 +484,9 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint):
                     ),
                 )
             )
+    handler = getattr(model, "handler_heads", None)
+    if handler is not None:
+        bindings.extend(handler.ft_bindings(checkpoint))
     checkpoint.load_parameters(model, tuple(bindings), validators)
     if head is not None:
         head._explicit_checkpoint_loaded = True

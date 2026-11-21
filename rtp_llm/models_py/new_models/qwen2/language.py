@@ -405,6 +405,7 @@ def _validate_supported_parallelism(
 class Qwen2ForCausalLM(Qwen3ForCausalLM):
     """Qwen2 owns its biased GQA decoder and shares the main dense PP runtime."""
 
+    supports_ft_handler_heads = True
     QKV_BIAS = True
     WEIGHTS_MAPPER = Qwen2CheckpointMapper()
     _decoder_layer = Qwen2DecoderLayer

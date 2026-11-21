@@ -120,6 +120,23 @@ def checkpoint(draft=True):
 
 
 class DSparkLoadTest(unittest.TestCase):
+    def test_last_pipeline_stage_loads_the_entire_self_contained_draft(self):
+        weights = checkpoint()
+        with tempfile.TemporaryDirectory() as root:
+            save_file(weights, str(Path(root) / "model.safetensors"))
+            for method in ("scratch", "fastsafetensors"):
+                load = replace(load_config(), load_method=method)
+                pc = load.parallelism_config
+                pc.pp_size, pc.pp_rank = 2, 1
+                pc.world_size, pc.world_rank = 2, 1
+                pc.pp_stage_layer_counts = [1, 1]
+                model = NewModelLoader(config(), load, model_path=root).load()
+                self.assertEqual(tuple(model.layer_ids()), (0, 1))
+                self.assertEqual(len(model.layers), 2)
+                torch.testing.assert_close(model.embed_tokens.weight, weights["model.embed_tokens.weight"])
+                torch.testing.assert_close(model.lm_head.weight, weights["lm_head.weight"])
+                torch.testing.assert_close(model.fc.weight, weights["fc.weight"])
+
     def load(self, weights, cfg=None, aliases=None, tp=1, rank=0):
         with tempfile.TemporaryDirectory() as root:
             save_file(weights, str(Path(root) / "model.safetensors"))

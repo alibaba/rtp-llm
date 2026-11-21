@@ -51,8 +51,13 @@ class Qwen3DSparkForCausalLM(Qwen3DSparkRuntime, Qwen3ForCausalLM):
             raise ValueError(
                 "DSpARK draft-local d2t vocabulary cannot use target output_vocab_ids pruning"
             )
-        if getattr(load_config.parallelism_config, "pp_size", 1) != 1:
-            raise ValueError("Qwen3 DSpARK does not support pipeline parallelism")
+        # The PP executor runs the full draft on the last target stage.
+        # ModelFactory marks draft configs before loading; local_layer_range
+        # then ignores the target's stage counts rather than slicing the draft.
+        if getattr(load_config.parallelism_config, "pp_size", 1) > 1 and not getattr(
+            model_config, "is_mtp", False
+        ):
+            raise ValueError("Qwen3 DSpARK on a pipeline requires a draft configuration")
         super().__init__(model_config, load_config)
         cfg = _extract_config_values(model_config, load_config)
         value = lambda name, default=None: (
@@ -103,8 +108,8 @@ class Qwen3DSparkForCausalLM(Qwen3DSparkRuntime, Qwen3ForCausalLM):
         self._input_vocab_size = input_vocab
 
     def checkpoint_weight_name_filter(self):
-        # DSpARK is non-PP; its optional training-only confidence head has no
-        # consumer in main's proposer/sampler.
+        # The draft owns every layer even on a target pipeline. Its optional
+        # training-only confidence head has no consumer in the proposer.
         return is_inference_weight
 
     def prepare_borrowed_parameters(self, aliases):

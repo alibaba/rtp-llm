@@ -2404,7 +2404,9 @@ class NewModelLoader:
                 raise ValueError(
                     f"{type(model).__name__} has no checkpoint format adapter"
                 )
-            if self.load_config.custom_weight_mappings:
+            if self.load_config.custom_weight_mappings and (
+                meta_checkpoint is not None or not getattr(model, "supports_ft_handler_heads", False)
+            ):
                 raise ValueError(
                     "Custom HF weight mappings cannot be applied to FT runtime tensors"
                 )

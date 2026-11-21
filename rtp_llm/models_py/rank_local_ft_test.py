@@ -101,6 +101,27 @@ def _gloo_load(rank, folder, rendezvous):
 
 
 class RankLocalFTTest(unittest.TestCase):
+    def test_replicated_ft_classifier_preserves_serialized_role_and_dtype(self):
+        from rtp_llm.models_py.downstream_heads import ReplicatedHandlerHeads
+        from rtp_llm.models_py.weight_mapper import WeightsMapper
+
+        role = "__custom__.score"
+        value = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        with tempfile.TemporaryDirectory() as root:
+            write_ft_shards([(None, role, value)], root)
+            generate_ft_index(root, {"TP_SIZE": 1, "DP_SIZE": 1, "EP_SIZE": 1})
+            for backend in ("scratch", "fastsafetensors"):
+                ckpt = FTCheckpoint.open(root, CheckpointTopology())
+                ckpt.read_backend = backend
+                model = RtpModule()
+                model.handler_heads = ReplicatedHandlerHeads(
+                    ((role, "classifier.weight", torch.float32),),
+                    WeightsMapper(), 3, torch.bfloat16,
+                )
+                ckpt.load_parameters(model, tuple(model.handler_heads.ft_bindings(ckpt)))
+                actual = model.handler_heads.exports()[role]
+                torch.testing.assert_close(actual, value, rtol=0, atol=0)
+
     def test_pp_keys_are_actual_module_paths_not_stage_local_offsets(self):
         leaf = torch.nn.Linear(2, 2)
         model = SimpleNamespace(

@@ -21,6 +21,7 @@ class GqaMoeForCausalLM(Qwen3ForCausalLM):
     # Expert/projection updates need explicit owner preflight, not the dense
     # model's blanket checkpoint-update capability.
     supports_checkpoint_weight_updates = False
+    supports_ft_handler_heads = True
 
     def load_ft_checkpoint(self, checkpoint):
         from rtp_llm.models_py.new_models.qwen2.ft_checkpoint import (
