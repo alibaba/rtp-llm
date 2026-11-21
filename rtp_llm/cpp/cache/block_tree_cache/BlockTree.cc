@@ -554,6 +554,7 @@ std::optional<std::vector<TreeNode*>> BlockTree::coveredDeviceGroupPath(
                    std::optional<std::vector<TreeNode*>>(std::vector<TreeNode*>{}) :
                    std::nullopt;
     }
+    std::optional<std::vector<TreeNode*>> lower_tier_path;
     for (const auto& range : ranges) {
         if (endpoint > range.matched_end || endpoint <= range.node->parent->token_end
             || (group->requiresExactStateEndpoint() && endpoint != range.node->token_end)) {
@@ -568,15 +569,16 @@ std::optional<std::vector<TreeNode*>> BlockTree::coveredDeviceGroupPath(
             continue;
         }
         const auto required   = group->requiredPathIndices(path, endpoint);
-        const bool all_device = group->hasDeviceCoverage(path, endpoint);
-        if (device_only && !all_device) {
+        const bool all_device = std::all_of(required.begin(), required.end(), [&](size_t index) {
+            return group->hasUsableDeviceResource(*path[index]);
+        });
+        if (!all_device && (device_only || lower_tier_path.has_value())) {
             continue;
         }
-        if (!device_only && !all_device && !required.empty()
-            && group->hasUsableDeviceResource(*path[required.back()])) {
+        if (!all_device && !required.empty() && group->hasUsableDeviceResource(*path[required.back()])) {
             continue;
         }
-        if (!device_only && std::any_of(required.begin(), required.end(), [&](size_t index) {
+        if (!all_device && std::any_of(required.begin(), required.end(), [&](size_t index) {
                 const auto& resource = path[index]->group_set_resources[group_id];
                 const Tier  tier     = resource.getTopTier();
                 return !resource.isMatchUsable()
@@ -588,12 +590,16 @@ std::optional<std::vector<TreeNode*>> BlockTree::coveredDeviceGroupPath(
             continue;
         }
         std::vector<TreeNode*> required_nodes;
-        for (const size_t index : group->requiredPathIndices(path, endpoint)) {
+        required_nodes.reserve(required.size());
+        for (const size_t index : required) {
             required_nodes.push_back(path[index]);
         }
-        return required_nodes;
+        if (all_device) {
+            return required_nodes;
+        }
+        lower_tier_path = std::move(required_nodes);
     }
-    return std::nullopt;
+    return lower_tier_path;
 }
 
 size_t BlockTree::contentMatchPos(const std::vector<int>& request_tokens) const {

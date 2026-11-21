@@ -484,6 +484,65 @@ TEST(BlockTreeLoaderTest, ExactHostTailKeepsReadyDevicePrefixAndReservesOnlyTail
     EXPECT_EQ(path.back()->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
 }
 
+TEST(BlockTreeLoaderTest, ExactDeviceLeafWinsOverLongerContentOnLowerTier) {
+    for (const Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        auto pool = makeStructuralDevicePool(0);
+        auto full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{pool},
+            tier == Tier::HOST ? makeHostPool(1, 4) : nullptr,
+            tier == Tier::DISK ? block_tree_cache_test::makeDiskPool(
+                                     1, 4, std::make_unique<block_tree_cache_test::MemoryDiskBlockIO>()) :
+                                 nullptr);
+        BlockTreeCacheConfig config;
+        config.enable_device_cache = true;
+        config.enable_host_cache   = tier == Tier::HOST;
+        config.enable_disk_cache   = tier == Tier::DISK;
+        auto cache = block_tree_cache_test::makeBlockTreeCacheForTest({full}, config, nullptr, nullptr, nullptr, 128);
+        ASSERT_NE(cache, nullptr);
+
+        const size_t device_endpoint = 100;
+        const size_t lower_endpoint  = 128;
+        pool->incRef(42);
+        std::vector<std::vector<GroupSetResource>> device(1, std::vector<GroupSetResource>(1));
+        device[0][0].device_blocks = {42};
+        std::vector<std::vector<GroupSetResource>> lower(1, std::vector<GroupSetResource>(1));
+        const auto lower_block = full->allocateSingleBlock(tier, BlockTreeRefType::CACHE);
+        lower[0][0].setBlocks(tier, {lower_block});
+        const std::vector<size_t>           device_ends{device_endpoint};
+        const std::vector<size_t>           lower_ends{lower_endpoint};
+        const std::vector<std::vector<int>> device_segments{std::vector<int>(device_endpoint, 1)};
+        const std::vector<std::vector<int>> lower_segments{std::vector<int>(lower_endpoint, 1)};
+        ASSERT_EQ(cache->tree()
+                      ->insertNode({100}, device, false, false, &device_segments, &device_ends)
+                      .inserted_nodes.size(),
+                  1u);
+        ASSERT_EQ(
+            cache->tree()->insertNode({128}, lower, false, false, &lower_segments, &lower_ends).inserted_nodes.size(),
+            1u);
+        pool->decRef(42);
+        full->releaseSingleBlock(tier, lower_block, BlockTreeRefType::CACHE);
+
+        const std::vector<int> tokens(101, 1);
+        ContentMatchContext    request;
+        request.tokens          = &tokens;
+        request.endpoint_key    = [](size_t endpoint) { return static_cast<CacheKeyType>(endpoint); };
+        request.source_identity = [](size_t begin, const std::vector<int>& segment, CacheKeyType key) {
+            return begin + segment.size() == static_cast<size_t>(key);
+        };
+        request.valid_endpoint    = [](size_t endpoint) { return endpoint > 0 && endpoint <= 100; };
+        request.reuse_unit_tokens = 128;
+        const auto result         = cache->match({}, {}, &tokens, &request);
+        EXPECT_EQ(result.target_token_endpoint, device_endpoint);
+        EXPECT_EQ(result.matched_device_endpoint, device_endpoint);
+        EXPECT_EQ(result.async_context, nullptr);
+        if (result.async_context) {
+            EXPECT_TRUE(result.async_context->abortPending());
+        }
+        block_tree_cache_test::releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    }
+}
+
 TEST(BlockTreeLoaderTest, CompleteKeysLoadPreciseCheckpointFromItsActualLocalTier) {
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
         auto full_pool  = makeStructuralDevicePool(0);
