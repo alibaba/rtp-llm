@@ -1,7 +1,10 @@
 """Explicit local V4.1 expert strategy; distributed transports are separate."""
 
+import os
+
 import torch
 
+from rtp_llm.config.dsv41_config import dsv41_prefill_pp_cut
 from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
 from rtp_llm.models_py.modules.dsv4.v41_moe import V41LocalMoE
 from rtp_llm.models_py.modules.dsv4.v41_mxfp8 import _scale_bytes
@@ -89,6 +92,17 @@ class V41GroupedFP4Strategy(RoutedExpertsStrategy):
             max_tokens=cfg.max_tokens_per_rank,
             masked_token_limit=min(128, cfg.max_tokens_per_rank),
             max_topk=cfg.n_activated_experts,
+            fuse_route_builder=(
+                os.environ.get("DSV41_MOE_ROUTE_BUILDER_FUSE") == "1"
+                and cfg.stage_context is not None
+                and cfg.stage_context.pp_rank == 0
+                and cfg.stage_context.group_size == 4
+                and cfg.cp_enabled
+                and cfg.cp_size == 4
+                and dsv41_prefill_pp_cut() == 20
+                and device.type == "cuda"
+                and torch.cuda.get_device_capability(device) == (12, 0)
+            ),
         )
         for key in names.values():
             layer_weights.pop(key)

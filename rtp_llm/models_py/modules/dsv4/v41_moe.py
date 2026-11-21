@@ -127,6 +127,7 @@ class V41LocalMoE(nn.Module):
         max_tokens=4096,
         masked_token_limit=128,
         max_topk=6,
+        fuse_route_builder=False,
     ):
         super().__init__()
         if not isinstance(experts, V41RoutedExperts):
@@ -151,6 +152,7 @@ class V41LocalMoE(nn.Module):
         self.expert_start_id = expert_start_id
         self.max_tokens, self.masked_token_limit = max_tokens, masked_token_limit
         self.max_topk = max_topk
+        self.fuse_route_builder = fuse_route_builder
 
     def forward_received(
         self, payload, dispatch_layout, *, layout="contiguous", return_layout=None
@@ -393,31 +395,56 @@ class V41LocalMoE(nn.Module):
             else:
                 base = torch.tensor(segment_starts, dtype=torch.int64, device=x.device)
             order = order[:active_count]
-            destinations = (
-                base.index_select(0, sorted_experts[:active_count])
-                + offsets[:active_count]
-            )
-            routed_x = torch.zeros(
-                (allocated, dim), device=x.device, dtype=source.dtype
-            )
-            routed_weights = torch.zeros(
-                allocated, device=x.device, dtype=torch.float32
-            )
-            valid = torch.zeros(allocated, device=x.device, dtype=torch.bool)
-            valid[destinations] = True
-            routed_x.index_copy_(0, destinations, source.index_select(0, order // topk))
-            routed_scales = None
-            if input_scales is not None:
-                routed_scales = torch.zeros(
-                    (allocated, dim // 32), device=x.device, dtype=torch.uint8
+            if (
+                self.fuse_route_builder
+                and input_scales is not None
+                and input_scales.is_contiguous()
+                and not torch.cuda.is_current_stream_capturing()
+            ):
+                from ._v41_route_builder_triton import route_builder
+
+                routed_x, routed_scales, routed_weights, valid = route_builder(
+                    source,
+                    input_scales,
+                    weights,
+                    order,
+                    counts,
+                    starts,
+                    base,
+                    allocated,
+                    active_count,
+                    experts,
+                    topk,
+                    route_map,
                 )
-                routed_scales.index_copy_(
-                    0, destinations, input_scales.index_select(0, order // topk)
+            else:
+                destinations = (
+                    base.index_select(0, sorted_experts[:active_count])
+                    + offsets[:active_count]
                 )
-            routed_weights.index_copy_(
-                0, destinations, weights.flatten().index_select(0, order)
-            )
-            route_map.index_copy_(0, order, destinations)
+                routed_x = torch.zeros(
+                    (allocated, dim), device=x.device, dtype=source.dtype
+                )
+                routed_weights = torch.zeros(
+                    allocated, device=x.device, dtype=torch.float32
+                )
+                valid = torch.zeros(allocated, device=x.device, dtype=torch.bool)
+                valid[destinations] = True
+                routed_x.index_copy_(
+                    0, destinations, source.index_select(0, order // topk)
+                )
+                routed_scales = None
+                if input_scales is not None:
+                    routed_scales = torch.zeros(
+                        (allocated, dim // 32), device=x.device, dtype=torch.uint8
+                    )
+                    routed_scales.index_copy_(
+                        0, destinations, input_scales.index_select(0, order // topk)
+                    )
+                routed_weights.index_copy_(
+                    0, destinations, weights.flatten().index_select(0, order)
+                )
+                route_map.index_copy_(0, order, destinations)
             down = self.experts.forward_contiguous(
                 routed_x.view(x.dtype),
                 segments,

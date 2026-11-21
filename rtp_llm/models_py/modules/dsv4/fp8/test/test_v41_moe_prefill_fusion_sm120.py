@@ -22,6 +22,46 @@ class V41MoEPrefillFusionTest(unittest.TestCase):
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
         torch.manual_seed(41723)
 
+    def test_route_builder_empty_experts_and_padding(self):
+        from rtp_llm.models_py.modules.dsv4._v41_route_builder_triton import (
+            route_builder,
+        )
+
+        device = torch.device("cuda")
+        source = torch.arange(256, device=device).to(torch.uint8).view(2, 128)
+        scales = torch.arange(8, device=device, dtype=torch.uint8).view(2, 4)
+        weights = torch.tensor([[0.125, 0.25], [0.5, 1.0]], device=device)
+        counts = torch.tensor([0, 2, 0, 1], device=device)
+        starts = torch.tensor([0, 0, 2, 2], device=device)
+        base = torch.tensor([0, 0, 128, 128], device=device)
+        order = torch.tensor([3, 0, 2], device=device)
+        route_map = torch.full((4,), -1, device=device)
+        actual = route_builder(
+            source,
+            scales,
+            weights,
+            order,
+            counts,
+            starts,
+            base,
+            256,
+            3,
+            4,
+            2,
+            route_map,
+        )
+        dest = torch.tensor([0, 1, 128], device=device)
+        expected = [torch.zeros_like(t) for t in actual]
+        expected[0][dest] = source[order // 2]
+        expected[1][dest] = scales[order // 2]
+        expected[2][dest] = weights.flatten()[order]
+        expected[3][dest] = True
+        for result, reference in zip(actual, expected):
+            self.assertTrue(
+                torch.equal(result.view(torch.uint8), reference.view(torch.uint8))
+            )
+        self.assertEqual(route_map.tolist(), [1, -1, 128, 0])
+
     def test_whole_local_moe_matches_same_shape_control(self):
         tensors = test_v41_routed_hardware.V41RoutedHardwareTest.weights(96)
         operators = []
