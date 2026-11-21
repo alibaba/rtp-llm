@@ -163,6 +163,12 @@ class AccMetrics(Enum):
     VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC = (
         "py_rtp_vit_remote_embedding_cache_stage_error_qps"
     )
+    VIT_REMOTE_EMB_HEADER_OBSERVATION_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_header_observation_qps"
+    )
+    VIT_REMOTE_EMB_HEADER_D2H_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_header_d2h_bytes_per_second"
+    )
     # Accumulated bytes are exported as B/s, not as an average object size.
     VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC = (
         "py_rtp_vit_remote_embedding_cache_sdk_object_bytes_per_second"

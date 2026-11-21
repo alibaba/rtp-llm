@@ -328,6 +328,7 @@ def unpack_object(
     blocking_cuda_events=False,
     payload_fence=None,
     observe_restore_timing=None,
+    observe_header=None,
 ):
     """Validate the layout before materializing any destination tensor.
 
@@ -373,11 +374,22 @@ def unpack_object(
                     if observe_restore_timing is not None
                     else None
                 )
+                restore_profiled = (
+                    getattr(librtp_compute_ops, "restore_emb_cuda_object_profiled", None)
+                    if observe_header is not None
+                    else None
+                )
                 stream_id = (
                     None if consumer_stream is None else consumer_stream.stream_id
                 )
                 with stage("native_object_restore"):
-                    if restore_observed is not None:
+                    if restore_profiled is not None:
+                        value, raw_header, timing, length, d2h_bytes, copies = (
+                            restore_profiled(
+                                buffer, expected_key, restore_devices, stream_id
+                            )
+                        )
+                    elif restore_observed is not None:
                         value, raw_header, timing = restore_observed(
                             buffer, expected_key, restore_devices, stream_id
                         )
@@ -386,7 +398,9 @@ def unpack_object(
                             buffer, expected_key, restore_devices, stream_id
                         )
                         timing = None
-                if timing is not None:
+                if restore_profiled is not None:
+                    observe_header(length, d2h_bytes, copies)
+                if timing is not None and observe_restore_timing is not None:
                     observe_restore_timing(timing)
                 if raw_header is None:
                     return value

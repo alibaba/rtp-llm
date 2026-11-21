@@ -159,16 +159,17 @@ inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, in
     return header;
 }
 
+inline constexpr int64_t kEmbCudaHeaderFirstReadBytes = 1024;
+
 inline std::string readEmbCudaObjectHeader(const at::Tensor& buffer) {
     constexpr int64_t prefixSize = 16;
-    constexpr int64_t firstReadSize = 1024;
     constexpr int64_t alignment = 64;
     constexpr uint64_t maxHeaderSize = 64 * 1024;
     const auto size = buffer.numel();
     if (size < prefixSize) {
         throw std::invalid_argument("invalid multimodal object buffer");
     }
-    const auto first = readEmbCudaHeader(buffer, 0, std::min(size, firstReadSize));
+    const auto first = readEmbCudaHeader(buffer, 0, std::min(size, kEmbCudaHeaderFirstReadBytes));
     const auto* bytes = first.data_ptr<uint8_t>();
     uint64_t headerSize = 0;
     for (unsigned i = 0; i < 8; ++i) {

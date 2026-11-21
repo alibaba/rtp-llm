@@ -233,7 +233,7 @@ std::vector<EmbTensorSlice> validateLayout(rapidjson::Document&              doc
     return slices;
 }
 
-template<bool observe>
+template<bool observe, bool profileHeader = false>
 pybind11::tuple restoreObject(const at::Tensor&                 input,
                               const std::optional<std::string>& expected,
                               bool                              restoreDevices,
@@ -280,6 +280,7 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
     const auto finish = [&](pybind11::object value, pybind11::object fallback) -> pybind11::tuple {
         if constexpr (observe) {
             stamp(5);
+            pybind11::object timing = pybind11::none();
             // Capture only slow successful native restores. The host-resume
             // component includes GIL reacquisition after the CUDA fence.
             if (decoded && ticks[5] - ticks[0] >= std::chrono::milliseconds(25)) {
@@ -288,9 +289,19 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
                     nanoseconds[i] =
                         std::chrono::duration_cast<std::chrono::nanoseconds>(ticks[i + 1] - ticks[i]).count();
                 }
-                return pybind11::make_tuple(std::move(value), std::move(fallback), nanoseconds);
+                timing = pybind11::cast(nanoseconds);
             }
-            return pybind11::make_tuple(std::move(value), std::move(fallback), pybind11::none());
+            if constexpr (profileHeader) {
+                const auto logicalBytes = 16 + static_cast<int64_t>(header.size());
+                const auto firstBytes   = std::min(input.numel(), kEmbCudaHeaderFirstReadBytes);
+                return pybind11::make_tuple(std::move(value),
+                                            std::move(fallback),
+                                            std::move(timing),
+                                            static_cast<int64_t>(header.size()),
+                                            std::max(logicalBytes, firstBytes),
+                                            logicalBytes > firstBytes ? 2 : 1);
+            }
+            return pybind11::make_tuple(std::move(value), std::move(fallback), std::move(timing));
         } else {
             return pybind11::make_tuple(std::move(value), std::move(fallback));
         }
@@ -311,6 +322,7 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
 void registerEmbTensorObjectDecode(pybind11::module& module) {
     module.def("restore_emb_cuda_object", &restoreObject<false>);
     module.def("restore_emb_cuda_object_observed", &restoreObject<true>);
+    module.def("restore_emb_cuda_object_profiled", &restoreObject<true, true>);
 }
 
 }  // namespace rtp_llm

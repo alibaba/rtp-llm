@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import threading
 import time
 from collections import Counter
@@ -38,6 +39,7 @@ _USE_NATIVE_SNAPSHOT = os.environ.get("MM_EMB_NATIVE_SNAPSHOT") == "1"
 _BLOCKING_CUDA_EVENTS = os.environ.get("MM_EMB_BLOCKING_CUDA_EVENTS") == "1"
 _RETRY_METADATA_TRANSPORT = os.environ.get("MM_EMB_METADATA_TRANSPORT_RETRY") == "1"
 _OBSERVE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE_TIMINGS") == "1"
+_OBSERVE_OBJECT_HEADER = os.environ.get("MM_EMB_NATIVE_HEADER_PROFILE") == "1"
 _SLOW_RESTORE_COMPONENTS = (
     "slow_restore_header",
     "slow_restore_layout",
@@ -269,6 +271,9 @@ class MMRemoteEmbeddingCache:
                     observe_lock_hold=cls._observe_gdr_lock_hold,
                     observe_restore_timing=(
                         cls._report_restore_timing if _OBSERVE_NATIVE_RESTORE else None
+                    ),
+                    observe_header=(
+                        cls._report_read_header if _OBSERVE_OBJECT_HEADER else None
                     ),
                     direct_payload=True,
                 )
@@ -571,6 +576,27 @@ class MMRemoteEmbeddingCache:
                 elapsed / 1_000_000,
                 {"operation": "read", "stage": stage, "status": "success"},
             )
+
+    @classmethod
+    def _report_header_size(cls, operation, length, copies):
+        # Size bins describe only JSON bytes, excluding the fixed prefix and pad.
+        # The 1008 boundary is exactly where the existing 1024-byte read spills.
+        bounds = (256, 512, 768, 1008, 1536, 2048, 4096, 8192, 16384, 65536)
+        band = str(next((upper for upper in bounds if length <= upper), "+Inf"))
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_HEADER_OBSERVATION_QPS_METRIC,
+            1,
+            {"operation": operation, "json_size_upper": band, "copies": str(copies)},
+        )
+
+    @classmethod
+    def _report_read_header(cls, length, d2h_bytes, copies):
+        cls._report_header_size("read", length, copies)
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_HEADER_D2H_BYTES_PER_SECOND_METRIC,
+            d2h_bytes,
+            {"copies": str(copies)},
+        )
 
     def _fetch_meta(self, client, key, trace_id, timeout_ms, deadline):
         try:
@@ -1147,6 +1173,8 @@ class MMRemoteEmbeddingCache:
                 api_ms = (time.perf_counter() - api_started) * 1000
                 outcome = "success"
                 self._count("write_success")
+                if _OBSERVE_OBJECT_HEADER and random.getrandbits(4) == 0:
+                    self._report_header_size("write_plan", len(plan.header_bytes), 0)
                 self.record(
                     "store_success",
                     key=key,
