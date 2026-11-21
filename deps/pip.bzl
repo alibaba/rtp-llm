@@ -61,10 +61,16 @@ CUDA13_ANNOTATIONS["nvidia-nccl-cu13"] = package_annotation(
 cc_library(
     name = "nccl_device",
     visibility = ["//visibility:public"],
-    hdrs = glob([
+    hdrs = [
+        "site-packages/nvidia/nccl/include/nccl.h",
+        "site-packages/nvidia/nccl/include/nccl_device.h",
+    ] + glob([
         "site-packages/nvidia/nccl/include/**/*.h",
         "site-packages/nvidia/nccl/include/**/*.cuh",
-    ]),
+    ], exclude = [
+        "site-packages/nvidia/nccl/include/nccl.h",
+        "site-packages/nvidia/nccl/include/nccl_device.h",
+    ], allow_empty = False),
     srcs = ["site-packages/nvidia/nccl/lib/libnccl.so.2"],
     includes = ["site-packages/nvidia/nccl/include"],
 )
@@ -72,7 +78,6 @@ cc_library(
 )
 
 CUDA13_ARM_ANNOTATIONS = dict(FLASHINFER_069_ANNOTATIONS)
-CUDA13_ARM_ANNOTATIONS["nvidia-nccl-cu13"] = CUDA13_ANNOTATIONS["nvidia-nccl-cu13"]
 
 def pip_deps():
     pip_parse(

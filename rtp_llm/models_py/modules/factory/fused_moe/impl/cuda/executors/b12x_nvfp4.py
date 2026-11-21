@@ -1,12 +1,9 @@
 """Dimension-derived adapter for FlashInfer static b12x NVFP4 MoE."""
 
-import builtins
-from dis import get_instructions
 from functools import cache
 from hashlib import sha256
 import logging
 from pathlib import Path
-from types import FunctionType
 from weakref import WeakValueDictionary
 
 import torch
@@ -63,63 +60,108 @@ def _matches_static_sources(dispatch_path, scale_utils_path):
     return digest.hexdigest() == _STATIC_SOURCES_SHA256
 
 
-def _static_launcher(launch):
-    """Bind the pinned static entry once; leave other callers' globals intact."""
-    if not isinstance(launch, FunctionType) or launch.__dict__ or launch.__closure__:
-        raise RuntimeError("Unrecognized FlashInfer static MoE launcher")
-    pending, seen = [launch], set()
-    reads_backend = False
-    bindings = []
-    while pending:
-        function = pending.pop()
-        if function in seen:
-            continue
-        seen.add(function)
-        bindings.append((id(function), "__code__", id(function.__code__)))
-        for instruction in get_instructions(function):
-            if instruction.opname != "LOAD_GLOBAL":
-                continue
-            name = instruction.argval
-            if name == "_FORCED_BACKEND":
-                if function is not launch:
-                    raise RuntimeError(
-                        "A FlashInfer callee reselects the static backend"
-                    )
-                reads_backend = True
-            if name not in function.__globals__:
-                if not hasattr(builtins, name):
-                    raise RuntimeError(f"Unbound FlashInfer global: {name}")
-                continue
-            value = function.__globals__[name]
-            bindings.append((id(function), name, id(value)))
-            if (
-                isinstance(value, FunctionType)
-                and value.__module__ == launch.__module__
-            ):
-                pending.append(value)
-    if not reads_backend:
-        raise RuntimeError("FlashInfer launcher does not read its backend directly")
-    bindings.extend(
-        (id(launch), "default", id(value)) for value in (launch.__defaults__ or ())
-    )
-    bindings.extend(
-        (id(launch), name, id(value))
-        for name, value in (launch.__kwdefaults__ or {}).items()
-    )
-    return _bind_static_launcher(launch, tuple(sorted(bindings)))
+def _launch_static(
+    dispatch,
+    *,
+    workspace,
+    weights,
+    a,
+    topk_ids,
+    topk_weights,
+    input_gs,
+    down_input_scale,
+    scatter_output,
+    num_experts,
+    num_tokens,
+    k,
+    n,
+    top_k,
+    quant_mode="nvfp4",
+    fast_math=False,
+    input_scales_are_reciprocal=True
+):
+    """Call the pinned static compiler directly, with no backend arbitration.
 
-
-@cache
-def _bind_static_launcher(launch, bindings):
-    private = FunctionType(
-        launch.__code__,
-        dict(launch.__globals__, _FORCED_BACKEND=_STATIC_BACKEND),
-        launch.__name__,
-        launch.__defaults__,
-        launch.__closure__,
+    This is the NVFP4/SiLU static ABI from FlashInfer 0.7.3. In particular it
+    never calls launch_sm120_static_moe, which can also select micro kernels.
+    Source hashes above cover the private compiler, schedule helpers and ABI.
+    """
+    if quant_mode != "nvfp4":
+        raise ValueError("b12x static adapter requires NVFP4")
+    static_n = weights.static_intermediate_size or weights.intermediate_size or n
+    static_n = max(n, dispatch._align_up(int(static_n), dispatch._LEVEL_TILE_N))
+    pairs = num_tokens * top_k
+    base_mac = min(dispatch.get_max_active_clusters(1), dispatch.get_num_sm(a.device))
+    tuned = dispatch._lookup_mac_ladder(dispatch._STATIC_MAC_LADDER, pairs)
+    mac = min(tuned or base_mac, base_mac)
+    if pairs < 40:
+        mac = min(mac, 64)
+    merged = top_k > 1 and dispatch._static_merged_groups(static_n, pairs)
+    compiled, _ = dispatch._get_static_kernel(
+        int(workspace.row_counts.shape[0]),
+        num_experts,
+        num_tokens,
+        k,
+        static_n,
+        top_k,
+        int(workspace.token_map.shape[1]),
+        topk_ids_dtype=torch.int32,
+        input_scales_are_reciprocal=input_scales_are_reciprocal,
+        fast_math=fast_math,
+        mac_override=mac,
+        activation="silu",
+        activation_precision="fp4",
+        quant_mode="nvfp4",
+        weight_n=weights.static_intermediate_size or weights.intermediate_size,
+        route_rows=workspace.max_rows,
+        merged_groups=merged,
+        deferred_init=dispatch._static_deferred_init(pairs),
+        source_scales=bool(weights.source_scales),
     )
-    private.__kwdefaults__ = dict(launch.__kwdefaults__ or {})
-    return private
+    route_scratch = workspace.route_output_scratch.view(-1)
+    if merged:
+        route_scratch = route_scratch[: workspace.max_rows * k]
+    w13_sf, down_sf = weights._w13_sf_storage, weights._down_sf_storage
+    if weights.static_w13_fp4 is None:
+        weights.ensure_legacy()
+        w13, down = weights.w13_fp4, weights.down_fp4
+    else:
+        w13, down = weights.static_w13_fp4, weights.static_down_fp4
+        if weights.static_w13_sf_storage is not None:
+            w13_sf, down_sf = (
+                weights.static_w13_sf_storage,
+                weights.static_down_sf_storage,
+            )
+    compiled(
+        a,
+        topk_ids.view(-1).to(torch.int32),
+        topk_weights.view(-1).to(torch.float32),
+        workspace.packed_a_view,
+        workspace.packed_input_scale.data_ptr(),
+        workspace.packed_a_flat,
+        route_scratch,
+        workspace.scale_flat,
+        workspace.barrier_count,
+        workspace.barrier_epoch,
+        workspace.route_state,
+        w13,
+        w13_sf.data_ptr(),
+        down,
+        down_sf.data_ptr(),
+        workspace.row_counts,
+        workspace.active_expert_count,
+        workspace.weight_expert_ids,
+        workspace.global_to_local_expert,
+        workspace.virt_route_scratch,
+        input_gs,
+        weights.w1_alpha,
+        weights.w2_alpha,
+        down_input_scale,
+        scatter_output,
+        workspace.token_map,
+        workspace.token_weights,
+    )
+    return scatter_output
 
 
 class _WorkspacePool:
@@ -141,7 +183,6 @@ class B12xNvfp4MoE:
                 "b12x NVFP4 requires the verified FlashInfer static sources "
                 "from 0.7.3 (7fa5c3b909a7)."
             )
-        _static_launcher(moe_dispatch.launch_sm120_static_moe)
         return utils.convert_sf_to_mma_layout, moe_dispatch
 
     @classmethod
@@ -163,8 +204,8 @@ class B12xNvfp4MoE:
 
     def __init__(self, w1, w2, scales, ep_rank, model_config, top_k):
         convert_sf_to_mma_layout, moe_dispatch = self._runtime()
-        self.launch = _static_launcher(moe_dispatch.launch_sm120_static_moe)
         self.dispatch = moe_dispatch
+        self.launch = lambda **kwargs: _launch_static(moe_dispatch, **kwargs)
         self.device = w1.device
         self.ep_rank = ep_rank
         self.num_experts = w1.shape[0]

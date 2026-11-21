@@ -48,7 +48,10 @@ struct Context {
     ncclComm_t   comm = nullptr;
     ncclDevComm  dev{};
     ncclWindow_t window{};
-    void*        input       = nullptr;
+    void*        input        = nullptr;
+    uint32_t*    abort_host   = nullptr;
+    uint32_t*    abort_device = nullptr;
+    cudaStream_t abort_stream = nullptr;
     bool         dev_created = false;
     bool         registered  = false;
 
@@ -66,6 +69,12 @@ struct Context {
         }
         if (input)
             ncclMemFree(input);
+        if (abort_stream)
+            cudaStreamDestroy(abort_stream);
+        if (abort_device)
+            cudaFree(abort_device);
+        if (abort_host)
+            cudaFreeHost(abort_host);
     }
 };
 
@@ -75,17 +84,23 @@ struct alignas(16) Pack {
 
 __device__ __forceinline__ void sync_or_trap(ncclLsaBarrierSession<ncclCoopCta>& barrier,
                                             ncclCoopCta coop,
+                                            const ncclDevComm& comm,
                                             uint64_t   timeout_cycles) {
+    // The untimed NCCL API returns void and may return after an abort. Never
+    // consume the peer window after that return: it may contain an old epoch.
+    const auto aborted = [&]() {
+        return comm.abortFlag && cuda::atomic_ref<uint32_t>{*comm.abortFlag}.load(cuda::memory_order_relaxed) != 0;
+    };
     if (timeout_cycles == 0) {
-        // NCCL 2.30.4 waitInternal<false> polls the communicator abort flag.
-        // Use the same abort-driven policy as the standard collective by default.
         barrier.sync(coop, cuda::memory_order_acq_rel);
+        if (__syncthreads_or(threadIdx.x == 0 && aborted()))
+            asm volatile("trap;");
         return;
     }
     const auto status = barrier.sync(coop, cuda::memory_order_acq_rel, timeout_cycles);
     // NCCL returns timeout to the waiting lanes. Make the decision uniform
     // before any lane reads the peer window or a subsequent layer reuses it.
-    if (__syncthreads_or(status != ncclSuccess))
+    if (__syncthreads_or(status != ncclSuccess || (threadIdx.x == 0 && aborted())))
         asm volatile("trap;");
 }
 
@@ -110,7 +125,7 @@ __global__ void reduce_gate(Bf16* output,
     // The acquire/release barriers publish the stream-ordered local copy
     // before peer loads, then retire each CTA's peer reads before the
     // next stream-ordered copy can reuse this window.
-    sync_or_trap(barrier, coop, timeout_cycles);
+    sync_or_trap(barrier, coop, comm, timeout_cycles);
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count / 8; i += blockDim.x * gridDim.x) {
         const Pack  x          = local[i];
         const Pack  y          = peer[i];
@@ -127,7 +142,7 @@ __global__ void reduce_gate(Bf16* output,
         output_packs[i] = result;
     }
     // All peers finish reading before a later layer can reuse the window.
-    sync_or_trap(barrier, coop, timeout_cycles);
+    sync_or_trap(barrier, coop, comm, timeout_cycles);
 }
 
 template<typename Function>
@@ -148,6 +163,10 @@ void validate_device(int device) {
     check(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device));
     if (major != 12 || minor != 0)
         throw std::runtime_error("LSA MoE requires SM120");
+    int async_engines;
+    check(cudaDeviceGetAttribute(&async_engines, cudaDevAttrAsyncEngineCount, device));
+    if (async_engines < 1)
+        throw std::runtime_error("LSA cancellation requires concurrent host-to-device copies");
     int runtime_version;
     check(ncclGetVersion(&runtime_version));
     if (runtime_version / 100 != NCCL_VERSION_CODE / 100)
@@ -200,6 +219,16 @@ extern "C" int qwen38_lsa_allocate(int device, int hidden, void** output) {
         check(cudaSetDevice(device));
         validate_device(device);
         auto context = std::make_unique<Context>(device, hidden);
+        // NCCL 2.30.4 populates dev.abortFlag only for internal communicators.
+        // Own a device-local flag so normal barrier checks do not read across
+        // PCIe. A pinned constant and independent copy stream can publish fatal
+        // cancellation even while the Decode stream waits for a missing peer.
+        check(cudaHostAlloc(reinterpret_cast<void**>(&context->abort_host), sizeof(uint32_t), cudaHostAllocDefault));
+        *context->abort_host = 1;
+        check(cudaMalloc(reinterpret_cast<void**>(&context->abort_device), sizeof(uint32_t)));
+        check(cudaStreamCreateWithFlags(&context->abort_stream, cudaStreamNonBlocking));
+        check(cudaMemsetAsync(context->abort_device, 0, sizeof(uint32_t), context->abort_stream));
+        check(cudaStreamSynchronize(context->abort_stream));
         const size_t window_bytes = static_cast<size_t>(kMaxRows) * hidden * sizeof(Bf16);
         check(ncclMemAlloc(&context->input, window_bytes));
         *output = context.release();
@@ -264,8 +293,9 @@ extern "C" int qwen38_lsa_activate(void* handle) {
         requirements.lsaBarrierCount = kMaxBlocks;
         check(ncclDevCommCreate(context->comm, &requirements, &context->dev));
         context->dev_created = true;
-        if (context->dev.lsaSize != 2)
-            throw std::runtime_error("Expected two LSA peers");
+        context->dev.abortFlag = context->abort_device;
+        if (context->dev.lsaSize != 2 || context->dev.lsaBarrier.nBarriers < kMaxBlocks || !context->dev.abortFlag)
+            throw std::runtime_error("LSA requires two peers, 64 granted barrier slots and an abort flag");
     });
 }
 
@@ -278,7 +308,7 @@ extern "C" int qwen38_lsa_apply(void*       handle,
                                 void*       stream_pointer) {
     return protect([&] {
         auto* context = static_cast<Context*>(handle);
-        if (!context || !context->dev_created || rows < 1 || rows > kMaxRows)
+        if (!context || !context->comm || !context->dev_created || rows < 1 || rows > kMaxRows)
             throw std::runtime_error("Invalid LSA context or row count");
         int device;
         check(cudaGetDevice(&device));
@@ -304,11 +334,33 @@ extern "C" int qwen38_lsa_apply(void*       handle,
     });
 }
 
+// Fatal cancellation only. The caller must terminate this worker; Graphs may
+// still hold device resources from the now-aborted communicator. In particular
+// this is not a way to switch one rank back to the normal routed collective.
+extern "C" int qwen38_lsa_abort(void* handle) {
+    return protect([&] {
+        auto* context = static_cast<Context*>(handle);
+        if (!context || !context->comm)
+            throw std::runtime_error("LSA requires a live communicator to abort");
+        check(cudaSetDevice(context->device));
+        // Publish cancellation before NCCL tears down its native resources.
+        // This also works when a waiting kernel occupies the CUDA stream.
+        check(cudaMemcpyAsync(context->abort_device,
+                              context->abort_host,
+                              sizeof(uint32_t),
+                              cudaMemcpyHostToDevice,
+                              context->abort_stream));
+        auto comm = context->comm;
+        context->comm = nullptr;
+        check(ncclCommAbort(comm));
+    });
+}
+
 // Out-of-place NCCL reference for the paired integration benchmark.
 extern "C" int qwen38_lsa_reference(void* handle, const void* input, void* output, int rows, void* stream_pointer) {
     return protect([&] {
         auto* context = static_cast<Context*>(handle);
-        if (!context || rows < 1 || rows > kMaxRows)
+        if (!context || !context->comm || rows < 1 || rows > kMaxRows)
             throw std::runtime_error("Invalid NCCL reference context or rows");
         check(ncclAllReduce(input,
                             output,

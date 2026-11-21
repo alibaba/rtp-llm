@@ -25,6 +25,17 @@ from rtp_llm.models_py.triton_kernels.common.moe_gating import (
 )
 
 
+# Independent CUDA/NCCL/Triton implementations may differ at BF16 rounding
+# boundaries. Keep the existing MoE gating tolerance, and report the actual
+# differences rather than claiming a cross-implementation bitwise contract.
+def check_reference(actual, expected):
+    torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+    return {
+        "unequal_elements": int(torch.count_nonzero(actual != expected)),
+        "max_abs_error": float((actual.float() - expected.float()).abs().max()),
+    }
+
+
 def main():
     if "LOCAL_RANK" in os.environ:
         run_worker(int(os.environ["LOCAL_RANK"]))
@@ -65,15 +76,16 @@ def run_missing_peer(rank, group_options):
     ops = rtp_llm_ops._qwen38_lsa
     ids = [ops.unique_id() if rank == 0 else None]
     dist.broadcast_object_list(ids, src=0)
-    hidden = 2560
+    abort_default = os.environ.get("RTP_TEST_LSA_DEFAULT_ABORT") == "1"
+    hidden, rows = (8192, 32) if abort_default else (2560, 1)
     handle = ops.allocate(rank, hidden)
-    ops.set_timeout(handle, 1000)
+    ops.set_timeout(handle, 0 if abort_default else 1000)
     ops.connect(handle, rank, ids[0])
     ops.check_capability(handle)
     ops.activate(handle)
-    value = torch.zeros(1, hidden, device="cuda", dtype=torch.bfloat16)
+    value = torch.zeros(rows, hidden, device="cuda", dtype=torch.bfloat16)
     output = torch.full_like(value, float("nan"))
-    gate = torch.zeros(1, 1, device="cuda", dtype=torch.bfloat16)
+    gate = torch.zeros(rows, 1, device="cuda", dtype=torch.bfloat16)
     stream = torch.cuda.current_stream()
     dist.barrier()
     if rank == 0:
@@ -84,17 +96,25 @@ def run_missing_peer(rank, group_options):
             value.data_ptr(),
             gate.data_ptr(),
             output.data_ptr(),
-            1,
+            rows,
             stream.cuda_stream,
         )
+        if abort_default:
+            # Rank 1 deliberately never submits its matching kernel. Cancel
+            # rank 0's default untimed wait through the independent H2D stream
+            # and the real NCCL abort API. This shape uses all 64 barrier CTAs.
+            # This case runs in its own process and never reuses the context.
+            time.sleep(0.2)
+            ops.abort(handle)
         with unittest.TestCase().assertRaisesRegex(
-            RuntimeError, "unspecified launch failure"
+            RuntimeError, "unspecified launch failure|illegal memory access"
         ):
             stream.synchronize()
         elapsed = time.monotonic() - start
-        assert 0.5 <= elapsed < 15, f"LSA nominal 1s timeout was {elapsed}s"
+        lower = 0.1 if abort_default else 0.5
+        assert lower <= elapsed < 15, f"LSA failed to stop: {elapsed}s"
         print(
-            f"LSA_MISSING_PEER_TIMEOUT nominal_ms=1000 elapsed_s={elapsed:.6f}",
+            f"LSA_MISSING_PEER_STOP default_abort={abort_default} rows={rows} hidden={hidden} elapsed_s={elapsed:.6f}",
             flush=True,
         )
     dist.barrier()
@@ -417,12 +437,7 @@ def run_hidden_size(device, rank, hidden_size):
             expected = baseline()
             actual = fused()
             torch.cuda.synchronize()
-            assert torch.equal(actual, expected), (
-                rank,
-                hidden_size,
-                rows,
-                "offset or strided eager",
-            )
+            check_reference(actual, expected)
             offset_graph = torch.cuda.CUDAGraph()
             dist.barrier()
             with torch.cuda.graph(offset_graph):
@@ -432,11 +447,7 @@ def run_hidden_size(device, rank, hidden_size):
             expected = baseline()
             offset_graph.replay()
             torch.cuda.synchronize()
-            assert torch.equal(captured_offset, expected), (
-                rank,
-                hidden_size,
-                "offset graph",
-            )
+            check_reference(captured_offset, expected)
             offset_graph.reset()
             partial, shared, hidden = aligned_partial, aligned_shared, aligned_hidden
 
@@ -448,12 +459,13 @@ def run_hidden_size(device, rank, hidden_size):
                 time.sleep(0.1)
             actual = fused()
             torch.cuda.synchronize()
-            assert torch.equal(actual, expected)
+            check_reference(actual, expected)
             if rank == 0:
                 print(
                     "LSA_DELAYED_PEER_PASSED timeout_ms=2000 delay_ms=100", flush=True
                 )
 
+        comparisons = []
         for pattern in range(12):
             partial.normal_(mean=pattern / 10)
             shared.normal_()
@@ -461,7 +473,7 @@ def run_hidden_size(device, rank, hidden_size):
             reference = baseline()
             actual = fused()
             torch.cuda.synchronize()
-            assert torch.equal(actual, reference), (rank, rows, pattern)
+            comparisons.append(check_reference(actual, reference))
         graph = torch.cuda.CUDAGraph()
         dist.barrier()
         with torch.cuda.graph(graph):
@@ -473,7 +485,12 @@ def run_hidden_size(device, rank, hidden_size):
             reference = baseline()
             graph.replay()
             torch.cuda.synchronize()
-            assert torch.equal(captured, reference), (rank, rows, "dynamic graph")
+            comparisons.append(check_reference(captured, reference))
+            # The same fused implementation must remain byte-identical between
+            # eager and Graph for these identical inputs and reduction order.
+            eager = fused()
+            torch.cuda.synchronize()
+            assert torch.equal(captured, eager), (rank, rows, "eager/graph")
         timings = {}
         for name, call in (("nccl_triton", baseline), ("staged_lsa_fused", fused)):
             dist.barrier()
@@ -501,7 +518,18 @@ def run_hidden_size(device, rank, hidden_size):
                 samples.append(duration.item())
             timings[name] = statistics.median(samples)
         results.append(
-            dict(hidden_size=hidden_size, rows=rows, bitwise=True, times_us=timings)
+            dict(
+                hidden_size=hidden_size,
+                rows=rows,
+                times_us=timings,
+                reference_atol=1e-2,
+                reference_rtol=1e-2,
+                eager_graph_bitwise=True,
+                reference_unequal_elements=sum(
+                    x["unequal_elements"] for x in comparisons
+                ),
+                reference_max_abs_error=max(x["max_abs_error"] for x in comparisons),
+            )
         )
         if rank == 0:
             print("LSA_MODEL_ENTRY_CASE", json.dumps(results[-1]), flush=True)
