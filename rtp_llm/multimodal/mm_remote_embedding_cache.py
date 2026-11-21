@@ -13,7 +13,7 @@ import random
 import threading
 import time
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import torch
@@ -1377,6 +1377,59 @@ class MMRemoteEmbeddingCache:
             raise ValueError("remote object is not a multimodal result")
         return value, approval
 
+    def _finish_native_read(self, result, size, key, consumer_stream):
+        (
+            state, value, code, inflight, acquire_ns, sdk_ns, restore_ns, held_ns,
+            _, _, header_size, header_bytes, header_copies, header_ns,
+        ) = result
+        status = state.name
+        error = self._gdr_pool.native_read_error(code, inflight) if status == "SdkFailure" else None
+        if status == "Expired":
+            stage_status = "timeout"
+        elif error is not None and _is_read_miss(error):
+            stage_status = "skipped"
+        elif status in ("SdkFailure", "CudaFailure", "InvalidObject"):
+            stage_status = "error"
+        else:
+            stage_status = "success"
+        if acquire_ns:
+            self._report_stage_latency("read", "gdr_acquire", "success", acquire_ns / 1e6)
+        if held_ns:
+            self._report_stage_latency("read", "gdr_lease_hold", stage_status, held_ns / 1e6)
+        if sdk_ns:
+            self._report_stage_latency(
+                "read", "native_load", "error" if status == "SdkFailure" else "success", sdk_ns / 1e6
+            )
+            self._report_stage_latency(
+                "read", "transfer", stage_status, (sdk_ns + restore_ns) / 1e6, size
+            )
+        if restore_ns:
+            self._report_stage_latency(
+                "read", "native_object_restore", stage_status, restore_ns / 1e6
+            )
+        if header_ns:
+            self._report_read_header(header_size, header_bytes, header_copies)
+            self._report_stage_latency("read", "native_restore_header", stage_status, header_ns / 1e6)
+        if status == "Expired":
+            raise TimeoutError("registered EMB read expired")
+        if error is not None:
+            raise error
+        if status == "InvalidObject":
+            raise ValueError("invalid registered EMB object")
+        if status == "CudaFailure":
+            raise RuntimeError("native registered EMB restore failed")
+        if status == "LayoutFallback":
+            # Only the rare unsupported layout takes a host snapshot. The
+            # original transfer is already complete and its lease returned.
+            with cuda_graph_gate.operation(), (
+                torch.cuda.stream(consumer_stream) if consumer_stream is not None else nullcontext()
+            ):
+                return unpack_object(
+                    value, cuda_device=self.cuda_device, max_bytes=self.max_object_bytes,
+                    expected_key=key, observe_stage=self._observe_stage,
+                )
+        return value
+
     def load(
         self, key, *, timeout_ms=None, trace_id=None, entry=None, restore_approval=True
     ):
@@ -1420,6 +1473,25 @@ class MMRemoteEmbeddingCache:
                 client = self._get_client()
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
+                native_read = getattr(type(self._gdr_pool), "try_native_read", None)
+                if self._direct_payload and callable(native_read):
+                    timing["stage"] = "transfer"
+                    api_started = time.perf_counter()
+                    result = native_read(self._gdr_pool, meta, key, trace_id, deadline, consumer_stream)
+                    if result is not None:
+                        try:
+                            value = self._finish_native_read(result, size, key, consumer_stream)
+                        except Exception as error:
+                            if _is_read_miss(error):
+                                timing["outcome"] = "miss"
+                                return None
+                            self._retire_client(client, error)
+                            raise
+                        timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
+                        return value
+                    unwrap = getattr(type(self._gdr_pool), "unwrap_object_meta", None)
+                    if callable(unwrap):
+                        meta = unwrap(meta)
                 if self._gdr_pool is not None:
                     timing["stage"] = "client_acquire"
                     slot_wait = min(

@@ -302,6 +302,9 @@ class RtpKvMetaObjectClient:
         return self._client.native_object_api() if callable(export) else None
 
     def native_save_error(self, code, may_be_inflight):
+        return self.native_transfer_error("save", code, may_be_inflight)
+
+    def native_transfer_error(self, operation, code, may_be_inflight):
         from kv_cache_manager.client.pybind.kvcm_py_client import ClientErrorCode
 
         try:
@@ -309,9 +312,9 @@ class RtpKvMetaObjectClient:
         except ValueError:
             native_code = code
         return self._client_error_type(
-            "save",
+            operation,
             native_code,
-            unknown_outcome=code == 2 or type(native_code) is int,
+            unknown_outcome=operation == "save" and (code == 2 or type(native_code) is int),
             data_transfer_may_be_inflight=may_be_inflight,
         )
 
@@ -375,14 +378,27 @@ class RtpKvMetaObjectClient:
             and hasattr(codes, "ER_SDK_TIMEOUT_BUFFER_SAFE")
         )
 
-    def get_object_meta(self, key: str, *, trace_id=None, timeout_ms=None):
-        """Return native object metadata, or None for a cache miss."""
+    @property
+    def supports_native_object_load(self):
+        return getattr(self._client, "supports_native_object_load", False) is True
+
+    def get_object_meta(
+        self, key: str, *, trace_id=None, timeout_ms=None, native_load=False
+    ):
+        """Fetch metadata once, optionally with its matching native load capability.
+
+        A miss returns None, or (None, None) in native load mode.
+        """
         self._ensure_open()
         if timeout_ms is None:
             timeout_ms = self._config.call_timeout_ms
         if timeout_ms <= 0:
             raise KvMetaLookupTimeout("KVMeta lookup deadline exceeded")
         try:
+            if native_load:
+                return self._client.get_object_meta_with_native_load(
+                    key, timeout_ms, trace_id=trace_id
+                )
             return self._client.get_object_meta(key, timeout_ms, trace_id=trace_id)
         except self._client_error_type as error:
             if getattr(error.code, "name", None) == "ER_SDK_TIMEOUT":

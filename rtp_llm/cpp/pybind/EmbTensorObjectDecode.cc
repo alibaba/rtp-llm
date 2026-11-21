@@ -2,6 +2,11 @@
 
 #if USING_CUDA
 
+#include "rtp_llm/cpp/pybind/EmbNativeObjectApi.h"
+#include "rtp_llm/cpp/pybind/EmbRegisteredArena.h"
+#include "rtp_llm/cpp/pybind/EmbRegisteredWrite.h"
+
+#include <c10/util/ScopeExit.h>
 #include <rapidjson/document.h>
 
 #include <array>
@@ -233,6 +238,54 @@ std::vector<EmbTensorSlice> validateLayout(rapidjson::Document&              doc
     return slices;
 }
 
+template<typename Stamp>
+std::optional<std::vector<at::Tensor>> restoreObjectPayload(const at::Tensor&                 input,
+                                                            const std::optional<std::string>& expected,
+                                                            bool                              restoreDevices,
+                                                            const std::optional<int64_t>&     consumerStreamId,
+                                                            std::optional<int32_t>            headerHint,
+                                                            rapidjson::Document&              document,
+                                                            std::string&                      header,
+                                                            EmbHeaderReadStats*               headerStats,
+                                                            Stamp                             stamp,
+                                                            bool* payloadStarted = nullptr) {
+    header = readEmbCudaObjectHeader(input, headerHint, headerStats);
+    stamp(1);
+    std::optional<std::vector<EmbTensorSlice>> slices;
+    try {
+        slices = validateLayout(document, header, input, expected, restoreDevices);
+    } catch (const UnsupportedLayout&) {
+        // No payload copy has been submitted.
+    }
+    stamp(2);
+    if (!slices) {
+        return std::nullopt;
+    }
+    if (payloadStarted) {
+        *payloadStarted = true;
+    }
+    auto decoded = restoreEmbTensorSlices(input, *slices);
+    if (consumerStreamId) {
+        const auto consumer = c10::Stream::unpack3(*consumerStreamId, input.get_device(), c10::kCUDA);
+        for (const auto& tensor : decoded) {
+            if (tensor.is_cuda()) {
+                tensor.record_stream(consumer);
+            }
+        }
+    }
+    waitEmbCudaStream(input);
+    return decoded;
+}
+
+pybind11::object buildObjectTree(const rapidjson::Document& document, const std::vector<at::Tensor>& decoded) {
+    std::vector<pybind11::object> tensors;
+    tensors.reserve(decoded.size());
+    for (const auto& tensor : decoded) {
+        tensors.push_back(pybind11::cast(tensor));
+    }
+    return toPython(field(document, "tree"), tensors);
+}
+
 template<bool observe, bool profileHeader = false>
 pybind11::tuple restoreObject(const at::Tensor&                 input,
                               const std::optional<std::string>& expected,
@@ -241,7 +294,7 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
                               std::optional<int32_t>            headerHint) {
     using Clock = std::chrono::steady_clock;
     std::array<Clock::time_point, 6> ticks;
-    const auto stamp = [&](size_t index) {
+    const auto                       stamp = [&](size_t index) {
         if constexpr (observe) {
             ticks[index] = Clock::now();
         }
@@ -254,28 +307,15 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
     {
         pybind11::gil_scoped_release release;
         const c10::cuda::CUDAGuard   deviceGuard(input.device());
-        header = readEmbCudaObjectHeader(input, headerHint, profileHeader ? &headerStats : nullptr);
-        stamp(1);
-        std::optional<std::vector<EmbTensorSlice>> slices;
-        try {
-            slices = validateLayout(document, header, input, expected, restoreDevices);
-        } catch (const UnsupportedLayout&) {
-            // Return the bytes already fetched. Python keeps its validation and
-            // full JSON compatibility; nothing has used the payload yet.
-        }
-        stamp(2);
-        if (slices) {
-            decoded = restoreEmbTensorSlices(input, *slices);
-            if (consumerStreamId) {
-                const auto consumer = c10::Stream::unpack3(*consumerStreamId, input.get_device(), c10::kCUDA);
-                for (const auto& tensor : *decoded) {
-                    if (tensor.is_cuda()) {
-                        tensor.record_stream(consumer);
-                    }
-                }
-            }
-            waitEmbCudaStream(input);
-        }
+        decoded = restoreObjectPayload(input,
+                                       expected,
+                                       restoreDevices,
+                                       consumerStreamId,
+                                       headerHint,
+                                       document,
+                                       header,
+                                       profileHeader ? &headerStats : nullptr,
+                                       stamp);
         stamp(3);
     }
     stamp(4);
@@ -294,12 +334,13 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
                 timing = pybind11::cast(nanoseconds);
             }
             if constexpr (profileHeader) {
-                return pybind11::make_tuple(std::move(value),
-                                            std::move(fallback),
-                                            std::move(timing),
-                                            static_cast<int64_t>(header.size()),
-                                            headerStats.bytes,
-                                            headerStats.copies);
+                return pybind11::make_tuple(
+                    std::move(value),
+                    std::move(fallback),
+                    std::move(timing),
+                    static_cast<int64_t>(header.size()),
+                    headerStats.bytes,
+                    headerStats.copies);
             }
             return pybind11::make_tuple(std::move(value), std::move(fallback), std::move(timing));
         } else {
@@ -309,18 +350,173 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
     if (!decoded) {
         return finish(pybind11::none(), pybind11::bytes(header));
     }
-    std::vector<pybind11::object> tensors;
-    tensors.reserve(decoded->size());
-    for (const auto& tensor : *decoded) {
-        tensors.push_back(pybind11::cast(tensor));
+    return finish(buildObjectTree(document, *decoded), pybind11::none());
+}
+
+enum class EmbReadState {
+    Success,
+    Expired,
+    LeaseUnavailable,
+    LayoutFallback,
+    InvalidObject,
+    CudaFailure,
+    SdkFailure
+};
+
+using ReadClock = std::chrono::steady_clock;
+
+int64_t readElapsed(ReadClock::time_point start) {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(ReadClock::now() - start).count();
+}
+
+struct EmbReadResult {
+    EmbReadState                           state         = EmbReadState::LeaseUnavailable;
+    int32_t                                code          = 0;
+    bool                                   inflight      = false;
+    int64_t                                acquireNs     = 0;
+    int64_t                                sdkNs         = 0;
+    int64_t                                restoreNs     = 0;
+    int64_t                                headerNs      = 0;
+    int64_t                                heldNs        = 0;
+    int64_t                                acquireLockNs = 0;
+    int64_t                                releaseLockNs = 0;
+    EmbHeaderReadStats                     headerStats;
+    std::string                            header;
+    rapidjson::Document                    document;
+    std::optional<std::vector<at::Tensor>> decoded;
+    at::Tensor                             fallback;
+};
+
+const KvcmObjectNativeLoadApiV1* loadApi(pybind11::handle capsule) {
+    const auto* api = static_cast<const KvcmObjectNativeLoadApiV1*>(
+        PyCapsule_GetPointer(capsule.ptr(), KVCM_OBJECT_NATIVE_LOAD_CAPSULE_V1));
+    if (!api) {
+        throw pybind11::error_already_set();
     }
-    return finish(toPython(field(document, "tree"), tensors), pybind11::none());
+    if (api->version != KVCM_OBJECT_NATIVE_LOAD_VERSION_1 || api->struct_size < sizeof(*api) || !api->load
+        || !api->context || !api->client_identity) {
+        throw std::invalid_argument("invalid exact-object native load API");
+    }
+    return api;
+}
+
+EmbReadResult readRegisteredObject(EmbRegisteredArena&               arena,
+                                   const at::Tensor&                 root,
+                                   int64_t                           length,
+                                   const KvcmObjectNativeLoadApiV1&  api,
+                                   const std::string&                trace,
+                                   const std::optional<std::string>& expected,
+                                   const std::optional<int64_t>&     consumerStreamId,
+                                   bool                              useHeaderHint,
+                                   bool                              profileHeader,
+                                   int64_t                           budgetNs,
+                                   bool                              sampleLocks) {
+    TORCH_CHECK(root.is_cuda() && root.is_contiguous() && root.scalar_type() == at::kByte && root.dim() == 1,
+                "expected a registered CUDA byte arena");
+    TORCH_CHECK(length > 0 && length <= root.numel() && static_cast<uint64_t>(length) == api.object_size
+                    && budgetNs <= 600'000'000'000,
+                "invalid native read size or deadline");
+    EmbReadResult result;
+    const auto    start = ReadClock::now();
+    if (budgetNs <= 0) {
+        result.state = EmbReadState::Expired;
+        return result;
+    }
+    const auto deadline = start + std::chrono::nanoseconds(budgetNs);
+    // Under the shared CUDA graph gate, only try an immediate acquisition.
+    // The original bounded wait runs outside this gate on contention.
+    const auto [acquired, ticket, offset, capacity, lockNs] =
+        arena.tryAcquireForNativeRead(length, sampleLocks);
+    if (acquired != EmbRegisteredArena::Result::Acquired) {
+      return result;
+    }
+    const auto leased = ReadClock::now();
+    bool reusable = true;
+    auto cleanup = c10::make_scope_exit(
+        [&] { arena.release(ticket, offset, reusable, false); });
+    result.acquireNs =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(leased - start)
+            .count();
+    result.acquireLockNs = lockNs;
+    if (leased >= deadline) {
+      result.state = EmbReadState::Expired;
+    } else {
+      const auto input = root.narrow(0, offset, length);
+      const KvcmObjectNativeLoadRequestV1 request{
+          trace.data(), trace.size(), input.data_ptr(),
+          static_cast<uint64_t>(length), 1};
+      const auto sdkStart = ReadClock::now();
+      const auto transfer = api.load(api.context, &request);
+      result.sdkNs = readElapsed(sdkStart);
+      reusable = !transfer.data_transfer_may_be_inflight;
+      if (transfer.code || !reusable) {
+        result.state = EmbReadState::SdkFailure;
+        result.code = transfer.code;
+      } else if (ReadClock::now() >= deadline) {
+        result.state = EmbReadState::Expired;
+      } else {
+        const auto restoreStart = ReadClock::now();
+        bool cudaPayloadStarted = false;
+        std::optional<EmbTransportCudaStream> transport;
+        const auto failCuda = [&] {
+          reusable = false;
+          result.state = EmbReadState::CudaFailure;
+          if (transport) {
+            transport->quarantine();
+          }
+          arena.failDevice();
+        };
+        try {
+          const c10::cuda::CUDAGuard device(root.device());
+          transport.emplace(root.get_device());
+          const c10::cuda::CUDAStreamGuard stream(
+              c10::cuda::getStreamFromExternal(
+                  reinterpret_cast<cudaStream_t>(transport->address()),
+                  root.get_device()));
+          const int32_t hint =
+              useHeaderHint && api.has_userdata1 ? api.userdata1 : 0;
+          result.decoded = restoreObjectPayload(
+              input, expected, true, consumerStreamId, hint, result.document,
+              result.header, profileHeader ? &result.headerStats : nullptr,
+              [&](size_t step) {
+                if (step == 1 && profileHeader) {
+                  result.headerNs = readElapsed(restoreStart);
+                }
+              },
+              &cudaPayloadStarted);
+          if (result.decoded) {
+            result.state = EmbReadState::Success;
+          } else {
+            // The compatible Python parser may accept this layout.
+            // Hand it owned bytes after fencing; the original MR is
+            // already releasable when Python starts parsing.
+            cudaPayloadStarted = true;
+            result.fallback = readEmbCudaHeader(input, 0, length);
+            result.state = EmbReadState::LayoutFallback;
+          }
+        } catch (const std::invalid_argument &) {
+          if (cudaPayloadStarted) {
+            failCuda();
+          } else {
+            result.state = EmbReadState::InvalidObject;
+          }
+        } catch (...) {
+          failCuda();
+        }
+        result.restoreNs = readElapsed(restoreStart);
+      }
+    }
+    result.inflight      = !reusable;
+    result.heldNs        = readElapsed(leased);
+    result.releaseLockNs = arena.release(ticket, offset, reusable, sampleLocks);
+    cleanup.release();
+    return result;
 }
 
 }  // namespace
 
 void registerEmbTensorObjectDecode(pybind11::module& module) {
-    namespace py = pybind11;
+    namespace py    = pybind11;
     const auto bind = [&](const char* name, auto restore) {
         module.def(name,
                    restore,
@@ -333,6 +529,76 @@ void registerEmbTensorObjectDecode(pybind11::module& module) {
     bind("restore_emb_cuda_object", &restoreObject<false>);
     bind("restore_emb_cuda_object_observed", &restoreObject<true>);
     bind("restore_emb_cuda_object_profiled", &restoreObject<true, true>);
+}
+
+void registerEmbRegisteredRead(pybind11::module& module) {
+    namespace py = pybind11;
+    py::enum_<EmbReadState>(module, "EmbRegisteredReadState")
+        .value("Success", EmbReadState::Success)
+        .value("Expired", EmbReadState::Expired)
+        .value("LeaseUnavailable", EmbReadState::LeaseUnavailable)
+        .value("LayoutFallback", EmbReadState::LayoutFallback)
+        .value("InvalidObject", EmbReadState::InvalidObject)
+        .value("CudaFailure", EmbReadState::CudaFailure)
+        .value("SdkFailure", EmbReadState::SdkFailure);
+    module.def("read_emb_registered_object",
+               [](EmbRegisteredArena&               arena,
+                  const at::Tensor&                 root,
+                  int64_t                           length,
+                  py::capsule                       metadata,
+                  py::capsule                       registeredClient,
+                  const std::string&                trace,
+                  const std::optional<std::string>& expected,
+                  const std::optional<int64_t>&     consumerStreamId,
+                  bool                              useHeaderHint,
+                  bool                              profileHeader,
+                  int64_t                           budgetNs,
+                  bool                              sampleLocks) {
+                   const auto* meta   = loadApi(metadata);
+                   const auto* client = static_cast<const KvcmObjectNativeApiV2*>(
+                       PyCapsule_GetPointer(registeredClient.ptr(), KVCM_OBJECT_NATIVE_API_CAPSULE_V2));
+                   if (!client) {
+                       throw py::error_already_set();
+                   }
+                   if (!validEmbNativeWriteApi(client) || client->context != meta->client_identity) {
+                       throw std::invalid_argument("native EMB metadata belongs to a different client");
+                   }
+                   EmbReadResult result;
+                   {
+                       py::gil_scoped_release release;
+                       result = readRegisteredObject(arena,
+                                                     root,
+                                                     length,
+                                                     *meta,
+                                                     trace,
+                                                     expected,
+                                                     consumerStreamId,
+                                                     useHeaderHint,
+                                                     profileHeader,
+                                                     budgetNs,
+                                                     sampleLocks);
+                   }
+                   py::object value = py::none();
+                   if (result.decoded) {
+                       value = buildObjectTree(result.document, *result.decoded);
+                   } else if (result.fallback.defined()) {
+                       value = py::cast(std::move(result.fallback));
+                   }
+                   return py::make_tuple(result.state,
+                                         std::move(value),
+                                         result.code,
+                                         result.inflight,
+                                         result.acquireNs,
+                                         result.sdkNs,
+                                         result.restoreNs,
+                                         result.heldNs,
+                                         result.acquireLockNs,
+                                         result.releaseLockNs,
+                                         result.header.size(),
+                                         result.headerStats.bytes,
+                                         result.headerStats.copies,
+                                         result.headerNs);
+               });
 }
 
 }  // namespace rtp_llm

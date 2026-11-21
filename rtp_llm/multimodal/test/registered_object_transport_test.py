@@ -77,6 +77,28 @@ class CudaRdmaSyncMemopsTest(unittest.TestCase):
 
 
 class RegisteredObjectTransportTest(unittest.TestCase):
+    def test_native_metadata_lookup_preserves_miss_and_original_handle(self):
+        pool = RegisteredTransportPool.__new__(RegisteredTransportPool)
+        pool._native_read = Mock()
+        pool._client = Mock()
+        meta = SimpleNamespace(size_bytes=4096, userdata1=416)
+        capsule = object()
+        pool._client.get_object_meta.side_effect = ((None, None), (meta, capsule))
+
+        self.assertIsNone(pool.get_object_meta("miss", timeout_ms=12))
+        pool._client.get_object_meta.assert_called_once_with(
+            "miss", native_load=True, timeout_ms=12
+        )
+        pool._client.get_object_meta.reset_mock()
+        hit = pool.get_object_meta("hit", timeout_ms=9)
+        pool._client.get_object_meta.assert_called_once_with(
+            "hit", native_load=True, timeout_ms=9
+        )
+        self.assertEqual(hit.size_bytes, meta.size_bytes)
+        self.assertIs(hit.capsule, capsule)
+        self.assertIs(pool.unwrap_object_meta(hit), meta)
+        pool._native_read.assert_not_called()
+
     def test_invalid_configuration_does_not_construct_client(self):
         def forbidden(**kw):
             self.fail("invalid configuration constructed client")

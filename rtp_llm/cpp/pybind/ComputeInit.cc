@@ -20,6 +20,7 @@ void registerExecCtxOps(pybind11::module& m);
 #if USING_CUDA
 void registerEmbTensorObjectDecode(pybind11::module& m);
 void registerEmbLocalCache(pybind11::module& m);
+void registerEmbRegisteredRead(pybind11::module& m);
 #endif
 using namespace torch_ext;
 
@@ -28,6 +29,7 @@ PYBIND11_MODULE(librtp_compute_ops, m) {
 #if USING_CUDA
     registerEmbTensorObjectDecode(m);
     registerEmbRegisteredWrite(m);
+    registerEmbRegisteredRead(m);
     registerEmbLocalCache(m);
 #endif
     registerEmbTensorObjectPlan(m);

@@ -18,6 +18,7 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 from .client import USE_EMB_HEADER_HINT, save_one_with_optional_header_hint
 
+_USE_NATIVE_READ = os.environ.get("MM_EMB_NATIVE_REGISTERED_READ") == "1"
 _USE_NATIVE_WRITE = os.environ.get("MM_EMB_NATIVE_REGISTERED_WRITE") == "1"
 _ISOLATED_CUDA_STREAMS = os.environ.get("MM_EMB_ISOLATED_CUDA_STREAMS") == "1"
 
@@ -152,6 +153,15 @@ def _safe_error_context(error):
     return fields
 
 
+class _NativeObjectMeta:
+    __slots__ = ("original", "capsule", "size_bytes")
+
+    def __init__(self, meta, capsule):
+        self.original = meta
+        self.capsule = capsule
+        self.size_bytes = meta.size_bytes
+
+
 class RegisteredTransportUnavailableError(RuntimeError):
     def __init__(
         self, message, *, quarantined, initial_failure=None, quarantine_id=None
@@ -171,7 +181,7 @@ class RegisteredObjectTransport:
     _quarantined_transports = []
     # Retain the pool independently of any Python result from an in-flight
     # native call. An OOM during return must not release an uncertain MR.
-    _native_write_owners = []
+    _native_io_owners = []
 
     def __init__(
         self, owner, buffer, device, observe_stage, *, lazy_stream=False, extent=None
@@ -568,13 +578,14 @@ class RegisteredTransportPool:
         self._native_quarantined_bytes = 0
         self._idle_streams = []
         self._native_write = None
-        self._native_write_capsule = None
+        self._native_read = None
+        self._native_client_capsule = None
         self._native_write_event_type = None
-        self._native_write_quarantined_bytes = 0
-        self._native_write_quarantine_started = None
-        self._native_write_observed_use = (0, 0)
+        self._native_io_quarantined_bytes = 0
+        self._native_io_quarantine_started = None
+        self._native_observed_use = [(0, 0), (0, 0)]
         self._create_slots(factory, slots, max_object_bytes, device, observe_stage)
-        self._enable_native_write()
+        self._enable_native_io()
         self.instance_id = self._client.instance_id
         self.instance_group = self._client.instance_group
         self._gc_thread = threading.Thread(
@@ -582,32 +593,40 @@ class RegisteredTransportPool:
         )
         self._gc_thread.start()
 
-    def _enable_native_write(self):
-        if not (_USE_NATIVE_WRITE and self.direct_payload and self._native_arena is not None):
+    def _enable_native_io(self):
+        if not ((_USE_NATIVE_WRITE or _USE_NATIVE_READ) and
+                self.direct_payload and self._native_arena is not None):
             return
         import librtp_compute_ops
 
-        invoke = getattr(librtp_compute_ops, "write_emb_registered_object", None)
+        write = getattr(librtp_compute_ops, "write_emb_registered_object", None)
+        read = getattr(librtp_compute_ops, "read_emb_registered_object", None)
         supports = getattr(librtp_compute_ops, "supports_registered_emb_write", None)
         event_type = getattr(librtp_compute_ops, "EmbCudaSnapshotReady", None)
         export = getattr(type(self._client), "native_object_api", None)
-        if not callable(invoke) or not callable(supports) or not callable(export) or event_type is None:
+        write = write if _USE_NATIVE_WRITE and event_type is not None else None
+        read = (
+            read if _USE_NATIVE_READ and
+            getattr(self._client, "supports_native_object_load", False) is True else None
+        )
+        if not callable(supports) or not callable(export) or not (write or read):
             return
         try:
             capsule = self._client.native_object_api()
             if not supports(capsule):
                 return
         except Exception:
-            logging.warning("KVCM native save handle unavailable", exc_info=True)
+            logging.warning("KVCM native object handle unavailable", exc_info=True)
             return
-        self._native_write_capsule = capsule
+        self._native_client_capsule = capsule
         self._native_write_event_type = event_type
-        self._native_write = invoke
+        self._native_write = write
+        self._native_read = read
         with RegisteredObjectTransport._quarantine_lock:
-            RegisteredObjectTransport._native_write_owners.append(self)
+            RegisteredObjectTransport._native_io_owners.append(self)
 
     def try_native_write(self, plan, ready_events, key, trace_id, deadline):
-        invoke, capsule, root = self._native_write, self._native_write_capsule, self._arena
+        invoke, capsule, root = self._native_write, self._native_client_capsule, self._arena
         if invoke is None or capsule is None or root is None or plan.checksum:
             return None
 
@@ -643,17 +662,63 @@ class RegisteredTransportPool:
         if state.name == "LeaseUnavailable":
             # Use the same bounded queue and wait outside the CUDA graph gate.
             return None
-        if state.name == "CudaFailure":
+        self._note_native_completion(True, state.name, may_be_inflight)
+        return result
+
+    def try_native_read(self, meta, key, trace_id, deadline, consumer_stream):
+        invoke, capsule, root = self._native_read, self._native_client_capsule, self._arena
+        if invoke is None or capsule is None or root is None or not isinstance(meta, _NativeObjectMeta):
+            return None
+        if (
+            (consumer_stream is not None and consumer_stream.device != root.device)
+            or (key is not None and (type(key) is not str or not key.isascii()))
+        ):
+            return None
+        profile_header = self._observe_header is not None and random.getrandbits(4) == 0
+        sample = (
+            self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
+        )
+        with cuda_graph_gate.operation():
+            result = invoke(
+                self._native_arena, root, meta.size_bytes, meta.capsule, capsule,
+                trace_id or f"kvcm-native-load-{uuid.uuid4().hex}", key,
+                None if consumer_stream is None else consumer_stream.stream_id,
+                USE_EMB_HEADER_HINT, profile_header,
+                int((deadline - time.monotonic()) * 1_000_000_000),
+                sample,
+            )
+        state, _, _, may_be_inflight, _, _, _, _, acquire_lock_ns, release_lock_ns, *_ = result
+        if sample:
+            if acquire_lock_ns:
+                self._observe_lock_hold(False, "acquire", acquire_lock_ns)
+            if release_lock_ns:
+                self._observe_lock_hold(False, "release", release_lock_ns)
+        if state.name == "LeaseUnavailable":
+            return None
+        self._note_native_completion(False, state.name, may_be_inflight)
+        return result
+
+    def _native_io_quarantine(self):
+        if self._native_client_capsule is None:
+            return 0, 0
+        write_bytes, write_count = self._native_arena.native_write_quarantine()
+        read_bytes, read_count = self._native_arena.native_read_quarantine()
+        return write_bytes + read_bytes, write_count + read_count
+
+    def _note_native_completion(self, write, state, may_be_inflight):
+        if state == "CudaFailure":
             self._native_device_failed = True
         if may_be_inflight:
-            self._native_write_quarantined_bytes = self._native_arena.native_write_quarantine()[0]
-            if self._native_write_quarantine_started is None:
-                self._native_write_quarantine_started = time.monotonic()
-            self._report_hold("write", "entered")
-        return result
+            self._native_io_quarantined_bytes = self._native_io_quarantine()[0]
+            if self._native_io_quarantine_started is None:
+                self._native_io_quarantine_started = time.monotonic()
+            self._report_hold("write" if write else "read", "entered")
 
     def native_save_error(self, code, may_be_inflight):
         return self._client.native_save_error(code, may_be_inflight)
+
+    def native_read_error(self, code, may_be_inflight):
+        return self._client.native_transfer_error("load", code, may_be_inflight)
 
     def _create_slots(self, factory, slots, capacity, device, observe_stage):
         if not 0 < capacity <= 1024**3:
@@ -723,11 +788,11 @@ class RegisteredTransportPool:
                     quarantine_id=held[0]._quarantine_id,
                 )
             if any(
-                pool._native_arena.native_write_quarantine()[1] > 0
-                for pool in RegisteredObjectTransport._native_write_owners
+                pool._native_io_quarantine()[1] > 0
+                for pool in RegisteredObjectTransport._native_io_owners
             ):
                 raise RegisteredTransportUnavailableError(
-                    "native GDR write is quarantined; restart the worker",
+                    "native GDR transfer is quarantined; restart the worker",
                     quarantined=True,
                 )
             with torch.cuda.device(device):
@@ -781,11 +846,11 @@ class RegisteredTransportPool:
             (time.monotonic() - slot._quarantine_started for slot in held), default=0
         )
         native_holds = 0
-        if self._native_write is not None:
-            native_bytes, native_holds = self._native_arena.native_write_quarantine()
+        if self._native_client_capsule is not None:
+            native_bytes, native_holds = self._native_io_quarantine()
             held_bytes += native_bytes
-            if self._native_write_quarantine_started is not None:
-                age = max(age, time.monotonic() - self._native_write_quarantine_started)
+            if self._native_io_quarantine_started is not None:
+                age = max(age, time.monotonic() - self._native_io_quarantine_started)
         try:
             self._observe_hold(
                 operation, event, held_bytes, age, registered_bytes, len(held) + native_holds
@@ -798,8 +863,8 @@ class RegisteredTransportPool:
         elapsed = 0
         while not self._gc_stop.wait(1):
             with self._condition:
-                if self._native_write is not None and self._observe_lease is not None:
-                    self._report_native_write_in_use()
+                if self._native_client_capsule is not None and self._observe_lease is not None:
+                    self._report_native_io_in_use()
             if self._observe_arena is not None:
                 self._report_arena()
             elapsed += 1
@@ -807,13 +872,16 @@ class RegisteredTransportPool:
                 self._gc_tick()
                 elapsed = 0
 
-    def _report_native_write_in_use(self):
-        in_use = self._native_arena.native_write_in_use()
-        previous_bytes, previous_count = self._native_write_observed_use
-        nbytes, count = in_use
-        if in_use != self._native_write_observed_use:
-            self._observe_lease(True, count - previous_count, nbytes - previous_bytes)
-            self._native_write_observed_use = in_use
+    def _report_native_io_in_use(self):
+        for write, observe in (
+            (False, self._native_arena.native_read_in_use),
+            (True, self._native_arena.native_write_in_use),
+        ):
+            nbytes, count = observe()
+            previous_bytes, previous_count = self._native_observed_use[write]
+            if (nbytes, count) != (previous_bytes, previous_count):
+                self._observe_lease(write, count - previous_count, nbytes - previous_bytes)
+                self._native_observed_use[write] = (nbytes, count)
 
     def _report_arena(self):
         if self._native_arena is not None:
@@ -863,7 +931,7 @@ class RegisteredTransportPool:
         if self._native_arena is not None:
             return (
                 self._native_device_failed
-                or self._native_quarantined_bytes + self._native_write_quarantined_bytes
+                or self._native_quarantined_bytes + self._native_io_quarantined_bytes
                 >= self._native_capacity
             )
         return any(slot.device_failed is True for slot in self._slots) or (
@@ -888,7 +956,17 @@ class RegisteredTransportPool:
         client = self._client
         if client is None:
             return None
+        if self._native_read is not None:
+            result = client.get_object_meta(key, native_load=True, **kwargs)
+            if result is None:
+                return None
+            meta, capsule = result
+            return _NativeObjectMeta(meta, capsule) if capsule is not None else meta
         return client.get_object_meta(key, **kwargs)
+
+    @staticmethod
+    def unwrap_object_meta(meta):
+        return meta.original if isinstance(meta, _NativeObjectMeta) else meta
 
     def _round_up(self, nbytes):
         block = self._min_block_bytes
@@ -1145,9 +1223,7 @@ class RegisteredTransportPool:
         # Called under _condition after all leases drain, including late IO.
         if self._client is None:
             return True
-        if any(slot.quarantined for slot in self._slots) or (
-            self._native_write is not None and self._native_arena.native_write_quarantine()[1]
-        ):
+        if any(slot.quarantined for slot in self._slots) or self._native_io_quarantine()[1]:
             return False
         try:
             self._client.close()
@@ -1161,12 +1237,12 @@ class RegisteredTransportPool:
             self._quarantine_registration(error, "close")
             self._report_hold("unknown", "gc_error")
         else:
-            if self._native_write is not None:
+            if self._native_client_capsule is not None:
                 if self._observe_lease is not None:
-                    self._report_native_write_in_use()
+                    self._report_native_io_in_use()
                 with RegisteredObjectTransport._quarantine_lock:
-                    RegisteredObjectTransport._native_write_owners.remove(self)
-                self._native_write = self._native_write_capsule = None
+                    RegisteredObjectTransport._native_io_owners.remove(self)
+                self._native_read = self._native_write = self._native_client_capsule = None
             self._client = None
             for slot in self._slots:
                 slot._buffer = None
