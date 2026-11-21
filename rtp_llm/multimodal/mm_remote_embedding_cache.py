@@ -36,6 +36,7 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
 _USE_NATIVE_SNAPSHOT = os.environ.get("MM_EMB_NATIVE_SNAPSHOT") == "1"
 _BLOCKING_CUDA_EVENTS = os.environ.get("MM_EMB_BLOCKING_CUDA_EVENTS") == "1"
+_RETRY_METADATA_TRANSPORT = os.environ.get("MM_EMB_METADATA_TRANSPORT_RETRY") == "1"
 
 
 def _is_write_in_progress(error):
@@ -73,6 +74,7 @@ def _log_error(marker, error, **context):
 
 class MMRemoteEmbeddingCache:
     _GDR_READ_SLOT_WAIT_SECONDS = 0.025
+    _METADATA_RETRY_MAX_MS = 10
 
     def __init__(
         self,
@@ -548,6 +550,35 @@ class MMRemoteEmbeddingCache:
         )
         return elapsed_ms
 
+    def _fetch_meta(self, client, key, trace_id, timeout_ms, deadline):
+        try:
+            return client.get_object_meta(key, trace_id=trace_id, timeout_ms=timeout_ms)
+        except Exception as error:
+            if (
+                not _RETRY_METADATA_TRANSPORT
+                or getattr(error, "operation", None) != "get_object_meta"
+                or getattr(error, "data_transfer_may_be_inflight", True) is not False
+                or getattr(getattr(error, "code", None), "name", None)
+                != "ER_INVALID_GRPCSTATUS"
+            ):
+                raise
+            # Exact-object metadata is idempotent. Bound extra delay on the
+            # retry while keeping the original request budget on the first call.
+            retry_ms = min(
+                self._METADATA_RETRY_MAX_MS, int((deadline - time.monotonic()) * 1000)
+            )
+            if retry_ms > 0:
+                try:
+                    with self._observe_stage("read", "metadata_retry"):
+                        return client.get_object_meta(
+                            key, trace_id=trace_id, timeout_ms=retry_ms
+                        )
+                except Exception:
+                    # The retry stage records its outcome separately. Preserve
+                    # the original typed transport failure for the caller.
+                    pass
+            raise
+
     def _lookup_object_meta(self, client, key, trace_id, timeout_ms, deadline):
         outcome = "error"
         try:
@@ -555,9 +586,7 @@ class MMRemoteEmbeddingCache:
                 "read", "metadata"
             ):
                 try:
-                    meta = client.get_object_meta(
-                        key, trace_id=trace_id, timeout_ms=timeout_ms
-                    )
+                    meta = self._fetch_meta(client, key, trace_id, timeout_ms, deadline)
                 except Exception as error:
                     # The typed lookup error is metadata-only; discovery can
                     # recover on the existing client without GPU registration.

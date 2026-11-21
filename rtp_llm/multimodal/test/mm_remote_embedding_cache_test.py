@@ -190,6 +190,59 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(event["error_code"], "ER_INVALID_GRPCSTATUS")
         self.assertEqual(event["trace_id"], "native-get")
 
+    def test_metadata_transport_retry_uses_only_remaining_request_time(self):
+        failure = RuntimeError("transport failed")
+        failure.code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")
+        failure.operation = "get_object_meta"
+        failure.data_transfer_may_be_inflight = False
+        result = SimpleNamespace(size_bytes=12)
+        client = Mock()
+        client.get_object_meta.side_effect = [failure, result]
+        remote = self.remote(Store())
+        module = "rtp_llm.multimodal.mm_remote_embedding_cache"
+        with patch(f"{module}._RETRY_METADATA_TRANSPORT", True), patch(
+            f"{module}.time.monotonic", return_value=100.0
+        ), patch(f"{module}.kmonitor.report") as report:
+            self.assertIs(
+                remote._lookup_object_meta(client, "key", "trace", 50, 100.0065),
+                result,
+            )
+        self.assertEqual(
+            client.get_object_meta.call_args_list,
+            [
+                call("key", trace_id="trace", timeout_ms=50),
+                call("key", trace_id="trace", timeout_ms=6),
+            ],
+        )
+        samples = self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC)
+        self.assertIn(
+            dict(operation="read", stage="metadata_retry", status="success"),
+            [tags for _, tags in samples],
+        )
+
+    def test_metadata_transport_retry_preserves_the_original_failure(self):
+        failure = RuntimeError("transport failed")
+        failure.code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")
+        failure.operation = "get_object_meta"
+        failure.data_transfer_may_be_inflight = False
+        remote = self.remote(Store())
+        module = "rtp_llm.multimodal.mm_remote_embedding_cache"
+        with patch(f"{module}._RETRY_METADATA_TRANSPORT", True), patch(
+            f"{module}.time.monotonic", return_value=100.0
+        ):
+            for deadline, expected_calls in ((100.0, 1), (101.0, 2)):
+                with self.subTest(deadline=deadline):
+                    client = Mock()
+                    client.get_object_meta.side_effect = [failure, TimeoutError()]
+                    with self.assertRaises(RuntimeError) as found:
+                        remote._fetch_meta(client, "key", "trace", 50, deadline)
+                    self.assertIs(found.exception, failure)
+                    self.assertEqual(client.get_object_meta.call_count, expected_calls)
+                    if expected_calls == 2:
+                        self.assertEqual(
+                            client.get_object_meta.call_args.kwargs["timeout_ms"], 10
+                        )
+
     def test_error_details_are_bounded_redacted_and_preserve_suppressed_cause(self):
         secret = "do-not-log-this-secret"
         try:
