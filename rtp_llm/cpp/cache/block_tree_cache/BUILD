@@ -1,6 +1,28 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "no_block_copy_link_deps", "torch_deps")
 
+cc_library(
+    name = "aligned_host_memory",
+    srcs = ["block_pool/AlignedHostMemory.cc"] + select({
+        "@//:using_cuda": ["block_pool/CudaHostMemoryRegistration.cc"],
+        "//conditions:default": ["block_pool/UnsupportedHostMemoryRegistration.cc"],
+    }),
+    hdrs = [
+        "block_pool/AlignedHostMemory.h",
+        "block_pool/HostMemoryRegistration.h",
+    ],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps() + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
 # Leaf pool target: DeviceBlockPool owns its backing and inherits the common
 # IBlockPool lifecycle. Keeping this target below allocator/group targets avoids
 # a cycle with the full block_tree_cache library.
@@ -19,6 +41,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":aligned_host_memory",
         "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:memory_layout_strategy",
@@ -100,13 +123,9 @@ cc_library(
         "block_pool/DiskBlockIO.cc",
         "block_pool/DiskBlockPool.cc",
         "block_pool/DiskMountGuard.cc",
-        "block_pool/AlignedHostMemory.cc",
         "block_pool/HostBlockPool.cc",
         "block_pool/HostStagingBlockPool.cc",
-    ] + select({
-        "@//:using_cuda": ["block_pool/CudaHostMemoryRegistration.cc"],
-        "//conditions:default": ["block_pool/UnsupportedHostMemoryRegistration.cc"],
-    }),
+    ],
     hdrs = [
         "BlockTree.h",
         "BlockTreeCache.h",
@@ -150,14 +169,13 @@ cc_library(
         "block_pool/DiskBlockIO.h",
         "block_pool/DiskBlockPool.h",
         "block_pool/DiskMountGuard.h",
-        "block_pool/AlignedHostMemory.h",
         "block_pool/HostBlockPool.h",
         "block_pool/HostStagingBlockPool.h",
-        "block_pool/HostMemoryRegistration.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":aligned_host_memory",
         "//rtp_llm/cpp/cache/events:kv_cache_event",
         ":block_tree_task_pool",
         ":crc_dump_writer",

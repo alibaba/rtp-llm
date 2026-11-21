@@ -8,6 +8,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.offload.policy import ERROR_INVALID_ROW
+
 if TYPE_CHECKING:
     from rtp_llm.models_py.modules.offload.runtime import KVWrite
     from rtp_llm.ops import OffloadStorage
@@ -22,11 +24,24 @@ class FetchRows:
     error: torch.Tensor | None = None
 
 
+@dataclass(frozen=True)
+class WriteState:
+    mapping: torch.Tensor
+    generations: torch.Tensor
+    versions: torch.Tensor
+    tags: torch.Tensor
+    slot_epochs: torch.Tensor
+    hot_epoch: torch.Tensor
+    active_rows: torch.Tensor
+    error: torch.Tensor
+    dynamic: bool
+
+
 class LayoutOps(Protocol):
     def fetch(self, storage: OffloadStorage, misses: FetchRows) -> None: ...
 
     def store(
-        self, storage: OffloadStorage, data: KVWrite, resident_ids: torch.Tensor
+        self, storage: OffloadStorage, data: KVWrite, state: WriteState
     ) -> None: ...
 
 
@@ -147,8 +162,17 @@ def _write(
     Host,
     Resident,
     Ids,
-    ResidentIds,
     Values,
+    Map,
+    Generations,
+    Versions,
+    Tags,
+    SlotEpochs,
+    HotEpoch,
+    ActiveRows,
+    Error,
+    ROWS_PER_BLOCK: tl.constexpr,
+    DYNAMIC: tl.constexpr,
     PAGE_ROWS: tl.constexpr,
     HBM_ROWS: tl.constexpr,
     TOTAL_ROWS: tl.constexpr,
@@ -178,10 +202,23 @@ def _write(
         else:
             destination = _row_offset(token - HBM_ROWS, PAGE_ROWS, HOST[0], HOST[1])
             tl.store(host + destination + host_x, data, x < WIDTH)
-            slot = tl.load(ResidentIds + i).to(tl.int64)
-            if slot >= 0:
-                destination = _row_offset(slot, PAGE_ROWS, GPU[0], GPU[1])
+            slot = tl.load(Map + token)
+            mapped = slot >= 0
+            if DYNAMIC:
+                mapped = mapped & (slot < tl.load(ActiveRows))
+                tag = tl.load(Tags + slot, mapped, other=-1)
+                allocation = tl.load(SlotEpochs + slot, mapped, other=-1)
+                expected = tl.load(HotEpoch + slot, mapped, other=-1)
+                mapped = mapped & (tag == token) & (allocation == expected)
+            version = tl.load(Versions + slot, mapped, other=-1)
+            generation = tl.load(Generations + token // ROWS_PER_BLOCK)
+            if mapped & (version == generation):
+                destination = _row_offset(
+                    slot.to(tl.int64) + HBM_ROWS, PAGE_ROWS, GPU[0], GPU[1]
+                )
                 tl.store(resident + destination + gpu_x, data, x < WIDTH)
+    elif token != -1:
+        tl.atomic_or(Error, ERROR_INVALID_ROW, sem="relaxed")
 
 
 def _copy_unit(*planes: torch.Tensor) -> int:
@@ -260,9 +297,7 @@ class PagedRowLayout:
                 4,
             )
 
-    def store(
-        self, storage: OffloadStorage, data: KVWrite, resident_ids: torch.Tensor
-    ) -> None:
+    def store(self, storage: OffloadStorage, data: KVWrite, state: WriteState) -> None:
         for host, resident, values in zip(
             storage.host_planes, storage.resident_planes, data.planes
         ):
@@ -274,8 +309,17 @@ class PagedRowLayout:
                 host,
                 resident,
                 data.backing_ids,
-                resident_ids,
                 values,
+                state.mapping,
+                state.generations,
+                state.versions,
+                state.tags,
+                state.slot_epochs,
+                state.hot_epoch,
+                state.active_rows,
+                state.error,
+                storage.rows_per_block,
+                state.dynamic,
                 storage.rows_per_page,
                 storage.hbm_blocks * storage.rows_per_block,
                 storage.total_blocks * storage.rows_per_block,

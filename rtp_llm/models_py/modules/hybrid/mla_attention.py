@@ -176,6 +176,7 @@ class MlaAttention(nn.Module):
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
         return_topk: bool = False,
+        offload_write_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Optional[torch.Tensor]]:
         is_sparse = self.indexer is not None or self.reuse_topk_indices
         offload_plan = self.offload_plan
@@ -287,7 +288,11 @@ class MlaAttention(nn.Module):
                 prev_topk_indices,
             )
         offload_args = (
-            {"offload_plan": offload_plan, "offload_writer": self.offload_writer}
+            {
+                "offload_plan": offload_plan,
+                "offload_writer": self.offload_writer,
+                "offload_write_ids": offload_write_ids,
+            }
             if offload_plan is not None
             else {}
         )

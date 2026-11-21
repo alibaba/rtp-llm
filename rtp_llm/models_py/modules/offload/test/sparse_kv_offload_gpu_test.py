@@ -458,6 +458,33 @@ class SparseOffloadRuntimeTest(_CudaStreamTestCase):
                             torch.equal(slots[positions + 1], slots[positions].roll(1))
                         )
 
+    def test_aligned_tiles_reserve_disjoint_offsets_per_request(self):
+        width = 512
+        runtime, refs, _ = self.make_runtime(
+            capacity=4 * width, planes=((torch.uint8, 16, 0),), requests=4
+        )
+        host = torch.arange(width, dtype=torch.int32, device="cuda") + runtime.hbm_rows
+        # Two queries reuse one partition. Duplicates span multiple CTAs.
+        ids = torch.stack((host, host.roll(129), host + width, host + 2 * width))
+        keys = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device="cuda")
+        requests = torch.tensor([2, 2, 0, 1], dtype=torch.int32, device="cuda")
+        runtime.begin(ids, request_keys=keys, request_ids=requests)
+        self.assert_rows(runtime, refs, ids)
+        self.assertEqual(runtime._miss_count.item(), 3 * width)
+        self.assertEqual(runtime._pending_count.sum().item(), 3 * width)
+
+        runtime.reset()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=self.stream):
+            runtime.begin(ids, request_keys=keys, request_ids=requests)
+            runtime.drain()
+        ids[3].fill_(-1)
+        ids[3, 0] = 1
+        graph.replay()
+        self.assert_rows(runtime, refs, ids)
+        self.assertEqual(runtime._miss_count.item(), 2 * width)
+        self.assertEqual(runtime._pending_count.sum().item(), 2 * width)
+
     def test_graph_buckets_reset_version_publication_and_writes(self):
         runtime, refs, _ = self.make_runtime()
         captures = []
@@ -1197,6 +1224,36 @@ class SparseMlaOffloadTest(_CudaStreamTestCase):
             self.assertTrue(
                 storage.resident_planes[0].view(torch.uint8).eq(19).all().item()
             )
+
+    def test_shared_write_ids_follow_slot_mapping_on_graph_replay(self):
+        cache = make_offload_test_cache(True)
+        plans = build_offload_plans(cache, offload_descs({0: (0, 1)}))
+        writers = []
+        for layer in range(2):
+            writer = MlaKVCacheWriteOp(KvCacheDataType.FP8)
+            writer.configure_offload(plans[layer, "default"].storage, 4)
+            writers.append(writer)
+        storage = plans[0, "default"].storage
+        block = storage.rows_per_block
+        host = storage.hbm_blocks * block
+        params = SimpleNamespace(
+            slot_mapping=torch.tensor(
+                [0, block, -1, host], dtype=torch.int64, device="cuda"
+            )
+        )
+        ckv = torch.ones((4, 512), dtype=torch.bfloat16, device="cuda")
+        rope = torch.ones((4, 64), dtype=torch.bfloat16, device="cuda")
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=self.stream):
+            backing_ids = writers[0].pack_write_ids(params, ckv.shape[0])
+            for writer in writers:
+                data = writer.pack(ckv, rope, params, backing_ids=backing_ids)
+                self.assertIs(data.backing_ids, backing_ids)
+        graph.replay()
+        self.assertEqual(backing_ids.tolist(), [-1, block, -1, host])
+        params.slot_mapping.add_(1)
+        graph.replay()
+        self.assertEqual(backing_ids.tolist(), [-1, block + 1, -1, host + 1])
 
     def test_early_indexer_keeps_projection_output_unchanged(self):
         attention = MlaAttention.__new__(MlaAttention)

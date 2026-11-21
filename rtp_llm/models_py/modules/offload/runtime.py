@@ -9,11 +9,8 @@ import triton
 import triton.language as tl
 
 from rtp_llm.models_py.modules.offload import policy as eviction
-from rtp_llm.models_py.modules.offload.layout import FetchRows, LayoutOps
-from rtp_llm.models_py.modules.offload.policy import (
-    ERROR_INVALID_ROW,
-    ERROR_MISSING_ADMISSION,
-)
+from rtp_llm.models_py.modules.offload.layout import FetchRows, LayoutOps, WriteState
+from rtp_llm.models_py.modules.offload.policy import ERROR_MISSING_ADMISSION
 
 if TYPE_CHECKING:
     from rtp_llm.ops import OffloadStorage
@@ -119,48 +116,6 @@ def _finish_admission(
     tl.store(Owners + token, 0x7FFFFFFF, refresh & (owner == i))
     if tl.program_id(0) == 0:
         tl.store(Epoch, tl.load(Epoch) + 1)
-
-
-@triton.jit
-def _write_resident_ids(
-    Ids,
-    Out,
-    Map,
-    Generations,
-    Versions,
-    Tags,
-    SlotEpochs,
-    HotEpoch,
-    ActiveRows,
-    Error,
-    TOTAL_ROWS: tl.constexpr,
-    ROWS_PER_BLOCK: tl.constexpr,
-    HBM_ROWS: tl.constexpr,
-    NUM_ROWS: tl.constexpr,
-    TILE_SIZE: tl.constexpr,
-    DYNAMIC: tl.constexpr,
-):
-    i = tl.program_id(0) * TILE_SIZE + tl.arange(0, TILE_SIZE)
-    token = tl.load(Ids + i, i < NUM_ROWS, other=-1)
-    bad = (i < NUM_ROWS) & ((token < -1) | (token >= TOTAL_ROWS))
-    tl.atomic_or(
-        Error, ERROR_INVALID_ROW, tl.sum(bad.to(tl.int32), 0) > 0, sem="relaxed"
-    )
-    host = (i < NUM_ROWS) & (token >= HBM_ROWS) & (token < TOTAL_ROWS)
-    slot = tl.load(Map + token, host, other=-1)
-    mapped = host & (slot >= 0)
-    if DYNAMIC:
-        mapped = mapped & (slot < tl.load(ActiveRows))
-        tag = tl.load(Tags + slot, mapped, other=-1)
-        allocation = tl.load(SlotEpochs + slot, mapped, other=-1)
-        expected = tl.load(HotEpoch + slot, mapped, other=-1)
-    version = tl.load(Versions + slot, mapped, other=-1)
-    generation = tl.load(Generations + token // ROWS_PER_BLOCK, host, other=-1)
-    current = (slot >= 0) & (version == generation)
-    if DYNAMIC:
-        current = mapped & current & (tag == token) & (allocation == expected)
-    resident = tl.where(current, slot + HBM_ROWS, -1)
-    tl.store(Out + i, tl.where(token < HBM_ROWS, token, resident), i < NUM_ROWS)
 
 
 class SparseOffloadRuntime:
@@ -316,7 +271,7 @@ class SparseOffloadRuntime:
         self._pending_count = torch.zeros_like(self._request_parts)
         self._slots = torch.empty((maximum,), dtype=torch.int32, device=self.device)
         self._misses = torch.empty_like(self._slots)
-        self._write_slots = torch.empty_like(self._slots)
+        self._pending_positions = torch.empty_like(self._slots)
         # Share the counter allocation, avoiding another allocator-sized chunk.
         # Error is sticky across selections/replay; reset() explicitly clears it.
         # Device-side validation accumulates the ERROR_* bits from policy.py.
@@ -325,6 +280,17 @@ class SparseOffloadRuntime:
         if not self.dynamic:
             self.active_rows = self._miss_count
             self.hot_epoch = self.versions
+        self._write_state = WriteState(
+            self.mapping,
+            self.generations,
+            self.versions,
+            self.tags,
+            self.slot_epochs,
+            self.hot_epoch,
+            self.active_rows,
+            self.error,
+            self.dynamic,
+        )
         self.transfer_stream = torch.cuda.Stream(device=self.device)
         self.ready = tuple(torch.cuda.Event() for _ in storages)
         self._kickoff = torch.cuda.Event()
@@ -524,8 +490,6 @@ class SparseOffloadRuntime:
                     HBM_ROWS=self.hbm_rows,
                     DYNAMIC=self.dynamic,
                 )
-                # Reuse write scratch before any ready event is published;
-                # write() cannot consume it until admission/fetch has finished.
                 eviction.collect_misses[grid](
                     ids,
                     indices,
@@ -538,7 +502,7 @@ class SparseOffloadRuntime:
                     query_requests,
                     self._request_parts,
                     self._first_requests,
-                    self._write_slots,
+                    self._pending_positions,
                     self._pending_count,
                     self.error,
                     NUM_ROWS=n,
@@ -551,7 +515,7 @@ class SparseOffloadRuntime:
                 )
                 eviction.admit[(self.max_requests,)](
                     ids,
-                    self._write_slots,
+                    self._pending_positions,
                     self._pending_count,
                     self.mapping,
                     self.tags,
@@ -621,32 +585,12 @@ class SparseOffloadRuntime:
             ):
                 raise ValueError("write planes must contain W native KV rows on CUDA")
             self._check_plane(values)
-        # Chunk large writes using fixed scratch; selection size does not limit W.
         for start in range(0, n, self.maximum):
             stop = min(start + self.maximum, n)
             chunk = KVWrite(
                 data.backing_ids[start:stop], tuple(p[start:stop] for p in data.planes)
             )
-            slots = self._write_slots[: stop - start]
-            _write_resident_ids[(triton.cdiv(stop - start, 256),)](
-                chunk.backing_ids,
-                slots,
-                self.mapping,
-                self.generations,
-                self.versions,
-                self.tags,
-                self.slot_epochs,
-                self.hot_epoch,
-                self.active_rows,
-                self.error,
-                TOTAL_ROWS=self.mapping.numel(),
-                ROWS_PER_BLOCK=self.block_rows,
-                HBM_ROWS=self.hbm_rows,
-                NUM_ROWS=stop - start,
-                TILE_SIZE=256,
-                DYNAMIC=self.dynamic,
-            )
-            self.layout.store(storage, chunk, slots)
+            self.layout.store(storage, chunk, self._write_state)
 
     def acquire(self, storage_index: int) -> KVReadView:
         if self._indices is None:

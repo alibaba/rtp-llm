@@ -8,6 +8,9 @@
 
 namespace rtp_llm {
 
+// The tensor owns both the mapping and its registration. Views retain both.
+torch::Tensor allocateRegisteredPinnedHostTensor(size_t bytes);
+
 class AlignedHostMemory {
 public:
     AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name);

@@ -106,6 +106,11 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool use_memfd, int
 
 }  // namespace
 
+torch::Tensor allocateRegisteredPinnedHostTensor(size_t bytes) {
+    int fd = -1;
+    return allocateRegisteredCpuTensor(bytes, /*use_memfd=*/false, &fd);
+}
+
 AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name) {
     backing_bytes_ = usable_bytes + alignment;
     try {

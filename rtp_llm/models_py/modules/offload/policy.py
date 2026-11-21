@@ -42,11 +42,14 @@ def mark_requests(
     bits |= tl.where(tl.sum(bad_request.to(tl.int32), 0) > 0, ERROR_INVALID_REQUEST, 0)
     tl.atomic_or(Error, bits, bits != 0, sem="relaxed")
     # HBM-only queries need no hot partition, including an idle dynamic pool.
-    valid &= token >= HBM_ROWS
+    valid &= (token >= HBM_ROWS) & (request >= 0) & (request < NUM_REQUESTS)
     epoch = tl.load(Epoch)
-    tl.atomic_xchg(
-        Seen + request, epoch, valid & (request >= 0) & (request < NUM_REQUESTS)
-    )
+    if ANONYMOUS or ROWS_PER_QUERY % TILE_SIZE == 0:
+        # An aligned tile belongs to one query, so its Host rows share a mark.
+        seen_request = tl.max(tl.where(valid, request, -1), 0)
+        tl.atomic_xchg(Seen + seen_request, epoch, seen_request >= 0, sem="relaxed")
+    else:
+        tl.atomic_xchg(Seen + request, epoch, valid)
     tl.store(PendingCount + i, 0, i < MAX_REQUESTS)
 
 
@@ -278,7 +281,14 @@ def collect_misses(
         sem="relaxed",
     )
     pending &= part >= 0
-    offset = tl.atomic_add(PendingCount + part, 1, pending, sem="relaxed")
+    if ANONYMOUS or ROWS_PER_QUERY % TILE_SIZE == 0:
+        # Reserve one interval for the tile and give each pending row an offset.
+        partition = tl.max(tl.where(pending, part, -1), 0)
+        count = tl.sum(pending.to(tl.int32), 0)
+        start = tl.atomic_add(PendingCount + partition, count, count > 0, sem="relaxed")
+        offset = start + tl.cumsum(pending.to(tl.int32), 0) - 1
+    else:
+        offset = tl.atomic_add(PendingCount + part, 1, pending, sem="relaxed")
     tl.atomic_or(
         Error,
         ERROR_REQUEST_QUOTA,

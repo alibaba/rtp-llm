@@ -380,6 +380,7 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: Any,
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        offload_write_ids: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
         topk_indices = None
@@ -390,6 +391,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 kv_cache=kv_cache,
                 prev_topk_indices=prev_topk_indices,
                 return_topk=True,
+                offload_write_ids=offload_write_ids,
             )
             plan = self.self_attn.offload_plan
             if plan is not None and self._drain_offload_before_moe and not plan.drain:
@@ -639,6 +641,7 @@ class GenericMoeModel(GptModelBase):
         residual = torch.zeros_like(hidden_states)
         is_sparse_mla = self._uses_sparse_mla()
         prev_topk_indices = None
+        offload_write_ids = None
         if is_sparse_mla:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
@@ -653,6 +656,13 @@ class GenericMoeModel(GptModelBase):
                 group_tag: select_fmha_impl_for_group(fmha_impl, group_tag)
                 for group_tag in ("default", "indexer_kv")
             }
+            if self.offload_plans:
+                layer_index, _ = next(iter(self.offload_plans))
+                writer = self.layers[layer_index].self_attn.offload_writer
+                # The default FMHA route supplies one slot mapping for all MLA layers.
+                offload_write_ids = writer.pack_write_ids(
+                    sparse_fmha_impl["default"].rope_params, hidden_states.shape[0]
+                )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             if is_sparse_mla:
                 layer_fmha_impl = sparse_fmha_impl
@@ -682,7 +692,14 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=layer_kv_cache,
-                **({"prev_topk_indices": prev_topk_indices} if is_sparse_mla else {}),
+                **(
+                    {
+                        "prev_topk_indices": prev_topk_indices,
+                        "offload_write_ids": offload_write_ids,
+                    }
+                    if is_sparse_mla
+                    else {}
+                ),
             )
             hidden_states = output.hidden_states
             residual = output.residual

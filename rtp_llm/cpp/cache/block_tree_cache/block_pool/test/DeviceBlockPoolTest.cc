@@ -7,6 +7,10 @@
 #include <vector>
 
 #include "gtest/gtest.h"
+
+#if USING_CUDA
+#include <ATen/cuda/CachingHostAllocator.h>
+#endif
 #include "autil/EnvUtil.h"
 
 // Build the device pool config from the lightweight cache-config test helpers
@@ -267,16 +271,16 @@ TEST(DeviceBlockPoolTest, OffloadLengthAwareRoutingCanBeDisabledAndValidatesSett
 }
 
 TEST(DeviceBlockPoolTest, OffloadHotCacheCommitsAndReleasesPhysicalPagesForActiveRequests) {
-    auto config = makeOffloadConfig();
+    auto config                        = makeOffloadConfig();
     config->offload->max_selected_rows = 65536;
-    config->offload->max_requests = 8;
+    config->offload->max_requests      = 8;
     config->offload->dynamic_hot_cache = true;
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
     const auto& storages = pool.allLayerOffloadStorage();
-    const auto* address = storages[0]->resident_planes[0].data_ptr();
-    const auto shape = storages[0]->resident_planes[0].sizes().vec();
-    const auto baseline = pool.offloadDeviceSizeBytes();
+    const auto* address  = storages[0]->resident_planes[0].data_ptr();
+    const auto  shape    = storages[0]->resident_planes[0].sizes().vec();
+    const auto  baseline = pool.offloadDeviceSizeBytes();
     EXPECT_EQ(storages[0]->active_hot_rows.item<int>(), 0);
     for (const auto& storage : storages) {
         storage->resident_planes[0].narrow(0, 0, 4).fill_(17);
@@ -314,14 +318,14 @@ TEST(DeviceBlockPoolTest, OffloadHotCacheCommitsAndReleasesPhysicalPagesForActiv
 
 TEST(DeviceBlockPoolTest, StaticOffloadHotCacheKeepsPreallocatedCapacityAcrossRequestCounts) {
     for (bool device_malloc : {false, true}) {
-        auto config = makeOffloadConfig();
-        config->use_device_malloc_backing = device_malloc;
+        auto config                        = makeOffloadConfig();
+        config->use_device_malloc_backing  = device_malloc;
         config->offload->max_selected_rows = 65536;
-        config->offload->max_requests = 8;
+        config->offload->max_requests      = 8;
         DeviceBlockPool pool(config);
         ASSERT_TRUE(pool.init());
         const auto& storages = pool.allLayerOffloadStorage();
-        const auto bytes = pool.offloadDeviceSizeBytes();
+        const auto  bytes    = pool.offloadDeviceSizeBytes();
         ASSERT_GT(bytes, 0u);
         for (const auto& storage : storages) {
             EXPECT_EQ(storage->hot_cache, nullptr);
@@ -344,7 +348,12 @@ TEST(DeviceBlockPoolTest, OffloadNativePlanesAndSegmentBoundaries) {
         auto config                       = makeOffloadConfig();
         config->use_device_malloc_backing = raw_device;
         DeviceBlockPool pool(config);
+        auto*           allocator = at::getHostAllocator(at::kCUDA);
+        const auto      before    = allocator->get_stats();
         ASSERT_TRUE(pool.init());
+        const auto after = allocator->get_stats();
+        EXPECT_EQ(after.active_bytes.current, before.active_bytes.current);
+        EXPECT_EQ(pool.offloadHostSizeBytes(), 2u * 4 * 256 * 576 * 2);
         const auto& storages = pool.allLayerOffloadStorage();
         ASSERT_EQ(storages.size(), 2u);
         EXPECT_EQ(storages[0]->generations.data_ptr(), storages[1]->generations.data_ptr());

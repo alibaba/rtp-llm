@@ -58,8 +58,26 @@ class MlaKVCacheWriteOp:
         )
         self._pack_block_rows = storage.rows_per_block
 
+    def pack_write_ids(self, fmha_params, n: int) -> torch.Tensor:
+        if n > self._pack_backing_ids.numel():
+            raise ValueError("MLA write exceeds configured decode batch size")
+        if n:
+            _pack_write_ids[(triton.cdiv(n, 256),)](
+                fmha_params.slot_mapping,
+                self._pack_backing_ids,
+                n,
+                self._pack_block_rows,
+                256,
+            )
+        return self._pack_backing_ids[:n]
+
     def pack(
-        self, append_ckv_t: torch.Tensor, key_pe: torch.Tensor, fmha_params
+        self,
+        append_ckv_t: torch.Tensor,
+        key_pe: torch.Tensor,
+        fmha_params,
+        *,
+        backing_ids: Optional[torch.Tensor] = None,
     ) -> KVWrite:
         n = append_ckv_t.shape[0]
         if n > self._pack_slots.numel():
@@ -73,15 +91,12 @@ class MlaKVCacheWriteOp:
                 self.kv_cache_type,
                 self.scale,
             )
-            _pack_write_ids[(triton.cdiv(n, 256),)](
-                fmha_params.slot_mapping,
-                self._pack_backing_ids,
-                n,
-                self._pack_block_rows,
-                256,
-            )
+        if backing_ids is None:
+            backing_ids = self.pack_write_ids(fmha_params, n)
+        elif backing_ids.shape != (n,):
+            raise ValueError("MLA packed write IDs must match the write row count")
         rows = self._pack_staging.view(-1, *self._pack_staging.shape[2:])[:n]
-        return KVWrite(self._pack_backing_ids[:n], (rows,))
+        return KVWrite(backing_ids, (rows,))
 
     def forward(
         self,

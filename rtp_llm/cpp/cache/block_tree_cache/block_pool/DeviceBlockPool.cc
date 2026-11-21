@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/AlignedHostMemory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/OffloadDeviceBuffer.h"
 
 #include <algorithm>
@@ -590,12 +591,11 @@ void DeviceBlockPool::initializeOffloadStorage() {
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
-    // Retain a pinned allocation for empty host views (P=0) as well.
-    offload_host_buffer_ =
-        torch::empty({static_cast<int64_t>(std::max<size_t>(host_bytes, 8))},
-                     torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
-    void*      mapped = nullptr;
-    const auto err    = cudaHostGetDevicePointer(&mapped, offload_host_buffer_.data_ptr(), 0);
+    // Register the requested bytes directly to avoid rounding large pools up
+    // to a pinned-allocator bucket. Empty host views still need pinned backing.
+    offload_host_buffer_ = allocateRegisteredPinnedHostTensor(std::max<size_t>(host_bytes, 8));
+    void*      mapped    = nullptr;
+    const auto err       = cudaHostGetDevicePointer(&mapped, offload_host_buffer_.data_ptr(), 0);
     RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess && mapped == offload_host_buffer_.data_ptr(),
                             "offload pinned storage requires identical host and CUDA UVA addresses");
     auto generations =

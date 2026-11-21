@@ -515,6 +515,7 @@ class SparseMlaImpl(MlaImplBase):
         *,
         offload_plan: Optional[LayerOffloadPlan] = None,
         offload_writer: Optional[MlaKVCacheWriteOp] = None,
+        offload_write_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass for sparse MLA attention (prefill or decode).
@@ -552,7 +553,12 @@ class SparseMlaImpl(MlaImplBase):
         q_pe = q[:, :, self.nope_head_dim :]
         self.rope_impl.forward(q_pe, k_pe, self.rope_params)
         if plan is not None:
-            data = offload_writer.pack(compressed_kv, k_pe, self.rope_params)
+            if offload_write_ids is None:
+                data = offload_writer.pack(compressed_kv, k_pe, self.rope_params)
+            else:
+                data = offload_writer.pack(
+                    compressed_kv, k_pe, self.rope_params, backing_ids=offload_write_ids
+                )
             # Query transformation does not read KV. Enqueue it before write's
             # fetch wait so it can overlap Host reads on the transfer stream.
             q_transformed = self._apply_input_bmm(q, layer_id)
