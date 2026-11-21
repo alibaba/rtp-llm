@@ -13,6 +13,50 @@ from rtp_llm.models_py.new_models.deepseek_v4.cuda_rms import (
 
 
 class CudaV4RmsTest(unittest.TestCase):
+    def test_v41_target_loaded_norm_binds_native_and_preserves_inplace(self):
+        import os
+        import tempfile
+
+        from flashinfer.jit.norm import gen_norm_module
+        from flashinfer.utils import device_support_pdl
+        from safetensors import safe_open
+        from safetensors.torch import save_file
+
+        from rtp_llm.models_py.module_base import RtpModule
+        from rtp_llm.models_py.new_models.deepseek_v41.backbone import (
+            _target_block_norm_factory,
+        )
+
+        dev = torch.device("cuda:0")
+        owner = RtpModule()
+        # Also exercise the ARM route on non-ARM CUDA test workers.
+        with patch("platform.machine", return_value="aarch64"), patch.object(
+            torch.version, "cuda", "13.0"
+        ), patch.object(torch.cuda, "get_device_capability", return_value=(10, 0)):
+            owner.norm = _target_block_norm_factory(dev)(5120, 1e-20, torch.bfloat16)
+        self.assertIs(owner.norm._implementation, native_rmsnorm)
+        self.assertIs(
+            type(_target_block_norm_factory(None)(64, 1e-6, torch.bfloat16)), RMSNorm
+        )
+        owner.to(dev)
+        dest = owner.norm.weight
+        rng = torch.Generator().manual_seed(92255105)
+        w = torch.randn(5120, generator=rng).bfloat16()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "norm.safetensors")
+            save_file({"norm.weight": w}, path)
+            with safe_open(path, framework="pt") as ckpt:
+                owner.load_weights([("norm.weight", ckpt.get_tensor("norm.weight"))])
+        self.assertIs(owner.norm.weight, dest)
+        self.assertTrue(torch.equal(dest.cpu(), w))
+        vendor = gen_norm_module().build_and_load()
+        for n in (392, 136):
+            x = torch.randn(n, 5120, generator=rng).bfloat16().to(dev)
+            expected = torch.empty_like(x)
+            vendor.rmsnorm(expected, x, dest, 1e-20, device_support_pdl(dev))
+            self.assertIs(owner.norm(x, output=x), x)
+            self.assertTrue(torch.equal(x, expected))
+
     def test_route_is_only_v4_cuda13_sm100_arm(self):
         with patch("platform.machine", return_value="aarch64"), patch.object(
             torch.version, "cuda", "13.0"

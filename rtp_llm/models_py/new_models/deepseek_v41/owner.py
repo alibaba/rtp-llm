@@ -119,7 +119,7 @@ class OwnedV41Mixin:
         self.WEIGHTS_MAPPER = _BackboneMapper(self.v4)
 
     def create_backbone(self, args, load_config):
-        return runtime_backbone_class()(
+        return runtime_backbone_class(target_block_device=load_config.device)(
             args,
             checkpoint_path=self._owned_checkpoint_path,
             head_dtype=(

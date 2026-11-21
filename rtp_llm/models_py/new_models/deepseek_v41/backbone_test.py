@@ -144,6 +144,29 @@ def checkpoint(commit=False, layer_prefix="layers"):
 
 
 class BackboneCheckpointTest(unittest.TestCase):
+    def test_block_norm_selection_uses_serving_device_not_staging_device(self):
+        from unittest.mock import patch
+
+        from rtp_llm.models_py.new_models.deepseek_v4.cuda_rms import native_rmsnorm
+        from rtp_llm.models_py.new_models.deepseek_v41.backbone import (
+            _target_block_norm_factory,
+        )
+
+        with torch.device("meta"), patch(
+            "platform.machine", return_value="aarch64"
+        ), patch.object(torch.version, "cuda", "13.0"), patch.object(
+            torch.cuda, "get_device_capability", return_value=(10, 0)
+        ) as cap:
+            dev = torch.device("cuda:3")
+            target = _target_block_norm_factory(dev)(64, 1e-6, torch.bfloat16)
+            self.assertIs(target._implementation, native_rmsnorm)
+            self.assertTrue(target.weight.is_meta)
+            cap.assert_called_once_with(dev)
+            for device in (None, "cpu"):
+                default = _target_block_norm_factory(device)(64, 1e-6, torch.bfloat16)
+                self.assertIsNone(default._implementation)
+            cap.assert_called_once_with(dev)
+
     def test_native_hc_checkpoint_owners_preserve_fused_seam(self):
         from safetensors import safe_open
 

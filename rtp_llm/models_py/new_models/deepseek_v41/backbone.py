@@ -2,6 +2,7 @@
 
 import os
 import weakref
+from functools import partial
 
 import torch
 from torch import nn
@@ -263,15 +264,34 @@ def _checkpoint_native_hc(args, layer_id, name):
     return unit
 
 
-def _checkpoint_cuda_norm(dim, eps, dtype):
+def _checkpoint_cuda_norm(dim, eps, dtype, *, implementation=None):
     from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm as CudaRMSNorm
 
     return CudaRMSNorm(
-        nn.Parameter(torch.empty(dim, dtype=dtype), requires_grad=False), eps
+        nn.Parameter(torch.empty(dim, dtype=dtype), requires_grad=False),
+        eps,
+        implementation=implementation,
     )
 
 
-def runtime_backbone_class():
+def _target_block_norm_factory(device):
+    # CPU/meta is only the initial parameter location; select for serving.
+    if (
+        device is not None
+        and torch.device(device).type == "cuda"
+        and torch.version.cuda is not None
+    ):
+        from rtp_llm.models_py.new_models.deepseek_v4.cuda_rms import (
+            native_rmsnorm,
+            use_native_rms,
+        )
+
+        if use_native_rms(device):
+            return partial(_checkpoint_cuda_norm, implementation=native_rmsnorm)
+    return _checkpoint_cuda_norm
+
+
+def runtime_backbone_class(*, target_block_device=None):
     """Compose the real main runtime only for production construction.
 
     Pure checkpoint staging does not import native runtime. Production does
@@ -299,7 +319,7 @@ def runtime_backbone_class():
         attention_type = RuntimeAttention
         commit_attention_type = RuntimeCommitAttention
         hc_type = staticmethod(_checkpoint_native_hc)
-        norm_type = staticmethod(_checkpoint_cuda_norm)
+        norm_type = staticmethod(_target_block_norm_factory(target_block_device))
 
     class RuntimeTransformer(V4Transformer, OwnedV41Transformer):
         __init__ = OwnedV41Transformer.__init__
