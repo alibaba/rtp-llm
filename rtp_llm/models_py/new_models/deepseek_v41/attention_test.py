@@ -98,6 +98,19 @@ def load(owner, values):
 
 
 class AttentionCheckpointTest(unittest.TestCase):
+    def test_consumer_selects_nearest_source_regardless_of_list_order(self):
+        cfg = config()
+        cfg.compress_ratios = [1] * 5
+        cfg.v41_config = {
+            "kv_source_layer_ids": [2, 0, 0],
+            "index_source_layer_ids": [1, 0, 0],
+        }
+        owner = OwnedV41Attention(cfg, 4, {})
+        self.assertEqual(
+            (owner.kv_source_layer_id, owner.index_source_layer_id), (2, 1)
+        )
+        self.assertEqual(list(owner.sources.parameters()), [])
+
     def test_qkv_runtime_reuses_loaded_parameters_and_raw_scale_views(self):
         owner = load(OwnedV41Attention(config(), 0, {}), weights())
         initial = dict(owner.named_parameters())

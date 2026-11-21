@@ -224,7 +224,13 @@ class MlaAttention(nn.Module):
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
     ):
-        if self.attn_config.is_sparse:
+        return self.resolve_layer_routes(
+            self.attn_config.is_sparse, self.reuse_topk_indices, fmha_impl, kv_cache
+        )
+
+    @staticmethod
+    def resolve_layer_routes(is_sparse, reuse_topk_indices, fmha_impl, kv_cache):
+        if is_sparse:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
                 raise RuntimeError(
@@ -241,7 +247,7 @@ class MlaAttention(nn.Module):
                 indexer_kv_cache = None
             elif isinstance(kv_cache, Mapping) and (
                 set(kv_cache) == required_tags
-                or (self.reuse_topk_indices and set(kv_cache) == {"default"})
+                or (reuse_topk_indices and set(kv_cache) == {"default"})
             ):
                 default_kv_cache = kv_cache["default"]
                 indexer_kv_cache = kv_cache.get("indexer_kv")

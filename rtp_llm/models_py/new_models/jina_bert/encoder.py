@@ -8,8 +8,13 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from rtp_llm.models_py.downstream_heads import unpack_handler_mapping
 from rtp_llm.models_py.module_base import RtpModule, _mark_loaded
-from rtp_llm.models_py.read_spec import ReadSpec, make_sharded_read_spec
+from rtp_llm.models_py.read_spec import (
+    ReadSpec,
+    make_sharded_read_spec,
+    unwrap_checkpoint_tensor,
+)
 
 
 class _Names:
@@ -193,8 +198,10 @@ class JinaEncoder(RtpModule):
                 "Jina direct encoder has no PP stage ownership contract"
             )
         self._custom = {
-            source: (str(i), target)
-            for i, (target, source) in enumerate(load.custom_weight_mappings)
+            source: (str(i), target, requested_dtype)
+            for i, (target, source, requested_dtype) in enumerate(
+                map(unpack_handler_mapping, load.custom_weight_mappings)
+            )
         }
         self.custom_params = nn.ParameterDict()
         self.embeddings = nn.Module()
@@ -229,7 +236,8 @@ class JinaEncoder(RtpModule):
                 target = self.WEIGHTS_MAPPER.map_name(source)
                 custom = self._custom.get(source, self._custom.get(target))
                 if custom is not None:
-                    key, _ = custom
+                    key, _, dtype = custom
+                    tensor, _ = unwrap_checkpoint_tensor(tensor)
                     if key in self.custom_params or not tensor.is_floating_point():
                         raise ValueError(
                             f"invalid or duplicate Jina downstream tensor {source}"
@@ -237,7 +245,7 @@ class JinaEncoder(RtpModule):
                     owning = self.embeddings.word_embeddings.weight
                     self.custom_params[key] = nn.Parameter(
                         tensor.detach().to(
-                            device=owning.device, dtype=owning.dtype, copy=True
+                            device=owning.device, dtype=dtype or owning.dtype, copy=True
                         ),
                         requires_grad=False,
                     )
@@ -248,7 +256,7 @@ class JinaEncoder(RtpModule):
         super().load_weights(mapped())
         missing = [
             source
-            for source, (key, _) in self._custom.items()
+            for source, (key, _, _) in self._custom.items()
             if key not in self.custom_params
         ]
         if missing:
@@ -256,7 +264,7 @@ class JinaEncoder(RtpModule):
 
     def custom_weight_view(self):
         return {
-            target: self.custom_params[key] for key, target in self._custom.values()
+            target: self.custom_params[key] for key, target, _ in self._custom.values()
         }
 
     def checkpoint_weight_name_filter(self):

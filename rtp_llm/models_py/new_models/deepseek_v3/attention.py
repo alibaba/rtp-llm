@@ -407,6 +407,7 @@ class DeepSeekV32MlaAttention(RtpModule):
         self.register_buffer("_kc_w", None, persistent=False)
         self.register_buffer("_vc_w", None, persistent=False)
         self.indexer: Optional[nn.Module] = None
+        self.reuse_topk_indices = False
 
     def _projection_name(self, name: str) -> str:
         if self.q_lora_rank == 0 and name.startswith("q_proj."):
@@ -695,7 +696,12 @@ class DeepSeekV32MlaAttention(RtpModule):
         from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 
         default_impl, default_cache, indexer_impl, indexer_cache = (
-            MlaAttention._resolve_layer_routes(self, fmha_impl, kv_cache)
+            MlaAttention.resolve_layer_routes(
+                self.indexer is not None or self.reuse_topk_indices,
+                self.reuse_topk_indices,
+                fmha_impl,
+                kv_cache,
+            )
         )
         topk_indices = self._run_sparse_indexer(
             hidden_states, q_c, q_view, indexer_cache, indexer_impl

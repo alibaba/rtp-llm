@@ -8,6 +8,7 @@ requirement(["filelock"])
 py_test(
     name = "test_scaled_rope_stages_ppu",
     srcs = ["test_scaled_rope_stages.py"],
+    main = "test_scaled_rope_stages.py",
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
         "//rtp_llm/models_py/kernels/cuda/test:scaled_rope_reference",

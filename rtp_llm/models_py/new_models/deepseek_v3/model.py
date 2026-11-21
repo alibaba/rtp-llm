@@ -66,12 +66,22 @@ class DeepSeekV32Indexer(Indexer, SparseIndexerParameters):
         cos_sin_cache: Optional[torch.Tensor] = None,
         parallelism_config: Any = None,
         prefix: str = "self_attn.indexer",
+        hw_kernel_config=None,
+        owner_tokens_per_block: Optional[int] = None,
+        stable_topk: bool = False,
     ):
         # The main Indexer forward uses these direct projection parameters;
         # only its old checkpoint-driven constructor is replaced.
         SparseIndexerParameters.__init__(
-            self, index_n_heads, index_head_dim, hidden_size, q_lora_rank,
-            layernorm_eps, quant_config, params_dtype, prefix,
+            self,
+            index_n_heads,
+            index_head_dim,
+            hidden_size,
+            q_lora_rank,
+            layernorm_eps,
+            quant_config,
+            params_dtype,
+            prefix,
         )
         self.layer_idx = layer_idx
         self.index_n_heads = index_n_heads
@@ -87,6 +97,11 @@ class DeepSeekV32Indexer(Indexer, SparseIndexerParameters):
         self.is_neox_style = is_neox_style
         self.parallelism_config = parallelism_config
 
+        self._configure_indexer_runtime(
+            hw_kernel_config, owner_tokens_per_block or blocksize
+        )
+        self._fuse_kernels_enabled = self._can_fuse_rope(cos_sin_cache)
+
         self.indexer_op = IndexerOp(
             index_n_heads=index_n_heads,
             index_head_dim=index_head_dim,
@@ -97,10 +112,14 @@ class DeepSeekV32Indexer(Indexer, SparseIndexerParameters):
             block_size=self.block_size,
             scale_fmt=self.scale_fmt,
             is_neox_style=is_neox_style,
+            stable_topk=stable_topk,
+            enable_fuse_kernels=self._fuse_kernels_enabled,
         )
 
     def bind_rope_cache(self, cos_sin_cache: torch.Tensor) -> None:
         self.indexer_op.cos_sin_cache = cos_sin_cache
+        self._fuse_kernels_enabled = self._can_fuse_rope(cos_sin_cache)
+        self.indexer_op.enable_fuse_kernels = self._fuse_kernels_enabled
 
 
 class DeepSeekV32DecoderLayer(RtpModule):
@@ -152,6 +171,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
         cos_sin_cache: Optional[torch.Tensor] = None,
         blocksize: int = 64,
         prefix: str = "layer",
+        hw_kernel_config=None,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -243,6 +263,13 @@ class DeepSeekV32DecoderLayer(RtpModule):
                 cos_sin_cache=cos_sin_cache,
                 parallelism_config=parallelism_config,
                 prefix=f"{prefix}.self_attn.indexer",
+                hw_kernel_config=hw_kernel_config,
+                owner_tokens_per_block=getattr(
+                    getattr(model_config, "attn_config", None),
+                    "tokens_per_block",
+                    blocksize,
+                ),
+                stable_topk=getattr(model_config, "model_type", "") == "glm_5",
             )
         else:
             self.self_attn.indexer = None

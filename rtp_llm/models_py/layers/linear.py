@@ -515,6 +515,9 @@ class RowParallelLinear(LinearBase):
             elif shape == (global_input, self.output_size):
                 dim = 0
         elif param_name in ("weight_scale", "input_scale"):
+            param = getattr(self, param_name, None)
+            if param is not None and math.prod(shape) == param.numel():
+                return None  # Already local/replicated, including square per-output scales.
             if len(shape) > 0 and shape[-1] == global_input:
                 dim = len(shape) - 1
         elif param_name == "weight_scale_inv" and len(shape) > 1:

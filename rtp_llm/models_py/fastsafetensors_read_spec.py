@@ -377,6 +377,10 @@ def iter_read_spec_tensors(
             safetensor_slice_expander is not None
             and safetensor_slice_expander.handles_safetensor(key)
         ):
+            # The shared-file planner verifies identical selected physical keys
+            # across ranks before scheduling this collective.
+            if name_filter is not None and not name_filter(key):
+                continue
             experts_per_rank = (
                 safetensor_slice_expander.num_experts
                 // safetensor_slice_expander.ep_size
@@ -541,7 +545,8 @@ def build_read_spec_parallel_loader(
                 )
                 key_context = (
                     diag.watch_keys(batch.batch_id, batch.keys)
-                    if diag is not None else nullcontext(batch.keys)
+                    if diag is not None
+                    else nullcontext(batch.keys)
                 )
                 with timing_context(
                     "get_tensor", self._log_message, batch.batch_id
@@ -553,7 +558,11 @@ def build_read_spec_parallel_loader(
                         self.safetensor_slice_expander,
                         self.segmented_tensor_reader,
                         self.name_filter,
-                        diag if diag is not None and hasattr(diag, "_wo_a_local") else None,
+                        (
+                            diag
+                            if diag is not None and hasattr(diag, "_wo_a_local")
+                            else None
+                        ),
                     )
                 get_tensor_time = timer.elapsed_ms
                 if diag is not None:

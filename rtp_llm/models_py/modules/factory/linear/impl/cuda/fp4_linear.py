@@ -17,6 +17,16 @@ from rtp_llm.models_py.kernels.cuda.fp4_kernel import cutlass_scaled_fp4_mm_wrap
 from rtp_llm.ops import HWKernelConfig
 
 
+def fp4_backend_options():
+    quantize_kwargs = (
+        {"backend": "cute-dsl"}
+        if "backend" in inspect.signature(fp4_quantize).parameters
+        else {}
+    )
+    default = "cute-dsl" if quantize_kwargs else "cutlass"
+    return quantize_kwargs, os.getenv("RTP_LLM_FP4_GEMM_BACKEND", default)
+
+
 class CudaFp4GEMMLinear(LinearBase):
     """CUDA FP4 quantized Linear"""
 
@@ -66,13 +76,7 @@ class CudaFp4GEMMLinear(LinearBase):
         self.bias = bias
         # CUDA12 pins FlashInfer 0.6.0, which has no quantization backend
         # argument or CuTe GEMM. Resolve this once, outside graph capture.
-        self._quantize_kwargs = (
-            {"backend": "cute-dsl"}
-            if "backend" in inspect.signature(fp4_quantize).parameters
-            else {}
-        )
-        default_backend = "cute-dsl" if self._quantize_kwargs else "cutlass"
-        self.backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", default_backend)
+        self._quantize_kwargs, self.backend = fp4_backend_options()
         self.alpha = self.weight_scale_2 * self.input_scale
         self.input_scale_inv = 1 / self.input_scale
 

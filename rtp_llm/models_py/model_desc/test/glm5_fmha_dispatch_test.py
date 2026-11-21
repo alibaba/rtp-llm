@@ -388,12 +388,13 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 package = "rtp_llm.models_py.model_desc.generic_moe."
                 with (
                     patch(
-                        package + "LinearFactory.create_linear_from_weights"
+                        package
+                        + "runtime_modules.LinearFactory.create_linear_from_weights"
                     ) as linear,
-                    patch(package + "SelectTopk"),
+                    patch(package + "runtime_modules.SelectTopk"),
                     patch(package + "MoEConfigAdapter", return_value=adapter),
-                    patch(package + "FusedMoeFactory") as factory,
-                    patch(package + "DenseMLP") as shared,
+                    patch(package + "runtime_modules.FusedMoeFactory") as factory,
+                    patch(package + "runtime_modules.DenseMLP") as shared,
                 ):
                     factory.return_value.create_fused_moe.side_effect = create
                     layer = Glm5MoeLayer(
@@ -473,13 +474,14 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         package = "rtp_llm.models_py.model_desc.generic_moe."
         with (
             patch(
-                package + "LinearFactory.create_linear_from_weights",
+                package + "runtime_modules.LinearFactory.create_linear_from_weights",
                 return_value=Mock(),
             ),
-            patch(package + "SelectTopk"),
-            patch(package + "GroupTopK", return_value=Mock()),
+            patch(package + "runtime_modules.SelectTopk"),
+            patch(package + "runtime_modules.GroupTopK", return_value=Mock()),
             patch(
-                package + "DenseMLP", return_value=Mock(return_value=torch.ones(3, 4))
+                package + "runtime_modules.DenseMLP",
+                return_value=Mock(return_value=torch.ones(3, 4)),
             ),
             patch(
                 "rtp_llm.models_py.model_desc.glm5.FusedMoeFactory.create_fused_moe",

@@ -10,6 +10,7 @@ def create_ft_export_job(model):
     discovered before export, without calling the handler's runtime init.
     """
     from rtp_llm.model_loader.weight_module import CustomAtomicWeight
+    from rtp_llm.models_py.downstream_heads import unpack_handler_mapping
     from rtp_llm.tools.convert.ft_export_weights import FTExportWeights
     from rtp_llm.utils.database import CkptDatabase
     from rtp_llm.utils.model_weight import CkptWeightInfo
@@ -37,8 +38,10 @@ def create_ft_export_job(model):
     custom_fields = []
     if custom_module is not None:
         custom_fields = [
-            CustomAtomicWeight(role, [CkptWeightInfo(checkpoint_name)])
-            for role, checkpoint_name in custom_module.checkpoint_weight_mappings()
+            CustomAtomicWeight(role, [CkptWeightInfo(checkpoint_name)], data_type=dtype)
+            for role, checkpoint_name, dtype in map(
+                unpack_handler_mapping, custom_module.checkpoint_weight_mappings()
+            )
         ]
     return FTExportWeights(
         config,

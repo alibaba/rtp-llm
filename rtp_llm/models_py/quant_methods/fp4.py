@@ -331,8 +331,8 @@ class ModelOptFp4LinearMethod(QuantizeMethodBase):
             )
         if torch.cuda.get_device_capability(device)[0] < 10:
             raise RuntimeError("ModelOpt NVFP4 execution requires SM100 or newer")
-        backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND", "cutlass")
-        if backend not in ("cutlass", "trtllm", "sgl_cutlass"):
+        backend = os.getenv("RTP_LLM_FP4_GEMM_BACKEND")
+        if backend not in (None, "cute-dsl", "cutlass", "trtllm", "sgl_cutlass"):
             raise ValueError(f"Unknown NVFP4 GEMM backend {backend!r}")
         try:
             flashinfer = importlib.import_module("flashinfer")
@@ -345,6 +345,11 @@ class ModelOptFp4LinearMethod(QuantizeMethodBase):
             executor_module = importlib.import_module(
                 "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear"
             )
+            quantize_kwargs, backend = executor_module.fp4_backend_options()
+            if backend == "cute-dsl" and not quantize_kwargs:
+                raise RuntimeError(
+                    "installed FlashInfer does not support the cute-dsl backend"
+                )
             self._executor_type = executor_module.CudaFp4GEMMLinear
             if not callable(self._executor_type):
                 raise RuntimeError("CudaFp4GEMMLinear is unavailable")

@@ -48,6 +48,10 @@ class KimiK25ForCausalLM(DeepSeekV32ForCausalLM):
             (key.removeprefix("language_model."), value) for key, value in iterator
         )
 
+    def online_weight_name_filter(self):
+        # The text RPC uses canonical names without the multimodal file prefix.
+        return super().checkpoint_weight_name_filter()
+
     def embedding(self, inputs):
         mm = getattr(inputs, "multimodal_inputs", None)
         features = getattr(mm, "multimodal_features", None)

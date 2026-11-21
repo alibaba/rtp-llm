@@ -148,12 +148,7 @@ class Glm4MoeBlock(DeepSeekV32MoEBlock):
         weights, ids = self.route(self.gate(hidden_states))
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(ids, weights)
-        output = self.experts(hidden_states, weights, ids)
-        return (
-            output
-            if self.shared_experts is None
-            else output + self.shared_experts(hidden_states)
-        )
+        return self._merge_experts(hidden_states, weights, ids)
 
 
 class Glm4MoeDecoderLayer(RtpModule):

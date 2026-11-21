@@ -5,13 +5,13 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.layers.activation import silu_and_mul
 from rtp_llm.models_py.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
 from rtp_llm.models_py.module_base import RtpModule
-from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
 _FP8_BLOCK_QUANT_TYPES = {
@@ -33,6 +33,7 @@ def _pad_dimension(
     expected_size: int,
     padded_size: int,
     label: str,
+    pad_value: float = 0.0,
 ) -> torch.Tensor:
     current_size = tensor.shape[dim]
     if current_size == padded_size:
@@ -45,9 +46,9 @@ def _pad_dimension(
 
     pad_shape = list(tensor.shape)
     pad_shape[dim] = padded_size - expected_size
-    padding = torch.zeros(pad_shape, dtype=torch.float32, device=tensor.device).to(
-        tensor.dtype
-    )
+    padding = torch.full(
+        pad_shape, pad_value, dtype=torch.float32, device=tensor.device
+    ).to(tensor.dtype)
     if str(tensor.dtype).startswith("torch.float8_"):
         padded = torch.cat(
             (tensor.view(torch.uint8), padding.view(torch.uint8)), dim=dim
@@ -146,6 +147,7 @@ class DeepSeekV32MLP(RtpModule):
                 expected_size=math.ceil(self.intermediate_size / block_n),
                 padded_size=self.padded_intermediate_size // block_n,
                 label=name,
+                pad_value=1.0,
             )
         if name == "down_proj.weight_scale_inv":
             return _pad_dimension(
@@ -154,6 +156,7 @@ class DeepSeekV32MLP(RtpModule):
                 expected_size=math.ceil(self.intermediate_size / block_k),
                 padded_size=self.padded_intermediate_size // block_k,
                 label=name,
+                pad_value=1.0,
             )
         return tensor
 

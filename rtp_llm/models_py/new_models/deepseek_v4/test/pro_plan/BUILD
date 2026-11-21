@@ -8,5 +8,5 @@ py_test(
     env_inherit = ["DSV4_PRO_SOURCE"],
     tags = ["manual"],
     timeout = "long",
-    deps = ["//rtp_llm/models_py:new_weight_loader"],
+    deps = ["//rtp_llm:models", "//rtp_llm/models_py:new_weight_loader"],
 )

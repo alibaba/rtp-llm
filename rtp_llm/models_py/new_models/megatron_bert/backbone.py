@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from rtp_llm.models_py.downstream_heads import unpack_handler_mapping
 from rtp_llm.models_py.module_base import RtpModule, _mark_loaded
 from rtp_llm.models_py.read_spec import make_sharded_read_spec, unwrap_checkpoint_tensor
 
@@ -153,15 +154,13 @@ class MegatronParameters:
         )
         self.final_norm = nn.LayerNorm(h, eps=config.layernorm_eps, dtype=dtype)
         self.custom_params = nn.ParameterDict()
-        self._custom = {
-            f"p{i}": runtime
-            for i, (runtime, _) in enumerate(load.custom_weight_mappings)
+        mappings = tuple(map(unpack_handler_mapping, load.custom_weight_mappings))
+        self._custom = {f"p{i}": runtime for i, (runtime, _, _) in enumerate(mappings)}
+        self._custom_dtype = {
+            f"p{i}": dt or dtype for i, (_, _, dt) in enumerate(mappings)
         }
         self.WEIGHTS_MAPPER = _Names(
-            {
-                source: f"p{i}"
-                for i, (_, source) in enumerate(load.custom_weight_mappings)
-            }
+            {source: f"p{i}" for i, (_, source, _) in enumerate(mappings)}
         )
 
     def checkpoint_weight_name_filter(self):
@@ -189,10 +188,17 @@ class MegatronParameters:
                 if not tensor.is_floating_point() or key not in self._custom:
                     raise ValueError(f"Invalid Megatron-BERT custom weight {source}")
                 # The FST staging tensor does not survive the iterator.
-                value = tensor.detach().to(self.compute_dtype, copy=True)
+                value = tensor.detach().to(self._custom_dtype[key], copy=True)
                 self.custom_params[key] = nn.Parameter(value, requires_grad=False)
                 _mark_loaded(self.custom_params, key)
-            elif not self._dispatch(self, name, tensor):
+                continue
+            if name == "embeddings.position_embeddings.weight":
+                tensor, _ = unwrap_checkpoint_tensor(tensor)
+                if tensor.ndim == 2:
+                    tensor = tensor[
+                        : self.embeddings.position_embeddings.num_embeddings
+                    ]
+            if not self._dispatch(self, name, tensor):
                 raise ValueError(
                     f"Unexpected Megatron-BERT checkpoint tensor {source!r}"
                 )

@@ -258,7 +258,7 @@ class NewLoaderWeightManager:
                 ):
                     source = module._prepare_checkpoint_weight(
                         incoming["weight"], None, tied=True
-                    )
+                    ).to(dtype=module.weight.dtype)
                     leaf_updates = [TensorUpdate("weight", module.weight, source)]
                 else:
                     leaf_updates = module.prepare_weight_updates(incoming)
@@ -299,7 +299,9 @@ class NewLoaderWeightManager:
         layer = re.match(r"^(?:model\.)?layers\.(\d+)\.", name)
         if layer and int(layer[1]) >= self._loader.model_config.num_layers:
             raise ValueError(f"Checkpoint layer out of range: {name}")
-        select = getattr(self._model, "checkpoint_weight_name_filter", None)
+        select = getattr(self._model, "online_weight_name_filter", None)
+        if select is None:
+            select = getattr(self._model, "checkpoint_weight_name_filter", None)
         owns = select() if callable(select) else None
         # Use stage filtering only for known layer/global ownership, not to
         # silently accept arbitrary unknown names rejected by a model's filter.

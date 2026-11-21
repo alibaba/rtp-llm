@@ -16,8 +16,7 @@ from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
-from rtp_llm.models_py.quant_methods.fp8_cpu import \
-    quantize_weight_per_tensor_cpu
+from rtp_llm.models_py.quant_methods.fp8_cpu import quantize_weight_per_tensor_cpu
 from rtp_llm.models_py.registry import MODEL_REGISTRY
 
 
@@ -103,6 +102,31 @@ def source_weights():
 
 
 class CpuFp8LoadTest(unittest.TestCase):
+    def test_online_moe_block_fnuz_preserves_extrema_and_scales(self):
+        from rtp_llm.models_py.quant_methods import fp8_moe
+
+        method = fp8_moe.Fp8MoEMethod(types.SimpleNamespace(weight_block_size=[2, 2]))
+        weight = torch.tensor([[[448.0, -448.0], [0.0, 224.0]]])
+        layer = types.SimpleNamespace(
+            _FP8_BLOCK_SIZE=2,
+            num_local_experts=1,
+            w13=weight.clone(),
+            w2=weight.clone() * 2,
+            w13_scale=torch.empty(1, 1, 1),
+            w2_scale=torch.empty(1, 1, 1),
+        )
+        with mock.patch.object(
+            fp8_moe, "_runtime_fp8_dtype", return_value=torch.float8_e4m3fnuz
+        ):
+            method._online_per_block(layer)
+            method._requant_per_block_if_needed(layer)
+        for param, scale, expected in (
+            (layer.w13, layer.w13_scale, weight),
+            (layer.w2, layer.w2_scale, weight * 2),
+        ):
+            self.assertEqual(param.dtype, torch.float8_e4m3fnuz)
+            torch.testing.assert_close(param.float() * scale, expected, rtol=0, atol=0)
+
     def test_fixed_main_bf16_vectors_exact_bytes_and_scale(self):
         # Captured with actual main f559bb4 quantize_weight_to_fp8 on CPU.
         # First vector covers the scale floor and signed zero; second covers a

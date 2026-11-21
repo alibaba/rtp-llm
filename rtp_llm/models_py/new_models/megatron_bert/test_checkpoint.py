@@ -176,6 +176,18 @@ class TestMegatron(unittest.TestCase):
     def test_scratch_packed_encoder_and_task_head(self):
         self.assert_outputs("scratch")
 
+    def test_longer_checkpoint_position_table(self):
+        values = dict(self.ref.state_dict())
+        key = "bert.embeddings.position_embeddings.weight"
+        table = values[key]
+        values[key] = torch.cat((table, table[:3]))
+        for method in ("scratch", "fastsafetensors"):
+            with self.subTest(method=method):
+                model = self.load_case(method, values)
+                torch.testing.assert_close(
+                    model.embeddings.position_embeddings.weight, table
+                )
+
     def test_fst_packed_encoder_and_task_head(self):
         self.assert_outputs("fastsafetensors")
 

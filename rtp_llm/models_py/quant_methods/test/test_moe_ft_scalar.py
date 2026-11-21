@@ -3,9 +3,9 @@
 Staging is not serving: real public FP8 runtime preflight rejects CPU.
 """
 
+import json
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,11 +14,11 @@ import torch
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     Fp8DynamicPerTensorQuantConfig,
-    Fp8PerTensorCompressedQuantConfig,
     Fp8PerChannelCompressedQuantConfig,
+    Fp8PerTensorCompressedQuantConfig,
 )
+from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
-from rtp_llm.models_py.ft_checkpoint import FTCheckpoint, CheckpointTopology
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
@@ -165,6 +165,7 @@ class LegacyScalarFTTest(unittest.TestCase):
 
     def test_ep_rank_aggregate_tracks_selected_physical_rows(self):
         from safetensors.torch import save_file
+
         from rtp_llm.models_py.expert_placement import ExpertPlacement
 
         with tempfile.TemporaryDirectory() as root:
@@ -200,6 +201,8 @@ class LegacyScalarFTTest(unittest.TestCase):
 
     def stage(self, loader, root, method):
         cp = FTCheckpoint.open(root, CheckpointTopology())
+        # fixture() encodes the CUDA FT ABI, irrespective of the test worker.
+        cp.index_metadata["ft_export_backend"] = "cuda"
         cp.read_backend = method
         model = loader._create_checkpoint_model(cp)
         model.load_ft_checkpoint(cp)

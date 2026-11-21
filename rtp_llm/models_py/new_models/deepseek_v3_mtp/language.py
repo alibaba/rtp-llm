@@ -20,7 +20,6 @@ Top-level model: DeepSeekV32MTPForCausalLM
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-
 from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
@@ -37,7 +36,6 @@ from rtp_llm.models_py.layers.embedding import (
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
-from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
     DeepSeekV32ForCausalLM,
     build_rope_cache,
@@ -48,6 +46,8 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     read_config_json,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32DecoderLayer
+from rtp_llm.models_py.weight_mapper import WeightsMapper
+
 from .mtp_block import MTPBlock
 
 # ------------------------------------------------------------------ #
@@ -101,7 +101,10 @@ def _draft_checkpoint_layer(config_json: Dict[str, Any], ckpt_path: str) -> int:
     if depth == 1 and nextn_layers == 0:
         return 0
     if depth == 1 and nextn_layers == 1:
-        from rtp_llm.models_py.weight_mapper import discover_ckpt_files, safetensor_index_entries
+        from rtp_llm.models_py.weight_mapper import (
+            discover_ckpt_files,
+            safetensor_index_entries,
+        )
 
         def markers(names):
             return {i for i in (0, 1) if f"model.layers.{i}.eh_proj.weight" in names}
@@ -161,13 +164,18 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
             if name.startswith(prefix):
                 return True
             if combined:
-                if name in ("model.embed_tokens.weight", "model.norm.weight", "lm_head.weight"):
+                if name in (
+                    "model.embed_tokens.weight",
+                    "model.norm.weight",
+                    "lm_head.weight",
+                ):
                     return False
                 layer_idx = DeepSeekV32ForCausalLM._checkpoint_layer_index(name)
                 if layer_idx is not None and layer_idx < self._checkpoint_layer:
                     return False
             # Do not silently drop misspelled or unexpected draft tensors.
             return True
+
         return keep
 
     def load_weights(self, weights):
@@ -198,7 +206,9 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
             fmha_config=fmha_config,
             py_hw_kernel_config=load_config.py_hw_kernel_config,
         )
-        self._init_capture_context(self._capture_canonical_layer, self._capture_canonical_final)
+        self._init_capture_context(
+            self._capture_canonical_layer, self._capture_canonical_final
+        )
         self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
         self._mla_kernel_layout = None
 
@@ -220,7 +230,9 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
                 prefix + _EH_PROJ_KEY: _EH_PROJ_MAPPED,
                 prefix + "embed_tokens.weight": "embed_tokens.weight",
             },
-            prefix_mapping={prefix + name: "layers.0." + name for name in _LAYER_PREFIXES},
+            prefix_mapping={
+                prefix + name: "layers.0." + name for name in _LAYER_PREFIXES
+            },
         )
         # The raw file's layer count locates the source; the runtime always
         # owns one block, including when the score has a different depth.
@@ -314,6 +326,7 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
             indexer_is_neox_style=cfg["indexer_is_neox_style"],
             cos_sin_cache=cos_sin_cache,
             blocksize=cfg["blocksize"],
+            hw_kernel_config=load_config.py_hw_kernel_config,
             prefix="layers.0",
         )
         self.layers.append(layer)

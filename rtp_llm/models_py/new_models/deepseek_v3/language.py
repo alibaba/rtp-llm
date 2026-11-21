@@ -155,15 +155,17 @@ class MlaRuntimeLayoutMixin:
             self.weight = self._mla_kernel_layout
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False,
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> Any:
         if getattr(self, "use_mla", True):
             self._ensure_mla_kernel_layout()
         # Preserve CUDA graph mode and both sparse MLA cache routes from main.
-        return super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
-
-
+        return super().prepare_fmha_impl(
+            inputs, is_cuda_graph, cuda_graph_selection_mode
+        )
 
 
 def read_config_json(ckpt_path: str) -> Dict[str, Any]:
@@ -711,7 +713,9 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
             fmha_config=fmha_config,
             py_hw_kernel_config=load_config.py_hw_kernel_config,
         )
-        self._init_capture_context(self._capture_canonical_layer, self._capture_canonical_final)
+        self._init_capture_context(
+            self._capture_canonical_layer, self._capture_canonical_final
+        )
         self._keep_mla_checkpoint_weights = load_config.keep_mla_checkpoint_weights
         self._mla_kernel_layout: Optional[MlaKernelWeightLayout] = None
 
@@ -731,7 +735,8 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
 
         cfg = extract_config_values(model_config, load_config, config_json)
         self._score_name_filter = score_name_filter(
-            cfg["num_layers"], config_json.get("num_hidden_layers", cfg["num_layers"]),
+            cfg["num_layers"],
+            config_json.get("num_hidden_layers", cfg["num_layers"]),
             config_json.get("num_nextn_predict_layers", 0),
         )
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
@@ -799,6 +804,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
                 indexer_is_neox_style=cfg["indexer_is_neox_style"],
                 cos_sin_cache=cos_sin_cache,
                 blocksize=cfg["blocksize"],
+                hw_kernel_config=load_config.py_hw_kernel_config,
                 prefix=f"layers.{i}",
             )
             self.layers.append(layer)

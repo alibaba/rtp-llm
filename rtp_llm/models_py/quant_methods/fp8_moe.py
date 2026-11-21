@@ -749,9 +749,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
         from rtp_llm.models_py.quant_methods.fp8 import per_block_quant_like_legacy
 
-        runtime_dtype = _runtime_fp8_dtype(layer.w13.device)
-        new_w13 = torch.empty_like(layer.w13.data, dtype=runtime_dtype)
-        new_w2 = torch.empty_like(layer.w2.data, dtype=runtime_dtype)
+        # The quantizer emits FN codes even on FNUZ devices. Preserve the codes
+        # until _requant_per_block_if_needed converts both weights and scales.
+        new_w13 = torch.empty_like(layer.w13.data, dtype=torch.float8_e4m3fn)
+        new_w2 = torch.empty_like(layer.w2.data, dtype=torch.float8_e4m3fn)
         for expert_id in range(layer.num_local_experts):
             weight, scale = per_block_quant_like_legacy(
                 layer.w13.data[expert_id].contiguous(), BS

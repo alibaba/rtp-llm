@@ -34,13 +34,8 @@ class OwnedV41AttentionSources(RtpModule):
         sources = {}
         for key in ("kv_source_layer_ids", "index_source_layer_ids"):
             values = tuple(v41_config.get(key, ()))
-            if (
-                any(type(value) is not int or value < 0 for value in values)
-                or tuple(sorted(set(values))) != values
-            ):
-                raise ValueError(
-                    f"{key} must be strictly increasing nonnegative layer IDs"
-                )
+            if any(type(value) is not int or value < 0 for value in values):
+                raise ValueError(f"{key} must contain nonnegative layer IDs")
             sources[key] = values
         self.layer_id, self.compress_ratio = layer_id, compress_ratio
         self.is_kv_source = layer_id in sources["kv_source_layer_ids"]
@@ -56,7 +51,7 @@ class OwnedV41AttentionSources(RtpModule):
                     raise ValueError(
                         f"Compressed V4.1 layer {layer_id} has no preceding {key}"
                     )
-                setattr(self, attr, preceding[-1])
+                setattr(self, attr, max(preceding))
         if self.is_kv_source and not compress_ratio:
             raise ValueError("A V4.1 global KV producer must be compressed")
         self.compressor = RtpModule()

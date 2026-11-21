@@ -11,11 +11,6 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextModel, Qwen3NextMetadata
-from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel
-from rtp_llm.models_py.new_models.qwen3_next.gdn import Qwen3NextGatedDeltaNet
-from rtp_llm.models_py.new_models.qwen3_next.gdn_parameters import _finite_positive_real
-from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.layers.embedding import (
     ParallelLMHead,
@@ -28,8 +23,13 @@ from rtp_llm.models_py.layers.linear import (
     RowParallelLinear,
 )
 from rtp_llm.models_py.layers.norm import RMSNorm, RMSResNorm
+from rtp_llm.models_py.model_desc.generic_moe import (
+    GenericMoeLayer,
+    use_unified_moe_tp_reduce,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, use_unified_moe_tp_reduce
+from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata, Qwen3NextModel
+from rtp_llm.models_py.model_desc.qwen3_next_mtp import Qwen3NextMTPModel
 from rtp_llm.models_py.module_base import CheckpointLoadTarget, RtpModule
 from rtp_llm.models_py.modules import MultimodalEmbeddingInjector
 from rtp_llm.models_py.new_models.model_base import required_config_value
@@ -38,9 +38,13 @@ from rtp_llm.models_py.new_models.qwen3.language import (
     _positive_int,
     _validate_supported_parallelism,
 )
+from rtp_llm.models_py.new_models.qwen3_next.gdn import Qwen3NextGatedDeltaNet
+from rtp_llm.models_py.new_models.qwen3_next.gdn_parameters import _finite_positive_real
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 from rtp_llm.ops import HybridAttentionType
+
 if TYPE_CHECKING:
     from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, PyModelInputs
 
@@ -703,7 +707,9 @@ class Qwen3NextMoEBlock(RtpModule):
             self.fake_balance_expert(topk_ids, topk_weights)
 
         return self.experts(
-            hidden_states, topk_weights, topk_ids,
+            hidden_states,
+            topk_weights,
+            topk_ids,
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
 
@@ -712,6 +718,7 @@ class Qwen3NextMoEBlock(RtpModule):
     # non-unified branch for executors which must finalize their own output.
     _merge_shared_expert_output = GenericMoeLayer._merge_shared_expert_output
     _gate_shared_expert_output = GenericMoeLayer._gate_shared_expert_output
+    _add_shared_expert = GenericMoeLayer._add_shared_expert
     forward = GenericMoeLayer.forward
 
 

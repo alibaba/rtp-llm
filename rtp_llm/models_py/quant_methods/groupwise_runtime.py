@@ -516,7 +516,7 @@ def build_moe_executor(layer):
             extra_expert_args,
         ):
             if (
-                activation not in ("silu", "swiglu")
+                activation.lower() not in ("silu", "siglu", "swiglu")
                 or expert_map is not None
                 or a2_scale is not None
                 or extra_expert_args

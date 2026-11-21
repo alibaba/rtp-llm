@@ -49,6 +49,12 @@ _ALIASES = {
 __all__ = list(_EXPORTS) + list(_ALIASES)
 
 
+def register_ft_export_descriptors():
+    """Populate the offline converter's subclass registry, not the serving import graph."""
+    for module in dict.fromkeys(_EXPORTS.values()):
+        import_module("." + module, __name__)
+
+
 def __getattr__(name):
     name = _ALIASES.get(name, name)
     try:

@@ -231,6 +231,19 @@ class JinaCheckpointTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing Jina downstream"):
             self._load(data, "scratch", mapping)
 
+    def test_downstream_declared_dtype(self):
+        data = checkpoint()
+        source = "classifier.weight"
+        data[source] = torch.rand(2, 12)
+        for method in ("scratch", "fastsafetensors"):
+            with self.subTest(method=method):
+                model = self._load(
+                    data, method, (("__custom__.head", source, torch.float16),)
+                )
+                torch.testing.assert_close(
+                    model.custom_weight_view()["__custom__.head"], data[source].half()
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
