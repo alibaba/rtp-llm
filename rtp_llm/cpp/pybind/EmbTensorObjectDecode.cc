@@ -4,6 +4,8 @@
 
 #include <rapidjson/document.h>
 
+#include <array>
+#include <chrono>
 #include <optional>
 #include <string_view>
 #include <unordered_set>
@@ -231,10 +233,19 @@ std::vector<EmbTensorSlice> validateLayout(rapidjson::Document&              doc
     return slices;
 }
 
+template<bool observe>
 pybind11::tuple restoreObject(const at::Tensor&                 input,
                               const std::optional<std::string>& expected,
                               bool                              restoreDevices,
                               const std::optional<int64_t>&     consumerStreamId) {
+    using Clock = std::chrono::steady_clock;
+    std::array<Clock::time_point, 6> ticks;
+    const auto stamp = [&](size_t index) {
+        if constexpr (observe) {
+            ticks[index] = Clock::now();
+        }
+    };
+    stamp(0);
     rapidjson::Document                    document;
     std::string                            header;
     std::optional<std::vector<at::Tensor>> decoded;
@@ -242,6 +253,7 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
         pybind11::gil_scoped_release release;
         const c10::cuda::CUDAGuard   deviceGuard(input.device());
         header = readEmbCudaObjectHeader(input);
+        stamp(1);
         std::optional<std::vector<EmbTensorSlice>> slices;
         try {
             slices = validateLayout(document, header, input, expected, restoreDevices);
@@ -249,6 +261,7 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
             // Return the bytes already fetched. Python keeps its validation and
             // full JSON compatibility; nothing has used the payload yet.
         }
+        stamp(2);
         if (slices) {
             decoded = restoreEmbTensorSlices(input, *slices);
             if (consumerStreamId) {
@@ -261,22 +274,43 @@ pybind11::tuple restoreObject(const at::Tensor&                 input,
             }
             waitEmbCudaStream(input);
         }
+        stamp(3);
     }
+    stamp(4);
+    const auto finish = [&](pybind11::object value, pybind11::object fallback) -> pybind11::tuple {
+        if constexpr (observe) {
+            stamp(5);
+            // Capture only slow successful native restores. The host-resume
+            // component includes GIL reacquisition after the CUDA fence.
+            if (decoded && ticks[5] - ticks[0] >= std::chrono::milliseconds(25)) {
+                std::array<int64_t, 5> nanoseconds;
+                for (size_t i = 0; i < nanoseconds.size(); ++i) {
+                    nanoseconds[i] =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(ticks[i + 1] - ticks[i]).count();
+                }
+                return pybind11::make_tuple(std::move(value), std::move(fallback), nanoseconds);
+            }
+            return pybind11::make_tuple(std::move(value), std::move(fallback), pybind11::none());
+        } else {
+            return pybind11::make_tuple(std::move(value), std::move(fallback));
+        }
+    };
     if (!decoded) {
-        return pybind11::make_tuple(pybind11::none(), pybind11::bytes(header));
+        return finish(pybind11::none(), pybind11::bytes(header));
     }
     std::vector<pybind11::object> tensors;
     tensors.reserve(decoded->size());
     for (const auto& tensor : *decoded) {
         tensors.push_back(pybind11::cast(tensor));
     }
-    return pybind11::make_tuple(toPython(field(document, "tree"), tensors), pybind11::none());
+    return finish(toPython(field(document, "tree"), tensors), pybind11::none());
 }
 
 }  // namespace
 
 void registerEmbTensorObjectDecode(pybind11::module& module) {
-    module.def("restore_emb_cuda_object", &restoreObject);
+    module.def("restore_emb_cuda_object", &restoreObject<false>);
+    module.def("restore_emb_cuda_object_observed", &restoreObject<true>);
 }
 
 }  // namespace rtp_llm

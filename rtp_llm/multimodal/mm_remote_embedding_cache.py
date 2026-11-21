@@ -37,6 +37,14 @@ _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
 _USE_NATIVE_SNAPSHOT = os.environ.get("MM_EMB_NATIVE_SNAPSHOT") == "1"
 _BLOCKING_CUDA_EVENTS = os.environ.get("MM_EMB_BLOCKING_CUDA_EVENTS") == "1"
 _RETRY_METADATA_TRANSPORT = os.environ.get("MM_EMB_METADATA_TRANSPORT_RETRY") == "1"
+_OBSERVE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE_TIMINGS") == "1"
+_SLOW_RESTORE_COMPONENTS = (
+    "slow_restore_header",
+    "slow_restore_layout",
+    "slow_restore_cuda_payload",
+    "slow_restore_host_resume",
+    "slow_restore_python_object",
+)
 
 
 def _is_write_in_progress(error):
@@ -259,6 +267,9 @@ class MMRemoteEmbeddingCache:
                     observe_arena=cls._observe_gdr_arena,
                     observe_acquire_failure=cls._observe_gdr_acquire_failure,
                     observe_lock_hold=cls._observe_gdr_lock_hold,
+                    observe_restore_timing=(
+                        cls._report_restore_timing if _OBSERVE_NATIVE_RESTORE else None
+                    ),
                     direct_payload=True,
                 )
             return raw_factory()
@@ -549,6 +560,17 @@ class MMRemoteEmbeddingCache:
             {"operation": operation},
         )
         return elapsed_ms
+
+    @classmethod
+    def _report_restore_timing(cls, nanoseconds):
+        # One observation per component for each successful native restore
+        # whose measured wall time reached the codec's slow-call threshold.
+        for stage, elapsed in zip(_SLOW_RESTORE_COMPONENTS, nanoseconds):
+            cls._report_metric(
+                GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                elapsed / 1_000_000,
+                {"operation": "read", "stage": stage, "status": "success"},
+            )
 
     def _fetch_meta(self, client, key, trace_id, timeout_ms, deadline):
         try:

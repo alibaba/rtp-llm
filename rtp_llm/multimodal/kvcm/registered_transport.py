@@ -418,6 +418,7 @@ class RegisteredObjectTransport:
                     expected_key=expected_key,
                     blocking_cuda_events=self._owner.blocking_cuda_events,
                     payload_fence=self._wait_for_stream_completion,
+                    observe_restore_timing=self._owner._observe_restore_timing,
                 )
             except Exception as error:
                 # Layout validation completes before any payload copy. Header
@@ -496,6 +497,7 @@ class RegisteredTransportPool:
         arena_bytes=None,
         min_block_bytes=None,
         observe_lock_hold=None,
+        observe_restore_timing=None,
     ):
         if type(slots) is not int or slots <= 0:
             raise ValueError("slots must be a positive integer")
@@ -509,6 +511,7 @@ class RegisteredTransportPool:
         self._observe_arena = observe_arena
         self._observe_acquire_failure = observe_acquire_failure
         self._observe_lock_hold = observe_lock_hold
+        self._observe_restore_timing = observe_restore_timing
         self._lock_hold_rng = random.Random()
         self._gc_stop = threading.Event()
         self._condition = threading.Condition()

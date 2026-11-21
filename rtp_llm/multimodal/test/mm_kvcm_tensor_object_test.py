@@ -199,6 +199,36 @@ class TensorObjectTest(unittest.TestCase):
                 )
         separate_header.assert_not_called()
 
+    @unittest.skipUnless(torch.cuda.is_available() and torch.version.cuda, "CUDA required")
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE_RESTORE") == "1", "native restore required"
+    )
+    def test_slow_native_restore_reports_components_without_changing_result(self):
+        import librtp_compute_ops
+
+        if not hasattr(librtp_compute_ops, "restore_emb_cuda_object_observed"):
+            self.skipTest("native restore timing binding required")
+        value = torch.arange(1024, dtype=torch.bfloat16, device="cuda")
+        plan = plan_object({"result": value, "cache_key": "sample"}, checksum=False)
+        timing = []
+        with patch.object(tensor_object, "_USE_NATIVE_OBJECT_RESTORE", True):
+            wire = pack_object(
+                plan, out=torch.empty(plan.nbytes, device="cuda", dtype=torch.uint8)
+            )
+            torch.cuda._sleep(150_000_000)
+            restored = unpack_object(
+                wire,
+                expected_key="sample",
+                blocking_cuda_events=True,
+                payload_fence=lambda: self.fail("native restore must fence the copy"),
+                observe_restore_timing=timing.append,
+            )
+        torch.testing.assert_close(restored["result"], value)
+        (components,) = timing
+        self.assertEqual(len(components), 5)
+        self.assertTrue(all(duration >= 0 for duration in components))
+        self.assertGreaterEqual(sum(components), 25_000_000)
+
     def _assert_cuda_header_reads(self, *, blocking_cuda_events, single_binding=False):
         stages = []
 
