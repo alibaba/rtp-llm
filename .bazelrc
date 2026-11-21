@@ -249,7 +249,6 @@ test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda31
 # would shadow it and ABI-skew torch plugins (libtorch_nvshmem's
 # materialize_cow_storage mismatch on ut-sm9x).
 test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
-test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
@@ -264,7 +263,6 @@ test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bi
 # resolution without shadowing the runfiles torch -- see cuda13_arm note).
 test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
 test:cuda13 --test_env=RAYON_NUM_THREADS=8
-test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
 test:cuda12_9 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda12_9 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc

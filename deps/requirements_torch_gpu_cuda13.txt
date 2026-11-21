@@ -48,9 +48,9 @@ deep-ep==2.1.0+a56d615
 tilelang==0.1.15
 apache-tvm-ffi==0.1.12
 
-# Unified rtp_kernel built from cuda_extension feat/port-nvfp4-xqa@94fd20eb
-# against torch 2.11+cu130; NVFP4 mm only (no XQA wrappers).
-rtp-kernel==0.1.0+94fd20eb.cu132
+# Unified rtp_kernel built from cuda_extension opt/gr-mixer-sm120-20261112@960ac09d
+# against torch 2.11+cu130; NVFP4 mm and SM120 fused GR mixer.
+rtp-kernel==0.1.0+960ac09d.cu132
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`

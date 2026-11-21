@@ -1,10 +1,12 @@
 """Configuration ownership across final overrides and target/draft spawn."""
 
 import json
+import os
 import pickle
 import unittest
 from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig as ModelConfig
 from rtp_llm.config.qwen4_exp_config import freeze_runtime_config
@@ -25,6 +27,44 @@ class RuntimeSnapshotTest(unittest.TestCase):
         config._qwen4_indexer_budget = 1024
         config._qwen4_indexer_kv_heads = 1
         return config
+
+    def test_decode_mode_defaults_to_ipc_and_survives_spawn(self):
+        config = self.config()
+        snapshot = freeze_runtime_config(
+            config, SimpleNamespace(get_attn_tp_size=lambda: 2)
+        )
+        self.assertEqual(
+            snapshot.options.decode_communication_mode, "vocab_parallel_ipc"
+        )
+        self.assertEqual(snapshot, pickle.loads(pickle.dumps(snapshot)))
+        with self.assertRaisesRegex(RuntimeError, "frozen"):
+            config.qwen4_decode_communication_mode = "default"
+
+    def test_explicit_decode_mode_override_is_frozen(self):
+        config = self.config()
+        config.apply_override_args('{"qwen4_decode_communication_mode":"default"}')
+        snapshot = freeze_runtime_config(
+            config, SimpleNamespace(get_attn_tp_size=lambda: 2)
+        )
+        self.assertEqual(snapshot.options.decode_communication_mode, "default")
+        with self.assertRaisesRegex(RuntimeError, "frozen"):
+            config.qwen4_decode_communication_mode = "vocab_parallel_ipc"
+
+    def test_invalid_decode_override_does_not_mutate_other_options(self):
+        config = self.config()
+        for mode in (None, True, "ipc", "1"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                ValueError, "decode_communication_mode"
+            ):
+                config.apply_override_args(
+                    json.dumps(
+                        {
+                            "qwen4_ple_prefetch_mb": 512,
+                            "qwen4_decode_communication_mode": mode,
+                        }
+                    )
+                )
+            self.assertEqual(config.qwen4_ple_prefetch_mb, 256)
 
     def test_final_override_snapshot_survives_pickle_and_is_immutable(self):
         config = self.config()
@@ -137,6 +177,16 @@ class RuntimeSnapshotTest(unittest.TestCase):
     def test_budget_setter_rejects_boolean_values(self):
         with self.assertRaisesRegex(ValueError, "positive integer"):
             self.config().qwen4_ple_prefetch_mb = True
+
+    def test_gr_precision_survives_spawn_and_cannot_change_after_freeze(self):
+        config = self.config()
+        config.quant_config = SimpleNamespace(gr_storage="source_bf16")
+        parallelism = SimpleNamespace(get_attn_tp_size=lambda: 2)
+        snapshot = freeze_runtime_config(config, parallelism)
+        self.assertEqual(snapshot, pickle.loads(pickle.dumps(snapshot)))
+        config.quant_config.gr_storage = "inherit"
+        with self.assertRaisesRegex(RuntimeError, "configuration changed"):
+            freeze_runtime_config(config, parallelism)
 
 
 if __name__ == "__main__":

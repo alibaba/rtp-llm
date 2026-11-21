@@ -252,6 +252,14 @@ models_py_test(
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
+# Host admission checks and rtp-kernel SM120 numerical/Graph tests.
+models_py_test(
+    name = "gated_residual_sm120_test",
+    src = "parity/gated_residual_sm120_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
 models_py_test(
     name = "gated_residual_bf16_test",
     src = "parity/gated_residual_bf16_test.py",
@@ -345,6 +353,20 @@ models_py_test(
     name = "qsa_target_prepare_test",
     src = "qsa/qsa_target_prepare_test.py",
     gpu = "RTX_5000_PRO_CU13",
+    deps = _REFERENCE_DEPS,
+)
+
+models_py_test(
+    name = "decode_communication_test",
+    src = "distributed/decode_communication_test.py",
+    deps = _REFERENCE_DEPS,
+)
+
+models_py_test(
+    name = "decode_communication_sm120_test",
+    src = "distributed/decode_communication_sm120_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    gpus = 2,
     deps = _REFERENCE_DEPS,
 )
 
@@ -456,6 +478,7 @@ test_suite(
         ":gdn_upstream_parity_test",
         ":hc_prefill_mix_test",
         ":gated_residual_bf16_test",
+        ":gated_residual_sm120_test",
         ":compute_weight_view_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:histogram_topk_test",
         ":upstream_parity_test",
@@ -498,6 +521,7 @@ test_suite(
         "//rtp_llm/models_py/kernels/cuda/qsa/test:draft_qsa_metadata_test",
         ":fp8_kv_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:chunk_paged_gqa_test",
+        "//rtp_llm/models_py/kernels/cuda/qsa/test:chunk_optimizations_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:indexer_tensorcore_test",
         ":prefill_preflight_test",
         "//rtp_llm/models_py/kernels/cuda/qsa/test:grouped_fp8_test",
@@ -570,6 +594,8 @@ test_suite(
     name = "qwen4_distributed",
     tests = [
         ":cpu_target_status_test",
+        ":decode_communication_test",
+        ":decode_communication_sm120_test",
         ":tp_registered_input_test",
     ],
 )

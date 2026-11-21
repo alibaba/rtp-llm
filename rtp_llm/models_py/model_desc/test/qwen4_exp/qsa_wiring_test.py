@@ -15,6 +15,35 @@ from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
+class QsaUnitScaleContractTest(TestCase):
+    def test_reused_prefix_never_inherits_the_current_writer_scale_contract(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
+            SparseGqaFmhaImpl,
+        )
+
+        owner = SimpleNamespace(
+            rope_kvcache_impl=SimpleNamespace(fp8_kv_scale_is_unity=True)
+        )
+        cache = SimpleNamespace(kv_cache_base=torch.empty(1, dtype=torch.float8_e4m3fn))
+        self.assertTrue(
+            SparseGqaFmhaImpl._can_skip_main_kv_scales(owner, cache, prefix=0)
+        )
+        self.assertFalse(
+            SparseGqaFmhaImpl._can_skip_main_kv_scales(owner, cache, prefix=6144)
+        )
+        owner.rope_kvcache_impl = SimpleNamespace()
+        self.assertFalse(
+            SparseGqaFmhaImpl._can_skip_main_kv_scales(owner, cache, prefix=0)
+        )
+        owner.rope_kvcache_impl = SimpleNamespace(fp8_kv_scale_is_unity=True)
+        cache.kv_cache_base = torch.empty(1, dtype=torch.bfloat16)
+        self.assertFalse(
+            SparseGqaFmhaImpl._can_skip_main_kv_scales(owner, cache, prefix=0)
+        )
+
+
 class Qwen4ExpQSAConstructionTest(TestCase):
     def test_decoder_constructs_only_the_selected_attention_backend(self):
         config = Qwen4ModelConfig()
@@ -44,7 +73,7 @@ class Qwen4ExpQSAConstructionTest(TestCase):
                         qwen4_exp.Qwen4ExpDecoderLayer, "_build_residual_modules"
                     ),
                     patch(
-                        "rtp_llm.models_py.modules.qwen4_exp.tp_reduce.install_target_graph_all_reduce"
+                        "rtp_llm.models_py.modules.qwen4_exp.tp_reduce.install_tp_all_reduce"
                     ),
                 ):
                     layer = qwen4_exp.Qwen4ExpDecoderLayer(

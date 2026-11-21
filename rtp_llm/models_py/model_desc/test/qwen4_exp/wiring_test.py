@@ -226,6 +226,68 @@ class Qwen4ExpModelConstructionTest(TestCase):
         self.assertFalse(model._capture_mtp_target_hidden)
         self.assertEqual(model.hyper_connection_mixer.hc_hidden_size, hc_hidden)
 
+    def test_decode_vocab_releases_idle_blocks_after_replacing_consumers(self):
+        import weakref
+        from contextlib import nullcontext
+
+        from rtp_llm.models_py.modules.qwen4_exp import (
+            decode_communication,
+            decode_vocab_weights,
+        )
+
+        config = ModelConfig()
+        config.num_layers = 0
+        config.hidden_size = _HIDDEN
+        config.vocab_size = 16
+        config.hc_mult = _HC
+        config.layernorm_eps = _EPS
+        config.capture_aux_hidden_layer_ids = None
+        norm, down, up, _ = _hc_weights(0)
+        weights = self._FakeModelWeights(torch.zeros(16, _HIDDEN), norm, down, up)
+        old = weakref.ref(weights.global_weights[W.embedding])
+        replacement = nn.Module()
+        replacement.weight = torch.ones(16, _HIDDEN)
+        reducer = SimpleNamespace(workspace=SimpleNamespace(group=object()))
+
+        base_init = qwen4_exp.Qwen35Model.__init__
+
+        def base_with_embedding(model, *args, **kwargs):
+            base_init(model, *args, **kwargs)
+            model.embed_tokens = nn.Module()
+            model.embed_tokens.weight = weights.global_weights[W.embedding]
+
+        def prepare(*, source_weights, compute_weights, group):
+            source_weights[W.embedding] = replacement.weight
+            compute_weights[W.embedding] = replacement.weight
+            return SimpleNamespace(weight=replacement.weight)
+
+        def release():
+            self.assertIsNone(
+                old(), "old consumer must retire before allocator cleanup"
+            )
+            self.assertIs(weights.global_weights[W.embedding], replacement.weight)
+
+        with (
+            patch.object(qwen4_exp.Qwen35Model, "__init__", base_with_embedding),
+            patch.object(
+                decode_communication, "prepare_decode_reduce", return_value=reducer
+            ),
+            patch.object(
+                decode_vocab_weights, "prepare_decode_vocab", side_effect=prepare
+            ),
+            patch.object(
+                decode_communication, "DecodeVocabEmbedding", return_value=replacement
+            ),
+            patch("torch.cuda.device", return_value=nullcontext()) as device,
+            patch("torch.cuda.empty_cache", side_effect=release) as empty,
+        ):
+            model = qwen4_exp.Qwen4ExpModel(
+                config, ParallelismConfig(), weights, MoeConfig(), 0
+            )
+        self.assertIs(model.embed_tokens, replacement)
+        empty.assert_called_once_with()
+        device.assert_called_once_with(replacement.weight.device)
+
 
 class Qwen4ExpAttentionTagRoutingTest(TestCase):
     """The PLE layer owns three cache regions, so attention must be tag-routed.

@@ -3,6 +3,7 @@
 from typing import Any, Collection, Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_exp_config import resolve_decode_communication_mode
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
@@ -198,6 +199,19 @@ class Qwen4ExpMTP(Qwen4Exp):
             and draft_storage == "source_bf16"
         ):
             raise ValueError("qwen4_exp MTP requires matching dense storage modes")
+        # Communication policy and IPC setup outcome also apply to an
+        # independently loaded BF16 draft vocabulary. Inherit before either
+        # vocabulary path returns and before the draft freezes its options.
+        draft_model_config.qwen4_decode_communication_mode = (
+            resolve_decode_communication_mode(target_config)
+        )
+        target_py_model = getattr(target_model, "py_model", None)
+        # Keep only the communication resource, not the target's layers and
+        # weights: configs may outlive a closed model or a failed build. Always
+        # refresh the outcome when the caller reuses a draft config.
+        draft_model_config._qwen4_target_decode_reduce = getattr(
+            target_py_model, "_decode_reduce", None
+        )
         target_vocab = getattr(target_config, "_qwen4_vocab_storage", target_storage)
         draft_vocab = getattr(draft_model_config, "_qwen4_vocab_storage", draft_storage)
         if target_vocab != draft_vocab:

@@ -74,11 +74,7 @@ def _tiled_prefill(
         safe_max = tl.where(next_max == -float("inf"), 0.0, next_max)
         alpha = tl.exp2(maximum - safe_max)
         probability = tl.exp2(scores - safe_max[:, None])
-        hi = probability.to(tl.bfloat16)
-        lo = (probability - hi.to(tl.float32)).to(tl.bfloat16)
-        acc = acc * alpha[:, None]
-        acc = tl.dot(hi, v, acc)
-        acc = tl.dot(lo, v, acc)
+        acc = tl.dot(probability.to(tl.bfloat16), v, acc * alpha[:, None])
         normalizer = normalizer * alpha + tl.sum(probability, 1)
         maximum = next_max
     output = tl.where(normalizer[:, None] > 0, acc / normalizer[:, None], 0.0)

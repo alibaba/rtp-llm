@@ -216,7 +216,7 @@ class SparseFmhaTest(unittest.TestCase):
         expected = sparse_prefill_attn_torch_reference(q, k, v, selected)
         torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
 
-    def test_grouping_falls_back_without_nvidia_bf16_tensor_cores(self):
+    def test_unsupported_backend_is_rejected_without_vector_attention(self):
         q = torch.randn(1, 3, 2, _D, device=_DEV).to(torch.bfloat16)
         k = torch.randn(1, 1, 16, _D, device=_DEV).to(torch.bfloat16)
         v = torch.randn_like(k)
@@ -233,9 +233,8 @@ class SparseFmhaTest(unittest.TestCase):
                         new=object(),
                     ),
                 ):
-                    actual = sparse_prefill_attn(q, k, v, selected)
-                expected = sparse_prefill_attn_torch_reference(q, k, v, selected)
-                torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+                    with self.assertRaisesRegex(RuntimeError, "Tensor Cores"):
+                        sparse_prefill_attn(q, k, v, selected)
 
     def test_matches_torch_reference(self):
         torch.manual_seed(0)
