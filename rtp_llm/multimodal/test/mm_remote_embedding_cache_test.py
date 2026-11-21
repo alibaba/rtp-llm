@@ -860,7 +860,7 @@ class RemoteCacheTest(unittest.TestCase):
             )
         )
 
-        def load_object(meta, *, consumer_stream, expected_key, trace_id):
+        def load_object(meta, *, consumer_stream, expected_key, trace_id, deadline):
             target = torch.empty(meta.size_bytes, dtype=torch.uint8)
             slot.load_from_meta(meta, target, trace_id=trace_id)
             return unpack_object(target, expected_key=expected_key)
@@ -1828,6 +1828,31 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertIsNotNone(remote.load("key"))
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def test_remote_write_latency_includes_object_planning(self):
+        remote = self.remote(Store())
+        perf_counter = time.perf_counter
+        planning_seconds = 0
+
+        def measured_plan(*args, **kwargs):
+            nonlocal planning_seconds
+            planning_seconds += 0.125
+            return plan_object(*args, **kwargs)
+
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.time.perf_counter",
+            side_effect=lambda: perf_counter() + planning_seconds,
+        ), patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.plan_object",
+            side_effect=measured_plan,
+        ), patch("rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report") as report:
+            remote.submit_result("key", (torch.ones(3), None))
+            remote._write_executor.shutdown(wait=True)
+        samples = self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC)
+        self.assertEqual(len(samples), 1)
+        elapsed_ms, tags = samples[0]
+        self.assertEqual(tags, {"status": "success"})
+        self.assertGreaterEqual(elapsed_ms, 125)
 
     def test_remote_write_metrics_follow_completed_background_operations(self):
         for failed in (False, True):

@@ -908,6 +908,7 @@ class MMRemoteEmbeddingCache:
         """Admit an encoder result and enqueue its owned snapshot for upload."""
         if key is None or self._skip_quarantined("write"):
             return
+        started = time.perf_counter()
         try:
             inspection = None
             if entry is not None:
@@ -950,7 +951,6 @@ class MMRemoteEmbeddingCache:
             with self._lock:
                 self._pending_writes.discard(key)
             return
-        started = time.perf_counter()
         self.record(
             "encoder_result_admitted",
             key=key,
@@ -1121,7 +1121,7 @@ class MMRemoteEmbeddingCache:
                     queue_ms=queue_ms,
                     sdk_api_ms=api_ms,
                     status=outcome,
-                    scope="snapshot_queue_client_acquire_sdk_save_and_validation",
+                    scope="plan_admission_snapshot_queue_client_acquire_sdk_save_and_validation",
                 )
                 if client is not None:
                     self._release_client(client)

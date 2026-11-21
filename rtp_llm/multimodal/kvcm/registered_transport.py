@@ -791,7 +791,7 @@ class RegisteredTransportPool:
             self._idle_streams.append(slot._stream)
         slot._buffer = slot._stream = None
 
-    def _acquire_native(self, nbytes, for_write, wait_seconds, deadline, sample):
+    def _acquire_native(self, nbytes, for_write, wait_seconds, sample):
         arena = self._native_arena
         root = self._arena
         if root is None:
@@ -823,9 +823,9 @@ class RegisteredTransportPool:
                     failure = "closed"
                 elif self.quarantined:
                     failure = "quarantined"
-                elif wait_seconds and time.monotonic() >= deadline:
-                    failure = "python_bookkeeping_deadline"
                 else:
+                    # The numeric lease finished within the allocator budget.
+                    # The caller still checks its request deadline before IO.
                     if self._idle_streams:
                         slot._stream = self._idle_streams.pop()
                     self._in_use[slot] = for_write
@@ -872,7 +872,7 @@ class RegisteredTransportPool:
             self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
         )
         if self._native_arena is not None:
-            return self._acquire_native(nbytes, for_write, wait_seconds, deadline, sample)
+            return self._acquire_native(nbytes, for_write, wait_seconds, sample)
         if not self._condition.acquire(timeout=wait_seconds):
             self._report_acquire_failure(for_write, "lock_timeout")
             return None
@@ -948,6 +948,7 @@ class RegisteredTransportPool:
             self._condition.notify_all()
 
     def release(self, slot):
+        arena = self._native_arena
         sample = (
             self._observe_lock_hold is not None and self._lock_hold_rng.getrandbits(6) == 0
         )
@@ -956,7 +957,7 @@ class RegisteredTransportPool:
             held_since = time.perf_counter_ns() if sample else 0
             for_write = self._in_use.pop(slot)
             reusable = not slot.quarantined
-            if slot._native_ticket:
+            if arena is not None:
                 if reusable:
                     self._slots.remove(slot)
                     if slot._stream is not None:
@@ -973,8 +974,8 @@ class RegisteredTransportPool:
             self._condition.notify_all()
             held_ns = time.perf_counter_ns() - held_since if sample else 0
         del retired_view
-        if slot._native_ticket:
-            held_ns = self._native_arena.release(
+        if arena is not None:
+            held_ns = arena.release(
                 slot._native_ticket, slot._extent[0], reusable, sample
             )
         if sample:

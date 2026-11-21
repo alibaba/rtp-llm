@@ -231,9 +231,9 @@ class GaugeMetrics(Enum):
     # serialization. source distinguishes mm_embedding_cpp/get_embedding_result;
     # status is success/error. Async submission ACKs are deliberately excluded.
     VIT_REQUEST_RT_METRIC = "py_rtp_vit_request_rt"
-    # Milliseconds, one observation per admitted remote operation. Read includes
-    # queueing, SDK calls, deserialization and device restoration enqueue, without
-    # CUDA synchronization. Write includes queueing, packing and SDK save.
+    # Full observed cache latency in milliseconds. A read hit includes metadata,
+    # queueing, SDK read, validation, and the direct GDR restore fence. A successful
+    # write includes planning, admission, snapshots, queueing, packing, and SDK save.
     VIT_REMOTE_EMB_READ_RT_METRIC = "py_rtp_vit_remote_embedding_cache_read_rt"
     VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
 
