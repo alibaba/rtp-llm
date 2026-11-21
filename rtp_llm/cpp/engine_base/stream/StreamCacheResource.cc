@@ -240,7 +240,11 @@ void StreamCacheResource::completeRegisteredSave(size_t completed_endpoint) {
             continue;
         }
         for (auto& binding : point.group_bindings) {
-            if (binding.state == PrefixCacheSaveState::REGISTERED && binding.resource.hasCompleteDeviceValue()) {
+            const auto& groups = resource_context_.cache_manager->blockTreeCache()->groupSets();
+            const bool zero_demand = binding.group_set_id < groups.size()
+                                     && groups[binding.group_set_id]->hasZeroStateDemand(point.endpoint.pos);
+            if (binding.state == PrefixCacheSaveState::REGISTERED
+                && (binding.resource.hasCompleteDeviceValue() || zero_demand)) {
                 binding.state = PrefixCacheSaveState::CONTENT_COMPLETE;
                 any_completed = true;
             }

@@ -718,6 +718,56 @@ bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tie
     return true;
 }
 
+const char* BlockTree::preciseForkRejection(const CacheKeysType& keys,
+                                     const std::vector<std::vector<GroupSetResource>>& resources,
+                                     const std::vector<std::vector<int>>& segments,
+                                     const std::vector<size_t>& ends) const {
+    if (keys.empty() || keys.size() != resources.size() || keys.size() != segments.size()
+        || keys.size() != ends.size() || resources.back().size() != group_sets_.size()) {
+        return "invalid_internal_fork_path";
+    }
+    const auto existing = findNode(keys);
+    const size_t ancestor_count = keys.size() - 1;
+    if (existing.size() < ancestor_count
+        || (ancestor_count > 0 && isShortLeaf(existing[ancestor_count - 1]))) {
+        return "missing_internal_fork_ancestor";
+    }
+    for (size_t i = 0; i < existing.size(); ++i) {
+        if (existing[i]->token_end != ends[i] || existing[i]->token_ids != segments[i]) {
+            return "stale_internal_fork_ancestor";
+        }
+    }
+    TreeNode projected;
+    projected.parent = ancestor_count > 0 ? existing[ancestor_count - 1] : root_.get();
+    projected.token_end = ends.back();
+    projected.group_set_resources = resources.back();
+    if (existing.size() == keys.size()) {
+        for (size_t group = 0; group < group_sets_.size(); ++group) {
+            const auto& retained = existing.back()->group_set_resources[group];
+            if (!retained.isValidSteadyState()) {
+                return "internal_fork_not_jointly_ready";
+            }
+            if (!retained.is_empty()) {
+                projected.group_set_resources[group] = retained;
+            }
+        }
+    }
+    std::vector<TreeNode*> path(existing.begin(), existing.begin() + ancestor_count);
+    path.push_back(&projected);
+    for (const auto& group : group_sets_) {
+        if (!group->hasPhysicalCoverage(path, ends.back())) {
+            return "internal_fork_not_jointly_ready";
+        }
+        for (const auto index : group->requiredPathIndices(path, ends.back())) {
+            const auto& resource = path[index]->group_set_resources[group->groupSetId()];
+            if (!resource.isValidSteadyState() || resource.is_empty()) {
+                return "internal_fork_not_jointly_ready";
+            }
+        }
+    }
+    return nullptr;
+}
+
 BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& resources,
                                             bool                                              collect_path,
@@ -755,15 +805,8 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
                                 resources[i].size());
             return result;
         }
-        const bool short_endpoint =
-            token_ends != nullptr && ((*token_ends)[i] - (i == 0 ? 0 : (*token_ends)[i - 1])) < reuse_unit_tokens_;
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetResource& resource = resources[i][group_set_id];
-            if (short_endpoint && (resource.hasTier(Tier::HOST) || resource.hasTier(Tier::DISK))) {
-                RTP_LLM_LOG_WARNING(
-                    "short leaf requires local DEVICE resource: key_index=%zu group_set_id=%zu", i, group_set_id);
-                return result;
-            }
             RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState()
                                         && (!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue()),
                                     "BlockTree insert requires an IDLE steady resource and complete DEVICE value: "

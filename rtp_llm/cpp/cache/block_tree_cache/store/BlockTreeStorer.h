@@ -74,7 +74,9 @@ private:
                                            Tier                                              target_tier,
                                            const std::vector<std::vector<int>>*              token_segments,
                                            PrefixCachePlanState*                             prefix_plan_state,
-                                           std::optional<int64_t> observation_request_id);
+                                           std::optional<int64_t>                            observation_request_id,
+                                           const std::vector<size_t>*                        token_ends,
+                                           bool                                              internal_fork);
     void             runStoreTask(const StoreTaskPtr& task);
     void             scheduleStoreSettlement(const StoreTaskPtr& task,
                                              ErrorInfo            error,

@@ -112,6 +112,92 @@ class SparseSaveSlotsTest(unittest.TestCase):
         self.assertEqual(slots[-5].item(), 9 * 4 * 16)
         self.assertEqual(slots[-1].item(), 9 * 4 * 16 + 1)
 
+    def test_cp4_full_snapshots_cover_each_ranks_valid_prefix(self) -> None:
+        positions = torch.arange(1300, dtype=torch.int64)
+        targets = SparseSaveTargets(
+            torch.tensor([[1024, 1300]], dtype=torch.int64),
+            torch.tensor([[7, 9]], dtype=torch.int32),
+        )
+        for ratio, entries, counts in (
+            (4, 32, ((64, 64, 64, 64), (64, 5, 0, 0))),
+            (128, 1, ((2, 2, 2, 2), (2, 0, 0, 0))),
+        ):
+            for rank in range(4):
+                with self.subTest(ratio=ratio, rank=rank):
+                    mapped = list(
+                        iter_sparse_full_kv_slots(
+                            targets,
+                            positions,
+                            torch.zeros_like(positions),
+                            physical_tokens_per_block=256,
+                            kernel_tokens_per_block=128,
+                            entries_per_kernel_block=entries,
+                            ratio=ratio,
+                            cp_size=4,
+                            cp_rank=rank,
+                        )
+                    )
+                    for index, (_, slots) in enumerate(mapped):
+                        expected_count = counts[index][rank]
+                        valid = slots[slots >= 0]
+                        first_slot = (7 if index == 0 else 9) * 2 * entries
+                        self.assertEqual(
+                            valid.tolist(),
+                            list(range(first_slot, first_slot + expected_count)),
+                        )
+
+    def test_cp4_same_block_suffix_preserves_copied_prefix(self) -> None:
+        positions = torch.arange(1300, 1320, dtype=torch.int64)
+        targets = SparseSaveTargets(
+            torch.tensor([[1320]], dtype=torch.int64),
+            torch.tensor([[9]], dtype=torch.int32),
+        )
+        for rank, prefix_rows, suffix_rows in (
+            (0, 64, 0),
+            (1, 5, 5),
+            (2, 0, 0),
+            (3, 0, 0),
+        ):
+            with self.subTest(rank=rank):
+                # Model the existing whole-page history copy, with distinct code/scale planes.
+                source = torch.full((64, 2), -1, dtype=torch.int64)
+                source[:prefix_rows, 0] = torch.arange(prefix_rows)
+                source[:prefix_rows, 1] = torch.arange(prefix_rows) + 1000
+                destination = source.clone()
+                slots = list(
+                    iter_sparse_full_kv_slots(
+                        targets,
+                        positions,
+                        torch.zeros_like(positions),
+                        physical_tokens_per_block=256,
+                        kernel_tokens_per_block=128,
+                        entries_per_kernel_block=32,
+                        ratio=4,
+                        cp_size=4,
+                        cp_rank=rank,
+                    )
+                )[0][1]
+                offsets = slots[slots >= 0] - 9 * 64
+                self.assertEqual(
+                    offsets.tolist(),
+                    list(range(prefix_rows, prefix_rows + suffix_rows)),
+                )
+                destination[offsets, 0] = torch.arange(
+                    prefix_rows, prefix_rows + suffix_rows
+                )
+                destination[offsets, 1] = (
+                    torch.arange(prefix_rows, prefix_rows + suffix_rows) + 1000
+                )
+                self.assertTrue(
+                    torch.equal(destination[:prefix_rows], source[:prefix_rows])
+                )
+                count = prefix_rows + suffix_rows
+                self.assertEqual(destination[:count, 0].tolist(), list(range(count)))
+                self.assertEqual(
+                    destination[:count, 1].tolist(), list(range(1000, 1000 + count))
+                )
+                self.assertTrue(torch.all(destination[count:] == -1))
+
     def test_missing_optional_destination_yields_no_work(self) -> None:
         targets = SparseSaveTargets(
             torch.tensor([[1301, -1]], dtype=torch.int64),

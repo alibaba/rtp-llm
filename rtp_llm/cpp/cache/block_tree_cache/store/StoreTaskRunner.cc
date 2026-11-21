@@ -13,15 +13,29 @@ namespace rtp_llm {
 StoreTaskRunner::StoreTaskRunner(const std::vector<GroupSetPtr>& group_sets): group_sets_(group_sets) {}
 
 bool StoreTaskRunner::prepareTask(Task& task, const std::vector<std::vector<GroupSetResource>>& resources) {
+    if (resources.size() != task.cache_keys.size()
+        || (!task.token_ends.empty() && task.token_ends.size() != task.cache_keys.size())) {
+        return false;
+    }
     for (size_t key_index = 0; key_index < task.cache_keys.size(); ++key_index) {
+        if (resources[key_index].size() != group_sets_.size()) {
+            return false;
+        }
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetPtr& group_set = group_sets_[group_set_id];
-            if (group_set->preciseOnly()) {
+            if (!task.token_ends.empty() && group_set->hasZeroStateDemand(task.token_ends[key_index])) {
                 continue;
             }
             const GroupSetResource& source = resources[key_index][group_set_id];
-            if (source.device_blocks.empty()) {
+            if (!source.hasCompleteDeviceValue()) {
                 continue;
+            }
+            if ((task.target_tier == Tier::HOST && !group_set->hostPool())
+                || (task.target_tier == Tier::DISK && !group_set->diskPool())) {
+                if (group_set->preciseOnly()) {
+                    continue;
+                }
+                return false;
             }
             const BlockIdxType target_block = group_set->allocateSingleBlock(task.target_tier, BlockTreeRefType::STORE);
             if (isNullBlockIdx(target_block)) {

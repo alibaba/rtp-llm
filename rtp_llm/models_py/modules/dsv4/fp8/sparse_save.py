@@ -135,8 +135,8 @@ def iter_sparse_full_kv_slots(
 
     One physical ID expands to ``physical/kernel`` consecutive kernel IDs,
     exactly as ``BlockIds::updateKernelSlotAt`` does for the runtime table.
-    CP FULL ownership is physical page round-robin, independent of state/SWA
-    byte slicing.  The source copy supplies any restored history in this page.
+    Each CP rank snapshots its physical page within the endpoint's canonical
+    block. The source copy supplies restored history before the current suffix.
     """
     if targets is None:
         return
@@ -157,10 +157,10 @@ def iter_sparse_full_kv_slots(
     for row, endpoint, block_id in targets.rows():
         if endpoint <= 0:
             continue
-        physical_block = (endpoint - 1) // physical
+        local_block = (endpoint - 1) // physical // cp_size
+        physical_block = local_block * cp_size + cp_rank
         runtime_is_independent = None
         if runtime_block_table is not None:
-            local_block = physical_block // cp_size
             first_kernel = local_block * blocks_per_physical
             if first_kernel < int(runtime_block_table.shape[1]):
                 runtime_kernel = runtime_block_table[row, first_kernel]
@@ -172,12 +172,15 @@ def iter_sparse_full_kv_slots(
                         runtime_kernel // blocks_per_physical != block_id
                     )
         block_start = physical_block * physical
-        valid = (req == row) & (pos >= block_start) & (pos < endpoint)
-        valid = valid & (((pos + 1) % ratio) == 0)
+        valid = (
+            (req == row)
+            & (pos >= block_start)
+            & (pos < block_start + physical)
+            & (pos < endpoint)
+            & (((pos + 1) % ratio) == 0)
+        )
         if runtime_is_independent is not None:
             valid = valid & runtime_is_independent
-        if cp_size > 1:
-            valid = valid & ((physical_block % cp_size) == cp_rank)
         kernel_offset = (pos - block_start) // kernel
         kernel_id = block_id * blocks_per_physical + kernel_offset
         slot = kernel_id * entries_per_kernel_block + (pos % kernel) // ratio

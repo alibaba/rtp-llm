@@ -1232,15 +1232,19 @@ TEST(BlockTreeTest, ExactKeyConflictCannotAdoptResourcesOrChangeLeafIdentity) {
     EXPECT_EQ(tree.size(), 1u);
 }
 
-TEST(BlockTreeTest, ShortLeafRejectsNonDeviceResource) {
-    BlockTree                           tree(makeGroupSets(1), 256, false);
-    const std::vector<std::vector<int>> segment{std::vector<int>(100, 1)};
-    const std::vector<size_t>           endpoint{100};
-    auto                                resources = makeEmpty2DResources(1);
-    resources[0][0].host_block                    = 10;
-    const auto result                             = tree.insertNode({42}, resources, false, false, &segment, &endpoint);
-    EXPECT_TRUE(result.inserted_nodes.empty());
-    EXPECT_EQ(tree.size(), 0u);
+TEST(BlockTreeTest, ShortLeafPreservesIdentityOnLocalTiers) {
+    for (const auto tier : {Tier::HOST, Tier::DISK}) {
+        BlockTree tree(makeGroupSets(1), 256, false);
+        const std::vector<std::vector<int>> segment{std::vector<int>(100, 1)};
+        const std::vector<size_t> endpoint{100};
+        auto resources = makeEmpty2DResources(1);
+        resources[0][0].setBlocks(tier, {10});
+        const auto result = tree.insertNode({42}, resources, false, false, &segment, &endpoint);
+        ASSERT_EQ(result.inserted_nodes.size(), 1u);
+        EXPECT_EQ(result.inserted_nodes[0]->token_end, 100u);
+        EXPECT_EQ(result.inserted_nodes[0]->token_ids, segment.front());
+        EXPECT_TRUE(result.inserted_nodes[0]->group_set_resources[0].hasTier(tier));
+    }
 }
 
 TEST(BlockTreeTest, VisitNodeRangeLockedStopsAtMaxNodes) {

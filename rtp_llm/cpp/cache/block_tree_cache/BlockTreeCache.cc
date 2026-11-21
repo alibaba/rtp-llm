@@ -189,7 +189,7 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (internal_fork) {
+        if (internal_fork && target_tier == Tier::DEVICE) {
             const std::optional<size_t> fork_endpoint =
                 token_ends != nullptr && !token_ends->empty() ?
                     std::optional<size_t>(token_ends->back()) : std::nullopt;
@@ -203,53 +203,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
                                                   fork_endpoint);
                 return 0;
             }
-            const auto existing = tree_->findNode(cache_keys);
-            const size_t ancestor_count = cache_keys.size() - 1;
-            if (existing.size() < ancestor_count || (ancestor_count > 0 && tree_->isShortLeaf(existing[ancestor_count - 1]))) {
-                storer_.observePublicationSkipped(observation_request_id, target_tier, "missing_internal_fork_ancestor",
-                                                  fork_endpoint);
+            if (const char* reason = tree_->preciseForkRejection(cache_keys, resources, *token_segments, *token_ends)) {
+                storer_.observePublicationSkipped(observation_request_id, target_tier, reason, fork_endpoint);
                 return 0;
-            }
-            for (size_t index = 0; index < ancestor_count; ++index) {
-                if (existing[index]->token_end != (*token_ends)[index]
-                    || existing[index]->token_ids != (*token_segments)[index]) {
-                    storer_.observePublicationSkipped(observation_request_id, target_tier, "stale_internal_fork_ancestor",
-                                                      fork_endpoint);
-                    return 0;
-                }
-            }
-            TreeNode projected_root;
-            projected_root.token_end = 0;
-            TreeNode projected;
-            projected.parent = ancestor_count > 0 ? existing[ancestor_count - 1] : &projected_root;
-            projected.token_end = token_ends->back();
-            projected.group_set_resources.resize(tree_->groupSets().size());
-            const TreeNode* present = existing.size() == cache_keys.size() ? existing.back() : nullptr;
-            if (present != nullptr && (present->token_end != projected.token_end
-                                       || present->token_ids != token_segments->back())) {
-                storer_.observePublicationSkipped(observation_request_id, target_tier, "internal_fork_identity_conflict",
-                                                  fork_endpoint);
-                return 0;
-            }
-            if (resources.back().size() != tree_->groupSets().size()) {
-                storer_.observePublicationSkipped(observation_request_id, target_tier, "invalid_internal_fork_groups",
-                                                  fork_endpoint);
-                return 0;
-            }
-            for (size_t group_id = 0; group_id < tree_->groupSets().size(); ++group_id) {
-                const auto& incoming = resources.back()[group_id];
-                const auto& retained = present != nullptr ? present->group_set_resources[group_id] : incoming;
-                projected.group_set_resources[group_id] =
-                    present != nullptr && !retained.is_empty() ? retained : incoming;
-            }
-            std::vector<TreeNode*> projected_path(existing.begin(), existing.begin() + ancestor_count);
-            projected_path.push_back(&projected);
-            for (const auto& group : tree_->groupSets()) {
-                if (!group->hasDeviceCoverage(projected_path, projected.token_end)) {
-                    storer_.observePublicationSkipped(observation_request_id, target_tier,
-                                                      "internal_fork_not_jointly_ready", fork_endpoint);
-                    return 0;
-                }
             }
         }
         storage_write =

@@ -184,7 +184,14 @@ StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&              
                             internal_fork,
                             ready_after_insert);
     } else {
-        submitLowerTierLocked(cache_keys, resources, target_tier, token_segments, prefix_plan_state, observation_request_id);
+        submitLowerTierLocked(cache_keys,
+                              resources,
+                              target_tier,
+                              token_segments,
+                              prefix_plan_state,
+                              observation_request_id,
+                              token_ends,
+                              internal_fork);
         return {};
     }
     return storage_backend_ && !internal_fork ?
@@ -265,7 +272,7 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
         keys->push_back(cache_keys[key_index]);
         auto& key_handles = request.handles.emplace_back();
         for (size_t group_set = 0; group_set < tree_->groupSets().size(); ++group_set) {
-            if (tree_->groupSets()[group_set]->preciseOnly()) {
+            if (!tree_->groupSets()[group_set]->supportsRemoteReuse()) {
                 continue;
             }
             const auto& resource = resources[key_index][group_set];
@@ -286,12 +293,22 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
                                             Tier                                              target_tier,
                                             const std::vector<std::vector<int>>*              token_segments,
                                             PrefixCachePlanState*                             prefix_plan_state,
-                                            std::optional<int64_t> observation_request_id) {
+                                            std::optional<int64_t>                            observation_request_id,
+                                            const std::vector<size_t>*                        token_ends,
+                                            bool                                              internal_fork) {
+    if (token_ends != nullptr
+        && (token_ends->size() != cache_keys.size() || token_segments == nullptr
+            || token_segments->size() != cache_keys.size())) {
+        return;
+    }
+    if (internal_fork && (token_ends == nullptr || cache_keys.empty())) {
+        return;
+    }
     const bool plan_reached = tree_->observabilityEnabled() && !cache_keys.empty()
                               && resources.size() == cache_keys.size();
     std::vector<PrefixCachePlanPoint> plan_points;
     if (plan_reached) {
-        plan_points = tree_->planRecoveryPoints(cache_keys, resources, token_segments, target_tier);
+        plan_points = tree_->planRecoveryPoints(cache_keys, resources, token_segments, target_tier, token_ends);
         if (prefix_plan_state != nullptr) {
             *prefix_plan_state = PrefixCachePlanState::FORMED;
         }
@@ -317,6 +334,8 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         token_segments ? *token_segments : std::vector<std::vector<int>>{},
         plan_points);
     task->observation_request_id = observation_request_id;
+    task->token_ends             = token_ends ? *token_ends : std::vector<size_t>{};
+    task->internal_fork          = internal_fork;
 
     const char* failure_reason = "prepare_failed";
     block_tree_cache_detail::ScopeRollback prepare_guard(
@@ -447,6 +466,8 @@ void BlockTreeStorer::settleTask(StoreTask& task, bool copy_success, const char*
 
 size_t BlockTreeStorer::settleLocked(StoreTask& task, bool publish, const char* failure_reason) {
     BlockTreeInsertResult insert_result;
+    const char*                       fork_rejection = nullptr;
+    std::optional<bool>               fork_ready;
     std::vector<PrefixCachePlanPoint> unfulfilled;
     if (publish) {
         std::vector<std::vector<GroupSetResource>> resources(task.cache_keys.size(),
@@ -455,7 +476,48 @@ size_t BlockTreeStorer::settleLocked(StoreTask& task, bool publish, const char* 
             resources[descriptor.path_index][descriptor.group_set_id].setBlocks(
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
-        insert_result = tree_->insertNode(task.cache_keys, resources, true, false, &task.token_segments);
+        const auto* ends = task.token_ends.empty() ? nullptr : &task.token_ends;
+        if (task.internal_fork && ends != nullptr && task.cache_keys.size() > 1) {
+            // A direct lower-tier branch owns its spine transfer. Publish that
+            // spine first under this lock, then validate the branch against it.
+            const auto existing    = tree_->findNode(task.cache_keys);
+            bool       spine_ready = true;
+            for (size_t i = 0; i + 1 < resources.size() && spine_ready; ++i) {
+                for (const auto& group : tree_->groupSets()) {
+                    if (group->groupType() == CacheGroupType::FULL && resources[i][group->groupSetId()].is_empty()
+                        && (i >= existing.size() || existing[i]->group_set_resources[group->groupSetId()].is_empty())) {
+                        spine_ready = false;
+                        break;
+                    }
+                }
+            }
+            if (spine_ready) {
+                const CacheKeysType spine_keys(task.cache_keys.begin(), task.cache_keys.end() - 1);
+                const std::vector<std::vector<GroupSetResource>> spine_resources(resources.begin(),
+                                                                                 resources.end() - 1);
+                const std::vector<std::vector<int>>              spine_segments(task.token_segments.begin(),
+                                                                   task.token_segments.end() - 1);
+                const std::vector<size_t> spine_ends(task.token_ends.begin(), task.token_ends.end() - 1);
+                insert_result =
+                    tree_->insertNode(spine_keys, spine_resources, true, false, &spine_segments, &spine_ends);
+            }
+        }
+        if (task.internal_fork) {
+            fork_rejection =
+                tree_->preciseForkRejection(task.cache_keys, resources, task.token_segments, task.token_ends);
+            fork_ready = fork_rejection == nullptr;
+        }
+        if (!task.internal_fork || fork_rejection == nullptr) {
+            const auto branch_result =
+                tree_->insertNode(task.cache_keys, resources, true, false, &task.token_segments, ends);
+            insert_result.inserted_nodes.insert(insert_result.inserted_nodes.end(),
+                                                branch_result.inserted_nodes.begin(),
+                                                branch_result.inserted_nodes.end());
+            insert_result.adopted_nodes.insert(insert_result.adopted_nodes.end(),
+                                               branch_result.adopted_nodes.begin(),
+                                               branch_result.adopted_nodes.end());
+            insert_result.accepted_resource_count += branch_result.accepted_resource_count;
+        }
         unfulfilled   = tree_->unfulfilledPlanPoints(task.plan_points, task.cache_keys);
         logPrefixPlanUnfulfilled(tree_->observabilityInstance(),
                                  unfulfilled,
@@ -466,10 +528,17 @@ size_t BlockTreeStorer::settleLocked(StoreTask& task, bool publish, const char* 
         logPrefixPlanUnfulfilled(tree_->observabilityInstance(), unfulfilled, failure_reason, task.error, task.observation_request_id);
     }
     if (tree_->observabilityEnabled()) {
-        logPrefixPublication(tree_->observabilityInstance(), task.observation_request_id, task.target_tier,
-                             publish ? &insert_result : nullptr,
-                             publish ? (unfulfilled.empty() ? nullptr : "insert_not_fulfilled") : failure_reason,
-                             unfulfilled.size());
+        logPrefixPublication(
+            tree_->observabilityInstance(),
+            task.observation_request_id,
+            task.target_tier,
+            publish ? &insert_result : nullptr,
+            publish ? (fork_rejection ? fork_rejection : (unfulfilled.empty() ? nullptr : "insert_not_fulfilled")) :
+                      failure_reason,
+            unfulfilled.size(),
+            task.internal_fork && !task.token_ends.empty() ? std::optional<size_t>(task.token_ends.back()) :
+                                                             std::nullopt,
+            fork_ready);
     }
     task.plan_points.clear();
 

@@ -113,6 +113,35 @@ TEST(StoreTaskRunnerTest, LocalOnlyGroupDoesNotBlockCompleteGroupLowerTierStore)
     unreferenceDeviceBlocksForTest(*hca, hca_source);
 }
 
+TEST(StoreTaskRunnerTest, PreciseStateUsesLocalPoolsExceptAtCompressionBoundary) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.reuse_mode          = CacheReuseMode::PRECISE_ONLY;
+    policy.sliding_window_size = 128;
+    policy.shared_chunk_state  = true;
+    const auto topology        = makeTestTopology({makeTestGroupBase(policy)});
+    auto       device          = makeTestDevicePool({{16, 0}}, 2, "store_precise_state");
+    auto       host            = block_transfer_engine_test::makeHostPool(16, 1);
+    auto       disk            = block_tree_cache_test::makeDiskPool(16, 1, std::make_unique<MemoryDiskBlockIO>());
+    auto       group           = makeTestGroupSet(0, topology, {"group0"}, {device}, host, disk);
+    const std::vector<GroupSetPtr>             groups{group};
+    StoreTaskRunner                            runner(groups);
+    const auto                                 source = allocateDeviceBlocksForTest(*group, 1);
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = source[0];
+    for (const auto tier : {Tier::HOST, Tier::DISK}) {
+        for (const size_t endpoint : {1024u, 1026u}) {
+            StoreTaskRunner::Task task(tier, {100}, std::chrono::seconds(30));
+            task.token_ends = {endpoint};
+            ASSERT_TRUE(runner.prepareTask(task, resources));
+            EXPECT_EQ(task.descriptors().size(), endpoint == 1024 ? 0u : 1u);
+            EXPECT_EQ(device->referencedBlocksNum(BlockTreeRefType::STORE), endpoint == 1024 ? 0u : 1u);
+            runner.releaseTaskResources(task);
+            EXPECT_EQ(device->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
+        }
+    }
+    unreferenceDeviceBlocksForTest(*group, source);
+}
+
 TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {
     auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.reuse_mode                                   = CacheReuseMode::STANDARD;

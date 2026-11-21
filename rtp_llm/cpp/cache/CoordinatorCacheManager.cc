@@ -1372,9 +1372,10 @@ void CoordinatorCacheManager::prepareRegisteredSave(PrefixCacheRegistration& reg
                 binding.unfulfilled_reason = "missing_group_set";
                 continue;
             }
-            if (point.internal_only && group_set->hasZeroStateDemand(point.endpoint.pos)) {
-                binding.state                  = PrefixCacheSaveState::CONTENT_COMPLETE;
-                registration.content_completed = true;
+            if (group_set->hasZeroStateDemand(point.endpoint.pos)) {
+                binding.state = point.endpoint.pos <= resume_endpoint ? PrefixCacheSaveState::CONTENT_COMPLETE :
+                                                                       PrefixCacheSaveState::REGISTERED;
+                registration.content_completed = registration.content_completed || point.endpoint.pos <= resume_endpoint;
                 continue;
             }
             const bool dense_swa = std::all_of(group_set->groupTags().begin(),
