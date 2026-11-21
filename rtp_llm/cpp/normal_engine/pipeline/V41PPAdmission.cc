@@ -20,6 +20,50 @@ namespace {
 // contract, STAGE over the local PP stage's ranks for the asynchronous one. Narrowing the scope is
 // what allows stage 0 to run ahead of stage 1; within a stage all four ranks still execute an
 // identical collective sequence, so invariant #1 (participation symmetry) is preserved.
+
+// Native GPU admission vote (DSV41_VOTE_NATIVE_GPU, default off): upload the packet once,
+// all-gather on a GPU-resident receive buffer, compute the verdict on-device (full-payload
+// compare + fatal/reject/same), copy back a compact verdict. One all-gather per vote, same as
+// the reference path, so collective order and participation symmetry are preserved.
+bool worldRejectedNativeGpu(const torch::Tensor& packet,
+                            const std::string&   error,
+                            ParallelMode         mode,
+                            int64_t              peer_count) {
+    const int64_t numel      = packet.numel();
+    auto          dev        = torch::Device(torch::kCUDA);  // current device (each rank's own GPU)
+    auto          packet_gpu = packet.to(dev, /*non_blocking=*/false);
+    auto          gathered   = torch::empty({peer_count * numel}, packet.options().device(dev));
+    execAllGather({{gathered}, mode, {packet_gpu}, false});
+    // on-device verdict: fatal (status not in {0,1}), reject (status==0), same (payload match).
+    auto rows       = gathered.view({peer_count, numel});
+    auto status     = rows.select(1, 0);              // [peer_count]
+    auto fatal_mask = (status != 0) & (status != 1);  // [peer_count] bool
+    auto payload_match =
+        (rows.narrow(1, 1, numel - 1) == packet_gpu.narrow(0, 1, numel - 1).unsqueeze(0)).all(1);  // [peer_count] bool
+    auto any_fatal        = fatal_mask.any();
+    auto any_reject       = (status == 0).any();
+    auto all_same         = payload_match.all();
+    auto first_fatal_idx  = fatal_mask.to(torch::kInt64).argmax();
+    auto first_fatal_stat = status.index({first_fatal_idx});
+    // compact verdict, copied back once (a single small D2H).
+    auto        verdict_gpu = torch::stack({any_fatal.to(torch::kInt64),
+                                            any_reject.to(torch::kInt64),
+                                            all_same.to(torch::kInt64),
+                                            first_fatal_idx,
+                                            first_fatal_stat});
+    auto        verdict     = verdict_gpu.cpu();
+    const auto* v           = verdict.data_ptr<int64_t>();
+    if (v[0] != 0) {
+        // Match the reference worldRejected's fatal throw exactly: same exception type, first
+        // fatal peer index and status, local status, and the local error text.
+        throw std::runtime_error("V4.1 global PP preflight failed at WORLD rank " + std::to_string(v[3])
+                                 + " with status " + std::to_string(v[4]) + "; local status "
+                                 + std::to_string(packet.data_ptr<int64_t>()[0]) + ": "
+                                 + (error.empty() ? "missing/fatal peer admission" : error));
+    }
+    return v[1] != 0 || v[2] == 0;
+}
+
 bool worldRejected(const torch::Tensor& packet, const std::string& error, ParallelMode mode, int64_t peer_count) {
     // Optimistic-overlap diagnostic (RTP_LLM_V41_PP_OPTIMISTIC): skip the per-chunk
     // cross-stage agreement rendezvous. Both stages drive the identical deterministic
@@ -225,7 +269,16 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
     }
     const int64_t ct_t2 = ct ? autil::TimeUtility::currentTimeInMicroSeconds() : 0;
     try {
-        const bool rejected = worldRejected(packet, error, agreementMode(), agreementPeers());
+        // Native GPU admission vote (DSV41_VOTE_NATIVE_GPU, default off): the first large
+        // admission vote on async stage 0 only; later votes, stage 1, and the synchronous
+        // WORLD contract keep the reference host path.
+        static const bool native_gpu = [] {
+            const char* const value = std::getenv("DSV41_VOTE_NATIVE_GPU");
+            return value != nullptr && (std::string(value) == "1" || std::string(value) == "true");
+        }();
+        const bool scoped_native = native_gpu && async_overlap_ && pp_rank_ == 0;
+        const bool rejected = scoped_native ? worldRejectedNativeGpu(packet, error, agreementMode(), agreementPeers()) :
+                                              worldRejected(packet, error, agreementMode(), agreementPeers());
         ++round_;
         if (rejected) {
             if (batch) {
