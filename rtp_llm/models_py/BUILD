@@ -1,5 +1,823 @@
 load("@arch_config//:arch_select.bzl", "requirement", "triton_deps")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
+load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
+load(":checkpoint_service_tests.bzl", "checkpoint_service_tests")
+
+py_test(
+    name = "v4_fst_nogds_test",
+    srcs = ["v4_fst_nogds_test.py"],
+    deps = [":new_loader_core"],
+)
+
+py_test(
+    name = "v4_fst_nogds_gpu_test",
+    srcs = ["v4_fst_nogds_gpu_test.py"],
+    deps = [":new_loader_core", "//rtp_llm:fastsafetensors"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "v41_fst_file_pool_test",
+    srcs = ["v41_fst_file_pool_test.py"],
+    deps = [":new_loader_core", "//rtp_llm:fastsafetensors"],
+    env = {"FASTSAFETENSORS_NOGDS": "1"},
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "fst_host_backend_test",
+    srcs = ["fst_host_backend_test.py"],
+    deps = [":new_loader_core"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "v4_fst_diagnostic_test",
+    srcs = ["v4_fst_diagnostic_test.py"],
+    deps = [":new_loader_core"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "v41_fst_memory_test",
+    srcs = ["v41_fst_memory_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
+    deps = [":new_loader_core"],
+)
+
+py_test(
+    name = "qwen4_media_embedding_test",
+    srcs = ["new_models/qwen4_exp/test/test_media_embedding.py"],
+    main = "new_models/qwen4_exp/test/test_media_embedding.py",
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "RUN_NATIVE_FST_CPU_TESTS": "1",
+    },
+    deps = [
+        ":new_weight_loader",
+        ":new_loader_core",
+        ":models",
+        "//rtp_llm:models",
+        "//rtp_llm:multimodal",
+        "//rtp_llm:fastsafetensors",
+    ],
+)
+
+# Qwen4 checkpoint owners and exact native service entrypoints. CPU execution
+# validates loading/storage, not device inference or golden accuracy.
+[
+    py_test(
+        name = "qwen4_direct_" + part + "_test",
+        srcs = ["new_models/qwen4_exp/test/test_" + part + ".py"],
+        main = "new_models/qwen4_exp/test/test_" + part + ".py",
+        env = {
+            "CUDA_VISIBLE_DEVICES": "",
+            "HIP_VISIBLE_DEVICES": "",
+            "ROCR_VISIBLE_DEVICES": "",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NEWLOADER_TEST_NATIVE_FST": "1",
+        },
+        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:fastsafetensors"],
+    )
+    for part in [
+        "attention_weights", "checkpoint_validation", "dense_profiles",
+        "gdn_weights", "hyper_connection", "ple_layer", "ple_weights",
+        "qsa_indexer", "target_weights",
+    ]
+]
+
+[
+    py_test(
+        name = name,
+        srcs = [src],
+        main = src,
+        env = {
+            "CUDA_VISIBLE_DEVICES": "",
+            "HIP_VISIBLE_DEVICES": "",
+            "ROCR_VISIBLE_DEVICES": "",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NEWLOADER_TEST_NATIVE_FST": "1",
+        },
+        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:fastsafetensors"],
+    )
+    for name, src in [
+        ("qwen4_nvfp4_experts_checkpoint_test", "new_models/qwen4_exp/nvfp4_experts_test.py"),
+        ("qwen4_expert_factory_checkpoint_test", "new_models/qwen4_exp/expert_factory_test.py"),
+        ("qwen4_mtp_input_checkpoint_test", "new_models/qwen4_exp_mtp/mtp_input_test.py"),
+        ("qwen4_mtp_draft_replay_metadata_test", "new_models/qwen4_exp_mtp/draft_replay_test.py"),
+        ("qwen4_mtp_vocabulary_loan_test", "new_models/qwen4_exp_mtp/vocabulary_test.py"),
+    ]
+]
+
+[
+    py_test(
+        name = name,
+        srcs = [
+            "new_models/qwen4_exp/test/test_native_service.py",
+            "new_models/qwen4_exp/test/test_target_weights.py",
+        ] + extra,
+        main = main,
+        # Service publication constructs the original Qwen4 attention/cache
+        # runtime and needs its accelerator compute DSO. Keep CPU tensor
+        # staging, but schedule these two integration targets on CUDA workers;
+        # the independent precision owner test remains on ordinary CPU workers.
+        tags = ["L20_CU13"] if native_runtime else [],
+        exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"} if native_runtime else {},
+        env = {
+            "CUDA_VISIBLE_DEVICES": "",
+            "HIP_VISIBLE_DEVICES": "",
+            "ROCR_VISIBLE_DEVICES": "",
+            "OMP_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NEWLOADER_TEST_NATIVE_FST": "1",
+        },
+        deps = [":new_weight_loader", ":new_loader_core", ":models", "//rtp_llm:models", "//rtp_llm:fastsafetensors"],
+    )
+    for name, main, extra, native_runtime in [
+        ("qwen4_native_service_checkpoint_test", "new_models/qwen4_exp/test/test_native_service.py", ["new_models/qwen4_exp/test/test_precision_profiles.py"], True),
+        ("qwen4_precision_source_checkpoint_test", "new_models/qwen4_exp/test/test_precision_profiles.py", ["new_models/qwen4_exp/test/test_precision_profiles.py"], False),
+        ("qwen4_mtp_native_service_checkpoint_test", "new_models/qwen4_exp_mtp/native_draft_service_test.py", ["new_models/qwen4_exp_mtp/native_draft_service_test.py", "new_models/qwen4_exp/test/test_precision_profiles.py"], True),
+    ]
+]
+
+models_py_test(
+    name = "qwen4_nvfp4_newloader_hopper_output_test",
+    src = "new_models/qwen4_exp/nvfp4_experts_test.py",
+    gpu = "H20_CU13",
+    args = ["Qwen4Nvfp4ExpertTest.test_gpu_marlin_output_against_dequantized_reference"],
+    env = {"RUN_Q4_NEWLOADER_MARLIN": "1"},
+    tags = ["manual"],
+    deps = [":new_weight_loader"],
+)
+
+models_py_test(
+    name = "qwen4_mixed_storage_sm120_test",
+    src = "new_models/qwen4_exp/test/test_dense_profiles.py",
+    gpu = "RTX_5000_PRO_CU13",
+    args = ["DenseProfileTest.test_sm120_uses_original_direct_packed_quantization"],
+    env = {"RUN_Q4_DIRECT_STORAGE_GPU": "1"},
+    tags = ["manual"],
+    deps = [":new_weight_loader"],
+)
+
+# Shared packed layout math must not depend on either model loader.
+py_library(
+    name = "groupwise_export_helpers",
+    srcs = [
+        "read_spec.py",
+        "quant_methods/groupwise_checkpoint.py",
+        "quant_methods/groupwise_export.py",
+    ],
+    deps = ["//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+# Portable checkpoint protocol. Keep this target independent of the native
+# inference library so real CPU checkpoint regressions need no fake ABI.
+py_library(
+    name = "new_loader_core",
+    srcs = [
+        "__init__.py",
+        "borrowed_parameters.py",
+        "downstream_heads.py",
+        "expert_placement.py",
+        "fastsafetensors_read_spec.py",
+        "v4_fst_diagnostic.py",
+        "finetune_overlay.py",
+        "fp4_read_spec.py",
+        "fst_host_backend.py",
+        "fst_range_reader.py",
+        "fst_file_plan.py",
+        "ft_checkpoint.py",
+        "lora_checkpoint.py",
+        "meta_checkpoint.py",
+        "model_loader.py",
+        "module_base.py",
+        "read_spec.py",
+        "registry.py",
+        "runtime_weight_update.py",
+        "v41_fst_memory.py",
+        "v41_fst_file_pool.py",
+        "v4_fst_nogds.py",
+        "weight_mapper.py",
+    ],
+    deps = [
+        "//rtp_llm:device_detection",
+        "//rtp_llm:safetensors_torch",
+        "//rtp_llm/models_py/distributed:rank_layout",
+    ] + select({
+        "@//:using_ppu": [":ppu_entrypoint"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "direct_lora_checkpoint_test",
+    srcs = ["direct_lora_checkpoint_test.py"],
+    deps = [":new_weight_loader", "//rtp_llm:lora", "//rtp_llm:utils"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+)
+
+py_test(
+    name = "main_core_checkpoint_test",
+    srcs = ["main_core_checkpoint_test.py"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    deps = [":new_loader_core"],
+)
+
+py_test(
+    name = "ft_module_install_test",
+    srcs = ["ft_module_install_test.py"],
+    deps = [":new_loader_core"],
+)
+
+py_test(
+    name = "rank_local_ft_test",
+    srcs = ["rank_local_ft_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm/tools/convert:ft_export_metadata",
+        "//rtp_llm/tools/convert:ft_export_writer",
+    ],
+)
+
+py_test(
+    name = "auto_fst_route_test",
+    srcs = ["auto_fst_route_test.py"],
+    args = ["DefaultFstRouteTest"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    deps = [":new_loader_core"],
+)
+
+# Native reader contract on build profiles that actually package the wheel.
+# PPU's current wheel-less CI still runs every portable policy test above.
+py_test(
+    name = "auto_fst_native_reader_test",
+    srcs = ["auto_fst_route_test.py"],
+    main = "auto_fst_route_test.py",
+    args = ["DefaultFstNativeReaderTest"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_9_x86": [],
+        "@//:using_cuda12_arm": [],
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [":new_loader_core", "//rtp_llm:fastsafetensors"],
+)
+
+py_test(
+    name = "main_parallel_runtime_test",
+    srcs = ["main_parallel_runtime_test.py"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:fastsafetensors",
+    ],
+)
+
+py_test(
+    name = "llama_checkpoint_formats_test",
+    srcs = ["llama_checkpoint_formats_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm/tools/convert:ft_export_metadata",
+        "//rtp_llm/tools/convert:ft_export_writer",
+    ],
+)
+
+py_test(
+    name = "qwen2_main_ft_stage_test",
+    srcs = ["qwen2_main_ft_stage_test.py"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm/tools/convert:ft_export_metadata",
+        "//rtp_llm/tools/convert:ft_export_writer",
+    ],
+)
+
+py_test(
+    name = "checkpoint_source_test",
+    srcs = ["checkpoint_source_test.py"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    deps = [":new_loader_core"],
+)
+
+py_test(
+    name = "v41_owned_attention_checkpoint_test",
+    srcs = ["new_models/deepseek_v41/attention_test.py"],
+    main = "new_models/deepseek_v41/attention_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+)
+
+py_test(
+    name = "v41_owned_backbone_checkpoint_test",
+    srcs = ["new_models/deepseek_v41/backbone_test.py"],
+    main = "new_models/deepseek_v41/backbone_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+)
+
+py_test(
+    name = "v41_service_checkpoint_test",
+    srcs = [
+        "new_models/deepseek_v41/service_test.py",
+        "new_models/deepseek_v41/backbone_test.py",
+    ],
+    main = "new_models/deepseek_v41/service_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm:safetensors", "//rtp_llm:torch"],
+)
+
+# Direct parameter owners use main's existing runtime models/helpers, never a
+# backported scheduler/cache/PP engine. Production routing is integrated later.
+py_test(
+    name = "v41_dspark_auxiliary_test",
+    srcs = ["new_models/deepseek_v41_dspark/auxiliary_test.py"],
+    main = "new_models/deepseek_v41_dspark/auxiliary_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader"],
+)
+
+py_test(
+    name = "v41_dspark_checkpoint_test",
+    srcs = [
+        "new_models/deepseek_v41_dspark/checkpoint_test.py",
+        "new_models/deepseek_v41/backbone_test.py",
+    ],
+    main = "new_models/deepseek_v41_dspark/checkpoint_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader"],
+)
+
+py_test(
+    name = "v41_dspark_service_test",
+    srcs = [
+        "new_models/deepseek_v41_dspark/service_test.py",
+        "new_models/deepseek_v41_dspark/checkpoint_test.py",
+        "new_models/deepseek_v41/service_test.py",
+        "new_models/deepseek_v41/backbone_test.py",
+    ],
+    main = "new_models/deepseek_v41_dspark/service_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_test(
+    name = "v41_dspark_cold_native_forward_test",
+    srcs = [
+        "new_models/deepseek_v41_dspark/native_forward_test.py",
+        "new_models/deepseek_v41_dspark/service_test.py",
+        "new_models/deepseek_v41_dspark/checkpoint_test.py",
+        "new_models/deepseek_v41/service_test.py",
+        "new_models/deepseek_v41/backbone_test.py",
+    ],
+    main = "new_models/deepseek_v41_dspark/native_forward_test.py",
+    data = ["//:rtp_compute_ops"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_test(
+    name = "v41_service_routes_test",
+    srcs = [
+        "new_models/deepseek_v41/routes_test.py",
+        "new_models/deepseek_v41_dspark/service_test.py",
+        "new_models/deepseek_v41_dspark/checkpoint_test.py",
+        "new_models/deepseek_v41/service_test.py",
+        "new_models/deepseek_v41/backbone_test.py",
+    ],
+    main = "new_models/deepseek_v41/routes_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_test(
+    name = "v41_dspark_release_metadata_test",
+    srcs = ["new_models/deepseek_v41_dspark/release_metadata_test.py"],
+    main = "new_models/deepseek_v41_dspark/release_metadata_test.py",
+    tags = ["manual"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_library(
+    name = "new_weight_loader",
+    srcs = ["eplb_controller.py", "new_weight_manager.py", "quantized_weight_update.py"] + glob([
+        "layers/*.py",
+        "new_models/*.py",
+        "new_models/**/*.py",
+        "quant_methods/*.py",
+    ], exclude = [
+        "**/test/**",
+        "**/tests/**",
+        "**/*_test.py",
+        "**/test_*.py",
+    ]),
+    # Full model owners import both native binding modules. Place the DSOs
+    # together in the package path used by rtp_llm.ops; the portable reader
+    # above deliberately has no native inference dependency.
+    data = [
+        "//rtp_llm/libs:librtp_compute_ops_so",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        ":models",
+        ":new_loader_core",
+        "//rtp_llm/models_py/new_models/qwen3_moe_eagle3:draft_body",
+        "//rtp_llm:config",
+        "//rtp_llm:eplb",
+        "//rtp_llm/model_loader/tipc:tipc",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:ops",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ] + select({
+        # The ROCm fastsafetensors wrapper imports fast_safetensors, shipped
+        # in a second wheel that its metadata does not declare as a dependency.
+        "@//:using_rocm": ["//rtp_llm:fast-safetensors"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "int8_export_helpers",
+    srcs = ["quant_methods/int8.py"],
+    deps = [":groupwise_export_helpers", "//rtp_llm:torch"],
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "main_update_compat_test",
+    srcs = ["main_update_compat_test.py"],
+    deps = [":new_weight_loader"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "serving_route_checkpoint_test",
+    srcs = ["serving_route_checkpoint_test.py"],
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+# V4 checkpoints contain native UE8M0. These tests use CPU tensors, but
+# require the CUDA13 package set (in particular its safetensors dtype table).
+_V4_CHECKPOINT_TEST_PLATFORMS = select({
+    "@//:using_cuda13_x86": [],
+    "@//:using_cuda13_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+[
+    py_test(
+        name = name,
+        srcs = [entry] + extra,
+        main = entry,
+        deps = [":new_weight_loader", "//rtp_llm:models"],
+        env = {
+            "CUDA_VISIBLE_DEVICES": "",
+            "HIP_VISIBLE_DEVICES": "",
+            "NEWLOADER_TEST_NATIVE_FST": "1",
+            "OMP_NUM_THREADS": "1",
+        },
+        target_compatible_with = _V4_CHECKPOINT_TEST_PLATFORMS,
+    )
+    for name, entry, extra in [
+        ("deepseek_v4_hc_load_test", "new_models/deepseek_v4/hc_test.py", []),
+        ("deepseek_v4_backbone_load_test", "new_models/deepseek_v4/backbone_test.py", []),
+        ("deepseek_v4_mtp_load_test", "new_models/deepseek_v4/mtp_test.py", [
+            "new_models/deepseek_v4/backbone_test.py",
+            "serving_route_checkpoint_test.py",
+        ]),
+        ("v4_dspark_checkpoint_routes_test", "new_models/deepseek_v4_dspark/checkpoint_test.py", []),
+        ("v4_dspark_aux_checkpoint_test", "new_models/deepseek_v4_dspark/aux_checkpoint_test.py", []),
+        ("v4_dspark_owner_checkpoint_test", "new_models/deepseek_v4_dspark/owner_checkpoint_test.py", [
+            "new_models/deepseek_v4/backbone_test.py",
+            "serving_route_checkpoint_test.py",
+        ]),
+    ]
+]
+
+py_test(
+    name = "deepseek_v4_mtp_cuda13_service_test",
+    srcs = [
+        "new_models/deepseek_v4/mtp_test.py",
+        "new_models/deepseek_v4/backbone_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    main = "new_models/deepseek_v4/mtp_test.py",
+    args = ["V4MtpCheckpointTest.test_real_gpu_service_publication"],
+    env = {"V4_MTP_SERVICE_GPU": "cuda:0"},
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_test(
+    name = "bert_input_vocab_test",
+    srcs = ["bert_input_vocab_test.py", "bert_service_test.py", "serving_route_checkpoint_test.py"],
+    main = "bert_input_vocab_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm:transformers"],
+)
+
+checkpoint_service_tests(
+    name = "bert_service_test",
+    native_name = "bert_native_output_test",
+    cpu_case = "BertServiceTest",
+    native_case = "BertNativeOutputTest",
+    srcs = [
+        "bert_service_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    main = "bert_service_test.py",
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm:models",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_test(
+    name = "jina_direct_checkpoint_cpu_test",
+    srcs = ["new_models/jina_bert/jina_checkpoint_test.py"],
+    main = "new_models/jina_bert/jina_checkpoint_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader"],
+)
+
+checkpoint_service_tests(
+    name = "jina_native_checkpoint_test",
+    native_name = "jina_native_output_test",
+    cpu_case = "JinaServiceCheckpointTest",
+    native_case = "JinaRuntimeCheckpointTest",
+    srcs = [
+        "new_models/jina_bert/jina_checkpoint_test.py",
+        "new_models/jina_bert/jina_runtime_checkpoint_test.py",
+    ],
+    main = "new_models/jina_bert/jina_runtime_checkpoint_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_test(
+    name = "qwen3_dspark_newloader_checkpoint_test",
+    srcs = ["new_models/qwen3_dspark/checkpoint_test.py"],
+    main = "new_models/qwen3_dspark/checkpoint_test.py",
+    deps = [":new_weight_loader"],
+)
+
+py_test(
+    name = "qwen3_dspark_checkpoint_cuda_graph_test",
+    srcs = [
+        "new_models/qwen3_dspark/checkpoint_cuda_test.py",
+        "new_models/qwen3_dspark/checkpoint_test.py",
+    ],
+    main = "new_models/qwen3_dspark/checkpoint_cuda_test.py",
+    deps = [":new_weight_loader"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qwen3_dspark_checkpoint_format_test",
+    srcs = [
+        "new_models/qwen3_dspark_format_test.py",
+        "speculative/qwen3_dspark_checkpoint.py",
+    ],
+    main = "new_models/qwen3_dspark_format_test.py",
+    deps = ["//rtp_llm:safetensors", "//rtp_llm:torch"],
+)
+
+py_test(
+    name = "qwen3_dspark_sampler_checkpoint_test",
+    srcs = ["new_models/qwen3_dspark_weights_test.py"],
+    main = "new_models/qwen3_dspark_weights_test.py",
+    deps = [":new_weight_loader"],
+)
+
+checkpoint_service_tests(
+    name = "qwen3_dspark_native_service_test",
+    native_name = "qwen3_dspark_native_output_test",
+    cpu_case = "PublicDraftLoadingTest",
+    native_case = "DraftNativeOutputTest",
+    srcs = [
+        "new_models/qwen3_dspark/checkpoint_test.py",
+        "qwen3_dspark_native_service_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    main = "qwen3_dspark_native_service_test.py",
+    deps = [":new_weight_loader", "//rtp_llm:async_model", "//rtp_llm:model_factory", "//rtp_llm:models", "//rtp_llm:transformers"],
+)
+
+py_test(
+    name = "serving_route_qwen3_test",
+    srcs = [
+        "serving_route_qwen3_test.py",
+        "serving_route_checkpoint_test.py",
+        "new_models/qwen3/main_pp_checkpoint_test.py",
+    ],
+    main = "serving_route_qwen3_test.py",
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_test(
+    name = "main_native_pp_checkpoint_test",
+    srcs = ["new_models/qwen3/main_pp_checkpoint_test.py"],
+    main = "new_models/qwen3/main_pp_checkpoint_test.py",
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+    },
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_test(
+    name = "eplb_direct_reload_test",
+    srcs = ["eplb_direct_test.py"],
+    main = "eplb_direct_test.py",
+    deps = [":new_weight_loader"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    timeout = "moderate",
+)
+
+py_test(
+    name = "qwen3_moe_checkpoint_test",
+    srcs = [
+        "qwen3_moe_checkpoint_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    main = "qwen3_moe_checkpoint_test.py",
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_test(
+    name = "qwen3_moe_native_service_test",
+    srcs = [
+        "qwen3_moe_native_service_test.py",
+        "qwen3_moe_checkpoint_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    main = "qwen3_moe_native_service_test.py",
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+checkpoint_service_tests(
+    name = "qwen3_vl_native_service_test",
+    native_name = "qwen3_vl_native_output_test",
+    cpu_case = "PublicVLTest",
+    native_case = "VLNativeOutputTest",
+    srcs = [
+        "new_models/qwen3_vl/service_test.py",
+        "qwen3_moe_checkpoint_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    main = "new_models/qwen3_vl/service_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm:models",
+        "//rtp_llm:multimodal",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
+py_test(
+    name = "qwen3_vl_device_rotary_test",
+    srcs = [
+        "qwen3_vl_device_rotary_test.py",
+        "new_models/qwen3_vl/service_test.py",
+        "qwen3_moe_checkpoint_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:models",
+        "//rtp_llm:multimodal",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
+py_test(
+    name = "serving_route_deepseek_test",
+    srcs = [
+        "serving_route_checkpoint_test.py",
+        "serving_route_deepseek_test.py",
+    ],
+    main = "serving_route_deepseek_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:models"],
+)
+
+py_library(
+    name = "owner_migration_checkpoint_test_cases",
+    testonly = True,
+    srcs = ["owner_migration_checkpoint_test.py"],
+    deps = [":new_weight_loader"],
+    visibility = ["//rtp_llm/model_loader/test:__pkg__"],
+)
+
+py_library(
+    name = "ple_residency_test_cases",
+    testonly = True,
+    srcs = ["new_models/qwen4_exp/ple_residency_test.py"],
+    deps = [":new_weight_loader"],
+    visibility = ["//rtp_llm/models/qwen4_exp/test:__pkg__"],
+)
+
+py_test(
+    name = "ple_host_fst_routing_test",
+    srcs = ["new_models/qwen4_exp/ple_residency_test.py"],
+    main = "new_models/qwen4_exp/ple_residency_test.py",
+    deps = [":new_weight_loader"],
+)
+
+py_test(
+    name = "v4_wo_a_layout_test",
+    srcs = [
+        "modules/dsv4/fp8/_wo_a_layout.py",
+        "v4_wo_a_layout_test.py",
+    ],
+    main = "v4_wo_a_layout_test.py",
+    deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "owner_migration_checkpoint_test",
+    srcs = ["owner_migration_checkpoint_test.py"],
+    deps = [":new_weight_loader"],
+)
 
 exports_files(
     ["modules/factory/linear/fixed_m_linear.py"],
@@ -13,6 +831,47 @@ py_library(
     ]),
     visibility = ["//visibility:public"],
     deps = ["//rtp_llm:torch"],
+)
+
+py_test(
+    name = "qwen_service_vision_test",
+    srcs = [
+        "new_models/qwen_service_vision.py",
+        "new_models/qwen_service_vision_test.py",
+    ],
+    main = "new_models/qwen_service_vision_test.py",
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+    },
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_test(
+    name = "megatron_bert_checkpoint_test",
+    srcs = ["new_models/megatron_bert/test_checkpoint.py"],
+    main = "new_models/megatron_bert/test_checkpoint.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "MKL_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"},
+    deps = [":new_weight_loader", "//rtp_llm:fastsafetensors", "//rtp_llm:transformers"],
+)
+
+checkpoint_service_tests(
+    name = "megatron_bert_native_checkpoint_test",
+    native_name = "megatron_bert_native_output_test",
+    cpu_case = "MegatronServiceCheckpointTest",
+    native_case = "NativeMegatronTest",
+    srcs = [
+        "new_models/megatron_bert/native_checkpoint_test.py",
+        "new_models/megatron_bert/test_checkpoint.py",
+    ],
+    main = "new_models/megatron_bert/native_checkpoint_test.py",
+    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": ""},
+    deps = [":new_weight_loader", "//rtp_llm:fastsafetensors", "//rtp_llm:models", "//rtp_llm:transformers"],
 )
 
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the
@@ -200,6 +1059,7 @@ py_library(
         "//conditions:default": [],
     }),
     deps = [
+        ":new_loader_core",
         ":utils",
         ":kernels",
         ":tile_kernels_mhc",
@@ -259,12 +1119,18 @@ exports_files(["modules/factory/sitecustomize.py"])
 
 exports_files(
     [
+        "new_models/deepseek_v4/ppu_platform.py",
         "modules/dsv4/ppu/resources.py",
         "modules/dsv4/ppu/moe/ppu_ep_moe.py",
         "modules/dsv4/ppu/metadata/cache.py",
         "modules/dsv4/ppu/manifest.py",
     ],
     visibility = ["//rtp_llm/models_py/modules/dsv4/ppu/test:__pkg__"],
+)
+
+exports_files(
+    ["new_models/deepseek_v4/backbone_test.py"],
+    visibility = ["//rtp_llm/models_py/new_models/deepseek_v4/test:__pkg__"],
 )
 
 py_library(
@@ -327,11 +1193,18 @@ py_library(
 )
 
 py_library(
+    name = "scaled_rope",
+    srcs = ["kernels/cuda/scaled_rope.py"],
+    deps = ["//rtp_llm:torch"] + triton_deps(["triton"]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "kernels",
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ], exclude = _DSV4_PPU_KERNELS + ["kernels/**/test/**"]) + select({
+    ], exclude = _DSV4_PPU_KERNELS + ["kernels/**/test/**", "kernels/cuda/scaled_rope.py"]) + select({
         "@//:using_ppu": glob(_DSV4_PPU_KERNELS),
         "//conditions:default": [],
     }),
@@ -340,6 +1213,7 @@ py_library(
         "kernels/cuda/marlin_nvfp4/marlin_kernels/LICENSE",
     ] + glob(["kernels/cuda/qsa/*.cu", "kernels/cuda/qsa/*.cuh"]),
     deps = [
+        ":scaled_rope",
         ":utils",
         "//rtp_llm:torch",
         "//rtp_llm/models_py/triton_kernels:common",
@@ -389,6 +1263,8 @@ py_library(
         ":modules",
         ":kernels",
         ":configs",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
         "//rtp_llm:warmup",
         "//rtp_llm/model_loader:loader",
     ] + select({
@@ -435,4 +1311,46 @@ filegroup(
 exports_files(
     ["model_desc/cp_mtp_hidden_handoff.py"],
     visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
+)
+
+checkpoint_service_tests(
+    name = "roberta_checkpoint_test",
+    native_name = "roberta_native_output_test",
+    cpu_case = "RobertaCheckpointTest",
+    native_case = "RobertaNativeOutputTest",
+    srcs = ["new_models/roberta/test_roberta_checkpoint.py"],
+    main = "new_models/roberta/test_roberta_checkpoint.py",
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    deps = [
+        ":new_weight_loader",
+        "//rtp_llm:models",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_test(
+    name = "bert_input_vocab_native_output_test",
+    srcs = [
+        "bert_input_vocab_native_output_test.py",
+        "bert_input_vocab_test.py",
+        "bert_service_test.py",
+        "serving_route_checkpoint_test.py",
+    ],
+    main = "bert_input_vocab_native_output_test.py",
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+    },
+    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm:transformers"],
 )

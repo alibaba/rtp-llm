@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/embedding_engine/EmbeddingEngine.h"
+#include "rtp_llm/cpp/embedding_engine/EmbeddingTokenRange.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -90,6 +91,16 @@ std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(th::Tensor             
 
 std::shared_ptr<EmbeddingOutput> EmbeddingEngine::decode(std::shared_ptr<EmbeddingInput> input,
                                                          EmbeddingProfileConfig          profile_config) {
+    // Direct encoder owners publish the checkpoint's real input table rows.
+    // Validate at the host admission boundary, before batching/device copies;
+    // an advertised config/tokenizer vocabulary may be larger than this table.
+    if (model_config_.input_vocab_size > 0 && model_config_.has_positional_encoding) {
+        TORCH_CHECK(input->token_ids.device().is_cpu() && input->token_ids.scalar_type() == torch::kInt32
+                        && input->token_ids.is_contiguous(),
+                    "Embedding input token IDs must be contiguous host int32 tensors");
+        validateEmbeddingTokenRange(
+            input->token_ids.data_ptr<int32_t>(), input->token_ids.numel(), model_config_.input_vocab_size);
+    }
     auto embedding_stream = std::make_shared<EmbeddingStream>(input, std::move(profile_config));
     embedding_stream->setMetricReporter(metrics_reporter_);
     THROW_IF_STATUS_ERROR(enqueue(embedding_stream));

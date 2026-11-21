@@ -448,6 +448,11 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, positions=positions)
 
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
+    from rtp_llm.models_py.modules.dsv4.prefill.v4_fixed_replay import open_trace
+
+    replay = open_trace(v4, cp_ctx, input_ids, prepare_hidden_fn)
+    if replay is not None:
+        replay.observe("embed", h)
     capture_aux = bool(capture_ids)
 
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
@@ -617,6 +622,14 @@ def forward_layers(
             )
             for layer_idx, layer_call in enumerate(layer_calls):
                 with layer_forward_range(layer_idx):
+                    if replay is not None and layer_idx == 1:
+                        from rtp_llm.models_py.modules.dsv4.prefill.v4_l1_ops import (
+                            instrument,
+                        )
+
+                        layer_call = instrument(
+                            replay, v4.layers[layer_idx], layer_call
+                        )
                     h = layer_call(
                         h,  # [T, hc, dim]
                         input_ids,  # [T]
@@ -625,6 +638,8 @@ def forward_layers(
                         kv_cache=kv_cache,
                         block_tables_by_type=block_tables_by_type,
                     )  # [T, hc, dim]
+                    if replay is not None:
+                        replay.observe(f"layer.{layer_idx}", h)
                     if layer_idx in capture_ids:
                         v4.capture_aux_hidden(layer_idx, h)
                     if capture_context is not None:
@@ -676,6 +691,8 @@ def forward_layers(
     with record_range_ctx():
         h = v4._hc_head_reduce(h)  # [T, dim]
         h = v4.norm(h)  # [T, dim]
+        if replay is not None:
+            replay.observe("final_norm", h)
     # The per-forward ``PrefillWorkspace`` (prefill-Q + optional CP
     # gather/restore scratch) is a local of this function: it drops here on
     # return, returning ~16 GiB to the caching allocator so the MTP draft

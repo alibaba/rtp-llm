@@ -9,6 +9,10 @@ class FusedSiluAndMul(SiluAndMulBase):
     """CUDA implementation of silu_and_mul using flashinfer."""
 
     def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
+        return self.apply_cuda(gate_up)
+
+    @staticmethod
+    def apply_cuda(gate_up: torch.Tensor) -> torch.Tensor:
         """
         Perform SiLU activation and element-wise multiplication using CUDA kernel.
 

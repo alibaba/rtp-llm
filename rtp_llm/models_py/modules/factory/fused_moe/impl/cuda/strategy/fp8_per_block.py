@@ -63,7 +63,23 @@ class CudaFp8PerBlockNoDPMaskedStrategy(MoeStrategy):
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
         checker.check(quant_method == "FP8_PER_BLOCK")
-        checker.check(config.moe_strategy == "fp8_per_block_no_dp_masked")
+        # On Hopper the continuous executor cannot capture graphs. Allow AUTO
+        # to select the existing masked/TP implementation for this topology
+        # only; don't redirect eager, DeepEP, DP or SM120 configurations.
+        from rtp_llm.models_py.utils.arch import get_sm
+
+        checker.check(
+            config.moe_strategy == "fp8_per_block_no_dp_masked"
+            or (
+                config.moe_strategy == "auto"
+                and config.enable_cuda_graph
+                and config.dp_size == 1
+                and config.tp_size == config.ep_size
+                and not config.moe_config.use_deepep_moe
+                and not resolver.use_low_latency(config)
+                and get_sm()[0] == 9
+            )
+        )
 
     def get_attributes(self) -> StrategyAttributes:
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_masked_executor_v2 import (

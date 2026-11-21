@@ -3,6 +3,7 @@
 from typing import Any, Collection, Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.qwen4_mtp_vocab import MTPVocabPolicy, mtp_vocab_policy
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.qwen4_exp.qwen4_exp import Qwen4Exp
@@ -151,72 +152,12 @@ class Qwen4ExpMTP(Qwen4Exp):
             target_model, Qwen4ExpMTP
         ):
             raise TypeError("qwen4_exp MTP requires a Qwen4Exp target owner")
-        if getattr(draft_model_config, "_qwen4_mtp_use_dedicated_embeddings", True):
-            raise ValueError(
-                "qwen4_exp MTP cannot alias a checkpoint that requests dedicated "
-                "draft embeddings"
-            )
-
-        target_config = target_model.model_config
-        if bool(getattr(target_config, "enable_output_vocab_pruning", False)) or bool(
-            getattr(draft_model_config, "enable_output_vocab_pruning", False)
-        ):
-            raise ValueError(
-                "qwen4_exp MTP cannot alias lm_head when output-vocab pruning is "
-                "enabled on the target or draft"
-            )
-        compatible_fields = (
-            "vocab_size",
-            "hidden_size",
-            "data_type",
-            "enable_fp32_lm_head",
-            "_qwen4_full_fp8_nvfp4",
-        )
-        mismatches = [
-            name
-            for name in compatible_fields
-            if getattr(target_config, name, False)
-            != getattr(draft_model_config, name, False)
-        ]
-        if mismatches:
-            details = ", ".join(
-                f"{name}={getattr(target_config, name)!r}/"
-                f"{getattr(draft_model_config, name)!r}"
-                for name in mismatches
-            )
-            raise ValueError(
-                "qwen4_exp MTP cannot alias semantically incompatible target "
-                f"weights: {details}"
-            )
-        target_storage = getattr(target_config, "_qwen4_dense_storage", "fp8")
-        draft_storage = getattr(draft_model_config, "_qwen4_dense_storage", "fp8")
-        mode = getattr(draft_model_config, "_qwen4_mtp_dense_storage_mode", "inherit")
-        preserve_source = mode in ("source_bf16", "source_bf16_shared_vocab")
-        if target_storage != draft_storage and not (
-            preserve_source
-            and target_storage == "fp8"
-            and draft_storage == "source_bf16"
-        ):
-            raise ValueError("qwen4_exp MTP requires matching dense storage modes")
-        target_vocab = getattr(target_config, "_qwen4_vocab_storage", target_storage)
-        draft_vocab = getattr(draft_model_config, "_qwen4_vocab_storage", draft_storage)
-        if target_vocab != draft_vocab:
-            if (
-                mode == "source_bf16"
-                and target_vocab == "fp8"
-                and draft_vocab == "source_bf16"
-            ):
-                # Returning no aliases keeps the target owner untouched. The
-                # existing loader reads the original BF16 vocabulary from the
-                # target checkpoint keys declared above, without FP8 scales.
-                return ()
-            raise ValueError("qwen4_exp MTP vocabulary storage is incompatible")
+        policy = mtp_vocab_policy(target_model.model_config, draft_model_config)
+        if policy is MTPVocabPolicy.LOAD_SOURCE:
+            return ()
         names = (W.embedding, W.lm_head)
-        if (
-            getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True
-            and target_vocab != "source_bf16"
-        ):
-            from rtp_llm.model_loader.fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+        if policy is MTPVocabPolicy.BORROW_SCALED_FP8:
+            from rtp_llm.utils.fp8_constants import FP8_STORAGE_SCALE_SUFFIX
 
             return names + (W.embedding + FP8_STORAGE_SCALE_SUFFIX, W.lm_head_s)
         return names

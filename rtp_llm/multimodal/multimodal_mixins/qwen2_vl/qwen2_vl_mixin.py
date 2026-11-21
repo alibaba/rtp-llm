@@ -109,15 +109,15 @@ class Qwen2_VLVitWeight(BaseVitWeights):
 
 
 class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
-    def __init__(self, mm_related_params: VitParameters):
+    def __init__(self, mm_related_params: VitParameters, *, share_memory=True):
         self.mm_related_params = mm_related_params
         self.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
 
-        self.visual = Qwen2VisionTransformerPretrainedModel(
-            mm_related_params.config
-        ).share_memory()
+        self.visual = Qwen2VisionTransformerPretrainedModel(mm_related_params.config)
+        if share_memory:
+            self.visual.share_memory()
         self.spatial_merge_size = mm_related_params.config.get("spatial_merge_size", 2)
 
     @property
@@ -332,6 +332,61 @@ class Qwen2_VLImageEmbedding(MultiModalEmbeddingInterface):
 
 
 class Qwen2_VLMixin(BaseMultiModalMixin):
+    _new_vision_embedding = Qwen2_VLImageEmbedding
+    _new_vision_prefix = "visual."
+
+    @classmethod
+    def from_new_loader(
+        cls,
+        compute_dtype,
+        device,
+        mm_related_params,
+        load_method,
+        vit_config,
+        ckpt_path,
+    ):
+        from rtp_llm.models_py.new_models.qwen_service_vision import load_service_vision
+
+        # Subclasses with a different tower must opt in explicitly.
+        embedding = cls.__dict__.get("_new_vision_embedding")
+        if embedding is None:
+            raise NotImplementedError(
+                f"{cls.__name__} has no direct visual weight owner"
+            )
+        result = cls.__new__(cls)
+        result.compute_dtype = compute_dtype
+        result.mm_related_params = mm_related_params
+        result.load_method = load_method
+        result.vit_config = vit_config
+        result.ckpt_path = ckpt_path
+        kwargs = {"share_memory": False} if embedding is Qwen2_VLImageEmbedding else {}
+        # Use the same processor, model, dtype and non-persistent rotary buffers
+        # as the service. Construct only one tower; do not initialize a legacy loader.
+        previous = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(compute_dtype)
+            with torch.device("cpu"):
+                result.mm_part = embedding(mm_related_params, **kwargs)
+        finally:
+            torch.set_default_dtype(previous)
+        prepare_buffers = getattr(
+            result.mm_part, "prepare_newloader_runtime_buffers", None
+        )
+        if prepare_buffers is not None:
+            prepare_buffers(device)
+        load_service_vision(
+            result.mm_part.visual,
+            ckpt_path,
+            compute_dtype,
+            device,
+            load_method,
+            prefix=cls._new_vision_prefix,
+        )
+        patch_linears = getattr(result, "_patch_vit_attention_linears", None)
+        if patch_linears is not None:
+            patch_linears()
+        return result
+
     def _init_multimodal(self):
         self.mm_part = Qwen2_VLImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen2_VLVitWeight(

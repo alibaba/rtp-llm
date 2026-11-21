@@ -418,8 +418,10 @@ class QWenV2(QWen):
 
 class QWenV2Embedding(QWenV2):
     @classmethod
-    def _create_config(cls, ckpt_path: str) -> ModelConfig:
-        config = QWenV2._create_config(ckpt_path)
+    def _create_config_from_json(
+        cls, ckpt_path: str, config_json: Dict[str, Any]
+    ) -> ModelConfig:
+        config = super()._create_config_from_json(ckpt_path, config_json)
         config.attn_config.is_causal = False
         return config
 

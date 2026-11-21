@@ -331,10 +331,20 @@ def forward_layers(
     if begin_decode is not None:
         begin_decode(attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
+    live = getattr(v4, "_v4_live38", None)
+    if live is not None and q_len > 1 and prepare_hidden_fn is None:
+        from rtp_llm.models_py.modules.dsv4.decode import v4_live_layers
+
+        v4_live_layers.begin(live, input_ids, q_len)
+        v4_live_layers.put(live, 0, h)
+    else:
+        live = None
     layer_forward_range = _profiler.make_layer_forward_range()
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
             h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            if live is not None:
+                v4_live_layers.put(live, layer_idx + 1, h)
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)
     if v4._mtp_hidden_buffer is not None:

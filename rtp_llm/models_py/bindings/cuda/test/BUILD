@@ -48,7 +48,7 @@ cc_test(
         "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
         "//conditions:default": {"gpu": "H20_CU13"},
     }),
-    tags = ["exclusive-if-local"],
+    tags = ["H20_CU13", "SM100_ARM_CU13", "exclusive-if-local"],
 )
 
 CUDA13_ONLY = select({
@@ -77,7 +77,7 @@ cc_test(
         "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
         "//conditions:default": {"gpu": "H20_CU13"},
     }),
-    tags = ["exclusive-if-local"],
+    tags = ["H20_CU13", "SM100_ARM_CU13", "exclusive-if-local"],
     target_compatible_with = CUDA13_ONLY,
 )
 
@@ -241,7 +241,7 @@ cc_test(
         "//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
         "//conditions:default": {"gpu": "H20_CU13"},
     }),
-    tags = ["exclusive-if-local"],
+    tags = ["H20_CU13", "SM100_ARM_CU13", "exclusive-if-local"],
 )
 
 # Reproduce the shared kernel's cold-cache thread sweep. Raw paired samples and

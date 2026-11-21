@@ -32,12 +32,13 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
 )
 
 
-def _crash_with_faulthandler(fault_trace_fd) -> None:
+def _crash_with_faulthandler(fault_trace_fd, ready) -> None:
     os.environ[_XGRAMMAR_SANDBOX_CORE_DUMP_ENV] = "0"
     _configure_xgrammar_sandbox_core_dump_for_current_process()
     with os.fdopen(fault_trace_fd.detach(), "wb", buffering=0) as fault_file:
         os.dup2(fault_file.fileno(), 2)
         _enable_worker_faulthandler(fault_file)
+        ready.set()
         os.kill(os.getpid(), signal.SIGSEGV)
 
 
@@ -131,15 +132,19 @@ class CompileExceptionReplyTest(unittest.TestCase):
 
     def test_spawned_fatal_signal_writes_real_python_traceback(self) -> None:
         context = multiprocessing.get_context("spawn")
+        ready = context.Event()
         with tempfile.TemporaryFile(mode="w+b") as fault_file:
             process = context.Process(
                 target=_crash_with_faulthandler,
-                args=(_DeferredDupFd(fault_file.fileno()),),
+                args=(_DeferredDupFd(fault_file.fileno()), ready),
             )
             process.start()
             try:
+                # Spawn imports the test module in a fresh interpreter. Do not
+                # count that startup time against the fatal-signal deadline.
+                self.assertTrue(ready.wait(timeout=90), "fault handler did not start")
                 process.join(timeout=10)
-                self.assertFalse(process.is_alive())
+                self.assertFalse(process.is_alive(), "worker survived SIGSEGV")
                 self.assertEqual(process.exitcode, -signal.SIGSEGV)
                 fault_file.seek(0)
                 fault_trace = fault_file.read().decode("utf-8", errors="replace")

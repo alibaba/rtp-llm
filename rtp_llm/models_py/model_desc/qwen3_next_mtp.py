@@ -1,4 +1,6 @@
-from typing import Any, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch import nn
@@ -15,15 +17,9 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextDecoderLayer,
     Qwen3NextMetadata,
 )
-from rtp_llm.models_py.modules import (
-    AttnImplFactory,
-    Embedding,
-    LinearFactory,
-    RMSNorm,
-    RMSResNorm,
-)
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+if TYPE_CHECKING:
+    from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -46,6 +42,8 @@ class Qwen3NextMTPModel(GptModelBase):
             fmha_config=fmha_config,
             py_hw_kernel_config=py_hw_kernel_config,
         )
+        from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
+
         self.embed_tokens = Embedding(
             model_config, parallelism_config, weights.get_global_weight(W.embedding)
         )
@@ -128,4 +126,6 @@ class Qwen3NextMTPModel(GptModelBase):
                 attn_meta=Qwen3NextMetadata(),
             )
         hidden_states, residual = self.norm(hidden_states, residual)
+        from rtp_llm.ops.compute_ops import PyModelOutputs
+
         return PyModelOutputs(hidden_states)

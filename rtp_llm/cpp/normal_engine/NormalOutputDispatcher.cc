@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
+#include "rtp_llm/cpp/normal_engine/NextSmokeSamplerAudit.h"
+#include <cmath>
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -546,7 +548,23 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  stream->isContextStream() ? model_output.generation_prefill_cuda_graph_status :
                                                              GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
                                  batch_custom_output};
+    const int before = sampler_output.next_smoke_top_values.defined() ? stream->seqLength() : -1;
     stream->update(update_info, true, recorded_timings, cur_batch_size);
+    if (before >= 0 && stream->seqLength() == before + 1 && !update_info.error_info && !stream->hasError()
+        && new_tokens.device().is_cpu() && new_tokens.scalar_type() == at::kInt && new_tokens.numel() >= 1) {
+        const int    slot = next_smoke_audit::slot(stream->streamId());
+        const float* vals = sampler_output.next_smoke_top_values.data_ptr<float>() + 2 * batch_idx_in;
+        const auto*  ids  = sampler_output.next_smoke_top_ids.data_ptr<int64_t>() + 2 * batch_idx_in;
+        if (slot >= 0 && std::isfinite(vals[0]) && std::isfinite(vals[1])) {
+            // No raw tokens, input, absolute logits, request IDs or vocabulary-sized snapshots.
+            const int32_t emitted = new_tokens.data_ptr<int32_t>()[0];
+            RTP_LLM_LOG_INFO("NEXT_SMOKE_AUDIT_V1 slot=%d step=%d pick=%d margin=%.9g",
+                             slot,
+                             before - stream->inputLength(),
+                             emitted == ids[0] ? 1 : (emitted == ids[1] ? 2 : 0),
+                             double(vals[0]) - vals[1]);
+        }
+    }
 }
 
 }  // namespace rtp_llm

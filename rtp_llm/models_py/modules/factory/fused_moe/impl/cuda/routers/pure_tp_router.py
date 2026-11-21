@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
+    ep_gather,
     recompute_topk_ids_sum_expert_count,
 )
 
@@ -53,6 +54,68 @@ class PureTpRouterBase(FusedMoeDataRouter):
         if self.tp_size > 1 and not should_skip_tp_allreduce(extra_finalize_args):
             return getattr(self, "tp_all_reduce", all_reduce)(output, group=Group.TP)
         return output
+
+    def _finalize_eplb_topk_outputs(
+        self,
+        output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        extra_finalize_args: Optional[FinalizeArgs],
+    ) -> torch.Tensor:
+        if should_skip_tp_allreduce(extra_finalize_args):
+            raise RuntimeError(
+                "Deterministic EPLB aggregation requires the TP all-reduce"
+            )
+        if output.numel() == 0 and topk_weights.shape[0] == 0:
+            # FusedMoe can bypass the executor on an empty input.
+            return output.reshape(0, output.shape[-1])
+        if output.dim() != 3 or tuple(output.shape[:2]) != tuple(topk_weights.shape):
+            raise ValueError(
+                "EPLB expert outputs must have shape [tokens, top_k, hidden]"
+            )
+        args = extra_finalize_args or {}
+        logical_topk_ids = args.get("eplb_logical_topk_ids")
+        logical_per_rank = args.get("eplb_logical_experts_per_rank")
+        if logical_topk_ids is None or not isinstance(logical_per_rank, int):
+            raise ValueError("Missing deterministic EPLB aggregation metadata")
+        if tuple(logical_topk_ids.shape) != tuple(topk_weights.shape):
+            raise ValueError("EPLB logical top-k ids do not match top-k weights")
+
+        logical_topk_ids = logical_topk_ids.to(device=output.device)
+        owners = torch.div(
+            logical_topk_ids.to(torch.int64),
+            logical_per_rank,
+            rounding_mode="floor",
+        )
+        valid = (logical_topk_ids >= 0) & (owners >= 0) & (owners < self.ep_size)
+        input_index = torch.arange(
+            output.shape[0] * output.shape[1],
+            device=output.device,
+            dtype=logical_topk_ids.dtype,
+        ).reshape(output.shape[0], output.shape[1])
+        flat_output = output.reshape(-1, output.shape[2])
+        owner_topk_ids = torch.where(
+            valid & (owners == self.ep_rank),
+            torch.zeros_like(logical_topk_ids),
+            torch.full_like(logical_topk_ids, -1),
+        )
+        owner_output = torch.empty(
+            (output.shape[0], output.shape[2]),
+            device=output.device,
+            dtype=torch.bfloat16,
+        )
+        ep_gather(
+            flat_output,
+            owner_topk_ids,
+            topk_weights,
+            input_index,
+            owner_output,
+        )
+        # The first reduction collects raw expert outputs from their dynamic
+        # physical owners.  This second reduction follows the original static
+        # path: each rank contributes only its canonical logical-owner sum.
+        # Keeping that BF16 collective preserves the static rounding order for
+        # every EP size, rather than reproducing it only when ep_size == 2.
+        return self._maybe_all_reduce_tp(owner_output, extra_finalize_args)
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
@@ -80,6 +143,7 @@ class PureTpRouterBase(FusedMoeDataRouter):
         self.expert_num_per_rank = self.expert_num // self.ep_size
         self.expert_start_id = self.ep_rank * self.expert_num_per_rank
         self.do_recompute_topk = do_recompute_topk
+        self.use_deterministic_eplb_gather = False
 
     @abstractmethod
     def _do_quant(
@@ -133,9 +197,14 @@ class PureTpRouterBase(FusedMoeDataRouter):
         apply_router_weight_on_input: bool,
         extra_finalize_args: Optional[FinalizeArgs],
     ) -> torch.Tensor:
-        return self._maybe_all_reduce_tp(
+        output = self._maybe_all_reduce_tp(
             payload.fused_expert_output, extra_finalize_args
         )
+        if getattr(self, "use_deterministic_eplb_gather", False):
+            output = self._finalize_eplb_topk_outputs(
+                output, topk_weights, extra_finalize_args
+            )
+        return output
 
 
 class PureTpRouterNoQuant(PureTpRouterBase):
@@ -164,30 +233,38 @@ class PureTpRouterNoQuant(PureTpRouterBase):
 
 
 class PureTpRouterFp8PerTensor(PureTpRouterBase):
-    """Pure TP router with FP8 per-tensor quantization."""
+    """Per-token activation quantization for FP8 expert GEMMs."""
+
+    supported_methods = ("FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR")
+    recompute_topk = True
 
     def __init__(
         self,
         config: MoEConfigAdapter,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(config, quant_config, do_recompute_topk=True)
+        super().__init__(config, quant_config, do_recompute_topk=self.recompute_topk)
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        """Check if PureTpRouterFp8PerTensor can handle the configuration"""
+        """Check both topology and the accepted weight scale contract."""
         super().check_conditions(checker, config)
         resolver = MoeConfigResolver()
         quant_method = resolver.get_quant_method(config)
-        checker.check(
-            quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
-        )
+        checker.check(quant_method in cls.supported_methods)
 
     def _do_quant(
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """FP8 per-token quantization"""
         return scaled_fp8_per_token_quant(a1, None)
+
+
+class PureTpRouterFp8PerChannel(PureTpRouterFp8PerTensor):
+    # Single rank: IDs are already local and the number of assignments is
+    # known from their shape; no CPU copy of per-expert counts is needed.
+    recompute_topk = False
+    supported_methods = ("FP8_PER_CHANNEL_COMPRESSED",)
 
 
 class PureTpRouterFp8PerBlock(PureTpRouterBase):

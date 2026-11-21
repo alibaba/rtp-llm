@@ -1,21 +1,17 @@
-from typing import Dict, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 import torch.nn as nn
 
-from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.modules.factory import LinearFactory
-from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
 
-device_type = get_device_type()
-if device_type == DeviceType.ROCm:
-    from rtp_llm.models_py.modules.base.rocm.norm import FusedQKRMSNorm
-else:
-    from rtp_llm.models_py.modules.base.cuda.norm import FusedQKRMSNorm
+if TYPE_CHECKING:
+    from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+    from rtp_llm.ops.compute_ops import LayerKVCache
 
 
 class CausalAttention(nn.Module):
@@ -32,7 +28,11 @@ class CausalAttention(nn.Module):
         linear_factory=None,
     ):
         super().__init__()
-        self.linear_factory = linear_factory or LinearFactory
+        if linear_factory is None:
+            from rtp_llm.models_py.modules.factory import LinearFactory
+
+            linear_factory = LinearFactory
+        self.linear_factory = linear_factory
         self.layer_idx = layer_idx
         self.parallelism_config = parallelism_config
         self.tp_size = parallelism_config.get_attn_tp_size()
@@ -65,6 +65,8 @@ class CausalAttention(nn.Module):
         self.o_proj.maybe_cache_quant_scale(self.cache_scale_len)
         self.qk_fuse_norm = None
         if W.q_ln_gamma in weights and W.k_ln_gamma in weights:
+            from rtp_llm.models_py.modules.base import FusedQKRMSNorm
+
             self.qk_fuse_norm = FusedQKRMSNorm(
                 weights[W.q_ln_gamma],
                 weights[W.k_ln_gamma],

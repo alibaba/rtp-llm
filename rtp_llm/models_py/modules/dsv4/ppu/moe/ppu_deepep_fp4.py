@@ -5,17 +5,10 @@ import torch
 
 def take_raw_routed_mxfp4_weights(cfg, layer_weights):
     """Consume validated EP-local checkpoint nibbles and raw E8M0 scales."""
-    from rtp_llm.utils.model_weight import W
+    from rtp_llm.models_py.modules.dsv4.ppu.moe.packed_inputs import PpuRoutedInputs
 
-    keys = (
-        W.v4_routed_w1_w,
-        W.v4_routed_w1_s,
-        W.v4_routed_w2_w,
-        W.v4_routed_w2_s,
-        W.v4_routed_w3_w,
-        W.v4_routed_w3_s,
-    )
-    w1, s1, w2, s2, w3, s3 = (layer_weights[k] for k in keys)
+    inputs = PpuRoutedInputs(layer_weights)
+    w1, s1, w2, s2, w3, s3 = inputs.parts
     e, d, inter = cfg.n_local_experts, cfg.dim, cfg.moe_inter_dim
     expected = ((e, inter, d // 2), (e, d, inter // 2), (e, inter, d // 2))
     e8m0 = getattr(torch, "float8_e8m0fnu", None)
@@ -34,14 +27,8 @@ def take_raw_routed_mxfp4_weights(cfg, layer_weights):
             )
     if not w1.is_cuda:
         raise RuntimeError("PPU routed MXFP4 requires PPU-resident weights")
-    result = (
-        torch.cat((w1.view(torch.uint8), w3.view(torch.uint8)), dim=1).contiguous(),
-        torch.cat((s1, s3), dim=1).contiguous(),
-        w2.view(torch.uint8).contiguous(),
-        s2.contiguous(),
-    )
-    for key in keys:
-        layer_weights.pop(key)
+    result = inputs.packed()
+    inputs.consume()
     return result
 
 

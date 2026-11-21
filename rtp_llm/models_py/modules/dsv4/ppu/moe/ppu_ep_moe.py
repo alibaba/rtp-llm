@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.dsv4.ppu.chunk_env import chunked_moe_enabled
 from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
     fused_moe_epilogue as combine_routed_and_shared,
 )
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.dsv4.ppu.moe.packed_inputs import shared_expert_inputs
 
 from rtp_llm.models_py.modules.dsv4.ppu.moe.gate import PpuGate
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import PpuMoeConfig
@@ -149,12 +149,7 @@ class PpuEPMoE(nn.Module):
         self.shared_experts = platform_provider.build_shared_expert(
             dim,
             moe_inter_dim,
-            expert_weights={
-                "w13_w": layer_weights[W.v4_shared_w13_w],
-                "w13_s": layer_weights[W.v4_shared_w13_s],
-                "w2_w": layer_weights[W.v4_shared_w2_w],
-                "w2_s": layer_weights[W.v4_shared_w2_s],
-            },
+            expert_weights=shared_expert_inputs(layer_weights),
             swiglu_limit=swiglu_limit,
             sglang_moe=True,
         )

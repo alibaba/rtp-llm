@@ -9,6 +9,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
+from rtp_llm.models_py import modules as runtime_modules
 from rtp_llm.models_py.model_desc import generic_moe, qwen3_next
 from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
@@ -80,24 +81,24 @@ class Qwen3NextRoutedOnlyTest(TestCase):
                             return_value=_Attention(),
                         ),
                         patch.object(
-                            qwen3_next,
+                            runtime_modules,
                             "RMSResNorm",
                             side_effect=lambda *a, **kw: _Norm(),
                         ),
                         patch.object(
-                            generic_moe.LinearFactory,
+                            runtime_modules.LinearFactory,
                             "create_linear_from_weights",
                             return_value=nn.Linear(8, 4, bias=False),
                         ),
                         patch.object(
-                            generic_moe, "SelectTopk", return_value=_select_topk
+                            runtime_modules, "SelectTopk", return_value=_select_topk
                         ),
                         patch.object(
-                            generic_moe.FusedMoeFactory,
+                            runtime_modules.FusedMoeFactory,
                             "create_fused_moe",
                             return_value=backend,
                         ),
-                        patch.object(generic_moe, "DenseMLP") as shared_mlp,
+                        patch.object(runtime_modules, "DenseMLP") as shared_mlp,
                     ):
                         layer = qwen3_next.Qwen3NextDecoderLayer(
                             config, ParallelismConfig(), weights, 0, MoeConfig()
@@ -115,13 +116,15 @@ class Qwen3NextRoutedOnlyTest(TestCase):
 
 class Qwen3NextFullAttentionMetadataTest(TestCase):
     def test_full_attention_preserves_flags_without_linear_metadata(self):
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
+
         # Device-only eager draft inputs have no CPU query partition. Neither
         # ordinary nor CP full-attention models need a convolution partition.
         for cp in (False, True):
             for graph in (False, True):
                 for verify in (False, True):
                     with self.subTest(cp=cp, graph=graph, verify=verify):
-                        attention = qwen3_next.PyAttentionInputs()
+                        attention = PyAttentionInputs()
                         attention.is_prefill = True
                         attention.is_target_verify = verify
                         attention.prefix_lengths = torch.zeros(1, dtype=torch.int32)

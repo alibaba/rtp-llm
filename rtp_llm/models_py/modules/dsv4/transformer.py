@@ -7,8 +7,6 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
-import logging
-import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -21,27 +19,14 @@ from rtp_llm.models_py.modules.base.common.embedding import EmbeddingTorch
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
+from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_policy import (
+    _optional_env_bool,
+    mega_decode_enabled,
+)
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
-
-_TRUE_ENV_VALUES = frozenset(("1", "true", "yes", "on"))
-_FALSE_ENV_VALUES = frozenset(("0", "false", "no", "off", ""))
-
-
-def _optional_env_bool(name: str) -> Optional[bool]:
-    if name not in os.environ:
-        return None
-    value = os.environ[name].strip().lower()
-    if value in _TRUE_ENV_VALUES:
-        return True
-    if value in _FALSE_ENV_VALUES:
-        return False
-    raise RuntimeError(
-        f"{name} must be one of {sorted(_TRUE_ENV_VALUES | _FALSE_ENV_VALUES)}, "
-        f"got {os.environ[name]!r}"
-    )
 
 
 @dataclass
@@ -225,37 +210,9 @@ class V4Transformer(nn.Module):
         embedding_weight = None
         if not self.commit_only:
             embedding_weight = gw[W.embedding]
-            # Process-level deployment override, intentionally outside V4Args.
-            # Set it consistently in each worker's environment.
-            mega_request = _optional_env_bool("DSV4_MEGA")
-            # SWA-only MTP/DSpark drafts share the process switch, but have no
-            # Mega sublayers to initialize or require from the runtime.
-            if mega_request is not False and any(args.compress_ratios[: args.n_layers]):
-                from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
-                    mega_decode_unavailable_reason,
-                )
-
-                unavailable_reason = mega_decode_unavailable_reason(
-                    args,
-                    embedding_weight.device,
-                )
-                if unavailable_reason is not None and mega_request is True:
-                    raise RuntimeError(
-                        f"DSV4_MEGA=1 is unsupported: {unavailable_reason}"
-                    )
-                if unavailable_reason is not None:
-                    logging.info(
-                        "DSV4 Mega decode is unavailable; using the ordinary path: %s",
-                        unavailable_reason,
-                    )
-                else:
-                    self._mega_decode_enabled = True
-                    logging.info(
-                        "DSV4 Mega attention decode enabled on %s (TP1, dim=%d); "
-                        "set DSV4_MEGA=0 to disable",
-                        embedding_weight.device,
-                        args.dim,
-                    )
+            self._mega_decode_enabled = mega_decode_enabled(
+                args, embedding_weight.device
+            )
 
         self.layers = nn.ModuleList(
             [

@@ -24,6 +24,10 @@ class V41Embedding(Embedding):
 class V41MXFP8Linear(torch.nn.Module):
     """Native 32x32 checkpoint blocks, expanded to per-row MXFP8 scales."""
 
+    @property
+    def v41_runtime_linear(self):
+        return self
+
     def __init__(self, weight: torch.Tensor, scales: torch.Tensor):
         super().__init__()
         self.weight = weight
@@ -94,15 +98,14 @@ def _is_v41_fp8_scale(w: torch.Tensor, s: torch.Tensor) -> bool:
     )
 
 
-def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
-    """Merge replicated projections and make checkpoint entries share storage.
+def merge_v41_qkv_tensors(qw, qs, kw, ks):
+    """Return the native executor and its component weight/scale views.
 
     The separate linears remain available for fallback and prefill, but their
     weight views must point at this allocation instead of retaining the two
     original allocations. Packed scales have an exact N-major leading
     dimension, so each fallback linear still packs its own small scale tensor.
     """
-    qw, qs, kw, ks = (weights[key] for key in (q_weight, q_scale, kv_weight, kv_scale))
     if not (
         qw.ndim == kw.ndim == 2
         and qw.dtype == kw.dtype == torch.float8_e4m3fn
@@ -117,8 +120,22 @@ def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
     merged_w = torch.cat((qw.view(torch.uint8), kw.view(torch.uint8))).view(qw.dtype)
     merged_s = torch.cat((qs.view(torch.uint8), ks.view(torch.uint8))).view(qs.dtype)
     linear = V41MXFP8Linear(merged_w, merged_s)
-    weights[q_weight], weights[kv_weight] = merged_w.split((qw.shape[0], kw.shape[0]))
-    weights[q_scale], weights[kv_scale] = merged_s.split((qs.shape[0], ks.shape[0]))
+    return (
+        linear,
+        merged_w.split((qw.shape[0], kw.shape[0])),
+        merged_s.split((qs.shape[0], ks.shape[0])),
+    )
+
+
+def merge_v41_qkv_weights(weights, q_weight, q_scale, kv_weight, kv_scale):
+    merged = merge_v41_qkv_tensors(
+        weights[q_weight], weights[q_scale], weights[kv_weight], weights[kv_scale]
+    )
+    if merged is None:
+        return None
+    linear, weight_views, scale_views = merged
+    weights[q_weight], weights[kv_weight] = weight_views
+    weights[q_scale], weights[kv_scale] = scale_views
     return linear
 
 

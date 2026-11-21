@@ -9,7 +9,6 @@ import shutil
 from typing import Dict, Optional
 
 import torch
-from safetensors import safe_open
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -33,6 +32,8 @@ from rtp_llm.tools.api.model_basic_info_analyzer import (
     parse_ft_model_type,
     parse_model_basic_info,
 )
+from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
+from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
 from rtp_llm.tools.convert.weights_convert_utils import (
     apply_layer_override_and_post_build,
 )
@@ -72,6 +73,17 @@ class WeightConverter:
         output_dir_base = fetch_remote_file_to_local(
             output_dir_base, MountRwMode.RWMODE_RW
         )
+        if os.path.commonpath(
+            (os.path.realpath(self.model_path), os.path.realpath(output_dir_base))
+        ) == os.path.realpath(self.model_path):
+            raise ValueError("FT output must not be inside the source checkpoint")
+        # A previous index, shard, or completion marker must never be attributed
+        # to this conversion, including when a job fails partway through.
+        if os.path.isdir(output_dir_base) and any(
+            name == "done" or name == "model.safetensors.index.json"
+            or name.endswith(".safetensors") for name in os.listdir(output_dir_base)
+        ):
+            raise FileExistsError("FT destination already contains a checkpoint; use a fresh directory")
         # 确定并发进程数，不超过tp_size
         pool_size = self._estimate_convert_parallel_num()
         logging.info(f"now start [{pool_size}] process tor convert")
@@ -84,12 +96,11 @@ class WeightConverter:
         if pool_size > 1:
             ctx = multiprocessing.get_context("spawn")
             with ctx.Pool(processes=pool_size) as pool:
-                pool.starmap(self._convert, args_list)
+                ranks = pool.starmap(self._convert, args_list)
         else:
-            for tp_rank, dp_rank, world_rank, _ in args_list:
-                self._convert(tp_rank, dp_rank, world_rank, output_dir_base)
+            ranks = [self._convert(*args) for args in args_list]
         # copy other files:
-        self._save_converted(self.model_path, output_dir_base)
+        self._save_converted(self.model_path, output_dir_base, ranks)
 
         return 0
 
@@ -275,7 +286,10 @@ class WeightConverter:
         moe_config = MoeConfig()
         vit_config = VitConfig()
 
-        model = self.model_cls.from_config(
+        # Construct only the config/tokenizer wrapper. from_config() loads the
+        # entire serving model, which the external FT writer neither consumes
+        # nor needs, and can require a GPU just to convert an artifact.
+        model = self.model_cls(
             model_config=model_config,
             parallelism_config=parallelism_config,
             hw_kernel_config=hw_kernel_config,
@@ -286,14 +300,13 @@ class WeightConverter:
             max_generate_batch_size=0,
             vit_config=vit_config,
             merge_lora=False,
-            skip_python_model=True,
         )
-        loader = model.create_model_loader()
+        writer = create_ft_export_job(model)
         device_str = f"cuda:{parallelism_config.local_rank}"
         max_retry_times = 3
         for i in range(max_retry_times):
             try:
-                loader.dump_weight_as_ft_style(device_str, output_dir_base)
+                writer.dump_weight_as_ft_style(device_str, output_dir_base)
                 logging.info(f"dump rank:[{world_rank}] done")
                 break
             except Exception as e:
@@ -304,12 +317,13 @@ class WeightConverter:
                     logging.error(
                         f"dump rank:[{world_rank}] retry {i} times, but still failed"
                     )
-                    raise RuntimeError(f"Failed after 10 retries: {str(e)}") from e
+                    raise RuntimeError(f"FT export failed after {max_retry_times} attempts") from e
                 continue
         logging.info(f"convert model rank:{world_rank} done")
+        return f"rank_{tp_rank:02d}_{dp_rank:02d}_{parallelism_config.ep_rank:02d}"
 
     @timer_wrapper("save convert result")
-    def _save_converted(self, input_path, output_path: str):
+    def _save_converted(self, input_path, output_path: str, ranks):
         self._copy_filtered_files(
             input_path,
             output_path,
@@ -321,62 +335,17 @@ class WeightConverter:
                 "*.pth",
                 "*.pt",
                 "*.gguf",
+                "done",
             ],
         )
-        self._generate_safetensor_meta_info(output_path)
+        self._generate_safetensor_meta_info(output_path, ranks)
         # touch done
         done_file = os.path.join(output_path, "done")
         with open(done_file, "w") as f:
             pass
 
-    @timer_wrapper("generate safetensors meta info")
-    def _generate_safetensor_meta_info(self, output_path: str):
-        weight_map = {}
-        total_size = 0
-
-        # 获取所有 .safetensor 文件，并按名称排序
-        safetensor_files = sorted(
-            [f for f in os.listdir(output_path) if f.endswith(".safetensors")]
-        )
-
-        if not safetensor_files:
-            logging.info("指定目录下没有找到任何 .safetensors 文件。")
-            return -1
-
-        for st_file in safetensor_files:
-            st_path = os.path.join(output_path, st_file)
-            total_size += os.path.getsize(st_path)
-
-            # 使用 safetensors 库打开文件并读取所有键（权重名称）
-            try:
-                with safe_open(st_path, framework="pt") as f:
-                    keys = f.keys()
-                    for key in keys:
-                        if key in weight_map:
-                            logging.warning(
-                                f"警告: 权重 '{key}' 已经映射到 '{weight_map[key]}', 现在尝试映射到 '{st_file}'。"
-                            )
-                        weight_map[key] = st_file
-            except Exception as e:
-                logging.warning(f"无法读取文件 '{st_file}': {e}")
-
-        index = {
-            "metadata": {"total_size": total_size},
-            "weight_map": weight_map,
-            "is_ft_style_weight": True,
-            "__env__params__": self.env_params,
-        }
-
-        # 将索引数据写入 JSON 文件
-        output_file = "model.safetensors.index.json"
-        output_path = os.path.join(output_path, output_file)
-        try:
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(index, f, indent=4, ensure_ascii=False)
-            logging.info(f"索引文件已成功生成: {output_file}")
-        except Exception as e:
-            logging.info(f"写入索引文件失败: {e}")
-            return -1
+    def _generate_safetensor_meta_info(self, output_path, expected_ranks=None):
+        generate_ft_index(output_path, self.env_params, expected_ranks=expected_ranks)
 
     @staticmethod
     def _copy_filtered_files(src_dir, dst_dir, exclude_patterns):

@@ -61,7 +61,10 @@ _TESTS = [
             "//rtp_llm/models_py:tile_kernels_mhc",
             "//rtp_llm:jit_cache_env",
             test_requirement("pytest"),
-        ],
+        ] + ([
+            "//rtp_llm/models_py:new_weight_loader",
+            "//rtp_llm:safetensors",
+        ] if name == "test_v41_wo_a_quant" else []),
         tags = ["dsv41_cuda13", "SM100_ARM_CU13"],
         exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
         target_compatible_with = select({

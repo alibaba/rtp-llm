@@ -37,21 +37,20 @@ from rtp_llm.utils.model_weight import W
 
 
 class CutlassExpertsFp8(FusedMoeExpertExecutor):
+    supported_methods = ("FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR")
+
     @classmethod
     def executor_type(cls):
         return ExecutorType.CUTLASS_FP8
 
     @classmethod
     def check_conditions(cls, checker: Any, config: Any) -> None:
-        """Check if CutlassExpertsFp8 can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
 
-        resolver = MoeConfigResolver()
-        quant_method = resolver.get_quant_method(config)
         checker.check(
-            quant_method in ["FP8_PER_TENSOR_COMPRESSED", "FP8_DYNAMIC_PER_TENSOR"]
+            MoeConfigResolver.get_quant_method(config) in cls.supported_methods
         )
 
     def __init__(
@@ -65,7 +64,6 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
         # Update quant_config with FP8-specific settings
         self.quant_config.quant_dtype = torch.float8_e4m3fn
         self.quant_config.per_act_token_quant = True
-        self.quant_config.per_out_ch_quant = False
         self.quant_config.block_shape = None
 
         self.num_experts = config.expert_num
@@ -245,7 +243,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             self.ab_strides1,
             self.c_strides1,
             per_act_token,
-            False,
+            self.quant_config.per_out_ch_quant,
             num_gemm_tokens,
             swap_ab_gemm1,
         )
@@ -270,7 +268,7 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             self.ab_strides2,
             self.c_strides2,
             per_act_token,
-            False,
+            self.quant_config.per_out_ch_quant,
             num_gemm_tokens,
             swap_ab_gemm2,
         )
@@ -289,6 +287,10 @@ class CutlassExpertsFp8(FusedMoeExpertExecutor):
             BLOCK_SIZE=512,
         )
         return CombineForwardPayload(fused_expert_output=output)
+
+
+class CutlassExpertsFp8PerChannel(CutlassExpertsFp8):
+    supported_methods = ("FP8_PER_CHANNEL_COMPRESSED",)
 
 
 class CutlassBatchedExpertsFp8(FusedMoeExpertExecutor):

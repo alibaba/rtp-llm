@@ -149,6 +149,7 @@ class AttentionFP8(_BaseAttentionFP8):
         tp_rank: int = 0,
         platform_provider=None,
         indexer_factory=None,
+        owned=None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -156,6 +157,9 @@ class AttentionFP8(_BaseAttentionFP8):
         for the outer compressor, ``W.v4_indexer_*`` (forwarded) for the
         indexer."""
         super(_BaseAttentionFP8, self).__init__()
+        self._checkpoint_owned = False  # This object is the bound PPU executor.
+        if (owned is None) == (layer_weights is None):
+            raise ValueError("PPU attention requires exactly one parameter source")
         self._platform_provider = platform_provider
         self.layer_id = layer_id
         self.dim = dim
@@ -196,7 +200,8 @@ class AttentionFP8(_BaseAttentionFP8):
         )
         attn_sink_slice = slice(tp_rank * n_heads_local, (tp_rank + 1) * n_heads_local)
 
-        from rtp_llm.utils.model_weight import W
+        if owned is None:
+            from rtp_llm.utils.model_weight import W
 
         # Q / KV / O — FP8 linears go through LinearFactory →
         # CudaFp8DeepGEMMLinear → DeepGEMM fp8_gemm_nt.
@@ -235,15 +240,20 @@ class AttentionFP8(_BaseAttentionFP8):
                 s = s.contiguous()
             return _v4_fp8_linear(w, s, platform_provider=platform_provider)
 
-        self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
-        # wq_b is row-split along N (n_heads * head_dim)
-        self.wq_b = _fp8_w_s(
-            W.v4_attn_wq_b_w,
-            W.v4_attn_wq_b_s,
-            row_slice=wq_b_row_slice if tp_size > 1 else None,
-        )
-        # MQA single KV head — replicate.
-        self.wkv = _fp8_w_s(W.v4_attn_wkv_w, W.v4_attn_wkv_s)
+        if owned is not None:
+            self.wq_a = owned.wq_a.bind_runtime()
+            self.wq_b = owned.wq_b.bind_runtime()
+            self.wkv = owned.wkv.bind_runtime()
+        else:
+            self.wq_a = _fp8_w_s(W.v4_attn_wq_a_w, W.v4_attn_wq_a_s)
+            # wq_b is row-split along N (n_heads * head_dim)
+            self.wq_b = _fp8_w_s(
+                W.v4_attn_wq_b_w,
+                W.v4_attn_wq_b_s,
+                row_slice=wq_b_row_slice if tp_size > 1 else None,
+            )
+            # MQA single KV head — replicate.
+            self.wkv = _fp8_w_s(W.v4_attn_wkv_w, W.v4_attn_wkv_s)
 
         # wo_a grouped projection: row-split along (n_groups*o_lora_rank).
         # Stored as plain ``[N, K]`` fp8 weight + UE8M0 scale tensors;
@@ -252,23 +262,29 @@ class AttentionFP8(_BaseAttentionFP8):
         # fallback path inline-dequants from these via
         # ``dequantize_fp8_weight``.
         assert (n_heads * head_dim) % o_groups == 0
-        wo_a_w = layer_weights[W.v4_attn_wo_a_w]
-        wo_a_s = layer_weights[W.v4_attn_wo_a_s]
-        if tp_size > 1:
-            wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
-            if wo_a_s.dtype == torch.int32:
-                # framework path: scale is already (N, K//128//4) int32
-                wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
-            else:
-                wo_a_s = wo_a_s[
-                    wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
-                ].contiguous()
+        if owned is not None:
+            # Already TP-local via the checkpoint ReadSpec.
+            wo_a_w, wo_a_s = owned.wo_a.weight, owned.wo_a.scale
+        else:
+            wo_a_w = layer_weights[W.v4_attn_wo_a_w]
+            wo_a_s = layer_weights[W.v4_attn_wo_a_s]
+            if tp_size > 1:
+                wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
+                if wo_a_s.dtype == torch.int32:
+                    # framework path: scale is already (N, K//128//4) int32
+                    wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
+                else:
+                    wo_a_s = wo_a_s[
+                        wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
+                    ].contiguous()
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s
         K_local = n_heads_local * head_dim // n_groups_local
 
         self.wo_a = platform_provider.build_wo_a_fp8_linear(lambda *_args, **_kwargs: None, wo_a_w, wo_a_s, groups=n_groups_local, k_local=K_local)
         if self.wo_a is None:
+            if owned is not None:
+                raise RuntimeError("M890P grouped wo_a projection was not bound")
             _stk_w, _stk_s = _prepare_wo_a_stacked(
                 wo_a_w, wo_a_s, n_groups_local, o_lora_rank, K_local
             )
@@ -279,30 +295,36 @@ class AttentionFP8(_BaseAttentionFP8):
             self.register_buffer("_wo_a_stk_s", None, persistent=False)
 
         # wo_b row-split along K (cols), all_reduce after forward
-        self.wo_b = _fp8_w_s(
-            W.v4_attn_wo_b_w,
-            W.v4_attn_wo_b_s,
-            col_slice=wo_b_col_slice if tp_size > 1 else None,
-        )
+        if owned is not None:
+            self.wo_b = owned.wo_b.bind_runtime()
+            self.q_norm = owned.q_norm.weight
+            self.kv_norm = owned.kv_norm.weight
+            self.attn_sink = owned.attn_sink
+        else:
+            self.wo_b = _fp8_w_s(
+                W.v4_attn_wo_b_w,
+                W.v4_attn_wo_b_s,
+                col_slice=wo_b_col_slice if tp_size > 1 else None,
+            )
 
-        # Non-quantized norm weights — plain BF16 tensors (loader cast
-        # via compute_dtype).  BF16 dtype is required by
-        # FlashInfer RMSNorm (which can produce silent NaNs with fp32). attn_sink loads
-        # as fp32 via descriptor data_type.
-        self.q_norm = layer_weights[W.v4_attn_q_norm]
-        self.kv_norm = layer_weights[W.v4_attn_kv_norm]
-        attn_sink_full = layer_weights[W.v4_attn_sink]
-        self.attn_sink = (
-            attn_sink_full[attn_sink_slice].contiguous()
-            if tp_size > 1
-            else attn_sink_full
-        )
+            # Non-quantized norm weights — plain BF16 tensors (loader cast
+            # via compute_dtype).  BF16 dtype is required by
+            # FlashInfer RMSNorm (which can produce silent NaNs with fp32). attn_sink loads
+            # as fp32 via descriptor data_type.
+            self.q_norm = layer_weights[W.v4_attn_q_norm]
+            self.kv_norm = layer_weights[W.v4_attn_kv_norm]
+            attn_sink_full = layer_weights[W.v4_attn_sink]
+            self.attn_sink = (
+                attn_sink_full[attn_sink_slice].contiguous()
+                if tp_size > 1
+                else attn_sink_full
+            )
 
         assert (n_heads * head_dim) % o_groups == 0
 
         # Compressor + Indexer (only for compressed layers)
         if compress_ratio:
-            outer_cmp_weights = {
+            outer_cmp_weights = None if owned is not None else {
                 "ape": layer_weights[W.v4_compressor_ape],
                 "wkv": layer_weights[W.v4_compressor_wkv],
                 "wgate": layer_weights[W.v4_compressor_wgate],
@@ -319,6 +341,7 @@ class AttentionFP8(_BaseAttentionFP8):
                 cp_role=_CP_ROLE_MAIN,
                 norm_eps=norm_eps,
                 compressor_weights=outer_cmp_weights,
+                owned=owned.compressor if owned is not None else None,
                 platform_provider=platform_provider,
             )
             self.compressor._profile_label = (
@@ -350,6 +373,7 @@ class AttentionFP8(_BaseAttentionFP8):
                     max_seq_len=max_seq_len,
                     norm_eps=norm_eps,
                     layer_weights=layer_weights,
+                    owned=owned.indexer if owned is not None else None,
                     platform_provider=platform_provider,
                 )
 

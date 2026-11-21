@@ -278,6 +278,8 @@ class Qwen2_5_VLWeightInfo(BaseMultiModalDeployWeightInfo):
 
 
 class Qwen2_5_VLMixin(Qwen2_VLMixin):
+    _new_vision_embedding = Qwen2_5_VLImageEmbedding
+
     def _init_multimodal(self):
         self.mm_part = Qwen2_5_VLImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen2_VLVitWeight(

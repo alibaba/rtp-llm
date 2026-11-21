@@ -1,6 +1,15 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+cc_test(
+    name = "v4_smoke_witness_protocol_test",
+    srcs = [
+        "speculative/V4SmokeWitness.h",
+        "speculative/V4SmokeWitnessTest.cpp",
+    ],
+    copts = ["-std=c++17"],
+)
+
 # Header-only PP wire types so consumers can depend on them without the whole executor.
 cc_library(
     name = "pipeline_types",
@@ -42,6 +51,7 @@ cc_library(
     }),
     deps = [
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
+        "@boringssl//:crypto",
         ":pipeline_types",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:cache_config",

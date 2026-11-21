@@ -8,6 +8,8 @@ from pathlib import Path
 import torch
 from torch import nn
 
+from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.registry import register_model
 from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
     IMAGE,
     V41ImageInput,
@@ -251,4 +253,45 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
         return embeddings
 
 
-__all__ = ["DeepSeekV41VisionEmbedding", "V41VisionAttention"]
+@register_model("deepseek_v41_vision")
+class OwnedDeepSeekV41VisionEmbedding(DeepSeekV41VisionEmbedding, RtpModule):
+    """Direct checkpoint names with the existing BF16/FP32 vision runtime."""
+
+    # Each vision service owns a full replica, independent of language TP/EP.
+    fastsafetensors_load_isolated = True
+
+    def __init__(self, model_config, load_config):
+        super().__init__(model_config["v41_config"])
+        self.requires_grad_(False)
+
+    def checkpoint_weight_name_filter(self):
+        delimiters = {"image_start", "image_newline", "image_end"}
+        return lambda name: name in delimiters or name.startswith(
+            ("vision.", "aligner.")
+        )
+
+
+def load_v41_service_vision(
+    config, checkpoint_path, compute_dtype, device, load_method
+):
+    """Validate the direct owner before publishing it; never build a weight dict."""
+    from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+
+    loader = NewModelLoader(
+        {"model_type": "deepseek_v41_vision", "v41_config": config},
+        NewLoaderConfig(
+            device=device,
+            compute_dtype=compute_dtype,
+            load_method=getattr(load_method, "value", load_method),
+        ),
+        model_path=checkpoint_path,
+    )
+    return loader.load(), loader
+
+
+__all__ = [
+    "DeepSeekV41VisionEmbedding",
+    "V41VisionAttention",
+    "OwnedDeepSeekV41VisionEmbedding",
+    "load_v41_service_vision",
+]

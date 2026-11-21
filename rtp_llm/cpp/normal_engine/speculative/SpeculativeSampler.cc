@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
+#include "rtp_llm/cpp/normal_engine/speculative/V41CacheRoundTrace.h"
 #include <algorithm>
 #include <vector>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -46,7 +47,13 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     RTP_LLM_CHECK_WITH_INFO(anchors.defined() && anchors.is_cuda() && anchors.numel() == batch_size,
                             "DSpARK anchors must be a CUDA tensor with one token per request");
 
-    auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
+    auto       previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
+    const auto fixed           = std::getenv("RTP_V41_DRAFT_ROLE") ? v41_cache_round::draftProbe() : std::nullopt;
+    if (fixed) {
+        TORCH_CHECK(batch_size == 1 && propose_step_ == 3 && fixed->anchor >= 0 && fixed->anchor < markov_w1.size(0),
+                    "unexpected matched sampler geometry");
+        previous_tokens = torch::full_like(previous_tokens, fixed->anchor);
+    }
     auto all_probabilities =
         torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
                      torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
@@ -76,6 +83,19 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
             sampled_target_tokens = d2t_map_.index_select(0, sampled_draft_tokens.to(torch::kLong)).to(torch::kInt32);
         }
         all_probabilities.select(1, step).copy_(sampling_probabilities);
+        if (fixed && step == 0) {
+            v41_cache_round::writeDraftScores(*fixed,
+                                              proposal_logits.select(1, 0),
+                                              markov_bias,
+                                              logits,
+                                              sampling_probabilities,
+                                              temperature,
+                                              markov_embedding,
+                                              markov_w2,
+                                              d2t_map_,
+                                              sampled_draft_tokens,
+                                              sampled_target_tokens);
+        }
         token_columns.push_back(sampled_target_tokens);
         previous_tokens = sampled_target_tokens.to(torch::kLong);
     }

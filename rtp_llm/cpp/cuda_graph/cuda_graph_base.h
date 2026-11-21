@@ -24,6 +24,8 @@ enum class CudaGraphCheckMode : uint8_t {
 
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
+    // Host-only: set for a fully verified diagnostic request, never captured.
+    bool                             v41_cache_proposal = false;
     int                              current_batch_size{1};
     int                              current_seq_len{1};
     int                              current_real_graph_bs{1};       // for decode
@@ -46,11 +48,11 @@ struct GraphParams {
     int           max_seq_len                  = 0;
     // Generation prefill may capture a longer discarded scratch sequence.
     // Zero keeps the existing per-request bound equal to max_seq_len.
-    int    request_max_seq_len    = 0;
-    int    num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
-    size_t max_context_batch_size = 128;
-    std::size_t      hidden_size           = 0;
-    c10::ScalarType  model_data_type       = c10::ScalarType::Float;
+    int              request_max_seq_len    = 0;
+    int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    size_t           max_context_batch_size = 128;
+    std::size_t      hidden_size            = 0;
+    c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int              generation_prefill_cuda_graph_max_requests = 0;

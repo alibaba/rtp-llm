@@ -3,8 +3,6 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 
-from rtp_llm.ops.compute_ops import rtp_llm_ops
-
 
 class BaseNorm(nn.Module):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
@@ -69,6 +67,8 @@ class AddBiasResLayerNorm(BaseAddBiasResLayerNorm):
     def forward(
         self, hidden_states: torch.Tensor, residual: torch.Tensor, bias: torch.Tensor
     ):
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.fused_add_layernorm(
             hidden_states,
             residual,
@@ -146,6 +146,8 @@ class LayerNorm(BaseLayerNorm):
 
     def forward(self, hidden_states: torch.Tensor):
         output = torch.empty_like(hidden_states)
+        from rtp_llm.ops.compute_ops import rtp_llm_ops
+
         rtp_llm_ops.layernorm(
             output,
             hidden_states,

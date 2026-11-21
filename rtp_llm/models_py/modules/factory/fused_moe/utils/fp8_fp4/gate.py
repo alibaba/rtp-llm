@@ -128,6 +128,7 @@ class Gate(nn.Module):
         n_hash_layers: int = 0,
         vocab_size: int = 0,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
+        weight_owner=None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W``. Reads
@@ -142,11 +143,20 @@ class Gate(nn.Module):
         self.hash = layer_id < n_hash_layers
         self.fuse_hash_gate = False
         self.vocab_size = int(vocab_size)
+        if layer_weights is not None and weight_owner is not None:
+            raise ValueError("Gate accepts one weight owner, not both loading APIs")
+        if weight_owner is not None:
+            self.weight = weight_owner.router_weight
+            self.bias = None if self.hash else weight_owner.router_bias
+            if self.hash:
+                self.tid2eid = weight_owner.router_tid2eid
+            self.bias_vl = getattr(weight_owner, "router_bias_vl", None)
+            return
         from rtp_llm.utils.model_weight import W
 
         assert (
             layer_weights is not None
-        ), "Gate requires layer_weights (descriptor path)"
+        ), "Gate requires parameter owner or descriptor weights"
         self.weight = layer_weights[W.moe_gate]
         if self.hash:
             assert vocab_size > 0

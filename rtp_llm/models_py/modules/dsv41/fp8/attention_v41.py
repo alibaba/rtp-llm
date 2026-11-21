@@ -580,6 +580,10 @@ def _prefill_sparse_plan(shared, key, candidates, visible, key_count, block_size
 
 
 class AttentionV41FP8(AttentionFP8):
+    # Also inherited by the checkpoint-owning attention, which uses these
+    # same forward methods but has a distinct construction/lifetime.
+    v41_group32_attention = True
+
     def __init__(self, *args, v41_config, shared_attention, **kwargs):
         ratio = int(kwargs["compress_ratio"])
         if ratio not in (0, 1, 2):
@@ -698,12 +702,13 @@ class AttentionV41FP8(AttentionFP8):
         ):
             from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
-            if type(self.wo_b) is V41MXFP8Linear:
+            wo_b = getattr(self.wo_b, "v41_runtime_linear", self.wo_b)
+            if type(wo_b) is V41MXFP8Linear:
                 quantized = _v41_output_projection.try_grouped_output_quant(
                     o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
                 )
                 if quantized is not None:
-                    return self.wo_b.forward_quantized(*quantized, out=out)
+                    return wo_b.forward_quantized(*quantized, out=out)
 
             projected = _v41_output_projection.grouped_output_projection(
                 o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
@@ -2333,6 +2338,13 @@ class AttentionV41FP8(AttentionFP8):
                     + starts[ids_full]
                 )
             try:
+                from rtp_llm.models_py.modules import v41_cache_model_trace
+
+                cache_probe = (
+                    v41_cache_model_trace.active() if self.layer_id == 2 else None
+                )
+                if cache_probe is not None and cache_probe.prefix == 512:
+                    cache_probe.pool("reused_before_write", self, common.cp_ctx)
                 self._produce_global(
                     x_full,
                     pos_full,
@@ -2345,6 +2357,11 @@ class AttentionV41FP8(AttentionFP8):
                     grouped_projection=x_groups is not None,
                     batched_groups=batched_groups,
                 )
+                if cache_probe is not None:
+                    cache_probe.pool("after_write", self, common.cp_ctx)
+                    # Actual per-request output of the physical-pool gather,
+                    # handed to the indexer and the sparse attention kernel.
+                    cache_probe.readback(self, common.cp_ctx)
             finally:
                 if raw_tiles is not None:
                     raw_tiles.close()
@@ -2579,9 +2596,10 @@ class AttentionV41FP8(AttentionFP8):
         flat = x.reshape(T, -1)
         from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
+        index_wq = getattr(self.index_wq, "v41_runtime_linear", self.index_wq)
         q = (
-            self.index_wq.forward_quantized(*qr_quantized)
-            if qr_quantized is not None and isinstance(self.index_wq, V41MXFP8Linear)
+            index_wq.forward_quantized(*qr_quantized)
+            if qr_quantized is not None and isinstance(index_wq, V41MXFP8Linear)
             else self._lin(self.index_wq, qr.reshape(T, -1))
         ).view(T, self.index_n_heads, self.index_head_dim)
         weights = F.linear(flat, self.index_weights)

@@ -112,19 +112,23 @@ struct GptModelInputs {
     bool need_all_hidden_states = false;
     bool skip_lm_head           = false;
     // PP batch contains only middle chunks; all TP ranks follow the same sampling/draft path.
-    bool is_middle_chunk_only = false;
-    bool capture_hidden_states  = false;
-    bool need_moe_gating        = false;
-    bool warmup                 = false;
-    bool skip_run               = false;
-    bool shutdown               = false;
-    bool is_fake_stream         = false;
+    bool is_middle_chunk_only  = false;
+    bool capture_hidden_states = false;
+    bool need_moe_gating       = false;
+    bool warmup                = false;
+    bool skip_run              = false;
+    bool shutdown              = false;
+    bool is_fake_stream        = false;
 
     // Linear attention target verify should write draft tokens mamba states
     // to extra kv_cache blocks when normal inference only write last token mamba state.
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+
+    // Set only by the fixed V4.1 Aone fixture after checking the complete,
+    // immutable prompt on the stream owner; never set from request options.
+    bool v41_cache_fixture = false;
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;
@@ -173,6 +177,8 @@ struct GptModelOutputs {
 
     /** Downstream activations from a non-last target stage. */
     std::map<std::string, torch::Tensor> pp_intermediates;
+    // Observed target verify path, not the requested graph configuration.
+    int8_t target_verify_graph_path{-1};  // -1 unknown/not verify; 0 eager; 1 graph runner
 };
 
 struct CopyParams {

@@ -49,7 +49,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.topology import 
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
-from rtp_llm.utils.model_weight import W
+from rtp_llm.models_py.modules.fp8_fp4_weight_source import take_weight
 
 from .fp8_fp4_base import Fp8Fp4ExecutorBase, normalize_moe_w13_gate_up
 
@@ -423,8 +423,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         D = cfg.dim
         source_inter = cfg.moe_inter_dim
 
-        w13 = layer_weights.pop(W.moe_w1)
-        s13_raw = layer_weights.pop(W.moe_s1)
+        w13 = take_weight(layer_weights, "routed_w13")
+        s13_raw = take_weight(layer_weights, "routed_s13")
         w13, s13_raw = normalize_moe_w13_gate_up(
             w13,
             s13_raw,
@@ -452,8 +452,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         del s13_raw
         torch.cuda.empty_cache()
 
-        w2 = layer_weights.pop(W.moe_w2)
-        s2_raw = layer_weights.pop(W.moe_s2)
+        w2 = take_weight(layer_weights, "routed_w2")
+        s2_raw = take_weight(layer_weights, "routed_s2")
         if inter != source_inter:
             padded_w2 = torch.zeros((E, D, inter // 2), dtype=torch.int8, device=device)
             padded_s2 = torch.empty(

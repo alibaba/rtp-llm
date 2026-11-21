@@ -9,7 +9,7 @@ from PIL import Image
 from transformers import (
     AutoProcessor,
     Qwen2VLImageProcessor,
-    Qwen3VLConfig,
+    AutoConfig,
     Qwen3VLVisionModel,
 )
 
@@ -52,6 +52,8 @@ if not hasattr(tl, "wrap_triton"):
 
 
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
+    _newloader_rotary_tower = Qwen3VLVisionModel
+
     def __init__(self, mm_related_params: VitParameters):
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
@@ -59,10 +61,33 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
-        config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
+        # The dense composite config silently substitutes default tower dimensions
+        # for a Qwen3-VL-MoE checkpoint. Resolve both registered config types.
+        config_hf = AutoConfig.from_pretrained(mm_related_params.config["ckpt_path"])
         config_hf.vision_config._attn_implementation = default_attn_impl
         self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
         self.spatial_merge_size = self.visual.spatial_merge_size
+
+    def prepare_newloader_runtime_buffers(self, device):
+        # Only explicitly opted-in towers share this rotary constructor.
+        if not isinstance(self.visual, self._newloader_rotary_tower):
+            return
+        target = torch.device(device)
+        if target.type == "cuda" and target.index is None:
+            target = torch.device("cuda", torch.cuda.current_device())
+        rotary = self.visual.rotary_pos_emb
+        if rotary.inv_freq.device == target or (
+            target.type == "cpu" and rotary.inv_freq.device.type == "cpu"
+        ):
+            return
+        # inv_freq is intentionally absent from checkpoints. CPU pow + transfer
+        # is not bit-equivalent to the original target-device initialization;
+        # for 72-wide heads this can change even BF16 sine/cosine values.
+        # Rebuild just that buffer; preserve its non-persistent registration.
+        config = self.visual.config
+        with torch.device(target):
+            head_dim = config.hidden_size // config.num_heads
+            rotary.inv_freq = type(rotary)(head_dim // 2).inv_freq
 
     @property
     def _data_type(self):
@@ -233,6 +258,9 @@ class Qwen3VLVitWeight(BaseVitWeights):
 
 
 class Qwen3_VLMixin(Qwen2_5_VLMixin):
+    _new_vision_embedding = Qwen3_VLImageEmbedding
+    _new_vision_prefix = "model.visual."
+
     def _init_multimodal(self):
         self.mm_part = Qwen3_VLImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen3VLVitWeight(

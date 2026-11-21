@@ -8,7 +8,7 @@ import os
 import sys
 import types
 import unittest
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -39,6 +39,10 @@ def fake_module(name, **attrs):
 
 def shaped_module(name, **attrs):
     result = type(name, (nn.Module,), {})()
+    if name == "AttentionV41FP8":
+        result.v41_group32_attention = True
+    elif name == "V41MXFP8Linear":
+        object.__setattr__(result, "v41_runtime_linear", result)
     for key, value in attrs.items():
         setattr(result, key, value)
     return result
@@ -105,6 +109,26 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual(linears[(32, 128)], ("q", model.q))
         self.assertEqual(set(outputs), {(8, 32, 128)})
         self.assertEqual(outputs[(8, 32, 128)], ("a", model.a))
+
+    def test_loader_owned_attention_warms_its_unregistered_quantized_views(self):
+        # The direct owner and runtime subclass do not share the old class
+        # names. Derived executors must not be registered a second time.
+        model = nn.Module()
+        model.attn = shaped_module(
+            "RuntimeAttention",
+            v41_group32_attention=True,
+            _wo_a_stk_w=torch.empty(8, 32, 128),
+        )
+        group = shaped_module("V41MXFP8Linear", N=32, K=128)
+        fused = shaped_module("V41MXFP8Linear", N=64, K=256)
+        output = shaped_module("V41MXFP8Linear", N=96, K=128)
+        model.attn.wo_b = shaped_module("Dsv41MXFP8Linear")
+        object.__setattr__(model.attn.wo_b, "v41_runtime_linear", output)
+        object.__setattr__(model.attn, "wq_a_wkv", fused)
+        model.attn._wo_a_groups_v41 = [group]
+        linears, outputs = warmup.collect_v41_dense_shapes(model)
+        self.assertEqual({v[1] for v in linears.values()}, {group, fused, output})
+        self.assertEqual(outputs[(8, 32, 128)], ("attn", model.attn))
 
     def test_m_grid_includes_both_quantizer_threshold_sides(self):
         with mock.patch.object(
@@ -928,33 +952,47 @@ class V41KernelJitWarmupTest(unittest.TestCase):
 
     def test_commit_initial_warmup_occurs_after_fc_load_and_buffer_bind(self):
         source = _REPO / "rtp_llm/models_py/model_desc/deepseek_v41_base_model.py"
-        method = copy.deepcopy(
-            next(
-                node
-                for node in ast.walk(ast.parse(source.read_text()))
-                if isinstance(node, ast.FunctionDef)
-                and node.name == "_initialize_commit_only"
-            )
+        # Execute the initializer and its real staging hooks. The fake transformer
+        # avoids loading a checkpoint; the FC load and deletion of its source
+        # must still happen through the same hook used by the runtime.
+        hook_names = (
+            "_initialize_commit_only",
+            "_runtime_weight_counts",
+            "_create_runtime_transformer",
+            "_release_runtime_weight_source",
         )
-        for arg in method.args.args:
-            arg.annotation = None
-        method.returns = None
-        tree = ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[]))
+        model = next(
+            node
+            for node in ast.parse(source.read_text()).body
+            if isinstance(node, ast.ClassDef) and node.name == "DeepSeekV4Model"
+        )
+        methods = [
+            node
+            for node in model.body
+            if isinstance(node, ast.FunctionDef) and node.name in hook_names
+        ]
+        tree = ast.Module(body=methods, type_ignores=[])
         events = []
         attn = types.SimpleNamespace(init_rope_cache=lambda **kw: events.append("rope"))
         transformer = types.SimpleNamespace(
             layers=[types.SimpleNamespace(attn=attn)], embed=None
         )
-        namespace = {
-            "logging": mock.Mock(),
-            "torch": torch,
-            "model_build_scope": lambda token: nullcontext(),
-            "V4Transformer": lambda *args, **kw: transformer,
-        }
+
+        def build(args, *, mw):
+            self.assertIs(args, instance._v4_args)
+            self.assertIs(mw, instance.weight)
+            events.append("build")
+            return transformer
+
+        namespace = {"logging": mock.Mock(), "torch": torch, "V4Transformer": build}
         exec(compile(tree, str(source), "exec"), namespace)
-        instance = types.SimpleNamespace(
+        fixture = type(
+            "CommitRuntime",
+            (types.SimpleNamespace,),
+            {name: namespace[name] for name in hook_names},
+        )
+        instance = fixture(
             weight=types.SimpleNamespace(weights=[object()], global_weights={}),
-            _build_scope_token=object(),
             _v4_args=types.SimpleNamespace(v41_config=object()),
             _resolve_prefill_q_token_capacity=lambda: 321,
             _materialized=False,
@@ -983,10 +1021,8 @@ class V41KernelJitWarmupTest(unittest.TestCase):
         with mock.patch.object(
             warmup, "warmup_v41_prefill_jit", side_effect=run_warmup
         ):
-            self.assertTrue(
-                namespace["_initialize_commit_only"](instance, object(), "cuda:3")
-            )
-        self.assertEqual(events, ["rope", "fc", "bind", "warmup"])
+            self.assertTrue(instance._initialize_commit_only(object(), "cuda:3"))
+        self.assertEqual(events, ["build", "rope", "fc", "bind", "warmup"])
         self.assertTrue(instance._materialized)
 
 

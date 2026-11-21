@@ -7,9 +7,6 @@ import psutil
 import torch
 
 from rtp_llm.device.device_base import DeviceBase, MemInfo
-from rtp_llm.ops.compute_ops import (
-    preprocess_weight_scale,
-)
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.swizzle_utils import should_swizzle_linear_attn_ba, swizzle_tensor
 
@@ -107,6 +104,8 @@ class ArmCpuImpl(CpuImpl):
         qweight = qweight.to(torch.int8)
         if not is_int8:
             qweight = packer(qweight)
+        from rtp_llm.ops.compute_ops import preprocess_weight_scale
+
         qweight_interleaved = preprocess_weight_scale(qweight, scales_fp16)
 
         # zero = 0 if qzeros_int32 = -2004318072 torch.int32 for awq
@@ -323,11 +322,6 @@ class GpuImpl(DeviceBase):
         processed_zeros = torch.stack(processed_zeros, dim=0)
         processed_scalses = torch.stack(processed_scalses, dim=0)
         return processed_weights, processed_zeros, processed_scalses
-
-    def shuffle_moe_weight(
-        self, x: torch.Tensor, datatype: torch.dtype, name: str
-    ) -> torch.Tensor:
-        return x
 
     def shuffle_gemm_weight(self, x: torch.Tensor) -> torch.Tensor:
         return x
