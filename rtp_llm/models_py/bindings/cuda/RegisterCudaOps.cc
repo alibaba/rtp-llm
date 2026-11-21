@@ -66,6 +66,10 @@ void registerLsaBindings(py::module& ops) {
         py::gil_scoped_release release;
         checkLsa(qwen38_lsa_activate(reinterpret_cast<void*>(handle)));
     });
+    m.def("abort", [](uintptr_t handle) {
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_abort(reinterpret_cast<void*>(handle)));
+    });
     m.def("apply", [](uintptr_t handle,
                       uintptr_t partial,
                       uintptr_t shared,

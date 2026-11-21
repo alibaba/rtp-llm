@@ -15,12 +15,10 @@ cc_library(
         "@local_config_cuda//cuda:cudart",
     ] + select({
         "//:using_cuda13_x86": ["@pip_gpu_cuda13_torch_nvidia_nccl_cu13//:nccl_device"],
-        "//:using_cuda13_arm": ["@pip_cuda13_arm_torch_nvidia_nccl_cu13//:nccl_device"],
         "//conditions:default": [],
     }),
     target_compatible_with = select({
         "//:using_cuda13_x86": [],
-        "//:using_cuda13_arm": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     visibility = ["//rtp_llm/models_py/bindings/cuda:__pkg__"],

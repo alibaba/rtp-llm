@@ -225,7 +225,6 @@ cc_library(
     ],
     copts = copts() + ["-fno-strict-aliasing"] + select({
         "//:using_cuda13_x86": ["-DRTP_ENABLE_SM120_LSA"],
-        "//:using_cuda13_arm": ["-DRTP_ENABLE_SM120_LSA"],
         "//conditions:default": [],
     }),
     deps = [
@@ -236,7 +235,6 @@ cc_library(
         ":cuda_attn_bindings_base",
     ] + select({
         "//:using_cuda13_x86": ["//rtp_llm/models_py/kernels/cuda/qwen38_moe:reduce_gate"],
-        "//:using_cuda13_arm": ["//rtp_llm/models_py/kernels/cuda/qwen38_moe:reduce_gate"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

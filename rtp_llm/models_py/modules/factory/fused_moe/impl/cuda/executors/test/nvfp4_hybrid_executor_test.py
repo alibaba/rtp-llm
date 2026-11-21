@@ -3,7 +3,7 @@
 import json
 import os
 import unittest
-from types import FunctionType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -171,7 +171,7 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
             side_effect=lambda **kwargs: [kwargs["input"] - 1],
         ) as cutlass:
             # Includes the threshold and its immediate neighbor, not request concurrency.
-            for rows in (1, 2, 8, 16, 17, 32, 64):
+            for rows in (*range(1, 18), 32, 64):
                 x = torch.zeros(rows, 2560, dtype=torch.bfloat16)
                 payload = ExpertForwardPayload(
                     expert_x=x,
@@ -190,7 +190,7 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                     ids = cutlass.call_args.kwargs["token_selected_experts"]
                 self.assertEqual(ids.dtype, torch.int32)
                 self.assertEqual(ids.data_ptr(), payload.expert_topk_ids.data_ptr())
-            self.assertEqual(executor.b12x.call_count, 4)
+            self.assertEqual(executor.b12x.call_count, 16)
             self.assertEqual(cutlass.call_count, 3)
             self.assertEqual(cutlass.call_args.kwargs["profile_ids"], [13, 37])
             executor.max_b12x_rows = 8
@@ -259,39 +259,102 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                     convert.call_args_list[1].kwargs,
                     dict(m=k, k=n, num_groups=e, sf_vec_size=16),
                 )
-                self.assertEqual(adapter.launch(quant_mode="nvfp4"), "static")
                 self.assertEqual(launch(quant_mode="nvfp4"), "dynamic")
                 same_shape = B12xNvfp4MoE(w1, w2, scales, 1, model, topk)
                 self.assertIs(adapter.states, same_shape.states)
                 pools.append(adapter.workspace_pool)
         self.assertIsNot(pools[0], pools[1])
 
-    def test_static_launcher_is_cached_and_rejects_unknown_bindings(self):
+    def test_static_entry_does_not_use_backend_arbitration(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
-            _static_launcher,
+            _launch_static,
         )
 
-        def launch(*, mode="nvfp4"):
-            return _FORCED_BACKEND, mode
-
-        bound = _static_launcher(launch)
-        self.assertIs(bound, _static_launcher(launch))
-        self.assertEqual(bound(), ("static", "nvfp4"))
-        self.assertEqual(launch(), ("dynamic", "nvfp4"))
-        unknown = FunctionType(launch.__code__, {"__builtins__": __builtins__})
-        with self.assertRaisesRegex(RuntimeError, "Unbound FlashInfer global"):
-            _static_launcher(unknown)
-        decorated = FunctionType(launch.__code__, launch.__globals__)
-        _static_launcher(decorated)
-        decorated.unknown_policy = True
-        with self.assertRaisesRegex(RuntimeError, "Unrecognized"):
-            _static_launcher(decorated)
-
-        def wrapper():
-            return launch()
-
-        with self.assertRaisesRegex(RuntimeError, "Unrecognized"):
-            _static_launcher(wrapper)
+        tensor = torch.zeros(8, 8)
+        workspace = SimpleNamespace(
+            **{
+                name: tensor
+                for name in (
+                    "row_counts",
+                    "token_map",
+                    "route_output_scratch",
+                    "packed_a_view",
+                    "packed_input_scale",
+                    "packed_a_flat",
+                    "scale_flat",
+                    "barrier_count",
+                    "barrier_epoch",
+                    "route_state",
+                    "active_expert_count",
+                    "weight_expert_ids",
+                    "global_to_local_expert",
+                    "virt_route_scratch",
+                    "token_weights",
+                )
+            },
+            max_rows=8,
+        )
+        weights = SimpleNamespace(
+            **{
+                name: tensor
+                for name in (
+                    "_w13_sf_storage",
+                    "_down_sf_storage",
+                    "static_w13_fp4",
+                    "static_down_fp4",
+                    "w1_alpha",
+                    "w2_alpha",
+                )
+            },
+            static_intermediate_size=256,
+            intermediate_size=256,
+            static_w13_sf_storage=None,
+            source_scales=True,
+        )
+        compiled = Mock()
+        forbidden = Mock(side_effect=AssertionError("backend arbitration reached"))
+        dispatch = SimpleNamespace(
+            _align_up=lambda x, a: (x + a - 1) // a * a,
+            _LEVEL_TILE_N=128,
+            get_num_sm=lambda device: 80,
+            get_max_active_clusters=lambda n: 80,
+            _lookup_mac_ladder=lambda ladder, pairs: None,
+            _STATIC_MAC_LADDER=(),
+            _static_merged_groups=lambda n, pairs: False,
+            _static_deferred_init=lambda pairs: False,
+            _get_static_kernel=Mock(return_value=(compiled, 64)),
+            launch_sm120_static_moe=forbidden,
+            _get_micro_kernel=forbidden,
+            _get_direct_micro_kernel=forbidden,
+        )
+        for backend in (None, "static", "micro", "direct_micro", "dynamic"):
+            dispatch._FORCED_BACKEND = backend
+            output = _launch_static(
+                dispatch,
+                workspace=workspace,
+                weights=weights,
+                a=tensor,
+                topk_ids=torch.zeros(2, 2, dtype=torch.int32),
+                topk_weights=torch.ones(2, 2),
+                input_gs=tensor,
+                down_input_scale=tensor,
+                scatter_output=tensor,
+                num_experts=4,
+                num_tokens=2,
+                k=256,
+                n=256,
+                top_k=2,
+            )
+            self.assertIs(output, tensor)
+            self.assertEqual(dispatch._FORCED_BACKEND, backend)
+            self.assertEqual(
+                dispatch._get_static_kernel.call_args.kwargs["quant_mode"], "nvfp4"
+            )
+            self.assertEqual(
+                dispatch._get_static_kernel.call_args.kwargs["mac_override"], 64
+            )
+        self.assertEqual(compiled.call_count, 5)
+        forbidden.assert_not_called()
 
     def test_adapter_keeps_nonuniform_swizzled_scale_bytes(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
@@ -471,7 +534,6 @@ class B12xNvfp4GpuTest(unittest.TestCase):
     def test_remote_routes_and_workspace_reuse_in_eager_and_graph(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
             B12xNvfp4MoE,
-            _static_launcher,
         )
 
         self.assertTrue(
@@ -479,27 +541,31 @@ class B12xNvfp4GpuTest(unittest.TestCase):
             "Pinned runtime is mandatory for this GPU target",
         )
         _, dispatch = B12xNvfp4MoE._runtime()
-        launch = _static_launcher(dispatch.launch_sm120_static_moe)
         original_backend = dispatch._FORCED_BACKEND
-        static = Mock(wraps=launch.__globals__["_get_static_kernel"])
+        static = Mock(wraps=dispatch._get_static_kernel)
         forbidden = Mock(
             side_effect=AssertionError(
                 "static workspace must not launch a micro backend"
             )
         )
         with patch.dict(
-            launch.__globals__,
+            dispatch.__dict__,
             {
                 "_get_static_kernel": static,
+                "launch_sm120_static_moe": forbidden,
                 "_get_micro_kernel": forbidden,
                 "_get_direct_micro_kernel": forbidden,
             },
         ):
             for ep_rank in (0, 1):
-                for rows in (1, 2, 4, 8, 16):
+                for rows in range(1, 17):
                     with self.subTest(ep_rank=ep_rank, rows=rows):
                         before = static.call_count
                         self.check_remote_routes(ep_rank, rows)
+                        print(
+                            f"B12X_STATIC_CASE ep_rank={ep_rank} rows={rows}",
+                            flush=True,
+                        )
                         self.assertGreater(static.call_count, before)
                         forbidden.assert_not_called()
                         self.assertEqual(dispatch._FORCED_BACKEND, original_backend)
