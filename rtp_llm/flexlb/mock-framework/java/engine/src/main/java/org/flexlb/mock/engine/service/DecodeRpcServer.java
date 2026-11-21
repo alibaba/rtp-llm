@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.service;
 
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.RemoteStage;
+
 import io.grpc.*;
 import io.grpc.stub.*;
 import java.util.HashSet;

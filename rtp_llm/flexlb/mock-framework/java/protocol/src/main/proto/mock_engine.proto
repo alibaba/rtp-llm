@@ -16,8 +16,16 @@ message DecodeLayout {
   fixed64 cache_key_seed = 2;
 }
 
+// Simulation-only stages; independent of the production P2P RPC surface.
+enum RemoteStage {
+  ALLOCATE = 0;
+  LOAD = 1;
+  GENERATE = 2;
+  PREFILL_COMPLETE = 3;
+}
+
 message DecodeFrame {
-  .RemoteStage stage = 1;
+  RemoteStage stage = 1;
   int64 request_id = 2;
   string client_id = 3;
   .GenerateInputPB input = 4;

@@ -341,6 +341,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/p2p/test:mock_generate_stream",
         ":block_pool_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "//rtp_llm/cpp/testing:device_test_utils",

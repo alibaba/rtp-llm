@@ -17,6 +17,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,6 +60,70 @@ import static org.mockito.Mockito.when;
  * Checks request scheduling priority, capacity waiting and progress across blocked placements.
  */
 class RequestSchedulerTest {
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "prefill-only",
+                "one-token",
+                "beam",
+                "variable-beam",
+                "multiple-sequences",
+                "pd-disabled",
+                "prompt-logits",
+                "multimodal"
+            })
+    void requestsThatCannotUseBatchAdmissionRetainQueueAdmission(String kind) {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        DefaultRouter router = mockRouter();
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        BalanceContext context = RequestLifecycleTestSupport.context(config, 919L);
+        var input = EngineRpcService.GenerateInputPB.newBuilder();
+        var generation =
+                input.getGenerateConfigBuilder()
+                        .setCanUsePdSeparation(true)
+                        .setMaxNewTokens(8)
+                        .setNumBeams(1)
+                        .setNumReturnSequences(1);
+        switch (kind) {
+            case "prefill-only" -> generation.setMaxNewTokens(0).setPrefillOnly(true);
+            case "one-token" -> generation.setMaxNewTokens(1);
+            case "beam" -> generation.setNumBeams(2);
+            case "variable-beam" -> generation.addVariableNumBeams(1).addVariableNumBeams(2);
+            case "multiple-sequences" -> generation.setNumReturnSequences(2);
+            case "pd-disabled" -> generation.setCanUsePdSeparation(false);
+            case "prompt-logits" -> generation.setReturnPromptLogits(true);
+            case "multimodal" -> input.getMultimodalTokenLayoutBuilder();
+            default -> throw new AssertionError(kind);
+        }
+        context.setGenerateInputPb(input.build().toByteString());
+        context.getRequest().setMaxNewTokens(generation.getMaxNewTokens());
+        context.getRequest().setNumBeams(generation.getNumBeams());
+        var future = new CompletableFuture<Response>();
+        when(lifecycle.register(context)).thenReturn(future);
+        when(router.select(context))
+                .thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.PREFILL, null)));
+        var scheduler =
+                new RequestScheduler(
+                        service,
+                        router,
+                        mock(EndpointRegistry.class),
+                        mock(BatchSchedulerReporter.class),
+                        mock(EvictionManager.class),
+                        lifecycle,
+                        new PlacementAvailability());
+        try {
+            assertSame(future, scheduler.submit(context));
+            verify(router, never()).select(context);
+            assertTrue(BatchDeliveryStrategy.requiresClientRoute(context));
+            assertFalse(future.isDone());
+            assertEquals(1, scheduler.getQueuedRequestCount());
+        } finally {
+            scheduler.closePlacement();
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void vitOnlyDoesNotRegisterOrQueueAndSameIdCanLaterSchedulePd(boolean queue) {

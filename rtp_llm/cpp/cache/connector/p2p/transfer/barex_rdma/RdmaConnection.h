@@ -59,7 +59,8 @@ public:
     /// @brief 发起 RDMA Read；CONNECTED 时立即派发，否则入队等待或同步失败
     void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
               RdmaReadCallback callback,
-              uint64_t deadline_ms) override;
+              uint64_t deadline_ms,
+              std::function<bool()> is_cancelled = {}) override;
 
     const std::string& getIp() const { return ip_; }
     uint32_t           getPort() const { return port_; }
@@ -70,6 +71,7 @@ private:
         RdmaReadCallback callback;
         std::shared_ptr<RdmaMetricsCollector>                                collector;
         uint64_t                                                             deadline_ms;
+        std::function<bool()>                                                is_cancelled;
     };
 
     // Enqueues a single request under pending_mutex_.
@@ -100,7 +102,8 @@ public:
                     const std::shared_ptr<RdmaMetricsCollector>& collector,
                     RdmaReadCallback callback,
                     uint64_t deadline_ms,
-                    const std::shared_ptr<::accl::barex::XConnection>& conn);
+                    const std::shared_ptr<::accl::barex::XConnection>& conn,
+                    const std::function<bool()>& is_cancelled = {});
 
     TransferErrorCode validateAndBuildRwMemps(
         const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,

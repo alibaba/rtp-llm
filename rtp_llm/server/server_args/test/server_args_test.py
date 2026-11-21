@@ -221,6 +221,32 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class PrefillMultimodalRetryArgumentsTest(TestCase):
+    def test_retry_environment_and_cli_precedence(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(
+            os.environ,
+            {"PREFILL_RETRY_TIMES": "2", "PREFILL_RETRY_TIMEOUT_MS": "75"},
+            clear=True,
+        ):
+            environment = server_args.setup_args([]).pd_separation_config
+            explicit = server_args.setup_args(
+                ["--prefill_retry_times", "3", "--prefill_retry_timeout_ms", "100"]
+            ).pd_separation_config
+        self.assertEqual(environment.prefill_retry_times, 2)
+        self.assertEqual(environment.prefill_retry_timeout_ms, 75)
+        self.assertEqual(explicit.prefill_retry_times, 3)
+        self.assertEqual(explicit.prefill_retry_timeout_ms, 100)
+
+    def test_retry_is_disabled_by_default(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = server_args.setup_args([]).pd_separation_config
+        self.assertEqual(config.prefill_retry_times, 0)
+
+
 class DynamicDecodeArgumentsTest(TestCase):
     def test_dynamic_decode_backend_parser_and_default(self):
         from rtp_llm.server.server_args import server_args
@@ -859,7 +885,6 @@ class ServerArgsSetTest(TestCase):
         os.environ["DP_SIZE"] = "2"
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
-        os.environ["PREFILL_PREPARE_RESOURCE_POOL_SIZE"] = "256"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
@@ -909,15 +934,13 @@ class ServerArgsSetTest(TestCase):
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
 
-        # Verify prefill thread-pool configuration
-        self.assertEqual(
-            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
-            256,
-        )
         restored_pd_config = pickle.loads(
             pickle.dumps(py_env_configs.pd_separation_config)
         )
-        self.assertEqual(restored_pd_config.prefill_prepare_resource_pool_size, 256)
+        self.assertEqual(
+            restored_pd_config.__getstate__(),
+            py_env_configs.pd_separation_config.__getstate__(),
+        )
 
         # Verify fifo_scheduler_config
         self.assertEqual(
@@ -1029,8 +1052,6 @@ class ServerArgsSetTest(TestCase):
             "32",
             "--concurrency_limit",
             "128",
-            "--prefill_prepare_resource_pool_size",
-            "384",
             "--max_context_batch_size",
             "64",
             "--max_batch_tokens_without_cache",
@@ -1089,11 +1110,6 @@ class ServerArgsSetTest(TestCase):
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
 
-        # Verify prefill thread-pool configuration
-        self.assertEqual(
-            py_env_configs.pd_separation_config.prefill_prepare_resource_pool_size,
-            384,
-        )
         # Verify fifo_scheduler_config
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -2274,6 +2290,36 @@ class BatchRecordArgsTest(TestCase):
                     [], {"RTP_LLM_RECORD_DECODE_SAMPLE_RATE": good}
                 )
                 self.assertEqual(config.record_decode_sample_rate, float(good))
+
+
+class CacheStoreArgumentsTest(TestCase):
+    def parse_config(self, args, env):
+        from rtp_llm.ops import CacheStoreConfig
+        from rtp_llm.server.server_args.cache_store_group_args import (
+            init_cache_store_group_args,
+        )
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        config = CacheStoreConfig()
+        parser = EnvArgumentParser()
+        parser.set_root_config(config)
+        init_cache_store_group_args(parser, config)
+        with patch.dict(os.environ, env, clear=True):
+            parser.parse_args(args)
+        return config
+
+    def test_retired_transfer_options_are_ignored_in_env(self):
+        config = self.parse_config(
+            [],
+            {
+                "CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS": "invalid",
+                "P2P_KV_FORCE_RELEASE_TIMEOUT_MS": "invalid",
+            },
+        )
+        self.assertFalse(hasattr(config, "rdma_transfer_wait_timeout_ms"))
+        self.assertFalse(hasattr(config, "p2p_kv_force_release_timeout_ms"))
+        self.assertEqual(config.p2p_transfer_not_done_resource_hold_ms, 10000)
+        self.assertEqual(config.p2p_lease_query_timeout_ms, 500)
 
 
 if __name__ == "__main__":

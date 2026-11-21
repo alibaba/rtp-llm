@@ -127,6 +127,7 @@ class FrontendServerTest(TestCase):
                 )
             controller = MagicMock()
             controller.increment.return_value = 1
+            controller.request_counter.value = 1
             server = self.frontend_server
             original_controller = server._global_controller
             original_worker = server._frontend_worker
@@ -245,6 +246,30 @@ class FrontendServerTest(TestCase):
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
+
+    def test_batch_request_ids_cross_sequence_windows_without_overlapping(self):
+        worker = MagicMock()
+        worker.batch_infer = AsyncMock(return_value=FakePipelinResponse(res="batch"))
+        self.frontend_server._frontend_worker = worker
+        controller = self.frontend_server._global_controller
+        with patch("rtp_llm.utils.concurrency_controller.time.time_ns", return_value=1_800_000_000_000_000_000):
+            for count in (4097, 2):
+                asyncio.run(
+                    self.frontend_server.batch_infer(
+                        {"prompt_batch": ["hello"] * count}, FakeRawRequest()
+                    )
+                )
+            single_id = self.frontend_server._request_id_for_slot(controller.increment())
+            controller.decrement()
+        ids = [
+            request_id
+            for call in worker.batch_infer.call_args_list
+            for request_id in call.kwargs["request_ids"]
+        ]
+        self.assertEqual(len(ids), 4099)
+        self.assertEqual(len(set(ids)), len(ids))
+        self.assertNotIn(single_id, ids)
+        self.assertEqual(controller.current_concurrency.value, 0)
 
     def test_simple(self):
         loop = asyncio.new_event_loop()
@@ -542,49 +567,128 @@ class FrontendServerTest(TestCase):
                         0,
                     )
 
-    def test_native_batch_atomic_rpc_errors_do_not_count_partial_success(self):
+    def test_native_batch_rpc_errors_preserve_item_results_and_metrics(self):
+        import struct
+
         from rtp_llm.config.exceptions import FtRuntimeException
         from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
             BatchGenerateOutputsPB,
             ErrorCodePB,
+            TensorPB,
         )
 
         for api in ("pipeline", "openai"):
-            for failure in ("cardinality", "partial"):
+            for failure in ("cardinality", "partial", "first", "all"):
                 with self.subTest(api=api, failure=failure):
-                    call, visitor, sink, _, _ = self._native_batch_fixture(api)
-                    client = ModelRpcClient.__new__(ModelRpcClient)
-                    client._addresses = ["backend:1234"]
-                    client._max_rpc_timeout_ms = 1000
-                    client._channel_pool = SimpleNamespace(get=AsyncMock())
+                    call, visitor, sink, clock, _ = self._native_batch_fixture(api)
+                    with patch(
+                        "rtp_llm.cpp.model_rpc.model_rpc_client.GrpcHostChannelPool"
+                    ) as pool:
+                        pool.return_value = SimpleNamespace(get=AsyncMock())
+                        client = ModelRpcClient(["backend:1234"], {}, 1000)
                     visitor.model_rpc_client = client
                     response = BatchGenerateOutputsPB()
-                    if failure == "partial":
-                        output = response.results.add().final_output
-                        output.frontend_input_len.value = 10
-                        output.frontend_output_len.value = 4
-                        output.frontend_generate_token_num.value = 8
-                        failed = response.results.add().error_info
-                        failed.error_code = ErrorCodePB.INVALID_PARAMS
-                        failed.error_message = "invalid batch item"
-                    stub = SimpleNamespace(
-                        BatchGenerateCall=AsyncMock(return_value=response)
-                    )
+                    failed_indices = {
+                        "cardinality": set(),
+                        "partial": {1},
+                        "first": {0},
+                        "all": {0, 1},
+                    }[failure]
+                    if failure != "cardinality":
+                        for index in range(2):
+                            item = response.results.add()
+                            if index in failed_indices:
+                                item.error_info.error_code = ErrorCodePB.INVALID_PARAMS
+                                item.error_info.error_message = "invalid batch item"
+                                continue
+                            output = item.final_output
+                            output.frontend_input_len.value = 10
+                            output.frontend_output_len.value = 4
+                            output.frontend_generate_token_num.value = 8
+                            output.frontend_context_token_num.value = 10
+                            output.frontend_context_token_num_with_cache.value = 10
+                            output.frontend_context_execute_time_us.value = 1_000_000
+                            output.frontend_context_execute_time_with_cache_us.value = (
+                                1_000_000
+                            )
+                            flat = output.flatten_output
+                            flat.output_ids.data_type = TensorPB.INT32
+                            flat.output_ids.shape.extend([2, 1, 4])
+                            flat.output_ids.int32_data = struct.pack("<8i", *range(8))
+                            flat.finished.extend([True, True])
+                            for _ in range(2):
+                                flat.aux_info.add().output_len = 4
+
+                    async def rpc(*args, **kwargs):
+                        clock[0] = 11.0
+                        return response
+
+                    stub = SimpleNamespace(BatchGenerateCall=AsyncMock(side_effect=rpc))
                     with patch(
                         "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
                         return_value=stub,
-                    ), self.assertRaises(FtRuntimeException):
-                        asyncio.run(call())
+                    ):
+                        if failure == "cardinality":
+                            with self.assertRaisesRegex(
+                                FtRuntimeException, "cardinality"
+                            ):
+                                asyncio.run(call())
+                        else:
+                            result = asyncio.run(call())
+                            self.assertEqual(result.status_code, 200)
+                            items = json.loads(result.body)[
+                                "response_batch" if api == "pipeline" else "responses"
+                            ]
+                            self.assertEqual(len(items), 2)
+                            for index, item in enumerate(items):
+                                if index in failed_indices:
+                                    self.assertIn(
+                                        "invalid batch item", str(item["error"])
+                                    )
+                                else:
+                                    self.assertNotIn("error", item)
                     stub.BatchGenerateCall.assert_awaited_once()
                     reported = [c.args[0] for c in sink.report.call_args_list]
                     self.assertEqual(
                         reported.count(GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC), 1
                     )
-                    self.assertNotIn(
-                        GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC, reported
+                    self.assertEqual(
+                        [
+                            c.args[1]
+                            for c in sink.report.call_args_list
+                            if c.args[0] == GaugeMetrics.FRONTEND_CONCURRENCY_METRIC
+                        ],
+                        [1, 0],
                     )
-                    self.assertNotIn(
-                        GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC, reported
+                    values = {
+                        metric: [
+                            c.args[1]
+                            for c in sink.report.call_args_list
+                            if c.args[0] == metric
+                        ]
+                        for metric in (
+                            GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC,
+                            GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC,
+                            GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC,
+                            GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC,
+                        )
+                    }
+                    self.assertEqual(
+                        values[GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC],
+                        [10] if failure in ("partial", "first") else [],
+                    )
+                    self.assertEqual(
+                        values[GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC],
+                        [4] if failure in ("partial", "first") else [],
+                    )
+                    # Empty completed windows emit idle zero, never failed-item tokens.
+                    self.assertEqual(
+                        values[GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC],
+                        [8.0] if failure in ("partial", "first") else [0.0],
+                    )
+                    self.assertEqual(
+                        values[GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC],
+                        [10.0] if failure in ("partial", "first") else [0.0],
                     )
                     self.assertEqual(
                         self.frontend_server._request_metrics._active_requests, 0
@@ -1604,9 +1708,12 @@ class FrontendServerTest(TestCase):
             num_return_sequences=1,
             can_use_pd_separation=True,
         )
-        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config), True)
-        self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config), False)
-        self.assertIsNone(_selected_pd_separation(RoleType.DECODE, pd_config))
+        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config, False), False)
+        self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config, False), False)
+        self.assertIs(
+            _selected_pd_separation(RoleType.DECODE, pd_config, False), True
+        )
+        self.assertIsNone(_selected_pd_separation(None, pd_config, False))
 
         fallback_updates = (
             {"max_new_tokens": 1},
@@ -1619,7 +1726,7 @@ class FrontendServerTest(TestCase):
             with self.subTest(update=update):
                 fallback_config = pd_config.model_copy(update=update)
                 self.assertIs(
-                    _selected_pd_separation(RoleType.PREFILL, fallback_config),
+                    _selected_pd_separation(RoleType.PREFILL, fallback_config, False),
                     False,
                 )
 
@@ -1653,7 +1760,7 @@ class FrontendServerTest(TestCase):
         )
         cases = (
             (RoleType.PDFUSION, "127.0.0.1", 51001, False),
-            (RoleType.PREFILL, "prefill.test", 51002, True),
+            (RoleType.DECODE, "decode.test", 51002, True),
         )
         try:
             for request_id, (role, host, port, expected_pd_sep) in enumerate(

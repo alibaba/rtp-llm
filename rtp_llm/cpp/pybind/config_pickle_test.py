@@ -144,18 +144,33 @@ class MoeConfigPickleTest(unittest.TestCase):
 class PDSepConfigPickleTest(unittest.TestCase):
     def test_current_format_round_trip(self):
         config = PDSepConfig()
-        config.prefill_stop_stream_wait_timeout_ms = 118
-        config.prefill_prepare_resource_pool_size = 119
+        config.load_cache_timeout_ms = 118
+        config.max_rpc_timeout_ms = 119
 
         restored = pickle.loads(pickle.dumps(config))
 
-        self.assertEqual(restored.prefill_stop_stream_wait_timeout_ms, 118)
-        self.assertEqual(restored.prefill_prepare_resource_pool_size, 119)
+        self.assertEqual(restored.load_cache_timeout_ms, 118)
+        self.assertEqual(restored.max_rpc_timeout_ms, 119)
+
+    def test_previous_nineteen_field_layout_preserves_active_fields(self):
+        config = PDSepConfig()
+        config.load_cache_timeout_ms = 118
+        config.max_rpc_timeout_ms = 119
+        config.worker_port_offset = 120
+        state = config.__getstate__()
+        self.assertEqual(len(state), 12)
+        previous = state[:9] + (True, 4096, False, 7) + state[9:] + (False, 8, True)
+        self.assertEqual(len(previous), 19)
+        restored = _new_config(PDSepConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(restored.load_cache_timeout_ms, 118)
+        self.assertEqual(restored.max_rpc_timeout_ms, 119)
+        self.assertEqual(restored.worker_port_offset, 120)
 
     def test_rejects_invalid_state_length(self):
-        for size in (17, 18, 20):
+        for size in (9, 10, 11, 13, 17, 18, 20, 22):
             with self.subTest(size=size), self.assertRaisesRegex(
-                RuntimeError, "expected 19 fields"
+                RuntimeError, "expected 12 or 19 fields"
             ):
                 pickle.loads(pickle.dumps(_MalformedPDSepConfig(size)))
 

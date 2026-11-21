@@ -161,6 +161,7 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         worker_route.cache_tag = local.cache_tag;
         worker_route.partition = local.partition;
         worker_route.slice     = local.slice;
+        worker_route.slice_payload_bytes = route_pb.slice_payload_bytes();
 
         for (const auto& layer_block_pb : route_pb.layer_blocks()) {
             auto layer_id           = layer_block_pb.layer_id();
@@ -215,7 +216,8 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
         }
         worker_plan.routes.push_back(std::move(worker_route));
     }
-    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, worker_plan);
+    int64_t physical_completion_time_us = 0;
+    ErrorInfo error_info = worker_->read(request_id, unique_key, deadline_ms, worker_plan, &physical_completion_time_us);
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,
@@ -223,6 +225,9 @@ bool P2PConnectorDecode::readPerRank(int64_t                                 req
                             error_info.ToString().c_str());
     }
     setP2PResponse(response, error_info);
+    if (error_info.ok() && physical_completion_time_us > 0) {
+        response.mutable_p2p_response()->set_kv_complete_time_us(physical_completion_time_us);
+    }
     return error_info.ok();
 }
 

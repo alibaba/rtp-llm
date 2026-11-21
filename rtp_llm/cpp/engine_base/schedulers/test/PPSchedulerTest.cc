@@ -815,7 +815,7 @@ TEST_F(PPSchedulerTest, RejectsUnsupportedRequestsBeforeKvAdmissionEvenAtCapacit
         {RoleType::PREFILL, 1, false},
         {RoleType::PREFILL, 0, false},
         {RoleType::DECODE, 1, false},
-        {RoleType::DECODE, 0, true},
+        {RoleType::DECODE, 0, false},
     };
     installReadinessAllocator([](const MallocInfo&) { return std::shared_ptr<AsyncContext>{}; });
     for (const auto& request : cases) {
@@ -838,6 +838,53 @@ TEST_F(PPSchedulerTest, RejectsUnsupportedRequestsBeforeKvAdmissionEvenAtCapacit
         EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
         EXPECT_TRUE(scheduler->empty());
     }
+}
+
+TEST_F(PPSchedulerTest, DecodeAdmitsPdContextOnlyForCacheLoading) {
+    auto context = makeControlledAllocatorContext();
+    installReadinessAllocator([&](const MallocInfo&) { return context; });
+    auto scheduler                          = createScheduler(1, RoleType::DECODE, SP_TYPE_MTP);
+    auto stream                             = createStream({1, 2, 3}, false, false, 8, {}, RoleType::DECODE);
+    stream->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto loading = scheduler->schedule();
+    ASSERT_TRUE(loading.ok());
+    EXPECT_TRUE(loading->streams.empty());
+    EXPECT_TRUE(loading->finished_request_ids.empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::LOADING_CACHE);
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_FALSE(stream->isPPInflight());
+    EXPECT_GT(stream->curBlocksNum(), 0u);
+
+    // Model the side channel committing the first token before load completion.
+    stream->update({torch::tensor({{4}}, torch::kInt32), 1});
+    ASSERT_TRUE(context->completeTransfers(1, true));
+    auto ready = scheduler->schedule();
+    ASSERT_TRUE(ready.ok());
+    EXPECT_EQ(ready->streams, (std::list<GenerateStreamPtr>{stream}));
+    EXPECT_FALSE(stream->isContextStream());
+    EXPECT_TRUE(stream->isPPInflight());
+}
+
+TEST_F(PPSchedulerTest, DecodePdContextWaitsForAdmissionCapacity) {
+    installReadinessAllocator([](const MallocInfo&) { return std::shared_ptr<AsyncContext>{}; });
+    auto scheduler                          = createScheduler(0, RoleType::DECODE, SP_TYPE_MTP);
+    auto stream                             = createStream({1, 2, 3}, false, false, 8, {}, RoleType::DECODE);
+    stream->generateConfig()->pd_separation = true;
+    ASSERT_TRUE(scheduler->enqueue(stream).ok());
+
+    auto output = scheduler->schedule();
+    ASSERT_TRUE(output.ok());
+    EXPECT_TRUE(output->streams.empty());
+    EXPECT_TRUE(output->finished_request_ids.empty());
+    EXPECT_EQ(stream->getStatus(), StreamState::WAITING);
+    EXPECT_TRUE(stream->statusInfo().ok());
+    EXPECT_FALSE(stream->hasEvent(StreamEvents::CanRun));
+    EXPECT_EQ(initial_malloc_calls_, 0u);
+    EXPECT_EQ(stream->curBlocksNum(), 0u);
+    EXPECT_FALSE(scheduler->empty());
 }
 
 TEST_F(PPSchedulerTest, DecodeRejectsContextStreams) {
@@ -1061,7 +1108,7 @@ TEST_F(PPSchedulerTest, PdPrefillFinalChunkIsReapedWithoutEnteringPendingDecode)
     update_info.update_remote_generate = true;
     stream->update(update_info, false);
     stream->clearPPInflight();
-    EXPECT_TRUE(stream->hasEvent(StreamEvents::NeedRemoteGenerate));
+    EXPECT_TRUE(stream->hasEvent(StreamEvents::PrefillHandoffReady));
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
 
     auto retired = scheduler->schedule();

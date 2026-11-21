@@ -736,8 +736,9 @@ class Pipeline(object):
         base_request_id: int,
         generate_config_json: dict,
         generate_env_config=None,
+        request_ids: Optional[List[int]] = None,
         **kwargs: Any,
-    ) -> List[GenerateResponse]:
+    ) -> List[Union[GenerateResponse, FtRuntimeException]]:
         frontend_metric_observer = kwargs.pop("frontend_metric_observer", None)
         frontend_metric_tags = dict(kwargs.pop("frontend_metric_tags", None) or {})
         generate_config = self.create_generate_config(
@@ -804,7 +805,9 @@ class Pipeline(object):
             # and at the RPC layer it is converted to a per-request protobuf so any brief
             # list aliasing across siblings is dropped before it reaches the engine.
             gen_input = GenerateInput(
-                request_id=base_request_id + i,
+                request_id=(
+                    request_ids[i] if request_ids is not None else base_request_id + i
+                ),
                 token_ids=input_tensor,
                 mm_inputs=[],
                 generate_config=copy.copy(generate_config),
@@ -822,7 +825,10 @@ class Pipeline(object):
         stop_word_id_slices = get_stop_word_slices(stop_word_ids)
 
         responses = []
-        for i, outputs in enumerate(batch_outputs):
+        for outputs in batch_outputs:
+            if isinstance(outputs, FtRuntimeException):
+                responses.append(outputs)
+                continue
             (
                 generate_texts,
                 output_lens,

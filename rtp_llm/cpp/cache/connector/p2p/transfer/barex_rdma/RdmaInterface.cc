@@ -15,15 +15,16 @@ std::shared_ptr<IRdmaMemoryManager> createRdmaMemoryManager() {
     return manager;
 }
 
-std::shared_ptr<IRdmaClient> createRdmaClient(const std::shared_ptr<IRdmaMemoryManager>& memory_manager,
-                                              int                                        io_thread_count,
-                                              int                                        worker_thread_count,
-                                              uint32_t                                   rdma_connections_per_host) {
+std::shared_ptr<IRdmaClient> createRdmaClient(const std::shared_ptr<IRdmaMemoryManager>&        memory_manager,
+                                              const std::shared_ptr<kmonitor::MetricsReporter>& metrics_reporter,
+                                              int                                               io_thread_count,
+                                              int                                               worker_thread_count,
+                                              uint32_t rdma_connections_per_host) {
     if (!memory_manager) {
         RTP_LLM_LOG_ERROR("createRdmaClient: memory_manager is nullptr");
         return nullptr;
     }
-    auto client = std::make_shared<RdmaClient>(memory_manager, rdma_connections_per_host);
+    auto client = std::make_shared<RdmaClient>(memory_manager, rdma_connections_per_host, metrics_reporter);
     if (!client->init(io_thread_count, worker_thread_count)) {
         RTP_LLM_LOG_ERROR("createRdmaClient: client init failed");
         return nullptr;

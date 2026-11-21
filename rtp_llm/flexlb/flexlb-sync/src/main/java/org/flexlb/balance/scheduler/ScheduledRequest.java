@@ -46,7 +46,7 @@ public final class ScheduledRequest implements Prioritized {
     private final boolean routeDelivery;
 
     /**
-     * Publish-time NON_BATCH ownership. It has exactly one downstream owner:
+     * Publish-time ownership for NON_BATCH and BATCH client-route fallback. It has exactly one downstream owner:
      * this ACTIVE item until RouteDeliveryStrategy takes it, then the route
      * transaction. ACTIVE terminal paths take and close the same capability.
      */
@@ -104,7 +104,8 @@ public final class ScheduledRequest implements Prioritized {
         FlexlbConfig schedulingConfig =
                 Objects.requireNonNull(ctx.getConfig(), "request scheduling config");
         this.routeDelivery =
-                schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH;
+                schedulingConfig.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
+                        || BatchDeliveryStrategy.requiresClientRoute(ctx);
         this.maxInflightBatchesPerPrefillWorker =
                 routeDelivery
                         ? 0

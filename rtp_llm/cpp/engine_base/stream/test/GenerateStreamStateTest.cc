@@ -184,6 +184,17 @@ TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutco
     }
 }
 
+TEST_F(GenerateStreamStateTest, testDecodeInitialCapacityPressureFailsImmediately) {
+    auto stream    = createStream({1, 2, 3}, false, RoleType::DECODE);
+    auto allocator = installRetryableInitMalloc();
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).Times(1);
+    stream->reportEvent(StreamEvents::CanRun);
+
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
+}
+
 TEST_F(GenerateStreamStateTest, testDirectStateManipulation) {
     auto stream = createStream();
     // WAITING -> LOADING_CACHE via direct manipulation
@@ -557,6 +568,9 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     run_model_if_eligible();
     EXPECT_TRUE(stream->isFinished());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(stream->firstError().error.code(), ErrorCode::MALLOC_FAILED);
+    stream->reportError(ErrorCode::CANCELLED, "later cancellation");
+    EXPECT_EQ(stream->firstError().error.code(), ErrorCode::MALLOC_FAILED);
     EXPECT_NE(stream->getStatus(), StreamState::RUNNING);
     EXPECT_EQ(model_entry_count, 0u);
     EXPECT_EQ(tracked_abort_count, 1u);

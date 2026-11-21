@@ -26,6 +26,7 @@ cc_library(
 cc_library(
     name = "transfer_plan_glue",
     hdrs = [
+        "PipelineLayoutCodec.h",
         "RouteCodec.h",
         "ShardLayoutFactory.h",
     ],

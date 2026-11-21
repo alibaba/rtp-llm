@@ -37,6 +37,7 @@ public:
         int                              prefill_tp_size = 0;
         int                              prefill_cp_size = 0;
         bool                             decode_needs_compute = true;
+        std::string                      prefill_pipeline_layout;
     };
 
     virtual std::optional<P2PRoutingContext> p2pRouting() const {

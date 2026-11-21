@@ -657,6 +657,34 @@ TEST_F(BroadcastManagerTest, RejectedBroadcastNeverDispatchesAnyRank) {
     }
 }
 
+TEST_F(BroadcastManagerTest, CancellationBeforeRankDispatchKeepsEarlierRpcTracked) {
+    auto server = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
+    ASSERT_TRUE(server->start());
+    const auto address = "127.0.0.1:" + std::to_string(server->listenPort());
+    BroadcastManager manager({address, address});
+    ASSERT_TRUE(manager.init());
+
+    int calls = 0;
+    auto rpc_call = [&](const std::shared_ptr<RpcService::Stub>& stub,
+                        const std::shared_ptr<grpc::ClientContext>& context,
+                        const FunctionRequestPB& request,
+                        grpc::CompletionQueue* queue) {
+        ++calls;
+        return stub->AsyncExecuteFunction(context.get(), request, queue);
+    };
+    auto before_dispatch = [&](FunctionRequestPB&) -> grpc::Status {
+        return calls == 0 ? grpc::Status::OK : grpc::Status(grpc::StatusCode::CANCELLED, "test cancellation");
+    };
+    auto result = manager.broadcast<FunctionRequestPB, FunctionResponsePB>(
+        std::vector<FunctionRequestPB>(2), 1000, rpc_call, before_dispatch);
+    ASSERT_NE(result, nullptr);
+    ASSERT_TRUE(result->waitDone(2000));
+    EXPECT_EQ(calls, 1);
+    EXPECT_TRUE(result->rpcSucceeded(0));
+    EXPECT_FALSE(result->rpcSucceeded(1));
+    EXPECT_FALSE(result->success());
+}
+
 TEST_F(BroadcastManagerTest, PartialDispatchExceptionKeepsLegacyPropagation) {
     auto server = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
     ASSERT_TRUE(server->start());
@@ -677,6 +705,19 @@ TEST_F(BroadcastManagerTest, PartialDispatchExceptionKeepsLegacyPropagation) {
         (manager.broadcast<FunctionRequestPB, FunctionResponsePB>(std::vector<FunctionRequestPB>(2), 1000, rpc_call)),
         RTPException);
     EXPECT_EQ(calls, 2);
+
+    calls = 0;
+    BroadcastManager p2p_manager({address, address, address});
+    ASSERT_TRUE(p2p_manager.init());
+    auto result = p2p_manager.broadcast<FunctionRequestPB, FunctionResponsePB>(
+        std::vector<FunctionRequestPB>(3), 1000, rpc_call, {}, BroadcastManager::DispatchFailurePolicy::kStop);
+    ASSERT_NE(result, nullptr);
+    ASSERT_TRUE(result->waitDone(2000));
+    EXPECT_EQ(calls, 2);
+    EXPECT_TRUE(result->rpcSucceeded(0));
+    EXPECT_FALSE(result->rpcSucceeded(1));
+    EXPECT_FALSE(result->rpcSucceeded(2));
+    EXPECT_NE(result->firstError().error.ToString().find("second rank dispatch failed"), std::string::npos);
 }
 
 TEST_F(BroadcastManagerTest, WaitDoneReportsTransportErrors) {

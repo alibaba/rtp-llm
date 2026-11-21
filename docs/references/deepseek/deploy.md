@@ -23,13 +23,10 @@ Single-node resource specifications requiring 4 nodes for multi-node deployment:
 ```
 LD_PRELOAD=/usr/lib64/libjemalloc.so
 ali_extend_devs=/dev/gdrdrv:/dev/gdrdrv:rwm \
-RDMA_CONNECT_RETRY_TIMES=2 \
 MAX_RPC_TIMEOUT_MS=1800000 \
 PD_SEPARATION=1 \
 ROLE_TYPE=PREFILL \
 PREFILL_MAX_WAIT_TIMEOUT_US=180000000 \
-PREFILL_RETRY_TIMEOUT_MS=20 \
-PREFILL_RETRY_TIME=1 \
 USE_CACHE_STORE=1 \
 LOAD_CACHE_TIMEOUT_MS=180000 \
 ENABLE_MERGE_W13=1 \
@@ -77,13 +74,10 @@ Single-node resource specifications requiring 18 nodes for multi-node deployment
 ```
 LD_PRELOAD=/usr/lib64/libjemalloc.so
 ali_extend_devs=/dev/gdrdrv:/dev/gdrdrv:rwm \
-RDMA_CONNECT_RETRY_TIMES=2 \
 MAX_RPC_TIMEOUT_MS=1800000 \
 PD_SEPARATION=0 \
 ROLE_TYPE=DECODE \
 PREFILL_MAX_WAIT_TIMEOUT_US=180000000 \
-PREFILL_RETRY_TIMEOUT_MS=20 \
-PREFILL_RETRY_TIME=1 \
 USE_CACHE_STORE=1 \
 LOAD_CACHE_TIMEOUT_MS=180000 \
 ENABLE_MERGE_W13=1 \

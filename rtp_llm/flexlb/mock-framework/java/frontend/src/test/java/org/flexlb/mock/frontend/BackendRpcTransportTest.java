@@ -77,6 +77,41 @@ class BackendRpcTransportTest {
         }
     }
 
+    @Test void realEngineRoutesGenerateToDecodeEvenWhenMasterAlreadyEnqueued() throws Exception {
+        for (boolean batched : List.of(false, true)) try (var h = new Harness()) {
+            var seen = new AtomicReference<GenerateInputPB>();
+            var decode = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0))
+                .addService(new RpcServiceGrpc.RpcServiceImplBase() {
+                    @Override public void generateStreamCall(GenerateInputPB input, StreamObserver<GenerateOutputsPB> response) {
+                        seen.set(input); response.onNext(token(input.getRequestId(), 1, false));
+                        response.onNext(token(input.getRequestId(), 2, false));
+                        response.onNext(token(input.getRequestId(), 3, true)); response.onCompleted();
+                    }
+                }).build().start();
+            try {
+                h.peerTpSize = 2; h.batched = batched;
+                h.route = route -> route.toBuilder().addServerStatus(FlexlbServerStatusPB.newBuilder()
+                    .setRole("DECODE").setServerIp("127.0.0.1").setGrpcPort(decode.getPort())).build();
+                var result = h.result(h.frontend.send(request(903), Duration.ofSeconds(3)));
+                assertEquals(BackendRpcTransport.Outcome.success, result.outcome());
+                assertEquals(3, result.outputTokens()); assertNotNull(seen.get());
+                assertEquals(903, seen.get().getRequestId());
+                assertEquals(batched, seen.get().getEnqueuedByMaster());
+                assertEquals(2, seen.get().getGenerateConfig().getRoleAddrsCount());
+                assertEquals(0, h.generates.get()); assertEquals(0, h.fetches.get());
+            } finally { decode.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+        }
+    }
+
+    @Test void failedProtocolProbeDoesNotSubmitOrFetchFromAnUnknownEngine() throws Exception {
+        try (var h = new Harness()) {
+            h.peerFailure = Status.UNAVAILABLE;
+            var result = h.result(h.frontend.send(request(904), Duration.ofSeconds(2)));
+            assertEquals(BackendRpcTransport.Outcome.error, result.outcome());
+            assertEquals(0, h.generates.get()); assertEquals(0, h.fetches.get());
+        }
+    }
+
     @Test void scheduleRejectionHasNoTokenSampleAndDoesNotOpenAnEngineStream() throws Exception {
         try (var h = new Harness()) {
             h.route = r -> r.toBuilder().setSuccess(false).setCode(429).clearLifecycle().build();
@@ -405,6 +440,8 @@ class BackendRpcTransportTest {
 
         volatile Status scheduleFailure;
 
+        volatile int peerTpSize;
+        volatile Status peerFailure;
         volatile boolean batched;
         volatile int scheduleDelay, tokenDelay;
 
@@ -418,6 +455,11 @@ class BackendRpcTransportTest {
 
         Harness() throws Exception {
             engine = NettyServerBuilder.forAddress(new InetSocketAddress("127.0.0.1", 0)).addService(new RpcServiceGrpc.RpcServiceImplBase() {
+                @Override public void getPeerInfo(GetPeerInfoRequestPB input, StreamObserver<GetPeerInfoResponsePB> response) {
+                    if (peerFailure != null) { response.onError(peerFailure.asRuntimeException()); return; }
+                    response.onNext(GetPeerInfoResponsePB.newBuilder().setTpSize(peerTpSize).build());
+                    response.onCompleted();
+                }
                 @Override public void generateStreamCall(GenerateInputPB input, StreamObserver<GenerateOutputsPB> response) {
                     generates.incrementAndGet(); generated.set(input); stream(input.getRequestId(), response);
                 }

@@ -1,5 +1,7 @@
 package org.flexlb.mock.engine.service;
 
+import org.flexlb.mock.protocol.grpc.MockEngineProtocol.RemoteStage;
+
 import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeFrame;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.MockDecodePromptPB;

@@ -289,6 +289,15 @@ class FrontendServer(object):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
 
+    def _request_id_for_slot(self, slot: int) -> int:
+        return generate_request_id(
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            slot % 4096,
+            timestamp_ms=slot >> 12,
+        )
+
     def _request_metric_tags(self, request: Any, headers=None) -> Dict[str, str]:
         request = request if isinstance(request, dict) else {}
         normalized = extract_request_headers(headers)
@@ -398,13 +407,8 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            sequence = self._global_controller.increment() % 4096  # 12 bits
-            request[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip,
-                self.py_env_configs.server_config.server_port,
-                self.server_id,
-                sequence,
-            )
+            sequence = self._global_controller.increment()
+            request[request_id_field_name] = self._request_id_for_slot(sequence)
         except Exception as e:
             return self._handle_exception(request, e)
 
@@ -490,6 +494,11 @@ class FrontendServer(object):
                 _record_http_status(trace_state, 200)
                 trace_state.finish(error=e)
             format_e = format_exception(e)
+            logging.warning(
+                "Frontend streaming failure: request_id=%s http_status=200 error_code=%s error_name=%s message=%s",
+                request.get(request_id_field_name), format_e.get("error_code"),
+                format_e.get("error_code_str"), format_e.get("message"),
+            )
             self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
@@ -519,14 +528,9 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            sequence = self._global_controller.increment() % 4096  # 12 bits
+            sequence = self._global_controller.increment()
             acquired = True
-            req[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip,
-                self.py_env_configs.server_config.server_port,
-                self.server_id,
-                sequence,
-            )
+            req[request_id_field_name] = self._request_id_for_slot(sequence)
             request_headers = extract_request_headers(
                 getattr(raw_request, "headers", None)
             )
@@ -609,13 +613,8 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        sequence = self._global_controller.increment() % 4096  # 12 bits
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        sequence = self._global_controller.increment()
+        request_id = self._request_id_for_slot(sequence)
 
         # Chat completions HTTP SERVER span.
         # Returns None when telemetry is disabled; all calls below are no-ops then.
@@ -718,25 +717,27 @@ class FrontendServer(object):
     async def batch_chat_completion(self, request, raw_request: Request):
         from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
 
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        sequence = self._global_controller.increment(max(1, len(request.requests)))
+        request_id = self._request_id_for_slot(sequence)
 
         async def generate_call(metric_tags, metric_observer):
             assert self._openai_endpoint is not None
             responses = await self._openai_endpoint.batch_chat_completion(
                 request_id,
                 request,
+                request_ids=[
+                    self._request_id_for_slot(sequence + i)
+                    for i in range(len(request.requests))
+                ],
                 frontend_metric_tags=metric_tags,
                 frontend_metric_observer=metric_observer,
             )
             return ORJSONResponse(
                 content=BatchChatCompletionResponse(
-                    responses=[r.model_dump(exclude_none=True) for r in responses]
+                    responses=[
+                        r if isinstance(r, dict) else r.model_dump(exclude_none=True)
+                        for r in responses
+                    ]
                 ).model_dump()
             )
 
@@ -780,17 +781,11 @@ class FrontendServer(object):
             self._global_controller.decrement()
 
     async def batch_infer(self, req: dict, raw_request: Request):
-        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
-        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
-        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
-        # only one slot regardless of N.
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
+
+        prompts = req.get("prompt_batch", [])
+        sequence = self._global_controller.increment(max(1, len(prompts)))
+        request_id = self._request_id_for_slot(sequence)
 
         async def generate_call(metric_tags, metric_observer):
             assert self._frontend_worker is not None
@@ -800,26 +795,30 @@ class FrontendServer(object):
                 prompts=prompts,
                 request_id=request_id,
                 generate_config=generate_config,
+                request_ids=[
+                    self._request_id_for_slot(sequence + i) for i in range(len(prompts))
+                ],
                 frontend_metric_tags=metric_tags,
                 frontend_metric_observer=metric_observer,
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
 
         previous_trace_state = CURRENT_TRACE_STATE.get()
-        trace_state = start_server_span(
-            "POST /batch_infer",
-            raw_request.headers,
-            initial_attributes={
-                trace_attrs.HTTP_REQUEST_METHOD: "POST",
-                trace_attrs.HTTP_METHOD: "POST",
-                trace_attrs.GEN_AI_SPAN_KIND: "LLM",
-                trace_attrs.LINGJI_FLAG: True,
-                trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
-                trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
-                trace_attrs.GEN_AI_OPERATION_NAME: "batch",
-            },
-        )
+        trace_state = None
         try:
+            trace_state = start_server_span(
+                "POST /batch_infer",
+                raw_request.headers,
+                initial_attributes={
+                    trace_attrs.HTTP_REQUEST_METHOD: "POST",
+                    trace_attrs.HTTP_METHOD: "POST",
+                    trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+                    trace_attrs.LINGJI_FLAG: True,
+                    trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
+                    trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+                    trace_attrs.GEN_AI_OPERATION_NAME: "batch",
+                },
+            )
             if trace_state is not None:
                 trace_state.begin_batch(
                     extract_correlation_request_id(raw_request.headers)
@@ -909,6 +908,11 @@ class FrontendServer(object):
         metric_tags = dict(metric_tags or self._request_metric_tags(request))
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
+        logging.warning(
+            "Frontend failure: request_id=%s http_status=500 error_code=%s error_name=%s message=%s",
+            request.get(request_id_field_name), exception_json.get("error_code"),
+            error_code_str, exception_json.get("message"),
+        )
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC, 1, metric_tags)
         elif isinstance(e, asyncio.CancelledError):

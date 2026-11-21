@@ -71,9 +71,15 @@ struct KeyShardSpec {
 
 /// @brief 一条传输路径 = 一个 (src_rank, dst_rank, cache_tag) 组合。
 ///
-/// route 与 layer 无关：同一条 route 的描述对该 tag 覆盖的所有 layer 都成立，
-/// 执行期按层展开成传输单元，key 为 <unique_key>_<layer_id>_<tag>_r<route_id>。
+/// TP planning leaves layers empty. PP planning attaches the exact layers
+/// that share this route's key rule and shard geometry.
 struct TransferRoute {
+    struct LayerMapping {
+        int global_id;
+        int src_local_id;
+        int dst_local_id;
+    };
+
     int         route_id = 0;
     int         src_rank = 0;  // prefill worker index
     int         dst_rank = 0;  // decode worker index
@@ -90,10 +96,14 @@ struct TransferRoute {
     size_t dst_bytes = 0;
     size_t cache_key_tokens_per_block = 0;
     size_t group_tokens_per_block     = 0;
+    std::vector<LayerMapping> layers                     = {};
+    size_t                    src_slice_payload_bytes    = 0;
+    size_t                    dst_slice_payload_bytes    = 0;
 };
 
 struct TransferPlan {
     std::vector<TransferRoute> routes;
+    uint64_t                   layout_digest = 0;
 
     std::vector<const TransferRoute*> forDecodeRank(int dst_rank) const {
         std::vector<const TransferRoute*> out;

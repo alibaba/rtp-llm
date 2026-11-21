@@ -176,7 +176,8 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
                                               const std::vector<size_t>& logical_positions,
                                               int                        cp_rank,
                                               int                        cp_size,
-                                              size_t                     cache_key_tokens_per_block) {
+                                              size_t                     cache_key_tokens_per_block,
+                                              bool                       shared_pp_block_table) {
     const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size) {
         return conversionError(context + ": invalid CP rank/size");
@@ -186,7 +187,10 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
     }
     try {
         const auto& keys   = resource.cacheKeys();
-        const auto& blocks = resource.blocksForLayer(layer_id, group.tag);
+        // The PP scheduler has already checked target-layer ownership. The
+        // shared allocation is keyed by tag in the Stage 0 resource.
+        const auto& blocks =
+            shared_pp_block_table ? resource.blocks(group.tag) : resource.blocksForLayer(layer_id, group.tag);
         auto        buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
         const bool  state_group = group.policy.group_type != CacheGroupType::FULL;
         const auto  state_slots =
@@ -242,7 +246,8 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
                                          const std::vector<size_t>& positions,
                                          int                        cp_rank,
                                          int                        cp_size,
-                                         size_t                     cache_key_tokens_per_block) {
+                                         size_t                     cache_key_tokens_per_block,
+                                         int                        layer_end) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     if (positions.empty()) {
         return std::move(result);
@@ -253,6 +258,9 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
         return conversionError("tag=" + cache_tag + ": non-empty route has no topology layers");
     }
     for (int layer_id : topology.layerIdsForGroup(cache_tag)) {
+        if (layer_id >= layer_end) {
+            continue;
+        }
         auto buffer = convertLayerTagForRoute(
             resource, *group, layer_id, positions, cp_rank, cp_size, cache_key_tokens_per_block);
         if (!buffer.ok()) {

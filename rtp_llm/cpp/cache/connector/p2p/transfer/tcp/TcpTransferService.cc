@@ -57,6 +57,10 @@ void TcpTransferService::transfer(::google::protobuf::RpcController*            
         return;
     }
     auto ctx = std::make_shared<TcpTaskContext>(controller, request, response, done, metrics_reporter_);
+    if (ctx->isTimeout()) {
+        ctx->run(false, TransferErrorCode::TIMEOUT, "TCP transfer expired before matching");
+        return;
+    }
     std::lock_guard<std::mutex> lock(wait_tasks_mutex_);
     wait_tasks_.push_back(ctx);
 }
@@ -99,6 +103,14 @@ void TcpTransferService::waitCheckProc() {
         }
     }
     for (auto& ctx : ready_ctxs) {
+        if (ctx->isTimeout()) {
+            ctx->run(false, TransferErrorCode::TIMEOUT, "matched TCP transfer expired before worker enqueue");
+            continue;
+        }
+        if (ctx->isCancelled()) {
+            ctx->run(false, TransferErrorCode::CANCELLED, "matched TCP transfer cancelled before worker enqueue");
+            continue;
+        }
         auto ret = worker_thread_pool_->pushTask([this, ctx]() { this->transferViaTcp(ctx); });
         if (ret != autil::ThreadPoolBase::ERROR_NONE) {
             RTP_LLM_LOG_WARNING("TcpTransferService push transfer task to thread pool failed, unique_key: %s",
@@ -109,6 +121,10 @@ void TcpTransferService::waitCheckProc() {
 }
 
 void TcpTransferService::transferViaTcp(const std::shared_ptr<TcpTaskContext>& ctx) {
+    if (ctx->isTimeout()) {
+        ctx->run(false, TransferErrorCode::TIMEOUT, "TCP transfer expired in the Decode worker queue");
+        return;
+    }
     if (!ctx->startTransfer()) {
         ctx->run(false, TransferErrorCode::CANCELLED, "recv task cancelled before transfer started");
         return;

@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <cstdlib>
 #include <string>
 
@@ -62,16 +63,25 @@ void GenerateStateMachine::handleWaiting() {
         if (stream != nullptr) {
             stream->recordWaitLatency();
         }
+        const auto allocation_start_us = currentTimeUs();
         auto result = stream_cache_resource_->initKVBlock();
+        initial_kv_allocation_rt_us = currentTimeUs() - allocation_start_us;
         if (!result.ok()) {
             const auto role_type              = stream_cache_resource_->resourceContext().role_type;
-            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
+            const bool retryable_context_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
                                                 && stream_cache_resource_->isContextStream();
-            if (absl::IsUnavailable(result) && retryable_prefill_init) {
+            const bool retryable_handoff_init = role_type == RoleType::DECODE && stream && stream->queryPdSep();
+            if (retryable_handoff_init && currentTimeMs() >= stream->deadlineMs()) {
+                reportEvent(StreamEvents::Error, ErrorCode::GENERATE_TIMEOUT, "decode KV allocation deadline expired");
+                status.store(StreamState::FINISHED, std::memory_order_release);
+                releaseResource();
+                return;
+            }
+            if (absl::IsUnavailable(result) && (retryable_context_init || retryable_handoff_init)) {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }
-            error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+            reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
             return;
@@ -107,7 +117,7 @@ void GenerateStateMachine::handleWaiting() {
     // cache block tables aligned with the growing sequence length.
     auto result = stream_cache_resource_->incrKVBlock();
     if (!result.ok()) {
-        error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
+        reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
         status.store(StreamState::FINISHED, std::memory_order_release);
         releaseResource();
         return;
@@ -121,7 +131,12 @@ void GenerateStateMachine::handleLoading() {
         if (stream != nullptr) {
             stream->recordLoadingCacheDoneTime();
         }
-        status.store(StreamState::WAITING, std::memory_order_release);
+        if (events_.has(StreamEvents::GenerateDone)) {
+            status.store(StreamState::FINISHED, std::memory_order_release);
+            releaseResource();
+        } else {
+            status.store(StreamState::WAITING, std::memory_order_release);
+        }
     }
 }
 
@@ -209,8 +224,7 @@ void GenerateStateMachine::releaseResource() {
     // If a worker still owns KV blocks, mark deferred and let its dec path
     // perform the release after the pending count drains.
     GenerateStream* stream = stream_cache_resource_->stream();
-    if (stream != nullptr && stream->hasPendingAsyncBookkeeping()) {
-        stream->markDeferredRelease();
+    if (stream != nullptr && stream->deferResourceReleaseIfBusy()) {
         return;
     }
     stream_cache_resource_->releaseResource();

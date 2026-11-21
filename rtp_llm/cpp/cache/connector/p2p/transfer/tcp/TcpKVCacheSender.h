@@ -47,7 +47,8 @@ private:
                       uint32_t                                                             port,
                       const std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest>& transfer_request,
                       std::function<void(TransferErrorCode, const std::string&)>           callback,
-                      int64_t                                                              deadline_ms);
+                      int64_t                                                              deadline_ms,
+                      const std::function<bool()>&                                         is_cancelled = {});
 
 private:
     std::shared_ptr<transfer::TcpClient> tcp_client_;

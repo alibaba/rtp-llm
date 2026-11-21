@@ -10,7 +10,8 @@ from unittest import IsolatedAsyncioTestCase, main
 import torch
 from typing_extensions import override
 
-from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
+from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode, RoleAddr, RoleType
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -53,6 +54,7 @@ from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
 )
 from rtp_llm.ops import PDSepConfig, SpecialTokens
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.host_service import HostServiceArgs
 from rtp_llm.test.utils.stream_util import (
     is_valid_tool_call_chunk,
     merge_stream_responses,
@@ -2995,6 +2997,304 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             sorted(self.endpoint.stop_words_str_list),
             sorted(["<|user|>", "<|observation|>"]),
         )
+
+    def test_backend_role_list_matches_entry_role_and_domains(self):
+        for role, host_args, expected in (
+            (RoleType.FRONTEND, HostServiceArgs(), []),
+            (
+                RoleType.FRONTEND,
+                HostServiceArgs(pdfusion_domain="pdfusion-test"),
+                [RoleType.PDFUSION],
+            ),
+            (RoleType.PREFILL, HostServiceArgs(), [RoleType.DECODE]),
+        ):
+            with self.subTest(role=role, expected=expected):
+                config = PDSepConfig()
+                config.role_type = role
+                self.assertEqual(
+                    BackendRPCServerVisitor.get_backend_role_list(config, host_args),
+                    expected,
+                )
+
+    def test_frontend_rejects_prefill_only_domain_without_master(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        with self.assertRaisesRegex(ValueError, "FRONTEND with a Prefill domain"):
+            BackendRPCServerVisitor.get_backend_role_list(
+                config, HostServiceArgs(prefill_domain="prefill-test")
+            )
+        self.assertEqual(
+            BackendRPCServerVisitor.get_backend_role_list(
+                config,
+                HostServiceArgs(
+                    prefill_domain="prefill-test", master_domain="master-test"
+                ),
+            ),
+            [RoleType.PREFILL],
+        )
+
+    async def test_domain_routing_skips_when_no_missing_roles(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+        visitor.backend_role_list = []
+
+        called = False
+
+        def _unexpected_call(_roles, refresh=False):
+            nonlocal called
+            called = True
+            return []
+
+        visitor.host_service.get_backend_role_addrs = _unexpected_call
+        input_obj = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        await visitor.get_domain_route_addrs(input_obj)
+
+        self.assertFalse(called)
+
+    async def test_route_ips_keeps_partial_frontend_route(
+        self,
+    ):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+
+        visitor.backend_role_list = [RoleType.DECODE, RoleType.PREFILL]
+
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.host_service.service_available = True
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: (
+            [
+                RoleAddr(
+                    role=RoleType.DECODE,
+                    ip="127.0.0.1",
+                    http_port=10000,
+                    grpc_port=10001,
+                )
+            ]
+            if RoleType.DECODE in roles
+            else []
+        )
+
+        input_obj = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        await visitor.route_ips(input_obj)
+        self.assertEqual([addr.role for addr in input_obj.generate_config.role_addrs], [RoleType.DECODE])
+
+    async def test_prefill_http_entry_supplies_local_handoff_without_overriding_route(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.PREFILL
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=config,
+            addresses=["127.0.0.2:9001", "127.0.0.3:9003"],
+        )
+        visitor.backend_role_list = [RoleType.DECODE, RoleType.PREFILL]
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: []
+        decode = RoleAddr(
+            role=RoleType.DECODE, ip="decode", http_port=8000, grpc_port=8001
+        )
+        explicit = RoleAddr(
+            role=RoleType.PREFILL, ip="selected", http_port=7000, grpc_port=7001
+        )
+        for selected in (None, explicit):
+            with self.subTest(explicit=selected is not None):
+                input_obj = GenerateInput(
+                    request_id=1,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(
+                        role_addrs=[decode] + ([selected] if selected else [])
+                    ),
+                )
+                await visitor.route_ips(input_obj)
+                prefill = [
+                    a for a in input_obj.generate_config.role_addrs
+                    if a.role == RoleType.PREFILL
+                ]
+                self.assertEqual(len(prefill), 1)
+                self.assertEqual(prefill[0].ip, "selected" if selected else "127.0.0.3")
+                self.assertEqual(prefill[0].grpc_port, 7001 if selected else 9003)
+
+        reserved = GenerateInput(
+            request_id=3,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(role_addrs=[decode]),
+            enqueued_by_master=True,
+        )
+        await visitor.route_ips(reserved)
+        self.assertEqual(reserved.generate_config.role_addrs, [decode])
+
+        missing_decode = GenerateInput(
+            request_id=2,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+        await visitor.route_ips(missing_decode)
+        self.assertEqual([addr.role for addr in missing_decode.generate_config.role_addrs], [RoleType.PREFILL])
+
+    async def test_master_only_frontend_rejects_empty_route_and_preserves_error(self):
+        from unittest.mock import AsyncMock
+
+        from rtp_llm.server.master_client import FlexlbResponse
+
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=config,
+            addresses=["localhost:8080"],
+        )
+        visitor.backend_role_list = []
+        visitor.host_service.get_master_addr = lambda: "master:8080"
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.get_domain_route_addrs = AsyncMock()
+        for result in (
+            FlexlbResponse.connection_failed_response(),
+            FlexlbResponse.error_response(512, "admission rejected"),
+        ):
+            with self.subTest(connection_failed=result.connection_failed):
+                visitor.get_master_route_addrs = AsyncMock(return_value=result)
+                input_obj = GenerateInput(
+                    request_id=1,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                )
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "no backend role addresses found"
+                ) as raised:
+                    await visitor.route_ips(input_obj)
+                if result.error_code is not None:
+                    self.assertEqual(raised.exception.rtp_error_code, result.error_code)
+                visitor.get_master_route_addrs.assert_awaited_once_with(input_obj)
+
+    def _frontend_batch_visitor_and_inputs(self):
+        config = PDSepConfig()
+        config.role_type = RoleType.FRONTEND
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=config,
+            addresses=["localhost:8080"],
+        )
+        visitor.host_service.service_available = False
+        inputs = [
+            GenerateInput(
+                request_id=i,
+                token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                mm_inputs=[],
+                generate_config=GenerateConfig(),
+            )
+            for i in (11, 12)
+        ]
+        return visitor, inputs
+
+    async def test_batch_enqueue_pd_uses_one_pair(self):
+        visitor, inputs = self._frontend_batch_visitor_and_inputs()
+        visitor.host_service.service_available = True
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
+        pair = [
+            RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=10000, grpc_port=10001),
+            RoleAddr(role=RoleType.DECODE, ip="decode", http_port=20000, grpc_port=20001),
+        ]
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: [
+            addr for addr in pair if addr.role in roles
+        ]
+        async def batch_enqueue(items):
+            for item in items:
+                self.assertEqual(item.generate_config.role_addrs, pair)
+                self.assertFalse(item.enqueued_by_master)
+            return []
+        visitor.model_rpc_client.batch_enqueue = batch_enqueue
+        self.assertEqual(await visitor.batch_enqueue(inputs), [])
+
+    async def test_batch_enqueue_pd_empty(self):
+        visitor, _ = self._frontend_batch_visitor_and_inputs()
+        self.assertEqual(await visitor.batch_enqueue([]), [])
+
+    async def test_batch_enqueue_routes_each_request_for_batch_infer(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.DECODE
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["10.0.0.10:10101", "10.0.0.11:10111"],
+        )
+        visitor.host_service.service_available = True
+
+        route_calls = []
+
+        async def _fake_route(input_obj: GenerateInput):
+            route_calls.append(input_obj.request_id)
+            input_obj.generate_config.role_addrs = [
+                RoleAddr(
+                    role=RoleType.PDFUSION,
+                    ip="10.0.0.10",
+                    http_port=10100,
+                    grpc_port=10101,
+                )
+            ]
+
+        async def _fake_batch_enqueue(inputs: list[GenerateInput]):
+            self.assertEqual(route_calls, [41, 42])
+            self.assertEqual(len(inputs[0].generate_config.role_addrs), 1)
+            self.assertEqual(inputs[0].generate_config.role_addrs[0].ip, "10.0.0.10")
+            self.assertEqual(len(inputs[1].generate_config.role_addrs), 1)
+            self.assertEqual(inputs[1].generate_config.role_addrs[0].ip, "10.0.0.10")
+            return []
+
+        visitor.route_ips = _fake_route
+        visitor.model_rpc_client.batch_enqueue = _fake_batch_enqueue
+
+        results = await visitor.batch_enqueue(
+            [
+                GenerateInput(
+                    request_id=41,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                ),
+                GenerateInput(
+                    request_id=42,
+                    token_ids=torch.tensor([4, 5, 6], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                ),
+            ]
+        )
+
+        self.assertEqual(results, [])
 
     async def test_think_label_real_situation_union(self):
         tokenizer = TokenizerFactory.create(

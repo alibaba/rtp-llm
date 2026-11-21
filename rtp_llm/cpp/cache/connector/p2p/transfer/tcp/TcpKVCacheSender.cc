@@ -180,7 +180,8 @@ void TcpKVCacheSender::loadToRemote(
     uint32_t                                                             port,
     const std::shared_ptr<::tcp_transfer::TcpLayerBlockTransferRequest>& transfer_request,
     std::function<void(TransferErrorCode, const std::string&)>           callback,
-    int64_t                                                              deadline_ms) {
+    int64_t                                                              deadline_ms,
+    const std::function<bool()>&                                         is_cancelled) {
     if (deadline_ms <= currentTimeMs()) {
         if (callback) callback(TransferErrorCode::TIMEOUT, "transfer deadline expired before TCP submission");
         return;
@@ -197,6 +198,10 @@ void TcpKVCacheSender::loadToRemote(
     // and controller share the remaining per-request budget, without exporting
     // another process's absolute clock or Prefill's static load timeout.
     const auto remaining_ms = deadline_ms - currentTimeMs();
+    if (is_cancelled && is_cancelled()) {
+        callback(TransferErrorCode::CANCELLED, "transfer cancelled before TCP submission");
+        return;
+    }
     if (remaining_ms <= 0) {
         if (callback) callback(TransferErrorCode::TIMEOUT, "transfer deadline expired during TCP preparation");
         return;
@@ -249,7 +254,7 @@ void TcpKVCacheSender::send(const transfer::SendRequest&                        
     // loadToRemote = getChannel + arpc stub.transfer; only the synchronous
     // prefix is measured here (the closure runs on arpc IO threads).
     const int64_t load_remote_start_us = currentTimeUs();
-    loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms);
+    loadToRemote(request.ip, request.port, transfer_request, callback2, request.deadline_ms, request.is_cancelled);
     const int64_t load_remote_cost_us = currentTimeUs() - load_remote_start_us;
 
     const int64_t total_sync_cost_us = make_req_cost_us + load_remote_cost_us;

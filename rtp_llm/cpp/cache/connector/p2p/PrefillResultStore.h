@@ -24,6 +24,7 @@ public:
         uint64_t                             rng_offset                           = 0;
         bool                                 has_first_token                      = false;
         int64_t                              first_token_id   = 0;
+        int64_t                              first_token_time_us = 0;
         int32_t                              total_reuse_len  = 0;
         int32_t                              local_reuse_len  = 0;
         int32_t                              remote_reuse_len = 0;
@@ -37,6 +38,10 @@ public:
         torch::Tensor                        propose_hidden;
         std::vector<int32_t>                 position_ids;
         std::map<std::string, torch::Tensor> first_token_tensors;
+        int64_t                              frontend_context_token_num                  = 0;
+        int64_t                              frontend_context_token_num_with_cache       = 0;
+        int64_t                              frontend_context_execute_time_us            = 0;
+        int64_t                              frontend_context_execute_time_with_cache_us = 0;
         std::optional<PromptLogitsOutput>    prompt_logits;
     };
 

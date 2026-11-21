@@ -65,8 +65,11 @@ bool RdmaKVCacheReceiver::init(uint32_t listen_port,
                                int64_t p2p_rdma_staging_total_bytes,
                                size_t llm_kv_block_size_bytes,
                                int64_t rdma_disconnect_after_deadline_ms) {
-    rdma_client_ = createRdmaClient(
-        rdma_memory_manager_, rdma_io_thread_count, rdma_worker_thread_count, rdma_connections_per_host);
+    rdma_client_ = createRdmaClient(rdma_memory_manager_,
+                                    metrics_reporter_,
+                                    rdma_io_thread_count,
+                                    rdma_worker_thread_count,
+                                    rdma_connections_per_host);
     if (!rdma_client_) {
         RTP_LLM_LOG_WARNING("create rdma client failed");
         return false;

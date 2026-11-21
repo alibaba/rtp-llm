@@ -8,13 +8,18 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
-#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -33,6 +38,10 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <future>
+#include <set>
+#include "autil/NetUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendFactory.h"
 
 namespace rtp_llm {
 
@@ -135,27 +144,6 @@ public:
     std::vector<std::shared_ptr<RequestBlockBuffer>>      load_buffer_requests_;
 };
 
-class MinimalEngine: public EngineBase {
-public:
-    MinimalEngine(const EngineInitParams& params, std::shared_ptr<KVCacheManager> cache_manager): EngineBase(params) {
-        resource_context_.cache_manager = std::move(cache_manager);
-    }
-
-    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
-        return nullptr;
-    }
-    void         enqueue(std::shared_ptr<GenerateStream>&) override {}
-    absl::Status stop() override {
-        return absl::OkStatus();
-    }
-    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
-        return absl::UnimplementedError("unused in test");
-    }
-    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
-        return KVCacheInfo();
-    }
-};
-
 void fillDsv4RegionBytes(
     const std::shared_ptr<KVCacheManager>& manager, int block_id, int layer_id, const std::string& tag, uint8_t value) {
     auto parts = manager->convertIndexToBuffer(layer_id, tag, block_id);
@@ -187,11 +175,7 @@ uint8_t dsv4PdPattern(const CacheConfig& config, int layer_id, const std::string
     return static_cast<uint8_t>(17 + layer_id * 19 + gid * 11 + block_pos);
 }
 
-// Block positions a group actually transfers on the PD prefill->decode path.
-// Both sides derive the plan from the group policy through buildCacheStorePlan:
-// runtimeWriteCacheStore directly, DecodeRpcServer::loadCache via
-// DecodeRpcServer::buildGroupLoadPlan. This helper mirrors that plan for
-// cp_size == 1, where it reduces to blockPositionsForCacheTransfer.
+// Expected logical positions for the cache-store writer round trip.
 std::vector<size_t>
 dsv4TransferPositions(const CacheConfig& config, const std::string& tag, size_t block_num, size_t reuse_block_size) {
     const auto policy = config.group(tag).policy;
@@ -207,6 +191,51 @@ torch::Tensor blockIdsTensor(const BatchKVCacheResourcePtr& resource, const std:
     const auto& blocks = resource->blocks(0, tag);
     return torch::from_blob(const_cast<int*>(blocks.data()), {1, static_cast<int64_t>(blocks.size())}, torch::kInt32)
         .clone();
+}
+
+// The Decode RPC no longer consumes the legacy store. Keep these writer
+// round trips on the retained CacheStore API; P2P routing is covered separately.
+void loadWrittenCacheBlocks(const std::shared_ptr<MemoryBackedCacheStore>& store,
+                            const std::shared_ptr<KVCacheManager>&         manager,
+                            const BatchKVCacheResourcePtr&                 resource,
+                            const std::vector<int64_t>&                    keys,
+                            int64_t                                        request_id,
+                            size_t                                         model_id,
+                            size_t                                         layer_count,
+                            size_t                                         reuse_blocks = 0,
+                            int                                            cp_size      = 1) {
+    const auto& config = manager->cacheConfig();
+    for (int rank = 0; rank < cp_size; ++rank) {
+        std::vector<std::shared_ptr<RequestBlockBuffer>> buffers;
+        for (size_t layer = 0; layer < layer_count; ++layer) {
+            for (const auto& tag : config.topology().layer(layer).group_tags) {
+                auto        buffer = std::make_shared<RequestBlockBuffer>(std::to_string(request_id),
+                                                                   std::to_string(request_id) + "-"
+                                                                       + std::to_string(layer) + "-tag-" + tag);
+                const auto& blocks = resource->blocks(0, tag);
+                for (auto pos : dsv4TransferPositions(config, tag, blocks.size(), reuse_blocks)) {
+                    if (cp_size > 1 && pos % cp_size != static_cast<size_t>(rank)) {
+                        continue;
+                    }
+                    if (isNullBlockIdx(blocks[pos])) {
+                        continue;
+                    }
+                    const auto parts = manager->convertIndexToBuffer(layer, tag, blocks[pos]);
+                    ASSERT_EQ(parts.size(), 1u);
+                    const auto key = "kv_" + makeCacheKey(model_id, std::to_string(keys.at(pos)), layer, tag);
+                    buffer->addBlock(key,
+                                     std::shared_ptr<void>(parts[0].addr, [](void*) {}),
+                                     parts[0].size_bytes,
+                                     parts[0].is_cuda,
+                                     true);
+                }
+                buffers.push_back(buffer);
+            }
+        }
+        auto load = store->loadBuffers(buffers, "127.0.0.1", 12345, 12346, 5000, [] { return false; }, 1, 0);
+        load->waitDone();
+        ASSERT_TRUE(load->success()) << load->getErrorInfoString();
+    }
 }
 
 // Per-request metadata for a one-context-batch, one-block cache-store write.
@@ -274,14 +303,7 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
 }  // namespace
 
 // =============================================================================
-// Test fixture: PD sep KV cache release correctness
-// Validates that holdKVCacheForPDSep / releaseKVCacheForPDSep / releaseResource
-// interact correctly with respect to:
-//   1. Block ref-counts stay > 0 while pd_kvcache_ref_ is held
-//   2. insertIntoCache (device reuse) is called before blocks are cleared
-//   3. freeBlocksNum() returns to baseline after both release paths complete
-//   4. Race condition: concurrent releaseKVCacheForPDSep (grpc thread) vs
-//      releaseResource (engine thread)
+// PD KV cache release and reuse correctness, including grouped cache publication.
 // =============================================================================
 class PdSepKVCacheReleaseTest: public DeviceTestBase {
 protected:
@@ -297,7 +319,8 @@ protected:
 
     CacheConfig makeDsv4Config(uint32_t block_num               = 16,
                                uint32_t seq_size_per_block      = kDsv4TokensPerBlock,
-                               uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock) {
+                               uint32_t kernel_seq_size_per_blk = kDsv4TokensPerBlock,
+                               ParallelismConfig pc = ParallelismConfig{}) {
         ModelConfig mc;
         mc.num_layers                   = 43;
         mc.hidden_size                  = 4096;
@@ -326,7 +349,6 @@ protected:
         // pools so the unit test does not reserve hundreds of MB of HBM.
         test::setDsv4ExplicitPoolBlocks(mc, "hca_state", block_num);
 
-        ParallelismConfig pc;
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
@@ -335,6 +357,8 @@ protected:
         config.finalizeBlockNums(block_num, RuntimeConfig{});
         return config;
     }
+
+    void verifyDsv4TcpRegionTransfer(uint32_t logical_tokens, uint32_t kernel_tokens);
 
     // Build a PREFILL stream with reuse_cache enabled
     void prepareStream(const std::vector<int>& input_tokens) {
@@ -393,58 +417,38 @@ protected:
     size_t                                initial_free_blocks_ = 0;
 };
 
-TEST_F(PdSepKVCacheReleaseTest, MissingGroupIdentityRejectsAsyncLoadBeforeConnecting) {
-    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
-    EngineInitParams params;
-    DecodeRpcServer  server;
-    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
-    server.resource_.workers      = {"decode-0"};
-    server.resource_.grpc_workers = {"127.0.0.1:1"};
-    grpc::ServerContext          server_context;
-    DecodeRpcContext             rpc_context{nullptr};
-    kmonitor::MetricsReporterPtr reporter;
-    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
-    decode_context.peer_addrs = {"prefill-0"};
-    // An uninitialized resource has no rows/tags. The request-only builders may
-    // accept this, but the asynchronous dispatch entry must reject it locally.
-    KVCacheResource                     resource;
-    DecodeRpcServer::LoadKVCacheContext load_context(
-        42, "missing-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
-    ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
-    EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, load_context));
-    EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
-}
-
-TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnecting) {
-    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
-    EngineInitParams params;
-    DecodeRpcServer  server;
-    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
-    server.resource_.workers      = {"decode-0"};
-    server.resource_.grpc_workers = {"127.0.0.1:1"};
-    grpc::ServerContext          server_context;
-    DecodeRpcContext             rpc_context{nullptr};
-    kmonitor::MetricsReporterPtr reporter;
-    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
-    decode_context.peer_addrs = {"prefill-0"};
+TEST_F(PdSepKVCacheReleaseTest, RejectsMissingOrMalformedGroupIdentityBeforeConnecting) {
+    const auto config = makeConfig();
+    P2PConnectorSchedulerConfig scheduler_config;
+    scheduler_config.topology = config.topologyPtr();
+    scheduler_config.cache_key_tokens_per_block = config.seq_size_per_block;
+    scheduler_config.parallelism_config.tp_size = 1;
+    // No RPC client or worker pool: route validation must finish before either is needed.
+    P2PSchedulerDecodeRead scheduler(scheduler_config, nullptr, nullptr);
+    const auto plan = scheduler.planFor(1, 1, "invalid-identity");
+    ASSERT_TRUE(plan->ok()) << plan->error.ToString();
     KVCacheResource resource;
-    resource.initGroups(manager->cacheConfig().topologyPtr());
-    auto                             holder = std::make_shared<BlockIds>();
-    const auto                       tag    = manager->cacheConfig().groupTags().front();
+    resource.cacheKeys() = {42};
+    const auto expect_invalid_route = [&] {
+        auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1);
+        EXPECT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    };
+    expect_invalid_route();
+
+    resource.initGroups(config.topologyPtr());
+    auto holder = std::make_shared<BlockIds>();
+    holder->assign({1});
+    const auto tag = config.groupTags().front();
     const std::vector<GroupBlockIds> malformed{{{}, {holder}},
                                                {{{tag, 0}, {"extra", 0}}, {holder, holder}},
                                                {{{tag, 1}}, {holder}},
                                                {{{tag, 0}, {"extra", 2}}, {holder, holder}},
                                                {{{tag, 0}}, {nullptr}}};
     for (const auto& blocks : malformed) {
-        DecodeRpcServer::LoadKVCacheContext context(
-            42, "malformed-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
-        // Fault injection proves dispatch revalidates even after constructor validation.
-        // Production only receives the const complete object.
-        const_cast<GroupBlockIds&>(context.groupBlockIds()) = blocks;
-        ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
-        EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, context));
-        EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+        // Fault injection: the dispatch projection must reject malformed identity before any RPC.
+        const_cast<GroupBlockIds&>(resource.groupBlockIds()) = blocks;
+        expect_invalid_route();
     }
 }
 
@@ -476,85 +480,7 @@ TEST_F(PdSepKVCacheReleaseTest, testNormalRelease_BlocksReturnedToPool) {
 }
 
 // =============================================================================
-// Test 2: holdKVCacheForPDSep increments ref count
-// After hold, pd_kvcache_ref_ is non-null
-// =============================================================================
-TEST_F(PdSepKVCacheReleaseTest, testHoldKVCacheForPDSep_SetsRef) {
-    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
-    allocateAndFinish();
-
-    auto& resource = stream_->streamCacheResource();
-    ASSERT_GT(resource.curBlocksNum(), 0);
-
-    // Call hold - simulates prefill pollLocalOutput holding the cache
-    resource.holdKVCacheForPDSep();
-
-    EXPECT_NE(resource.pd_kvcache_ref_, nullptr) << "pd_kvcache_ref_ should be set after hold";
-}
-
-// =============================================================================
-// Test 3: releaseResource with pd_kvcache_ref_ held
-// Blocks should be cleared after releaseResource (clearBlocks always called)
-// resource_released_ should be true, insertIntoCache should run
-// =============================================================================
-TEST_F(PdSepKVCacheReleaseTest, testReleaseResource_WithHold_ClearsBlocks) {
-    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
-    allocateAndFinish();
-
-    auto& resource  = stream_->streamCacheResource();
-    int   allocated = resource.curBlocksNum();
-    ASSERT_GT(allocated, 0);
-
-    resource.holdKVCacheForPDSep();
-    ASSERT_NE(resource.pd_kvcache_ref_, nullptr);
-
-    // Simulate engine thread calling releaseResource
-    stream_->releaseResource();
-
-    EXPECT_TRUE(resource.resource_released_) << "resource_released_ should be true";
-    // clearBlocks() is always called in releaseResource
-    // blocks list is cleared, but ref is still held by pd_kvcache_ref_
-    // freeBlocksNum should NOT be fully restored yet (blocks still held by ref)
-    // NOTE: tryReleaseKVBlock calls cache_manager_->free() which returns blocks to pool,
-    // but pd_kvcache_ref_ holds an extra ref, so actual free count depends on impl.
-    // Key invariant: resource_released_ = true and no crash.
-    EXPECT_TRUE(resource.resource_released_);
-}
-
-// =============================================================================
-// Test 4: releaseKVCacheForPDSep after releaseResource
-// This is the "correct order" path: engine thread releases first,
-// then grpc thread calls releaseKVCacheForPDSep.
-// After both complete, freeBlocks should return to initial.
-// =============================================================================
-TEST_F(PdSepKVCacheReleaseTest, testCorrectOrder_ReleaseResourceThenReleasePDSep_BlocksReturned) {
-    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
-    allocateAndFinish();
-
-    auto& resource = stream_->streamCacheResource();
-    ASSERT_GT(resource.curBlocksNum(), 0);
-
-    // Step 1: hold (prefill pollLocalOutput)
-    resource.holdKVCacheForPDSep();
-    ASSERT_NE(resource.pd_kvcache_ref_, nullptr);
-
-    // Step 2: engine thread releases
-    stream_->releaseResource();
-    EXPECT_TRUE(resource.resource_released_);
-
-    // Step 3: grpc thread releases
-    resource.releaseKVCacheForPDSep();
-    EXPECT_EQ(resource.pd_kvcache_ref_, nullptr) << "pd_kvcache_ref_ should be reset";
-
-    // After both releases, the device cache may retain 1 block for reuse (insertIntoCache).
-    // Key invariant: no blocks leaked beyond initial allocation.
-    EXPECT_GE(cache_manager_->freeBlocksNum(), initial_free_blocks_ - 2)
-        << "No extra blocks should be leaked. free=" << cache_manager_->freeBlocksNum()
-        << " initial=" << initial_free_blocks_;
-}
-
-// =============================================================================
-// Test 5: insertIntoCache is called during releaseResource (device reuse cache)
+// insertIntoCache is called during releaseResource (device reuse cache)
 // After releaseResource, the cache keys should be findable in the block cache
 // (i.e., a subsequent allocation with the same tokens hits reuse)
 // =============================================================================
@@ -566,14 +492,9 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(resource.curBlocksNum(), 0);
 
-    resource.holdKVCacheForPDSep();
-
     // Engine thread releases: should call insertIntoCache (device cache)
     stream_->releaseResource();
     EXPECT_TRUE(resource.resource_released_);
-
-    // Release the pd_sep hold (grpc thread)
-    resource.releaseKVCacheForPDSep();
 
     // Now prepare a second stream with the same tokens - should get reuse
     ResourceContext resource_context2;
@@ -610,79 +531,333 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
     stream2->releaseResource();
 }
 
-// =============================================================================
-// Test 6: Race condition simulation
-// Engine thread calls releaseResource concurrently with
-// grpc thread calling releaseKVCacheForPDSep.
-// Verifies: no crash, no double-free, freeBlocks returns to initial after both.
-// =============================================================================
-TEST_F(PdSepKVCacheReleaseTest, testRaceCondition_ConcurrentRelease_NoDoubleFree) {
-    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
-    allocateAndFinish();
-
-    auto& resource = stream_->streamCacheResource();
-    ASSERT_GT(resource.curBlocksNum(), 0);
-
-    resource.holdKVCacheForPDSep();
-    ASSERT_NE(resource.pd_kvcache_ref_, nullptr);
-
-    std::atomic<bool> engine_done{false};
-    std::atomic<bool> grpc_done{false};
-
-    // Engine thread: releaseResource
-    std::thread engine_thread([&]() {
-        stream_->releaseResource();
-        engine_done.store(true);
-    });
-
-    // Grpc thread: releaseKVCacheForPDSep (with small delay to increase race chance)
-    std::thread grpc_thread([&]() {
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
-        resource.releaseKVCacheForPDSep();
-        grpc_done.store(true);
-    });
-
-    engine_thread.join();
-    grpc_thread.join();
-
-    EXPECT_TRUE(engine_done.load()) << "Engine thread should have completed";
-    EXPECT_TRUE(grpc_done.load()) << "Grpc thread should have completed";
-    EXPECT_TRUE(resource.resource_released_) << "resource_released_ should be true";
-    EXPECT_EQ(resource.pd_kvcache_ref_, nullptr) << "pd_kvcache_ref_ should be reset";
-
-    // Critical: no double-free, no extra blocks leaked.
-    // insertIntoCache may hold 1 cached block ref, so freeBlocksNum can be <= initial.
-    EXPECT_GE(cache_manager_->freeBlocksNum(), initial_free_blocks_ - 2)
-        << "No extra blocks should be leaked after concurrent release. "
-        << "free=" << cache_manager_->freeBlocksNum() << " initial=" << initial_free_blocks_;
+void PdSepKVCacheReleaseTest::verifyDsv4TcpRegionTransfer(uint32_t logical_tokens, uint32_t kernel_tokens) {
+    auto config = makeDsv4Config(/*block_num=*/4, logical_tokens, kernel_tokens);
+    auto manager = std::make_shared<KVCacheManager>(config, false, nullptr);
+    ASSERT_TRUE(manager->init());
+    transfer::TransferBackendConfig backend_config;
+    backend_config.cache_store_listen_port = autil::NetUtil::randomPort();
+    backend_config.messager_io_thread_count = 1;
+    backend_config.messager_worker_thread_count = 1;
+    auto sender = transfer::createTransferBackend(transfer::TransferBackend::kTcp, backend_config,
+                                                   transfer::TransferBackendRole::kSender).sender;
+    auto receiver = transfer::createTransferBackend(transfer::TransferBackend::kTcp, backend_config,
+                                                     transfer::TransferBackendRole::kReceiver).receiver;
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+    std::set<std::string> covered_groups;
+    size_t region_count = 0;
+    for (const auto& layer : config.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            auto source = manager->convertIndexToBuffer(layer.layer_id, tag, 1);
+            auto target = manager->convertIndexToBuffer(layer.layer_id, tag, 2);
+            ASSERT_FALSE(source.empty()) << tag;
+            ASSERT_EQ(source.size(), target.size()) << tag;
+            std::vector<std::vector<uint8_t>> expected;
+            for (size_t region = 0; region < source.size(); ++region) {
+                ASSERT_EQ(source[region].size_bytes, target[region].size_bytes);
+                std::vector<uint8_t> bytes(source[region].size_bytes);
+                for (size_t offset = 0; offset < bytes.size(); ++offset) {
+                    bytes[offset] = static_cast<uint8_t>((region_count * 37 + offset) % 251);
+                }
+                auto host = torch::from_blob(bytes.data(), {static_cast<int64_t>(bytes.size())}, torch::kUInt8);
+                auto src = torch::from_blob(source[region].addr, {static_cast<int64_t>(bytes.size())},
+                    torch::TensorOptions(torch::kUInt8).device(source[region].is_cuda ? torch::kCUDA : torch::kCPU));
+                auto dst = torch::from_blob(target[region].addr, {static_cast<int64_t>(bytes.size())},
+                    torch::TensorOptions(torch::kUInt8).device(target[region].is_cuda ? torch::kCUDA : torch::kCPU));
+                src.copy_(host);
+                dst.fill_(255);
+                expected.push_back(std::move(bytes));
+                ++region_count;
+            }
+            runtimeSyncAndCheck();
+            auto src_info = std::make_shared<transfer::KeyBlockInfo>();
+            auto dst_info = std::make_shared<transfer::KeyBlockInfo>();
+            src_info->blocks = source;
+            dst_info->blocks = target;
+            const auto key = "dsv4-seven-groups-" + std::to_string(layer.layer_id) + "-" + tag;
+            const auto deadline = currentTimeMs() + 10000;
+            transfer::RecvRequest receive;
+            receive.unique_key = key;
+            receive.deadline_ms = deadline;
+            receive.block_info.emplace(1001, dst_info);
+            auto task = receiver->recv(receive);
+            ASSERT_NE(task, nullptr);
+            transfer::SendRequest send;
+            send.ip = "127.0.0.1";
+            send.port = backend_config.cache_store_listen_port;
+            send.unique_key = key;
+            send.deadline_ms = deadline;
+            send.timeout_ms = 10000;
+            send.block_info.emplace(1001, src_info);
+            auto completion = std::make_shared<std::promise<transfer::TransferErrorCode>>();
+            auto done = completion->get_future();
+            sender->send(send, [completion](auto code, const std::string&) { completion->set_value(code); });
+            ASSERT_EQ(done.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+            ASSERT_EQ(done.get(), transfer::TransferErrorCode::OK) << tag;
+            ASSERT_TRUE(task->success()) << task->errorMessage();
+            runtimeSyncAndCheck();
+            for (size_t region = 0; region < target.size(); ++region) {
+                auto dst = torch::from_blob(target[region].addr, {static_cast<int64_t>(target[region].size_bytes)},
+                    torch::TensorOptions(torch::kUInt8).device(target[region].is_cuda ? torch::kCUDA : torch::kCPU));
+                auto actual = dst.cpu().contiguous();
+                EXPECT_EQ(std::memcmp(actual.data_ptr<uint8_t>(), expected[region].data(), expected[region].size()), 0)
+                    << "layer=" << layer.layer_id << " tag=" << tag << " region=" << region;
+            }
+            covered_groups.insert(tag);
+        }
+    }
+    EXPECT_EQ(covered_groups.size(), kDsv4PoolNum);
+    EXPECT_GT(region_count, covered_groups.size());
 }
 
-// =============================================================================
-// Test 7: holdKVCacheForPDSep without subsequent releaseKVCacheForPDSep
-// (simulates grpc failure: hold is called but release never comes)
-// releaseResource alone should still eventually free blocks when ref drops
-// =============================================================================
-TEST_F(PdSepKVCacheReleaseTest, testHoldWithoutReleasePDSep_ResourceReleasedStillCompletes) {
-    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
-    allocateAndFinish();
+TEST_F(PdSepKVCacheReleaseTest, Dsv4RealCpPlanTransfersSuffixThroughTcpAndPreservesReusedPrefix) {
+    ParallelismConfig prefill_pc;
+    prefill_pc.role_type                          = RoleType::PREFILL;
+    prefill_pc.tp_size                            = 2;
+    prefill_pc.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    prefill_pc.prefill_cp_config.kv_cache_sharded = true;
+    prefill_pc.prefill_cp_config.prefill_cp_size  = 2;
+    auto decode_pc                                = prefill_pc;
+    decode_pc.role_type                           = RoleType::DECODE;
+    decode_pc.tp_size                             = 1;
+    decode_pc.prefill_cp_config.method            = CPRotateMethod::PREFILL_CP;
+    const auto prefill_config                     = makeDsv4Config(8, 256, 128, prefill_pc);
+    const auto decode_config                      = makeDsv4Config(8, 256, 128, decode_pc);
+    const auto source =
+        ShardLayoutFactory::fromTopology(prefill_config.topology(), prefill_pc, RoleType::PREFILL, kDsv4TokensPerBlock);
+    const auto target =
+        ShardLayoutFactory::fromTopology(decode_config.topology(), decode_pc, RoleType::DECODE, kDsv4TokensPerBlock);
+    const auto tags = ShardLayoutFactory::tagsOf(decode_config.topology());
+    ASSERT_EQ(tags.size(), kDsv4PoolNum);
+    const auto planned = KVCacheTransferPlanner::plan(source, target, tags);
+    ASSERT_TRUE(planned.ok()) << planned.error.ToString();
+    // Prefix filtering must happen after resolving the original request's key
+    // geometry. Resolving a shortened suffix would change CP ownership and
+    // compact-tail placement instead of preserving absolute key positions.
+    constexpr size_t      full_key_count = 7;
+    constexpr size_t      reused_keys    = 3;  // Odd prefix shifts CP ownership if incorrectly rebased.
+    std::set<std::string> covered;
+    std::set<int>         source_ranks;
+    bool                  has_byte_slice      = false;
+    bool                  has_retained_suffix = false;
+    for (const auto& route : planned.plan.routes) {
+        EXPECT_EQ(route.src_bytes, route.dst_bytes) << route.cache_tag;
+        EXPECT_GT(route.src_bytes, 0u) << route.cache_tag;
+        auto       positions = KVCacheTransferPlanner::resolveKeys(route.src_keys, full_key_count);
+        const auto original  = positions;
+        positions.erase(
+            std::remove_if(positions.begin(), positions.end(), [](size_t pos) { return pos < reused_keys; }),
+            positions.end());
+        for (const auto position : positions) {
+            EXPECT_GE(position, reused_keys);
+            EXPECT_LT(position, full_key_count);
+            EXPECT_NE(std::find(original.begin(), original.end(), position), original.end());
+        }
+        has_retained_suffix = has_retained_suffix || !positions.empty();
+        has_byte_slice      = has_byte_slice || route.dst_slice.mode != CpBlockSliceMode::NONE;
+        source_ranks.insert(route.src_rank);
+        covered.insert(route.cache_tag);
+    }
+    EXPECT_EQ(covered.size(), kDsv4PoolNum);
+    EXPECT_EQ(source_ranks, (std::set<int>{0, 1}));
+    EXPECT_TRUE(has_byte_slice);
+    EXPECT_TRUE(has_retained_suffix);
 
-    auto& resource = stream_->streamCacheResource();
-    ASSERT_GT(resource.curBlocksNum(), 0);
+    std::vector<std::shared_ptr<KVCacheManager>>      source_managers;
+    std::vector<std::shared_ptr<LayerBlockConverter>> source_converters;
+    std::vector<KVCacheResource>                      source_resources(2);
+    CacheKeysType                                     keys(full_key_count);
+    std::iota(keys.begin(), keys.end(), 1001);
+    BlockIndicesType physical_ids(full_key_count);
+    std::iota(physical_ids.begin(), physical_ids.end(), 1);
+    for (int rank = 0; rank < 2; ++rank) {
+        auto manager = std::make_shared<KVCacheManager>(prefill_config, false, nullptr);
+        ASSERT_TRUE(manager->init());
+        source_converters.push_back(std::make_shared<LayerBlockConverterImpl>(manager->coordinator_manager_));
+        source_managers.push_back(std::move(manager));
+        source_resources[rank].initGroups(prefill_config.topologyPtr());
+        source_resources[rank].setCacheKeys(keys);
+        for (const auto& tag : tags) {
+            source_resources[rank].mutableBlockIds(tag).assign(physical_ids);
+        }
+    }
+    auto target_manager = std::make_shared<KVCacheManager>(decode_config, false, nullptr);
+    ASSERT_TRUE(target_manager->init());
+    auto            target_converter = std::make_shared<LayerBlockConverterImpl>(target_manager->coordinator_manager_);
+    KVCacheResource target_resource;
+    target_resource.initGroups(decode_config.topologyPtr());
+    target_resource.setCacheKeys(keys);
+    for (const auto& tag : tags) {
+        target_resource.mutableBlockIds(tag).assign(physical_ids);
+    }
+    transfer::TransferBackendConfig backend_config;
+    backend_config.cache_store_listen_port      = autil::NetUtil::randomPort();
+    backend_config.messager_io_thread_count     = 1;
+    backend_config.messager_worker_thread_count = 1;
+    auto sender                                 = transfer::createTransferBackend(
+                      transfer::TransferBackend::kTcp, backend_config, transfer::TransferBackendRole::kSender)
+                      .sender;
+    auto receiver = transfer::createTransferBackend(
+                        transfer::TransferBackend::kTcp, backend_config, transfer::TransferBackendRole::kReceiver)
+                        .receiver;
+    ASSERT_NE(sender, nullptr);
+    ASSERT_NE(receiver, nullptr);
+    auto tensor = [](const BlockInfo& block) {
+        return torch::from_blob(block.addr,
+                                {static_cast<int64_t>(block.size_bytes)},
+                                torch::TensorOptions(torch::kUInt8).device(block.is_cuda ? torch::kCUDA : torch::kCPU));
+    };
+    size_t                transferred_regions = 0;
+    size_t                skipped_prefix_keys = 0;
+    std::set<std::string> transferred_tags;
+    for (const auto& layer : decode_config.topology().layers()) {
+        for (const auto& tag : layer.group_tags) {
+            std::vector<BlockInfo>            target_regions;
+            std::vector<std::vector<uint8_t>> expected;
+            for (const auto block_id : physical_ids) {
+                for (const auto& part : target_manager->convertIndexToBuffer(layer.layer_id, tag, block_id)) {
+                    tensor(part).fill_(255);
+                    target_regions.push_back(part);
+                    expected.emplace_back(part.size_bytes, 255);
+                }
+            }
+            ASSERT_FALSE(target_regions.empty());
+            for (const auto* route : planned.plan.forDecodeRankAndTag(0, tag)) {
+                const auto all_positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, full_key_count);
+                auto       suffix        = all_positions;
+                suffix.erase(std::remove_if(suffix.begin(), suffix.end(), [](size_t pos) { return pos < reused_keys; }),
+                             suffix.end());
+                if (suffix.empty()) {
+                    continue;
+                }
+                auto src_buffers = LayerCacheBufferUtil::convertTagForRoute(source_resources.at(route->src_rank),
+                                                                            prefill_config.topology(),
+                                                                            tag,
+                                                                            all_positions,
+                                                                            source.cpRank(route->src_rank),
+                                                                            source.physicalCpSize(tag),
+                                                                            kDsv4TokensPerBlock);
+                auto dst_buffers = LayerCacheBufferUtil::convertTagForRoute(target_resource,
+                                                                            decode_config.topology(),
+                                                                            tag,
+                                                                            suffix,
+                                                                            0,
+                                                                            target.physicalCpSize(tag),
+                                                                            kDsv4TokensPerBlock);
+                ASSERT_TRUE(src_buffers.ok()) << src_buffers.status().ToString();
+                ASSERT_TRUE(dst_buffers.ok()) << dst_buffers.status().ToString();
+                auto find_layer = [&](const auto& buffers) {
+                    return std::find_if(buffers.begin(), buffers.end(), [&](const auto& buffer) {
+                        return buffer->getLayerId() == layer.layer_id;
+                    });
+                };
+                auto src_layer = find_layer(src_buffers.value());
+                auto dst_layer = find_layer(dst_buffers.value());
+                ASSERT_NE(src_layer, src_buffers.value().end());
+                ASSERT_NE(dst_layer, dst_buffers.value().end());
+                if (source.effectiveMapping(tag) == CpBlockMappingMode::BLOCK_ROUND_ROBIN
+                    && source.groups.at(tag).policy.group_type == CacheGroupType::FULL) {
+                    for (const auto pos : all_positions) {
+                        EXPECT_EQ((*src_layer)->getBlockId(keys[pos]), physical_ids[pos / 2]);
+                    }
+                    for (const auto pos : suffix) {
+                        EXPECT_EQ((*dst_layer)->getBlockId(keys[pos]), physical_ids[pos]);
+                    }
+                }
 
-    resource.holdKVCacheForPDSep();
+                auto src_blocks =
+                    LayerCacheBufferUtil::buildKeyBlockInfosSliced(source_converters.at(route->src_rank),
+                                                                   *src_layer,
+                                                                   route->src_partition.count,
+                                                                   route->src_partition.id,
+                                                                   route->src_slice,
+                                                                   source.groups.at(tag).k_block_payload_bytes);
+                auto dst_blocks =
+                    LayerCacheBufferUtil::buildKeyBlockInfosSliced(target_converter,
+                                                                   *dst_layer,
+                                                                   route->dst_partition.count,
+                                                                   route->dst_partition.id,
+                                                                   route->dst_slice,
+                                                                   target.groups.at(tag).k_block_payload_bytes);
+                ASSERT_TRUE(src_blocks.ok()) << src_blocks.status().ToString();
+                ASSERT_TRUE(dst_blocks.ok()) << dst_blocks.status().ToString();
+                skipped_prefix_keys += src_blocks.value().size() - dst_blocks.value().size();
+                transferred_tags.insert(tag);
+                // Prefill publishes the full route key set. Decode receives only
+                // its suffix; prefix bytes and padding must remain untouched.
+                for (const auto& [key, info] : src_blocks.value()) {
+                    for (size_t part_index = 0; part_index < info->blocks.size(); ++part_index) {
+                        tensor(info->blocks[part_index])
+                            .fill_(static_cast<int>((key * 17 + route->src_rank * 31 + part_index) % 251));
+                    }
+                }
+                runtimeSyncAndCheck();
+                for (const auto& [key, info] : dst_blocks.value()) {
+                    const auto& src_parts = src_blocks.value().at(key)->blocks;
+                    ASSERT_EQ(src_parts.size(), info->blocks.size());
+                    for (size_t part_index = 0; part_index < info->blocks.size(); ++part_index) {
+                        const auto& part = info->blocks[part_index];
+                        ASSERT_EQ(part.size_bytes, src_parts[part_index].size_bytes);
+                        auto       bytes   = tensor(src_parts[part_index]).cpu().contiguous();
+                        bool       found   = false;
+                        const auto address = reinterpret_cast<uintptr_t>(part.addr);
+                        for (size_t region = 0; region < target_regions.size(); ++region) {
+                            const auto base = reinterpret_cast<uintptr_t>(target_regions[region].addr);
+                            if (address >= base && address - base <= expected[region].size()
+                                && part.size_bytes <= expected[region].size() - (address - base)) {
+                                std::memcpy(expected[region].data() + address - base,
+                                            bytes.data_ptr<uint8_t>(),
+                                            part.size_bytes);
+                                found = true;
+                                break;
+                            }
+                        }
+                        ASSERT_TRUE(found) << tag << " key=" << key;
+                        ++transferred_regions;
+                    }
+                }
+                const auto unique_key = "dsv4-planned-" + std::to_string(layer.layer_id) + "-" + tag + "-"
+                                        + std::to_string(route->route_id);
+                const auto            deadline = currentTimeMs() + 10000;
+                transfer::RecvRequest receive;
+                receive.unique_key  = unique_key;
+                receive.deadline_ms = deadline;
+                receive.block_info  = dst_blocks.value();
+                auto task           = receiver->recv(receive);
+                ASSERT_NE(task, nullptr);
+                transfer::SendRequest send;
+                send.ip          = "127.0.0.1";
+                send.port        = backend_config.cache_store_listen_port;
+                send.unique_key  = unique_key;
+                send.deadline_ms = deadline;
+                send.timeout_ms  = 10000;
+                send.block_info  = src_blocks.value();
+                auto completion  = std::make_shared<std::promise<transfer::TransferErrorCode>>();
+                auto done        = completion->get_future();
+                sender->send(send, [completion](auto code, const std::string&) { completion->set_value(code); });
+                ASSERT_EQ(done.wait_for(std::chrono::seconds(15)), std::future_status::ready);
+                ASSERT_EQ(done.get(), transfer::TransferErrorCode::OK) << unique_key;
+                ASSERT_TRUE(task->success()) << task->errorMessage();
+            }
+            runtimeSyncAndCheck();
+            for (size_t region = 0; region < target_regions.size(); ++region) {
+                auto actual = tensor(target_regions[region]).cpu().contiguous();
+                EXPECT_EQ(std::memcmp(actual.data_ptr<uint8_t>(), expected[region].data(), expected[region].size()), 0)
+                    << "layer=" << layer.layer_id << " tag=" << tag << " region=" << region;
+            }
+        }
+    }
+    EXPECT_GT(transferred_regions, kDsv4PoolNum);
+    EXPECT_GT(skipped_prefix_keys, 0u);
+    EXPECT_EQ(transferred_tags.size(), kDsv4PoolNum);
+}
+TEST_F(PdSepKVCacheReleaseTest, Dsv4SevenGroupsTransferEveryLayerRegionThroughTcp) {
+    ASSERT_NO_FATAL_FAILURE(verifyDsv4TcpRegionTransfer(kDsv4TokensPerBlock, kDsv4TokensPerBlock));
+}
 
-    // Only engine thread releases, grpc thread never calls releaseKVCacheForPDSep
-    stream_->releaseResource();
-
-    EXPECT_TRUE(resource.resource_released_);
-
-    // pd_kvcache_ref_ still holds a ref - blocks won't be fully freed until ref drops
-    // Simulate ref drop (e.g. stream destructor or explicit reset)
-    resource.pd_kvcache_ref_.reset();
-
-    // After ref drop, blocks should be returned (minus any held by device cache for reuse)
-    EXPECT_GE(cache_manager_->freeBlocksNum(), initial_free_blocks_ - 2)
-        << "Blocks should be freed once pd_kvcache_ref_ is dropped (minus device cache refs)";
+TEST_F(PdSepKVCacheReleaseTest, Dsv4DecoupledKernelBlocksTransferEveryLayerRegionThroughTcp) {
+    ASSERT_NO_FATAL_FAILURE(verifyDsv4TcpRegionTransfer(kDsv4TokensPerBlock, 128));
 }
 
 TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDeviceCache) {
@@ -710,13 +885,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
         }
     }
 
-    resource.holdKVCacheForPDSep();
-    ASSERT_NE(resource.pd_kvcache_ref_, nullptr);
-
     stream_->releaseResource();
     EXPECT_TRUE(resource.resource_released_);
-    resource.releaseKVCacheForPDSep();
-    EXPECT_EQ(resource.pd_kvcache_ref_, nullptr);
 
     ResourceContext resource_context2;
     resource_context2.cache_manager       = cache_manager_;
@@ -758,10 +928,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
 
     prepareDsv4Stream(tokens, RoleType::PREFILL);
     allocateAndFinish();
-    auto& prefill_resource = stream_->streamCacheResource();
-    prefill_resource.holdKVCacheForPDSep();
     stream_->releaseResource();
-    prefill_resource.releaseKVCacheForPDSep();
 
     ResourceContext decode_resource_context;
     decode_resource_context.cache_manager       = cache_manager_;
@@ -917,32 +1084,7 @@ TEST_F(PdSepKVCacheReleaseTest, testCpShardedCacheStoreTransfersRankMappedPhysic
         fillDsv4RegionBytes(decode_manager, decode_block, /*layer_id=*/0, "default", 0xEE);
     }
 
-    EngineInitParams params;
-    params.model_id                 = model_id;
-    params.model_config_.num_layers = 1;
-    params.parallelism_config       = ParallelismConfig();
-
-    DecodeRpcServer server;
-    server.engine_                   = std::make_shared<MinimalEngine>(params, decode_manager);
-    server.maga_init_params_         = params;
-    server.propose_maga_init_params_ = nullptr;
-    server.resource_.cache_store     = cache_store;
-
-    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346", "127.0.0.1:12347:12348"};
-    grpc::ServerContext                 server_context;
-    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "cp-sharded-cache-store-pd",
-                                                     peer_addrs,
-                                                     cache_keys,
-                                                     decode_resource->cacheResource(0).groupBlockIds(),
-                                                     /*reuse_block_size=*/0,
-                                                     /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
-                                                     &server_context,
-                                                     /*prefill_cp_size=*/cp_size);
-    const auto                          result = server.loadCache(load_context);
-    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    loadWrittenCacheBlocks(cache_store, decode_manager, decode_resource, cache_keys, request_id, model_id, 1, 0, cp_size);
     ASSERT_EQ(cache_store->load_buffer_requests_.size(), static_cast<size_t>(cp_size));
 
     for (int cp_rank = 0; cp_rank < cp_size; ++cp_rank) {
@@ -1071,31 +1213,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     ASSERT_EQ(cache_store->store_request_keys_.size(), expected_requests);
     ASSERT_EQ(cache_store->stored_blocks_.size(), expected_blocks);
 
-    EngineInitParams params;
-    params.model_id                 = model_id;
-    params.model_config_.num_layers = 4;
-    params.parallelism_config       = ParallelismConfig();
-
-    DecodeRpcServer server;
-    server.engine_                   = std::make_shared<MinimalEngine>(params, decode_manager);
-    server.maga_init_params_         = params;
-    server.propose_maga_init_params_ = nullptr;
-    server.resource_.cache_store     = cache_store;
-
-    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
-    grpc::ServerContext                 server_context;
-    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-cache-store-pd",
-                                                     peer_addrs,
-                                                     cache_keys,
-                                                     decode_resource->cacheResource(0).groupBlockIds(),
-                                                     /*reuse_block_size=*/0,
-                                                     /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
-                                                     &server_context);
-    const auto                          result = server.loadCache(load_context);
-    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    loadWrittenCacheBlocks(cache_store, decode_manager, decode_resource, cache_keys, request_id, model_id, 4, 0);
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);
@@ -1216,31 +1334,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
     ASSERT_NE(cache_store->stored_blocks_.find(first_csa_key), cache_store->stored_blocks_.end());
     EXPECT_EQ(cache_store->stored_blocks_[first_csa_key].size(), cache_config.group("csa_kv").kvBlockStrideBytes());
 
-    EngineInitParams params;
-    params.model_id                 = model_id;
-    params.model_config_.num_layers = 4;
-    params.parallelism_config       = ParallelismConfig();
-
-    DecodeRpcServer server;
-    server.engine_                   = std::make_shared<MinimalEngine>(params, decode_manager);
-    server.maga_init_params_         = params;
-    server.propose_maga_init_params_ = nullptr;
-    server.resource_.cache_store     = cache_store;
-
-    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
-    grpc::ServerContext                 server_context;
-    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-decoupled-cache-store-pd",
-                                                     peer_addrs,
-                                                     cache_keys,
-                                                     decode_resource->cacheResource(0).groupBlockIds(),
-                                                     /*reuse_block_size=*/0,
-                                                     /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
-                                                     &server_context);
-    const auto                          result = server.loadCache(load_context);
-    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    loadWrittenCacheBlocks(cache_store, decode_manager, decode_resource, cache_keys, request_id, model_id, 4, 0);
 
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (const auto& tag : cache_config.topology().layer(layer_id).group_tags) {
@@ -1366,31 +1460,7 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     ASSERT_EQ(cache_store->store_request_keys_.size(), expected_requests);
     ASSERT_EQ(cache_store->stored_blocks_.size(), expected_blocks);
 
-    EngineInitParams params;
-    params.model_id                 = model_id;
-    params.model_config_.num_layers = 4;
-    params.parallelism_config       = ParallelismConfig();
-
-    DecodeRpcServer server;
-    server.engine_                   = std::make_shared<MinimalEngine>(params, decode_manager);
-    server.maga_init_params_         = params;
-    server.propose_maga_init_params_ = nullptr;
-    server.resource_.cache_store     = cache_store;
-
-    std::vector<std::string>            peer_addrs = {"127.0.0.1:12345:12346"};
-    grpc::ServerContext                 server_context;
-    DecodeRpcServer::LoadKVCacheContext load_context(request_id,
-                                                     "dsv4-cache-store-pd-prefix-reuse",
-                                                     peer_addrs,
-                                                     cache_keys,
-                                                     decode_resource->cacheResource(0).groupBlockIds(),
-                                                     reuse_num,
-                                                     /*timeout_ms=*/5000,
-                                                     /*partition_count=*/1,
-                                                     /*partition_id=*/0,
-                                                     &server_context);
-    const auto                          result = server.loadCache(load_context);
-    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    loadWrittenCacheBlocks(cache_store, decode_manager, decode_resource, cache_keys, request_id, model_id, 4, reuse_num);
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), expected_requests);
     EXPECT_EQ(cache_store->load_request_keys_.size(), expected_requests);

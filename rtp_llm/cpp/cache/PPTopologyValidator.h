@@ -81,6 +81,8 @@ private:
     int64_t            pp_size_;
 };
 
+std::vector<std::string> collectPPStagePayloads(const std::string& payload, int64_t pp_size);
+
 /**
  * PP implementation of CacheCapacityNegotiator: exchange snapshots, validate,
  * and reduce the canonical table to the agreed inputs. It aborts startup on

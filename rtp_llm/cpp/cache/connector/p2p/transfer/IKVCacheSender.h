@@ -20,6 +20,7 @@ struct SendRequest {
     KeyBlockInfoMap block_info;
     int64_t         deadline_ms = 0;
     int64_t         timeout_ms = 0;
+    std::function<bool()>      is_cancelled;
 };
 
 using SendRequestPtr = std::shared_ptr<SendRequest>;

@@ -1287,6 +1287,15 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return absl::OkStatus();
     }
 
+    if (cache_manager_ && model_input.pd_separation && !model_input.warmup && !model_input.is_fake_stream
+        && !model_input.skip_lm_head) {
+        cache_manager_->finishP2PPublication(model_input.p2p_final_prefill,
+                                             model_input.request_pd_separation,
+                                             model_input.request_id,
+                                             model_input.request_deadline_ms,
+                                             model_input.p2p_deadline_clock_offset_ms);
+    }
+
     if (target_only) {
         collect_prefill_metrics();
         cudaSyncAndCheck();
