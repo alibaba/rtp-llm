@@ -90,6 +90,44 @@ class TensorObjectTest(unittest.TestCase):
             [call.args[1] for call in read_header.call_args_list], [0, 0, 1024, 0]
         )
 
+    @unittest.skipUnless(torch.cuda.is_available() and torch.version.cuda, "CUDA required")
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE_RESTORE") == "1", "native restore required"
+    )
+    def test_native_payload_fence_completes_before_releasing_registered_buffer(self):
+        import librtp_compute_ops
+
+        gpu = torch.arange(4096, dtype=torch.int16, device="cuda")
+        cpu = torch.arange(8, dtype=torch.int32)
+        value = {"cache_key": "key", "result": (gpu, cpu, gpu)}
+        plan = plan_object(value, checksum=False)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        consumer = torch.cuda.current_stream()
+        with torch.cuda.stream(stream):
+            packed = pack_object(
+                plan, out=torch.empty(plan.nbytes, dtype=torch.uint8, device="cuda")
+            )
+            with patch.object(
+                librtp_compute_ops,
+                "restore_emb_cuda_tensor_slices_and_wait",
+                wraps=librtp_compute_ops.restore_emb_cuda_tensor_slices_and_wait,
+            ) as native_fence:
+                restored_gpu, restored_cpu, alias = unpack_object(
+                    packed,
+                    expected_key="key",
+                    blocking_cuda_events=True,
+                    consumer_stream=consumer,
+                    payload_fence=lambda: self.fail("Python fence must not run"),
+                )["result"]
+            native_fence.assert_called_once()
+            self.assertTrue(stream.query())
+            packed.zero_()
+        self.assertIs(restored_gpu, alias)
+        torch.testing.assert_close(restored_gpu, gpu)
+        torch.testing.assert_close(restored_cpu, cpu)
+        stream.synchronize()
+
     def _assert_cuda_header_reads(self, *, blocking_cuda_events):
         stages = []
 

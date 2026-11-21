@@ -408,7 +408,7 @@ class RegisteredObjectTransport:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise TimeoutError("registered EMB read expired before restore")
                 failure_stage = "restore"
-                value = unpack_object(
+                return unpack_object(
                     transfer,
                     cuda_device=self._device,
                     max_bytes=self._capacity,
@@ -416,10 +416,8 @@ class RegisteredObjectTransport:
                     consumer_stream=consumer_stream,
                     expected_key=expected_key,
                     blocking_cuda_events=self._owner.blocking_cuda_events,
+                    payload_fence=self._wait_for_stream_completion,
                 )
-                with self._stage("read", "restore_ready_wait"):
-                    self._wait_for_stream_completion()
-                return value
             except Exception as error:
                 # Layout validation completes before any payload copy. Header
                 # copies to CPU are synchronous and cannot still use the slot.

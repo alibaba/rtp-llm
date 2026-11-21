@@ -93,6 +93,12 @@ inline void packEmbTensorSlices(const at::Tensor& output,
 }
 
 #if USING_CUDA
+inline void waitEmbCudaStream(const at::Tensor& buffer) {
+    at::cuda::CUDAEvent ready(cudaEventBlockingSync | cudaEventDisableTiming);
+    ready.record(c10::cuda::getCurrentCUDAStream(buffer.get_device()));
+    ready.synchronize();
+}
+
 inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, int64_t size) {
     TORCH_CHECK(buffer.is_cuda() && buffer.dim() == 1 && buffer.is_contiguous() && buffer.scalar_type() == at::kByte,
                 "expected a contiguous CUDA byte buffer");
@@ -101,9 +107,7 @@ inline at::Tensor readEmbCudaHeader(const at::Tensor& buffer, int64_t offset, in
     const c10::cuda::CUDAGuard deviceGuard(buffer.device());
     auto header = at::empty({size}, at::TensorOptions().dtype(at::kByte).pinned_memory(true));
     header.copy_(buffer.narrow(0, offset, size), /*non_blocking=*/true);
-    at::cuda::CUDAEvent ready(cudaEventBlockingSync | cudaEventDisableTiming);
-    ready.record(c10::cuda::getCurrentCUDAStream(buffer.get_device()));
-    ready.synchronize();
+    waitEmbCudaStream(buffer);
     return header;
 }
 #endif
@@ -158,40 +162,53 @@ inline std::vector<at::Tensor> cloneEmbHashes(const pybind11::capsule& handle) {
     return batch->cloneHashes();
 }
 
+inline std::vector<at::Tensor> restoreEmbTensorSlices(const at::Tensor& buffer,
+                                                     const std::vector<EmbTensorSlice>& slices) {
+    TORCH_CHECK(buffer.dim() == 1 && buffer.is_contiguous() && buffer.scalar_type() == at::kByte,
+                "expected a contiguous byte buffer");
+    for (const auto& [offset, bytes, dtype, shape, device] : slices) {
+        TORCH_CHECK(offset >= 0 && bytes >= 0 && offset <= buffer.numel() && bytes <= buffer.numel() - offset,
+                    "invalid EMB tensor slice");
+    }
+
+    std::vector<at::Tensor> result;
+    result.reserve(slices.size());
+    for (const auto& [offset, bytes, dtype, shape, device] : slices) {
+        const auto options = buffer.options().dtype(dtype).device(device);
+        if (bytes == 0) {
+            result.push_back(at::empty(shape, options));
+        } else {
+            const auto view = buffer.narrow(0, offset, bytes).view(dtype).reshape(shape);
+            result.push_back(view.to(options, /*non_blocking=*/true, /*copy=*/true));
+        }
+    }
+    return result;
+}
+
 inline void registerEmbTensorCodec(pybind11::module& module) {
     module.def("snapshot_emb_tensors", &snapshotEmbTensors, pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def("store_emb_hashes", &storeEmbHashes);
     module.def("clone_emb_hashes", &cloneEmbHashes);
 #if USING_CUDA
     module.def("read_emb_cuda_header", &readEmbCudaHeader, pybind11::call_guard<pybind11::gil_scoped_release>());
-#endif
-    module.def("pack_emb_tensor_slices", &packEmbTensorSlices, pybind11::call_guard<pybind11::gil_scoped_release>());
     module.def(
-        "restore_emb_tensor_slices",
+        "restore_emb_cuda_tensor_slices_and_wait",
         [](const at::Tensor& buffer, const std::vector<EmbTensorSlice>& slices) {
-            TORCH_CHECK(buffer.dim() == 1 && buffer.is_contiguous() && buffer.scalar_type() == at::kByte,
-                        "expected a contiguous byte buffer");
+            TORCH_CHECK(buffer.is_cuda(), "expected a CUDA EMB source");
             for (const auto& slice : slices) {
-                const auto offset = std::get<0>(slice);
-                const auto bytes = std::get<1>(slice);
-                TORCH_CHECK(offset >= 0 && bytes >= 0 && offset <= buffer.numel() && bytes <= buffer.numel() - offset,
-                            "invalid EMB tensor slice");
+                const auto device = std::get<4>(slice);
+                TORCH_CHECK(device.is_cpu() || (device.is_cuda() && (!device.has_index() || device == buffer.device())),
+                            "invalid fenced EMB tensor destination");
             }
-
-            std::vector<at::Tensor> result;
-            result.reserve(slices.size());
-            for (const auto& [offset, bytes, dtype, shape, device] : slices) {
-                const auto options = buffer.options().dtype(dtype).device(device);
-                if (bytes == 0) {
-                    result.push_back(at::empty(shape, options));
-                } else {
-                    const auto view = buffer.narrow(0, offset, bytes).view(dtype).reshape(shape);
-                    result.push_back(view.to(options, /*non_blocking=*/true, /*copy=*/true));
-                }
-            }
+            const c10::cuda::CUDAGuard deviceGuard(buffer.device());
+            auto result = restoreEmbTensorSlices(buffer, slices);
+            waitEmbCudaStream(buffer);
             return result;
         },
         pybind11::call_guard<pybind11::gil_scoped_release>());
+#endif
+    module.def("pack_emb_tensor_slices", &packEmbTensorSlices, pybind11::call_guard<pybind11::gil_scoped_release>());
+    module.def("restore_emb_tensor_slices", &restoreEmbTensorSlices, pybind11::call_guard<pybind11::gil_scoped_release>());
 }
 
 }  // namespace rtp_llm

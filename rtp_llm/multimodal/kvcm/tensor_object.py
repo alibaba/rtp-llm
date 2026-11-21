@@ -308,11 +308,13 @@ def unpack_object(
     consumer_stream=None,
     expected_key=None,
     blocking_cuda_events=False,
+    payload_fence=None,
 ):
     """Validate the layout before materializing any destination tensor.
 
     CUDA callers own the source and must wait for all submitted copies before
-    reusing it. CUDA results are allocated independently on the current stream.
+    reusing it. A caller can request completion here by providing its stream
+    fence. CUDA results are allocated independently on the current stream.
     """
 
     def stage(name):
@@ -437,11 +439,25 @@ def unpack_object(
 
     tensors = []
     if buffer.is_cuda and _USE_NATIVE_RESTORE:
-        from librtp_compute_ops import restore_emb_tensor_slices
+        import librtp_compute_ops
 
         gpu = torch.device(cuda_device or buffer.device)
         cpu = torch.device("cpu")
-        with stage("native_restore_payload"):
+        restore_slices = librtp_compute_ops.restore_emb_tensor_slices
+        fenced_restore = None
+        if (
+            payload_fence is not None
+            and blocking_cuda_events
+            and gpu.type == "cuda"
+            and (gpu.index is None or gpu == buffer.device)
+        ):
+            fenced_restore = getattr(
+                librtp_compute_ops, "restore_emb_cuda_tensor_slices_and_wait", None
+            )
+        restore_stage = (
+            "native_restore_fenced" if fenced_restore else "native_restore_payload"
+        )
+        with stage(restore_stage):
             slices = [
                 (
                     offset + spec["offset"],
@@ -452,11 +468,13 @@ def unpack_object(
                 )
                 for spec in specs
             ]
-            tensors = restore_emb_tensor_slices(buffer, slices)
+            tensors = (fenced_restore or restore_slices)(buffer, slices)
             if consumer_stream is not None:
                 for tensor in tensors:
                     if tensor.is_cuda:
                         tensor.record_stream(consumer_stream)
+        if fenced_restore is not None:
+            payload_fence = None
     elif buffer.is_cuda:
         for spec in specs:
             target_cuda = restore_devices and spec["device"] == "cuda"
@@ -486,4 +504,8 @@ def unpack_object(
                     if spec["device"] == "cuda":
                         tensors[index] = tensors[index].to(cuda_device or "cuda")
     with stage("tree_restore"):
-        return _rebuild_tree(header["tree"], len(specs), referenced, tensors)
+        value = _rebuild_tree(header["tree"], len(specs), referenced, tensors)
+    if payload_fence is not None:
+        with stage("restore_ready_wait"):
+            payload_fence()
+    return value
