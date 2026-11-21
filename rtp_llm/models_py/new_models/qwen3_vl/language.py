@@ -65,6 +65,13 @@ class Qwen2VLForCausalLM(_LanguageRuntime, Qwen2ForCausalLM):
 class _Qwen3VLRuntime(_LanguageRuntime):
     WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={"model.language_model.": ""})
 
+    @staticmethod
+    def online_checkpoint_name(name):
+        text = name.removeprefix("model.")
+        if text.startswith(("layers.", "embed_tokens.", "norm.")):
+            return "model.language_model." + text
+        return name
+
     def checkpoint_weight_name_filter(self):
         owns_stage = super().checkpoint_weight_name_filter()
         return lambda key: (

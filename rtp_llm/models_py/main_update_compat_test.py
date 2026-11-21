@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from contextlib import contextmanager
 from multiprocessing import shared_memory
@@ -52,6 +53,35 @@ class _Owner(RtpModule):
 
 
 class MainUpdateCompatTest(unittest.TestCase):
+    def test_busy_forward_rejects_update_without_writing_and_allows_retry(self):
+        model, loader = self.load()
+        manager = NewLoaderWeightManager(model, loader)
+        name = "model.layers.0.input_layernorm.weight"
+        weight = model.layers["0"].input_layernorm.weight
+        original = weight.detach().clone()
+        replacement = torch.full_like(original, 3)
+        entered, release = threading.Event(), threading.Event()
+
+        def forward():
+            with model._weight_update_lock:
+                entered.set()
+                release.wait(10)
+
+        worker = threading.Thread(target=forward)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            with self.assertRaises(BlockingIOError):
+                manager.update_tensors({name: replacement})
+            self.assertEqual(manager.version, 0)
+            torch.testing.assert_close(weight, original)
+        finally:
+            release.set()
+            worker.join()
+        manager.update_tensors({name: replacement})
+        self.assertEqual(manager.version, 1)
+        torch.testing.assert_close(weight, replacement)
+
     def load(self, rank=0):
         root = tempfile.TemporaryDirectory()
         self.addCleanup(root.cleanup)

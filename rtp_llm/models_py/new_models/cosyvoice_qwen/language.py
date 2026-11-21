@@ -35,6 +35,16 @@ class CosyVoiceQwenForCausalLM(Qwen2ForCausalLM):
 
     def checkpoint_weight_name_filter(self):
         owns = super().checkpoint_weight_name_filter()
-        return lambda name: name.startswith(
-            ("model.", "lm_head.", "transformer.")
+        return lambda name: (
+            name.startswith(
+                (
+                    "model.",
+                    "lm_head.",
+                    "transformer.",
+                    "layers.",
+                    "embed_tokens.",
+                    "norm.",
+                )
+            )
+            or name in self.handler_heads.sources
         ) and (owns is None or owns(name))

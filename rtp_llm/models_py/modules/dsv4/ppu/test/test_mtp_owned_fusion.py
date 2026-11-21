@@ -9,6 +9,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS
 from rtp_llm.models_py.modules.dsv4.ppu.ppu_decode_provider import PpuDecodeProvider
 from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
 from rtp_llm.models_py.new_models.deepseek_v4.ppu_mtp_weights import PpuMtpWeights
@@ -17,7 +18,9 @@ from rtp_llm.models_py.new_models.deepseek_v4.ppu_mtp_weights import PpuMtpWeigh
 class OwnedMtpFusionTest(unittest.TestCase):
     def test_real_loaded_projection_and_decode_fusion(self):
         dim, rows, hc = 4096, 2, 4
-        provider = PpuDecodeProvider({"DSV4_PPU_DECODE_FUSIONS": "1"})
+        provider = PpuDecodeProvider(
+            {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_DECODE_FUSIONS": "1"}
+        )
         owner = PpuMtpWeights(dim, 1e-6, torch.bfloat16, provider).to("cuda")
         tensors = {}
         for name in ("enorm", "hnorm"):

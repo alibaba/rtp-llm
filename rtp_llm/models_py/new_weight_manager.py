@@ -8,7 +8,7 @@ TP slicing and fusion. Each RPC validates/stages before changing live tensors.
 
 import re
 import threading
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 
 import torch
@@ -106,6 +106,19 @@ class NewLoaderWeightManager:
             ):
                 raise RuntimeError(f"Exported runtime storage changed for {name!r}")
 
+    @contextmanager
+    def _exclusive_update(self):
+        # The RPC holds the engine lifecycle mutex. Waiting here for a forward
+        # in a collective would also prevent SetRestart from releasing peers.
+        if not self._lock.acquire(blocking=False):
+            raise BlockingIOError(
+                "A model forward or update is active; retry after all ranks are idle"
+            )
+        try:
+            yield
+        finally:
+            self._lock.release()
+
     @torch.inference_mode()
     def update_tensors(self, weights: dict[str, torch.Tensor]) -> None:
         if not isinstance(weights, dict) or not weights:
@@ -115,7 +128,7 @@ class NewLoaderWeightManager:
             if self._adapters is not None
             else nullcontext()
         )
-        with self._lock, guard:
+        with self._exclusive_update(), guard:
             self._validate_contract()
             devices = {
                 tensor.device
@@ -137,6 +150,9 @@ class NewLoaderWeightManager:
                 ):
                     raise TypeError("Online updates require named checkpoint tensors")
                 canonical = _checkpoint_wire_name(name)
+                normalize = getattr(self._model, "online_checkpoint_name", None)
+                if normalize is not None:
+                    canonical = normalize(canonical)
                 if not self._local_request(canonical):
                     continue
                 mapped = self._loader._mapped_checkpoint_name(self._model, canonical)
@@ -296,7 +312,8 @@ class NewLoaderWeightManager:
             self.version += 1
 
     def _local_request(self, name):
-        layer = re.match(r"^(?:model\.)?layers\.(\d+)\.", name)
+        scoped = name.removeprefix("model.language_model.")
+        layer = re.match(r"^(?:model\.)?layers\.(\d+)\.", scoped)
         if layer and int(layer[1]) >= self._loader.model_config.num_layers:
             raise ValueError(f"Checkpoint layer out of range: {name}")
         select = getattr(self._model, "online_weight_name_filter", None)
@@ -305,7 +322,10 @@ class NewLoaderWeightManager:
         owns = select() if callable(select) else None
         # Use stage filtering only for known layer/global ownership, not to
         # silently accept arbitrary unknown names rejected by a model's filter.
-        if layer or name in (
+        if layer or scoped in (
+            "embed_tokens.weight",
+            "norm.weight",
+            "norm.bias",
             "model.embed_tokens.weight",
             "model.norm.weight",
             "model.norm.bias",

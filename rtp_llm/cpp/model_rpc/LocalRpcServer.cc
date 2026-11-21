@@ -1429,6 +1429,9 @@ LocalRpcServer::UpdateWeights(grpc::ServerContext* context, const UpdateWeightsR
         weight_manager_.attr("update")(req);
         return grpc::Status::OK;
     } catch (const py::error_already_set& e) {
+        if (e.matches(PyExc_BlockingIOError)) {
+            return {grpc::StatusCode::ABORTED, "Weight update busy; retry after every rank is idle"};
+        }
         const std::string details = e.what();
         RTP_LLM_LOG_WARNING("UpdateWeights Python exception: %s", details.c_str());
         const auto       newline               = details.find('\n');
