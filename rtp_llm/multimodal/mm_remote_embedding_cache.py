@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 from collections import Counter
@@ -42,6 +43,9 @@ _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
 _USE_NATIVE_SNAPSHOT = os.environ.get("MM_EMB_NATIVE_SNAPSHOT") == "1"
 _BLOCKING_CUDA_EVENTS = os.environ.get("MM_EMB_BLOCKING_CUDA_EVENTS") == "1"
 _RETRY_METADATA_TRANSPORT = os.environ.get("MM_EMB_METADATA_TRANSPORT_RETRY") == "1"
+_TRACE_SLOW_METADATA = os.environ.get("MM_EMB_TRACE_SLOW_METADATA") == "1"
+_SLOW_METADATA_MS = 100
+_META_TRACE = re.compile(r"[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}")
 _OBSERVE_NATIVE_RESTORE = os.environ.get("MM_EMB_NATIVE_RESTORE_TIMINGS") == "1"
 _OBSERVE_OBJECT_HEADER = os.environ.get("MM_EMB_NATIVE_HEADER_PROFILE") == "1"
 _SLOW_RESTORE_COMPONENTS = (
@@ -164,6 +168,7 @@ class MMRemoteEmbeddingCache:
         self._lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self._stats = Counter()
+        self._next_slow_metadata_log = 0.0
         self._audit_enabled = (
             os.environ.get("MM_EMB_REMOTE_AUDIT") == "1"
             if audit_enabled is None
@@ -630,6 +635,29 @@ class MMRemoteEmbeddingCache:
                     # the original typed transport failure for the caller.
                     pass
             raise
+
+    def _trace_slow_metadata(self, trace_id, elapsed_ms, ended_ns, timeout_ms, hit):
+        # ViT creates an opaque UUID4 for this lookup. Only keep that join key.
+        if not isinstance(trace_id, str) or _META_TRACE.fullmatch(trace_id) is None:
+            return
+        now = time.monotonic()
+        with self._stats_lock:
+            if now < self._next_slow_metadata_log:
+                return
+            self._next_slow_metadata_log = now + 1
+        try:
+            logging.warning(
+                "MM_EMB_METADATA_SLOW trace_id=%s pid=%d ended_ns=%d "
+                "lookup_ms=%.3f budget_ms=%d outcome=%s",
+                trace_id,
+                os.getpid(),
+                ended_ns,
+                elapsed_ms,
+                timeout_ms,
+                "hit" if hit else "miss",
+            )
+        except Exception:
+            pass  # Diagnostics must not change cache behavior.
 
     def _lookup_object_meta(self, client, key, trace_id, timeout_ms, deadline):
         outcome = "error"
@@ -1598,6 +1626,7 @@ class MMRemoteEmbeddingCache:
             # Only metadata hits can reserve payload resources below.
             timing["stage"] = "client_acquire"
             client = self._get_client()
+            slow_metadata_ended_ns = None
             try:
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
@@ -1612,10 +1641,20 @@ class MMRemoteEmbeddingCache:
                 finally:
                     timing["metadata_ms"] = (time.perf_counter() - api_started) * 1000
                     timing["sdk_api_ms"] = timing["metadata_ms"]
+                if _TRACE_SLOW_METADATA and timing["metadata_ms"] >= _SLOW_METADATA_MS:
+                    slow_metadata_ended_ns = time.time_ns()
             finally:
                 self._release_client(client)
             if time.monotonic() >= deadline:
                 raise TimeoutError("remote embedding metadata completed after deadline")
+            if slow_metadata_ended_ns is not None:
+                self._trace_slow_metadata(
+                    trace_id,
+                    timing["metadata_ms"],
+                    slow_metadata_ended_ns,
+                    remaining_ms,
+                    meta is not None,
+                )
             if meta is None:
                 outcome = "miss"
                 self._count("miss")

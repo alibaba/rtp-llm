@@ -42,6 +42,25 @@ from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 class RemoteCacheTest(unittest.TestCase):
+    def test_slow_metadata_logs_only_the_join_key_with_rate_limit(self):
+        remote = self.remote(Store(), read_timeout_ms=500)
+        trace = "0123456789ab4cde8f0123456789abcd"
+        module = "rtp_llm.multimodal.mm_remote_embedding_cache"
+        with patch(f"{module}._SLOW_METADATA_MS", 0), patch(
+            f"{module}.logging.warning"
+        ) as warning:
+            with patch(f"{module}._TRACE_SLOW_METADATA", False):
+                self.assertIsNone(remote.load("private-key", trace_id=trace))
+            with patch(f"{module}._TRACE_SLOW_METADATA", True):
+                self.assertIsNone(remote.load("private-key", trace_id="request input"))
+                self.assertIsNone(remote.load("private-key", trace_id=trace))
+                self.assertIsNone(remote.load("private-key", trace_id=trace))
+            warning.assert_called_once()
+            self.assertEqual(warning.call_args.args[1], trace)
+            self.assertEqual(warning.call_args.args[-1], "miss")
+            self.assertNotIn("private-key", repr(warning.call_args))
+            self.assertEqual(remote.stats()["miss"], 4)
+
     def test_gdr_rejects_a_whole_valid_payload_from_a_different_key(self):
         # A late RDMA can replay a complete, internally checksummed old object.
         # Byte integrity alone must not authorize using it for another request.
