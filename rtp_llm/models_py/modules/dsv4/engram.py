@@ -826,7 +826,59 @@ class Engram(nn.Module):
             hidden, hash_ids, token_mask, out=hidden if inplace else None
         )
 
+    def _wkv_native_fp8_eligible(self, hidden, hash_ids) -> bool:
+        """Import-free gate for the direct-FP8 WKV path. Every check runs without
+        importing _engram_fp8_wkv (which pulls in Triton), so CPU-only Engram
+        deployments are untouched when the option is off. Returns True only when the
+        native path applies; the caller then lazily imports the kernel module."""
+        # option gate — read the env var directly, no Triton import
+        if os.environ.get("DSV41_ENGRAM_WKV_INPUT", "baseline") != "native_fp8":
+            return False
+        # CUDA-only fused kernel
+        if not (hidden.is_cuda and hash_ids.is_cuda):
+            return False
+        if torch.cuda.is_current_stream_capturing():
+            return False
+        # a pending prefetched row/event must be consumed by _rows_for (ordering)
+        if getattr(self, "_prefetched_rows", None) is not None:
+            return False
+        # native WKV projection only (V41MXFP8Linear exposes forward_quantized;
+        # _ReferenceWKV / plain nn.Linear do not)
+        if not hasattr(self.wkv, "forward_quantized"):
+            return False
+        # supported table geometry: 24 hash columns (n_hash_cols = (max_ngram_size-1)
+        # * n_heads) x 256-wide rows; one hash column per (ngram, head) pair
+        if self.layout.n_hash_cols != 24 or self.layout.head_dim != 256:
+            return False
+        if hash_ids.ndim != 2 or hash_ids.shape[-1] != 24:
+            return False
+        # integer hash indices only
+        if hash_ids.dtype not in (torch.int32, torch.int64):
+            return False
+        return True
+
     def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
+        if self._wkv_native_fp8_eligible(hidden, hash_ids):
+            from rtp_llm.models_py.modules.dsv4 import _engram_fp8_wkv
+
+            # canonical quantized operands straight from the table into the unchanged
+            # native WKV; no BF16 intermediate. Falls back to the baseline path when the
+            # embedding flavor is unsupported (operands is None).
+            operands = _engram_fp8_wkv.operands_from_embedding(
+                self.embed_tokens, hash_ids
+            )
+            if operands is not None:
+                x_q, x_s = operands
+                kv = self.wkv.forward_quantized(x_q, x_s)
+                return gated_engram_residual(
+                    hidden,
+                    kv,
+                    self.q_weight,
+                    self.k_weight,
+                    self.eps,
+                    token_mask,
+                    out=out,
+                )
         rows = self._rows_for(hidden, hash_ids).flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
