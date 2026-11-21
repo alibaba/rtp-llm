@@ -594,6 +594,7 @@ class AttentionV41Test(unittest.TestCase):
         cache = SimpleNamespace(
             group_tags=tags,
             get_layer_cache=lookup,
+            get_layer_cache_groups=lambda layer: [SimpleNamespace(tag=tags[layer])],
             get_entries_per_block=lambda tag: 128 if tag == tags[0] else 140,
             get_kernel_seq_size_per_block=lambda tag: 256,
             get_seq_size_per_block=lambda tag: 256,

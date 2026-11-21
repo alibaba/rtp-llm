@@ -119,6 +119,7 @@ def build_paged_pool_specs(
     # the layers that own it.
     specs: Dict[int, Tuple[int, int, int]] = {}
     saved_kv: Dict[int, Any] = {}
+    layer_tags: Dict[int, set[str]] = {}
     present_tags = set(map(str, getattr(kv_cache, "group_tags", ())))
     has_decoder_swa = DECODER_SWA_KV in present_tags
     try:
@@ -141,6 +142,13 @@ def build_paged_pool_specs(
                 continue
             for layer in v4.layers:
                 attn = layer.attn
+                if attn.layer_id not in layer_tags:
+                    layer_tags[attn.layer_id] = {
+                        cache.tag
+                        for cache in kv_cache.get_layer_cache_groups(attn.layer_id)
+                    }
+                if attn_type not in layer_tags[attn.layer_id]:
+                    continue
                 if id(attn) not in saved_kv:
                     saved_kv[id(attn)] = (
                         attn,
