@@ -1,0 +1,72 @@
+{
+  "schema_version": 2,
+  "model": {
+    "label": "qwen2.5-7b-prefill-shared",
+    "type": "qwen_2",
+    "checkpoint": "/data/models/Qwen2.5-7B-Instruct",
+    "tokenizer": "/data/models/Qwen2.5-7B-Instruct",
+    "topology": {
+      "tp": 2,
+      "dp": 1,
+      "pp": 1,
+      "ep": 2
+    }
+  },
+  "engine": {
+    "max_seq_len": 8193,
+    "max_batch_tokens": 32768,
+    "concurrency_limit": 4,
+    "args": {
+      "reuse_cache": 1
+    },
+    "env": {
+      "TOKENIZERS_PARALLELISM": "false"
+    }
+  },
+  "workload": {
+    "kind": "cache_grid",
+    "max_input_len": 8192,
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "compute_steps": [
+      1024,
+      256
+    ],
+    "batch_sizes": [
+      1
+    ],
+    "measure_runs": 3,
+    "min_compute_len": 256,
+    "cache_lengths": [
+      0,
+      2048,
+      4096,
+      6144
+    ],
+    "seed": 1
+  },
+  "execution": {
+    "backend": "local",
+    "platform": "cuda13",
+    "test_timeout_seconds": 7000,
+    "local": {
+      "devices": [
+        0,
+        1
+      ]
+    },
+    "aone": {
+      "resource": "daily",
+      "gpu_type": "H20_CU13",
+      "gpus_per_machine": 2,
+      "shard_count": 2,
+      "max_parallel": 2,
+      "exec_properties": {}
+    }
+  },
+  "output": {
+    "result_root": "perf_test_results"
+  },
+  "regression": {},
+  "publish": {}
+}

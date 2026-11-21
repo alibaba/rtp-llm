@@ -1,419 +1,302 @@
-# RTP-LLM Performance Benchmark Tool
-In this chapter, I will present the performance testing tools developed in RTP-LLM, including standalone measurement of model prefill and decode performance under various batch sizes with single-node and multi-node parallelism, timeline recording, and their usage methods.
-## Design Principle
-RTP-LLM employs a special batch scheduler that accumulates requests until the specified batch size is reached, then all requests enter the engine simultaneously. The scheduler supports both prefill and decode modes; in decode mode, requests are only allocated KV cache without prefill, enabling accurate and efficient measurement of engine performance.
-In detail, the batch-scheduler profiler is executed three times for a single input:
- - Warm-up run, to account for one-time setup such as JIT compilation.
- - Timing run, to measure engine performance.
- - Profiling run, to capture a timeline for subsequent analysis; this step may degrade end-to-end performance.
+# RTP-LLM Unified Performance Benchmark
 
-For every run we use min_new_tokens and max_new_tokens to ensure that all requests perform the same number of decode steps.
+Use `tools/perf_test` for local, SSH and AOne model-level prefill/decode tests.
+Each run takes one strict JSON config. Declare the model, topology, engine,
+workload and output in that file. Mode is inferred from `workload.kind`; action
+is `run` for a config and `report` for an existing run directory. Explicit
+`--mode` remains an assertion and must agree with the workload.
 
-Since in decode mode, we not prefill the KVCache, so hidden_states after every forward step is not real. So we also hack moe gate select for moe model and speculative accept func for mtp. In that way, we get stable result for analyse result.
-## Single-Node Benchmark
+## Configure and preview
 
-Single-node perf tests share the same entrypoint: `rtp_llm/test/perf_test/batch_decode_test.py`. There are two **mutually exclusive** modes:
+```bash
+./tools/perf_test --config=rtp_llm/test/perf_test/examples/prefill_local.json --dry-run
+./tools/perf_test --config=rtp_llm/test/perf_test/examples/decode_ssh_gang.json --dry-run
+./tools/perf_test --config=rtp_llm/test/perf_test/examples/prefill_aone_ci.json --dry-run
+```
 
-1. **Grid mode** — fix a list of batch sizes and input lengths (`--batch_size`, `--input_len`, comma-separated). Do **not** pass `--dataset_name`, `--dataset_path`, `--dataset`, or `--test_json`.
-2. **Distribution mode** — load or build a length histogram from a dataset or CSV, then sample workloads. Pass one of: `--dataset_name`, `--dataset_path`, `--dataset` (distribution CSV), or `--test_json`.
+Remove `--dry-run` to execute. Preview validates the complete plan without
+creating a run directory, contacting hosts, building or starting a model.
 
-### Checkpoint / tokenizer and Hub
-
-For this perf entrypoint only, if `--checkpoint_path` or `--tokenizer_path` is a ModelScope/HuggingFace **repo id** (e.g. `Qwen/Qwen3.5-35B-A3B`) or an **`https://huggingface.co/...` / `https://www.modelscope.cn/...` page URL**, `batch_decode_test` resolves it to a **local directory** (ModelScope first, then HuggingFace) before starting the engine, and rewrites argv so the child process never calls `AutoTokenizer.from_pretrained` on a remote id. Ordinary `start_server` / production paths do **not** perform that automatic download; use local paths or prefetch there.
-
-Set **`--model_type`** explicitly for grid mode (and whenever `model_type` cannot be inferred from local `config.json`). Engine flags use **`--checkpoint_path`** (binds to internal `ckpt_path`), not `--ckpt_path`, for this tool.
-
-`batch_size` is the batch on **each** DP rank when `dp_size` > 1.
-
-### Bazel targets (manual)
-
-Repository defaults (see `rtp_llm/test/perf_test/BUILD`):
-
-- **`//rtp_llm/test/perf_test:grid_perf_test`** — grid example with `qwen35_moe`, small `batch_size` / `input_len`, decode-only (`--partial 1`), `seq_size_per_block=1024`.
-- **`//rtp_llm/test/perf_test:distribution_perf_test`** — distribution sampling with ShareGPT (`--dataset_name sharegpt`), tunable `max_seq_len` / `concurrency_limit`.
-- **`//rtp_llm/test/perf_test:model_perf_test`** — model-agnostic entrypoint with no baked-in checkpoint or topology. Use this target for a new model; supply all model and engine values at invocation time.
-
-#### Reusable model target
-
-`model_perf_test` exposes model, workload, engine, repetition, and output
-settings independently:
-
-| Group | Interface | Meaning |
+| Backend | Configuration | Execution |
 | --- | --- | --- |
-| Model | `--test_arg=--model_type=...`, `--test_arg=--checkpoint_path=...`, `--test_arg=--tokenizer_path=...` | Model implementation and local/Hub paths. |
-| Workload | `--test_arg=--batch_size=1,2,4`, `--test_arg=--input_len=1024,4096`, `--test_arg=--partial=2` | Grid shape and phase (`0` both, `1` decode, `2` prefill). |
-| Engine | `--test_arg=--engine_arg=NAME=VALUE` | Any engine flag, repeatable; e.g. `tp_size=8`, `ep_size=8`, `fp8_kv_cache=1`. |
-| Engine environment | `--test_arg=--engine_env=NAME=VALUE` | Repeatable environment default. An explicit Bazel `--test_env` value wins. |
-| Repetitions | `--test_arg=--warmup_runs=1`, `--test_arg=--measure_runs=3`, `--test_arg=--profile_runs=0` | Per-case warmup, measurement, and optional profiling runs. |
-| Output | `--test_arg=--result_dir=...` | Defaults to Bazel's `TEST_UNDECLARED_OUTPUTS_DIR`. |
+| local | `execution.backend="local"`, `devices` | Current machine |
+| ssh | `execution.backend="ssh"`, `hosts`, `gpus_per_machine`, `source` | Named remote machines |
+| aone | `execution.backend="aone"`, resource and GPU type | AOne shards or gang |
 
-Example for a new prefill model:
+`model.topology` is the only user declaration of TP/DP/PP/EP. Workload kind
+`cache_grid` selects prefill; `grid` and `distribution` select decode. Decode
+uses fixed global batches divisible by DP. Current model-level measurements
+require PP=1. Prefill cache grids and decode profiling require DP=1.
+For ordinary decode, `workload.profiling.steps` must be between 1 and
+`min(1000, shortest output length)` in a single capture round; increasing
+`runs` does not extend this limit. SP/MTP decode currently requires `steps=1`:
+output tokens do not establish a reliable model-independent iteration budget.
+These checks apply to both `engine.args.sp_type` and its paired `engine.env.SP_TYPE`;
+an explicit CLI argument takes precedence over the environment value.
+Unsafe windows are rejected during planning, before starting an engine.
+Each capture round re-arms the participating ranks with `start_profile`, then
+profiling waits for every round's trace on each local participating rank.
+Local traces use the run's `engine_traces/` directory, independent of ambient
+profiler environment settings.
 
-```shell
-bazelisk test //rtp_llm/test/perf_test:model_perf_test \
-    --config=cuda13 \
-    --test_arg=--model_type=deepseek_v4 \
-    --test_arg=--checkpoint_path=/models/DeepSeek-V4 \
-    --test_arg=--tokenizer_path=/models/DeepSeek-V4 \
-    --test_arg=--batch_size=1,2,4,8 \
-    --test_arg=--input_len=1024,4096,16384,65536 \
-    --test_arg=--partial=2 \
-    --test_arg=--decode_test_length=1 \
-    --test_arg=--engine_arg=tp_size=8 \
-    --test_arg=--engine_arg=ep_size=8 \
-    --test_arg=--engine_arg=world_size=8 \
-    --test_arg=--engine_arg=fp8_kv_cache=1 \
-    --test_arg=--engine_arg=load_method=fastsafetensors \
-    --test_arg=--measure_runs=3 \
-    --test_arg=--profile_runs=0 \
-    --test_env=PERF_GRID_WARMUP_RUNS=1
+## Shared local and AOne configuration
+
+`examples/prefill_shared.json` uses schema version 2. Model, engine and workload
+are shared. `execution.local` and `execution.aone` hold backend-specific settings;
+only the selected backend participates in the resolved execution plan. Version-1
+local/AOne configs remain supported. SSH keeps its version-1 contract and runner.
+
+```bash
+# Same file, local or AOne single-machine execution.
+./tools/perf_test --config=rtp_llm/test/perf_test/examples/prefill_shared.json --dry-run
+./tools/perf_test --config=rtp_llm/test/perf_test/examples/prefill_shared.json \
+  --set execution.backend=aone --dry-run
+
+# The example has TP=2, DP=1: one GPU on each of two AOne hosts.
+./tools/perf_test --config=rtp_llm/test/perf_test/examples/prefill_shared.json \
+  --set execution.backend=aone \
+  --set execution.aone.gpus_per_machine=1 \
+  --set execution.aone.shard_count=null --dry-run
 ```
 
-`--engine_arg=NAME=VALUE` is forwarded as the normal engine CLI pair
-`--NAME VALUE`. Existing raw engine flags remain supported, so old targets do
-not change. Keep a given engine flag in one form in a command to avoid
-ambiguous duplicate values.
+Remove `--dry-run` to execute, after setting model/tokenizer paths accessible on
+the selected machines. Switching backends does not change model topology or
+workload. Existing capability restrictions still apply, including gang-only
+AOne decode. AOne case sharding and model gang execution are mutually exclusive.
 
-#### Output contract
+`--set PATH=VALUE` applies typed overrides without changing the input file:
+JSON numbers, booleans, arrays, objects and null are parsed as JSON; other values
+are strings. Unknown structured fields are errors. Use a whole object for map
+keys containing dots, for example
+`--set 'execution.aone.exec_properties={"custom.pool":"benchmark"}'`.
+Scheduler properties must have string values. Generated `gpu` and `gpu_count`
+cannot conflict with explicit properties; gangs retain full-host reservations.
+For experiments, override the base with paths such as
+`--set base_config.execution.backend=local`.
 
-Every run writes under the result directory:
+## Bazel platform environment
 
-* `test_info.json` (schema version 2): model paths/type, workload settings,
-  effective repetition counts, redacted invocation, forwarded engine
-  arguments, and engine environment variable names. Secret-like values are
-  not persisted. It is written once before server startup (`status=running`)
-  and again on successful completion (`status=completed`).
-* `Prefill_Result.json` and/or `Decode_Result.json`: one record per
-  batch-size/input-length point, with success rate, wait time, prefill/decode
-  timing, and `generate_config`.
-* Profiler JSON files, when enabled, are moved into `timelines/`.
+The CLI submits local measurements to the internal
+`//rtp_llm/test/perf_test:perf_test_local` py_test. AOne single-machine and gang
+measurements already run as Bazel tests. `execution.platform` selects the real
+Bazel `--config`, so `.bazelrc` test environments supply CC, CXX, CUDAHOSTCXX,
+PATH and LD_LIBRARY_PATH, and the existing NVIDIA wrapper adds runfiles library
+paths and obtains GPU locks. No new environment variables are required.
 
-The test exits non-zero if server startup or requests fail while preserving
-the output directory for diagnosis. The generic target does not infer a
-model-specific topology: pass every required engine flag explicitly and keep
-`test_info.json` with the result.
+Version-2 local configs require a platform; AOne can infer it from GPU type and
+rejects incompatible explicit platforms. Legacy local configs default to cuda13.
+The selected toolchain and model dependencies must exist on execution machines.
+`engine.env` remains available for benchmark-specific settings and explicit
+overrides; it is not necessary to duplicate platform toolchain settings there.
 
-Example (SM90; adjust configs for your stack e.g. `cuda13`):
+Use `--bazel-arg=--jobs=8` and
+`--bazel-startup-arg=--output_user_root=/absolute/worktree-cache` for native
+Bazel options. Local submissions use a worktree/platform-specific output root by
+default. Platform, worker input, GPU allocation and test timeout are managed
+by perf_test; conflicting raw options are rejected. The internal local target
+is manual/local and cannot submit AOne jobs. The redundant `:perf_test` binary
+has been removed; use `tools/perf_test`.
 
-```shell
-# Grid: override sizes and run decode + prefill (partial=0) or decode-only
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda13 \
-    --test_arg=--batch_size=1,2,4,8 \
-    --test_arg=--input_len=128,1024,2048 \
-    --test_arg=--partial=0
+`execution.test_timeout_seconds` drives both Bazel timeout and the existing
+worker watchdog (default 7000 seconds). Explicit existing budgets, including
+19500 seconds in the DeepSeek daily examples, are retained. Local device IDs
+index the wrapper's locked allocation; the launcher requests enough slots for
+the configured IDs and overrides inherited WORLD_SIZE for allocation.
 
-# Grid: custom local checkpoint and model type
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda13 \
-    --test_arg=--checkpoint_path=/path/to/local/ckpt \
-    --test_arg=--tokenizer_path=/path/to/local/tokenizer \
-    --test_arg=--model_type=qwen35_moe
+CLI result roots are resolved from the submitting working directory before
+entering runfiles. Local results stay under that persistent root, with submission
+bundles and command evidence under its `.launch/` subdirectory. Workers consume
+frozen plans without re-reading configs or re-sampling workloads. Runs retain
+`input_config.json`, `launch_request.json` and, for local workers,
+`launch_environment.json` with selected actual toolchain environment values.
+Later resume/profile invocations keep the original run evidence and write their
+own request/environment records alongside the corresponding submission bundle.
+Resume/profile use persisted plans; offline report and dry-run do not launch a
+GPU test. `--set` is only accepted for new config runs.
 
-# Distribution mode (use distribution_perf_test or pass dataset flags via test_arg)
-bazelisk test //rtp_llm/test/perf_test:distribution_perf_test \
-    --config=cuda13 \
-    --test_arg=--model_type=qwen35_moe
+## Prefill batches
+
+`examples/prefill_multi_grid_local.json` contains named cold, explicit mixed,
+random and traffic grids in one engine session. Freeze its sampled batches
+before sharing a config:
+
+```bash
+python -m rtp_llm.test.perf_test.prefill.export \
+  --config rtp_llm/test/perf_test/examples/prefill_multi_grid_local.json \
+  --output /tmp/prefill-batches-frozen.json
 ```
 
-Optional environment for the engine, e.g. `INT8_MODE=1`:
+The exporter detects random and traffic sources, including named grids.
+`--output-dir DIR` instead exports one file per batch size for a single
+top-level random workload. Existing destinations are rejected. The corresponding
+Bazel binary is `//rtp_llm/test/perf_test:export_prefill_batches`.
 
-```shell
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda13 \
-    --test_env=INT8_MODE=1
+## SSH machines
+
+Start with `examples/decode_ssh_gang.json` under `rtp_llm/test/perf_test/` for
+SSH execution settings. For prefill, combine its `execution` object with the
+model, engine and workload from `examples/prefill_local.json` in one JSON.
+Set topology, `gpus_per_machine` and host count together; the local prefill
+example needs one host. There is no launcher YAML or referenced benchmark JSON
+to maintain.
+
+Each host has a `ssh_target` for the submitting machine's SSH connection and
+an `advertise_host` reachable by the other model workers. System SSH config,
+including aliases and jump hosts, is respected. Passwordless access and a
+prepared Python/GPU environment are required. Credentials do not belong in
+benchmark configs.
+
+World size is TP × DP × PP. The per-machine width is the smaller of world size
+and `gpus_per_machine`; world size must divide evenly across hosts. Supply
+exactly the required number of hosts, in rank order. A single remote host is
+supported. Model paths must be available in the remote runtime.
+
+`source.ref="auto"` freezes the submitting public worktree's current Git commit.
+Commit tracked changes first. A branch/tag must already resolve locally; it
+is frozen to a full SHA before submission. Only committed Git objects are sent
+to executor-owned remote mirrors/checkouts. Untracked local files are not sent.
+
+Build policies are `build_with_deps`, `build` and `reuse`. The first two require
+an installed `source.build_driver` implementing the build request/receipt
+protocol. Machine admission prepares that adapter and its execution policy;
+the backend does not silently run bare Bazel when it is missing. Reuse requires
+matching code, build settings, toolchain and verified native artifacts.
+
+The worker owns only its run's process group and allocated devices. Cancellation
+and cleanup use the recorded owner identity, rather than process-name matching.
+A disconnected submitter can inspect or cancel its run later:
+
+```bash
+./tools/perf_test --run-dir=/path/to/ssh-run --maintenance=status
+./tools/perf_test --run-dir=/path/to/ssh-run --maintenance=cancel
+./tools/perf_test --run-dir=/path/to/ssh-run --maintenance=collect
+./tools/perf_test --run-dir=/path/to/ssh-run --maintenance=clean
 ```
 
-### Prefill vs decode only
+Collection retains failure evidence and does not promote an interrupted run to
+success. Cleanup refuses active or mismatched owners and preserves source/build
+caches. SSH supports prefill run and collected offline report, and decode run;
+SSH checkpoint resume and standalone profile are not enabled.
 
-When prefill and decode need different engine configs, restrict phases with **`--partial`**: `0` = both (default), `1` = decode grid only, `2` = prefill only. Example decode-only:
+## Batch experiments
 
-```shell
-bazelisk test //rtp_llm/test/perf_test:grid_perf_test \
-    --config=cuda13 \
-    --test_arg=--partial=1
+`examples/decode_ssh_experiment.json` contains a complete inline `base_config`
+and named benchmarks. `overrides` changes explicit fields, `zip_axes` combines
+equal-length arrays by index, and `product_axes` expands a Cartesian product.
+Overlapping paths and backend/source/output overrides are rejected.
+
+```bash
+./tools/perf_test --config=rtp_llm/test/perf_test/examples/decode_ssh_experiment.json --dry-run
 ```
 
-## Multi Node Benchmark
-We also provide a Python script to enable multi-node benchmark, but since it requires setting up the environment and starting the script on multiple machines, it still involves more steps than single-node testing.
+Every expanded task is planned before the first remote side effect. Input files
+are snapshotted once; each task's final workload and seed are materialized once.
+Execution uses those frozen plans in order. Each task has its own run and result;
+`experiment_plan.json` and `experiment_summary.json` index the experiment.
 
-For each machine to be tested, you need to create an environment in which RTP-LLM can run and support passwordless SSH access from the current machine’s port.
-### Benchmark Yaml
-Configure the parameters with reference to `rtp_llm/test/perf_test/multi_node/multi_benchmark_config.yaml`. Below is the detail explaination of yaml structure.
+## Results and follow-up actions
 
-First part is the experiment name identifier
-```yaml
-experiment_name: "H20_Node1"
+Runs are written under `output.result_root/<run_id>/`. Read
+`results/result.json` for the schema-v2 result envelope, `results/summary.json`
+for aggregate metrics and `reports/` for reports. Prefill records cases in
+`results/cases.jsonl`; decode uses `results/cases/`. Profiles and traces retain
+member provenance. Execution plans use the current schema only; old plan
+versions and removed launcher entries are rejected.
+
+Decode `throughput_tokens_per_second` counts successful output tokens divided
+by the client wall-clock duration of each concurrent round. It includes HTTP
+transport, request dispatch, and distributed coordination; it is not a pure
+engine compute rate. Worker threads and HTTP sessions are prepared before
+formal timing and reused across rounds. Warmup rounds also warm the connections;
+with `warmup_runs=0`, the first measured round includes initial TCP setup.
+Latency fields continue to come from the server's `aux_info`.
+
+```bash
+./tools/perf_test --run-dir=/path/to/local-prefill-run --action=resume
+./tools/perf_test --run-dir=/path/to/local-prefill-run --action=profile --cases=CASE_ID
+./tools/perf_test --run-dir=/path/to/prefill-run --action=report
 ```
 
-Second part is the test configuration and retry settings.
-```yaml
-test_config:
-  num_retry_times: 3
-  build_from_scratch: 2
-  copy_test_result: true
+Local prefill supports run/resume/profile/report. AOne and SSH prefill support
+run and collected offline report. Decode supports run, including its automatic
+report; AOne decode requires a multi-machine gang. Follow-up actions read the
+frozen run and do not accept config overrides.
+
+The manual `offline_bench_test` is a separate microbenchmark. Public runs do not
+automatically publish results or replace regression baselines. Enabling a
+`publish` backend is rejected until an execution path supports publication;
+credentials and signed URLs must remain outside benchmark configs.
+
+## Trace analysis
+
+Prefill and decode store profile manifests in
+`profiles/<session_id>/manifest.json` and captured files in
+`traces/<session_id>/<case_id>/`. Schema 2 manifests list each case's capture
+status and run-relative artifact path, format, rank and phase (unknown values
+are null). Case dimensions and topology come from `execution_plan.json`.
+
+Analyze a captured run, an experiment, or a directory containing runs:
+
+```bash
+python -m rtp_llm.test.perf_test.multi_node.analyzer.batch_analyze /path/to/run
 ```
 
-Third part describe the machine list, user name and port to ssh.
-```yaml
-machine_config:
-  ip_lists:
-    - "127.0.0.1"
-  run_user: "admin"
-  ssh_port: 2222
+The command writes `reports/trace/analysis.json` and `kernels.csv` below its
+input directory; `--output-dir DIR` selects another destination. It does not
+launch an engine or change measurements. Missing, incomplete, invalid and
+unsupported artifacts are listed in `skipped`. An input with no analyzable
+trace exits nonzero. Copied collected runs are supported without rewriting
+the original plan.
+
+Only listed Kineto/Chrome Trace JSON files are analyzed. `.nsys-rep` captures
+remain available for Nsight Systems and are reported as unsupported by this
+JSON analyzer. Each trace retains its session/case/rank context. Kernel time is
+the sum of raw kernel durations; kernel span is the first-to-last kernel
+interval. Neither is end-to-end request latency. No duration outliers are
+silently removed. `--min-occurrences N` filters table rows only (default 1).
+
+For a single trace, use
+`python -m rtp_llm.test.perf_test.multi_node.analyzer.trace_analyze /path/to/trace.json`.
+Optional module analysis uses the restored configs with the same run input:
+
+```bash
+python -m rtp_llm.test.perf_test.multi_node.analyzer.batch_analyze /path/to/run \
+  --module-conf rtp_llm/test/perf_test/multi_node/analyzer/configs/qwen_480b_prefill_fp8.py
 ```
 
-Fourth part is for cloning code to local in ssh machine, checkout to the branch you need to test, and compilation options.
-```yaml
-build_config:
-  git_repo_url: "git@gitlab.alibaba-inc.com:foundation_models/RTP-LLM.git"
-  git_checkout_ref: "origin/feature/yiyin_fork_rtp_llm"
-  # open_source_url: "git@github.com:alibaba/rtp-llm.git"
-  open_source_ref: "origin/feature/yiyin_multi_benchmark"
-  ft_sub_dir: "rtp_llm_perf_test"
-  bazel_build_args: '" --jobs 64 --verbose_failures --config=cuda13 "'
+`module_conf.py` provides name matching only; the two `qwen_480b_*` presets also
+provide model-specific FLOPs/IO estimates. Select a preset matching the model
+and phase; the supplied formulas describe TP1. `modules.csv` and each trace's
+`statistics.modules` contain matched kernel names, actual invocation counts,
+summed durations and percentages of total kernel time. Rules match independently,
+so overlapping patterns can contribute to more than one module. Kernel row
+filtering does not remove events from module totals.
+
+FLOPs/IO describe one module invocation. Rates are computed only when the spec
+explicitly declares `formula_per_kernel=True`: estimated work per invocation
+is multiplied by the actual matching kernel-event count and divided by summed
+duration. QKV/O GEMM presets declare this; other presets leave rates null when
+logical module invocations cannot be inferred from kernel launches. Context comes from the frozen case and
+topology, with a per-DP batch and the case's input length. Heterogeneous or cached
+prefill shapes, unsupported TP/phase, invalid formulas and unknown capture steps
+produce null estimates and an `estimation_error`, while measured module times
+remain available. Decode rates require explicit decode phase metadata. These
+estimates are not measured hardware counters or end-to-end latency. Config files
+are Python files defining `module_config` with strings or `ModuleConf` values.
+The old Task-directory scanner and shell wrappers remain removed.
+
+## Result goldens
+
+Generate a candidate from a completed result, review the differences, then
+validate the accepted file explicitly:
+
+```bash
+python -m rtp_llm.test.perf_test.regression.golden generate \
+  --result /path/to/run/results/result.json --output /tmp/result.candidate.json
+python -m rtp_llm.test.perf_test.regression.golden validate \
+  --result /path/to/run/results/result.json --golden /path/to/accepted.golden.json
 ```
 
-Fifth part is the common configuration shared across all benchmarks.
-```yaml
-common_config:
-  warm_up: 1
-  act_type: "bf16"
-  hack_layer_num: 4
-  start_port: 12333
-  decode_test_length: 2048
-  max_context_batch_size: 1
-  reserver_runtime_mem_mb: 0
-```
-
-The sixth part describes the benchmark configuration structure. Each benchmark consists of four main components:
-
-**benchmark_name**: A unique identifier for the benchmark test case.
-
-**fixed_config**: Contains static configuration that remain constant across all test iterations. This includes model paths, model type, and other fixed settings.
-```yaml
-benchmarks:
-  - benchmark_name: "Qwen3-Coder-480B-A35B-Instruct"
-    fixed_config:
-      tokenizer_path: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
-      checkpoint_path: "Qwen/Qwen3-Coder-480B-A35B-Instruct"
-      model_type: "qwen_3_moe"
-      is_decode: true
-      weight_type: "fp8"
-      use_deepep_moe: true
-      use_deepep_low_latency: true
-      accl_fp8_cast_level: 1
-      accl_low_latency_optimize: 1
-      accl_dispatch_num_warp_groups: 4
-      accl_combine_num_warp_groups: 4
-      enable_merge_w13: true
-```
-
-**iterative_search_config**: Defines configuration that will be tested in parallel combinations. All configuration in this section must have lists of equal length, as each index position represents one test configuration. For example, if `dp_size: [1, 4]` and `tp_size: [8, 8]`, the script will test two configurations: `(dp_size=1, tp_size=8)` and `(dp_size=4, tp_size=8)`.
-```yaml
-    iterative_search_config:
-      dp_size: [1, 4]
-      tp_size: [8, 8]
-      concurrency_limit: [8, 4]
-      batch_size_list: ["[8]", "[4]"]
-      input_len_list: ["[2048,4096,8192]", "[65536]"]
-```
-
-**recursive_search_config**: Defines configuration that will be tested using Cartesian product combinations. Each configuration can have multiple values, and all possible combinations will be tested. For example, with `concurrency_limit: [4, 8]` and `gen_num_per_cycle: [2, 3]`, four combinations will be tested: `(4, 2)`, `(4, 3)`, `(8, 2)`, `(8, 3)`.
-```yaml
-    recursive_search_config:
-      concurrency_limit: [4, 8]
-      gen_num_per_cycle: [2, 3]
-```
-
-### Run step
-```shell
-# in root of RTP-LLM
-cd rtp_llm/test/perf_test/multi_node
-# Configure multi_benchmark_config.yaml
-/opt/conda310/bin/python3 multi_benchmark.py -c multi_benchmark_config.yaml
-```
-Ultimately, multi-node benchmark dumps trace profiles and logs to local `test_output` directory.
-
-## Result Format
-Decode result, where batch size stands for per DP Rank
-``` shell
-+---------------------------------------------------------------------------------------------+
-|                                        Decode Result                                        |
-+---------+------------+------------------+--------------+------------------+-----------------+
-| Seq Len | Batch Size | Sucess/Total Req | Input/Output | Waiting Time(ms) | Decode Time(ms) |
-+---------+------------+------------------+--------------+------------------+-----------------+
-| 4096    | 1          | 1/1              | 4096/2048    | 0.00             | 1.75            |
-| 4096    | 2          | 2/2              | 4096/2048    | 0.00             | 1.72            |
-| 4096    | 4          | 4/4              | 4096/2048    | 0.00             | 1.91            |
-| 4096    | 8          | 8/8              | 4096/2048    | 0.00             | 1.93            |
-| 4096    | 16         | 16/16            | 4096/2048    | 0.00             | 2.00            |
-| 4096    | 32         | 32/32            | 4096/2048    | 0.00             | 2.19            |
-| 4096    | 48         | 48/48            | 4096/2048    | 0.00             | 2.43            |
-| 4096    | 64         | 64/64            | 4096/2048    | 0.00             | 2.60            |
-| 4096    | 80         | 80/80            | 4096/2048    | 0.00             | 2.87            |
-+---------+------------+------------------+--------------+------------------+-----------------+
-```
-Trace files and logs
-``` shell
-test_output/
-├── Experiment_H20_Node1_20251023-181554-251847
-│   ├── Benchmark_Qwen3-8B_20251023-184040-471413
-│   │   ├── Task_concurrency_limit-4_batch_size_list-[4]_input_len_list-[8192]
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_184240.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b4_s8192_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   └── Task_concurrency_limit-8_batch_size_list-[8]_input_len_list-[2048,4096]
-│   │       ├── clean.log
-│   │       ├── copy.log
-│   │       ├── Decode_Result.json
-│   │       ├── kill.log
-│   │       ├── process_logs
-│   │       │   └── process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_184046.log
-│   │       ├── test.log
-│   │       └── trace_files
-│   │           ├── normal_profiler_wr0_b8_s2048_prefill0_1.json
-│   │           ├── normal_profiler_wr0_b8_s4096_prefill0_2.json
-│   │           ├── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │           └── normal_profiler_wr1_b0_s0_prefill0_2.json
-│   ├── Benchmark_Qwen3-Coder-480B-A35B-Instruct-FP8_20251023-181634-679473
-│   │   ├── Task_concurrency_limit-4_batch_size_list-[4]_input_len_list-[8192]_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-4
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183008.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b4_s8192_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   ├── Task_concurrency_limit-4_batch_size_list-[4]_input_len_list-[8192]_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-5
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183240.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b4_s8192_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   ├── Task_concurrency_limit-4_batch_size_list-[4]_input_len_list-[8192]_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-4
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183518.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b4_s8192_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   ├── Task_concurrency_limit-4_batch_size_list-[4]_input_len_list-[8192]_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-5
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_183801.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b4_s8192_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   ├── Task_concurrency_limit-8_batch_size_list-[8]_input_len_list-[2048,4096]_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-4
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_181641.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b8_s2048_prefill0_1.json
-│   │   │       ├── normal_profiler_wr0_b8_s4096_prefill0_2.json
-│   │   │       ├── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_2.json
-│   │   ├── Task_concurrency_limit-8_batch_size_list-[8]_input_len_list-[2048,4096]_accl_dispatch_num_warp_groups-4_accl_combine_num_warp_groups-5
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_182004.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b8_s2048_prefill0_1.json
-│   │   │       ├── normal_profiler_wr0_b8_s4096_prefill0_2.json
-│   │   │       ├── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_2.json
-│   │   ├── Task_concurrency_limit-8_batch_size_list-[8]_input_len_list-[2048,4096]_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-4
-│   │   │   ├── clean.log
-│   │   │   ├── copy.log
-│   │   │   ├── Decode_Result.json
-│   │   │   ├── kill.log
-│   │   │   ├── process_logs
-│   │   │   │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_182327.log
-│   │   │   ├── test.log
-│   │   │   └── trace_files
-│   │   │       ├── normal_profiler_wr0_b8_s2048_prefill0_1.json
-│   │   │       ├── normal_profiler_wr0_b8_s4096_prefill0_2.json
-│   │   │       ├── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │   │       └── normal_profiler_wr1_b0_s0_prefill0_2.json
-│   │   └── Task_concurrency_limit-8_batch_size_list-[8]_input_len_list-[2048,4096]_accl_dispatch_num_warp_groups-5_accl_combine_num_warp_groups-5
-│   │       ├── clean.log
-│   │       ├── copy.log
-│   │       ├── Decode_Result.json
-│   │       ├── kill.log
-│   │       ├── process_logs
-│   │       │   └── process_TEST_OUTPUT_QWEN_3_MOE_1_2_0_20251023_182644.log
-│   │       ├── test.log
-│   │       └── trace_files
-│   │           ├── normal_profiler_wr0_b8_s2048_prefill0_1.json
-│   │           ├── normal_profiler_wr0_b8_s4096_prefill0_2.json
-│   │           ├── normal_profiler_wr1_b0_s0_prefill0_1.json
-│   │           └── normal_profiler_wr1_b0_s0_prefill0_2.json
-│   ├── build.log
-│   ├── clean.log
-│   ├── host.log
-│   └── kill.log
-└── Experiment_H20_Node1_20251023-200243-425716
-    ├── Benchmark_Qwen3-8B_20251023-205656-543908
-    │   ├── Task_concurrency_limit-4_batch_size_list-[4]_input_len_list-[8192]
-    │   │   ├── clean.log
-    │   │   ├── copy.log
-    │   │   ├── Decode_Result.json
-    │   │   ├── kill.log
-    │   │   ├── process_logs
-    │   │   │   └── process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_205847.log
-    │   │   ├── test.log
-    │   │   └── trace_files
-    │   │       ├── normal_profiler_wr0_b4_s8192_prefill0_1.json
-    │   │       └── normal_profiler_wr1_b0_s0_prefill0_1.json
-    │   └── Task_concurrency_limit-8_batch_size_list-[8]_input_len_list-[2048,4096]
-    │       ├── clean.log
-    │       ├── copy.log
-    │       ├── Decode_Result.json
-    │       ├── kill.log
-    │       ├── process_logs
-    │       │   └── process_TEST_OUTPUT_QWEN_3_1_2_0_20251023_205700.log
-    │       ├── test.log
-    │       └── trace_files
-    │           ├── normal_profiler_wr0_b8_s2048_prefill0_1.json
-    │           ├── normal_profiler_wr0_b8_s4096_prefill0_2.json
-    │           ├── normal_profiler_wr1_b0_s0_prefill0_1.json
-    │           └── normal_profiler_wr1_b0_s0_prefill0_2.json
-    ├── build.log
-    ├── clean.log
-    ├── host.log
-    └── kill.log
-
-41 directories, 116 files
-```
+`generate` atomically replaces its output; use a candidate path before promotion.
+`validate` reads the golden without changing it. The corresponding Bazel binary
+is `//rtp_llm/test/perf_test:perf_test_golden`.

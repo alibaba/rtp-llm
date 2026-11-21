@@ -9,9 +9,8 @@ Flow:
 import logging
 import os
 
-from rtp_llm.test.perf_test.dataset import extract_arg
+from rtp_llm.test.perf_test.engine_paths import extract_arg, resolve_engine_paths
 from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig, OfflineRunner
-from rtp_llm.test.perf_test.perf_config import resolve_perf_engine_paths
 from rtp_llm.test.perf_test.server import EngineServer
 from rtp_llm.test.utils.coredump_util import summarize_and_cleanup_coredumps
 
@@ -105,6 +104,12 @@ def parse_offline_args():
     )
     bench.add_argument("--tp_size", type=int, default=1)
     bench.add_argument(
+        "--existing-server-port",
+        type=int,
+        default=None,
+        help="Connect to an existing local engine instead of starting a server",
+    )
+    bench.add_argument(
         "--server_start_timeout",
         type=int,
         default=1600,
@@ -112,6 +117,11 @@ def parse_offline_args():
     )
 
     args, remaining = parser.parse_known_args()
+    if (
+        args.existing_server_port is not None
+        and not 1 <= args.existing_server_port <= 65535
+    ):
+        parser.error("--existing-server-port must be between 1 and 65535")
     return args, remaining
 
 
@@ -137,7 +147,7 @@ def main() -> str:
         remaining.extend(["--tp_size", str(tp_size)])
 
     # Resolve Hub IDs (e.g. "Qwen/Qwen3.5-35B-A3B") to local paths
-    remaining = resolve_perf_engine_paths(remaining)
+    remaining = resolve_engine_paths(remaining)
     checkpoint_path = extract_arg(remaining, "checkpoint_path") or checkpoint_path
     tokenizer_path = extract_arg(remaining, "tokenizer_path") or tokenizer_path
     model_type = extract_arg(remaining, "model_type", "") or os.environ.get(
