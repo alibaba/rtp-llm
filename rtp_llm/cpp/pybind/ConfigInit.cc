@@ -727,24 +727,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
                     t[1] = py::int_(8);
                 }
-                    t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
-                    t[1] = py::int_(9);
-                }
-                const py::tuple reclaim_state = t;
-                const bool      has_reclaim_field =
-                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
-                if (has_reclaim_field) {
-                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
-                    t[1] = py::int_(8);
-                }
-                const py::tuple reclaim_v24_state = t;
-                const bool      has_v24_reclaim_field =
-                    t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 24;
-                if (has_v24_reclaim_field) {
-                    // Drop the tail reclaim flag; indices 0-78 become main's v23.
-                    t    = t[py::slice(0, 79, 1)].cast<py::tuple>();
-                    t[1] = py::int_(23);
-                }
                 constexpr size_t kLegacyFieldCount               = 55;
                 constexpr size_t kQueueConfigFieldCount          = 64;
                 constexpr size_t kWriteSyncFieldCount            = 56;

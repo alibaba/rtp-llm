@@ -85,9 +85,10 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 11))
-        self.assertEqual(len(state), 74)
-        self.assertEqual(state[71], config.kv_cache_pool_block_weights)
+        self.assertEqual(state[:2], ("KVCacheConfig", 25))
+        self.assertEqual(len(state), 81)
+        self.assertEqual(state[80], config.kv_cache_pool_block_weights)
+        self.assertTrue(state[79])
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
@@ -103,7 +104,10 @@ class KVCacheConfigPickleTest(TestCase):
         config.enable_linear_cache_reclaim = True
         config.kv_cache_pool_block_weights = '{"full":8,"linear":1}'
         state = config.__getstate__()
-        previous = (state[0], 9, *state[2:71])
+        # Historical v9 branch state: mainline v8 layout (rebuilt through
+        # the v22 helper) plus the reclaim flag at index 70.
+        v22_state = _version_twenty_two_state(config)
+        previous = (v22_state[0], 9, *v22_state[2:70], state[79])
         original = tuple(list(previous))
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
@@ -121,10 +125,10 @@ class KVCacheConfigPickleTest(TestCase):
     def test_previous_event_state_defaults_linear_reclaim_off(self):
         config = KVCacheConfig()
         config.enable_linear_cache_reclaim = True
-        state = config.__getstate__()
-        # A mainline version-7 state ends at the event fields; indices past
-        # that (including the v24/v25 tail flags) must not reach it.
-        previous = (state[0], 7, *state[2:69])
+        # Older layouts carry a retired host-placement flag at index 53, so
+        # build the legacy shape through the v22 helper before truncating.
+        v22_state = _version_twenty_two_state(config)
+        previous = (v22_state[0], 7, *v22_state[2:69])
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
         self.assertFalse(restored.enable_linear_cache_reclaim)
@@ -144,6 +148,7 @@ class KVCacheConfigPickleTest(TestCase):
                 config.enable_linear_cache_reclaim = True
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
+                v22_state = _version_twenty_two_state(config)
                 self.assertEqual(len(state), 81)
                 self.assertEqual(state[:2], ("KVCacheConfig", 25))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
@@ -175,8 +180,9 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
                 self.assertIn("block_tree_task_pool_size: 6\n", restored.to_string())
                 # A mainline version-8 state (crc tail, no reclaim / pool weights)
-                # must still decode with crc preserved and reclaim defaulted off.
-                crc_only = (state[0], 8, *state[2:70])
+                # must still decode with crc preserved and reclaim defaulted off;
+                # build it through the v22 helper to restore the retired flag at 53.
+                crc_only = (v22_state[0], 8, *v22_state[2:70])
                 restored_crc_only = KVCacheConfig.__new__(KVCacheConfig)
                 restored_crc_only.__setstate__(crc_only)
                 self.assertIs(restored_crc_only.enable_crc, enable_crc)
@@ -405,7 +411,9 @@ class KVCacheConfigPickleTest(TestCase):
                 for _ in range(2):
                     config = pickle.loads(pickle.dumps(config))
                     self.assertEqual(getattr(config, name), timeout)
-                    self.assertEqual(config.__getstate__()[-1], timeout)
+                    # v25 keeps frozen timeout at index 78; the v24/v25 tail
+                    # flags follow it.
+                    self.assertEqual(config.__getstate__()[78], timeout)
                     self.assertIn(f"{name}: {timeout}\n", config.to_string())
         for timeout in (-1, 2**31):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(
@@ -413,7 +421,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:-1], timeout))
+                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

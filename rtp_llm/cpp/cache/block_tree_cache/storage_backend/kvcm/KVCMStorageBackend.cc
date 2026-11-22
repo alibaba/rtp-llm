@@ -669,6 +669,7 @@ public:
         const auto                             meta = std::dynamic_pointer_cast<KVCMMatchMeta>(match_meta);
         RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "KVCM read received invalid match metadata");
         kvcm::LocationsView locations_view;
+        const bool only_full_groups = requestsOnlyFullGroups(request);
         if (meta->filtered) {
             locations_view.resize(meta->locations.size());
             for (size_t i = 0; i < meta->locations.size(); ++i) {
@@ -677,7 +678,6 @@ public:
                 }
             }
         } else {
-            const bool only_full_groups = requestsOnlyFullGroups(request);
             RTP_LLM_CHECK_WITH_INFO(group_policy_->filterNeedLoadLocations(meta->locations,
                                                                           locations_view,
                                                                           /*block_mask=*/0,

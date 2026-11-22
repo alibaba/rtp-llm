@@ -754,7 +754,14 @@ class GenerateConfigTest(TestCase):
         # Legacy payloads share the load deadline for eviction and omit later fields.
         legacy_defaults = KVCacheConfig()
         legacy_defaults.disk_cache_evict_timeout_ms = -1
-        event_state = (*state[:63], *legacy_defaults.__getstate__()[:79][63:])
+        # The v25 tail flags (linear reclaim, pool weights) also fall back to
+        # their defaults after a legacy v6 state round-trips.
+        event_state = (
+            *state[:63],
+            *legacy_defaults.__getstate__()[:79][63:],
+            legacy_defaults.__getstate__()[79],
+            legacy_defaults.__getstate__()[80],
+        )
         # Version 6 carried the retired host-placement flag at index 53.
         state = (state[0], 6, *state[2:53], True, *state[53:63])
         self.assertEqual(restore(state).__getstate__(), event_state)

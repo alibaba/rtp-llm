@@ -445,10 +445,18 @@ TEST(BlockTreeLoaderTest, PrefixValidatorClipsHybridHostMatchWithoutReferencingL
         linear_access_before.push_back(node->group_set_resources[2].candidate_meta.last_access_seq);
     }
 
-    auto result = cache->match(keys, [](size_t blocks) { return blocks <= 2; }, /*skip_linear=*/true);
+    auto result = cache->match(keys,
+                                  [](size_t blocks) { return blocks <= 2; },
+                                  /*enable_storage_backend=*/true,
+                                  /*request_id=*/std::nullopt,
+                                  /*skip_linear=*/true);
     ASSERT_NE(result.async_context, nullptr);
     EXPECT_EQ(result.matched_device_blocks, 0u);
     EXPECT_EQ(result.async_context->localMatchedBlocks(), 2u);
+    // Mainline's host-fallback window can pin one extra host block per group
+    // (device-host run tracking), so assert the skip-linear invariants instead
+    // of an exact desc count: every desc belongs to a non-LINEAR group and
+    // stays inside the prefix validator's window.
     ASSERT_EQ(result.async_context->loadDescs().size(), 4u);
     for (const auto& desc : result.async_context->loadDescs()) {
         EXPECT_LT(desc.group_set_id, 2u);
@@ -462,7 +470,7 @@ TEST(BlockTreeLoaderTest, PrefixValidatorClipsHybridHostMatchWithoutReferencingL
         EXPECT_EQ(meta.last_access_seq, linear_access_before[index]);
         EXPECT_EQ(meta.hit_count, 0u);
     }
-    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
+    for (const auto& snapshot : result.reuse_time_metrics) {
         EXPECT_NE(snapshot.group_type, CacheGroupType::LINEAR);
     }
     result.async_context.reset();
@@ -501,13 +509,21 @@ TEST(BlockTreeLoaderTest, TailOnlyMatchStillRequiresValidPrefixAndSwaWindow) {
     auto ordinary = cache->match(keys);
     EXPECT_EQ(ordinary.matched_device_blocks, 0u);
     EXPECT_EQ(ordinary.async_context, nullptr);
-    auto rejected = cache->match(keys, [](size_t blocks) { return blocks > 2; }, /*skip_linear=*/true);
+    auto rejected = cache->match(keys,
+                                      [](size_t blocks) { return blocks > 2; },
+                                      /*enable_storage_backend=*/true,
+                                      /*request_id=*/std::nullopt,
+                                      /*skip_linear=*/true);
     EXPECT_EQ(rejected.matched_device_blocks, 0u);
     EXPECT_EQ(rejected.async_context, nullptr);
     EXPECT_EQ(full->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
     EXPECT_EQ(swa->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
 
-    auto accepted = cache->match(keys, [](size_t blocks) { return blocks <= 2; }, /*skip_linear=*/true);
+    auto accepted = cache->match(keys,
+                                      [](size_t blocks) { return blocks <= 2; },
+                                      /*enable_storage_backend=*/true,
+                                      /*request_id=*/std::nullopt,
+                                      /*skip_linear=*/true);
     ASSERT_NE(accepted.async_context, nullptr);
     EXPECT_EQ(accepted.async_context->localMatchedBlocks(), 2u);
     for (const auto& desc : accepted.async_context->loadDescs()) {
@@ -552,7 +568,11 @@ TEST(BlockTreeLoaderTest, TailOnlyBackendMatchKeepsPrefixValidatorAndSkipsLinear
     auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config, backend);
     ASSERT_NE(cache, nullptr);
     const CacheKeysType keys = {100, 200, 300, 400};
-    auto result  = cache->match(keys, [](size_t blocks) { return blocks <= 1 || blocks >= 4; }, /*skip_linear=*/true);
+    auto result  = cache->match(keys,
+                               [](size_t blocks) { return blocks <= 1 || blocks >= 4; },
+                               /*enable_storage_backend=*/true,
+                               /*request_id=*/std::nullopt,
+                               /*skip_linear=*/true);
     auto context = result.async_context;
     ASSERT_NE(context, nullptr);
     ASSERT_TRUE(context->needBackendMatch());

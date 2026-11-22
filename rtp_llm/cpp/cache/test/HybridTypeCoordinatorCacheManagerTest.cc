@@ -2587,7 +2587,7 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyDoesNotReuse
     size_t resident_prefix_length = 0;
     allocator->insertIntoCache(InsertInfo{resource, nullptr, false}, resident_prefix_length);
 
-    const auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{500, 501}, {}, true);
+    const auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{500, 501}, {}, true, std::nullopt, true);
     EXPECT_EQ(match.matched_device_blocks, 0u);
     block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
     pool->decRef(blocks);
@@ -2620,7 +2620,8 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, PdDecodeLinearTailOnlyPublishesFul
 
     const auto ordinary_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201});
     EXPECT_EQ(ordinary_match.matched_device_blocks, 0u);
-    const auto pd_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201}, {}, true);
+    const auto pd_match =
+        allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201}, {}, true, std::nullopt, true);
     EXPECT_EQ(pd_match.matched_device_blocks, 2u);
     EXPECT_TRUE(std::all_of(pd_match.matched_device_resources.begin(),
                             pd_match.matched_device_resources.end(),
