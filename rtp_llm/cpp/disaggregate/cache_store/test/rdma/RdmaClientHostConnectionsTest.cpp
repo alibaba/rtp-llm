@@ -14,7 +14,48 @@ using namespace testing;
 
 namespace rtp_llm {
 
-class RdmaClientHostConnectionsTest: public CacheStoreTestBase {};
+class RdmaClientHostConnectionsTest: public CacheStoreTestBase {
+protected:
+    void expectRecycleDuringConnectWait(size_t connection_count) {
+        auto host_connections =
+            std::make_shared<RdmaClientHostConnections>(memory_util_, "1.2.3.4", 12345, 2, 1);
+        auto mock_transport = new ::accl::barex::MockXClientTransport;
+        std::shared_ptr<::accl::barex::XClientTransport> transport(mock_transport);
+        for (size_t i = 0; i < connection_count; ++i) {
+            auto mock_connection = new ::accl::barex::MockXConnection;
+            std::shared_ptr<::accl::barex::XConnection> connection(mock_connection);
+            EXPECT_CALL(*mock_connection, Close()).Times(1);
+            host_connections->connectSuccess(connection);
+        }
+        auto borrowed = host_connections->getConnection(transport);
+        ASSERT_NE(nullptr, borrowed);
+        ASSERT_EQ(connection_count, borrowed->getConnectionsCount());
+
+        // Return a busy group only after the next borrower starts connecting.
+        int calls = 0;
+        EXPECT_CALL(*mock_transport, Connect(::accl::barex::TCP_V4, "1.2.3.4", 12345, _))
+            .Times(2)
+            .WillRepeatedly(InvokeWithoutArgs([&]() {
+                if (++calls == 2) {
+                    host_connections->recycleConnection(borrowed);
+                }
+            }));
+        auto reused = host_connections->getConnection(transport);
+        ASSERT_NE(nullptr, reused);
+        EXPECT_EQ(borrowed->getAllConnections(), reused->getAllConnections());
+        EXPECT_TRUE(host_connections->available_connections_.empty());
+        EXPECT_TRUE(host_connections->newly_connections_.empty());
+        EXPECT_EQ(connection_count, host_connections->busy_connections_.size());
+    }
+};
+
+TEST_F(RdmaClientHostConnectionsTest, testRecycleFullGroupDuringConnectWait) {
+    expectRecycleDuringConnectWait(2);
+}
+
+TEST_F(RdmaClientHostConnectionsTest, testRecyclePartialGroupDuringConnectWait) {
+    expectRecycleDuringConnectWait(1);
+}
 
 TEST_F(RdmaClientHostConnectionsTest, testConnectSuccessOrFailed) {
     ASSERT_TRUE(memory_util_ != nullptr);
