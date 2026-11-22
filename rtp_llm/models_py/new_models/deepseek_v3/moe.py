@@ -276,6 +276,7 @@ class DeepSeekV32MoEBlock(RtpModule):
     """
 
     _reference_router_warning_emitted = False
+    experts_cls = BaseMoEExperts
 
     def __init__(
         self,
@@ -475,7 +476,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             )
 
         # Routed experts
-        self.experts = BaseMoEExperts(
+        self.experts = self.experts_cls(
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -512,14 +513,16 @@ class DeepSeekV32MoEBlock(RtpModule):
         else:
             self.shared_experts = None
 
+    def _gate_logits(self, hidden_states):
+        return self.gate(hidden_states).float()
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.dim() != 2:
             raise ValueError(
                 "DeepSeek MoE expects a two-dimensional token matrix, got "
                 f"{tuple(hidden_states.shape)}"
             )
-        router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
+        router_logits_fp32 = self._gate_logits(hidden_states)
         topk_ids_dtype = self.experts.topk_ids_dtype
 
         if self.correction_bias:

@@ -226,11 +226,16 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         bias: Optional[torch.Tensor] = None,
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
+        *,
+        logical_input_size: Optional[int] = None,
+        logical_output_size: Optional[int] = None,
     ):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
         self.weight = self._as_hipb_weight_view(weight)
+        self.logical_input_size = logical_input_size
+        self.logical_output_size = logical_output_size
         self.weight_scales = self._as_hipb_scale_b(weight_scales, self.output_size)
 
     @staticmethod
@@ -416,6 +421,18 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         self, input: torch.Tensor, bias: Optional[torch.Tensor], use_gelu: bool = False
     ) -> torch.Tensor:
         """Keep NewLoader bias in the GEMM epilogue without caching its storage."""
+        if self.logical_input_size is not None:
+            if input.shape[-1] != self.logical_input_size:
+                raise ValueError(
+                    f"Expected FP8 PTPC input K={self.logical_input_size}, got {input.shape[-1]}"
+                )
+            if self.logical_input_size != self.hidden_size:
+                input = F.pad(input, (0, self.hidden_size - self.logical_input_size))
+        if bias is not None and self.logical_output_size not in (
+            None,
+            self.output_size,
+        ):
+            bias = F.pad(bias, (0, self.output_size - self.logical_output_size))
         output = self._forward_hipb(
             input,
             add_bias=bias is not None,
@@ -423,6 +440,8 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
             bias_override=bias,
         )
         # Match the legacy bias-free GELU contract, not an unsupported epilogue.
+        if self.logical_output_size not in (None, self.output_size):
+            output = output[..., : self.logical_output_size].contiguous()
         return F.gelu(output) if use_gelu and bias is None else output
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:

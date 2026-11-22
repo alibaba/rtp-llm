@@ -56,6 +56,7 @@ class _AcceleratorRoot(RtpModule):
         )
         model = ModelConfig()
         model.model_type = "qwen_3_moe"
+        model.data_type = "bf16"
         model.hidden_size = model.moe_inter_size = 128
         model.expert_num = 2
         model.moe_k = 1
@@ -64,6 +65,7 @@ class _AcceleratorRoot(RtpModule):
         model.quant_config = source
         parallel = ParallelismConfig()
         moe = MoeConfig()
+        moe.use_all_gather = True
         moe.fp4_moe_op = "trtllm"
         self.experts = BaseMoEExperts(
             num_experts=2,

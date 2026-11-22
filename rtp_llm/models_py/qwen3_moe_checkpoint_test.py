@@ -143,6 +143,7 @@ def _serving_eplb_rank(rank, directory, rendezvous):
         configure(model)
         config, pc = model.model_config, model.parallelism_config
         config.is_mtp = False
+        config.moe_n_group = 0  # Ungrouped routing is one rebalance group.
         config.moe_inter_size = 6
         config.phy2log_path = str(Path(directory) / "placement.json")
         initial = [2, 2, 1, 3, 0, 0]

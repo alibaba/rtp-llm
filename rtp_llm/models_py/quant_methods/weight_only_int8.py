@@ -20,11 +20,6 @@ class WeightOnlyInt8LinearMethod(QuantizeMethodBase):
     def create_weights(self, layer, input_size, output_size, params_dtype):
         if params_dtype not in (torch.float16, torch.bfloat16):
             raise ValueError("Dense W8A16 requires FP16 or BF16 parameters")
-        if input_size % 64 or output_size % 64:
-            raise ValueError(
-                f"{layer.prefix}: CUTLASS W8A16 local K={input_size}, N={output_size} "
-                "must both be divisible by 64"
-            )
         layer.register_parameter(
             "weight",
             torch.nn.Parameter(
@@ -66,13 +61,37 @@ class WeightOnlyInt8LinearMethod(QuantizeMethodBase):
     def prepare_weights_on_cpu(self, layer):
         self.process_weights_after_loading(layer)
 
+    def can_stage_startup_lora(self, layer):
+        return layer.weight_scale is None and layer.weight.is_floating_point()
+
+    def stage_startup_lora(self, layer, update):
+        if not self.can_stage_startup_lora(layer):
+            raise ValueError("Startup LoRA requires unpacked floating point weights")
+        layer._startup_lora_update = update
+
     def process_weights_after_loading(self, layer):
         if layer.weight_scale is not None:
             return
         # Both the torch SM8 mixed-dtype operator and OldLoader consume these
         # exact unsigned-offset/interleaved bytes in [K,N] storage. Preserve
         # a signed parameter dtype for state inspection; .view(uint8) is free.
+        update = getattr(layer, "_startup_lora_update", None)
+        if update is not None:
+            # TP/fused factors are in checkpoint orientation. Match the base
+            # merge: FP32 product, cast the delta, then add before quantization.
+            delta = update.delta().to(layer.weight.dtype)
+            if delta.shape != layer.weight.shape or not torch.isfinite(delta).all():
+                raise ValueError(f"Invalid startup LoRA delta for {update.target!r}")
+            layer.weight.add_(delta.to(layer.weight.device))
+            del layer._startup_lora_update
         q, scale = quantize_weight_only_int8(layer.weight.T)
+        # Keep the public shard geometry unchanged. Only the physical kernel
+        # needs 64-wide tiles; zero lanes cannot affect the logical product.
+        pad_k, pad_n = -q.shape[0] % 64, -q.shape[1] % 64
+        if pad_k or pad_n:
+            q = torch.nn.functional.pad(q, (0, pad_n, 0, pad_k))
+            if pad_n:
+                scale = torch.nn.functional.pad(scale, (0, pad_n), value=1)
         packed = cuda_groupwise_layout(q, bits=8, arch=80)
         layer.weight = torch.nn.Parameter(packed, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(scale, requires_grad=False)
@@ -84,13 +103,21 @@ class WeightOnlyInt8LinearMethod(QuantizeMethodBase):
             )
         if layer.weight_scale is None:
             raise RuntimeError("Dense W8A16 forward requires finalized weights")
-        shape = (*x.shape[:-1], layer.weight_scale.numel())
+        shape = (*x.shape[:-1], layer.output_size)
         if x.numel() == 0:
             return x.new_empty(shape)
+        pad_k = layer.weight.shape[0] - x.shape[-1]
+        pad_n = layer.weight_scale.numel() - layer.output_size
+        if pad_k:
+            x = torch.nn.functional.pad(x, (0, pad_k))
+        if pad_n and bias is not None:
+            bias = torch.nn.functional.pad(bias, (0, pad_n))
         output = torch.ops.aten._mixed_dtypes_linear(
             x.reshape(-1, x.shape[-1]).contiguous(),
             layer.weight.view(torch.uint8),
             layer.weight_scale,
             bias=bias,
         )
+        if pad_n:
+            output = output[..., : layer.output_size].contiguous()
         return output.reshape(shape)

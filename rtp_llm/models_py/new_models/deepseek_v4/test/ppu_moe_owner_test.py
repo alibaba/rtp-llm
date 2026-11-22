@@ -109,7 +109,14 @@ class PpuMoEOwnerTest(unittest.TestCase):
 
     def test_real_tp_ep_and_single_rank_scratch_and_native_fst(self):
         state = checkpoint()
-        for method in ("scratch", "fastsafetensors"):
+        methods = ("scratch", "fastsafetensors")
+        if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0":
+            with self.assertRaisesRegex(
+                RuntimeError, "fastsafetensors prerequisite failed"
+            ):
+                self.load(state, config(1, 0, 1), "fastsafetensors")
+            methods = ("scratch",)
+        for method in methods:
             for topology in ((1, 0, 1), (2, 0, 1), (2, 1, 1), (2, 1, 2)):
                 with self.subTest(method=method, topology=topology):
                     cfg = config(*topology)

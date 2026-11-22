@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import types
@@ -19,8 +20,8 @@ class _Model(RtpModule):
     def __init__(self, config, load):
         super().__init__()
         self.proj = RowParallelLinear(
-            input_size=256,
-            output_size=192,
+            input_size=config.width,
+            output_size=config.rows,
             tp_size=load.tp_size,
             tp_rank=load.tp_rank,
             prefix="proj",
@@ -30,20 +31,38 @@ class _Model(RtpModule):
         )
 
 
-def load_fixture(device, tp=1, rank=0, method="scratch", dtype=torch.float16):
+def load_fixture(
+    device, tp=1, rank=0, method="scratch", dtype=torch.float16,
+    rows=192, width=256, startup=False,
+):
     gen = torch.Generator().manual_seed(91299458)
-    weight = torch.randn((192, 256), generator=gen).to(dtype)
+    weight = torch.randn((rows, width), generator=gen).to(dtype)
     # Different rank-local max values distinguish shard-before-quantization.
-    weight[:, 128:] *= 4
-    bias = torch.randn(192, generator=gen).to(dtype)
+    weight[:, width // 2:] *= 4
+    bias = torch.randn(rows, generator=gen).to(dtype)
     with tempfile.TemporaryDirectory() as directory:
         save_file(
             {"proj.weight": weight, "proj.bias": bias},
             os.path.join(directory, "model.safetensors"),
         )
+        adapter = None
+        if startup:
+            path = os.path.join(directory, "lora")
+            os.mkdir(path)
+            with open(os.path.join(path, "adapter_config.json"), "w") as f:
+                json.dump({"r": 2, "lora_alpha": 3}, f)
+            a = torch.randn(2, width, generator=gen)
+            b = torch.randn(rows, 2, generator=gen)
+            save_file(
+                {"base_model.model.proj.lora_A.weight": a,
+                 "base_model.model.proj.lora_B.weight": b},
+                os.path.join(path, "adapter_model.safetensors"),
+            )
+            adapter = ("one", path)
+            weight = weight + ((b @ a) * 1.5).to(dtype)
         with patch.dict(MODEL_REGISTRY, {"w8a16_fixture": _Model}):
             loader = NewModelLoader(
-                types.SimpleNamespace(model_type="w8a16_fixture"),
+                types.SimpleNamespace(model_type="w8a16_fixture", rows=rows, width=width),
                 NewLoaderConfig(
                     device=device,
                     compute_dtype=dtype,
@@ -55,7 +74,7 @@ def load_fixture(device, tp=1, rank=0, method="scratch", dtype=torch.float16):
                 ),
                 model_path=directory,
             )
-            layer = loader.load().proj
+            layer = loader.load(startup_lora=adapter).proj
             assert loader.loaded_method.value == method
     local = weight.chunk(tp, dim=1)[rank].T
     scale = local.abs().amax(0).clamp(min=1e-8) / 128
@@ -79,10 +98,28 @@ class WeightOnlyInt8CheckpointTest(unittest.TestCase):
                     layer.process_weights_after_loading()
                     self.assertEqual(layer.weight.data_ptr(), storage)
 
-    def test_reject_prequantized_and_unaligned_weights(self):
+    def test_peft_merges_before_quantization_of_unaligned_local_shards(self):
+        for method in ("scratch", "fastsafetensors"):
+            for rank in (0, 1):
+                with self.subTest(method=method, rank=rank):
+                    layer, q, scale, _ = load_fixture(
+                        "cpu", 2, rank, method, dtype=torch.bfloat16,
+                        rows=160, width=192, startup=True,
+                    )
+                    # Logical rank-local K=96/N=160; the GEMM uses K=128/N=192.
+                    padded = torch.nn.functional.pad(q, (0, 32, 0, 32))
+                    expected = cuda_groupwise_layout(padded, 8, 80)
+                    torch.testing.assert_close(layer.weight, expected, atol=0, rtol=0)
+                    torch.testing.assert_close(
+                        layer.weight_scale, torch.nn.functional.pad(scale, (0, 32), value=1),
+                        atol=0, rtol=0,
+                    )
+                    self.assertFalse(hasattr(layer, "_startup_lora_update"))
+                    with self.assertRaisesRegex(NotImplementedError, "Quantized LoRA"):
+                        layer.prepare_lora_factors("weight", None, None)
+
+    def test_reject_prequantized_weights(self):
         args = dict(quant_config=QuantizationConfig("INT8"), prefix="proj")
-        with self.assertRaisesRegex(ValueError, "divisible by 64"):
-            RowParallelLinear(input_size=96, output_size=192, **args)
         layer = RowParallelLinear(input_size=128, output_size=192, **args)
         with self.assertRaisesRegex(ValueError, "floating checkpoint"):
             layer.load_weights({"weight": torch.zeros(192, 128, dtype=torch.int8)})

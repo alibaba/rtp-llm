@@ -125,6 +125,8 @@ class DeepSeekV32Indexer(Indexer, SparseIndexerParameters):
 class DeepSeekV32DecoderLayer(RtpModule):
     """Single decoder layer: MLA attention + FFN (dense or MoE)."""
 
+    moe_cls = DeepSeekV32MoEBlock
+
     def __init__(
         self,
         hidden_size: int,
@@ -202,7 +204,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
         )
 
         if is_moe_layer:
-            self.mlp = DeepSeekV32MoEBlock(
+            self.mlp = self.moe_cls(
                 hidden_size=hidden_size,
                 moe_intermediate_size=moe_intermediate_size,
                 num_experts=num_experts,
@@ -278,7 +280,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
                     "tokens_per_block",
                     blocksize,
                 ),
-                stable_topk=getattr(model_config, "model_type", "") == "glm_5",
+                stable_topk=getattr(model_config, "model_type", "") in ("glm_5", "glm_5_mtp"),
             )
         else:
             self.self_attn.indexer = None

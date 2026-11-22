@@ -113,6 +113,39 @@ class ScaledRopeTest(unittest.TestCase):
                 )
                 torch.testing.assert_close(raw, saved, atol=0, rtol=0)
 
+    def test_prefill_graph_bucket_can_have_more_rows_than_live_tokens(self):
+        raw = torch.randn(9, 8, 128, device=self.device)
+        cu = torch.tensor([0, 3, 6, 9], dtype=torch.int32, device=self.device)
+        prefixes = cu.new_tensor([0, 65, 70])
+        config = SimpleNamespace(dim=96, base=10000, scale=8.0, max_pos=32,
+                                 factor1=1.0, factor2=4.0, index_factor=1)
+        for llama3 in (False, True):
+            def run():
+                return scaled_rope_qkv(
+                    raw.flatten(1), num_heads=4, num_kv_heads=2, head_size=128,
+                    rope_config=config, llama3=llama3, positions=None,
+                    cu_seqlens=cu, prefix_lengths=prefixes,
+                ).reshape_as(raw)
+
+            cu.copy_(cu.new_tensor([0, 3, 6, 9]))
+            run()  # Compile before capture.
+            if not self.interpreter:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual = run()
+            # Two live requests, one empty request, five discarded bucket rows.
+            cu.copy_(cu.new_tensor([0, 1, 4, 4]))
+            if self.interpreter:
+                actual = run()
+            else:
+                graph.replay()
+            self.assert_result(
+                actual[:4], raw[:4], cu.new_tensor([0, 65, 66, 67]),
+                cu.new_tensor([0, 1, 1, 1]), cu.new_tensor([1, 68, 70]),
+                rotary_dim=96, base=10000, scale=8.0, original_max_position=32,
+                llama3=llama3,
+            )
+
     def test_packed_adapter_accepts_capacity_positions_and_preserves_stride(self):
         config = SimpleNamespace(
             dim=128,

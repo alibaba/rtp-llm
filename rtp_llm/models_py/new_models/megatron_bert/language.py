@@ -7,6 +7,13 @@ from rtp_llm.models_py.new_models.megatron_bert.backbone import MegatronParamete
 
 
 class MegatronBertForEmbedding(MegatronParameters, GptModelBase, RtpModule):
+    supports_ft_handler_heads = True
+
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_megatron_ft_checkpoint
+
+        load_megatron_ft_checkpoint(self, checkpoint)
+
     def __init__(self, model_config, load_config):
         super().__init__(
             config=model_config,

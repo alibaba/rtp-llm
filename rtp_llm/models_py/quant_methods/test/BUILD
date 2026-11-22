@@ -104,7 +104,7 @@ py_test(
 
 py_test(
     name = "test_groupwise_owners",
-    srcs = ["test_groupwise_owners.py", "test_groupwise_checkpoint.py"],
+    srcs = ["test_groupwise_owners.py", "test_groupwise_checkpoint.py", "staged_checkpoint_fixture.py"],
     main = "test_groupwise_owners.py",
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
     deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:safetensors_torch"],
@@ -189,7 +189,7 @@ py_test(
 
 py_test(
     name = "test_w4a8_checkpoint",
-    srcs = ["test_w4a8_checkpoint.py", "test_w8a8_int8_moe.py"],
+    srcs = ["test_w4a8_checkpoint.py", "test_w8a8_int8_moe.py", "staged_checkpoint_fixture.py"],
     main = "test_w4a8_checkpoint.py",
     deps = ["//rtp_llm/models_py:new_weight_loader", "//rtp_llm:torch", "//rtp_llm:safetensors"],
 )

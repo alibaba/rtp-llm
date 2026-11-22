@@ -439,6 +439,18 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
     supports_checkpoint_weight_updates = True
     supports_custom_weight_mappings = True
     supports_handler_projection_layers = True
+    supports_ft_handler_heads = True
+
+    def load_ft_checkpoint(self, checkpoint):
+        # Multimodal/draft subclasses have other owned parameters. They need
+        # their own format contract, not the dense language-model one.
+        if type(self) is not Qwen3ForCausalLM:
+            raise ValueError(f"No Qwen3 dense FT adapter for {type(self).__name__}")
+        from rtp_llm.models_py.new_models.qwen2.ft_checkpoint import (
+            load_gqa_ffn_ft_checkpoint,
+        )
+
+        load_gqa_ffn_ft_checkpoint(self, checkpoint)
 
     _decoder_layer = Qwen3DecoderLayer
     _dense_config = staticmethod(_extract_config_values)
@@ -588,6 +600,10 @@ class Qwen3ForCausalLM(GptModelBase, RtpModule):
         self._lm_head_postprocessed = True
 
     def _init_handler_heads(self, load_config, cfg):
+        if getattr(getattr(load_config, "quant_config", None), "quant_type", None) == "pertensor_quant":
+            from rtp_llm.models_py.quant_methods.per_tensor_int8 import StaticInt8Mapper
+
+            self.WEIGHTS_MAPPER = StaticInt8Mapper(self.WEIGHTS_MAPPER)
         self.handler_heads = ReplicatedHandlerHeads(
             getattr(load_config, "custom_weight_mappings", ()),
             self.WEIGHTS_MAPPER,

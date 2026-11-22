@@ -14,7 +14,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Dict
 
 import torch
@@ -262,20 +262,14 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         import deep_gemm
         import torch.distributed as dist
 
-        cfg = self.cfg
-        D = cfg.dim
-        inter = _mega_intermediate_size(cfg)
-        device = self._transform_routed_weights(layer_weights, deep_gemm, inter)
+        inter = _mega_intermediate_size(self.cfg)
+        self._transform_routed_weights(
+            partial(take_weight, layer_weights), deep_gemm, inter
+        )
 
         self._setup_buffer_and_warmup()
 
     def setup_weights_from_fp4(self, w1_w, w1_s, w2_w, w2_s, w1_layout="gate_up"):
-        self._setup_fp4_weights(
-            {W.moe_w1: w1_w, W.moe_s1: w1_s, W.moe_w2: w2_w, W.moe_s2: w2_s},
-            w1_layout,
-        )
-
-    def _setup_fp4_weights(self, layer_weights, w1_layout):
         if self._fp8_routed:
             raise ValueError("FP8 MegaMoE only accepts FP8 per-block weights")
         import deep_gemm
@@ -285,7 +279,9 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             if self._prepared_policy
             else _mega_intermediate_size(self.cfg)
         )
-        self._transform_routed_weights(layer_weights, deep_gemm, inter, w1_layout)
+        weights = dict(routed_w13=w1_w, routed_s13=w1_s, routed_w2=w2_w, routed_s2=w2_s)
+        del w1_w, w1_s, w2_w, w2_s
+        self._transform_routed_weights(weights.pop, deep_gemm, inter, w1_layout)
         self._setup_buffer_and_warmup()
 
     def setup_shared_expert_from_fp8(self, w1_w, w1_s, w2_w, w2_s):
@@ -392,7 +388,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._setup_buffer_and_warmup()
 
     def _transform_routed_weights(
-        self, layer_weights: Dict, deep_gemm, inter: int, w1_layout=None
+        self, take, deep_gemm, inter: int, w1_layout=None
     ) -> torch.device:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
         layout ``fp8_fp4_mega_moe`` expects.
@@ -423,8 +419,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         D = cfg.dim
         source_inter = cfg.moe_inter_dim
 
-        w13 = take_weight(layer_weights, "routed_w13")
-        s13_raw = take_weight(layer_weights, "routed_s13")
+        w13 = take("routed_w13")
+        s13_raw = take("routed_s13")
         w13, s13_raw = normalize_moe_w13_gate_up(
             w13,
             s13_raw,
@@ -452,8 +448,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         del s13_raw
         torch.cuda.empty_cache()
 
-        w2 = take_weight(layer_weights, "routed_w2")
-        s2_raw = take_weight(layer_weights, "routed_s2")
+        w2 = take("routed_w2")
+        s2_raw = take("routed_s2")
         if inter != source_inter:
             padded_w2 = torch.zeros((E, D, inter // 2), dtype=torch.int8, device=device)
             padded_s2 = torch.empty(

@@ -31,7 +31,6 @@ from rtp_llm.models_py.runtime_weight_update import (
 )
 
 
-
 class BaseMoEExperts(RtpModule):
     """Stacked-expert MLP backed by FusedMoeFactory.
 
@@ -262,8 +261,7 @@ class BaseMoEExperts(RtpModule):
             torch.tensor(routes, dtype=torch.int64),
             persistent=False,
         )
-        self._eplb_log_stats: Optional[torch.Tensor] = None
-        self._eplb_gpu_loads: Optional[torch.Tensor] = None
+        self._eplb_stats = None
 
         self._model_config = model_config
         self._parallelism_config = parallelism_config
@@ -1040,7 +1038,10 @@ class BaseMoEExperts(RtpModule):
                 if tensor is None or name in self._runtime_layout_prepared_keys:
                     continue
                 shuffled = prepare_moe_weight_layout(
-                    tensor, projection=projection, is_scale=is_scale
+                    tensor,
+                    projection=projection,
+                    is_scale=is_scale,
+                    gate_first=getattr(self, "_fp8_gate_first", False),
                 )
                 # ROCm layout conversion returns a new allocation.  Keeping the
                 # registered pre-shuffle tensor alive would retain nearly two
@@ -1180,22 +1181,12 @@ class BaseMoEExperts(RtpModule):
                 )
 
     def bind_eplb_stats(self, log_stats: torch.Tensor, gpu_loads: torch.Tensor) -> None:
-        expected_log = (self.num_experts,)
-        expected_gpu = (self.ep_size,)
-        if tuple(log_stats.shape) != expected_log or log_stats.dtype != torch.int32:
-            raise ValueError(
-                f"EPLB logical stats must be int32 {expected_log}, got "
-                f"{tuple(log_stats.shape)} {log_stats.dtype}"
-            )
-        if tuple(gpu_loads.shape) != expected_gpu or gpu_loads.dtype != torch.int32:
-            raise ValueError(
-                f"EPLB GPU loads must be int32 {expected_gpu}, got "
-                f"{tuple(gpu_loads.shape)} {gpu_loads.dtype}"
-            )
-        if log_stats.device != self.w13.device or gpu_loads.device != self.w13.device:
-            raise ValueError("EPLB stats and MoE weights must be on the same device")
-        self._eplb_log_stats = log_stats
-        self._eplb_gpu_loads = gpu_loads
+        from rtp_llm.models_py.layers.eplb_stats import ExpertRouteStats
+
+        self._eplb_stats = ExpertRouteStats(
+            log_stats, gpu_loads, num_experts=self.num_experts,
+            ep_size=self.ep_size, device=self.w13.device,
+        )
 
     def _eplb_weight_names(self):
         from rtp_llm.utils.model_weight import W
@@ -1211,17 +1202,8 @@ class BaseMoEExperts(RtpModule):
     def _record_eplb_stats(
         self, logical_ids: torch.Tensor, physical_ids: torch.Tensor
     ) -> None:
-        if self._eplb_log_stats is None or self._eplb_gpu_loads is None:
-            return
-        flat_logical = logical_ids.reshape(-1).to(torch.int64)
-        flat_physical = physical_ids.reshape(-1).to(torch.int64)
-        valid = (flat_logical >= 0) & (flat_logical < self.num_experts)
-        safe_logical = flat_logical.clamp(0, self.num_experts - 1)
-        self._eplb_log_stats.scatter_add_(0, safe_logical, valid.to(dtype=torch.int32))
-        physical_per_rank = self.physical_num_experts // self.ep_size
-        safe_physical = flat_physical.clamp(0, self.physical_num_experts - 1)
-        owners = torch.div(safe_physical, physical_per_rank, rounding_mode="floor")
-        self._eplb_gpu_loads.scatter_add_(0, owners, valid.to(dtype=torch.int32))
+        if self._eplb_stats is not None:
+            self._eplb_stats.record(logical_ids, physical_ids, self.physical_num_experts)
 
     def apply_eplb_plan(
         self,
@@ -1332,6 +1314,10 @@ class BaseMoEExperts(RtpModule):
             raise TypeError("hw_kernel_config.enable_cuda_graph must be a bool")
         return enabled
 
+    @property
+    def requires_expert_id_mapping(self) -> bool:
+        return self._dynamic_eplb_enabled or not self._expert_placement.is_identity
+
     def _map_logical_to_physical(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Map logical ids to the legacy initial physical execution slots.
 
@@ -1342,7 +1328,7 @@ class BaseMoEExperts(RtpModule):
         routing while expressing the ids in the physical expert namespace used
         by NewLoader's fused MoE.
         """
-        if not self._dynamic_eplb_enabled and self._expert_placement.is_identity:
+        if not self.requires_expert_id_mapping:
             return topk_ids
         logical_ids = topk_ids.to(dtype=torch.int64)
         valid = (logical_ids >= 0) & (logical_ids < self.num_experts)

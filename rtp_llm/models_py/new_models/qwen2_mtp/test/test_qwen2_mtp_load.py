@@ -238,6 +238,24 @@ class Qwen2MTPLoadTest(_MTPCheckpointFixture):
         torch.testing.assert_close(
             model.layers[1].self_attn.o_proj.weight, torch.full((4, 4), 11.0)
         )
+        key = "model.layers.1.eh_proj.weight"
+        weights[key] = weights[key].t().contiguous()
+        model = self.load(weights)
+        torch.testing.assert_close(model.mtp_block.fc.weight, weights["model.layers.0.eh_proj.weight"])
+        weights[key] = torch.ones(1, 32)
+        with self.assertRaisesRegex(ValueError, "Invalid or duplicate draft tensor"):
+            self.load(weights)
+
+    def test_trt_decoder_with_draft_fusion(self):
+        weights = self.weights()
+        weights["transformer.vocab_embedding.weight"] = weights.pop("model.embed_tokens.weight")
+        base = "model.layers.0.self_attn."
+        parts = [weights.pop(base + k + "_proj.weight") for k in ("q", "k", "v")]
+        fused = torch.arange(torch.cat(parts).numel(), dtype=torch.float32).reshape(-1, 4)
+        weights["transformer.layers.0.attention.qkv.weight"] = fused.t().contiguous()
+        model = self.load(weights)
+        torch.testing.assert_close(model.layers[0].self_attn.qkv_proj.weight, fused)
+        torch.testing.assert_close(model.mtp_block.fc.weight, weights["model.layers.0.eh_proj.weight"])
 
     def test_incomplete_or_wrong_dtype_maps_fail(self):
         weights = self.weights()

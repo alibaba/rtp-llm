@@ -655,8 +655,7 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
                 if self.kv_cache is not None:
                     tags = (
                         ("default", "indexer_kv")
-                        if isinstance(layer.self_attn, MlaAttention)
-                        and layer.self_attn.has_indexer
+                        if getattr(layer.self_attn, "has_indexer", False)
                         else ("default",)
                     )
                     caches = get_layer_caches_for_groups(self.kv_cache, idx, tags)

@@ -35,7 +35,7 @@ from rtp_llm.models_py.layers.embedding import (
 )
 from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.module_base import RtpModule, _is_allowed_dropped_weight
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
     DeepSeekV32ForCausalLM,
     build_rope_cache,
@@ -45,7 +45,6 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     positive_int,
     read_config_json,
 )
-from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32DecoderLayer
 from rtp_llm.models_py.weight_mapper import WeightsMapper
 
 from .mtp_block import MTPBlock
@@ -64,7 +63,6 @@ _LAYER_PREFIXES = (
 )
 
 _KEY_REMAP = {
-    "shared_head.head.weight": "lm_head.weight",
     "shared_head.norm.weight": "norm.weight",
     "enorm.weight": "mtp_block.e_norm.weight",
     "hnorm.weight": "mtp_block.h_norm.weight",
@@ -151,6 +149,15 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
     Single-layer MoE decoder + MTPBlock projection.
     """
 
+    draft_checkpoint_layer = staticmethod(_draft_checkpoint_layer)
+    reverse_mtp_concat = True
+
+    def _vocab_mapping(self, prefix):
+        return {
+            prefix + "embed_tokens.weight": "embed_tokens.weight",
+            prefix + "shared_head.head.weight": "lm_head.weight",
+        }
+
     def checkpoint_to_runtime_expert_layer(self, index: int) -> int:
         if index != self._checkpoint_layer:
             raise ValueError(f"not a NextN expert layer: {index}")
@@ -161,6 +168,8 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
         combined = self._checkpoint_layer != 0
 
         def keep(name):
+            if name in self._vocab_keys:
+                return True
             if name.startswith(prefix):
                 return True
             if combined:
@@ -183,7 +192,9 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
 
         def selected():
             for name, tensor in items:
-                if not name.startswith(self._checkpoint_prefix):
+                if _is_allowed_dropped_weight(name):
+                    continue
+                if name not in self._vocab_keys and not name.startswith(self._checkpoint_prefix):
                     raise ValueError(f"unexpected NextN checkpoint tensor: {name!r}")
                 yield name, tensor
 
@@ -220,15 +231,17 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
                 "DeepSeek MTP newloader requires checkpoint config.json"
             )
         cfg = extract_config_values(model_config, load_config, config_json)
-        self._checkpoint_layer = _draft_checkpoint_layer(config_json, ckpt_path)
+        self._checkpoint_layer = self.draft_checkpoint_layer(config_json, ckpt_path)
         self._checkpoint_prefix = f"model.layers.{self._checkpoint_layer}."
 
         prefix = self._checkpoint_prefix
+        vocab = self._vocab_mapping(prefix)
+        self._vocab_keys = frozenset(vocab)
         self.WEIGHTS_MAPPER = WeightsMapper(
             exact_mapping={
                 **{prefix + name: dest for name, dest in _KEY_REMAP.items()},
                 prefix + _EH_PROJ_KEY: _EH_PROJ_MAPPED,
-                prefix + "embed_tokens.weight": "embed_tokens.weight",
+                **vocab,
             },
             prefix_mapping={
                 prefix + name: "layers.0." + name for name in _LAYER_PREFIXES
@@ -254,9 +267,10 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
         # --- RoPE cache ---
         device = torch.device(getattr(load_config, "device", "cuda"))
         cos_sin_cache = build_rope_cache(
-            config_json if config_json else cfg,
+            config_json,
             cfg["max_seq_len"],
             device,
+            model_config=model_config,
         )
         self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
 
@@ -276,7 +290,7 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
         self.mtp_block = MTPBlock(
             hidden_size=cfg["hidden_size"],
             rms_norm_eps=cfg["rms_norm_eps"],
-            reverse_concat=True,
+            reverse_concat=self.reverse_mtp_concat,
             bias=False,
             params_dtype=cfg["params_dtype"],
             prefix="mtp_block",
@@ -284,7 +298,7 @@ class DeepSeekV32MTPForCausalLM(DeepSeekV32ForCausalLM):
 
         # --- Single MoE decoder layer ---
         self.layers = nn.ModuleList()
-        layer = DeepSeekV32DecoderLayer(
+        layer = self.decoder_layer_cls(
             hidden_size=cfg["hidden_size"],
             num_heads=cfg["num_heads"],
             q_lora_rank=cfg["q_lora_rank"],

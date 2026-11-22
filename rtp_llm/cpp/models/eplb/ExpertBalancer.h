@@ -174,7 +174,7 @@ private:
     EplbController eplb_controller_;
     EPLBConfig     eplb_control_data_;
 
-    RtpLLmEplbMetricsCollector   executor_collector_;
+    RtpLLmEplbMetricsCollector   executor_collector_{};
     kmonitor::MetricsReporterPtr metrics_reporter_;
     ExpertBalancerPythonWrapper  eplb_python_wrapper_;
 

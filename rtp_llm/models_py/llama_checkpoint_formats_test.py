@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import torch
 
+from rtp_llm.config.quant_config import QuantizationConfig as CheckpointQuantization
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.tools.convert.ft_export_metadata import generate_ft_index
@@ -18,29 +19,199 @@ def values(*shape):
     return torch.arange(torch.Size(shape).numel(), dtype=torch.float32).reshape(shape)
 
 
-def load(root, tp=1, rank=0):
+def load(root, tp=1, rank=0, kv_heads=1, dtype=torch.float32, task_type=None):
     config = SimpleNamespace(
         ckpt_path=str(root), model_type="llama", num_layers=1, vocab_size=8,
         hidden_size=8, inter_size=8, layernorm_eps=1e-6, is_mtp=False,
         enable_fp32_lm_head=False, tie_word_embeddings=False,
-        attn_config=SimpleNamespace(head_num=2, kv_head_num=1, size_per_head=4),
+        attn_config=SimpleNamespace(head_num=2, kv_head_num=kv_heads, size_per_head=4),
         capture_aux_hidden_layer_ids=[], hidden_state_capture_layer_ids=[],
     )
+    if task_type is not None:
+        config.task_type = task_type
     parallel = SimpleNamespace(
         tp_size=tp, tp_rank=rank, dp_size=1, dp_rank=0, ep_size=1, ep_rank=0,
         pp_size=1, pp_rank=0, world_size=tp, world_rank=rank,
         get_attn_tp_size=lambda: tp, get_attn_tp_rank=lambda: rank,
         get_ffn_tp_size=lambda: tp, get_ffn_tp_rank=lambda: rank,
     )
+    quant = CheckpointQuantization.load_from_ckpt(str(root))
     options = NewLoaderConfig(
-        tp_size=tp, tp_rank=rank, compute_dtype=torch.float32, device="cpu",
-        parallelism_config=parallel, quant_config=QuantizationConfig("none"),
+        tp_size=tp, tp_rank=rank, compute_dtype=dtype, device="cpu",
+        parallelism_config=parallel, quant_config=QuantizationConfig(
+            quant.get_method() if quant else "none", source_config=quant
+        ),
         load_method="scratch",
     )
     return NewModelLoader(config, options, model_path=str(root)).load()
 
 
 class LlamaCheckpointFormatsTest(unittest.TestCase):
+    def test_explicitly_disabled_window_does_not_limit_full_attention(self):
+        from rtp_llm.models_py.new_models.qwen2.llama import _check_window
+
+        for family in ("llama", "yi"):
+            hf = dict(model_type=family, sliding_window=4, use_sliding_window=False)
+            _check_window(hf, 8)
+            for change in (
+                {"use_sliding_window": True},
+                {"use_sliding_window": None},
+                {"layer_types": ["full_attention", "sliding_attention"]},
+                {"model_type": "mistral"},
+            ):
+                active = {**hf, **change}
+                _check_window(active, 4)
+                with self.assertRaisesRegex(ValueError, "sliding_window"):
+                    _check_window(active, 8)
+
+    def test_calibrated_decoder_does_not_quantize_routed_experts(self):
+        from rtp_llm.models_py.quant_methods.unquantized import UnquantizedFusedMoEMethod
+
+        cfg = QuantizationConfig("pertensor_quant")
+        experts = SimpleNamespace(PROJ_NAMES=("gate_proj", "up_proj", "down_proj"))
+        self.assertIsInstance(
+            cfg.get_moe_quant_method(experts, "model.layers.0.mlp.experts"),
+            UnquantizedFusedMoEMethod,
+        )
+
+
+    def test_real_llama_smooth_converter_projection_layout(self):
+        from rtp_llm.utils.smooth_quant_convert.llama.convert import (
+            split_and_save_weight,
+        )
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "config.json").write_text('{"model_type":"llama"}')
+            (root / "smoothquant.ini").touch()
+            tensors = {
+                "model.embed_tokens.weight": values(8, 8),
+                "lm_head.weight": values(8, 8),
+                "model.norm.weight": values(8) + 1,
+                "model.layers.0.input_layernorm.weight": values(8) + 1,
+                "model.layers.0.post_layernorm.weight": values(8) + 1,
+            }
+            for proj in (
+                "attention.query_key_value",
+                "attention.dense",
+                "mlp.fc",
+                "mlp.gate",
+                "mlp.proj",
+            ):
+                width = 24 if proj == "attention.query_key_value" else 8
+                weight = values(8, width) / 128 - 0.5
+                calibration = {
+                    "x": torch.ones(8),
+                    "w": weight.abs().amax(0),
+                    "y": torch.ones(width),
+                }
+                opts = {"int8_outputs": "all", "multi_query_mode": False}
+                tensors.update(
+                    split_and_save_weight(
+                        0,
+                        root,
+                        1,
+                        f"layers.0.{proj}.weight",
+                        weight.numpy(),
+                        calibration,
+                        opts,
+                    )
+                )
+                if proj in ("attention.dense", "mlp.proj"):
+                    tensors.update(
+                        split_and_save_weight(
+                            0,
+                            root,
+                            1,
+                            f"layers.0.{proj}.smoother",
+                            torch.ones(8).numpy(),
+                            None,
+                            opts,
+                        )
+                    )
+            torch.save(tensors, root / "llama2.pt")
+            model = load(root, kv_heads=2, dtype=torch.float16)
+            attention = model.layers[0].self_attn.qkv_proj
+            source = "model.layers.0.attention.query_key_value."
+            torch.testing.assert_close(
+                attention.weight, tensors[source + "weight.int8.col"].reshape(8, 24).T
+            )
+            torch.testing.assert_close(
+                attention.weight_scale.flatten(),
+                tensors[source + "scale_w_quant_orig.col"].flatten(),
+            )
+
+    def test_calibrated_decoder_int8_legacy_suffixes(self):
+        from safetensors.torch import save_file
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "config.json").write_text('{"model_type":"llama"}')
+            (root / "pertensorquant.ini").touch()
+            layer = "model.layers.0."
+            tensors = {
+                "model.embed_tokens.weight": values(8, 8),
+                "lm_head.weight": values(8, 8),
+                "model.norm.weight": values(8) + 1,
+                layer + "input_layernorm.weight": values(8) + 1,
+                layer + "post_attention_layernorm.weight": values(8) + 1,
+            }
+            for i, (proj, width) in enumerate(
+                (
+                    ("self_attn.q_proj", 8),
+                    ("self_attn.k_proj", 4),
+                    ("self_attn.v_proj", 4),
+                    ("self_attn.o_proj", 8),
+                    ("mlp.gate_proj", 8),
+                    ("mlp.up_proj", 8),
+                    ("mlp.down_proj", 8),
+                )
+            ):
+                base = layer + proj
+                tensors[base + ".qweight"] = (values(8, width) % 11 - 5 + i).to(
+                    torch.int8
+                )
+                tensors[base + ".scales"] = (
+                    torch.tensor([0.25]) if width == 4 else (values(1, width) + 1) / 8
+                )
+            for proj in (
+                "self_attn.qkv",
+                "self_attn.o_proj",
+                "mlp.gate_proj",
+                "mlp.down_proj",
+            ):
+                tensors[layer + proj + "_input_scale"] = torch.tensor([0.5])
+            path = root / "model.safetensors"
+            save_file(tensors, path)
+            for rank in range(2):
+                model = load(root, 2, rank)
+                qkv = model.layers[0].self_attn.qkv_proj
+                x = (values(3, 8) - 5) / 3
+                outputs = []
+                for proj in ("q_proj", "k_proj", "v_proj"):
+                    base = layer + "self_attn." + proj
+                    w, s = tensors[base + ".qweight"], tensors[base + ".scales"]
+                    expected = ((x / 0.5).round().int() @ w.int()) * 0.5 * s
+                    outputs.append(
+                        expected.chunk(2, -1)[rank] if proj == "q_proj" else expected
+                    )
+                torch.testing.assert_close(
+                    qkv(x), torch.cat(outputs, -1), atol=0, rtol=0
+                )
+                gate = tensors[layer + "mlp.gate_proj.qweight"].T.chunk(2)[rank]
+                up = tensors[layer + "mlp.up_proj.qweight"].T.chunk(2)[rank]
+                torch.testing.assert_close(
+                    model.layers[0].mlp.gate_up_proj.weight, torch.cat([gate, up])
+                )
+                torch.testing.assert_close(
+                    model.layers[0].self_attn.o_proj.weight,
+                    tensors[layer + "self_attn.o_proj.qweight"].chunk(2)[rank].T,
+                )
+            del tensors[layer + "self_attn.qkv_input_scale"]
+            save_file(tensors, path)
+            with self.assertRaisesRegex(RuntimeError, "input_scale"):
+                load(root)
+
     def test_meta_consolidated_pth_without_hf_config(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -73,6 +244,27 @@ class LlamaCheckpointFormatsTest(unittest.TestCase):
             torch.testing.assert_close(attn.qkv_proj.weight, torch.cat((q, k, v)))
             torch.testing.assert_close(model.embed_tokens.weight, tensors["tok_embeddings.weight"])
             torch.testing.assert_close(model.lm_head.weight, tensors["output.weight"])
+            from rtp_llm.ops import TaskType
+
+            backbone = load(root, task_type=TaskType.DENSE_EMBEDDING)
+            self.assertIsNone(backbone.lm_head)
+            torch.testing.assert_close(backbone.norm.weight, tensors["norm.weight"])
+            torch.testing.assert_close(backbone.layers[0].self_attn.qkv_proj.weight, attn.qkv_proj.weight)
+            for rank in range(2):
+                path = root / f"consolidated.{rank:02d}.pth"
+                part = torch.load(path, weights_only=True)
+                del part["output.weight"]
+                torch.save(part, path)
+            self.assertIsNone(load(root, task_type=TaskType.DENSE_EMBEDDING).lm_head)
+            with self.assertRaisesRegex(ValueError, "Missing FT sources for lm_head.weight"):
+                load(root)
+            for rank in range(2):
+                path = root / f"consolidated.{rank:02d}.pth"
+                part = torch.load(path, weights_only=True)
+                part["unexpected.weight"] = torch.ones(1)
+                torch.save(part, path)
+            with self.assertRaisesRegex(ValueError, "Unbound FT tensors.*unexpected.weight"):
+                load(root, task_type=TaskType.DENSE_EMBEDDING)
 
     def test_rank_local_ft_without_hf_config(self):
         with tempfile.TemporaryDirectory() as temp:

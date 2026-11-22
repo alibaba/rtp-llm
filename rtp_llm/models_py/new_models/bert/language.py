@@ -99,8 +99,21 @@ class _OptionalPooler(RtpModule):
 class BertEncoderOwner(GptModelBase, RtpModule):
     checkpoint_prefix = "bert"
     supports_custom_weight_mappings = True
+    supports_ft_handler_heads = True
 
-    def __init__(self, config, load):
+    @classmethod
+    def from_ft_checkpoint_header(cls, config, load, checkpoint):
+        rows, width = checkpoint.read_rank_slice(
+            "global.embedding", checkpoint.topology.tp_rank
+        )
+        if rows <= 0 or width * load.attn_tp_size != config.hidden_size:
+            raise ValueError("Invalid rank-local BERT FT embedding dimensions")
+        explicit = getattr(config, "input_vocab_size", 0)
+        if explicit and explicit != rows:
+            raise ValueError("BERT FT embedding disagrees with explicit input_vocab_size")
+        return cls(config, load, ft_input_rows=rows)
+
+    def __init__(self, config, load, *, ft_input_rows=None):
         super().__init__(
             config,
             load.parallelism_config,
@@ -116,18 +129,26 @@ class BertEncoderOwner(GptModelBase, RtpModule):
         hf = json.loads((Path(config.ckpt_path) / "config.json").read_text())
         if hf.get("position_embedding_type", "absolute") != "absolute":
             raise ValueError("The BERT serving encoder expects absolute positions")
+        position_rows = int(hf.get("max_position_embeddings", 512))
+        # EmbeddingExecutor generates IDs in [0, max_seq_len), including
+        # RoBERTa's padding offset. Keep all learned rows for shorter caps.
+        if config.max_seq_len > position_rows:
+            raise ValueError(
+                f"BERT max_seq_len={config.max_seq_len} exceeds the "
+                f"{position_rows}-row position embedding table"
+            )
         self.hf_depth = int(hf["num_hidden_layers"])
         owned = tuple(self.layer_ids())
         self.first = 0 in owned
         self.last = config.num_layers - 1 in owned
         self.owned = frozenset(owned)
-        self.checkpoint_input_vocab_size = checkpoint_input_vocab_size(
+        self.checkpoint_input_vocab_size = ft_input_rows or checkpoint_input_vocab_size(
             config, self.checkpoint_prefix, tp_rank=load.tp_rank, tp_size=load.tp_size
         )
         self.embeddings = (
             BertEmbeddings(
                 self.checkpoint_input_vocab_size,
-                int(hf.get("max_position_embeddings", 512)),
+                position_rows,
                 int(hf.get("type_vocab_size", 2)),
                 config.hidden_size,
                 config.layernorm_eps,
@@ -139,12 +160,16 @@ class BertEncoderOwner(GptModelBase, RtpModule):
             else None
         )
         self.encoder = nn.Module()
-        input_major = static_int8 and static_int8_input_major(
-            config,
-            self.checkpoint_prefix,
-            owned,
-            tp_rank=load.tp_rank,
-            tp_size=load.tp_size,
+        input_major = (
+            static_int8
+            and ft_input_rows is None
+            and static_int8_input_major(
+                config,
+                self.checkpoint_prefix,
+                owned,
+                tp_rank=load.tp_rank,
+                tp_size=load.tp_size,
+            )
         )
         self.encoder.layer = nn.ModuleDict(
             {str(i): BertLayer(config, load, i, input_major=input_major) for i in owned}
@@ -167,6 +192,7 @@ class BertEncoderOwner(GptModelBase, RtpModule):
         self.local_heads = config.attn_config.head_num // load.attn_tp_size
         self.head_dim = config.attn_config.size_per_head
         mappings = tuple(load.custom_weight_mappings)
+        self._ft_handler_roles = tuple(mapping[0] for mapping in mappings)
         self.all_handler_sources = {
             self.WEIGHTS_MAPPER.map_name(mapping[1]) for mapping in mappings
         }
@@ -180,6 +206,11 @@ class BertEncoderOwner(GptModelBase, RtpModule):
 
     def finalize_runtime_input_vocab(self, config, tokenizer):
         publish_input_vocab(config, tokenizer, self.checkpoint_input_vocab_size)
+
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_bert_ft_checkpoint
+
+        load_bert_ft_checkpoint(self, checkpoint)
 
     def checkpoint_weight_name_filter(self):
         def keep(source):

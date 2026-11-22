@@ -264,6 +264,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
 
     def test_qwen35_dense_safetensors_loads_without_synthetic_moe_config(self):
         config = _config(tie=False)
+        config._checkpoint_num_layers_before_override = 2
         config.model_type = "qwen35_dense"
         config.expert_num = config.moe_k = config.moe_inter_size = config.moe_style = 0
         weights = {
@@ -271,6 +272,7 @@ class Qwen3NextLoadTest(unittest.TestCase):
             for name, tensor in _dense_weights(include_lm_head=True).items()
         }
         with tempfile.TemporaryDirectory() as model_path:
+            weights["model.language_model.layers.1.input_layernorm.weight"] = torch.ones(4)
             save_file(weights, os.path.join(model_path, "model.safetensors"))
             for rank in range(2):
                 with self.subTest(rank=rank):
@@ -280,6 +282,10 @@ class Qwen3NextLoadTest(unittest.TestCase):
                         model_path=model_path,
                     ).load()
                     NewModelLoader._validate_loaded_weights(model)
+                    self.assertTrue(model.owns_lora_checkpoint_target("layers.0.self_attn.q_proj.weight"))
+                    self.assertFalse(model.owns_lora_checkpoint_target("layers.1.self_attn.q_proj.weight"))
+                    # Keys outside even the source geometry must still reach strict validation.
+                    self.assertTrue(model.checkpoint_weight_name_filter()("model.language_model.layers.9.bad"))
                     self.assertEqual(model._cfg["expert_num"], 0)
                     self.assertFalse(hasattr(model.layers[0].mlp, "experts"))
                     q_gate = weights[

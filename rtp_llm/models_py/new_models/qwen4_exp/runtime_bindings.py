@@ -163,18 +163,30 @@ def bind_moe(owner, config, parallelism_config, *, moe_config=None, hw_kernel_co
             self.down_proj = bind_projection(shared.down_proj, hw_kernel_config=hw_kernel_config, role=role)
 
     class DirectExperts(nn.Module):
-        topk_ids_dtype = torch.int32
+        @property
+        def topk_ids_dtype(self):
+            if native_experts is None:
+                return torch.int32
+            return native_experts.topk_ids_dtype
+
+        @property
+        def router(self):
+            return getattr(native_experts, "router", None)
+
         def forward(self, hidden_states, topk_weights, topk_ids, activation, skip_tp_allreduce=False):
             if activation != "SiGLU":
-                raise ValueError("Qwen4 Marlin experts require SiGLU")
+                raise ValueError("Qwen4 experts require SiGLU")
             if hasattr(owner.experts, "runtime"):
-                if skip_tp_allreduce:
-                    raise RuntimeError("Direct EPLB expert wrapper does not suppress its runtime reduction")
-                return owner.experts(hidden_states,topk_weights,topk_ids)
+                return owner.experts(
+                    hidden_states, topk_weights, topk_ids,
+                    skip_tp_allreduce=skip_tp_allreduce,
+                )
             output = owner.experts(hidden_states,topk_ids,topk_weights)
             if not skip_tp_allreduce and parallelism_config.tp_size > 1:
                 output = all_reduce(output,group=Group.TP)
             return output
+
+    native_experts = getattr(owner.experts, "runtime", None)
 
     class DirectMoe(Qwen4MoeLayer):
         def __init__(self):
@@ -194,8 +206,12 @@ def bind_moe(owner, config, parallelism_config, *, moe_config=None, hw_kernel_co
                 self.fake_balance_expert = FakeBalanceExpert(expert_num=config.expert_num,
                     moe_k=config.moe_k,dp_rank=parallelism_config.dp_rank,
                     dp_size=parallelism_config.dp_size,ep_size=parallelism_config.ep_size)
-            native_experts = getattr(owner.experts, "runtime", None)
-            self.fused_moe = native_experts if native_experts is not None and not getattr(owner.experts, "_dynamic_eplb_enabled", False) else DirectExperts()
+            # The naked executor consumes physical ids; the gate returns logical ids.
+            self.fused_moe = (
+                native_experts
+                if native_experts is not None and not owner.experts.requires_expert_id_mapping
+                else DirectExperts()
+            )
             self.correction_bias = None
             self.shared_expert = None
             if owner.shared_expert is not None:

@@ -73,21 +73,25 @@ class GenericMoeMTPModel(Glm5ModelBase):
             weights.global_weights[W.multi_tokens_predict_final_ln_gamma],
             eps=model_config.layernorm_eps,
         )
-        topk = int(model_config.attn_config.indexer_topk)
+        self._init_mtp_indexer_state(
+            max_generate_batch_size, weights.global_weights[W.multi_tokens_predict_enorm].device
+        )
+
+    def _init_mtp_indexer_state(self, max_generate_batch_size, buffer_device):
+        topk = int(self.config.attn_config.indexer_topk)
         self._mtp_indexer_share_enabled = _mtp_indexer_share_active(
-            model_config, parallelism_config, self.layer_num, topk
+            self.config, self.parallelism_config, self.layer_num, topk
         )
         self._mtp_indexer_role = _MTP_INDEXER_ROLE_NORMAL
-        buffer_device = weights.global_weights[W.multi_tokens_predict_enorm].device
         buffer_shape = (
             (max_generate_batch_size, topk)
             if self._mtp_indexer_share_enabled
             else (0, 0)
         )
-        self._mtp_shared_topk_indices = torch.zeros(
-            buffer_shape,
-            dtype=torch.int32,
-            device=buffer_device,
+        self.register_buffer(
+            "_mtp_shared_topk_indices",
+            torch.zeros(buffer_shape, dtype=torch.int32, device=buffer_device),
+            persistent=False,
         )
 
     def clone_for_cuda_graph(

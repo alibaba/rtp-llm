@@ -304,6 +304,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         hidden_states = torch.zeros((2, 4), dtype=torch.float32)
         residual = torch.zeros_like(hidden_states)
         decoder_layer = Mock(
+            carries_dsa_topk=False,
             return_value=SimpleNamespace(
                 hidden_states=hidden_states,
                 residual=residual,

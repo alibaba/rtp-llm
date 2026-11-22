@@ -3,6 +3,7 @@ import json
 from datetime import timedelta
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
@@ -76,6 +77,31 @@ def _checkpoint(root):
 
 
 class TargetWeightsTest(unittest.TestCase):
+    def test_prefill_role_and_ple_document_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _checkpoint(root)
+            path = root / "config.json"
+            raw = json.loads(path.read_text())
+            del raw["text_config"]["eos_token_id"]
+            raw["eos_token_id"] = 7
+            path.write_text(json.dumps(raw))
+            load = NewLoaderConfig(device="cpu", parallelism_config=SimpleNamespace(role_type="PREFILL"))
+            model = Qwen4TargetWeights({"ckpt_path": directory}, load)
+            self.assertEqual(model.layers[0].ple.eos_token_id, 7)
+            hcs = [model.hyper_connection_mixer]
+            for layer in model.layers:
+                hcs.extend((layer.attn_hyper_connection, layer.mlp_hyper_connection))
+            self.assertTrue(all(hc.role == "PREFILL" for hc in hcs))
+            del raw["eos_token_id"]
+            path.write_text(json.dumps(raw))
+            config = SimpleNamespace(ckpt_path=directory, special_tokens=SimpleNamespace(eos_token_id=5))
+            model = Qwen4TargetWeights(config, load)
+            self.assertEqual(model.layers[0].ple.eos_token_id, 5)
+            config.special_tokens.eos_token_id = None
+            with self.assertRaisesRegex(ValueError, "resolved eos_token_id"):
+                Qwen4TargetWeights(config, load)
+
     def test_owners_follow_explicit_attention_and_head_shards(self):
         # Ownership contract only; production admission remains main's resolved
         # config. Physical EP ownership must not force attention/head sharding.

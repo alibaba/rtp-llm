@@ -19,6 +19,10 @@ class DeepSeekV41DSparkForCausalLM(
 ):
     _captures_aux_hidden = False
 
+    @property
+    def eplb_attention_only(self):
+        return self._commit_only_prefill
+
     def __init__(self, model_config, load_config):
         super().__init__(model_config, load_config)
         self._install_draft_auxiliary(

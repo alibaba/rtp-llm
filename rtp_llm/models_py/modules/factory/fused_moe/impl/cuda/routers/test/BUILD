@@ -29,6 +29,18 @@ py_test(
 )
 
 py_test(
+    name = "weight_only_ep_test",
+    srcs = ["weight_only_ep_test.py", "deepep_normal_router_test.py"],
+    main = "weight_only_ep_test.py",
+    deps = py_test_deps + [
+        "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "2"},
+)
+
+py_test(
     name = "deepep_normal_router_pp_test",
     srcs = ["deepep_normal_router_test.py"],
     main = "deepep_normal_router_test.py",

@@ -109,7 +109,9 @@ class ServiceTest(unittest.TestCase):
                 cfg.enable_fp32_lm_head = False
                 cfg.data_type = "fp32"
                 cfg.quant_config = None
+            draft.data_type = "fp16"
             ModelFactory._setup_eagle3_configs(target, draft, pc)
+            self.assertEqual(draft.compute_dtype, target.compute_dtype)
             g = (8, 12, 2, 1, 4, 1e-5, torch.float32)
             weights = {
                 n: torch.randn_like(p) / p.shape[-1] ** 0.5

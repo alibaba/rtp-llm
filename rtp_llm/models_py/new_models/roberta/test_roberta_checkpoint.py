@@ -411,6 +411,12 @@ class RobertaCheckpointTest(unittest.TestCase):
                 actual = owner.forward_hidden(_packed_inputs(owner, [sequence]))
                 expected = reference(torch.tensor([sequence])).last_hidden_state[0]
                 torch.testing.assert_close(actual, expected, rtol=2e-5, atol=5e-6)
+                config = _runtime_config(reference.config, directory)
+                config.max_seq_len += 1
+                with self.assertRaisesRegex(
+                    ValueError, "max_seq_len=11.*10-row position"
+                ):
+                    _load(directory, config, method)
 
     @torch.inference_mode()
     def test_classifier_reranker_projection_matches_transformers(self):

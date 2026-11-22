@@ -171,6 +171,7 @@ class Qwen4MTPDraftWeights(RtpModule):
             fp8_storage=plan.dense_fp8,
             norm_eps=eps,
             dtype=load.compute_dtype,
+            role=getattr(load.parallelism_config, "role_type", "PDFUSION"),
         )
         self.config = config
         self._loans = frozenset(

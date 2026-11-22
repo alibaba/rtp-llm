@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from safetensors.torch import save_file
@@ -72,6 +73,26 @@ def config_and_load(directory, rank, commit):
 
 
 class V41DraftServiceTest(unittest.TestCase):
+    def test_stats_owner_matches_commit_and_decode_roles(self):
+        from rtp_llm.models_py.eplb_controller import create_stage_expert_balancer
+
+        for commit in (False, True):
+            with self.subTest(commit=commit), tempfile.TemporaryDirectory() as directory:
+                save_file(values(commit), str(Path(directory) / "model.safetensors"))
+                config, load = config_and_load(directory, 0, commit)
+                config.eplb_config.eplb_mode = "STATS"
+                model = DeepSeekV41DSparkForCausalLM(config, load)
+                controller = create_stage_expert_balancer(SimpleNamespace(load_config=load), model, config)
+                self.assertTrue(controller.eplb_stats_only)
+                logical = torch.zeros(config.num_layers, config.expert_num, dtype=torch.int32)
+                gpu = torch.zeros(config.num_layers, load.ep_size, dtype=torch.int32)
+                model._newloader_eplb_bind_stats(logical, gpu)
+                for i, block in enumerate(model.v4.layers):
+                    if commit:
+                        self.assertIsNone(block.ffn)
+                    else:
+                        self.assertEqual(block.ffn._eplb_stats.logical.data_ptr(), logical[i].data_ptr())
+
     def test_actual_target_image_wrapper_exports_bind_draft_without_copy(self):
         # Use the actual target owner, including its runtime image wrapper,
         # instead of assuming export keys equal named_parameter paths.

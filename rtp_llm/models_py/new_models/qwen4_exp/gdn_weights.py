@@ -246,6 +246,11 @@ class Qwen4GDNWeights(RtpModule):
             bias=False,
             params_dtype=params_dtype,
         )
+        # Checkpoint permutation and backend storage belong to this GDN, not
+        # the rank-local linears. Do not bypass them via the manager's exact
+        # leaf fallback until the bound runtime supports a staged refresh.
+        for projection in (self.in_proj_qkvz, self.out_proj):
+            projection.supports_independent_weight_updates = False
         self._qkvz_layouts: Dict[str, str] = {}
         self._qkvz_split_parts: Dict[str, Set[str]] = {}
         self._ba_layout: Optional[str] = None

@@ -75,7 +75,8 @@ class _Qwen3VLRuntime(_LanguageRuntime):
     def checkpoint_weight_name_filter(self):
         owns_stage = super().checkpoint_weight_name_filter()
         return lambda key: (
-            key.startswith("model.language_model.") or key.startswith("lm_head.")
+            key.startswith(("model.language_model.", "lm_head."))
+            or self.WEIGHTS_MAPPER.map_name(key) in self.handler_heads.sources
         ) and (owns_stage is None or owns_stage(key))
 
 

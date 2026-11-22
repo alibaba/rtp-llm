@@ -106,7 +106,9 @@ class TestMegatron(unittest.TestCase):
             ),
         )
 
-    def load_case(self, load_method, values, *, tp=1, rank=0, custom=True):
+    def load_case(
+        self, load_method, values, *, tp=1, rank=0, custom=True, config=None
+    ):
         names = [
             "bert.pooler.dense.weight",
             "bert.pooler.dense.bias",
@@ -125,7 +127,7 @@ class TestMegatron(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             save_file(values, os.path.join(tmp, "model.safetensors"))
-            loader = NewModelLoader(self.config, cfg, model_path=tmp)
+            loader = NewModelLoader(config or self.config, cfg, model_path=tmp)
             model = loader.load()
         self.assertEqual(loader._selected_load_method.value, load_method)
         return model
@@ -190,6 +192,26 @@ class TestMegatron(unittest.TestCase):
 
     def test_fst_packed_encoder_and_task_head(self):
         self.assert_outputs("fastsafetensors")
+
+    def test_undeclared_token_types_are_checkpoint_driven(self):
+        config = SimpleNamespace(**{**vars(self.config), "type_vocab_size": 0})
+        key = "bert.embeddings.token_type_embeddings.weight"
+        values = dict(self.ref.state_dict())
+        table = values.pop(key)
+        for method in ("scratch", "fastsafetensors"):
+            with self.subTest(method=method):
+                owner = self.load_case(method, values, config=config)
+                self.assertIsNone(owner.embeddings.token_type_embeddings)
+                owner = self.load_case(method, {**values, key: table}, config=config)
+                torch.testing.assert_close(
+                    owner.embeddings.token_type_embeddings.weight, table
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "Invalid Megatron-BERT token type table"
+                ):
+                    self.load_case(
+                        method, {**values, key: table[:, :-1].contiguous()}, config=config
+                    )
 
     def test_tp2_bare_encoder_and_gamma_beta_aliases(self):
         sd = {

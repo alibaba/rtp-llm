@@ -99,13 +99,33 @@ class VocabParallelEmbedding(RtpModule):
                 raise ValueError(
                     "Tied embedding checkpoint shape does not match the model"
                 )
-            embedding_rows = set(range(self.vocab_start_idx, self.vocab_end_idx))
-            extra_rows = set(head.local_checkpoint_rows) - embedding_rows
-            if extra_rows:
-                rows = tuple(sorted(embedding_rows | extra_rows))
-                return ReadSpec(name, name, shape, partition="vocab", row_indices=rows)
-            # The ordinary local embedding slice already contains every head
-            # row; keep uniform scatter available instead of forcing gather.
+            # Scatter is collective: a rank whose head happens to need only
+            # local rows cannot scatter while its peer broadcasts the same key.
+            # Only the ordinary aligned, unpruned partition can use scatter.
+            if self.tp_size > 1 and (
+                head.output_vocab_ids
+                or head.tp_size != self.tp_size
+                or head.vocab_size_per_partition != self.vocab_size_per_partition
+                or head.tp_rank != self.tp_rank
+            ):
+                start, end = self.vocab_start_idx, self.vocab_end_idx
+                extra = [
+                    row for row in head.local_checkpoint_rows if not start <= row < end
+                ]
+                if extra:
+                    rows = tuple(sorted((*range(start, end), *extra)))
+                    return ReadSpec(
+                        name, name, shape, partition="vocab", row_indices=rows
+                    )
+                # FST still broadcasts, then selects this contiguous range.
+                # Scratch can read the range directly from the file.
+                return ReadSpec(
+                    name,
+                    name,
+                    shape,
+                    partition="vocab",
+                    slices=(slice(start, end), slice(None)),
+                )
         if (
             self.tp_size <= 1
             or name != "weight"

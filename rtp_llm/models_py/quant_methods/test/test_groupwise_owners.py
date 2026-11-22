@@ -29,6 +29,9 @@ from rtp_llm.models_py.quant_methods.groupwise_checkpoint import (
     GroupwiseCheckpointLayout,
     PackedGroupwiseWeights,
 )
+from rtp_llm.models_py.quant_methods.test.staged_checkpoint_fixture import (
+    save_with_late_shard,
+)
 from rtp_llm.models_py.quant_methods.test.test_groupwise_checkpoint import (
     checkpoint,
     reconstruct,
@@ -160,6 +163,7 @@ class GroupwiseOwnerTest(unittest.TestCase):
         ep=1,
         ep_rank=0,
         file_format="safetensors",
+        late=None,
     ):
         source = source_config(method, bits)
         config.quant_config = source
@@ -168,7 +172,9 @@ class GroupwiseOwnerTest(unittest.TestCase):
             config.expert_num = 4
             config.moe_k = 1
         with tempfile.TemporaryDirectory() as directory:
-            if file_format == "bin":
+            if late is not None:
+                save_with_late_shard(directory, values, late)
+            elif file_format == "bin":
                 torch.save(values, Path(directory) / "pytorch_model.bin")
             else:
                 save_file(values, str(Path(directory) / "model.safetensors"))
@@ -384,7 +390,9 @@ class GroupwiseOwnerTest(unittest.TestCase):
                         TypeError, "Grouped scales/bias must be floating point"
                     ):
                         owner.proj.load_weights({"bias": bias})
-                    with self.assertRaises((TypeError, RuntimeError)) as rejected:
+                    with self.assertRaisesRegex(
+                        TypeError, "Grouped scales/bias must be floating point"
+                    ):
                         self.load(
                             dict(values, **{"proj.bias": bias}),
                             config,
@@ -392,22 +400,67 @@ class GroupwiseOwnerTest(unittest.TestCase):
                             4,
                             backend,
                         )
-                    if isinstance(rejected.exception, TypeError):
-                        self.assertIn(
-                            "Grouped scales/bias must be floating point",
-                            str(rejected.exception),
-                        )
-                    else:
-                        # FST can group byte tensors after packed weights and
-                        # reject them before calling an already-finalized leaf.
-                        # Do not weaken that earlier guard just to change the
-                        # exception class of an invalid checkpoint.
-                        self.assertEqual(backend, "fastsafetensors")
-                        self.assertIn(dtype, (torch.bool, torch.uint8))
-                        self.assertIn(
-                            "Checkpoint tensor arrived after staged postprocessing completed",
-                            str(rejected.exception),
-                        )
+
+    def test_staged_fst_late_dense_metadata(self):
+        cfg = SimpleNamespace(
+            model_type="_groupwise_dense_cpu_owner", kind="merged", bias=False
+        )
+        identity = torch.arange(64, dtype=torch.int32) // 16
+        for method in ("gptq", "awq"):
+            required = {}
+            dense = []
+            for index, part in enumerate(("gate_proj", "up_proj")):
+                packed, projection = material(method, 4, 64, 64, index)
+                required.update(
+                    {f"proj.{part}.{key}": value for key, value in packed.items()}
+                )
+                dense.append(projection)
+
+            def load_late(late):
+                return self.load(required, cfg, method, 4, "fastsafetensors", late=late)
+
+            late = {"proj.g_idx": identity}
+            if method == "gptq":
+                late["proj.bias"] = torch.zeros(128, dtype=torch.float32)
+            owner = load_late(late)
+            self.assertIsNone(owner.proj.bias)
+            torch.testing.assert_close(
+                decode(owner.proj), torch.cat(dense, dim=1), rtol=0, atol=0
+            )
+            # Fused and per-projection aliases must not validate a logical key twice.
+            with self.assertRaisesRegex(RuntimeError, "Duplicate"):
+                owner.proj.load_weights({"gate_proj.g_idx": identity})
+            if method == "gptq":
+                with self.assertRaisesRegex(RuntimeError, "Duplicate"):
+                    owner.proj.load_weights({"gate_proj.bias": torch.zeros(64)})
+                with self.assertRaisesRegex(ValueError, "all zero"):
+                    load_late({"proj.bias": torch.ones(128)})
+            with self.assertRaisesRegex(ValueError, "activation-order"):
+                load_late({"proj.up_proj.g_idx": identity.flip(0)})
+            # A fused alias that would write packed parameters is still forbidden.
+            with self.assertRaisesRegex(RuntimeError, "after staged postprocessing"):
+                load_late({"proj.scales": torch.cat([packed["scales"]] * 2, dim=1)})
+
+    def test_staged_fst_late_expert_g_idx(self):
+        cfg = SimpleNamespace(model_type="_groupwise_moe_cpu_owner")
+        packed, _ = material("gptq", 4, 64, 64)
+        required = {
+            f"experts.{expert}.{proj}.{key}": value.clone()
+            for expert in range(4)
+            for proj in ("gate_proj", "up_proj", "down_proj")
+            for key, value in packed.items()
+        }
+        key = "experts.3.down_proj.g_idx"
+        identity = torch.arange(64, dtype=torch.int32) // 16
+        def load_index(index):
+            return self.load(
+                required, cfg, "gptq", 4, "fastsafetensors", late={key: index}
+            )
+
+        owner = load_index(identity)
+        torch.testing.assert_close(owner.experts.w2[3], packed["qweight"])
+        with self.assertRaisesRegex(ValueError, "activation-order"):
+            load_index(identity.flip(0))
 
     def test_gptq_biasless_buffers_are_strict_not_silently_discarded(self):
         packed, _ = material("gptq", 4, 64, 64)

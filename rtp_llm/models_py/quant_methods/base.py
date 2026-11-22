@@ -27,6 +27,10 @@ class QuantizeMethodBase(ABC):
     def normalize_checkpoint_weights(self, weights):
         return self._checkpoint_names.normalize(weights)
 
+    def is_validation_only_checkpoint_tensor(self, layer, name: str) -> bool:
+        """May load_weights validate this key without touching runtime tensors?"""
+        return False
+
     def validate_runtime_device(self, device: torch.device) -> None:
         """Fail before device migration when no executable backend exists."""
 
@@ -401,6 +405,8 @@ class QuantizationConfig:
                 from rtp_llm.models_py.quant_methods import weight_only_int8  # noqa: F401
             elif self.quant_type == "W8A8_INT8_PER_CHANNEL_COMPRESSED":
                 from rtp_llm.models_py.quant_methods import w8a8_int8  # noqa: F401
+            elif self.quant_type == "pertensor_quant":
+                from rtp_llm.models_py.quant_methods import per_tensor_int8  # noqa: F401
             elif self.quant_type in ("smooth_quant", "omni_quant"):
                 from rtp_llm.models_py.quant_methods import smooth_omni  # noqa: F401
             elif self.quant_type in ("awq", "gptq"):
@@ -417,6 +423,10 @@ class QuantizationConfig:
     def is_moe_layer_ignored(self, layer, prefix: str) -> bool:
         if not prefix:
             raise ValueError("MoE quantization requires a stable module prefix")
+        # The calibrated INT8 checkpoint format quantizes dense projections,
+        # never the routed expert bank. Select a floating executor as well.
+        if self.quant_type == "pertensor_quant":
+            return True
         projection_prefixes = [
             f"{prefix}.{projection}" for projection in layer.PROJ_NAMES
         ]

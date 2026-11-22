@@ -198,6 +198,30 @@ class MegatronParameters:
                     tensor = tensor[
                         : self.embeddings.position_embeddings.num_embeddings
                     ]
+            if (
+                name == "embeddings.token_type_embeddings.weight"
+                and self.embeddings.token_type_embeddings is None
+            ):
+                # A missing type_vocab_size is parsed as zero. If the
+                # checkpoint has a segment table, it is still part of the model.
+                tensor, _ = unwrap_checkpoint_tensor(tensor)
+                anchor = self.embeddings.word_embeddings.weight
+                if (
+                    tensor.ndim != 2
+                    or tensor.shape[0] == 0
+                    or tensor.shape[1] != anchor.shape[1]
+                    or not tensor.is_floating_point()
+                ):
+                    raise ValueError(
+                        f"Invalid Megatron-BERT token type table: {tuple(tensor.shape)}, "
+                        f"{tensor.dtype}; expected floating [rows, {anchor.shape[1]}]"
+                    )
+                table = nn.Embedding.from_pretrained(
+                    tensor.detach().to(anchor, copy=True)
+                )
+                self.embeddings.token_type_embeddings = table
+                _mark_loaded(table, "weight")
+                continue
             if not self._dispatch(self, name, tensor):
                 raise ValueError(
                     f"Unexpected Megatron-BERT checkpoint tensor {source!r}"

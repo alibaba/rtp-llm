@@ -50,6 +50,12 @@ class _SelectLayerMethod(Enum):
     MIX = "mix"
 
 
+class _StatsOnlyBalancer:
+    """The native executor reports counters, but never owns these packed weights."""
+
+    eplb_stats_only = True
+
+
 def create_stage_expert_balancer(loader, model, model_config):
     """Only actual routed-expert owners participate on this PP stage."""
     if not model_config.eplb_config.enable_eplb():
@@ -67,19 +73,38 @@ def create_stage_expert_balancer(loader, model, model_config):
     from rtp_llm.config.layer_partition import local_layer_range
 
     owned = local_layer_range(model_config, loader.load_config.parallelism_config)
-    expected = declared.intersection(owned)
-    actual = {
-        module.layer_idx
-        for module in model.modules()
-        if isinstance(module, BaseMoEExperts)
-    }
+    # DSpARK PREFILL owns attention/cache commits only, although the checkpoint
+    # declares FFNs for its DECODE role. No routed counters are written there.
+    attention_only = getattr(model, "eplb_attention_only", False)
+    expected = set() if attention_only else declared.intersection(owned)
+    experts = {}
+    for module in model.modules():
+        if not callable(getattr(module, "bind_eplb_stats", None)):
+            continue
+        if module.layer_idx in experts:
+            raise RuntimeError(
+                f"Multiple routed-expert modules found for layer {module.layer_idx}"
+            )
+        experts[module.layer_idx] = module
+    actual = set(experts)
     if actual != expected:
         raise ValueError(
             "EPLB routed-layer ownership mismatch: "
             f"missing={sorted(expected - actual)}, unexpected={sorted(actual - expected)}"
         )
-    if not expected:
+    if not expected and not attention_only:
         return None  # Valid dense-only PP stage.
+    if attention_only or any(
+        not isinstance(module, BaseMoEExperts) for module in experts.values()
+    ):
+        mode = model_config.eplb_config.eplb_mode
+        if getattr(mode, "name", mode) != "STATS":
+            raise ValueError(
+                "This routed expert layout supports EPLB statistics but not weight rebalancing"
+            )
+        model._newloader_eplb_num_layers = model_config.num_layers
+        model._newloader_eplb_bind_stats = partial(_bind_stats, experts)
+        return _StatsOnlyBalancer()
     return NewLoaderExpertBalancer(loader, model, model_config)
 
 
@@ -116,7 +141,8 @@ class NewLoaderExpertBalancer:
         self.num_experts = first.num_experts
         self.num_replicas = first.physical_num_experts
         self.num_gpu = first.ep_size
-        self.num_groups = int(getattr(model_config, "moe_n_group", 1))
+        # Zero denotes an ungrouped router (one balancing group).
+        self.num_groups = int(getattr(model_config, "moe_n_group", 1)) or 1
         mode = getattr(model_config.eplb_config, "eplb_mode", None)
         parallelism = loader.load_config.parallelism_config
         from rtp_llm.models_py.expert_placement import expert_stage_node_count

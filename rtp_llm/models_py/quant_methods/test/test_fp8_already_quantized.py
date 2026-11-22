@@ -724,6 +724,43 @@ class TestFp8PerChannelLoad(_LoadBackendMixin, unittest.TestCase):
     "requires a ROCm GPU and AITer",
 )
 class TestRocmFp8PerChannelOnline(unittest.TestCase):
+
+    def test_swizzle_pads_local_k_and_preserves_logical_output(self):
+        # 11008 / TP8 leaves K=1376, not a complete 64-column FP8 tile.
+        # A non-tile N also checks that fake output channels never escape.
+        k, n = 1376, 37
+        for method in ("fp8_per_channel_online", "fp8_per_channel"):
+            with self.subTest(method=method):
+                layer = ColumnParallelLinear(
+                    input_size=k,
+                    output_size=n,
+                    prefix="proj",
+                    bias=True,
+                    quant_config=_make_qc(
+                        method, hw_kernel_config=SimpleNamespace(use_swizzleA=True)
+                    ),
+                    params_dtype=torch.bfloat16,
+                ).cuda()
+                w = torch.zeros(n, k, dtype=torch.bfloat16, device="cuda")
+                w[:, -1] = torch.arange(n, device=w.device) % 2 + 1
+                bias = torch.ones(n, dtype=w.dtype, device=w.device)
+                state = {"proj.weight": w, "proj.bias": bias}
+                if method == "fp8_per_channel":
+                    state["proj.weight"] = w.to(torch.float8_e4m3fn)
+                    state["proj.weight_scale"] = torch.ones(n, 1, device=w.device)
+                layer.load_weights(state)
+                layer.process_weights_after_loading()
+                self.assertEqual(tuple(layer.weight.shape), (1408, 48))
+                x = torch.ones(3, k, dtype=w.dtype, device=w.device)
+                ref = x @ w.T + bias
+                torch.testing.assert_close(layer(x), ref, rtol=0.02, atol=0.02)
+                torch.testing.assert_close(
+                    layer.forward_with_bias_gelu(x),
+                    torch.nn.functional.gelu(ref),
+                    rtol=0.02,
+                    atol=0.02,
+                )
+
     def test_fp16_bf16_tp_weights_use_ptpc_runtime(self):
         import aiter
         from aiter.ops.shuffle import shuffle_weight
@@ -979,6 +1016,84 @@ class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
 
     BLOCK = 128
     runtime_backend = "cuda_deep_gemm"
+
+    def test_qkv_scale_extent_comes_from_projection_not_checkpoint(self):
+        for tp, local in ((1, False), (2, True), (2, False)):
+            layer = QKVParallelLinear(
+                hidden_size=256,
+                num_heads=4,
+                num_kv_heads=2,
+                head_dim=128,
+                tp_size=tp,
+                tp_rank=tp - 1,
+                quant_config=_make_qc("fp8_block"),
+                prefix="qkv",
+                params_dtype=torch.bfloat16,
+            )
+            rows = 4 // tp if local else 4
+            for bad_rows in (rows - 1, rows + 1):
+                with self.subTest(tp=tp, local=local, rows=bad_rows):
+                    bad = torch.full((bad_rows, 2), 7.0)
+                    with self.assertRaisesRegex(ValueError, "Shape mismatch"):
+                        layer._dispatch_qkv_shard(
+                            "q", "weight_scale_inv", bad, local_shard=local
+                        )
+                    self.assertFalse(
+                        layer._loaded_parameter_shards.get("weight_scale_inv")
+                    )
+                    self.assertTrue(bool((layer.weight_scale_inv == 1).all()))
+            layer._dispatch_qkv_shard(
+                "q", "weight_scale_inv", torch.full((rows, 2), 7.0), local_shard=local
+            )
+
+    def test_online_moe_partial_gate_up_uses_fused_scale_grid(self):
+        from rtp_llm.models_py.quant_methods.fp8 import per_block_quant_like_legacy
+        from rtp_llm.models_py.quant_methods.fp8_moe import Fp8MoEMethod
+
+        devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+        for device in devices:
+            layer = torch.nn.Module()
+            layer._quant_family = "fp8_per_block_online"
+            layer._FP8_BLOCK_SIZE = 128
+            layer.num_local_experts = 1
+            method = Fp8MoEMethod()
+            method.create_weights(layer, 1, 128, 160, torch.bfloat16)
+            layer.to(device)
+            # Middle tile spans the boundary between two very different planes.
+            up = torch.full((160, 128), 0.125, dtype=torch.bfloat16, device=device)
+            gate = torch.full_like(up, 32.0)
+            layer.w13[0].copy_(torch.cat([up, gate]))
+            layer.w2.fill_(1)
+            method._online_per_block(layer)
+            expected = (
+                [gate, up] if device == "cuda" and torch.version.hip else [up, gate]
+            )
+            w, s = per_block_quant_like_legacy(torch.cat(expected), 128)
+            self.assertEqual(tuple(layer.w13_scale.shape), (1, 3, 1))
+            torch.testing.assert_close(
+                layer.w13[0].view(torch.uint8), w.view(torch.uint8)
+            )
+            torch.testing.assert_close(layer.w13_scale[0], s)
+            if layer._fp8_gate_first:
+                from rtp_llm.models_py.quant_methods.moe_layout import (
+                    prepare_moe_weight_layout,
+                    undo_rocm_moe_matrix_tiles,
+                )
+
+                shuffled = prepare_moe_weight_layout(
+                    layer.w13, projection="gate_up", gate_first=True
+                )
+                torch.testing.assert_close(
+                    undo_rocm_moe_matrix_tiles(shuffled.view(torch.uint8))[0],
+                    w.view(torch.uint8),
+                )
+                scales = prepare_moe_weight_layout(
+                    layer.w13_scale,
+                    projection="gate_up",
+                    is_scale=True,
+                    gate_first=True,
+                )
+                torch.testing.assert_close(scales[0], s)
 
     def test_noncanonical_block_size_fails_before_weight_allocation(self):
         quant_config = QuantizationConfig(

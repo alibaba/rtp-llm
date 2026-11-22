@@ -58,7 +58,7 @@ def swap_halves(value):
     return torch.cat((second, first), dim=-2)
 
 
-def block_ft_scale(raw, logical_shape, *, source_dtype, swap_gate_up=False):
+def block_ft_scale(raw, logical_shape, *, source_dtype, swap_gate_up=False, padding=None):
     shape = tuple(logical_shape)
     *batch, n, k = shape
     nb, kb = _blocks(n), _blocks(k)
@@ -97,6 +97,10 @@ def block_ft_scale(raw, logical_shape, *, source_dtype, swap_gate_up=False):
         value = swap_halves(value)
     if source_dtype == torch.float8_e4m3fnuz:
         value = value * 0.5
+    if padding is not None:
+        # Legacy export fills *whole* added scale blocks with zero. The
+        # paired weight decoder verifies the corresponding weights are zero.
+        value = value.masked_fill(padding & (value == 0), 1.0)
     if not torch.isfinite(value).all() or (value <= 0).any():
         raise ValueError("Block scales must be positive and finite")
     return value
@@ -117,8 +121,41 @@ def block_ft_runtime_pair(layer, weight, scale, scale_key, requant):
     return weight, _transform_scale_ue8m0(scale, weight.shape[-2])
 
 
+def block_ft_ffn_width(checkpoint, down_key, logical_width, hidden):
+    """Keep the producer's TP partition; cropping each rank would lose real rows."""
+    if logical_width % 128 == 0:
+        # Padding cannot change this width. The normal binding still checks
+        # the payload shape; no extra peer file reads are needed.
+        return logical_width
+    scale_key = down_key.removesuffix(".kernel") + ".weight_only_quant_scale"
+    widths = set()
+    for peer in range(checkpoint.topology.tp_size):
+        packed = (
+            checkpoint.read_rank_slice(scale_key, peer, (slice(0, 1),) * 2).dtype
+            == torch.int32
+        )
+        shape = checkpoint.read_rank_slice(down_key, peer)
+        if len(shape) != 2:
+            raise ValueError("Expected a dense block-FP8 FT down projection")
+        n, width = shape if packed else shape[::-1]
+        if n != hidden or width not in (logical_width, _blocks(logical_width) * 128):
+            raise ValueError(f"Invalid block-FP8 FT FFN shard shape {shape}")
+        widths.add(width)
+    if len(widths) != 1:
+        raise ValueError("Block-FP8 FT FFN ranks disagree on padded width")
+    return widths.pop()
+
+
 def block_ft_bindings(
-    layer, source, scale_source, target, checkpoint, *, swizzled=False
+    layer,
+    source,
+    scale_source,
+    target,
+    checkpoint,
+    *,
+    swizzled=False,
+    projection=None,
+    ffn_width=None,
 ):
     """Import a dense rank-local linear matrix while preserving Parameter IDs."""
     peer = checkpoint.topology.tp_rank
@@ -132,6 +169,28 @@ def block_ft_bindings(
     )
     if len(sources) != len(scale_sources) or len(sources) not in (1, 2):
         raise ValueError("Expected one linear projection or separate gate/up planes")
+    padded = False
+    if ffn_width is not None:
+        if projection not in ("gate_up", "down"):
+            raise ValueError(
+                "FT FFN width is only valid for gate/up or down projections"
+            )
+        logical_width = full_shape[0] // 2 if projection == "gate_up" else full_shape[1]
+        if ffn_width not in (logical_width, _blocks(logical_width) * 128):
+            raise ValueError("Invalid block-FP8 FT FFN padding")
+        padded = ffn_width != logical_width
+        full_shape = (
+            (2 * ffn_width, full_shape[1])
+            if projection == "gate_up"
+            else (full_shape[0], ffn_width)
+        )
+        live = max(
+            0,
+            min(
+                ffn_width,
+                logical_width * checkpoint.topology.tp_size - peer * ffn_width,
+            ),
+        )
     shape = full_shape
     if len(sources) == 2:
         if full_shape[0] % 256:
@@ -181,21 +240,61 @@ def block_ft_bindings(
                     weight = block_ft_weight(
                         weight.unsqueeze(0), (1, *shape), False, rocm_shuffle=True
                     )[0]
+            if padded and live < ffn_width:
+                planes = (
+                    (weight,)
+                    if len(sources) == 2 or projection == "down"
+                    else weight.chunk(2)
+                )
+                for plane in planes:
+                    tail = plane[live:] if projection == "gate_up" else plane[:, live:]
+                    if torch.count_nonzero(tail.float()).item():
+                        raise ValueError(
+                            "Block-FP8 FT FFN padding contains nonzero weights"
+                        )
             pieces.append(weight)
         return combine(pieces)
 
     def decode_scale(values):
+        padding = None
+        if padded and live < ffn_width:
+            padding = torch.arange(
+                _blocks(ffn_width), device=values[0].device
+            ) >= _blocks(live)
+            if projection == "gate_up":
+                padding = padding.repeat(2 if len(sources) == 1 else 1).unsqueeze(1)
         return combine(
-            [block_ft_scale(val, shape, source_dtype=source_type) for val in values]
+            [
+                block_ft_scale(val, shape, source_dtype=source_type, padding=padding)
+                for val in values
+            ]
         )
 
+    scale_shape = (_blocks(full_shape[0]), _blocks(full_shape[1]))
+
+    def install_weight(values):
+        value = decode_weight(values)
+        layer.weight.data = layer.weight.new_empty(full_shape)
+        layer.weight.copy_(value)
+        if projection == "gate_up":
+            layer.output_size = layer.output_size_per_partition = full_shape[0]
+        else:
+            layer.input_size = layer.input_size_per_partition = full_shape[1]
+
     def install_scale(values):
+        if padded and tuple(param.shape) != scale_shape:
+            param.data = param.new_empty(scale_shape)
         param.copy_(decode_scale(values))
         layer._packed_block_fp8_ft = {"weight_scale_inv"} if packed else set()
 
     return (
         RuntimeTensorBinding(
-            sources, target + ".weight", decode_weight, entry(sources)
+            sources,
+            target + ".weight",
+            decode_weight,
+            entry(sources),
+            install_weight if padded else None,
+            full_shape if padded else None,
         ),
         RuntimeTensorBinding(
             scale_sources,
@@ -203,6 +302,7 @@ def block_ft_bindings(
             decode_scale,
             entry(scale_sources),
             install_scale,
+            scale_shape if padded else None,
         ),
     )
 

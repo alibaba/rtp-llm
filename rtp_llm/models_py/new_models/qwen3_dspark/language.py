@@ -20,6 +20,11 @@ from rtp_llm.models_py.weight_mapper import WeightsMapper
 
 
 class Qwen3DSparkForCausalLM(Qwen3DSparkRuntime, Qwen3ForCausalLM):
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_dspark_ft_checkpoint
+
+        load_dspark_ft_checkpoint(self, checkpoint)
+
     runtime_parameter_paths = {
         "embedding": "embed_tokens.weight",
         "lm_head": "lm_head.weight",

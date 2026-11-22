@@ -1,3 +1,5 @@
+load("//rtp_llm/models_py:checkpoint_test_platforms.bzl", "ue8m0_test_env", "ue8m0_test_platforms")
+
 py_test(
     name = "cuda_rms_order_test",
     srcs = ["cuda_rms_order_test.py"],
@@ -29,33 +31,27 @@ py_test(
 
 py_test(
     name = "ppu_moe_owner_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = ["ppu_moe_owner_test.py"],
     data = ["//rtp_llm/models_py:ppu_sources"],
     deps = ["//rtp_llm/models_py:new_weight_loader"],
-    env = {
-        "CUDA_VISIBLE_DEVICES": "",
-        "OMP_NUM_THREADS": "1",
-    },
+    env = ue8m0_test_env(),
 )
 
 py_test(
     name = "moe_owner_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = ["moe_owner_test.py"],
     deps = ["//rtp_llm/models_py:new_weight_loader"],
-    env = {
-        "CUDA_VISIBLE_DEVICES": "",
-        "OMP_NUM_THREADS": "1",
-    },
+    env = ue8m0_test_env(),
 )
 
 py_test(
     name = "ppu_attention_owner_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = ["ppu_attention_owner_test.py"],
     deps = ["//rtp_llm/models_py:new_weight_loader"],
-    env = {
-        "CUDA_VISIBLE_DEVICES": "",
-        "OMP_NUM_THREADS": "1",
-    },
+    env = ue8m0_test_env(),
 )
 
 py_test(
@@ -115,10 +111,8 @@ py_test(
 
 py_test(
     name = "ppu_globals_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = ["ppu_globals_test.py"],
     deps = ["//rtp_llm/models_py:new_weight_loader"],
-    env = {
-        "CUDA_VISIBLE_DEVICES": "",
-        "OMP_NUM_THREADS": "1",
-    },
+    env = ue8m0_test_env(),
 )

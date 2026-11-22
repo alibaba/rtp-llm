@@ -3,6 +3,8 @@
 
 namespace rtp_llm {
 
+enum class EplbWeightOwnership { Legacy, PythonInstall, StatsOnly };
+
 struct EplbPlanTensors {
     int           layer_id;
     torch::Tensor layer_id_buf;
@@ -48,12 +50,13 @@ public:
 
     void loadBalanceWeight(int ep_rank, int ep_size, EplbPlanTensors& eplb_plan);
 
-    static bool usesDirectInstall(const py::object& controller);
+    static EplbWeightOwnership weightOwnership(const py::object& controller);
+    EplbWeightOwnership weightOwnership() const { return ownership_; }
     void        installBalancePlan(const EplbPlanTensors& plan);
     void        finishBalancePlan(int layer_id, bool commit);
 
 private:
-    bool       direct_install_ = false;
+    EplbWeightOwnership ownership_ = EplbWeightOwnership::Legacy;
     py::object py_eplb_;
 };
 

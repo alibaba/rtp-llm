@@ -24,6 +24,28 @@ class _GDNFixture(RtpModule):
 
 
 class GDNWeightsTest(unittest.TestCase):
+    def test_custom_projection_layout_cannot_be_updated_as_a_plain_linear(self):
+        from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
+        from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+
+        model = RtpModule()
+        model.runtime_weight_view = lambda: {}
+        config = SimpleNamespace(
+            linear_key_head_dim=4, linear_value_head_dim=4, linear_num_key_heads=2,
+            linear_num_value_heads=4, linear_conv_kernel_dim=3,
+        )
+        model.linear_attn = Qwen4GDNWeights(
+            config, 8, 1e-6, 1, 0, torch.bfloat16, QuantizationConfig("none"), "linear_attn"
+        )
+        original = torch.zeros(48, 8, dtype=torch.bfloat16)
+        model.linear_attn.load_weights({"in_proj_qkvz.weight": original})
+        loader = SimpleNamespace(_mapped_checkpoint_name=NewModelLoader._mapped_checkpoint_name)
+        manager = NewLoaderWeightManager(model, loader)
+        with self.assertRaises(NotImplementedError):
+            manager.update_tensors({"linear_attn.in_proj_qkvz.weight": original + 1})
+        torch.testing.assert_close(model.linear_attn.in_proj_qkvz.weight, original)
+        self.assertEqual(manager.version, 0)
+
     def test_fused_per_head_checkpoint_layout(self):
         shapes = {"in_proj_qkvz.weight":(48,8), "in_proj_ba.weight":(8,8),
             "conv1d.weight":(32,1,3), "dt_bias":(4,), "A_log":(4,),

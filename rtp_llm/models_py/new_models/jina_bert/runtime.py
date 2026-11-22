@@ -8,6 +8,13 @@ from rtp_llm.models_py.new_models.jina_bert.encoder import JinaEncoder
 
 
 class JinaBertForEmbedding(JinaEncoder, GptModelBase):
+    supports_ft_handler_heads = True
+
+    def load_ft_checkpoint(self, checkpoint):
+        from .ft_checkpoint import load_jina_ft_checkpoint
+
+        load_jina_ft_checkpoint(self, checkpoint)
+
     def __init__(self, config, load):
         GptModelBase.__init__(
             self,

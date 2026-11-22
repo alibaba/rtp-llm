@@ -358,9 +358,14 @@ class ModelOptFp4LinearMethod(QuantizeMethodBase):
                     getattr(executor_module, "cutlass_scaled_fp4_mm_wrapper", None)
                 ):
                     raise RuntimeError("cutlass_scaled_fp4_mm_wrapper is unavailable")
-                ops = importlib.import_module("rtp_llm.ops.compute_ops")
-                if not callable(getattr(ops, "cutlass_scaled_fp4_mm", None)):
-                    raise RuntimeError("cutlass_scaled_fp4_mm is unavailable")
+                # Check the backend actually captured by the serving wrapper.
+                # Importing the wrapper alone also succeeds when its wheel is missing.
+                fp4_kernel = importlib.import_module(
+                    "rtp_llm.models_py.kernels.cuda.fp4_kernel.fp4_kernel"
+                )
+                fp4_kernel._require_nvfp4()
+                if not callable(getattr(fp4_kernel, "cutlass_scaled_fp4_mm", None)):
+                    raise RuntimeError("rtp_kernel.nvfp4.cutlass_scaled_fp4_mm is unavailable")
         except (ImportError, AttributeError, OSError, RuntimeError) as exc:
             raise RuntimeError(
                 f"NVFP4 backend {backend!r} failed loading-time validation: {exc}"

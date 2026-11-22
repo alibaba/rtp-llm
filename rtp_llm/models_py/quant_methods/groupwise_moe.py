@@ -125,8 +125,13 @@ class GroupwiseMoEMethod(FusedMoEMethodBase):
     def required_aux_parameters(self):
         return ("qzeros", "scales")
 
+    def is_validation_only_checkpoint_tensor(self, layer, name):
+        return self._role(layer, name)[2] == "g_idx"
+
     def load_weights(self, layer, weights):
-        if getattr(layer, "_groupwise_runtime_metadata", None) is not None:
+        if getattr(layer, "_groupwise_runtime_metadata", None) is not None and not all(
+            self.is_validation_only_checkpoint_tensor(layer, name) for name in weights
+        ):
             raise RuntimeError(
                 "Grouped expert runtime weights require a fresh checkpoint staging module"
             )

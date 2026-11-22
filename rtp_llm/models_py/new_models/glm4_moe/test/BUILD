@@ -1,9 +1,18 @@
+py_library(
+    name = "checkpoint_test_support",
+    testonly = True,
+    srcs = ["checkpoint_fixture.py", "load_config_fixture.py"],
+    deps = ["//rtp_llm/models_py:new_weight_loader"],
+    visibility = ["//rtp_llm/models_py/new_models/deepseek_vl2/test:__pkg__"],
+)
+
 py_test(
     name = "test_glm4_moe_load",
-    srcs = ["test_glm4_moe_load.py", "checkpoint_fixture.py"],
+    srcs = ["test_glm4_moe_load.py"],
     main = "test_glm4_moe_load.py",
     data = ["//:rtp_compute_ops", "//:th_transformer_config"],
     deps = [
+        ":checkpoint_test_support",
         "//rtp_llm:config",
         "//rtp_llm:safetensors",
         "//rtp_llm:torch",

@@ -2,6 +2,7 @@ load("@arch_config//:arch_select.bzl", "requirement", "triton_deps")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 load(":checkpoint_service_tests.bzl", "checkpoint_service_tests")
+load(":checkpoint_test_platforms.bzl", "ue8m0_test_env", "ue8m0_test_platforms")
 
 py_test(
     name = "v4_fst_nogds_test",
@@ -151,6 +152,14 @@ py_test(
 ]
 
 models_py_test(
+    name = "qwen4_static_expert_routing_test",
+    src = "new_models/qwen4_exp/static_routing_test.py",
+    gpu = "H20_CU13",
+    gpus = 2,
+    deps = [":new_weight_loader"],
+)
+
+models_py_test(
     name = "qwen4_nvfp4_newloader_hopper_output_test",
     src = "new_models/qwen4_exp/nvfp4_experts_test.py",
     gpu = "H20_CU13",
@@ -293,7 +302,7 @@ py_test(
 
 py_test(
     name = "main_parallel_runtime_test",
-    srcs = ["main_parallel_runtime_test.py"],
+    srcs = ["main_parallel_runtime_test.py", "layers/embedding.py"],
     env = {
         "CUDA_VISIBLE_DEVICES": "",
         "HIP_VISIBLE_DEVICES": "",
@@ -313,6 +322,8 @@ py_test(
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1"},
     deps = [
         ":new_weight_loader",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:utils",
         "//rtp_llm/tools/convert:ft_export_metadata",
         "//rtp_llm/tools/convert:ft_export_writer",
     ],
@@ -343,6 +354,7 @@ py_test(
 
 py_test(
     name = "v41_owned_attention_checkpoint_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = ["new_models/deepseek_v41/attention_test.py"],
     main = "new_models/deepseek_v41/attention_test.py",
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
@@ -351,20 +363,22 @@ py_test(
 
 py_test(
     name = "v41_owned_backbone_checkpoint_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = ["new_models/deepseek_v41/backbone_test.py"],
     main = "new_models/deepseek_v41/backbone_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    env = ue8m0_test_env(),
     deps = [":new_weight_loader", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
 
 py_test(
     name = "v41_service_checkpoint_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = [
         "new_models/deepseek_v41/service_test.py",
         "new_models/deepseek_v41/backbone_test.py",
     ],
     main = "new_models/deepseek_v41/service_test.py",
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"},
+    env = ue8m0_test_env(),
     deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm:safetensors", "//rtp_llm:torch"],
 )
 
@@ -380,6 +394,7 @@ py_test(
 
 py_test(
     name = "v41_dspark_checkpoint_test",
+    target_compatible_with = ue8m0_test_platforms(require_fst = True),
     srcs = [
         "new_models/deepseek_v41_dspark/checkpoint_test.py",
         "new_models/deepseek_v41/backbone_test.py",
@@ -391,6 +406,7 @@ py_test(
 
 py_test(
     name = "v41_dspark_service_test",
+    target_compatible_with = ue8m0_test_platforms(require_fst = True),
     srcs = [
         "new_models/deepseek_v41_dspark/service_test.py",
         "new_models/deepseek_v41_dspark/checkpoint_test.py",
@@ -404,6 +420,10 @@ py_test(
 
 py_test(
     name = "v41_dspark_cold_native_forward_test",
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     srcs = [
         "new_models/deepseek_v41_dspark/native_forward_test.py",
         "new_models/deepseek_v41_dspark/service_test.py",
@@ -421,6 +441,7 @@ py_test(
 
 py_test(
     name = "v41_service_routes_test",
+    target_compatible_with = ue8m0_test_platforms(),
     srcs = [
         "new_models/deepseek_v41/routes_test.py",
         "new_models/deepseek_v41_dspark/service_test.py",
@@ -501,13 +522,19 @@ py_test(
     deps = [":new_weight_loader", "//rtp_llm:models"],
 )
 
-# V4 checkpoints contain native UE8M0. These tests use CPU tensors, but
-# require the CUDA13 package set (in particular its safetensors dtype table).
-_V4_CHECKPOINT_TEST_PLATFORMS = select({
-    "@//:using_cuda13_x86": [],
-    "@//:using_cuda13_arm": [],
-    "//conditions:default": ["@platforms//:incompatible"],
-})
+[
+    py_test(
+        name = name,
+        srcs = [entry],
+        main = entry,
+        deps = [":new_weight_loader"],
+        env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": ""},
+    )
+    for name, entry in [
+        ("v4_checkpoint_namespace_test", "new_models/deepseek_v4/checkpoint_namespace_test.py"),
+        ("v4_load_geometry_test", "new_models/deepseek_v4/load_geometry_test.py"),
+    ]
+]
 
 [
     py_test(
@@ -521,9 +548,11 @@ _V4_CHECKPOINT_TEST_PLATFORMS = select({
             "NEWLOADER_TEST_NATIVE_FST": "1",
             "OMP_NUM_THREADS": "1",
         },
-        target_compatible_with = _V4_CHECKPOINT_TEST_PLATFORMS,
+        target_compatible_with = ue8m0_test_platforms(require_fst = True),
     )
     for name, entry, extra in [
+        ("v41_engram_source_test", "new_models/deepseek_v41/engram_source_test.py", []),
+        ("v41_linear_owner_test", "new_models/deepseek_v41/linear_owner_test.py", []),
         ("deepseek_v4_hc_load_test", "new_models/deepseek_v4/hc_test.py", []),
         ("deepseek_v4_backbone_load_test", "new_models/deepseek_v4/backbone_test.py", []),
         ("deepseek_v4_mtp_load_test", "new_models/deepseek_v4/mtp_test.py", [
@@ -639,6 +668,17 @@ py_test(
     ],
     main = "new_models/qwen3_dspark_format_test.py",
     deps = ["//rtp_llm:safetensors", "//rtp_llm:torch"],
+)
+
+py_test(
+    name = "encoder_qwen3_ft_test",
+    srcs = [
+        "new_models/encoder_qwen3_ft_test.py",
+        "new_models/jina_bert/jina_checkpoint_test.py",
+        "new_models/qwen3_dspark/checkpoint_test.py",
+    ],
+    main = "new_models/encoder_qwen3_ft_test.py",
+    deps = [":new_weight_loader", "//rtp_llm:models", "//rtp_llm/tools/convert:convert"],
 )
 
 py_test(

@@ -19,11 +19,14 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionCon
 
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen3_vl_moe import QWen3_VL_MOE
+from rtp_llm.models_py.downstream_heads import handler_weight_mappings
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3_vl.language import (
     Qwen3VLForCausalLM,
     Qwen3VLMoeForCausalLM,
 )
 from rtp_llm.models_py.qwen3_moe_checkpoint_test import weights
+from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.models_py.serving_route_checkpoint_test import service
 from rtp_llm.multimodal.multimodal_mixin_factory import MultimodalMixinFactory
 
@@ -300,6 +303,51 @@ class _VLServiceFixture(unittest.TestCase):
 
 
 class PublicVLTest(_VLServiceFixture):
+    def test_declared_top_level_handler_head_is_loaded(self):
+        for moe, server in ((False, _Dense), (True, _Moe)):
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                model_type, _, tensors = checkpoint(root, moe)
+                score = torch.arange(12, dtype=torch.float32).reshape(3, 4)
+                tensors.update({
+                    "score.weight": score,
+                    # Sharing the head's prefix does not make a tensor declared.
+                    "score.bias": torch.ones(7),
+                    "training_only.weight": torch.ones(5, 6),
+                })
+                save_file(tensors, str(root / "model.safetensors"))
+                config = server._create_config(temp)
+                config.model_type = model_type
+                config.ckpt_path = temp
+                config.data_type = "fp32"
+                for method in ("scratch", "fastsafetensors"):
+                    with self.subTest(model_type=model_type, method=method):
+                        parallel = service(temp, method).parallelism_config
+                        parallel.local_world_size = 1
+                        parallel.pp_stage_layer_counts = []
+                        load = NewLoaderConfig(
+                            compute_dtype=torch.float32,
+                            device="cpu",
+                            load_method=method,
+                            parallelism_config=parallel,
+                            quant_config=QuantizationConfig("none"),
+                            max_generate_batch_size=1,
+                            custom_weight_mappings=handler_weight_mappings(("score.weight",)),
+                            custom_projection_layers=(("score.weight", None),),
+                        )
+                        loader = NewModelLoader(config, load, model_path=temp)
+                        owner = loader.load()
+                        self.assertEqual(loader.loaded_method.value, method)
+                        exports = owner.runtime_weight_view()
+                        self.assertEqual(
+                            {k for k in exports if k.startswith("__custom__.")},
+                            {"__custom__.score.weight"},
+                        )
+                        torch.testing.assert_close(exports["__custom__.score.weight"], score)
+                        owns = owner.checkpoint_weight_name_filter()
+                        self.assertFalse(owns("score.bias"))
+                        self.assertFalse(owns("training_only.weight"))
+
     def test_checkpoint_vision_and_deepstack(self):
         self.check_vl(native_output=False)
 

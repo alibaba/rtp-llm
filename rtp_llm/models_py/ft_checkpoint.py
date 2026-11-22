@@ -78,6 +78,9 @@ class RuntimeTensorBinding:
     convert: Callable[[tuple[torch.Tensor, ...]], torch.Tensor]
     read: Callable[[], tuple[torch.Tensor, ...]] | None = None
     install: Callable[[tuple[torch.Tensor, ...]], None] | None = None
+    # Some legacy FFNs use a physically padded pair of TP projections. Their
+    # owner supplies both the exact validated geometry and its installer.
+    install_shape: tuple[int, ...] | None = None
 
 
 def ft_layer_bindings(model):
@@ -488,7 +491,14 @@ class FTCheckpoint:
                     f"{target_owners[id(target)]}, {binding.target}"
                 )
             target_owners[id(target)] = binding.target
-            if not isinstance(tensor, torch.Tensor) or tensor.shape != target.shape:
+            shape = target.shape
+            if binding.install_shape is not None:
+                if binding.install is None:
+                    raise ValueError(
+                        f"No installer for FT storage layout: {binding.target}"
+                    )
+                shape = binding.install_shape
+            if not isinstance(tensor, torch.Tensor) or tensor.shape != shape:
                 raise ValueError(f"FT layout mismatch for {binding.target}")
             # Runtime snapshots must not be silently requantized/cast.
             if tensor.dtype != target.dtype:
@@ -531,3 +541,10 @@ class FTCheckpoint:
                 marker = getattr(owner, "_mark_weight_loaded", None)
             if marker is not None:
                 marker(name)
+            else:
+                # Ordinary nn.Embedding, nn.Linear and nn.LayerNorm owners do
+                # not have RtpModule methods. Record the same provenance as
+                # the direct checkpoint dispatch for their registered leaves.
+                from rtp_llm.models_py.module_base import _mark_loaded
+
+                _mark_loaded(owner, name)

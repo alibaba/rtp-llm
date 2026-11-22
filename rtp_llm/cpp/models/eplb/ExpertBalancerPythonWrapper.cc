@@ -10,7 +10,7 @@ void EplbPlanTensors::init(int log_exp_num, int phy_exp_num) {
 }
 
 ExpertBalancerPythonWrapper::ExpertBalancerPythonWrapper(py::object py_eplb):
-    direct_install_(usesDirectInstall(py_eplb)), py_eplb_(std::move(py_eplb)) {}
+    ownership_(weightOwnership(py_eplb)), py_eplb_(std::move(py_eplb)) {}
 
 void ExpertBalancerPythonWrapper::createBalancePlan(torch::Tensor&   log_stats,
                                                     torch::Tensor&   gpu_loads,
@@ -36,7 +36,7 @@ void ExpertBalancerPythonWrapper::loadBalanceWeight(int ep_rank, int ep_size, Ep
 
     auto res = py_eplb_.attr("load_moe_weight")(eplb_plan.layer_id_buf, ep_rank, ep_size, eplb_plan.phy2log);
 
-    if (direct_install_) {
+    if (ownership_ == EplbWeightOwnership::PythonInstall) {
         eplb_plan.layer_id = res.cast<int>();
         if (eplb_plan.layer_id != eplb_plan.layer_id_buf.item<int>()) {
             throw std::runtime_error("EPLB loaded a different layer from the broadcast plan");
@@ -56,10 +56,16 @@ void ExpertBalancerPythonWrapper::loadBalanceWeight(int ep_rank, int ep_size, Ep
     eplb_plan.moe_scale_2  = result_tuple[4].cast<torch::Tensor>();
 }
 
-bool ExpertBalancerPythonWrapper::usesDirectInstall(const py::object& controller) {
+EplbWeightOwnership ExpertBalancerPythonWrapper::weightOwnership(const py::object& controller) {
     py::gil_scoped_acquire gil;
-    return controller && !controller.is_none() && py::hasattr(controller, "supports_python_weight_install")
-           && controller.attr("supports_python_weight_install")().cast<bool>();
+    if (controller && !controller.is_none()) {
+        if (py::getattr(controller, "eplb_stats_only", py::bool_(false)).cast<bool>())
+            return EplbWeightOwnership::StatsOnly;
+        if (py::hasattr(controller, "supports_python_weight_install")
+            && controller.attr("supports_python_weight_install")().cast<bool>())
+            return EplbWeightOwnership::PythonInstall;
+    }
+    return EplbWeightOwnership::Legacy;
 }
 
 void ExpertBalancerPythonWrapper::installBalancePlan(const EplbPlanTensors& plan) {

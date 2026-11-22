@@ -15,6 +15,9 @@ from rtp_llm.config.quant_config import (
 )
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
+from rtp_llm.models_py.quant_methods.test.staged_checkpoint_fixture import (
+    save_with_late_shard,
+)
 from rtp_llm.models_py.quant_methods.test.test_w8a8_int8_moe import _MoeModel
 from rtp_llm.models_py.registry import MODEL_REGISTRY
 
@@ -51,6 +54,7 @@ class W4A8CheckpointTest(unittest.TestCase):
         rank=1,
         ep=1,
         redundant=0,
+        late=None,
     ):
         source = (
             CompressedW4A8Int4PerChannelQuantConfig(
@@ -80,7 +84,10 @@ class W4A8CheckpointTest(unittest.TestCase):
             ),
         )
         with tempfile.TemporaryDirectory() as path:
-            save_file(tensors, os.path.join(path, "model.safetensors"))
+            if late is None:
+                save_file(tensors, os.path.join(path, "model.safetensors"))
+            else:
+                save_with_late_shard(path, tensors, late)
             with mock.patch.dict(MODEL_REGISTRY, {config.model_type: _MoeModel}):
                 loader = NewModelLoader(
                     config,
@@ -88,7 +95,9 @@ class W4A8CheckpointTest(unittest.TestCase):
                         device="cpu",
                         compute_dtype=torch.bfloat16,
                         load_method=method,
-                        force_cpu_load_weights=method == "fastsafetensors",
+                        force_cpu_load_weights=(
+                            method == "fastsafetensors" and late is None
+                        ),
                         tp_size=tp,
                         tp_rank=rank,
                         ep_size=ep,
@@ -199,6 +208,16 @@ class W4A8CheckpointTest(unittest.TestCase):
                 with self.subTest(method=method):
                     with self.assertRaises((ValueError, RuntimeError, TypeError)):
                         self.load(values, method=method)
+
+    def test_staged_fst_validates_late_weight_shape(self):
+        tensors = self.checkpoint()
+        key = "experts.3.down_proj.weight_shape"
+        shape = tensors.pop(key)
+        options = dict(method="fastsafetensors", tp=1, rank=0)
+        layer = self.load(tensors, late={key: shape}, **options)
+        self.assertIn("3.down_proj.weight_shape", layer._seen_checkpoint_names)
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.load(tensors, late={key: shape + 1}, **options)
 
     def test_cpu_staging_cannot_publish_cuda_layout(self):
         layer = self.load(self.checkpoint())

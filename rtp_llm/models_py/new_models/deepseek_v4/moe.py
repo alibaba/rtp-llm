@@ -77,6 +77,7 @@ class OwnedFp8Fp4MoE(RtpModule):
         self._hash_gate = layer_id < n_hash_layers
         self._loaded = set()
         self._runtime = None
+        self._eplb_stats = None
         self._runtime_configured = False
         self._runtime_transfer_started = False
         self._runtime_kwargs = dict(
@@ -325,6 +326,20 @@ class OwnedFp8Fp4MoE(RtpModule):
         # Role and the token budget are established later by model.initialize.
         # Never allocate dispatch/symmetric-memory buffers while loading weights.
 
+    @property
+    def layer_idx(self):
+        return self.layer_id
+
+    def bind_eplb_stats(self, log_stats, gpu_loads):
+        from rtp_llm.models_py.layers.eplb_stats import ExpertRouteStats
+
+        self._eplb_stats = ExpertRouteStats(
+            log_stats, gpu_loads, num_experts=self.num_experts,
+            ep_size=self.ep_size, device=self.router_weight.device,
+        )
+        if self._runtime is not None:
+            self._runtime.set_route_stats(self._eplb_stats)
+
     def configure_runtime(self, *, is_decode_role, max_tokens_per_rank, **kwargs):
         allowed = {
             "world_size",
@@ -377,6 +392,8 @@ class OwnedFp8Fp4MoE(RtpModule):
         )
 
         self._runtime = ChunkedFp8Fp4MoeLayer(weight_owner=self, **self._runtime_kwargs)
+        if self._eplb_stats is not None:
+            self._runtime.set_route_stats(self._eplb_stats)
 
     def take_executor_weight(self, name):
         """Transfer the original packed parameter once, without copying.

@@ -98,7 +98,8 @@ class PpuAttentionTest(unittest.TestCase):
             self.file_roundtrip(ratio)
 
     @unittest.skipUnless(
-        os.environ.get("PPU_ATTN_NATIVE_FST") == "1",
+        os.environ.get("NEWLOADER_TEST_NATIVE_FST", os.getenv("PPU_ATTN_NATIVE_FST"))
+        == "1",
         "requires native FST with E8M0 support",
     )
     def test_native_fst_cpu_csa(self):

@@ -366,13 +366,40 @@ class Fp4LinearTest(unittest.TestCase):
                     types.SimpleNamespace(
                         fp4_quantize=lambda: None, mm_fp4=lambda: None
                     ),
-                    types.SimpleNamespace(CudaFp4GEMMLinear=_CaptureExecutor),
+                    types.SimpleNamespace(
+                        CudaFp4GEMMLinear=_CaptureExecutor,
+                        fp4_backend_options=lambda: ({}, "sgl_cutlass"),
+                    ),
                 ],
             ):
                 with self.assertRaisesRegex(
                     RuntimeError, "cutlass_scaled_fp4_mm_wrapper"
                 ):
                     method.validate_runtime_device(torch.device("cuda:0"))
+
+            executor = types.SimpleNamespace(
+                CudaFp4GEMMLinear=_CaptureExecutor,
+                fp4_backend_options=lambda: ({}, "sgl_cutlass"),
+                cutlass_scaled_fp4_mm_wrapper=lambda: None,
+            )
+            for native_op in (None, lambda: None):
+                native = types.SimpleNamespace(
+                    _require_nvfp4=lambda: None, cutlass_scaled_fp4_mm=native_op
+                )
+                modules = {
+                    "flashinfer": types.SimpleNamespace(fp4_quantize=lambda: None, mm_fp4=lambda: None),
+                    "rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear": executor,
+                    "rtp_llm.models_py.kernels.cuda.fp4_kernel.fp4_kernel": native,
+                }
+                with self.subTest(available=callable(native_op)), mock.patch(
+                    "rtp_llm.models_py.quant_methods.fp4.importlib.import_module",
+                    side_effect=modules.__getitem__,
+                ):
+                    if native_op is None:
+                        with self.assertRaisesRegex(RuntimeError, "rtp_kernel.nvfp4"):
+                            method.validate_runtime_device(torch.device("cuda:0"))
+                    else:
+                        method.validate_runtime_device(torch.device("cuda:0"))
 
 
 if __name__ == "__main__":

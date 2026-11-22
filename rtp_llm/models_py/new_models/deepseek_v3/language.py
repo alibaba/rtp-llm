@@ -638,6 +638,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
     """
 
     WEIGHTS_MAPPER = WeightsMapper(prefix_mapping={"model.": ""})
+    decoder_layer_cls = DeepSeekV32DecoderLayer
 
     @staticmethod
     def _checkpoint_layer_index(name: str) -> Optional[int]:
@@ -734,9 +735,10 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
         )
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
 
-        # --- RoPE cache: read config.json directly for full rope fields ---
         device = torch.device(load_config.device)
-        cos_sin_cache = build_rope_cache(config_json, cfg["max_seq_len"], device)
+        cos_sin_cache = build_rope_cache(
+            config_json, cfg["max_seq_len"], device, model_config=model_config
+        )
         self.register_buffer("cos_sin_cache", cos_sin_cache, persistent=False)
 
         # --- Embedding ---
@@ -755,7 +757,7 @@ class DeepSeekV32ForCausalLM(MlaRuntimeLayoutMixin, GenericMoeModel, RtpModule):
 
         for i in range(cfg["num_layers"]):
             is_moe = i in moe_layer_set
-            layer = DeepSeekV32DecoderLayer(
+            layer = self.decoder_layer_cls(
                 hidden_size=cfg["hidden_size"],
                 num_heads=cfg["num_heads"],
                 q_lora_rank=cfg["q_lora_rank"],

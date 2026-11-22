@@ -313,6 +313,9 @@ class CpuFp8LoadTest(unittest.TestCase):
             "rtp_llm.models_py.quant_methods.fp8._select_fp8_runtime_backend",
             return_value="cuda_scaled_mm",
         ), mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8._runtime_fp8_dtype",
+            return_value=torch.float8_e4m3fn,
+        ), mock.patch(
             "rtp_llm.models_py.quant_methods.fp8._resolve_per_tensor_quant",
             side_effect=AssertionError("must not requantize FP8"),
         ):

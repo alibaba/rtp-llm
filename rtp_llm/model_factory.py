@@ -481,7 +481,10 @@ class ModelFactory:
         if (sp_config.type == SpeculativeType.EAGLE3) != (
             sp_config.model_type == "qwen_3_moe_eagle3"
         ):
-            raise ValueError("qwen_3_moe_eagle3 requires sp_type=eagle3")
+            raise ValueError(
+                "qwen_3_moe_eagle3 requires sp_type=eagle3 and vice versa; "
+                f"got sp_model_type={sp_config.model_type}, sp_type={sp_config.type.name}"
+            )
         if sp_config.type not in [
             SpeculativeType.MTP,
             SpeculativeType.EAGLE,
@@ -578,6 +581,11 @@ class ModelFactory:
             )
         if len(ids) != 3 or min(ids) < 0 or max(ids) >= target.num_layers:
             raise ValueError("EAGLE3 capture layer outside target decoder")
+        # Captures and both borrowed vocabulary tables enter the draft body
+        # directly. Use the target's effective dtype after quantization policy.
+        # The binding reads a DataType enum but its setter accepts a string.
+        draft.data_type = target.data_type.name.removeprefix("TYPE_").lower()
+        draft.enable_fp32_lm_head = target.enable_fp32_lm_head
         target.capture_aux_hidden_layer_ids = sorted(ids)
 
     @staticmethod

@@ -30,8 +30,8 @@ class Qwen2CheckpointMapper(WeightsMapper):
         "mlp.proj": "mlp.down_proj",
     }
 
-    def __init__(self):
-        super().__init__(prefix_mapping={"model.": ""})
+    def __init__(self, *, exact_mapping=None):
+        super().__init__(exact_mapping=exact_mapping, prefix_mapping={"model.": ""})
 
     def map_name(self, name):
         if name in self._GLOBALS:

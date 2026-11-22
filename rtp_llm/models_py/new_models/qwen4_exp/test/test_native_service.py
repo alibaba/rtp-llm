@@ -100,6 +100,7 @@ class NativeQwen4ServiceTest(unittest.TestCase):
                 self.assertEqual(model.py_model.layers[0].mlp.experts.w13.dtype, torch.bfloat16)
                 self.assertIs(model.weight.get_global_weight("embedding"), model.py_model.embed_tokens.weight)
                 qsa = model.py_model.layers[1].self_attn.qsa_indexer
+                self.assertIs(qsa.rope_config, config.attn_config.rope_config)
                 torch.testing.assert_close(
                     qsa.index_qk_proj.weight,
                     values["model.language_model.layers.1.self_attn.indexer.index_qk_proj.weight"],

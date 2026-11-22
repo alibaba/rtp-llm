@@ -3,7 +3,8 @@
 The service must pause every rank before updating and resume only after all
 updates succeed. The shared lock also excludes in-flight model forwards.
 Incoming names and tensors use global HF checkpoint layout; leaf loaders own
-TP slicing and fusion. Each RPC validates/stages before changing live tensors.
+TP slicing and fusion. Each RPC validates/stages before changing local live
+tensors. The RPC has no distributed commit or rollback across ranks.
 """
 
 import re
@@ -175,6 +176,14 @@ class NewLoaderWeightManager:
                     raise ValueError(
                         "Tied LM head is a non-owning alias; update model.embed_tokens.weight"
                     )
+                if (
+                    mapped == "embed_tokens.weight"
+                    and getattr(self._model, "embed_tokens", None) is None
+                    and getattr(output_head, "_explicit_checkpoint_loaded", False)
+                ):
+                    # An explicit head supersedes the tied checkpoint on this
+                    # PP stage. An embedding update only belongs to the first.
+                    continue
                 target, _ = self._model.resolve_checkpoint_load_plan(
                     mapped, tuple(tensor.shape)
                 )
@@ -208,13 +217,29 @@ class NewLoaderWeightManager:
                 quant = getattr(
                     getattr(target.module, "quant_config", None), "quant_type", "none"
                 )
+                expected_dtype = param.dtype if param is not None else None
                 if (
-                    param is not None
+                    mapped == "embed_tokens.weight"
+                    and tied_output
+                    and target.module is output_head
+                ):
+                    # On the last PP stage the head is a mirror, often FP32.
+                    # Validate the source embedding contract just like stage 0.
+                    expected_dtype = self._loader.load_config.compute_dtype
+                    rows = output_head._tied_checkpoint_source_rows
+                    if rows is not None and tensor.shape != (
+                        rows, output_head.hidden_size
+                    ):
+                        raise ValueError(
+                            "Tied embedding checkpoint shape does not match the model"
+                        )
+                if (
+                    expected_dtype is not None
                     and quant == "none"
-                    and tensor.dtype != param.dtype
+                    and tensor.dtype != expected_dtype
                 ):
                     raise TypeError(
-                        f"Update for {name!r} requires {param.dtype}, got {tensor.dtype}"
+                        f"Update for {name!r} requires {expected_dtype}, got {tensor.dtype}"
                     )
                 group = groups.setdefault(target.module, {})
                 if target.name in group:
@@ -277,7 +302,18 @@ class NewLoaderWeightManager:
                     ).to(dtype=module.weight.dtype)
                     leaf_updates = [TensorUpdate("weight", module.weight, source)]
                 else:
-                    leaf_updates = module.prepare_weight_updates(incoming)
+                    # Some rank-local leaves consume a layout prepared by their
+                    # parent (e.g. GDN). Reuse that conversion before staging.
+                    parent_path = module_name.rpartition(".")[0]
+                    parent = self._model.get_submodule(parent_path)
+                    prepare_child = getattr(
+                        parent, "prepare_child_weight_updates", None
+                    )
+                    leaf_updates = (
+                        prepare_child(module, incoming)
+                        if prepare_child is not None
+                        else module.prepare_weight_updates(incoming)
+                    )
                 if not leaf_updates:
                     raise RuntimeError(
                         "Checkpoint conversion produced no runtime updates"

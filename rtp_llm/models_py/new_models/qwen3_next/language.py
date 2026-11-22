@@ -871,12 +871,11 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         ) and self._owns_checkpoint_name(name)
 
     def _owns_checkpoint_name(self, name):
-        if not self._pipeline_partitioned:
-            return True
         mapped = self.WEIGHTS_MAPPER.map_name(name)
         if mapped.startswith("layers."):
-            index = mapped.split(".", 2)[1]
-            return not index.isdigit() or int(index) in self._owned_layer_ids
+            return self._owns_mapped_layer(mapped)
+        if not self._pipeline_partitioned:
+            return True
         if mapped == "embed_tokens.weight":
             return self.embed_tokens is not None or (
                 self.lm_head is not None and self.tie_word_embeddings
@@ -884,6 +883,23 @@ class Qwen3NextForCausalLM(Qwen3NextModel, RtpModule):
         if mapped.startswith(("lm_head.", "norm.")):
             return self.lm_head is not None
         return True
+
+    def _owns_mapped_layer(self, mapped):
+        parts = mapped.split(".", 2)
+        if len(parts) == 3 and parts[0] == "layers" and parts[2]:
+            index = parts[1]
+            if index.isascii() and index.isdigit() and str(int(index)) == index:
+                limit = getattr(
+                    self.config, "_checkpoint_num_layers_before_override", self.layer_num
+                )
+                if int(index) < limit:
+                    return int(index) in self._owned_layer_ids
+        # An unknown namespace or an invalid layer is not another stage's weight.
+        # Let the strict mapper reject it instead of silently skipping it.
+        return True
+
+    def owns_lora_checkpoint_target(self, mapped_name):
+        return self._owns_mapped_layer(mapped_name)
 
     def resolve_checkpoint_load_plan(self, name, shape):
         if (

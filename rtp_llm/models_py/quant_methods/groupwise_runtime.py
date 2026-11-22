@@ -439,7 +439,7 @@ def linear(layer, x, bias=None):
 
 
 def build_moe_executor(layer):
-    """Use the existing FusedMoe shell, TP reduction and DeepEP normal router.
+    """Use the existing FusedMoe shell with TP, stage NCCL or normal DeepEP.
 
     Only the packed expert GEMM executor is new. No EP collective, process group,
     or communication buffer is reimplemented here.
@@ -456,25 +456,14 @@ def build_moe_executor(layer):
         FusedMoEQuantConfig,
     )
     from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
+        ConditionChecker,
+    )
+    from rtp_llm.utils.util import to_torch_dtype
 
     platform = "cuda" if torch.version.hip is None else "rocm"
     routers = (
         "rtp_llm.models_py.modules.factory.fused_moe.impl." + platform + ".routers."
-    )
-    if layer.ep_size == 1:
-        pure = importlib.import_module(routers + "pure_tp_router")
-        PureTpRouterBase, PureTpRouterNoQuant = (
-            pure.PureTpRouterBase,
-            pure.PureTpRouterNoQuant,
-        )
-    else:
-        normal = importlib.import_module(routers + "deepep_normal_router")
-        DeepepNormalRouter = getattr(
-            normal,
-            "DeepepNormalRouterNoQuant" if platform == "cuda" else "DeepepNormalRouter",
-        )
-    from rtp_llm.models_py.modules.factory.fused_moe.utils.condition_checker import (
-        ConditionChecker,
     )
 
     if getattr(layer, "_dynamic_eplb_enabled", False):
@@ -509,15 +498,32 @@ def build_moe_executor(layer):
     config.expert_num = layer.physical_num_experts
     quant = FusedMoEQuantConfig()  # W-only: router must pass FP16/BF16 unchanged.
     checker = ConditionChecker(f"groupwise_{platform}_router")
-    if config.ep_size == 1:
-        PureTpRouterBase.check_conditions(checker, config)
-        router_type = PureTpRouterNoQuant
+    if config.ep_size == 1 or (platform == "cuda" and config.moe_config.use_all_gather):
+        pure = importlib.import_module(routers + "pure_tp_router")
+        if platform == "cuda":
+            router_type = pure.PureTpRouterWeightOnly
+            router_type.check_conditions(checker, config)
+        else:
+            router_type = pure.PureTpRouterNoQuant
+            pure.PureTpRouterBase.check_conditions(checker, config)
+    elif platform == "cuda" and to_torch_dtype(config.data_type) == torch.float16:
+        # Normal DeepEP combines BF16 only. For FP16 keep the precision of
+        # both the integer GEMM outputs and their reduction using native NCCL.
+        stage = importlib.import_module(routers + "pure_dp_router")
+        router_type = stage.StageRouterWeightOnlyFp16
+        router_type.check_conditions(checker, config)
     else:
-        DeepepNormalRouter.check_conditions(checker, config)
-        router_type = DeepepNormalRouter
+        normal = importlib.import_module(routers + "deepep_normal_router")
+        router_type = (
+            normal.DeepepNormalRouterWeightOnly
+            if platform == "cuda"
+            else normal.DeepepNormalRouter
+        )
+        router_type.check_conditions(checker, config)
     if not checker.all_passed():
+        failed = ", ".join(expr for _, expr, ok, _ in checker.conditions if not ok)
         raise RuntimeError(
-            "Grouped AWQ/GPTQ requires the existing pure-TP passthrough or supported DeepEP normal router; low-latency/MoRI routing is not adapted"
+            f"Weight-only MoE cannot use {router_type.__name__} on {platform}: {failed}"
         )
     router = router_type(config, quant)
 
@@ -576,8 +582,8 @@ def build_moe_executor(layer):
                 )
             ids = ids.to(torch.int32).contiguous()
             weights = weights.float().contiguous()
-            # DeepEP normal returns local physical IDs, including -1 holes;
-            # pure TP owns every expert, so global and local IDs are identical.
+            # Both EP transports deliver rank-local IDs and -1 holes. With
+            # unsharded experts (EP=1), global and local IDs are identical.
             routing = _route(ids, w13.weight.shape[0])
             first = _projection(
                 w13,

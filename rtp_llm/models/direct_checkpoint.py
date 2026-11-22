@@ -62,10 +62,17 @@ def load_owned_model(service, *, publish_runtime=True):
     ):
         device = "cpu"
     prepared_loan = None
+    admin_lock = None
     if service._weight_alias_names:
         source = service._weight_alias_owner
         if source is None or source.py_model is None or source.weight is None:
             raise RuntimeError("draft parameter loans require an already loaded target")
+        # Both C++ wrappers read the same Parameter storage. A target update
+        # must also exclude a draft forward which is still submitting kernels.
+        if publish_runtime:
+            admin_lock = getattr(source.py_model, "_weight_update_lock", None)
+            if admin_lock is None:
+                raise RuntimeError("draft parameter loans require the target's update lock")
         exports = {
             name: source.weight.get_global_weight(name)
             for name in service._weight_alias_names
@@ -129,7 +136,7 @@ def load_owned_model(service, *, publish_runtime=True):
     adapters = config.lora_infos
     if adapters and (not service.merge_lora or len(adapters) != 1):
         raise ValueError("Direct startup LoRA requires one merged checkpoint adapter")
-    module = loader.load()
+    module = loader.load(startup_lora=next(iter((adapters or {}).items()), None))
     actual = loader.loaded_method
     requested = load_config.load_method
     if actual is None or (
@@ -138,11 +145,6 @@ def load_owned_model(service, *, publish_runtime=True):
         raise RuntimeError(
             f"Direct checkpoint backend mismatch: requested={requested}, loaded={actual}"
         )
-    if adapters:
-        from rtp_llm.models_py.lora_checkpoint import merge_startup_lora_checkpoint
-
-        for name, path in adapters.items():
-            merge_startup_lora_checkpoint(module, loader, name, path)
     if not publish_runtime:
         # Offline conversion needs the loaded, postprocessed parameter owner,
         # not serving state, a second loader, or a second checkpoint read.
@@ -167,7 +169,8 @@ def load_owned_model(service, *, publish_runtime=True):
 
     # Live base updates and adapter restore/merge coordinate on the same lock.
     # Construct both before publishing anything that RPC workers can observe.
-    admin_lock = threading.RLock()
+    if admin_lock is None:
+        admin_lock = threading.RLock()
     rank_local_lora = RankLocalCheckpointAdapters(
         module, loader, startup_adapters=tuple(adapters or ()), admin_lock=admin_lock
     )

@@ -7,6 +7,7 @@ classes, alias declaration, loaders and publication path are the serving code.
 import json
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -171,6 +172,18 @@ class DraftNativeOutputTest(unittest.TestCase):
 
 
 class PublicDraftLoadingTest(unittest.TestCase):
+    def test_missing_pipeline_loan_reports_the_required_stage(self):
+        from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
+
+        cfg = SimpleNamespace(hidden_size=4, input_vocab_size=8, vocab_size=8)
+        target = SimpleNamespace(model_config=cfg, py_model=object(),
+                                 weight=SimpleNamespace(get_global_weight_or_none={"lm_head": torch.ones(8, 4)}.get))
+        cfg._dspark_shared_target_weights = ("lm_head",)
+        self.assertEqual(Qwen3DSpark.speculative_weight_alias_names(target, cfg), ("lm_head",))
+        cfg._dspark_shared_target_weights = ("embedding",)
+        with self.assertRaisesRegex(ValueError, "embedding.*same pipeline stage"):
+            Qwen3DSpark.speculative_weight_alias_names(target, cfg)
+
     def test_factory_scratch_and_fst_keep_requested_storage(self):
         for method in ("scratch", "fastsafetensors"):
             for vocab, loans in (
@@ -209,6 +222,21 @@ class PublicDraftLoadingTest(unittest.TestCase):
                         NewLoaderLoadMethod(method),
                     )
                     self.assertEqual(set(draft._weight_alias_names), set(loans))
+                    self.assertEqual(
+                        draft.py_model._weight_update_lock is target.py_model._weight_update_lock,
+                        bool(loans),
+                    )
+                    if loans:
+                        # Reproduce the C++ draft read guard on this thread
+                        # while the target RPC attempts to write on another.
+                        role = loans[0]
+                        original = target.weight.get_global_weight(role).clone()
+                        with ThreadPoolExecutor(max_workers=1) as worker:
+                            with draft.py_model._weight_update_lock:
+                                job = worker.submit(target.weight_manager.update_tensors, {role: torch.zeros_like(original)})
+                                with self.assertRaisesRegex(BlockingIOError, "forward or update"):
+                                    job.result(timeout=5)
+                        torch.testing.assert_close(target.weight.get_global_weight(role), original)
                     for role, name in (
                         ("embedding", "embed_tokens.weight"),
                         ("lm_head", "lm_head.weight"),

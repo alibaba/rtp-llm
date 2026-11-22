@@ -465,7 +465,7 @@ py_test(
 py_test(
     name = "deepseek_v41_image_renderer_test",
     srcs = ["deepseek_v41_image_renderer_test.py"],
-    deps = ["//rtp_llm:testlib"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm:multimodal", "//rtp_llm/models_py:new_weight_loader"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )

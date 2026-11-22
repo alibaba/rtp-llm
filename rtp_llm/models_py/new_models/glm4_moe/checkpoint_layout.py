@@ -12,6 +12,11 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 
+from rtp_llm.models_py.weight_mapper import (
+    _unwrap_pytorch_state_dict,
+    checkpoint_catalog,
+    discover_ckpt_files,
+)
 
 def _integer(value, field, minimum):
     if type(value) is not int or value < minimum:
@@ -45,21 +50,25 @@ def _has_bias(names, layers):
     return False
 
 
-def _has_correction(path, layers):
-    # Prefer the index: do not touch all expert shards on every TP rank.
-    indices = sorted(path.glob("*.index.json"))
-    if indices:
-        return any(
-            _has_bias(json.loads(index.read_text())["weight_map"], layers)
-            for index in indices
+def has_correction_bias(path, layers, *, prefix=""):
+    def matches(names):
+        return _has_bias(
+            (n.removeprefix(prefix) for n in names if n.startswith(prefix)), layers
         )
-    for shard in path.glob("*.safetensors"):
-        with safe_open(shard, framework="pt", device="cpu") as tensors:
-            if _has_bias(tensors.keys(), layers):
-                return True
-    for shard in path.glob("*.bin"):
+
+    # Use the same logical checkpoint as the loader, not optimizer/adapter shards
+    # or extra keys that are physically present but absent from the index.
+    catalog = checkpoint_catalog(str(path))
+    if catalog is not None:
+        return matches(name for name, _ in catalog.entries)
+    for shard in discover_ckpt_files(str(path)):
+        if shard.endswith(".safetensors"):
+            with safe_open(shard, framework="pt", device="cpu") as tensors:
+                if matches(tensors.keys()):
+                    return True
+            continue
         state = torch.load(shard, map_location="meta", weights_only=True)
-        if _has_bias(state.get("state_dict", state), layers):
+        if matches(_unwrap_pytorch_state_dict(state)):
             return True
     return False
 
@@ -109,7 +118,7 @@ class Glm4CheckpointLayout:
         qknorm = hf.get("use_qk_norm", config.qk_norm)
         if type(qknorm) is not bool:
             raise TypeError("GLM4 use_qk_norm must be bool")
-        correction = hf.get("topk_method") == "noaux_tc" or _has_correction(
+        correction = hf.get("topk_method") == "noaux_tc" or has_correction_bias(
             path, target
         )
         return cls(

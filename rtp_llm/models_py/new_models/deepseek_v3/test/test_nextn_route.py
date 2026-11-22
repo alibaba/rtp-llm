@@ -12,6 +12,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV3Mtp
+from rtp_llm.models.rotary_embedding.deepseek_rotary_embedding import DeepseekV3YarnRotaryEmbedding
 from rtp_llm.models_py.model_loader import NewLoaderLoadMethod
 from rtp_llm.models_py.new_models.deepseek_v3.language import DeepSeekV32ForCausalLM
 from rtp_llm.models_py.new_models.deepseek_v3.test.test_score_route import _score_weights
@@ -73,10 +74,12 @@ def fixture(combined):
     return cfg, (dict(score, **draft) if combined else draft), prefix
 
 
-def load_service(root, method, cls=_Draft, parallel=None, tag=None):
+def load_service(root, method, cls=_Draft, parallel=None, tag=None, override=None):
     cfg = cls._create_config(root)
     cfg.ckpt_path, cfg.model_type, cfg.max_seq_len = root, tag or ("deepseek-v3-mtp" if cls is _Draft else "deepseek3"), 128
     cfg.attn_config.tokens_per_block = cfg.attn_config.kernel_tokens_per_block = 64
+    if override is not None:
+        cfg.apply_override_args(json.dumps(override))
     cls._post_build_model_config(cfg)
     cfg.data_type, cfg.enable_fp32_lm_head, cfg.lora_infos = "bf16", False, {}
     return cls.from_config(
@@ -127,6 +130,31 @@ def _rank_load(rank, root, init):
 
 
 class NextNRouteTest(unittest.TestCase):
+    def test_yarn_override_reaches_score_and_nextn_runtime_cache(self):
+        cfg, weights, _ = fixture(True)
+        override = {"rope_scaling": dict(type="yarn", factor=8.0,
+                    original_max_position_embeddings=16, beta_fast=2.0, beta_slow=0.5)}
+        for disk_yarn in (False, True):
+            # Plain checkpoints may gain YaRN; scaled checkpoints must keep
+            # their DeepSeek magnitude coefficients when the frequencies change.
+            mscale, all_dim = (0.5, 0.0) if disk_yarn else (1.0, 1.0)
+            if disk_yarn:
+                cfg["rope_scaling"] = dict(type="yarn", factor=2.0,
+                    original_max_position_embeddings=64, mscale=mscale, mscale_all_dim=all_dim)
+            legacy = DeepseekV3YarnRotaryEmbedding(4, 128, 10000,
+                scaling_factor=8.0, original_max_position_embeddings=16,
+                beta_fast=2.0, beta_slow=0.5, mscale=mscale, mscale_all_dim=all_dim)
+            expected = torch.cat((legacy.cos_cached[:, :2], legacy.sin_cached[:, :2]), -1)
+            with tempfile.TemporaryDirectory() as root:
+                (Path(root) / "config.json").write_text(json.dumps(cfg))
+                save_file(weights, str(Path(root) / "model.safetensors"))
+                for cls in (_Score, _Draft):
+                    with self.subTest(disk_yarn=disk_yarn, service=cls.__name__):
+                        model = load_service(root, "scratch", cls, override=override).py_model
+                        self.assertTrue(model.initialize(SimpleNamespace(kv_cache=None)))
+                        actual = model.weight.get_global_weight_or_none(W.rope_cos_sin_cache)
+                        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_public_registry_distinguishes_nextn_from_target(self):
         for architecture, service_tag, owner in (
             ("DeepseekV3ForCausalLMNextN", "deepseek-v3-mtp", DeepSeekV32MTPForCausalLM),
@@ -207,6 +235,7 @@ class NextNRouteTest(unittest.TestCase):
     def test_separate_and_combined(self):
         for combined in (True, False):
             cfg, data, prefix = fixture(combined)
+            data["model.rotary_emb.inv_freq"] = torch.ones(2)
             with tempfile.TemporaryDirectory() as root:
                 (Path(root)/"config.json").write_text(json.dumps(cfg))
                 save_file(data, str(Path(root)/"model.safetensors"))

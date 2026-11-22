@@ -9,9 +9,11 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3_next.gdn_parameters import (
     Qwen3NextGdnParameters,
 )
+from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
 
@@ -108,7 +110,7 @@ class GdnOwnershipTest(unittest.TestCase):
                     )
                     self.assertIsNone(m._packed_input_weight())
 
-    def model(self, rank):
+    def model(self, rank, tp=2):
         config = SimpleNamespace(
             linear_key_head_dim=2,
             linear_value_head_dim=2,
@@ -117,8 +119,52 @@ class GdnOwnershipTest(unittest.TestCase):
             linear_conv_kernel_dim=3,
         )
         return Qwen3NextGdnParameters(
-            config, 8, 1e-6, 2, rank, torch.float32, None, "linear_attn"
+            config, 8, 1e-6, tp, rank, torch.float32, None, "linear_attn"
         )
+
+    def test_online_projection_update_matches_cold_load_and_is_atomic(self):
+        from rtp_llm.models_py.model_loader import NewModelLoader
+
+        class Model(RtpModule):
+            def runtime_weight_view(self):
+                return {}
+
+        loader = SimpleNamespace(
+            _mapped_checkpoint_name=NewModelLoader._mapped_checkpoint_name
+        )
+        inputs = {
+            "in_proj_qkvz.weight": torch.arange(24 * 8).float().reshape(24, 8),
+            "out_proj.weight": torch.arange(8 * 8).float().reshape(8, 8),
+        }
+        request = {"linear_attn." + name: value for name, value in inputs.items()}
+        for tp, rank in ((1, 0), (2, 0), (2, 1)):
+            with self.subTest(tp=tp, rank=rank):
+                model = Model()
+                model.linear_attn = self.model(rank, tp)
+                model.linear_attn.load_weights(
+                    {k: torch.zeros_like(v) for k, v in inputs.items()}
+                )
+                expected = self.model(rank, tp)
+                expected.load_weights(inputs)
+                manager = NewLoaderWeightManager(model, loader)
+                parameters = dict(model.linear_attn.named_parameters())
+                pointers = {k: parameters[k].data_ptr() for k in inputs}
+                with self.assertRaises(ValueError):
+                    manager.update_tensors(
+                        {**request, "linear_attn.out_proj.weight": torch.ones(8, 1)}
+                    )
+                self.assertEqual(manager.version, 0)
+                for name in inputs:
+                    torch.testing.assert_close(
+                        parameters[name], torch.zeros_like(parameters[name])
+                    )
+                manager.update_tensors(request)
+                self.assertEqual(manager.version, 1)
+                for name in inputs:
+                    self.assertEqual(parameters[name].data_ptr(), pointers[name])
+                    torch.testing.assert_close(
+                        parameters[name], expected.get_parameter(name)
+                    )
 
     def test_per_head_and_split_produce_same_projections(self):
         matrix = torch.arange(24 * 8, dtype=torch.float32).reshape(24, 8)

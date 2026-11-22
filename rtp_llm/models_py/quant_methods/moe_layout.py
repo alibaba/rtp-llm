@@ -19,13 +19,13 @@ _FLOAT8_DTYPES = (
 
 
 def _rocm_moe_layout(
-    tensor: torch.Tensor, *, projection: str, is_scale: bool
+    tensor: torch.Tensor, *, projection: str, is_scale: bool, gate_first: bool = False
 ) -> torch.Tensor:
     from aiter.ops.shuffle import shuffle_weight
 
     original_ndim = tensor.dim()
     result = tensor.unsqueeze(-1) if original_ndim == 2 else tensor
-    if projection == "gate_up":
+    if projection == "gate_up" and not gate_first:
         # Module checkpoint storage is [up, gate]; the ROCm executor consumes
         # [gate, up]. Byte concatenation preserves FP8 payloads on ROCm builds
         # where torch.cat does not implement the float8 dtype.
@@ -63,6 +63,7 @@ def prepare_moe_weight_layout(
     *,
     projection: Literal["gate_up", "down"],
     is_scale: bool = False,
+    gate_first: bool = False,
 ) -> torch.Tensor:
     """Convert one complete module-owned projection to its runtime layout.
 
@@ -79,7 +80,9 @@ def prepare_moe_weight_layout(
         return tensor
     if tensor.device.type != "cuda" or torch.version.hip is None:
         return tensor
-    return _rocm_moe_layout(tensor, projection=projection, is_scale=is_scale)
+    return _rocm_moe_layout(
+        tensor, projection=projection, is_scale=is_scale, gate_first=gate_first
+    )
 
 
 def undo_rocm_moe_matrix_tiles(tensor: torch.Tensor) -> torch.Tensor:

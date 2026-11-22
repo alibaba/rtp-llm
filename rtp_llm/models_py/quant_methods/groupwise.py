@@ -150,14 +150,20 @@ class GroupwiseLinearMethod(QuantizeMethodBase):
         parameter = parts[-1]
         if parameter not in ("qweight", "qzeros", "scales", "bias", "g_idx"):
             raise ValueError(f"Unexpected grouped checkpoint tensor {name}")
-        projection = (
-            parts[-2]
-            if len(parts) > 1 and parts[-2] in layer._groupwise_sources
-            else ""
-        )
+        if len(parts) > 2 or (
+            len(parts) == 2 and parts[0] not in layer._groupwise_sources
+        ):
+            raise ValueError(f"Unexpected grouped projection {name}")
+        projection = parts[0] if len(parts) == 2 else ""
         if parameter == "bias" and layer.bias is None and self.method != "gptq":
             raise ValueError(f"Unexpected grouped bias {name}")
         return projection, parameter
+
+    def is_validation_only_checkpoint_tensor(self, layer, name):
+        _, parameter = self._role(layer, name)
+        return parameter == "g_idx" or (
+            self.method == "gptq" and parameter == "bias" and layer.bias is None
+        )
 
     def _source_spec(self, name, shape, source, dim, shards, rank, parameter):
         if parameter in ("qweight", "qzeros", "scales"):
@@ -240,15 +246,22 @@ class GroupwiseLinearMethod(QuantizeMethodBase):
                 layer._main_weight_loaded = True
 
     def load_weights(self, layer, weights):
-        if getattr(layer, "_groupwise_runtime_metadata", None) is not None:
+        if getattr(layer, "_groupwise_runtime_metadata", None) is not None and not all(
+            self.is_validation_only_checkpoint_tensor(layer, name) for name in weights
+        ):
             raise RuntimeError(
                 "Grouped runtime weights require a fresh checkpoint staging module"
             )
         for name, value in weights.items():
             projection, parameter = self._role(layer, name)
             if parameter == "bias" and layer.bias is None:
-                key = (projection, parameter)
-                if key in layer._groupwise_seen:
+                parts = (
+                    (projection,)
+                    if projection in layer._groupwise_sources
+                    else layer._groupwise_sources
+                )
+                keys = {(part, parameter) for part in parts}
+                if not keys.isdisjoint(layer._groupwise_seen):
                     raise RuntimeError(f"Duplicate grouped projection tensor {name}")
                 tensor, spec = unwrap_checkpoint_tensor(value)
                 shape = spec.source_shape if spec is not None else tuple(tensor.shape)
@@ -262,7 +275,7 @@ class GroupwiseLinearMethod(QuantizeMethodBase):
                     )
                 # This is checkpoint-only metadata, not an owned parameter or
                 # an excuse to add a bias to the production model architecture.
-                layer._groupwise_seen.add(key)
+                layer._groupwise_seen.update(keys)
                 continue
             if projection in layer._groupwise_sources:
                 self._copy_projection(layer, projection, parameter, value, name)

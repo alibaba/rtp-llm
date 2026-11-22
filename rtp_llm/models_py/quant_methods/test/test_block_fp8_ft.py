@@ -10,6 +10,7 @@ from safetensors.torch import save_file
 from rtp_llm.models_py.ft_checkpoint import CheckpointTopology, FTCheckpoint
 from rtp_llm.models_py.quant_methods.block_fp8_ft import (
     block_ft_bindings,
+    block_ft_ffn_width,
     block_ft_scale,
     block_ft_weight,
     block_moe_ft_bindings,
@@ -17,13 +18,14 @@ from rtp_llm.models_py.quant_methods.block_fp8_ft import (
 from rtp_llm.models_py.quant_methods.fp8 import Fp8BlockLinearMethod
 
 
-def write_ft(directory, data):
+def write_ft(directory, data, *, producer=None):
     keys = {"rank_0_0_0." + k: v.contiguous() for k, v in data.items()}
     save_file(keys, str(Path(directory) / "ft.safetensors"))
     (Path(directory) / "model.safetensors.index.json").write_text(
         json.dumps(
             {
                 "is_ft_style_weight": True,
+                **({"ft_export_backend": producer} if producer is not None else {}),
                 "weight_map": {k: "ft.safetensors" for k in keys},
             }
         )
@@ -56,6 +58,110 @@ def source_snapshot(w, s, packed):
 
 
 class BlockFTTest(unittest.TestCase):
+
+    def test_padded_tp_ffn_keeps_producer_shards_and_zero_scale_blocks(self):
+        # The producer pads 320 real channels to 512 BEFORE TP2 splitting.
+        # Rank 0 therefore owns 256 real channels, not 160. A rank-local crop
+        # loses channels 160..255 even if the target shapes look correct.
+        hidden, logical, width = 128, 160, 256
+        gate_key = "layers.0.ffn_weights.intermediate_weight13.kernel"
+        down_key = "layers.0.ffn_weights.intermediate_weight2.kernel"
+
+        def scale_key(key):
+            return key.removesuffix(".kernel") + ".weight_only_quant_scale"
+
+        for packed in (False, True):
+            with self.subTest(packed=packed), tempfile.TemporaryDirectory() as root:
+                data = {}
+                ref = 0.0
+                for rank in range(2):
+                    live = min(width, 2 * logical - rank * width)
+                    gate_up = torch.zeros(2 * width, hidden)
+                    down = torch.zeros(hidden, width)
+                    # Distinct checkpoint scales across projections and TP ranks.
+                    gate_up[:live, 0] = 1
+                    gate_up[width : width + live, 0] = 2
+                    down[0, :live] = 3
+                    s13 = torch.ones(4, 1) * (2**rank)
+                    s2 = torch.ones(1, 2)
+                    ref += (
+                        live
+                        * torch.nn.functional.silu(torch.tensor(2.0**rank)).item()
+                        * (2.0 ** (rank + 1))
+                        * 3
+                    )
+                    if not packed and rank == 1:
+                        s13[[1, 3]] = 0
+                        s2[:, 1] = 0
+                    for key, w, s in ((gate_key, gate_up, s13), (down_key, down, s2)):
+                        kernel, scale = source_snapshot(
+                            w.to(torch.float8_e4m3fn), s, packed
+                        )
+                        prefix = f"rank_{rank}_0_0."
+                        data[prefix + key] = kernel.contiguous()
+                        data[prefix + scale_key(key)] = scale.contiguous()
+                save_file(data, str(Path(root) / "weights.safetensors"))
+                (Path(root) / "model.safetensors.index.json").write_text(
+                    json.dumps(
+                        {
+                            "is_ft_style_weight": True,
+                            "ft_export_backend": "cuda",
+                            "weight_map": {key: "weights.safetensors" for key in data},
+                        }
+                    )
+                )
+                actual = 0.0
+                for rank in range(2):
+                    cp = FTCheckpoint.open(
+                        root, CheckpointTopology(tp_size=2, tp_rank=rank)
+                    )
+                    m = torch.nn.Module()
+                    m.gate = linear(2 * logical, hidden).proj
+                    m.down = linear(hidden, logical).proj
+                    found = block_ft_ffn_width(cp, down_key, logical, hidden)
+                    self.assertEqual(found, width)
+                    bindings = []
+                    for name, key, projection in (
+                        ("gate", gate_key, "gate_up"),
+                        ("down", down_key, "down"),
+                    ):
+                        bindings.extend(
+                            block_ft_bindings(
+                                getattr(m, name),
+                                key,
+                                scale_key(key),
+                                name,
+                                cp,
+                                projection=projection,
+                                ffn_width=found,
+                            )
+                        )
+                    if rank == 1:
+                        invalid = torch.ones(2 * width, hidden).to(torch.float8_e4m3fn)
+                        with self.assertRaisesRegex(ValueError, "nonzero weights"):
+                            bindings[0].convert(
+                                (invalid if packed else invalid.reshape(hidden, -1),)
+                            )
+                    cp.load_parameters(m, tuple(bindings))
+                    self.assertEqual(
+                        (m.gate.output_size, m.down.input_size), (2 * width, width)
+                    )
+
+                    def decoded(proj):
+                        self.assertTrue(bool((proj.weight_scale_inv > 0).all()))
+                        return (
+                            proj.weight.float()
+                            * proj.weight_scale_inv.repeat_interleave(
+                                128, 0
+                            ).repeat_interleave(128, 1)
+                        )
+
+                    gate, up = decoded(m.gate)[:, 0].chunk(2)
+                    actual += (decoded(m.down) @ (torch.nn.functional.silu(gate) * up))[
+                        0
+                    ].item()
+                self.assertAlmostEqual(actual, ref, delta=0.01)
+
     def test_real_file_into_block_linear_owner_and_output(self):
         n, k = 257, 521  # partial N, K blocks and packed int32 padding
         g = torch.Generator().manual_seed(57)
@@ -74,7 +180,10 @@ class BlockFTTest(unittest.TestCase):
         for packed in (False, True):
             kernel, scale = source_snapshot(w, s, packed)
             with tempfile.TemporaryDirectory() as root:
-                write_ft(root, {"layers.0.kernel": kernel, "layers.0.scale": scale})
+                write_ft(
+                    root, {"layers.0.kernel": kernel, "layers.0.scale": scale},
+                    producer="cuda",
+                )
                 for backend in ("scratch", "fastsafetensors"):
                     with self.subTest(packed=packed, backend=backend):
                         cp = FTCheckpoint.open(root, CheckpointTopology())
@@ -158,11 +267,10 @@ class BlockFTTest(unittest.TestCase):
                 {key: row.reshape(2, 1).clone() for key, row in zip(keys, scales)}
             )
             with tempfile.TemporaryDirectory() as root:
-                write_ft(root, ft)
+                write_ft(root, ft, producer="rocm")
                 cp = FTCheckpoint.open(root, CheckpointTopology())
                 # Explicit cross-runtime source ABI; same-device untagged
                 # legacy ROCm follows torch.version.hip in production.
-                cp.index_metadata["ft_export_backend"] = "rocm"
                 m = linear(2 * n, k)
                 cp.load_parameters(
                     m,
@@ -260,7 +368,7 @@ class BlockFTTest(unittest.TestCase):
                 ).view(torch.float8_e4m3fn)
                 ft[stem + ".weight_only_quant_scale"] = torch.stack(ss)
             with tempfile.TemporaryDirectory() as root:
-                write_ft(root, ft)
+                write_ft(root, ft, producer="cuda")
                 for backend in ("scratch", "fastsafetensors"):
                     with self.subTest(packed=packed, backend=backend):
                         cp = FTCheckpoint.open(root, CheckpointTopology())

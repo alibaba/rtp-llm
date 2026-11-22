@@ -205,7 +205,8 @@ class Qwen4DecoderWeights(RtpModule):
         eps = float(text.get("rms_norm_eps",1e-6))
         for name in ("attn_hyper_connection", "mlp_hyper_connection"):
             setattr(self,name,Qwen4HyperConnection(h,plan.hc_mult,
-                plan.lowrank(f"layers.{layer_idx}.{name}"),norm_eps=eps,dtype=dtype,fp8_storage=plan.dense_fp8))
+                plan.lowrank(f"layers.{layer_idx}.{name}"),norm_eps=eps,dtype=dtype,fp8_storage=plan.dense_fp8,
+                role=getattr(load.parallelism_config, "role_type", "PDFUSION")))
         if self.layer_type == "linear_attention":
             fields = ("linear_key_head_dim", "linear_value_head_dim", "linear_num_key_heads", "linear_num_value_heads", "linear_conv_kernel_dim")
             la = SimpleNamespace(**{name:plan.positive(name) for name in fields})
@@ -213,9 +214,13 @@ class Qwen4DecoderWeights(RtpModule):
         else:
             qsa = None
             if int(text.get("indexer_head_dim",0)) > 0:
+                # Checkpoint-only dictionaries have no native attention config;
+                # target and draft services have their own finalized RoPE style.
+                attn_config = getattr(plan.model_config, "attn_config", None)
                 qsa = Qwen4QSAIndexer(h,n_heads=plan.positive("indexer_n_heads"),
                     head_dim=plan.positive("indexer_head_dim"), token_budget=plan.positive("indexer_budget"),
-                    compress_ratio=plan.positive("indexer_compress_ratio"),kv_heads=plan.positive("indexer_kv_heads"),norm_eps=eps,dtype=dtype,fp8_storage=plan.dense_fp8)
+                    compress_ratio=plan.positive("indexer_compress_ratio"),kv_heads=plan.positive("indexer_kv_heads"),norm_eps=eps,dtype=dtype,fp8_storage=plan.dense_fp8,
+                    rope_config=attn_config.rope_config if attn_config is not None else None)
             self.self_attn = Qwen4AttentionWeights(h,plan.positive("num_attention_heads"),plan.positive("num_key_value_heads"),
                 plan.positive("head_dim"),tp_size=load.attn_tp_size,tp_rank=load.attn_tp_rank,norm_eps=eps,dtype=dtype,qsa_indexer=qsa,fp8_storage=plan.dense_fp8)
         self.mlp = Qwen4MoeWeights(plan,layer_idx,load)
@@ -226,10 +231,16 @@ class Qwen4DecoderWeights(RtpModule):
             total = plan.positive("ple_embed_dim")
             if total % ((ngram-1)*heads):
                 raise ValueError("Qwen4 PLE total width must divide ngram head count")
+            eos = text.get("eos_token_id", plan.source_config.get("eos_token_id"))
+            if eos is None and plan.model_config is not None and not isinstance(plan.model_config, dict):
+                from rtp_llm.config.qwen4_exp_config import ple_eos_token_id
+                eos = ple_eos_token_id(plan.model_config)
+            if type(eos) is not int or not 0 <= eos < plan.vocab_size:
+                raise ValueError("Qwen4 PLE requires a resolved eos_token_id in the vocabulary")
             self.ple = Qwen4PLELayer(hidden_size=h,hc_mult=plan.hc_mult,ngram_size=ngram,
                 heads_per_ngram=heads,shard_count=plan.positive("split_ngram_parts"),
                 embedding_dim=total//((ngram-1)*heads),conv_kernel_size=plan.positive("ple_conv_kernel_size"),
-                eos_token_id=text.get("eos_token_id"),tp_size=load.attn_tp_size,tp_rank=load.attn_tp_rank,norm_eps=eps,dtype=dtype,
+                eos_token_id=eos,tp_size=load.attn_tp_size,tp_rank=load.attn_tp_rank,norm_eps=eps,dtype=dtype,
                 source_fp8=plan.source_fp8,fp8_storage=plan.dense_fp8,preserve_fp8_tables=plan.source_fp8,
                 prefetch_budget_mb=plan.ple_prefetch_mb)
 
@@ -256,7 +267,8 @@ class Qwen4TargetWeights(RtpModule):
         self.layers = nn.ModuleList([Qwen4DecoderWeights(plan,i,load_config) for i in range(plan.num_layers)])
         self.hyper_connection_mixer = Qwen4HyperConnection(plan.hidden_size,plan.hc_mult,
             plan.lowrank("hyper_connection_mixer"),with_inject=False,
-            norm_eps=float(plan.text.get("rms_norm_eps",1e-6)),dtype=load_config.compute_dtype,fp8_storage=plan.dense_fp8)
+            norm_eps=float(plan.text.get("rms_norm_eps",1e-6)),dtype=load_config.compute_dtype,fp8_storage=plan.dense_fp8,
+            role=getattr(load_config.parallelism_config, "role_type", "PDFUSION"))
 
     def load_weights(self, weights):
         items = weights.items() if isinstance(weights,dict) else weights

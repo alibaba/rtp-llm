@@ -79,6 +79,61 @@ def _weights(shared=True, shared_block=128, hash_gate=False):
 
 
 class Fp8Fp4OwnerTest(unittest.TestCase):
+    def test_stats_follow_actual_v4_and_v41_routes_across_chunks(self):
+        from rtp_llm.models_py.eplb_controller import create_stage_expert_balancer
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+            ChunkedFp8Fp4MoeLayer,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.layer import FusedMoeFactory
+        from rtp_llm.models_py.new_models.deepseek_v41.moe import OwnedV41MoE
+
+        class ExpertOutput(torch.nn.Module):
+            # Keep the production hash gate, chunker, and selector. Substitute
+            # only the SM100 expert GEMMs, and expose the IDs they consumed.
+            strategy_name = "local_loop"
+            includes_shared_expert = False
+            supports_gate_pack = True
+
+            def forward(self, hidden_states, topk_weights, topk_ids, activation):
+                return topk_ids.sum(dim=1, keepdim=True).expand_as(hidden_states)
+
+        for cls in (OwnedFp8Fp4MoE, OwnedV41MoE):
+            with self.subTest(cls=cls):
+                model = RtpModule()
+                layer = model.ffn = cls(
+                    1, 128, 128, 4, 2, 0, score_func="softmax", n_hash_layers=2,
+                    vocab_size=17, ep_size=2, ep_rank=1, max_tokens_per_rank=2, prefix="ffn",
+                )
+                layer.load_weights(_weights(shared=False, hash_gate=True))
+                layer.validate_weights_loaded()
+                config = types.SimpleNamespace(
+                    num_layers=2, moe_n_group=0, is_mtp=False, moe_layer_index=[1],
+                    eplb_config=types.SimpleNamespace(enable_eplb=lambda: True, eplb_mode="STATS"),
+                )
+                loader = types.SimpleNamespace(
+                    load_config=types.SimpleNamespace(parallelism_config=types.SimpleNamespace(pp_size=1))
+                )
+                controller = create_stage_expert_balancer(loader, model, config)
+                self.assertTrue(controller.eplb_stats_only)
+                with mock.patch.object(FusedMoeFactory, "create_fused_moe", return_value=ExpertOutput()):
+                    layer._runtime = ChunkedFp8Fp4MoeLayer(weight_owner=layer, **layer._runtime_kwargs)
+                logical = torch.zeros(2, 4, dtype=torch.int32)
+                gpu_loads = torch.zeros(2, 2, dtype=torch.int32)
+                model._newloader_eplb_bind_stats(logical, gpu_loads)
+                # Chunk capacity 2 => routes [0,1],[2,3] then [2,3]. Both
+                # independent counters use global layer ID 1; layer 0 is dense.
+                with mock.patch.object(
+                    layer.gate, "can_prepare_gate_payload",
+                    side_effect=AssertionError("stats mode must observe the executed routes"),
+                ):
+                    output = layer(torch.zeros(3, 128, dtype=torch.bfloat16), torch.tensor([0, 1, 1]))
+                self.assertEqual(output[:, 0].tolist(), [1, 5, 5])
+                self.assertEqual(logical.tolist(), [[0, 0, 0, 0], [1, 1, 2, 2]])
+                self.assertEqual(gpu_loads.tolist(), [[0, 0], [2, 4]])
+                config.eplb_config.eplb_mode = "ALL"
+                with self.assertRaisesRegex(ValueError, "not weight rebalancing"):
+                    create_stage_expert_balancer(loader, model, config)
+
     def _load(self, weights=None, load_method="scratch", **kwargs):
         weights = _weights() if weights is None else weights
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
@@ -177,6 +232,12 @@ class Fp8Fp4OwnerTest(unittest.TestCase):
 
     def test_native_fst_mixed_fp4_ue8m0_expert_checkpoint(self):
         checkpoint = _weights()
+        if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0":
+            with self.assertRaisesRegex(
+                RuntimeError, "fastsafetensors prerequisite failed"
+            ):
+                self._load(checkpoint, load_method="fastsafetensors")
+            return
         layer = self._load(checkpoint, load_method="fastsafetensors")
         # The file and its FST reader have gone away; the owner must still
         # contain the exact packed bytes, including non-representable scales.
@@ -221,7 +282,12 @@ class Fp8Fp4OwnerTest(unittest.TestCase):
         ckpt = _weights(hash_gate=True)
         table = ckpt["ffn.gate.tid2eid"].long()
         ckpt["ffn.gate.tid2eid"] = table
-        for method in ("scratch", "fastsafetensors"):
+        methods = (
+            ("scratch",)
+            if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0"
+            else ("scratch", "fastsafetensors")
+        )
+        for method in methods:
             with self.subTest(method=method):
                 layer = self._load(ckpt, load_method=method, n_hash_layers=2)
                 torch.testing.assert_close(layer.router_tid2eid, table.int())

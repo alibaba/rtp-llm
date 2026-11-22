@@ -139,6 +139,8 @@ class Fp8Fp4MoeRuntimeConfig:
 class Fp8Fp4MoeLayer(nn.Module):
     """Route tokens and execute canonical FP8/FP4 MoE weights via the factory."""
 
+    eplb_stats = None
+
     def __init__(
         self,
         *,
@@ -322,6 +324,7 @@ class Fp8Fp4MoeLayer(nn.Module):
         topk_ids = None
         use_gate_pack = (
             observer is None
+            and self.eplb_stats is None
             and self.fused_moe.supports_gate_pack
             and self.gate.can_prepare_gate_payload(x, flat_ids)
         )
@@ -337,6 +340,12 @@ class Fp8Fp4MoeLayer(nn.Module):
                         )
                 else:
                     topk_weights, topk_ids = self.gate(x, flat_ids)
+                    if self.eplb_stats is not None:
+                        # This executor requires identity placement. Count the
+                        # exact decisions passed to the kernel, once per chunk.
+                        self.eplb_stats.record(
+                            topk_ids, topk_ids, self.gate.weight.shape[0]
+                        )
             if observer is not None and not use_gate_pack:
                 assert topk_weights is not None and topk_ids is not None
                 observer("topk_weights", topk_weights)

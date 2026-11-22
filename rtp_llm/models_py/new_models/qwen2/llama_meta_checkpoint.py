@@ -95,7 +95,12 @@ def load_meta_checkpoint(model, checkpoint):
         )
 
     vocabulary("tok_embeddings.weight", "embed_tokens.weight", 1, model.embed_tokens)
-    vocabulary("output.weight", "lm_head.weight", 0, model.lm_head)
+    if model.lm_head is not None:
+        vocabulary("output.weight", "lm_head.weight", 0, model.lm_head)
+    else:
+        # Meta import only supports PP=1; no head here denotes an explicit
+        # non-generation task. Only the unused LM projection may be skipped.
+        checkpoint.entries.pop("output.weight", None)
     add(("norm.weight",), "norm.weight", lambda: local("norm.weight", None, model.norm))
     for index, layer in enumerate(model.layers):
         src = f"layers.{index}."

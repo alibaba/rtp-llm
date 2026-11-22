@@ -91,7 +91,7 @@ class GqaMoeForCausalLM(Qwen3ForCausalLM):
 
     def forward(self, inputs, fmha_impl=None):
         hidden = (
-            self.embed_tokens(inputs.input_ids)
+            self._input_embeddings(inputs)
             if self.embed_tokens is not None
             else inputs.pp_intermediates["hidden_states"]
         )

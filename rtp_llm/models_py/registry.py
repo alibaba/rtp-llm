@@ -180,7 +180,6 @@ for _model_type in (
     "glm4_moe_lite",
     "deepseek3",
     "deepseek_v32",
-    "glm_5",
     "deepseek_v31",
     "kimi_k2",
 ):
@@ -189,6 +188,18 @@ for _model_type in (
         "rtp_llm.models_py.new_models.deepseek_v3.language",
         "DeepSeekV32ForCausalLM",
     )
+
+register_lazy_model(
+    "glm_5", "rtp_llm.models_py.new_models.glm5.language", "Glm5ForCausalLM"
+)
+register_lazy_model(
+    "glm_5_mtp", "rtp_llm.models_py.new_models.glm5.language", "Glm5MTPForCausalLM"
+)
+register_lazy_model(
+    "deepseek_vl_v2",
+    "rtp_llm.models_py.new_models.deepseek_vl2.language",
+    "DeepSeekVLV2ForCausalLM",
+)
 
 register_lazy_model(
     "deepseek-v3-mtp",

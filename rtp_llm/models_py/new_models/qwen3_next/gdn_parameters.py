@@ -569,34 +569,51 @@ class Qwen3NextGdnParameters(RtpModule):
             dim=0,
         ).contiguous()
 
+    def _projection_tensor(self, module, parameter, tensor):
+        if module is self.in_proj_qkvz:
+            if parameter == "weight_scale_inv":
+                unit, _ = self._block_size(module)
+                reordered = reorder_qkvz_scale(tensor, self.linear_attn_config, unit)
+                return self._split_qkvz_rows(reordered, unit)
+            if parameter == "weight":
+                if module.quant_config.quant_type == "none" and (
+                    tensor.dim() != 2 or tensor.shape[1] != self.hidden_size
+                ):
+                    raise ValueError(
+                        f"in_proj_qkvz.weight expects input width {self.hidden_size}"
+                    )
+            if parameter == "weight" or (
+                parameter == "weight_scale" and tensor.numel() != 1
+            ):
+                reordered = reorder_qkvz([tensor], self.linear_attn_config)
+                return self._split_qkvz_rows(reordered, 1)
+        elif module is self.out_proj:
+            if parameter == "weight":
+                return self._split_out_weight(tensor)
+            if parameter == "weight_scale_inv":
+                return self._split_out_block_scale(tensor)
+        else:
+            raise ValueError("Not a GDN projection")
+        if parameter in ("weight_scale", "input_scale"):
+            return tensor
+        raise ValueError(f"Unsupported GDN projection parameter {parameter!r}")
+
+    def prepare_child_weight_updates(self, module, incoming):
+        local = {
+            name: self._projection_tensor(module, name, tensor)
+            for name, tensor in incoming.items()
+        }
+        return module.prepare_weight_updates(local)
+
     def load_weights(self, weights: Dict[str, torch.Tensor]) -> None:
         for name, tensor in weights.items():
-            if name == "in_proj_qkvz.weight":
-                self._claim_layout(self._qkvz_layouts, "weight", "fused")
-                reordered = reorder_qkvz([tensor], self.linear_attn_config)
-                self._load_child_weights(
-                    self.in_proj_qkvz, {"weight": self._split_qkvz_rows(reordered, 1)}
-                )
-            elif name == "in_proj_qkvz.weight_scale_inv":
-                self._claim_layout(self._qkvz_layouts, "weight_scale_inv", "fused")
-                block_n, _ = self._block_size(self.in_proj_qkvz)
-                reordered = reorder_qkvz_scale(tensor, self.linear_attn_config, block_n)
-                self._load_child_weights(
-                    self.in_proj_qkvz,
-                    {"weight_scale_inv": self._split_qkvz_rows(reordered, block_n)},
-                )
-            elif name == "in_proj_qkvz.weight_scale":
-                self._claim_layout(self._qkvz_layouts, "weight_scale", "fused")
-                if tensor.numel() == 1:
-                    local = tensor
-                else:
-                    local = self._split_qkvz_rows(
-                        reorder_qkvz([tensor], self.linear_attn_config), 1
-                    )
-                self._load_child_weights(self.in_proj_qkvz, {"weight_scale": local})
-            elif name == "in_proj_qkvz.input_scale":
-                self._claim_layout(self._qkvz_layouts, "input_scale", "fused")
-                self._load_child_weights(self.in_proj_qkvz, {"input_scale": tensor})
+            if name.startswith(("in_proj_qkvz.", "out_proj.")):
+                projection, parameter = name.split(".", 1)
+                module = getattr(self, projection)
+                local = self._projection_tensor(module, parameter, tensor)
+                if module is self.in_proj_qkvz:
+                    self._claim_layout(self._qkvz_layouts, parameter, "fused")
+                self._load_child_weights(module, {parameter: local})
             elif name.startswith("in_proj_qkv."):
                 self._load_split_qkvz("qkv", name.removeprefix("in_proj_qkv."), tensor)
             elif name.startswith("in_proj_z."):
@@ -638,18 +655,5 @@ class Qwen3NextGdnParameters(RtpModule):
                     )
                 if not self._assign_weight(self, "norm_w", tensor.contiguous()):
                     raise RuntimeError("Failed to load linear attention norm")
-            elif name == "out_proj.weight":
-                self._load_child_weights(
-                    self.out_proj, {"weight": self._split_out_weight(tensor)}
-                )
-            elif name == "out_proj.weight_scale_inv":
-                self._load_child_weights(
-                    self.out_proj,
-                    {"weight_scale_inv": self._split_out_block_scale(tensor)},
-                )
-            elif name in ("out_proj.weight_scale", "out_proj.input_scale"):
-                self._load_child_weights(
-                    self.out_proj, {name.rsplit(".", 1)[-1]: tensor}
-                )
             else:
                 raise RuntimeError(f"Unsupported Qwen3-Next linear tensor {name!r}")

@@ -19,7 +19,6 @@ from rtp_llm.models_py.quant_methods.base import (
 )
 
 
-
 def _convert_e4m3fn_to_fnuz(
     weight: torch.Tensor, scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -289,6 +288,15 @@ def _prepare_rocm_fp8_ptpc_executor(
         )
         from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
+        logical_n, logical_k = weight.shape
+        pad_n, pad_k = -logical_n % 16, -logical_k % 64
+        if pad_k or pad_n:
+            # Pad the bytes: ROCm need not implement padding for FP8 itself.
+            weight = torch.nn.functional.pad(
+                weight.view(torch.uint8), (0, pad_k, 0, pad_n)
+            ).view(weight.dtype)
+        if pad_n:
+            scale = torch.nn.functional.pad(scale.reshape(-1), (0, pad_n), value=1.0)
         runtime_weight = swizzle_tensor(weight.contiguous(), False).T
         runtime_scale = scale.float().reshape(-1, 1).T.contiguous()
         executor_type = RocmFp8PTPCLinearWithSwizzle
@@ -314,7 +322,11 @@ def _prepare_rocm_fp8_ptpc_executor(
     if runtime_backend == _ROCM_AITER_PTPC:
         return executor_type
     return executor_type(
-        weight=layer.weight, weight_scales=layer.weight_scale, bias=None
+        weight=layer.weight,
+        weight_scales=layer.weight_scale,
+        bias=None,
+        logical_input_size=logical_k,
+        logical_output_size=logical_n,
     )
 
 

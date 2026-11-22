@@ -18,7 +18,9 @@ _PPU_CONTRACT_TESTS = [
     data = ["//rtp_llm/models_py:ppu_sources"],
     deps = [":ppu_test_runtime", "//rtp_llm:device"] + ([
         "//rtp_llm/models_py:new_weight_loader",
-    ] if name == "mtp_owned_fusion" else []),
+    ] if name == "mtp_owned_fusion" else []) + ([
+        "//rtp_llm/model_loader:loader",
+    ] if name == "mtp_weights" else []),
     tags = ["PPU-ZW810E"],
     target_compatible_with = select({
         "@//:using_ppu": [],

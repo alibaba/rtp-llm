@@ -232,6 +232,26 @@ class PureTpRouterNoQuant(PureTpRouterBase):
         return a1, None
 
 
+class PureTpRouterWeightOnly(PureTpRouterBase):
+    """TP-replicated tokens, full-precision activations and local expert IDs."""
+
+    def __init__(self, config: MoEConfigAdapter, quant_config: FusedMoEQuantConfig):
+        if quant_config.is_quantized:
+            raise ValueError("Weight-only TP must pass unquantized activations")
+        super().__init__(config, quant_config, do_recompute_topk=config.ep_size > 1)
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        super().check_conditions(checker, config)
+        checker.check(config.moe_quant_method in ("awq", "gptq", "INT8"))
+        checker.check(config.dp_size == 1)
+
+    def _do_quant(
+        self, a1: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return a1, None
+
+
 class PureTpRouterFp8PerTensor(PureTpRouterBase):
     """Per-token activation quantization for FP8 expert GEMMs."""
 

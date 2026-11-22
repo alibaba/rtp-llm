@@ -362,6 +362,9 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
     def fused_moe(self):
         return self._moe.fused_moe
 
+    def set_route_stats(self, stats):
+        self._moe.eplb_stats = stats
+
     @property
     def gate(self):
         return self._moe.gate

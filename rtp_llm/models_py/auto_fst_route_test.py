@@ -106,7 +106,7 @@ def _simulated_device(
 
 def _select(loader, requested=None, paths=None):
     return loader._select_load_method(
-        loader._resolve_load_method() if requested is None else requested,
+        loader.load_config.load_method if requested is None else requested,
         _Owner({}, loader.load_config),
         loader._checkpoint_files() if paths is None else paths,
     )
@@ -118,7 +118,9 @@ def _rank_decision(rank, root, init):
     )
     try:
         loader = _loader(
-            root, parallelism_config=SimpleNamespace(world_size=2, pp_size=1)
+            root,
+            load_method=Method.AUTO,
+            parallelism_config=SimpleNamespace(world_size=2, pp_size=1),
         )
         paths = [] if rank == 1 else loader._checkpoint_files()
         with _simulated_device():
@@ -142,6 +144,42 @@ class _CheckpointCase(unittest.TestCase):
 
 
 class DefaultFstRouteTest(_CheckpointCase):
+    def test_load_method_environment_only_supplies_an_omitted_option(self):
+        for env in (None, "", "auto", "scratch", "fastsafetensors", "invalid"):
+            with self.subTest(env=env), patch.dict(os.environ):
+                if env is None:
+                    os.environ.pop("LOAD_METHOD", None)
+                else:
+                    os.environ["LOAD_METHOD"] = env
+                if env == "invalid":
+                    with self.assertRaisesRegex(ValueError, "LOAD_METHOD"):
+                        _loader(self.root)
+                else:
+                    default = _loader(self.root).load_config.load_method
+                    self.assertEqual(default, Method(env) if env else Method.AUTO)
+                for explicit in Method:
+                    with self.subTest(explicit=explicit):
+                        loader = _loader(self.root, load_method=explicit.value)
+                        self.assertEqual(loader.load_config.load_method, explicit)
+
+    def test_explicit_auto_keeps_preflight_fallback_with_fst_environment(self):
+        with patch.dict(os.environ, {"LOAD_METHOD": "fastsafetensors"}):
+            loader = _loader(self.root, "cpu", load_method=Method.AUTO)
+            torch.testing.assert_close(loader.load().weight, self.expected)
+            self.assertEqual(loader.loaded_method, Method.SCRATCH)
+
+        with _simulated_device("Ppu") as probe, patch.dict(
+            os.environ, {"LOAD_METHOD": "fastsafetensors"}
+        ):
+            probe.return_value = "missing compatible native SHM reader"
+            self.assertEqual(
+                _select(_loader(self.root, load_method="auto")), Method.SCRATCH
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "missing compatible native SHM reader"
+            ):
+                _select(_loader(self.root))
+
     def test_default_accelerators_enter_real_preflight(self):
         for backend, machine in (
             ("Cuda", "x86_64"),
@@ -155,7 +193,7 @@ class DefaultFstRouteTest(_CheckpointCase):
                 backend, machine
             ) as host_probe:
                 loader = _loader(self.root)
-                self.assertEqual(loader._resolve_load_method(), Method.AUTO)
+                self.assertEqual(loader.load_config.load_method, Method.AUTO)
                 with patch.object(
                     loader, "_fastsafetensors_api", wraps=loader._fastsafetensors_api
                 ) as api:
@@ -167,7 +205,7 @@ class DefaultFstRouteTest(_CheckpointCase):
                     )
 
     def test_preflight_failures_not_runtime_retry(self):
-        loader = _loader(self.root)
+        loader = _loader(self.root, load_method=Method.AUTO)
         with _simulated_device(), patch.dict(sys.modules, {"fastsafetensors": None}):
             self.assertEqual(_select(loader), Method.SCRATCH)
             with self.assertRaisesRegex(RuntimeError, "fastsafetensors.*unavailable"):
@@ -213,7 +251,7 @@ class DefaultFstNativeReaderTest(_CheckpointCase):
         torch.testing.assert_close(model.weight, self.expected)
 
     def test_failure_after_auto_fst_read_does_not_reopen_scratch(self):
-        loader = _loader(self.root)
+        loader = _loader(self.root, load_method=Method.AUTO)
         original = loader._fastsafetensors_weights_iterator
         observed = []
 

@@ -35,13 +35,19 @@ from rtp_llm.test.utils.port_util import PortManager
 
 
 def init_router(
-    rank: int, use_fp8: bool, parallelism_config: ParallelismConfig, nccl_port: int
+    rank: int,
+    use_fp8: bool,
+    parallelism_config: ParallelismConfig,
+    nccl_port: int,
+    *,
+    all_gather_only: bool = False,
+    top_k: Optional[int] = None,
 ):
     model_config = ModelConfig()
     # Keep the historical all-expert case; override explicitly for wheel limits.
     model_config.expert_num = int(os.environ.get("TEST_NUM_EXPERTS", "16"))
     model_config.hidden_size = 1024
-    model_config.moe_k = model_config.expert_num
+    model_config.moe_k = model_config.expert_num if top_k is None else top_k
 
     parallelism_config.world_rank = rank
     parallelism_config.local_rank = rank
@@ -53,6 +59,8 @@ def init_router(
     )
 
     moe_config = MoeConfig()
+    moe_config.use_deepep_moe = not all_gather_only
+    moe_config.use_all_gather = all_gather_only
     moe_config.use_deepep_low_latency = False
 
     config = MoEConfigAdapter(
@@ -70,6 +78,9 @@ def init_router(
         backend="nccl",
         timeout=60,
     )
+
+    if all_gather_only:
+        return config, None
 
     py_env = PyEnvConfigs()
     py_env.parallelism_config = parallelism_config
@@ -215,6 +226,7 @@ def test_single(
     pp_size: int = 1,
     token_num: Optional[int] = None,
     topk_ids_dtype: torch.dtype = torch.int64,
+    worker=worker_function,
 ):
     port_manager = PortManager()
     ports, locks = port_manager.get_consecutive_ports(1)
@@ -246,7 +258,7 @@ def test_single(
 
         # 创建进程
         p = mp.Process(
-            target=worker_function,
+            target=worker,
             args=(rank, use_fp8, token_num_per_rank, parallelism_config, nccl_port),
             kwargs={"topk_ids_dtype": topk_ids_dtype},
         )

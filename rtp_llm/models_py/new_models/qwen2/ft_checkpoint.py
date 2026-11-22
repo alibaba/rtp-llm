@@ -35,7 +35,7 @@ def load_dense_ft_checkpoint(model, checkpoint):
     return load_gqa_ffn_ft_checkpoint(model, checkpoint)
 
 
-def load_gqa_ffn_ft_checkpoint(model, checkpoint):
+def load_gqa_ffn_ft_checkpoint(model, checkpoint, *, extra_bindings=()):
     from rtp_llm.models_py.quant_methods.fp8 import (
         Fp8BlockLinearMethod,
         Fp8LinearMethod,
@@ -96,7 +96,9 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint):
     tp = checkpoint.topology.tp_size
     rank = checkpoint.topology.tp_rank
 
-    def fp8_bindings(linear, source, destination, projection, layer_prefix):
+    def fp8_bindings(
+        linear, source, destination, projection, layer_prefix, ffn_width=None
+    ):
         from rtp_llm.models_py.quant_methods.fp8_ft import (
             PerChannelFP8FTProjection,
             PerTensorFP8FTProjection,
@@ -110,7 +112,14 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint):
                 k.removesuffix(".kernel") + ".weight_only_quant_scale" for k in keys
             )
             return block_ft_bindings(
-                linear, keys, scales, destination, checkpoint, swizzled=swizzled
+                linear,
+                keys,
+                scales,
+                destination,
+                checkpoint,
+                swizzled=swizzled,
+                projection=projection,
+                ffn_width=ffn_width,
             )
         scale = source.removesuffix(".kernel") + ".weight_only_quant_scale"
         if isinstance(linear.quant_method, Fp8PerChannelLinearMethod):
@@ -317,7 +326,7 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint):
         ]
         return (merged[0] if projection == "down" else torch.cat(merged, dim=0),)
 
-    bindings = []
+    bindings = list(extra_bindings)
     if embedding is not None:
         bindings.append(
             RuntimeTensorBinding(
@@ -452,6 +461,19 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint):
         )
         local_width = ffn.down_proj.weight.shape[1]
         hidden = ffn.down_proj.weight.shape[0]
+        ffn_width = None
+        if isinstance(ffn.down_proj.quant_method, Fp8BlockLinearMethod):
+            from rtp_llm.models_py.quant_methods.block_fp8_ft import block_ft_ffn_width
+
+            ffn_width = block_ft_ffn_width(
+                checkpoint, down_names[0], local_width, hidden
+            )
+            if ffn_width != local_width and not isinstance(
+                ffn.gate_up_proj.quant_method, Fp8BlockLinearMethod
+            ):
+                raise ValueError(
+                    "Padded FT FFN requires matching gate/up and down layouts"
+                )
         for names, projection, target in (
             (down_names, "down", ffn_target + "down_proj.weight"),
             (gate_names, "gate_up", ffn_target + "gate_up_proj.weight"),
@@ -471,6 +493,7 @@ def load_gqa_ffn_ft_checkpoint(model, checkpoint):
                         dst + target.removesuffix(".weight"),
                         projection,
                         src,
+                        ffn_width=ffn_width,
                     )
                 )
                 continue

@@ -192,7 +192,12 @@ def scaled_rope_qkv(
         if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
             raise ValueError("prefill requires a non-empty cumulative-length table")
         cu = on_device(cu_seqlens)
-        batch_indices = torch.searchsorted(cu[1:], token, right=True)
+        # Graph replay keeps the capture bucket's QKV shape. Beyond the live
+        # end, searchsorted returns num_requests, not a valid prefix/KV row.
+        # These tokens are discarded; live token-to-request mappings stay exact.
+        batch_indices = torch.searchsorted(cu[1:], token, right=True).clamp_max_(
+            cu.numel() - 2
+        )
         if prefix_lengths is None or prefix_lengths.numel() == 0:
             prefixes = torch.zeros_like(cu[:-1])
         else:

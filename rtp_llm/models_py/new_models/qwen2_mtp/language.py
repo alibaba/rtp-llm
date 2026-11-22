@@ -10,8 +10,8 @@ from rtp_llm.models_py.module_base import _mark_loaded
 from rtp_llm.models_py.new_models.model_base import select_fmha_impl_for_layer
 from rtp_llm.models_py.new_models.mtp import MTPBlock
 from rtp_llm.models_py.new_models.qwen2.language import Qwen2ForCausalLM
+from rtp_llm.models_py.new_models.qwen2.trt_checkpoint import Qwen2CheckpointMapper
 from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
-from rtp_llm.models_py.weight_mapper import WeightsMapper
 if TYPE_CHECKING:
     from rtp_llm.ops.compute_ops import PyModelInputs
 
@@ -24,14 +24,13 @@ class Qwen2MTPForCausalLM(Qwen2ForCausalLM):
     decoder layers otherwise retain their checkpoint indices.
     """
 
-    WEIGHTS_MAPPER = WeightsMapper(
+    WEIGHTS_MAPPER = Qwen2CheckpointMapper(
         exact_mapping={
             "model.layers.0.e_norm.weight": "mtp_block.e_norm.weight",
             "model.layers.0.h_norm.weight": "mtp_block.h_norm.weight",
             "model.layers.0.eh_proj.weight": "mtp_block.fc.weight",
             "model.layers.0.final_head.norm.weight": "norm.weight",
         },
-        prefix_mapping={"model.": ""},
     )
 
     def __init__(self, model_config: Any, load_config: Any):
@@ -95,10 +94,13 @@ class Qwen2MTPForCausalLM(Qwen2ForCausalLM):
                 # and final norm. They are not additional decoder operations.
                 if mapped in self._extra_draft_shapes:
                     value, _ = unwrap_checkpoint_tensor(tensor)
+                    expected = self._extra_draft_shapes[mapped]
+                    # As for layer zero, both on-disk EH orientations are valid.
+                    shapes = (expected, expected[::-1]) if mapped.endswith(".eh_proj.weight") else (expected,)
                     if (
                         mapped in self._extra_draft_seen
                         or not value.is_floating_point()
-                        or tuple(value.shape) != self._extra_draft_shapes[mapped]
+                        or tuple(value.shape) not in shapes
                     ):
                         raise ValueError(f"Invalid or duplicate draft tensor {name}")
                     self._extra_draft_seen.add(mapped)

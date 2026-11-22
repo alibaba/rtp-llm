@@ -90,10 +90,31 @@ def merge_startup_lora_checkpoint(model, loader, adapter_name: str, path: str) -
     factor before its single atomic merge; no lifecycle manager is attached to
     the serving model, and its base snapshots are released after startup.
     """
-    updates = model_lora_checkpoint_updates(model, loader, path)
+    _merge_runtime_updates(
+        model, adapter_name, model_lora_checkpoint_updates(model, loader, path)
+    )
+
+
+def prepare_startup_lora_merge(model, loader, adapter_name, path):
+    """Stage factors before FST can finalize its first complete INT8 leaf."""
+    if not isinstance(adapter_name, str) or not adapter_name:
+        raise ValueError("LoRA adapter name must be non-empty")
+    runtime_updates = []
+    for update in model_lora_checkpoint_updates(model, loader, path):
+        leaf = model.get_submodule(update.target.rpartition(".")[0])
+        stage = getattr(getattr(leaf, "quant_method", None), "stage_startup_lora", None)
+        if stage is None:
+            runtime_updates.append(update)
+        else:
+            stage(leaf, update)
+    # Unquantized leaves can have a device-specific layout. Retain their
+    # existing post-layout transform and atomic merge after loader finalization.
+    return lambda: _merge_runtime_updates(model, adapter_name, runtime_updates)
+
+
+def _merge_runtime_updates(model, adapter_name, updates):
     if not updates:
-        # Nonempty, well-formed PEFT checkpoint; every target belongs to a
-        # different PP stage. There is nothing to mutate on this rank.
+        # Every target was staged before quantization or lives on another rank.
         return
     manager = RuntimeLoRAManager(
         dict(model.named_parameters()),

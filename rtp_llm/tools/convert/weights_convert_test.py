@@ -144,6 +144,32 @@ class WeightsConvertParallelismTest(unittest.TestCase):
 
 
 class FTExportJobTest(unittest.TestCase):
+    def test_dspark_export_declares_sampler_and_proposal_fields(self):
+        import torch
+        from types import SimpleNamespace
+        from rtp_llm.models.qwen_3_dspark import Qwen3DSpark
+        from rtp_llm.models.qwen_v3 import QWenV3Weight
+        from rtp_llm.utils.model_weight import W
+
+        cls = Qwen3DSpark.get_weight_cls()
+        for key, expected in (("d2t", [1, 3]), ("model.d2t", [1, 2])):
+            descriptor = cls.__new__(cls)
+            with (
+                patch.object(QWenV3Weight, "_process_meta"),
+                patch.object(QWenV3Weight, "_get_weight_info", return_value=SimpleNamespace(weights=[])),
+            ):
+                descriptor._process_meta([], ["hidden_norm.weight", key])
+                fields = {f.name: f for f in descriptor._get_weight_info().weights}
+            self.assertEqual(
+                {name: f.weights[0].name for name, f in fields.items()},
+                {W.dspark_fc_w: "fc.weight", W.dspark_hidden_norm_gamma: "hidden_norm.weight",
+                 W.dspark_markov_w1: "markov_head.markov_w1.weight", W.dspark_markov_w2: "markov_head.markov_w2.weight",
+                 W.multi_tokens_predict_d2t_map: key},
+            )
+            d2t = fields[W.multi_tokens_predict_d2t_map]
+            self.assertEqual(d2t.data_type, torch.int64)
+            self.assertEqual(d2t.process_fun([torch.tensor([1, 2])]).tolist(), expected)
+
     def test_custom_fields_and_adapter_metadata_without_serving_load(self):
         from rtp_llm.tools.convert.ft_export_job import create_ft_export_job
 

@@ -150,7 +150,10 @@ class LinearBase(RtpModule):
 
         # Excluded or mixed-attention leaves still carry the model's quant
         # configuration. The selected method owns the actual physical weight.
-        if not isinstance(self.quant_method, UnquantizedLinearMethod):
+        staging = getattr(self.quant_method, "can_stage_startup_lora", None)
+        if not isinstance(self.quant_method, UnquantizedLinearMethod) and not (
+            callable(staging) and staging(self)
+        ):
             raise NotImplementedError(
                 "Quantized LoRA merge requires a quantized update contract"
             )
@@ -1203,8 +1206,16 @@ class QKVParallelLinear(ColumnParallelLinear):
                 dim = 1
         elif param_name == "bias" and shape == (global_rows,):
             dim = 0
-        elif param_name == "weight_scale_inv" and len(shape) > 0:
-            block_n, _ = self.fp8_scale_block_size()
+        elif param_name == "weight_scale_inv":
+            block_n, block_k = self.fp8_scale_block_size()
+            expected = (
+                self._ceil_div(global_rows, block_n),
+                self._ceil_div(self.hidden_size, block_k),
+            )
+            if shape != expected:
+                raise ValueError(
+                    f"Shape mismatch for {name}: got {shape}, expected {expected}"
+                )
             local_rows = global_rows // shard_count
             start_row = shard_rank * local_rows
             if start_row % block_n or local_rows % block_n:
@@ -1480,7 +1491,20 @@ class QKVParallelLinear(ColumnParallelLinear):
             # FP8 per-block grid for this q/k/v shard: TP-slice along the
             # output(head)-block dim, then place at the shard's block offset
             # in the merged [total_blocks, in_blocks] grid.
-            block_n, _ = self.fp8_scale_block_size()
+            block_n, block_k = self.fp8_scale_block_size()
+            # Never infer a shard's extent from the payload: a short grid
+            # would leave default scales in real rows, an oversized one could
+            # write into the next projection.
+            source_rows = size if local_shard else num_heads * self.head_dim
+            expected = (
+                self._ceil_div(source_rows, block_n),
+                self._ceil_div(self.input_size, block_k),
+            )
+            if tuple(tensor.shape) != expected:
+                raise ValueError(
+                    f"Shape mismatch for {self.prefix}.{qkv_key}.weight_scale_inv: "
+                    f"got {tuple(tensor.shape)}, expected {expected}"
+                )
             rank = self.tp_rank if qkv_key == "q" else self.kv_head_rank
             self._ensure_parameter_shard_not_loaded(param_name, qkv_key)
             if self.tp_size > 1 and not local_shard:
@@ -1505,14 +1529,14 @@ class QKVParallelLinear(ColumnParallelLinear):
                     f"must align to FP8 output block {block_n}"
                 )
             off_blk = offset // block_n
-            target = param.data[off_blk : off_blk + tensor.shape[0]]
+            target = param.data[off_blk : off_blk + self._ceil_div(size, block_n)]
             if tuple(target.shape) != tuple(tensor.shape):
                 raise ValueError(
                     f"Shape mismatch for {self.prefix}.{qkv_key}.weight_scale_inv: "
                     f"got {tuple(tensor.shape)}, expected {tuple(target.shape)}"
                 )
             _copy_checked(
-                param.data[off_blk : off_blk + tensor.shape[0]],
+                target,
                 tensor,
                 f"{self.prefix}.{qkv_key}.{param_name}",
             )

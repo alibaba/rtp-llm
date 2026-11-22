@@ -30,6 +30,19 @@ class _Sampler(Qwen3DSparkMarkovHead):
 
 
 class SamplerTest(unittest.TestCase):
+    def test_sampler_padding_is_not_a_logical_vocabulary_row(self):
+        a = torch.arange(20, dtype=torch.float32).reshape(10, 2)
+        b = torch.arange(256, dtype=torch.float32).reshape(128, 2)
+        model = Qwen3DSparkMarkovHead(8, 5, 2)
+        model.load_weights({"markov_head.markov_w1.weight": a, "markov_head.markov_w2.weight": b})
+        torch.testing.assert_close(model.markov_w1.weight, a[:8].bfloat16())
+        torch.testing.assert_close(model.markov_w2.weight, b[:5].bfloat16())
+        for rows in (4, 129):
+            with self.assertRaisesRegex(ValueError, "Shape mismatch"):
+                Qwen3DSparkMarkovHead(8, 5, 2).load_weights(
+                    {"markov_head.markov_w2.weight": torch.ones(rows, 2)}
+                )
+
     def load(self, root, vocab, draft, rank, method):
         cfg = SimpleNamespace(
             model_type="_qwen3_dspark_sampler_test",

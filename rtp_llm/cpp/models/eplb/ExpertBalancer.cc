@@ -190,16 +190,22 @@ ExpertBalancer::ExpertBalancer(size_t                       log_exp_num,
     is_eplb_group_root_             = layout.pp_size > 1 ? layout.stageRank() == 0 : ep_rank_ == 0;
     executor_collector_.layer_begin = layer_begin_;
     eplb_control_data_              = eplb_config;
+    eplb_controller_.init(eplb_control_data_, eplb_config);
+    const auto ownership = eplb_python_wrapper_.weightOwnership();
+    if (ownership == EplbWeightOwnership::StatsOnly) {
+        RTP_LLM_CHECK_WITH_INFO(eplb_config.eplb_mode == EplbMode::STATS,
+                                "This expert layout supports statistics, not weight rebalancing");
+        return;  // reportStats reads the live model counters; no plan or staging weights.
+    }
 
     // init memory
     stats_.init(num_layers, log_exp_num, ep_size_);
-    direct_install_ = ExpertBalancerPythonWrapper::usesDirectInstall(py_eplb);
+    direct_install_ = ownership == EplbWeightOwnership::PythonInstall;
     eplb_plan_buffers_.init(
         log_exp_num, phy_exp_num, hidden_size, moe_size, ep_size_, dtype, quant_algo, !direct_install_);
     eplb_plan_tensors_.init(log_exp_num, phy_exp_num);
     load_flags_.init();
     load_flags_.setReady(false);
-    eplb_controller_.init(eplb_control_data_, eplb_config);
 
     test_mode_ = eplb_config.eplb_test_mode;
 
@@ -223,6 +229,19 @@ void ExpertBalancer::stepForward(ModelBase&                      model,
 
     OverallExpertStats& stats = model.overall_expert_stats_;
 
+    if (eplb_python_wrapper_.weightOwnership() == EplbWeightOwnership::StatsOnly) {
+        // The FP8/FP4 gate sees source-local tokens. An EP rank's executed
+        // load includes tokens routed to it by every peer, even on a step
+        // where that rank has no real input of its own.
+        auto& loads = stats.stats_buf.gpu_loads_buf;
+        if (!record_stats)
+            loads.zero_();
+        if (ep_size_ > 1)
+            execAllReduce({loads, ReduceOp::Sum, parallel_mode_});
+        reportStats(stats);
+        return;
+    }
+
     // report stats
     if (record_stats) {
         reportStats(stats);
@@ -233,6 +252,11 @@ void ExpertBalancer::stepForward(ModelBase&                      model,
 }
 
 bool ExpertBalancer::updateEplbConfig(const EPLBConfig& config) {
+    if (eplb_python_wrapper_.weightOwnership() == EplbWeightOwnership::StatsOnly
+        && config.eplb_mode != EplbMode::STATS && config.eplb_mode != EplbMode::NONE) {
+        RTP_LLM_LOG_WARNING("This expert layout supports EPLB statistics, not weight rebalancing");
+        return false;
+    }
     eplb_controller_.setData(config);
     return true;
 }

@@ -56,7 +56,7 @@ def make_checkpoint(root, *, classifier=False):
     return ref
 
 
-def public_load(root, method, task, *, tp=1, rank=0, quant=None):
+def public_load(root, method, task, *, tp=1, rank=0, quant=None, max_seq_len=10):
     config = Bert._create_config(str(root))
     config.model_type = "bert"
     config.tokenizer_path = str(root)
@@ -66,9 +66,7 @@ def public_load(root, method, task, *, tp=1, rank=0, quant=None):
     config.task_type = task
     config.generate_env_config = GenerateEnvConfig()
     config.render_config = RenderConfig()
-    config.max_seq_len = (
-        10  # A deployment cap is not the learned 24-row position table.
-    )
+    config.max_seq_len = max_seq_len
     fixture = service(str(root), method)
     parallel = fixture.parallelism_config
     parallel.tp_size = parallel.world_size = tp
@@ -212,6 +210,18 @@ def check_static_tp_rank(rank, checkpoint, rendezvous, input_major):
 
 
 class BertServiceTest(unittest.TestCase):
+    def test_deployment_cap_cannot_exceed_learned_position_table(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            make_checkpoint(root)
+            for method in ("scratch", "fastsafetensors"):
+                with self.subTest(method=method), self.assertRaisesRegex(
+                    ValueError, "max_seq_len=25.*24-row position"
+                ):
+                    public_load(
+                        root, method, TaskType.DENSE_EMBEDDING, max_seq_len=25
+                    )
+
     def test_static_int8_checkpoint(self):
         self._check_static_int8_checkpoint(False)
 

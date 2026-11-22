@@ -14,6 +14,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
+from rtp_llm.models_py.new_weight_manager import NewLoaderWeightManager
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.models_py.registry import register_model
 
@@ -64,6 +65,74 @@ def checkpoint():
 
 
 class MainPPCheckpointTest(unittest.TestCase):
+    @staticmethod
+    def stage_parallel(stage, tp=1, rank=0):
+        return SimpleNamespace(
+            tp_size=tp,
+            tp_rank=rank,
+            ep_size=1,
+            ep_rank=0,
+            pp_size=2,
+            pp_rank=stage,
+            pp_stage_layer_counts=[1, 2],
+            dp_size=1,
+            dp_rank=0,
+            world_size=2 * tp,
+            world_rank=stage * tp + rank,
+            get_attn_tp_size=lambda: tp,
+            get_attn_tp_rank=lambda: rank,
+            get_ffn_tp_size=lambda: tp,
+            get_ffn_tp_rank=lambda: rank,
+        )
+
+    def test_tied_pp_update_validates_embedding_source_on_both_stages(self):
+        config = model_config()
+        config.enable_fp32_lm_head = True
+        data = checkpoint()
+        name = "model.embed_tokens.weight"
+        replacement = data[name].bfloat16() + 16
+        for explicit in (False, True):
+            if explicit:
+                data["lm_head.weight"] = data[name] + 100
+            with self.subTest(explicit=explicit), tempfile.TemporaryDirectory() as root:
+                save_file(data, os.path.join(root, "model.safetensors"))
+                for stage in (0, 1):
+                    load = NewLoaderConfig(
+                        device="cpu",
+                        load_method="scratch",
+                        compute_dtype=torch.bfloat16,
+                        quant_config=QuantizationConfig("none"),
+                        parallelism_config=self.stage_parallel(stage),
+                    )
+                    loader = NewModelLoader(config, load, model_path=root)
+                    model = loader.load()
+                    manager = NewLoaderWeightManager(model, loader)
+                    owner = model.embed_tokens if stage == 0 else model.lm_head
+                    target = owner.weight
+                    old = target.detach().clone()
+                    ptr = target.data_ptr()
+                    if not explicit:
+                        for invalid, error in (
+                            (replacement.float(), TypeError),
+                            (torch.cat([replacement, replacement[:1]]), ValueError),
+                        ):
+                            with self.assertRaises(error):
+                                manager.update_tensors({name: invalid})
+                            torch.testing.assert_close(target, old)
+                            self.assertEqual(manager.version, 0)
+                        if stage == 1:
+                            with self.assertRaisesRegex(ValueError, "non-owning"):
+                                manager.update_tensors({"lm_head.weight": old})
+                    manager.update_tensors({name: replacement})
+                    mirrored = not explicit or stage == 0
+                    expected = replacement.to(target.dtype) if mirrored else old
+                    torch.testing.assert_close(target, expected)
+                    self.assertEqual(manager.version, int(mirrored))
+                    self.assertEqual(target.data_ptr(), ptr)
+                    self.assertEqual(
+                        target.dtype, torch.float32 if stage else torch.bfloat16
+                    )
+
     def test_non_generation_heads_are_handler_owned_and_norm_is_preserved(self):
         from rtp_llm.ops import TaskType
 
@@ -217,23 +286,7 @@ class MainPPCheckpointTest(unittest.TestCase):
                                 config.enable_output_vocab_pruning = True
                                 config.output_vocab_ids = [1, 3, 7]
                                 config.output_vocab_padded_size = 4
-                            parallel = SimpleNamespace(
-                                tp_size=tp,
-                                tp_rank=rank,
-                                ep_size=1,
-                                ep_rank=0,
-                                pp_size=2,
-                                pp_rank=stage,
-                                pp_stage_layer_counts=[1, 2],
-                                dp_size=1,
-                                dp_rank=0,
-                                world_size=2 * tp,
-                                world_rank=stage * tp + rank,
-                                get_attn_tp_size=lambda: tp,
-                                get_attn_tp_rank=lambda: rank,
-                                get_ffn_tp_size=lambda: tp,
-                                get_ffn_tp_rank=lambda: rank,
-                            )
+                            parallel = self.stage_parallel(stage, tp, rank)
                             load = NewLoaderConfig(
                                 tp_size=tp,
                                 tp_rank=rank,

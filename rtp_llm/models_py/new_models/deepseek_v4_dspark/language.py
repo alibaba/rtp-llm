@@ -59,6 +59,10 @@ class _DraftMapper:
 
 
 class DeepSeekV4DSparkForCausalLM(OwnedV4ModelMixin, DeepSeekV4DSparkModel, RtpModule):
+    @property
+    def eplb_attention_only(self):
+        return self._commit_only_prefill
+
     def __init__(self, model_config, load_config):
         role = getattr(load_config.parallelism_config, "role_type", None)
         self._commit_only_prefill = str(role).upper().rsplit(".", 1)[-1] == "PREFILL"

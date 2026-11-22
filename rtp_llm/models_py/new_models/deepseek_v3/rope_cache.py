@@ -1,4 +1,4 @@
-"""Build the shared MLA runtime cache directly from checkpoint metadata."""
+"""Build the shared MLA runtime cache from checkpoint and serving settings."""
 
 import math
 from typing import Optional
@@ -71,6 +71,10 @@ def _resolve_yarn_parameters(config_json: dict) -> Optional[dict]:
 
     if yarn is None:
         return None
+    return _validate_yarn_parameters(yarn)
+
+
+def _validate_yarn_parameters(yarn: dict) -> dict:
     missing = [key for key in _YARN_REQUIRED_KEYS if key not in yarn]
     if missing:
         raise ValueError(f"DeepSeek YaRN configuration is missing keys: {missing}")
@@ -110,8 +114,10 @@ def build_rope_cache(
     config_json: dict,
     max_seq_len: int,
     device: torch.device,
+    *,
+    model_config=None,
 ) -> torch.Tensor:
-    """Build RoPE cos/sin cache from config.json + max_seq_len.
+    """Build RoPE cos/sin cache with any finalized serving YaRN override.
 
     Returns [cos|sin] concatenated, shape [max_seq_len, rope_head_dim], float32.
     """
@@ -142,6 +148,29 @@ def build_rope_cache(
         )
 
     yarn_parameters = _resolve_yarn_parameters(config_json)
+    rope = getattr(getattr(model_config, "attn_config", None), "rope_config", None)
+    if rope is not None:
+        from rtp_llm.ops import RopeStyle
+
+        # DeepSeek normally leaves the native style as No and supplies the
+        # cache explicitly. A serving YaRN override sets the native style and
+        # these four fields *after* checkpoint config parsing. Keep the
+        # checkpoint's DeepSeek-specific magnitude coefficients (also for
+        # modern rope_parameters), just as the original weight owner did.
+        if rope.style == RopeStyle.Yarn:
+            checkpoint_yarn = yarn_parameters or {
+                "mscale": model_config.deepseek_rope_mscale,
+                "mscale_all_dim": model_config.deepseek_mscale_all_dim,
+            }
+            yarn_parameters = _validate_yarn_parameters(
+                {
+                    **checkpoint_yarn,
+                    "factor": rope.scale,
+                    "original_max_position_embeddings": rope.max_pos,
+                    "beta_slow": rope.factor1,
+                    "beta_fast": rope.factor2,
+                }
+            )
 
     if yarn_parameters is None:
         rotary_emb = DeepseekV3RotaryEmbedding(

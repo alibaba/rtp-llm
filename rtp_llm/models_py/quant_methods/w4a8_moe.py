@@ -163,6 +163,16 @@ class W4A8Int4MoEMethod(FusedMoEMethodBase):
             return False
         return True
 
+    def is_validation_only_checkpoint_tensor(self, layer, name):
+        parts = name.split(".")
+        return (
+            self.compressed
+            and len(parts) == 3
+            and parts[0].isdigit()
+            and parts[1] in layer.PROJ_NAMES
+            and parts[2] == "weight_shape"
+        )
+
     def dispatch_scale(self, layer, local_id: int, proj: str, param_name: str, tensor):
         if self.compressed and param_name == "weight_shape":
             if tensor.dtype not in (

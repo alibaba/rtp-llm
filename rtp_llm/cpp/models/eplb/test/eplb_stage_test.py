@@ -5,6 +5,7 @@ import time
 import traceback
 import unittest
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -125,6 +126,11 @@ def run_rank(rank, pp_size, port):
         assert result["all_ready"], result
         assert result["metrics_layer_begin"] == begin, result
         assert result["metrics_gpu_loads"] == [rank + 1] * (end - begin), result
+        # Source rank r routed its tokens to the other EP rank. Reporting
+        # only source-local counts would incorrectly give both GPUs zero.
+        assert test_ops.exercise_stats_only(
+            config, SimpleNamespace(eplb_stats_only=True), log_stats, gpu_loads.flip(1)
+        ) == [(rank ^ 1) + 1] * (end - begin)
         for fault in (None, "load", "install"):
             observer = DirectStepBalancer(stage, rank, fault)
             assert test_ops.exercise_direct_step(config, observer, log_stats, gpu_loads)

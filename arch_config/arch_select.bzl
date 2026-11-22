@@ -48,6 +48,10 @@ _CUDA13_ARM_DEFERRED = ["flash_attn", "flash-attn-3", "flashinfer-jit-cache"]
 # gracefully, so the other platforms resolve it to nothing.
 _DSV4_PLATFORM_ONLY = ["xgrammar"]
 
+# These optional readers only exist in the CUDA/ROCm wheel sets. Scratch
+# loading remains available on CPU and on the non-CUDA ARM build.
+_NATIVE_CHECKPOINT_READERS = ["fast-safetensors", "fastsafetensors"]
+
 # Names with no PPU wheel in the vendor lock (CUDA/ROCm-only deps, or no
 # cp312 wheel). requirement() resolves them to an empty library on PPU.
 _PPU_LOCK_SKIPPED = [
@@ -105,9 +109,9 @@ def requirement(names):
                 "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                 "@rtp_llm//:using_cuda12_arm": [requirement_cuda12_arm(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm("amd-aiter" if name == "aiter" else name)],
-                "@rtp_llm//:using_arm": [requirement_arm(name)],
+                "@rtp_llm//:using_arm": [] if name in _NATIVE_CHECKPOINT_READERS else [requirement_arm(name)],
                 "@rtp_llm//:using_ppu": ppu_deps,
-                "//conditions:default": [requirement_cpu(name)],
+                "//conditions:default": [] if name in _NATIVE_CHECKPOINT_READERS else [requirement_cpu(name)],
             }),
             visibility = ["//visibility:public"],
         )

@@ -303,6 +303,20 @@ class _StagedFSTLoadCoordinator:
         if child not in self._module_names:
             child.load_weights(weights)
             return
+        if child in self._finalized:
+            # Optional metadata may live in a later file than the last required
+            # weight. Let its owner validate it, but never reopen packed storage
+            # or postprocess the leaf twice.
+            validation_only = getattr(
+                getattr(child, "quant_method", None),
+                "is_validation_only_checkpoint_tensor",
+                None,
+            )
+            if callable(validation_only) and all(
+                validation_only(child, name) for name in weights
+            ):
+                child.load_weights(weights)
+                return
         self.prepare_child(child)
         child.load_weights(weights)
         self.finalize_child_if_complete(child)
@@ -344,6 +358,16 @@ class NewLoaderLoadMethod(str, Enum):
     SCRATCH = "scratch"
     FASTSAFETENSORS = "fastsafetensors"
 
+    @classmethod
+    def from_environment(cls) -> "NewLoaderLoadMethod":
+        value = os.environ.get("LOAD_METHOD", "").strip().lower()
+        try:
+            return cls(value) if value else cls.AUTO
+        except ValueError as exc:
+            raise ValueError(
+                f"Unsupported LOAD_METHOD environment value {value!r}"
+            ) from exc
+
 
 @dataclass(frozen=True)
 class NewLoaderConfig:
@@ -353,7 +377,11 @@ class NewLoaderConfig:
     ep_rank: int = 0
     compute_dtype: torch.dtype = torch.float16
     device: str = "cuda"
-    load_method: NewLoaderLoadMethod = NewLoaderLoadMethod.AUTO
+    # The service already resolved CLI > environment. Only direct library
+    # callers that omit this option should take their default from the environment.
+    load_method: NewLoaderLoadMethod = field(
+        default_factory=NewLoaderLoadMethod.from_environment
+    )
     quant_config: Any = None
     parallelism_config: Any = None
     moe_config: Any = None
@@ -749,7 +777,7 @@ class NewModelLoader:
         method = self._selected_load_method
         if method is None:
             method = self._select_load_method(
-                self._resolve_load_method(), model, selected_files, expert_filter
+                self.load_config.load_method, model, selected_files, expert_filter
             )
 
         if method == NewLoaderLoadMethod.FASTSAFETENSORS:
@@ -810,19 +838,6 @@ class NewModelLoader:
             name: tensor.detach().to(device="cpu").contiguous()
             for name, tensor in result.items()
         }
-
-    def _resolve_load_method(self) -> NewLoaderLoadMethod:
-        configured = self.load_config.load_method
-        if configured == NewLoaderLoadMethod.AUTO:
-            env_method = os.environ.get("LOAD_METHOD", "").strip().lower()
-            if env_method:
-                try:
-                    configured = NewLoaderLoadMethod(env_method)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"Unsupported LOAD_METHOD environment value {env_method!r}"
-                    ) from exc
-        return configured
 
     def _model_type(self) -> str:
         value = (
@@ -2318,11 +2333,11 @@ class NewModelLoader:
             module.process_weights_after_loading()
 
     @torch.inference_mode()
-    def load(self) -> nn.Module:
+    def load(self, *, startup_lora: Optional[Tuple[str, str]] = None) -> nn.Module:
         # Backend selection alone does not publish a model. On retry, do not
         # expose the previous attempt's backend as evidence for this attempt.
         self._selected_load_method = None
-        requested_method = self._resolve_load_method()
+        requested_method = self.load_config.load_method
         meta_checkpoint = None
         if self._model_type() == "llama":
             from rtp_llm.models_py.meta_checkpoint import MetaLlamaCheckpoint
@@ -2414,6 +2429,13 @@ class NewModelLoader:
             model.to(self.load_config.device)
             self._validate_loaded_weights(model)
             self._run_post_load_hooks(model)
+            if startup_lora is not None:
+                # Format adapters may import already packed runtime parameters.
+                from rtp_llm.models_py.lora_checkpoint import (
+                    merge_startup_lora_checkpoint,
+                )
+
+                merge_startup_lora_checkpoint(model, self, *startup_lora)
             model.eval()
             self._selected_load_method = (
                 NewLoaderLoadMethod.FASTSAFETENSORS
@@ -2428,6 +2450,11 @@ class NewModelLoader:
                 self.load_config.device,
             )
             return model
+        finish_lora = None
+        if startup_lora is not None:
+            from rtp_llm.models_py.lora_checkpoint import prepare_startup_lora_merge
+
+            finish_lora = prepare_startup_lora_merge(model, self, *startup_lora)
         overlay = self._finetune_overlay()
         if weight_mapper.is_rank_local_checkpoint(checkpoint_files) and not bool(
             getattr(model, "supports_rank_local_checkpoint", False)
@@ -2619,6 +2646,8 @@ class NewModelLoader:
         model.to(self.load_config.device)
         self._validate_loaded_weights(model)
         self._run_post_load_hooks(model)
+        if finish_lora is not None:
+            finish_lora()
         validate_borrowed_parameters(model)
         model.eval()
         self._selected_load_method = method

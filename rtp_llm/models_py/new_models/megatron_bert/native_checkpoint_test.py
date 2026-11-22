@@ -1,8 +1,10 @@
 """Main config/compute ABI acceptance. Requires the real candidate .so files."""
 
+import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -43,13 +45,21 @@ class _MegatronServiceFixture(unittest.TestCase):
             num_hidden_layers=2,
             vocab_size=16,
             max_position_embeddings=16,
+            type_vocab_size=3,
             num_labels=3,
         )
         torch.manual_seed(31)
         ref = MegatronBertForSequenceClassification(config).eval()
         ids = torch.tensor([[3, 4, 5]])
+        types = torch.tensor([[0, 1, 2]])
         with tempfile.TemporaryDirectory() as tmp, torch.inference_mode():
             config.save_pretrained(tmp)
+            # Old deployments may omit this optional JSON field even though
+            # their checkpoint contains a trained segment table.
+            config_file = Path(tmp) / "config.json"
+            manifest = json.loads(config_file.read_text())
+            manifest.pop("type_vocab_size")
+            config_file.write_text(json.dumps(manifest))
             tokenizer = PreTrainedTokenizerFast(
                 tokenizer_object=Tokenizer(
                     WordLevel(
@@ -63,6 +73,7 @@ class _MegatronServiceFixture(unittest.TestCase):
             tokenizer.save_pretrained(tmp)
             save_file(ref.state_dict(), os.path.join(tmp, "model.safetensors"))
             cfg = service_class.create_config(tmp)
+            self.assertEqual(cfg.type_vocab_size, 0)
             cfg.model_type = "megatron_bert"
             cfg.data_type = "fp32"
             cfg.tokenizer_path = tmp
@@ -95,6 +106,10 @@ class _MegatronServiceFixture(unittest.TestCase):
                     service.weight.get_global_weight("embedding"),
                     service.py_model.embeddings.word_embeddings.weight,
                 )
+                torch.testing.assert_close(
+                    service.weight.get_global_weight("token_type_embedding.weight"),
+                    ref.bert.embeddings.token_type_embeddings.weight,
+                )
                 classifier = service.custom_module.handler
                 self.assertEqual(
                     classifier.linear.weight.data_ptr(),
@@ -111,14 +126,15 @@ class _MegatronServiceFixture(unittest.TestCase):
                 inputs.bert_embedding_inputs = BertEmbeddingInputs(
                     torch.arange(3),
                     torch.empty(0),
-                    torch.zeros(3, dtype=torch.long),
+                    types[0],
                     torch.empty(0),
                     1.0,
                 )
                 hidden = service.py_model(inputs, PackedSdpa((3,))).hidden_states
                 logits = classifier.forward(ids[0], hidden, torch.tensor([3]))
                 torch.testing.assert_close(
-                    logits, ref(input_ids=ids).logits.to(logits.dtype)
+                    logits,
+                    ref(input_ids=ids, token_type_ids=types).logits.to(logits.dtype),
                 )
 
 

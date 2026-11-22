@@ -10,6 +10,12 @@ from rtp_llm.utils.util import get_config_from_path
 
 
 class Qwen3DSpark(QwenV3):
+    @staticmethod
+    def get_weight_cls():
+        from rtp_llm.models.qwen_3_dspark_ft import Qwen3DSparkWeight
+
+        return Qwen3DSparkWeight
+
     def support_pp(self) -> bool:
         return False
 
@@ -53,7 +59,7 @@ class Qwen3DSpark(QwenV3):
         if not roles:
             return ()
         target = target_model.model_config
-        if target_model.py_model is None or getattr(target, "is_mtp", False):
+        if target_model.py_model is None or target_model.weight is None or getattr(target, "is_mtp", False):
             raise ValueError("Qwen3 DSpARK loans require a loaded target, not a draft")
         if target.hidden_size != draft_model_config.hidden_size:
             raise ValueError("DSpARK target/draft hidden sizes differ")
@@ -72,6 +78,14 @@ class Qwen3DSpark(QwenV3):
                 raise ValueError(
                     "DSpARK cannot borrow a head with a different output vocabulary"
                 )
+        missing = [
+            role for role in roles
+            if target_model.weight.get_global_weight_or_none(role) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"DSpARK cannot borrow {missing}: the target weights must be on the same pipeline stage as the draft"
+            )
         return roles
 
 

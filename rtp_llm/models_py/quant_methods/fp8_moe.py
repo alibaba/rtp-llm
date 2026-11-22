@@ -357,16 +357,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "w2_scale", torch.zeros(E, H, dtype=torch.float32)
                 )
             else:  # fp8_per_block_online
-                nb = self._ceil_div(M_tp, block_n)
                 hb = self._ceil_div(H, block_k)
                 h_nb = self._ceil_div(H, block_n)
                 k_nb = self._ceil_div(M_tp, block_k)
-                layer._n_scale_blocks_per_proj = nb
+                # Online quantization runs once over the fused [up, gate]
+                # matrix, unlike prequantized checkpoints' two scale grids.
                 layer._k_scale_blocks_per_proj = k_nb
                 layer._fp8_moe_weight_block_size = [block_n, block_k]
                 layer.register_buffer(
                     "w13_scale",
-                    torch.zeros(E, 2 * nb, hb, dtype=torch.float32),
+                    torch.zeros(
+                        E, self._ceil_div(2 * M_tp, block_n), hb, dtype=torch.float32
+                    ),
                 )
                 layer.register_buffer(
                     "w2_scale",
@@ -749,14 +751,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
         from rtp_llm.models_py.quant_methods.fp8 import per_block_quant_like_legacy
 
+        # A tile may straddle the up/gate boundary. For ROCm quantize in
+        # executor order before computing scales; a later swap would not
+        # preserve that tile. CUDA already consumes the staging order.
+        layer._fp8_gate_first = (
+            torch.version.hip is not None and layer.w13.device.type == "cuda"
+        )
         # The quantizer emits FN codes even on FNUZ devices. Preserve the codes
         # until _requant_per_block_if_needed converts both weights and scales.
         new_w13 = torch.empty_like(layer.w13.data, dtype=torch.float8_e4m3fn)
         new_w2 = torch.empty_like(layer.w2.data, dtype=torch.float8_e4m3fn)
         for expert_id in range(layer.num_local_experts):
-            weight, scale = per_block_quant_like_legacy(
-                layer.w13.data[expert_id].contiguous(), BS
-            )
+            w13 = layer.w13.data[expert_id]
+            if layer._fp8_gate_first:
+                up, gate = w13.chunk(2, dim=0)
+                w13 = torch.cat((gate, up))
+            weight, scale = per_block_quant_like_legacy(w13.contiguous(), BS)
             new_w13[expert_id].copy_(weight)
             layer.w13_scale[expert_id].copy_(scale)
             weight, scale = per_block_quant_like_legacy(

@@ -42,6 +42,20 @@ You need to include a file called "smoothquant.ini" under the ckpt path, or writ
 ```
 Supports llama, qwen, starcoder. The name of the tensor stored in ckpt is referred to the associated model file.
 
+For the Llama SmoothQuant conversion tool, supply the original architecture
+metadata (e.g. `config.json`) along with `llama2.pt` and `smoothquant.ini`.
+Use the converter's default `--tensor-parallelism 1` to write complete
+matrices: the loader partitions them for the requested inference TP size.
+
+Calibrated decoder INT8 is a separate format, selected by `pertensorquant.ini`.
+For HF-style Llama/Qwen decoder projections, store signed INT8 `.qweight`
+matrices as [input, output], plus floating-point `.scales` (one positive
+step per matrix or per output channel). Each matmul needs its calibrated
+input step, e.g. `self_attn.qkv_input_scale`, `self_attn.o_proj_input_scale`,
+`mlp.gate_proj_input_scale` (shared by gate and up), and
+`mlp.down_proj_input_scale`. Missing calibration is an error; the loader
+does not substitute a guessed step. Routed experts remain floating point.
+
 
 ## BlockWiseFp8
 Support Load Quant or PreQuantified.<br>
