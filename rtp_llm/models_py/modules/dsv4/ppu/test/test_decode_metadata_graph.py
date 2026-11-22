@@ -12,6 +12,13 @@ from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS
 
 
 class MetadataFactoryTest(unittest.TestCase):
+    def test_metadata_graph_declares_device_only_replay_inputs(self):
+        from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import (
+            PpuDecodeMetadataGraph,
+        )
+
+        self.assertIs(PpuDecodeMetadataGraph.uses_device_only_cuda_graph_metadata, True)
+
     def test_shared_rope_options_and_late_materialization(self):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
@@ -20,7 +27,6 @@ class MetadataFactoryTest(unittest.TestCase):
         options = {**DECODE_EXECUTION_OPTIONS, "DSV4_PPU_MTP_METADATA_GRAPH": "1"}
         provider = PpuDecodeProvider(options)
         config = SimpleNamespace(q_len=1)
-        options["DSV4_PPU_DECODE_ROPE"] = "layer"
         with self.assertRaisesRegex(ValueError, "constructed"):
             provider.build_decode_metadata(DSv4DecodeFmhaImplFP8, config)
 
@@ -205,7 +211,7 @@ class MetadataGraphTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_mtp_verify_and_draft_metadata_match_reference(self):
-        for width in (2, 3, 4):
+        for width in (2, 3, 4, 5, 6):
             for role in ("verify", "draft"):
                 with self.subTest(width=width, role=role):
                     self._check_model_metadata(
@@ -223,7 +229,7 @@ class MetadataGraphTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_inactive_token_mask_tracks_device_tables(self):
-        for width in (1, 2, 3, 4):
+        for width in (1, 2, 3, 4, 5, 6):
             with self.subTest(width=width):
                 self._check_model_metadata(
                     "graph_fused", shared_rope=True, q_len=width,

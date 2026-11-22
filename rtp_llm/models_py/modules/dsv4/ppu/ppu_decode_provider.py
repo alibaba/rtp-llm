@@ -1,9 +1,12 @@
 """Decode composition with engine-owned DP/EP resources."""
 
-import torch
 import weakref
 
-from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS, _check_execution_options
+import torch
+from rtp_llm.models_py.modules.dsv4.ppu.manifest import (
+    DECODE_EXECUTION_OPTIONS,
+    _check_execution_options,
+)
 from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProvider
 
 
@@ -14,11 +17,24 @@ class PpuDecodeProvider(PpuModuleProvider):
     _moe_output_dtype = torch.bfloat16
 
     def build_moe(self, default_factory, *args, **kwargs):
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import PpuDeepEPFP4Strategy
         from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_ep_moe import PpuEPMoE
 
         if not kwargs.get("is_decode_role"):
             raise ValueError("PPU Decode MoE requires Decode resources")
+        return PpuEPMoE(
+            *args,
+            platform_provider=self,
+            strategy_type=self._build_moe_strategy,
+            strategy_kwargs={},
+            **kwargs,
+        )
+
+    def _build_moe_strategy(self, cfg):
+        # Select after PpuEPMoE has built the complete model/topology config.
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import (
+            PpuDeepEPFP4Strategy,
+        )
+
         strategy_type = PpuDeepEPFP4Strategy
         strategy_kwargs = {
             "expected_m_policy": self._moe_hint,
@@ -26,18 +42,27 @@ class PpuDecodeProvider(PpuModuleProvider):
             "gemm_tile": self._moe_tile,
         }
         if self._moe_backend == "megamoe":
-            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import PpuMegaMoEFP4Strategy
+            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
+                PpuMegaMoEFP4Strategy,
+                PpuMegaMoEFP8Strategy,
+            )
 
-            strategy_type = PpuMegaMoEFP4Strategy
+            exact = (
+                self._mega_mode == "plain"
+                and PpuMegaMoEFP8Strategy.can_handle(cfg)
+                and PpuMegaMoEFP8Strategy.package_is_available(
+                    self._mega_fp8_module_name
+                )
+            )
+            strategy_type = PpuMegaMoEFP8Strategy if exact else PpuMegaMoEFP4Strategy
+            strategy_kwargs = {} if exact else strategy_kwargs
             strategy_kwargs["resources"] = self._mega_resources
-            strategy_kwargs["module_name"] = self._mega_module_name
-        return PpuEPMoE(
-            *args,
-            platform_provider=self,
-            strategy_type=strategy_type,
-            strategy_kwargs=strategy_kwargs,
-            **kwargs,
-        )
+            strategy_kwargs["module_name"] = (
+                self._mega_fp8_module_name if exact else self._mega_module_name
+            )
+            if not exact:
+                strategy_kwargs["streamed"] = self._mega_streamed
+        return strategy_type(cfg, **strategy_kwargs)
 
     def __init__(
         self, execution_options, *, ep_size=None, tp_size=None, attn_profile="auto"
@@ -80,16 +105,43 @@ class PpuDecodeProvider(PpuModuleProvider):
             raise ValueError("DSV4_PPU_MTP_BATCH_INDEXER must be 0 or 1")
         self._mtp_batch_indexer = batch_indexer == "1"
         self._decode_fusions = self._bool("DSV4_PPU_DECODE_FUSIONS", False)
-        self._moe_backend = self.execution_options.get("DSV4_PPU_DECODE_MOE_BACKEND", "deepep")
+        self._moe_backend = self.execution_options.get(
+            "DSV4_PPU_DECODE_MOE_BACKEND", "deepep"
+        )
         if self._moe_backend not in ("deepep", "megamoe"):
             raise ValueError("DSV4_PPU_DECODE_MOE_BACKEND must be deepep or megamoe")
+        legacy_overlap = [
+            name
+            for name in (
+                "DSV4_PPU_MEGAMOE_STREAMED",
+                "DSV4_PPU_MEGAMOE_SHARED_STAGED",
+            )
+            if name in self.execution_options
+        ]
+        if legacy_overlap:
+            raise ValueError(
+                "DSV4_PPU_MEGAMOE_STREAMED and DSV4_PPU_MEGAMOE_SHARED_STAGED "
+                "were replaced by DSV4_PPU_MEGAMOE_MODE=plain|streamed|staged"
+            )
+        self._mega_mode = self.execution_options.get("DSV4_PPU_MEGAMOE_MODE", "plain")
+        if self._mega_mode not in ("plain", "streamed", "staged"):
+            raise ValueError("DSV4_PPU_MEGAMOE_MODE must be plain, streamed or staged")
+        if self._mega_mode != "plain" and self._moe_backend != "megamoe":
+            raise ValueError("MegaMoE overlap modes require the MegaMoE backend")
+        self._mega_streamed = self._mega_mode == "streamed"
+        self._shared_staged = self._mega_mode == "staged"
         self._mega_resources = None
         self._mega_module_name = "deep_gemm_mega"
+        self._mega_fp8_module_name = "deep_gemm_route_a"
         if self._moe_backend == "megamoe":
-            package = self.execution_options.get("DSV4_PPU_MEGAMOE_PACKAGE", "deep_gemm_mega")
+            package = self.execution_options.get(
+                "DSV4_PPU_MEGAMOE_PACKAGE", self._mega_module_name
+            )
             if package != self._mega_module_name:
                 raise ValueError("DSV4_PPU_MEGAMOE_PACKAGE must be deep_gemm_mega")
-            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import PpuMegaMoEResources
+            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_mega_moe import (
+                PpuMegaMoEResources,
+            )
 
             self._mega_resources = PpuMegaMoEResources()
         self.stream_pool = PpuStreamPool()
@@ -125,8 +177,12 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         attention._fuse_qkv_quant = self._decode_fusions
         self._decode_attention_refs.append(weakref.ref(attention))
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import (
+            PpuWoAFp8Linear,
+        )
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
 
         for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
             if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
@@ -142,10 +198,14 @@ class PpuDecodeProvider(PpuModuleProvider):
         return attention
 
     def build_shared_expert_executor(self, **kwargs):
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuSharedExpertExecutor
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+            PpuSharedExpertExecutor,
+        )
 
         return PpuSharedExpertExecutor(
-            stream_pool=self.stream_pool, start_before_routing=True,
+            stream_pool=self.stream_pool,
+            start_before_routing=True,
+            staged=self._shared_staged,
         )
 
     def build_hc_unit(self, *args, **kwargs):
@@ -172,26 +232,32 @@ class PpuDecodeProvider(PpuModuleProvider):
         head.tp_size, head.tp_rank = tp_size, tp_rank
         return head
 
-
     def build_mtp_input_fusion(self, enorm, hnorm, e_proj, h_proj):
         if not self._decode_fusions:
             return None
-        from rtp_llm.models_py.modules.dsv4.ppu.mtp.ppu_mtp_input import PpuMtpInputFusion
+        from rtp_llm.models_py.modules.dsv4.ppu.mtp.ppu_mtp_input import (
+            PpuMtpInputFusion,
+        )
 
         return PpuMtpInputFusion(enorm, hnorm, e_proj, h_proj)
 
-
     def build_decode_metadata(self, default_factory, *args, **kwargs):
-        if not self._mtp_metadata_graph:
-            return default_factory(*args, **kwargs)
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,
         )
-
-        from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import PpuDecodeMetadataGraph
+        from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import (
+            PpuDecodeMetadataGraph,
+        )
 
         if default_factory is not DSv4DecodeFmhaImplFP8:
-            raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
+            if self._mtp_metadata_graph:
+                raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
+            return default_factory(*args, **kwargs)
+        config = args[0] if args else kwargs.get("config")
+        if getattr(config, "q_len", 1) != 1 and not self._mtp_metadata_graph:
+            # Verify and draft catch-up use the framework multi-token updater,
+            # whose slot mappings include speculative ring entries.
+            return default_factory(*args, **kwargs)
         tables = {}
         for reference in self._decode_attention_refs:
             attention = reference()

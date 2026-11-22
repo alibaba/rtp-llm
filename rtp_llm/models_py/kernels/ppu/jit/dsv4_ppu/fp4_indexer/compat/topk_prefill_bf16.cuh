@@ -1047,6 +1047,32 @@ SGL_DEVICE static void streaming_topk_bf16(
 // and 2-pass register (<=32K) paths. Only allocates
 // RegisterTopKSmemPF + s_topk_indices smem.
 // ============================================================
+SGL_DEVICE void canonical_sort_pf(int32_t* shared) {
+  const int tx = threadIdx.x;
+  int value = tx < prefill_bf16::kTopK ? shared[tx] : 2147483647;
+#pragma unroll
+  for (int size = 2; size <= prefill_bf16::kTopK; size <<= 1) {
+#pragma unroll
+    for (int stride = size >> 1; stride > 0; stride >>= 1) {
+      int other = 2147483647;
+      if (stride < 32) {
+        other = __shfl_xor_sync(0xFFFFFFFF, value, stride);
+      } else {
+        if (tx < prefill_bf16::kTopK) shared[tx] = value;
+        __syncthreads();
+        if (tx < prefill_bf16::kTopK) other = shared[tx ^ stride];
+        __syncthreads();
+      }
+      if (tx < prefill_bf16::kTopK) {
+        const bool take_min = ((tx & size) == 0) == ((tx & stride) == 0);
+        value = take_min ? min(value, other) : max(value, other);
+      }
+    }
+  }
+  if (tx < prefill_bf16::kTopK) shared[tx] = value;
+  __syncthreads();
+}
+
 __global__ __launch_bounds__(prefill_bf16::kBlockSize, 2) void topk_prefill_bf16_register_kernel(
     const TopKPrefillBF16Params params) {
   using namespace prefill_bf16;
@@ -1084,6 +1110,7 @@ __global__ __launch_bounds__(prefill_bf16::kBlockSize, 2) void topk_prefill_bf16
   } else if (length <= kMax1PassLength) {
     register_topk_bf16_pf<false>(scores_ptr, s_topk_indices, length, smem_raw);
     __syncthreads();
+    if constexpr (kTopK == 512) canonical_sort_pf(s_topk_indices);
     // Use stride loop to handle kTopK > kBlockSize correctly.
     const auto tx = threadIdx.x;
     for (uint32_t i = tx; i < kTopK; i += kBlockSize) {
@@ -1104,6 +1131,7 @@ __global__ __launch_bounds__(prefill_bf16::kBlockSize, 2) void topk_prefill_bf16
     [[likely]];
     register_topk_bf16_pf<true>(scores_ptr, s_topk_indices, length, smem_raw);
     __syncthreads();
+    if constexpr (kTopK == 512) canonical_sort_pf(s_topk_indices);
     // Use stride loop to handle kTopK > kBlockSize correctly.
     const auto tx = threadIdx.x;
     for (uint32_t i = tx; i < kTopK; i += kBlockSize) {

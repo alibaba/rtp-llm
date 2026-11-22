@@ -5,6 +5,7 @@ _PPU_CONTRACT_TESTS = [
     "mtp_weights", "mtp_hidden", "compressor_norm_dispatch", "mtp_swa_ring_page",
     "chunked_moe", "deepep_graph_dispatch", "ppu_deep_gemm_layout_compat",
     "strategy_select", "tp_norm", "v4_router_contract", "v4_tp_reduce_contract",
+    "prefill_warmup",
 ]
 
 # Model contracts use the PPU dependency closure and test workers.
@@ -35,6 +36,8 @@ _PPU_CONTRACT_TESTS = [
 ) for name in [
     "isolated_metadata", "rich_contract", "chunk_options", "platform_provider",
     "prefill_communication", "tp_prefill_workspace_dims",
+    "dspark_q6_numeric", "dspark_swa_pd_contract",
+    "dspark_draft_platform", "dspark_index_geometry",
 ]]
 
 py_library(

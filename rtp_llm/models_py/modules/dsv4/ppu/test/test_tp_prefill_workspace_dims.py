@@ -84,6 +84,7 @@ class TpPrefillWorkspaceDimsTest(unittest.TestCase):
                     ),
                     "input_ids": SimpleNamespace(device="cpu", size=lambda axis: actual),
                     "PrefillWorkspace": lambda device, **kwargs: SimpleNamespace(**kwargs),
+                    "ws": None,
                 }
                 exec(code, scope)
                 workspace = scope["ws"]

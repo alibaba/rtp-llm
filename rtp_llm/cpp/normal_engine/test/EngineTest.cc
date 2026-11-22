@@ -2,6 +2,7 @@
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
+#include <stdexcept>
 #include <limits>
 
 #define private public
@@ -589,6 +590,33 @@ TEST_F(NormalEngineTest, testWarmUpInputLengthAccountsForReserve) {
     EXPECT_ANY_THROW((void)warmUpInputLength(1, 0));
     EXPECT_ANY_THROW((void)warmUpInputLength(17, 17));
 }
+
+#if USING_CUDA
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupFailureAbortsInitialization) {
+    CustomConfig config;
+    config.warm_up = true;
+    config.prefill_chunk_size = 8;
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+    params.pd_sep_config.role_type = RoleType::PREFILL;
+    bool saw_warmup = false;
+    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+        return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+            if (inputs.warmup) {
+                saw_warmup = true;
+                throw std::runtime_error("injected prefill warmup failure");
+            }
+        });
+    };
+    struct FactoryResetGuard {
+        ~FactoryResetGuard() { NormalExecutor::test_model_factory = nullptr; }
+    } factory_reset_guard;
+    EXPECT_THROW((void)std::make_shared<NormalEngine>(params, nullptr), std::exception);
+    EXPECT_TRUE(saw_warmup);
+}
+#endif
 
 TEST_F(NormalEngineTest, testDecodeWarmupUsesWarmupCacheTopology) {
     CustomConfig config;

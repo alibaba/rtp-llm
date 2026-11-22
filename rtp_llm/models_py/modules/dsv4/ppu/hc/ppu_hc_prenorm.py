@@ -163,14 +163,19 @@ def _launch_partials(x, weight, config):
     runtime = jit_tuner.compile_and_tune(
         # Vendor's in-memory tuner omits template from its key. A distinct
         # name is mandatory: otherwise it can return the cached atomic kernel.
-        name=("rtp_dsv4_hc_prenorm_workspace" if workspace_abi
-              else "rtp_dsv4_hc_prenorm_partials"),
+        name=(
+            "rtp_dsv4_hc_prenorm_workspace"
+            if workspace_abi
+            else "rtp_dsv4_hc_prenorm_partials"
+        ),
         keys=config,
         space=(),
         includes=(
-            "<deep_gemm/impls/tf32_hc_prenorm_gemm.cuh>"
-            if workspace_abi
-            else '\"../deep_gemm/tf32_hc_prenorm_gemm.cuh\"',
+            (
+                '"impls/tf32_hc_prenorm_gemm.cuh"'
+                if workspace_abi
+                else '"../deep_gemm/tf32_hc_prenorm_gemm.cuh"'
+            ),
         ),
         arg_defs=(
             ("a", torch.bfloat16),
@@ -181,7 +186,8 @@ def _launch_partials(x, weight, config):
             ("stream", torch.cuda.Stream),
             ("num_sms", int),
             ("smem_size", int),
-        ) + extra_defs,
+        )
+        + extra_defs,
         template=_WORKSPACE_TEMPLATE if workspace_abi else _TEMPLATE,
         args=args,
         jit_include_dir="actlize_v1.0.0",

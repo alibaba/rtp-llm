@@ -4,8 +4,6 @@ import os
 from typing import Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
     FP8_BLOCK_SIZE,
     _require_dtype,
@@ -16,6 +14,7 @@ from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
     checkpoint_ue8m0_scale_to_fp32,
     quantize_ppu_fp8_activation,
 )
+from torch import nn
 
 
 class PpuWoAFp8Linear(nn.Module):
@@ -100,6 +99,25 @@ class PpuWoAFp8Linear(nn.Module):
             ),
             persistent=False,
         )
+        # Official DSV4 keeps the sparse-attention output in BF16 through
+        # wo_a.  Reconstruct that checkpoint boundary once; quantizing the
+        # activation here is the first numerical divergence for case 1199.
+        weight_bf16 = (
+            (
+                weight.float()
+                .unflatten(0, (-1, FP8_BLOCK_SIZE))
+                .unflatten(-1, (-1, FP8_BLOCK_SIZE))
+                * scale_fp32[:, None, :, None]
+            )
+            .flatten(2, 3)
+            .flatten(0, 1)
+            .to(torch.bfloat16)
+        )
+        self.register_buffer(
+            "weight_bf16",
+            weight_bf16.view(groups, rank, k_local),
+            persistent=False,
+        )
         self._einsum = _resolve_deep_gemm_symbol("fp8_einsum")
         self._decode_attention_gemm = False
         self._attn_gemm_ep_size = None
@@ -109,7 +127,9 @@ class PpuWoAFp8Linear(nn.Module):
     def _decode_config(self, m):
         if not self._decode_attention_gemm:
             return None
-        from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import decode_attention_gemm_config
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import (
+            decode_attention_gemm_config,
+        )
 
         return decode_attention_gemm_config(
             m,
@@ -194,44 +214,13 @@ class PpuWoAFp8Linear(nn.Module):
         if m == 0:
             return output
 
-        # Quantization retains the token-major arithmetic and block scales.
-        x_2d = x.view(m * self.groups, self.k_local)
-        x_fp8, x_scale = quantize_ppu_fp8_activation(
-            x_2d, quantization=self.quantization
+        output.copy_(
+            torch.einsum(
+                "...gk,grk->...gr",
+                x,
+                self.weight_bf16,
+            )
         )
-        x_fp8 = x_fp8.view(m, self.groups, self.k_local)
-        x_scale = x_scale.view(m, self.groups, self.k_local // FP8_BLOCK_SIZE)
-        output_3d = output.view(m, self.groups, self.rank)
-        if self.sglang_layout:
-            from deep_gemm.jit_kernels.einsum import fp8_bmm
-
-            from rtp_llm.models_py.kernels.ppu.jit.ppu_sglang_permute import (
-                fused_permute,
-            )
-
-            perm_a, perm_scale = fused_permute(x_fp8, x_scale)
-            fp8_bmm(
-                perm_a,
-                perm_scale,
-                self.weight,
-                self.weight_scale,
-                output_3d,
-                configs=self._decode_config(m),
-            )
-            return output
-        try:
-            self._einsum(
-                "bhr,hdr->bhd",
-                (x_fp8, x_scale),
-                (self.weight, self.weight_scale),
-                output_3d,
-                recipe=(1, 1, FP8_BLOCK_SIZE),
-            )
-        except TypeError as exc:
-            raise RuntimeError(
-                "deep_gemm.fp8_einsum ABI mismatch for the M890P DSV4 "
-                "contract; expected equation, lhs_pair, rhs_pair, out, recipe"
-            ) from exc
         return output
 
 

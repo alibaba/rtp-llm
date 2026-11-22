@@ -12,7 +12,6 @@ from pathlib import Path
 from unittest import mock
 
 import torch
-
 from rtp_llm.models_py.kernels.ppu import runtime as RUNTIME
 from rtp_llm.models_py.modules.dsv4.ppu.attention import ppu_wo_a as WO_A
 from rtp_llm.models_py.modules.factory.linear.ppu_impl import fp8_linear as MODULE
@@ -102,35 +101,25 @@ class Fp8CpuContractTest(unittest.TestCase):
             quant.assert_not_called()
 
     @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "Torch lacks UE8M0 dtype")
-    def test_wo_a_tp4_group_geometry_and_einsum_abi(self):
-        calls = []
-
-        def einsum(equation, lhs, rhs, out, *, recipe):
-            calls.append(equation)
-            self.assertEqual(equation, "bhr,hdr->bhd")
-            self.assertEqual(recipe, (1, 1, 128))
-            self.assertEqual(tuple(lhs[0].shape), (3, 2, 128))
-            self.assertEqual(tuple(rhs[0].shape), (2, 128, 128))
-            self.assertEqual(rhs[1].dtype, torch.float32)
-            out.zero_()
-
-        quant = (torch.zeros((6, 128), dtype=torch.float8_e4m3fn), torch.ones((6, 1)))
+    def test_wo_a_tp4_group_geometry_keeps_bf16_activation(self):
+        quant = mock.Mock()
         with mock.patch.object(MODULE, "_require_m890p"), mock.patch.object(
             WO_A, "_require_m890p"
         ), mock.patch.object(
-            WO_A, "_resolve_deep_gemm_symbol", return_value=einsum
+            WO_A, "_resolve_deep_gemm_symbol", return_value=mock.Mock()
         ), mock.patch.object(
-            WO_A, "quantize_ppu_fp8_activation", return_value=quant
+            WO_A, "quantize_ppu_fp8_activation", quant
         ):
             layer = WO_A.PpuWoAFp8Linear(
-                torch.zeros((256, 128), dtype=torch.float8_e4m3fn),
+                torch.ones((256, 128), dtype=torch.float8_e4m3fn),
                 self.scale((2, 1)),
                 groups=2,
                 k_local=128,
             )
-            output = layer(torch.zeros((3, 2, 128), dtype=torch.bfloat16))
+            output = layer(torch.ones((3, 2, 128), dtype=torch.bfloat16))
             self.assertEqual(tuple(output.shape), (3, 2, 128))
-            self.assertEqual(len(calls), 1)
+            self.assertTrue(torch.equal(output, torch.full_like(output, 128)))
+            quant.assert_not_called()
 
     def test_missing_deepgemm_symbol_fails_without_fallback(self):
         with mock.patch.object(

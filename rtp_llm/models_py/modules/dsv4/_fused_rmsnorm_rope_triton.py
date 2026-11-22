@@ -36,6 +36,7 @@ def _fused_rmsnorm_rope_kernel(
     w_ptr,
     freqs_ri_ptr,
     out_ptr,
+    cache_rope_ptr,
     x_stride_n,
     out_stride_n,
     freq_stride_n: tl.constexpr,
@@ -48,6 +49,8 @@ def _fused_rmsnorm_rope_kernel(
     INVERSE: tl.constexpr,
     EPS: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
+    STORE_CACHE_ROPE: tl.constexpr,
+    ROUND_BEFORE_ROPE: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
     # Cast pid to int64 BEFORE the row-stride multiply: the prefill Q
@@ -92,6 +95,10 @@ def _fused_rmsnorm_rope_kernel(
         real = real * w_real
         imag = imag * w_imag
 
+    if ROUND_BEFORE_ROPE:
+        real = real.to(out_ptr.dtype.element_ty).to(tl.float32)
+        imag = imag.to(out_ptr.dtype.element_ty).to(tl.float32)
+
     freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
     cos = tl.load(freq_base)
     sin = tl.load(freq_base + 1)
@@ -103,6 +110,13 @@ def _fused_rmsnorm_rope_kernel(
 
     tl.store(out_row + real_off, new_real)
     tl.store(out_row + imag_off, new_imag)
+
+    if STORE_CACHE_ROPE:
+        real = real.to(cache_rope_ptr.dtype.element_ty).to(tl.float32)
+        imag = imag.to(cache_rope_ptr.dtype.element_ty).to(tl.float32)
+        cache_row = cache_rope_ptr + pid * RD
+        tl.store(cache_row + 2 * pair_off, real * cos - imag * sin)
+        tl.store(cache_row + 2 * pair_off + 1, real * sin + imag * cos)
 
 
 @triton.jit
@@ -125,6 +139,7 @@ def _fused_rmsnorm_rope_group_heads_kernel(
     HAS_WEIGHT: tl.constexpr,
     BLOCK_D: tl.constexpr,
     GROUP_HEADS: tl.constexpr,
+    ROUND_BEFORE_ROPE: tl.constexpr,
 ):
     freq_idx = tl.program_id(0).to(tl.int64)
     head_tile = tl.program_id(1).to(tl.int64)
@@ -160,6 +175,10 @@ def _fused_rmsnorm_rope_group_heads_kernel(
         real = real * w_real[None, :]
         imag = imag * w_imag[None, :]
 
+    if ROUND_BEFORE_ROPE:
+        real = real.to(out_ptr.dtype.element_ty).to(tl.float32)
+        imag = imag.to(out_ptr.dtype.element_ty).to(tl.float32)
+
     freq_base = freqs_ri_ptr + freq_idx * freqs_stride_b + pair_off * freqs_stride_k
     cos = tl.load(freq_base)
     sin = tl.load(freq_base + 1)
@@ -183,6 +202,8 @@ def fused_rmsnorm_rope(
     out: torch.Tensor | None = None,
     inplace: bool = False,
     group_heads: int | None = None,
+    cache_rope_out: torch.Tensor | None = None,
+    round_before_rope: bool = False,
 ) -> torch.Tensor:
     """Fused RMSNorm-over-last-dim + partial RoPE on the final ``rope_head_dim`` cols.
 
@@ -213,6 +234,10 @@ def fused_rmsnorm_rope(
     assert RD % 2 == 0 and RD <= D
     x_flat = x.view(-1, D)
     N = x_flat.shape[0]
+    if cache_rope_out is not None:
+        assert cache_rope_out.shape == (N, RD)
+        assert cache_rope_out.device == x.device and cache_rope_out.dtype == x.dtype
+        assert cache_rope_out.is_contiguous()
     if inplace:
         out_flat = x_flat
     elif out is not None:
@@ -261,12 +286,12 @@ def fused_rmsnorm_rope(
             selected_group_heads = 8 if N_freq >= group_heads8_min_freq else 4
     if selected_group_heads not in (1, 2, 4, 8):
         raise ValueError(
-            f"invalid group_heads={selected_group_heads}; "
-            "expected 1, 2, 4, or 8"
+            f"invalid group_heads={selected_group_heads}; " "expected 1, 2, 4, or 8"
         )
     can_group_heads = (
         selected_group_heads in (2, 4, 8)
         and not inplace
+        and cache_rope_out is None
         and freq_stride_n % selected_group_heads == 0
         and D <= 512
     )
@@ -291,6 +316,7 @@ def fused_rmsnorm_rope(
             HAS_WEIGHT=has_weight,
             BLOCK_D=BLOCK_D,
             GROUP_HEADS=selected_group_heads,
+            ROUND_BEFORE_ROPE=round_before_rope,
             num_warps=4 if BLOCK_D <= 512 else 8,
         )
     else:
@@ -299,6 +325,7 @@ def fused_rmsnorm_rope(
             w,
             freqs_ri,
             out_flat,
+            cache_rope_out if cache_rope_out is not None else out_flat,
             x_flat.stride(0),
             out_flat.stride(0),
             freq_stride_n=freq_stride_n,
@@ -311,6 +338,8 @@ def fused_rmsnorm_rope(
             INVERSE=inverse,
             EPS=eps,
             HAS_WEIGHT=has_weight,
+            STORE_CACHE_ROPE=cache_rope_out is not None,
+            ROUND_BEFORE_ROPE=round_before_rope,
             BLOCK_D=BLOCK_D,
             num_warps=4 if BLOCK_D <= 512 else 8,
         )

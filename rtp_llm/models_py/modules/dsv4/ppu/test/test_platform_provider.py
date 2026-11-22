@@ -57,7 +57,17 @@ class PlatformProviderTest(unittest.TestCase):
     def test_attention_binds_identity_and_rejects_another_instance(self):
         provider = self.module.PpuModuleProvider({})
         ctor = Mock()
-        with patch.dict(sys.modules, {PREFIX + ".attention.ppu_fp4_indexer": SimpleNamespace(PpuFP4Attention=ctor)}):
+        with patch.dict(
+            sys.modules,
+            {
+                PREFIX + ".attention.fp8.attention": SimpleNamespace(
+                    CommitOnlyAttentionFP8=object()
+                ),
+                PREFIX + ".attention.ppu_fp4_indexer": SimpleNamespace(
+                    PpuFP4Attention=ctor
+                ),
+            },
+        ):
             self.assertIs(provider.build_attention(None, 7), ctor.return_value)
             ctor.assert_called_once_with(7, platform_provider=provider)
             with self.assertRaises(TypeError):

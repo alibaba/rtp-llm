@@ -61,7 +61,14 @@ def install_deep_gemm_build_lock(compiler=None) -> None:
 
     patch_bound_references = compiler is None
     if patch_bound_references:
-        compiler = importlib.import_module("deep_gemm.jit.compiler")
+        try:
+            compiler = importlib.import_module("deep_gemm.jit.compiler")
+        except ModuleNotFoundError as error:
+            # Precompiled PPU DeepGEMM wheels have no runtime JIT package and
+            # therefore no cache-miss compilation path to serialize.
+            if error.name and error.name.startswith("deep_gemm.jit"):
+                return
+            raise
     original_build = compiler.build
     if getattr(original_build, _SERIALIZED_BUILD_MARKER, False):
         return
