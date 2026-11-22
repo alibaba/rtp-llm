@@ -77,7 +77,7 @@ def try_pack_inputs(qkv, selected, sources, visible, *, heads, head_dim):
     if not (
         _enabled(qkv)
         and qkv.ndim == 2
-        and 1 <= qkv.shape[0] <= 128
+        and 1 <= qkv.shape[0] <= 512
         and (heads, head_dim) == (12, 256)
         and qkv.shape[1] >= heads * head_dim
         and qkv.stride(1) == 1
@@ -126,7 +126,7 @@ def try_unpack_output(attention, inverse, valid, *, gate=None):
         _enabled(attention)
         and attention.ndim == 4
         and attention.shape[1:] == (12, 4, 256)
-        and 1 <= attention.shape[0] <= 32
+        and 1 <= attention.shape[0] <= 128
         and attention.stride(-1) == 1
         and all(stride > 0 for stride in attention.stride())
         and inverse.shape == valid.shape == (attention.shape[0] * 4,)
@@ -190,7 +190,7 @@ def try_restore_selection(selected, inverse, valid):
         and torch.cuda.get_device_capability(selected.device) in ((9, 0), (12, 0))
         and selected.ndim == 2
         and selected.shape[1] == 2051
-        and 4 <= selected.shape[0] <= 128
+        and 4 <= selected.shape[0] <= 512
         and selected.shape[0] % 4 == 0
         and selected.dtype == torch.int32
         and selected.stride(1) == 1

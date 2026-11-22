@@ -216,7 +216,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (4, 128)
             and hidden_states.ndim == 2
             and hidden_states.shape[1] == 2560
-            and hidden_states.shape[0] in range(4, 129, 4)
+            and hidden_states.shape[0] in range(4, 513, 4)
             and not hidden_states.requires_grad
             and not any(
                 name in self.qsa_indexer.__dict__
@@ -609,7 +609,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                         and hidden_states.is_cuda
                         and torch.version.hip is None
                         and hidden_states.ndim == 2
-                        and 1 <= hidden_states.shape[0] <= 256
+                        and 1 <= hidden_states.shape[0] <= 512
                         and torch.cuda.get_device_capability(hidden_states.device)
                         == (9, 0)
                     )

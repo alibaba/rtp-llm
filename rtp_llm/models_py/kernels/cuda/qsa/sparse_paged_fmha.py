@@ -1000,7 +1000,7 @@ def try_h20_direct_paged_decode(
     """Read sparse BF16 KV directly in the existing grouped split kernel."""
     batch, heads, dim = q.shape
     if (
-        not 16 <= batch <= 128
+        not 16 <= batch <= 512
         or page_size != 64
         or selected.shape != (batch, 1, 2051)
         or q.stride(-1) != 1

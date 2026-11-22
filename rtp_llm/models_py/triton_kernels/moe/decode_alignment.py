@@ -95,6 +95,32 @@ def _stable_scatter(
 
 
 @triton.jit
+def _atomic_scatter(
+    ids,
+    offsets,
+    sorted_ids,
+    experts,
+    ROUTES,
+    BLOCK: tl.constexpr,
+    ROUTE_TILE: tl.constexpr,
+    EXPERTS: tl.constexpr,
+    GLOBAL_START: tl.constexpr = 0,
+    PDL: tl.constexpr = False,
+):
+    route = tl.program_id(0) * ROUTE_TILE + tl.arange(0, ROUTE_TILE)
+    if PDL:
+        tl.extra.cuda.gdc_wait()
+    expert = tl.load(ids + route, mask=route < ROUTES, other=-1) - GLOBAL_START
+    valid = (route < ROUTES) & (expert >= 0) & (expert < EXPERTS)
+    local_expert = tl.where(valid, expert, 0).to(tl.int32)
+    slot = tl.atomic_add(offsets + local_expert, 1, mask=valid, sem="relaxed")
+    tl.store(sorted_ids + slot, route, mask=valid)
+    tl.store(experts + slot // BLOCK, local_expert, mask=valid & (slot % BLOCK == 0))
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
+
+
+@triton.jit
 def _align_one_cta_kernel(
     ids,
     sorted_ids,
@@ -148,7 +174,13 @@ def _align_one_cta_kernel(
 
 
 def moe_align_decode(
-    topk_ids, block_size, num_experts, *, max_routes=640, global_start=0
+    topk_ids,
+    block_size,
+    num_experts,
+    *,
+    max_routes=640,
+    global_start=0,
+    allow_unordered=False,
 ):
     """Match the Torch layout, including stable order and unused sentinels.
 
@@ -163,7 +195,7 @@ def moe_align_decode(
         and topk_ids.dim() == 2
         and topk_ids.dtype in (torch.int32, torch.int64)
         and topk_ids.is_contiguous()
-        and 0 < topk_ids.numel() <= min(max_routes, 2560)
+        and 0 < topk_ids.numel() <= min(max_routes, 5120)
         and 0 < num_experts <= 513
         and block_size in (8, 16, 32, 64)
     ):
@@ -219,9 +251,25 @@ def moe_align_decode(
         BLOCK_TILE=block_tile,
         GLOBAL_START=global_start,
         PDL=pdl,
-        num_warps=4,
+        num_warps=4 if slot_tile <= 4096 else 8,
         launch_pdl=pdl,
     )
+    if allow_unordered and routes > 640:
+        _atomic_scatter[(triton.cdiv(routes, 128),)](
+            topk_ids,
+            offsets,
+            sorted_ids,
+            experts,
+            ROUTES=routes,
+            BLOCK=block_size,
+            ROUTE_TILE=128,
+            EXPERTS=num_experts,
+            GLOBAL_START=global_start,
+            PDL=pdl,
+            num_warps=4,
+            launch_pdl=pdl,
+        )
+        return sorted_ids, experts, padded
     _stable_scatter[(routes,)](
         topk_ids,
         offsets,

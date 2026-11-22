@@ -390,7 +390,7 @@ def qsa_paged_indexer_score(
         next_n == 1
         and H == 4
         and D == 128
-        and 1 <= B <= 64
+        and 1 <= B <= 256
         and torch.version.hip is None
         and torch.cuda.get_device_capability(q_bf16.device) == (9, 0)
     )

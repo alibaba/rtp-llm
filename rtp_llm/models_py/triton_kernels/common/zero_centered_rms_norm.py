@@ -117,16 +117,20 @@ def _small_qk_rmsnorm_kernel(
 
 
 def is_small_qk_supported(qkv, q_gamma, k_gamma, q_heads, kv_heads, head_dim):
-    return (
+    if not (
         qkv.is_cuda
         and torch.version.hip is None
         and qkv.dtype == torch.bfloat16
         and qkv.dim() == 2
         and qkv.is_contiguous()
-        and 1 <= qkv.shape[0] <= 32
+    ):
+        return False
+    cap = torch.cuda.get_device_capability(qkv.device)
+    max_rows = 512 if cap == (9, 0) else (32 if cap == (12, 0) else 0)
+    return (
+        1 <= qkv.shape[0] <= max_rows
         and (q_heads, kv_heads, head_dim) in ((3, 1, 256), (6, 1, 256), (12, 1, 256))
         and qkv.shape[1] == (q_heads + 2 * kv_heads) * head_dim
-        and torch.cuda.get_device_capability(qkv.device) in ((9, 0), (12, 0))
         and q_gamma.device == k_gamma.device == qkv.device
         and q_gamma.dtype in (torch.bfloat16, torch.float32)
         and k_gamma.dtype in (torch.bfloat16, torch.float32)

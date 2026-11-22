@@ -241,6 +241,8 @@ class PLEExecution:
             cache = self.kv_cache.get_layer_cache(layer_idx, PLE_NGRAM_CTX_TAG)
             page_size = int(cache.seq_size_per_block)
             if ctx_inputs.is_prefill:
+                if len(lengths) > 512:
+                    continue
                 contexts = ids.new_full(
                     (len(lengths), embedding.context_len), embedding.eos_token_id
                 )
@@ -729,7 +731,7 @@ class PLEExecution:
                 )
             state_write_mode = (
                 torch.empty(batch, dtype=torch.int32, device=ids.device)
-                if ids.is_cuda and 16 <= batch <= 128 and state_pool.is_contiguous()
+                if ids.is_cuda and 16 <= batch <= 512 and state_pool.is_contiguous()
                 else None
             )
             decode_plan = self._try_decode_plan(

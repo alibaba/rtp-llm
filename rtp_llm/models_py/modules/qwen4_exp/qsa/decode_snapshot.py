@@ -25,7 +25,7 @@ def prepare_decode_snapshot(positions, kv, kt, state, st):
             or (torch.cuda.get_device_capability(positions.device) == (9, 0))
         )
         and positions.ndim == 1
-        and 1 <= positions.numel() <= 64
+        and 1 <= positions.numel() <= 256
         and positions.dtype == torch.int32
         and kv.ndim == state.ndim == 3
         and kv.shape[1] in (16, 32)

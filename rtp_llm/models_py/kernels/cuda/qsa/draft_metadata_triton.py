@@ -34,7 +34,6 @@ def _draft_rows(
     LANES: tl.constexpr,
     CAPACITY: tl.constexpr,
     BLOCK: tl.constexpr,
-    REQUEST_BLOCK: tl.constexpr,
 ):
     row = tl.arange(0, BLOCK)
     request = row // LANES
@@ -46,12 +45,14 @@ def _draft_rows(
     tl.store(sources + row, tl.where(active, begin + lane, 0), row < CAPACITY)
     tl.store(visible + row, tl.where(active, prefix + lane + 1, 0), row < CAPACITY)
 
-    batch_id = tl.arange(0, REQUEST_BLOCK)
-    ends = tl.load(cu + batch_id + 1, batch_id < BATCH, other=2147483647)
-    owner = tl.sum(
-        ((row[:, None] >= ends[None, :]) & (batch_id[None, :] < BATCH)).to(tl.int32),
-        axis=1,
-    )
+    owner = tl.zeros([BLOCK], dtype=tl.int32)
+    for b0 in tl.static_range(0, BATCH, 32):
+        batch_id = b0 + tl.arange(0, 32)
+        ends = tl.load(cu + batch_id + 1, batch_id < BATCH, other=2147483647)
+        owner += tl.sum(
+            ((row[:, None] >= ends[None, :]) & (batch_id[None, :] < BATCH)).to(tl.int32),
+            axis=1,
+        )
     owner = tl.minimum(owner, BATCH - 1)
     packed_begin = tl.load(cu + owner).to(tl.int64)
     local = row.to(tl.int64) - packed_begin
@@ -76,7 +77,7 @@ def draft_rows(lengths, prefixes, cu, token_capacity):
         or lengths.ndim != 1
         or prefixes.shape != lengths.shape
         or cu.shape != (batch + 1,)
-        or not 1 <= batch <= 32
+        or not 1 <= batch <= 128
         or token_capacity % batch
         or not 1 <= token_capacity // batch <= 4
     ):
@@ -100,7 +101,6 @@ def draft_rows(lengths, prefixes, cu, token_capacity):
         lanes,
         token_capacity,
         tr.next_power_of_2(token_capacity),
-        tr.next_power_of_2(batch),
         num_warps=4,
     )
     return sources, inverse, valid, positions, visible
@@ -170,8 +170,8 @@ def replay_invalid(
         or table.ndim != 2
         or table.shape[0] != batch
         or table.shape[1] <= 0
-        or not 1 <= batch <= 32
-        or not 0 <= expected.numel() <= token_capacity <= 128
+        or not 1 <= batch <= 128
+        or not 0 <= expected.numel() <= token_capacity <= 512
         or expected.ndim != 1
         or position_factor not in (1, 3)
         or transported.numel() != token_capacity * position_factor

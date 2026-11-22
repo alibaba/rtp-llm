@@ -56,7 +56,7 @@ class TargetMetadataTest(unittest.TestCase):
             (p, 5, 4),
             (p, 4, 8),
             (p[:0], 4, 4),
-            (torch.zeros(33, device="cuda", dtype=torch.int32), 4, 4),
+            (torch.zeros(129, device="cuda", dtype=torch.int32), 4, 4),
         ):
             self.assertIsNone(try_target_metadata(value, q, ratio))
 

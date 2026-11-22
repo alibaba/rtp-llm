@@ -24,7 +24,7 @@ compact_moe_output_buffer: ContextVar[torch.Tensor | None] = ContextVar(
     "compact_moe_output_buffer", default=None
 )
 
-_STABLE_ALIGNMENT_MAX_ROUTES = 2560
+_STABLE_ALIGNMENT_MAX_ROUTES = 5120
 _DENSE_EXPERT_ROWS = 128
 _H20_COMPACT_EAGER_MAX_ROWS = 5120
 
@@ -209,6 +209,7 @@ def compact_fp8_decode(
             experts,
             max_routes=_STABLE_ALIGNMENT_MAX_ROUTES,
             global_start=global_start,
+            allow_unordered=routes > 640,
         )
         plans = ((_GEMM_CONFIG, True, layout),)
     flat_ids = ids.view(-1)
@@ -221,7 +222,7 @@ def compact_fp8_decode(
     down_input = x.new_empty((routes, intermediate))
     down_scale = x.new_empty((routes, groups), dtype=torch.float32)
     pdl = sm90_pdl_enabled(x.device)
-    if large:
+    if large or routes > 640:
         tile_rows = 8 if routes >= 5120 else 4
         _silu_mul_quantize_tiles[(triton.cdiv(routes, tile_rows), groups)](
             up,

@@ -248,7 +248,7 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         and (
             (gate_up.shape[0] in (4, 8, 12, 16) and gate_up.shape[1] == 1280)
             or (
-                1 <= gate_up.shape[0] <= 256
+                1 <= gate_up.shape[0] <= 512
                 and gate_up.shape[1] == 640
                 and (
                     os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
@@ -362,7 +362,7 @@ def is_supported(x, output=None):
     # These shapes save GPU time on H20, but the extra dispatch costs more in eager.
     if not small and not (
         (
-            (width in (320, 640, 2560, 10240) and 1 <= rows <= 256)
+            (width in (320, 640, 2560, 10240) and 1 <= rows <= 512)
             or (width == 2560 and rows == 1024)
         )
         and (

@@ -103,7 +103,7 @@ def try_decode_conv_gate(
         block_map is not None
         and lengths is not None
         and (dim, heads) in ((10240, 48), (5120, 24), (2560, 12), (1280, 6))
-        and 0 < x.shape[0] <= 128
+        and 0 < x.shape[0] <= 512
         and x.is_cuda
         and torch.version.hip is None
         and page == 64

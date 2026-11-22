@@ -119,7 +119,7 @@ class Fp8Linear(nn.Module):
                     and self.weight.shape[1] == 640
                 )
                 or (
-                    1 <= gate_up.shape[0] <= 256
+                    1 <= gate_up.shape[0] <= 512
                     and gate_up.shape[1] == 640
                     and tuple(self.weight.shape) == (2560, 320)
                     and torch.cuda.get_device_capability(gate_up.device) == (9, 0)

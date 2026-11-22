@@ -51,8 +51,8 @@ class FlashInferAllReduce:
         self._hidden_dim = 0
         self._dtype: Optional[torch.dtype] = None
         self._max_num_tokens = 0
-        if h20_max_num_tokens not in (128, 256):
-            raise ValueError("H20 all-reduce token capacity must be 128 or 256")
+        if h20_max_num_tokens not in (128, 256, 512, 1024):
+            raise ValueError("H20 all-reduce token capacity must be 128, 256, 512, or 1024")
         self._h20_max_num_tokens = h20_max_num_tokens
         self._flashinfer_comm = None
 
