@@ -25,7 +25,10 @@ def _tp_sum(x, group):
 def _worker(rank, rendezvous, permutation):
     torch.cuda.set_device(rank)
     dist.init_process_group(
-        "nccl", init_method=rendezvous, rank=rank, world_size=2,
+        "nccl",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
         timeout=timedelta(seconds=120),
     )
     try:
@@ -59,23 +62,43 @@ def _worker(rank, rendezvous, permutation):
             config.phy2log_path = path
             config.eplb_config.redundant_expert = redundant
             experts = Qwen4RoutedExperts(
-                4, 1, 128, 128, 1, 0, 2, rank, torch.bfloat16, config,
-                pc, moe, None, 0,
+                4,
+                1,
+                128,
+                128,
+                1,
+                0,
+                2,
+                rank,
+                torch.bfloat16,
+                config,
+                pc,
+                moe,
+                None,
+                0,
             ).to(device)
             for e in range(4):
-                experts.load_weights({
-                    f"{e}.gate_proj.weight": eye,
-                    f"{e}.up_proj.weight": eye,
-                    f"{e}.down_proj.weight": (1 + e) * eye,
-                })
+                experts.load_weights(
+                    {
+                        f"{e}.gate_proj.weight": eye,
+                        f"{e}.up_proj.weight": eye,
+                        f"{e}.down_proj.weight": (1 + e) * eye,
+                    }
+                )
             experts.process_weights_after_loading()
             experts.runtime.router.tp_all_reduce = _tp_sum
-            gate = torch.nn.Linear(128, 4, bias=False, dtype=torch.bfloat16, device=device)
+            gate = torch.nn.Linear(
+                128, 4, bias=False, dtype=torch.bfloat16, device=device
+            )
             gate.weight.copy_(16 * x)
-            owner = SimpleNamespace(experts=experts, gate=gate, shared_expert=None, shared_expert_gate=None)
+            owner = SimpleNamespace(
+                experts=experts, gate=gate, shared_expert=None, shared_expert_gate=None
+            )
             runtime = bind_moe(owner, config, pc, moe_config=moe, hw_kernel_config=hw)
             torch.testing.assert_close(runtime(x), reference, atol=0.005, rtol=0.01)
-            assert (runtime.fused_moe is experts.runtime) == (not path and not redundant)
+            assert (runtime.fused_moe is experts.runtime) == (
+                not path and not redundant
+            )
     finally:
         dist.destroy_process_group()
 

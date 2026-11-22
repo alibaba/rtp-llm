@@ -15,7 +15,9 @@ class ExpertRouteStats:
                     f"{tuple(tensor.shape)} {tensor.dtype}"
                 )
             if tensor.device != device:
-                raise ValueError("EPLB stats and MoE weights must be on the same device")
+                raise ValueError(
+                    "EPLB stats and MoE weights must be on the same device"
+                )
         self.logical = logical
         self.gpu_loads = gpu_loads
 

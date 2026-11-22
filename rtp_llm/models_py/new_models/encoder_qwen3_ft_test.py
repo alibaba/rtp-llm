@@ -1,6 +1,7 @@
 """Real offline checkpoints: production FT descriptors, shard writer and index."""
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -24,7 +25,6 @@ from transformers import (
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
-from rtp_llm.config.quant_config import Int8PerTensorQuantConfig
 from rtp_llm.models.bert import Bert, Roberta
 from rtp_llm.models.jina_bert.jina_bert import JinaBert
 from rtp_llm.models.megatron_bert import MegatronBert
@@ -58,6 +58,9 @@ class ProductionFtRoundTrip(unittest.TestCase):
             hf.mkdir()
             ft.mkdir()
             hf_config.save_pretrained(hf)
+            if static:
+                # This is the marker used by weights_convert for calibrated BERT.
+                (hf / "pertensorquant.ini").touch()
             tokenizer = PreTrainedTokenizerFast(
                 tokenizer_object=Tokenizer(
                     WordLevel(
@@ -84,7 +87,7 @@ class ProductionFtRoundTrip(unittest.TestCase):
                 )
                 cfg.task_type, cfg.data_type = task, "fp32"
                 if static:
-                    cfg.quant_config = Int8PerTensorQuantConfig()
+                    cfg.init_precision_config(KVCacheConfig(), "fp32")
                 if name == "qwen_3_dspark":
                     cfg.gen_num_per_cycle = 3
                     cfg.is_mtp = True
@@ -115,6 +118,8 @@ class ProductionFtRoundTrip(unittest.TestCase):
             )
             create_ft_export_job(service).dump_weight_as_ft_style("cpu", str(ft))
             shutil.copyfile(hf / "config.json", ft / "config.json")
+            if static:
+                shutil.copyfile(hf / "pertensorquant.ini", ft / "pertensorquant.ini")
             generate_ft_index(str(ft), {"TP_SIZE": "1", "EP_SIZE": "1", "DP_SIZE": "1"})
 
             def load(path, tag, method):
@@ -124,17 +129,25 @@ class ProductionFtRoundTrip(unittest.TestCase):
                     parallelism_config=pc,
                     load_method=method,
                     custom_weight_mappings=mappings,
-                    quant_config=QuantizationConfig("pertensor_quant")
-                    if static
-                    else None,
+                    quant_config=(
+                        QuantizationConfig("pertensor_quant") if static else None
+                    ),
                 )
                 return NewModelLoader(
                     config(path, tag), options, model_path=str(path)
                 ).load()
 
             reference = load(hf, name, "scratch")
+            readers = (
+                ("scratch",)
+                if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0"
+                else (
+                    "scratch",
+                    "fastsafetensors",
+                )
+            )
             for tag in (name, *aliases):
-                for method in ("scratch", "fastsafetensors"):
+                for method in readers:
                     with self.subTest(tag=tag, method=method):
                         result = load(ft, tag, method)
                         self.assertEqual(

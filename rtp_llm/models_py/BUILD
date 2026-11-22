@@ -2,7 +2,7 @@ load("@arch_config//:arch_select.bzl", "requirement", "triton_deps")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch")
 load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 load(":checkpoint_service_tests.bzl", "checkpoint_service_tests")
-load(":checkpoint_test_platforms.bzl", "ue8m0_test_env", "ue8m0_test_platforms")
+load(":checkpoint_test_platforms.bzl", "checkpoint_reader_test_env", "ue8m0_test_env", "ue8m0_test_platforms")
 
 py_test(
     name = "v4_fst_nogds_test",
@@ -672,6 +672,7 @@ py_test(
 
 py_test(
     name = "encoder_qwen3_ft_test",
+    env = checkpoint_reader_test_env(),
     srcs = [
         "new_models/encoder_qwen3_ft_test.py",
         "new_models/jina_bert/jina_checkpoint_test.py",

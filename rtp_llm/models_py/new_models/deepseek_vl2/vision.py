@@ -9,7 +9,13 @@ from rtp_llm.models_py.registry import register_model
 @register_model("deepseek_vl2_vision")
 class DeepSeekVLV2VisionOwner(RtpModule):
     fastsafetensors_load_isolated = True
-    _parts = ("vision", "projector", "image_newline", "view_seperator", "tile_indicators")
+    _parts = (
+        "vision",
+        "projector",
+        "image_newline",
+        "view_seperator",
+        "tile_indicators",
+    )
 
     def __init__(self, model_config, load_config):
         super().__init__()
@@ -21,7 +27,9 @@ class DeepSeekVLV2VisionOwner(RtpModule):
 
     def checkpoint_weight_name_filter(self):
         return lambda name: name.startswith(("vision.", "projector.")) or name in (
-            "image_newline", "view_seperator", "tile_indicators",
+            "image_newline",
+            "view_seperator",
+            "tile_indicators",
         )
 
     def load_weights(self, weights):
@@ -41,7 +49,8 @@ def load_vision(embedding, ckpt_path, compute_dtype, device, load_method):
         model_config={"model_type": "deepseek_vl2_vision", "embedding": embedding},
         model_path=ckpt_path,
         load_config=NewLoaderConfig(
-            compute_dtype=compute_dtype, device=device,
+            compute_dtype=compute_dtype,
+            device=device,
             load_method=getattr(load_method, "value", load_method),
         ),
     ).load()

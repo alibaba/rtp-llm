@@ -43,8 +43,12 @@ class DeepSeekVLV2ForCausalLM(GqaMoeForCausalLM):
             correction_bias=has_correction_bias(path, depth, prefix="language."),
         )
         install_gqa_moe_parameters(
-            owner, cfg, layer_ids=layer_ids, partitioned=partitioned,
-            layout=layout, qkv_bias=False,
+            owner,
+            cfg,
+            layer_ids=layer_ids,
+            partitioned=partitioned,
+            layout=layout,
+            qkv_bias=False,
         )
 
     def __init__(self, model_config, load_config):
@@ -72,4 +76,6 @@ class DeepSeekVLV2ForCausalLM(GqaMoeForCausalLM):
         embedded = self.embed_tokens(ids)
         if mask is not None and mask.numel():
             embedded = embedded * mask.unsqueeze(-1)
-        return self.multimodal_embedding_injector(embedded, features, mm.mm_features_locs)
+        return self.multimodal_embedding_injector(
+            embedded, features, mm.mm_features_locs
+        )

@@ -17,6 +17,8 @@ from rtp_llm.models_py.distributed.deepep_wrapper import DeepEPWrapper
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.test.deepep_normal_router_test import (
     init_router,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.test.deepep_normal_router_test import (
     test_single as run_ranks,
 )
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig

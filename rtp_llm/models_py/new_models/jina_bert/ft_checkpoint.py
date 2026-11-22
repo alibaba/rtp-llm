@@ -12,7 +12,7 @@ def load_jina_ft_checkpoint(model, checkpoint):
     b.full_table(
         "global.token_type_embedding.weight", "embeddings.token_type_embeddings.weight"
     )
-    b.norm("global.pre_decoder_layernorm", "embeddings.LayerNorm")
+    b.norm("global.pre_decoder_layernorm", "embeddings.LayerNorm", bias_suffix="bias")
 
     for index, layer in enumerate(model.encoder.layer):
         src, dst = f"layers.{index}.", f"encoder.layer.{index}."

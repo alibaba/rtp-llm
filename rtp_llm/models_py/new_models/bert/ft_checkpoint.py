@@ -42,9 +42,9 @@ class EncoderBindings(list):
     def field(self, source, target, convert=identity):
         self.append(RuntimeTensorBinding((source,), target, convert))
 
-    def norm(self, source, target):
+    def norm(self, source, target, *, bias_suffix="beta"):
         self.field(source + ".gamma", target + ".weight")
-        self.field(source + ".beta", target + ".bias")
+        self.field(source + "." + bias_suffix, target + ".bias")
 
     def linear(self, source, target):
         self.field(source + ".kernel", target + ".weight", matrix)
@@ -107,8 +107,9 @@ class EncoderBindings(list):
 
 def load_bert_ft_checkpoint(model, checkpoint):
     from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
-    from .static_int8 import BertStaticInt8Linear
+
     from .static_ft import bind_static_projection
+    from .static_int8 import BertStaticInt8Linear
 
     bindings = EncoderBindings(checkpoint)
     static = isinstance(
@@ -142,7 +143,9 @@ def load_bert_ft_checkpoint(model, checkpoint):
                 "global.pre_decoder_layernorm.bias", "embeddings.LayerNorm.bias"
             )
         else:
-            bindings.norm("global.pre_decoder_layernorm", "embeddings.LayerNorm")
+            bindings.norm(
+                "global.pre_decoder_layernorm", "embeddings.LayerNorm", bias_suffix="bias"
+            )
     else:
         # select_stage handles embedding/position; the old writer replicated
         # these additional globals, but only stage zero has BERT embeddings.

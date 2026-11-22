@@ -35,6 +35,7 @@ from rtp_llm.models_py.new_models.deepseek_v3_mtp.language import (
     DeepSeekV32MTPForCausalLM,
 )
 from rtp_llm.models_py.new_models.glm5.packed_experts import Glm5PackedExpertMethod
+from rtp_llm.models_py.read_spec import unwrap_checkpoint_tensor
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
@@ -199,9 +200,9 @@ class _Glm5Decoder(DeepSeekV32DecoderLayer):
             cmp_mlp = SimpleNamespace(
                 gate=mlp.gate,
                 correction_bias=mlp.gate.e_score_correction_bias,
-                fused_moe=None
-                if mlp.experts.requires_expert_id_mapping
-                else mlp.fused_moe,
+                fused_moe=(
+                    None if mlp.experts.requires_expert_id_mapping else mlp.fused_moe
+                ),
                 shared_expert=mlp.shared_experts,
                 ffn_tp_size=mlp.ffn_tp_size,
             )
@@ -379,20 +380,24 @@ class _Glm5Mapper:
         return dest
 
     def apply(self, weights):
-        for name, tensor in weights:
+        for name, value in weights:
             dest = self.map_name(name)
             # Direct FP8 linears take numerical FP32 block scales, not raw
             # exponent bytes. Packed routed scale storage stays byte-for-byte.
-            if dest.endswith(".weight_scale_inv") and tensor.dtype == getattr(
-                torch, "float8_e8m0fnu", None
-            ):
-                tensor = tensor.float()
-            yield dest, tensor
+            if dest.endswith(".weight_scale_inv"):
+                tensor, spec = unwrap_checkpoint_tensor(value)
+                if tensor.dtype == getattr(torch, "float8_e8m0fnu", None):
+                    converted = tensor.float()
+                    # The reader may already have applied a TP slice. Retain
+                    # its proof so the destination does not shard the scale twice.
+                    value = spec.wrap_sharded_tensor(converted) if spec else converted
+            yield dest, value
 
 
 def _legacy_packed_checkpoint(path):
     """Older mixed exports identify group-32 FP4 by expert .weight_scale."""
     from safetensors import safe_open
+
     from rtp_llm.models_py.weight_mapper import (
         discover_ckpt_files,
         safetensor_index_entries,

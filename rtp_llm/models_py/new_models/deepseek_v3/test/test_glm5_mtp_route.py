@@ -1,6 +1,7 @@
 """GLM-5 draft through BaseModel.load and both NewLoader backends."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,15 +21,46 @@ from rtp_llm.models_py.new_models.deepseek_v3.test.test_nextn_route import (
 from rtp_llm.models_py.new_models.glm5.language import (
     Glm5ForCausalLM,
     Glm5MTPForCausalLM,
+    _Glm5Mapper,
 )
+from rtp_llm.models_py.read_spec import make_sharded_read_spec, unwrap_checkpoint_tensor
 from rtp_llm.models_py.registry import get_model_class
+from rtp_llm.models_py.weight_mapper import WeightsMapper
 
 
 class _Draft(_CpuCheckpoint, Glm5Mtp):
     pass
 
 
+_READERS = (
+    ("scratch",)
+    if os.environ.get("NEWLOADER_TEST_NATIVE_FST") == "0"
+    else (
+        "scratch",
+        "fastsafetensors",
+    )
+)
+
+
 class Glm5DraftRouteTest(unittest.TestCase):
+    def test_dense_scale_mapping_preserves_tp_shard(self):
+        mapper = _Glm5Mapper(WeightsMapper(prefix_mapping={"model.": ""}), packed=True)
+        name = "model.layers.0.self_attn.q_b_proj.scale"
+        spec = make_sharded_read_spec(name, (4, 1), 0, 2, 1)
+        source = torch.tensor([[1.0], [2.0], [4.0], [8.0]])
+        dtypes = [torch.float32]
+        if hasattr(torch, "float8_e8m0fnu"):
+            dtypes.append(torch.float8_e8m0fnu)
+        for dtype in dtypes:
+            with self.subTest(dtype=dtype):
+                local = spec.materialize(source.to(dtype))
+                key, value = next(mapper.apply([(name, local)]))
+                tensor, proof = unwrap_checkpoint_tensor(value)
+                self.assertEqual(key, "layers.0.self_attn.q_b_proj.weight_scale_inv")
+                self.assertIs(proof, spec)
+                torch.testing.assert_close(tensor, source[2:])
+
+    @unittest.skipUnless(hasattr(torch, "float8_e8m0fnu"), "requires UE8M0 torch dtype")
     def test_mixed_checkpoint_keeps_fp4_nibbles_and_group32_scales(self):
         cfg, data, prefix = fixture(False)
         cfg.update(
@@ -46,7 +78,7 @@ class Glm5DraftRouteTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             (Path(root) / "config.json").write_text(json.dumps(cfg))
             save_file(data, str(Path(root) / "model.safetensors"))
-            for method in ("scratch", "fastsafetensors"):
+            for method in _READERS:
                 with self.subTest(method=method):
                     service = load_service(root, method, cls=_Draft, tag="glm_5_mtp")
                     experts = service.py_model.layers[0].mlp.experts
@@ -101,7 +133,7 @@ class Glm5DraftRouteTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as root:
                 (Path(root) / "config.json").write_text(json.dumps(cfg))
                 save_file(data, str(Path(root) / "model.safetensors"))
-                for method in ("scratch", "fastsafetensors"):
+                for method in _READERS:
                     with self.subTest(combined=combined, method=method):
                         service = load_service(root, method, cls=_Draft, tag=tag)
                         model = service.py_model

@@ -46,9 +46,7 @@ class Qwen3DSparkWeight(QWenV3Weight):
         )
         if self._d2t_path is not None:
             transform = (
-                dspark_offset_d2t_to_absolute
-                if self._d2t_path == "d2t"
-                else identity
+                dspark_offset_d2t_to_absolute if self._d2t_path == "d2t" else identity
             )
             info.weights.append(
                 AtomicWeight(
