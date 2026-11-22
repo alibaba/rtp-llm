@@ -325,6 +325,14 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
         logits = self._draft_head_graph.take(hidden)
         return super().compute_fp8_lm_head_for_tp(hidden) if logits is None else logits
 
+    def try_argmax_fp8_lm_head_for_tp(self, local, valid_vocab_size: int = 0):
+        workspace = self.__dict__.get("_head_ipc_gather")
+        return (
+            workspace.try_argmax(local, valid_vocab_size)
+            if workspace is not None
+            else None
+        )
+
     def close(self) -> None:
         self._draft_head_graph.clear_activation()
         self._draft_head_graph.outputs.clear()

@@ -5,6 +5,7 @@ from functools import partial
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.flashinfer_all_reduce import get_flashinfer_allreduce
 from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
+from rtp_llm.models_py.modules.qwen4_exp.tp2_ar_hc_fused import try_defer_attn_tp2
 
 
 def install_target_graph_all_reduce(attention, mlp, *, fp8_gdn_decode=False):
@@ -24,6 +25,9 @@ def install_target_graph_all_reduce(attention, mlp, *, fp8_gdn_decode=False):
 
 
 def all_reduce_target_graph(tensor, group, *, inplace=True):
+    deferred = try_defer_attn_tp2(tensor, group)
+    if deferred is not None:
+        return deferred
     with record_function_range("qwen4.tp_all_reduce"):
         if tensor.is_cuda and group == collective_torch.Group.TP:
             communicator = get_flashinfer_allreduce()

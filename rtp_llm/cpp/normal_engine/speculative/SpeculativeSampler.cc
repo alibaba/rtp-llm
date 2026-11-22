@@ -12,7 +12,9 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
     FastTopKSamplerOutput output;
 
     if (top_k == 1) {
-        output.token_ids = torch::argmax(logits, -1, true);
+        output.token_ids = (logits.scalar_type() == torch::kInt64 && logits.dim() == 2 && logits.size(1) == 1) ?
+                               (d2t_map_.defined() ? logits.clone() : logits) :
+                               torch::argmax(logits, -1, true);
         // Argmax is a point mass. Rejection sampling consumes the mapped token
         // directly, without materializing or carrying a dense one-hot tensor.
     } else {

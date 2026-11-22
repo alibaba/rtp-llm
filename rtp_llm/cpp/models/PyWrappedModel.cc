@@ -1410,7 +1410,9 @@ torch::Tensor PyWrappedModel::sampleDraftGraphTokens(const PyModelInputs& inputs
     draft_inputs.lm_output_indexes = inputs.input_ids;
     draft_inputs.need_all_logits   = false;
     auto logits                    = callForwardPostLayers(outputs.hidden_states, draft_inputs, true).logits;
-    auto tokens                    = torch::argmax(logits, -1, true);
+    auto tokens = (logits.scalar_type() == torch::kInt64 && logits.dim() == 2 && logits.size(1) == 1) ?
+                      (weights_.d2t_map.defined() ? logits.clone() : logits) :
+                      torch::argmax(logits, -1, true);
     execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
     return tokens.to(torch::kInt32);
 }
@@ -1637,11 +1639,31 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
         printTorchTensorData(logits, "logits");
+        bool tp_argmax_done = false;
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
-            logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
+            if (use_bf16_tp_head && !need_all_logits && dspark_model_role_ == DSparkModelRole::NONE) {
+                py::gil_scoped_acquire gil;
+                if (py::hasattr(py_model_, "try_argmax_fp8_lm_head_for_tp")) {
+                    auto argmax_res = py_model_.attr("try_argmax_fp8_lm_head_for_tp")(
+                        logits, static_cast<int64_t>(description_.output_vocab_size));
+                    if (!argmax_res.is_none()) {
+                        auto token_ids = argmax_res.cast<torch::Tensor>();
+                        TORCH_CHECK(token_ids.is_cuda() && token_ids.device() == logits.device()
+                                        && token_ids.scalar_type() == torch::kInt64 && token_ids.dim() == 2
+                                        && token_ids.size(0) == logits.size(0) && token_ids.size(1) == 1
+                                        && token_ids.is_contiguous(),
+                                    "Head IPC argmax returned an invalid tensor");
+                        logits         = std::move(token_ids);
+                        tp_argmax_done = true;
+                    }
+                }
+            }
+            if (!tp_argmax_done) {
+                logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
+            }
         }
-        if (description_.output_vocab_size > 0) {
+        if (description_.output_vocab_size > 0 && !tp_argmax_done) {
             RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
                                         && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
                                     "output vocabulary gathered width mismatch: expected %zu, got %ld",
@@ -1651,7 +1673,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
-            RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
+            if (!tp_argmax_done) {
+                RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
+            }
         }
         outputs.logits            = logits;
         outputs.hidden_states     = last_hidden;
@@ -1709,13 +1733,35 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
         }
     }
     printTorchTensorData(logits, "logits");
+    bool tp_argmax_done = false;
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
-        logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
+        if (use_bf16_tp_head && dspark_model_role_ == DSparkModelRole::NONE) {
+            py::gil_scoped_acquire gil;
+            if (py::hasattr(py_model_, "try_argmax_fp8_lm_head_for_tp")) {
+                auto argmax_res = py_model_.attr("try_argmax_fp8_lm_head_for_tp")(
+                    logits, static_cast<int64_t>(description_.output_vocab_size));
+                if (!argmax_res.is_none()) {
+                    auto token_ids = argmax_res.cast<torch::Tensor>();
+                    TORCH_CHECK(token_ids.is_cuda() && token_ids.device() == logits.device()
+                                    && token_ids.scalar_type() == torch::kInt64 && token_ids.dim() == 2
+                                    && token_ids.size(0) == logits.size(0) && token_ids.size(1) == 1
+                                    && token_ids.is_contiguous(),
+                                "Head IPC argmax returned an invalid tensor");
+                    logits         = std::move(token_ids);
+                    tp_argmax_done = true;
+                }
+            }
+        }
+        if (!tp_argmax_done) {
+            logits = tpSyncEmbeddingOrLogits(logits, use_bf16_tp_head);
+        }
     }
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
-        RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
+        if (!tp_argmax_done) {
+            RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
+        }
     }
     // 3rd field (all_hidden_states) is the small [num_lm, hidden_size] — the whole
     // point of this path is to never materialize the full [seq, hidden] sequence.
