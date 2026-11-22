@@ -621,7 +621,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
         self.assertIsInstance(caught.exception.__cause__, ImportError)
 
     def test_rejects_incompatible_kvcm_object_api_before_registration(self):
-        for incompatible_version in (1, 3, True, "2", None):
+        for incompatible_version in (1, 4, True, "2", "3", None):
             with self.subTest(version=incompatible_version):
                 package = ModuleType("kv_cache_manager")
                 package.__path__ = []
@@ -684,10 +684,13 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
                 ):
                     kvcm_client._load_kvcm_client_types(require_address_update=True)
             native.KV_META_OBJECT_ADDRESS_UPDATE_VERSION = 1
-            self.assertEqual(
-                kvcm_client._load_kvcm_client_types(require_address_update=True)[0],
-                client_module.KvMetaObjectClient,
-            )
+            for version in (2, 3):
+                with self.subTest(object_api_version=version):
+                    client_module.KV_META_OBJECT_API_VERSION = version
+                    self.assertEqual(
+                        kvcm_client._load_kvcm_client_types(require_address_update=True)[0],
+                        client_module.KvMetaObjectClient,
+                    )
             client_module.KvMetaObjectClient.update_addresses = None
             with self.assertRaisesRegex(RuntimeError, "address update"):
                 kvcm_client._load_kvcm_client_types(require_address_update=True)

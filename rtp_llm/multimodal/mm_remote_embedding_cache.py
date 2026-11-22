@@ -9,10 +9,11 @@ import hashlib
 import json
 import logging
 import os
+import random
 import threading
 import time
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import torch
@@ -24,6 +25,7 @@ from rtp_llm.multimodal.kvcm.lookup import (
     KvMetaLookupError,
     KvMetaLookupTimeout,
 )
+from rtp_llm.multimodal.kvcm.native import USE_NATIVE_EMB
 from rtp_llm.multimodal.kvcm.registered_transport import _safe_error_context
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
@@ -34,6 +36,16 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 # Python 3.10 keeps future wait timeouts separate from built-in IO timeouts.
 _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
+_USE_NATIVE_SNAPSHOT = USE_NATIVE_EMB
+_BLOCKING_CUDA_EVENTS = USE_NATIVE_EMB
+_RETRY_METADATA_TRANSPORT = os.environ.get("MM_EMB_METADATA_TRANSPORT_RETRY") == "1"
+_SLOW_RESTORE_COMPONENTS = (
+    "slow_restore_header",
+    "slow_restore_layout",
+    "slow_restore_cuda_payload",
+    "slow_restore_host_resume",
+    "slow_restore_python_object",
+)
 
 
 def _is_write_in_progress(error):
@@ -45,6 +57,17 @@ def _is_write_in_progress(error):
         and getattr(error, "operation", None) == "save"
         and getattr(error, "unknown_outcome", True) is False
         and getattr(error, "data_transfer_may_be_inflight", None) is False
+    )
+
+
+def _is_transfer_timeout(error):
+    if isinstance(error, _TIMEOUT_ERRORS):
+        return True
+    return (
+        type(error).__name__ == "KvMetaObjectClientError"
+        and getattr(error, "operation", None) in ("load", "save")
+        and getattr(getattr(error, "code", None), "name", None)
+        in ("ER_SDK_TIMEOUT", "ER_SDK_TIMEOUT_BUFFER_SAFE")
     )
 
 
@@ -71,6 +94,7 @@ def _log_error(marker, error, **context):
 
 class MMRemoteEmbeddingCache:
     _GDR_READ_SLOT_WAIT_SECONDS = 0.025
+    _METADATA_RETRY_MAX_MS = 10
 
     def __init__(
         self,
@@ -253,9 +277,17 @@ class MMRemoteEmbeddingCache:
                     observe_hold=cls._observe_buffer_hold,
                     observe_lease=cls._observe_gdr_lease,
                     observe_arena=cls._observe_gdr_arena,
+                    observe_acquire_failure=cls._observe_gdr_acquire_failure,
+                    observe_lock_hold=cls._observe_gdr_lock_hold,
+                    observe_header=cls._report_read_header if USE_NATIVE_EMB else None,
                     direct_payload=True,
                 )
-            return raw_factory()
+            client = raw_factory()
+            logging.info(
+                "MM_EMB_REMOTE_BACKEND requested_native=%d read=legacy_staging write=legacy_staging",
+                USE_NATIVE_EMB,
+            )
+            return client
 
         # PACE seals the external GPU registration snapshot at client init.
         # Initialize before readiness, outside a request's read deadline, and
@@ -460,6 +492,22 @@ class MMRemoteEmbeddingCache:
         )
 
     @classmethod
+    def _observe_gdr_acquire_failure(cls, for_write, reason):
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_GDR_ACQUIRE_FAILURE_QPS_METRIC,
+            1,
+            {"operation": "write" if for_write else "read", "reason": reason},
+        )
+
+    @classmethod
+    def _observe_gdr_lock_hold(cls, for_write, phase, duration_ns):
+        cls._report_metric(
+            GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
+            duration_ns / 1_000_000,
+            {"operation": "write" if for_write else "read", "phase": phase},
+        )
+
+    @classmethod
     def _observe_gdr_arena(cls, total, free, largest_free):
         for stage, nbytes in (
             ("total", total),
@@ -528,6 +576,56 @@ class MMRemoteEmbeddingCache:
         )
         return elapsed_ms
 
+    @classmethod
+    def _report_header_size(cls, operation, length, copies):
+        # Size bins describe only JSON bytes, excluding the fixed prefix and pad.
+        # The 1008 boundary is exactly where the existing 1024-byte read spills.
+        bounds = (256, 512, 768, 1008, 1536, 2048, 4096, 8192, 16384, 65536)
+        band = str(next((upper for upper in bounds if length <= upper), "+Inf"))
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_HEADER_OBSERVATION_QPS_METRIC,
+            1,
+            {"operation": operation, "json_size_upper": band, "copies": str(copies)},
+        )
+
+    @classmethod
+    def _report_read_header(cls, length, d2h_bytes, copies):
+        cls._report_header_size("read", length, copies)
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_HEADER_D2H_BYTES_PER_SECOND_METRIC,
+            d2h_bytes,
+            {"copies": str(copies)},
+        )
+
+    def _fetch_meta(self, client, key, trace_id, timeout_ms, deadline):
+        try:
+            return client.get_object_meta(key, trace_id=trace_id, timeout_ms=timeout_ms)
+        except Exception as error:
+            if (
+                not _RETRY_METADATA_TRANSPORT
+                or getattr(error, "operation", None) != "get_object_meta"
+                or getattr(error, "data_transfer_may_be_inflight", True) is not False
+                or getattr(getattr(error, "code", None), "name", None)
+                != "ER_INVALID_GRPCSTATUS"
+            ):
+                raise
+            # Exact-object metadata is idempotent. Bound extra delay on the
+            # retry while keeping the original request budget on the first call.
+            retry_ms = min(
+                self._METADATA_RETRY_MAX_MS, int((deadline - time.monotonic()) * 1000)
+            )
+            if retry_ms > 0:
+                try:
+                    with self._observe_stage("read", "metadata_retry"):
+                        return client.get_object_meta(
+                            key, trace_id=trace_id, timeout_ms=retry_ms
+                        )
+                except Exception:
+                    # The retry stage records its outcome separately. Preserve
+                    # the original typed transport failure for the caller.
+                    pass
+            raise
+
     def _lookup_object_meta(self, client, key, trace_id, timeout_ms, deadline):
         outcome = "error"
         try:
@@ -535,9 +633,7 @@ class MMRemoteEmbeddingCache:
                 "read", "metadata"
             ):
                 try:
-                    meta = client.get_object_meta(
-                        key, trace_id=trace_id, timeout_ms=timeout_ms
-                    )
+                    meta = self._fetch_meta(client, key, trace_id, timeout_ms, deadline)
                 except Exception as error:
                     # The typed lookup error is metadata-only; discovery can
                     # recover on the existing client without GPU registration.
@@ -625,12 +721,11 @@ class MMRemoteEmbeddingCache:
         outcome = "success"
         try:
             yield
-        except _TIMEOUT_ERRORS:
-            outcome = "timeout"
-            raise
         except Exception as error:
             outcome = (
-                "skipped"
+                "timeout"
+                if _is_transfer_timeout(error)
+                else "skipped"
                 if stage == "transfer"
                 and (
                     (operation == "write" and _is_write_in_progress(error))
@@ -641,36 +736,40 @@ class MMRemoteEmbeddingCache:
             raise
         finally:
             elapsed_ms = (time.perf_counter() - started) * 1000
-            metric_stage = (
-                "metadata_put_start"
-                if operation == "write" and outcome == "skipped" and stage == "transfer"
-                else stage
-            )
+            cls._report_stage_latency(operation, stage, outcome, elapsed_ms, nbytes)
+
+    @classmethod
+    def _report_stage_latency(cls, operation, stage, outcome, elapsed_ms, nbytes=0):
+        metric_stage = (
+            "metadata_put_start"
+            if operation == "write" and outcome == "skipped" and stage == "transfer"
+            else stage
+        )
+        cls._report_metric(
+            GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+            elapsed_ms,
+            {"operation": operation, "stage": metric_stage, "status": outcome},
+        )
+        if stage == "transfer" and outcome != "skipped":
+            tags = {"operation": operation}
+            completed_bytes = nbytes if outcome == "success" else 0
             cls._report_metric(
-                GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
-                elapsed_ms,
-                {"operation": operation, "stage": metric_stage, "status": outcome},
+                AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
+                completed_bytes,
+                tags,
             )
-            if stage == "transfer" and outcome != "skipped":
-                tags = {"operation": operation}
-                completed_bytes = nbytes if outcome == "success" else 0
+            if completed_bytes:
                 cls._report_metric(
-                    AccMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
                     completed_bytes,
                     tags,
                 )
-                if completed_bytes:
+                if elapsed_ms > 0:
                     cls._report_metric(
-                        GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
-                        completed_bytes,
+                        GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                        completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
                         tags,
                     )
-                    if elapsed_ms > 0:
-                        cls._report_metric(
-                            GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
-                            completed_bytes * 1000 / elapsed_ms / (1024 * 1024),
-                            tags,
-                        )
 
     @classmethod
     def _report_outcome(cls, operation, outcome, *, stage="all"):
@@ -849,8 +948,26 @@ class MMRemoteEmbeddingCache:
                 )
 
         events = []
+        native_snapshot = None
+        if cuda_indices and _USE_NATIVE_SNAPSHOT:
+            import librtp_compute_ops
+
+            native_snapshot = getattr(
+                librtp_compute_ops, "snapshot_emb_cuda_tensors", None
+            )
         for device, indices in cuda_indices.items():
             with cuda_graph_gate.operation():
+                if native_snapshot is not None:
+                    producer = streams.get(device)
+                    snapshots, ready = native_snapshot(
+                        [plan.tensors[i] for i in indices],
+                        producer.stream_id if producer is not None else None,
+                        _BLOCKING_CUDA_EVENTS,
+                    )
+                    for i, snapshot in zip(indices, snapshots):
+                        plan.tensors[i] = snapshot
+                    events.append(ready)
+                    continue
                 caller = torch.cuda.current_stream(device)
                 producer = streams.get(device, caller)
                 # Inspection can finish on a different stream. Order later
@@ -858,13 +975,25 @@ class MMRemoteEmbeddingCache:
                 if producer != caller:
                     producer.wait_stream(caller)
                 with torch.cuda.stream(producer):
-                    for i in indices:
-                        tensor = plan.tensors[i]
-                        plan.tensors[i] = tensor.detach().clone(
-                            memory_format=torch.contiguous_format
+                    if _USE_NATIVE_SNAPSHOT:
+                        from librtp_compute_ops import snapshot_emb_tensors
+
+                        snapshots = snapshot_emb_tensors(
+                            [plan.tensors[i] for i in indices]
                         )
-                        tensor.record_stream(producer)
-                    ready = producer.record_event()
+                        for i, snapshot in zip(indices, snapshots):
+                            plan.tensors[i] = snapshot
+                    else:
+                        for i in indices:
+                            tensor = plan.tensors[i]
+                            plan.tensors[i] = tensor.detach().clone(
+                                memory_format=torch.contiguous_format
+                            )
+                            tensor.record_stream(producer)
+                    event = (
+                        torch.cuda.Event(blocking=True) if _BLOCKING_CUDA_EVENTS else None
+                    )
+                    ready = producer.record_event(event)
                 if producer != caller:
                     caller.wait_event(ready)
                 events.append(ready)
@@ -876,6 +1005,7 @@ class MMRemoteEmbeddingCache:
         """Admit an encoder result and enqueue its owned snapshot for upload."""
         if key is None or self._skip_quarantined("write"):
             return
+        started = time.perf_counter()
         try:
             inspection = None
             if entry is not None:
@@ -890,16 +1020,17 @@ class MMRemoteEmbeddingCache:
                         message=verdict.message,
                         request_scoped=self.request_scoped_inspection,
                     )
-            plan = plan_object(
-                {
-                    "version": 1,
-                    "result": result,
-                    "greennet": inspection,
-                    "cache_key": key,
-                },
-                max_bytes=self.max_object_bytes,
-                checksum=False,
-            )
+            with self._observe_stage("write", "plan_submit"):
+                plan = plan_object(
+                    {
+                        "version": 1,
+                        "result": result,
+                        "greennet": inspection,
+                        "cache_key": key,
+                    },
+                    max_bytes=self.max_object_bytes,
+                    checksum=False,
+                )
         except (ValueError, TypeError, RecursionError):
             self._count("encode_skip")
             self._report_skip("write", "unsupported_payload")
@@ -917,7 +1048,6 @@ class MMRemoteEmbeddingCache:
             with self._lock:
                 self._pending_writes.discard(key)
             return
-        started = time.perf_counter()
         self.record(
             "encoder_result_admitted",
             key=key,
@@ -935,7 +1065,8 @@ class MMRemoteEmbeddingCache:
             self._release(cost)
 
         try:
-            ready_events = self._snapshot(plan, producer_streams)
+            with self._observe_stage("write", "snapshot_submit"):
+                ready_events = self._snapshot(plan, producer_streams)
         except Exception as error:
             self.record(
                 "write_error",
@@ -951,6 +1082,19 @@ class MMRemoteEmbeddingCache:
             return
         nbytes, tensors = plan.nbytes, plan.header["tensors"]
 
+        def record_success():
+            self._count("write_success")
+            if USE_NATIVE_EMB and random.getrandbits(4) == 0:
+                self._report_header_size("write_plan", len(plan.header_bytes), 0)
+            self.record(
+                "store_success",
+                key=key,
+                trace_id=trace_id,
+                write_source="encoder_result",
+                nbytes=nbytes,
+                tensors=tensors,
+            )
+
         def write():
             client = None
             slot = None
@@ -964,6 +1108,84 @@ class MMRemoteEmbeddingCache:
                     outcome = "skipped"
                     self._report_skip("write", "write_queue_expired")
                     return
+                native_write = getattr(type(self._gdr_pool), "try_native_write", None)
+                if callable(native_write) and not self._gdr_pool_quarantined():
+                    failure_stage = "native_write"
+                    result = native_write(
+                        self._gdr_pool, plan, ready_events, key, trace_id, queue_deadline
+                    )
+                    if result is not None:
+                        (
+                            state,
+                            code,
+                            inflight,
+                            wait_ns,
+                            acquire_ns,
+                            pack_ns,
+                            sdk_ns,
+                            _,
+                            _,
+                            lease_ns,
+                        ) = result
+                        if wait_ns and ready_events:
+                            self._report_stage_latency(
+                                "write", "producer_wait", "success", wait_ns / 1e6
+                            )
+                        if acquire_ns:
+                            self._report_stage_latency(
+                                "write", "gdr_acquire", "success", acquire_ns / 1e6
+                            )
+                        if pack_ns:
+                            for phase in ("pack", "native_pack_fenced"):
+                                self._report_stage_latency(
+                                    "write", phase, "success", pack_ns / 1e6
+                                )
+                        status = state.name
+                        if lease_ns:
+                            self._report_stage_latency(
+                                "write",
+                                "gdr_lease_hold",
+                                "error" if inflight else "success",
+                                lease_ns / 1e6,
+                            )
+                        if status == "Expired":
+                            outcome = "skipped"
+                            self._report_skip(
+                                "write",
+                                "write_producer_wait_expired"
+                                if ready_events and not acquire_ns
+                                else "write_queue_expired",
+                            )
+                            return
+                        if status in ("ProducerFailure", "CudaFailure"):
+                            failure_stage = "producer_wait" if status == "ProducerFailure" else "pack"
+                            raise RuntimeError("native EMB CUDA " + failure_stage + " failed")
+                        failure_stage = "transfer"
+                        api_ms = sdk_ns / 1e6
+                        plan.tensors.clear()
+                        error = (
+                            self._gdr_pool.native_save_error(code, inflight)
+                            if status == "SdkFailure"
+                            else None
+                        )
+                        transfer_status = (
+                            "success" if error is None
+                            else "skipped" if _is_write_in_progress(error)
+                            else "timeout" if _is_transfer_timeout(error)
+                            else "error"
+                        )
+                        self._report_stage_latency(
+                            "write", "native_save", transfer_status, api_ms
+                        )
+                        self._report_stage_latency(
+                            "write", "transfer", transfer_status, api_ms, nbytes
+                        )
+                        if error is not None:
+                            raise error
+                        outcome = "success"
+                        record_success()
+                        return
+
                 if ready_events and not self._gdr_pool_quarantined():
                     failure_stage = "producer_wait"
                     with self._observe_stage(
@@ -995,7 +1217,9 @@ class MMRemoteEmbeddingCache:
                 # storage; pack is the first operation that needs that storage.
                 failure_stage = "client_acquire"
                 if self._gdr_pool is not None:
-                    with self._observe_inflight("write_gdr_wait"):
+                    with self._observe_inflight(
+                        "write_gdr_wait"
+                    ), self._observe_stage("write", "gdr_acquire"):
                         slot = self._gdr_pool.acquire(
                             nbytes=plan.nbytes, for_write=True, timeout=remaining
                         )
@@ -1041,15 +1265,7 @@ class MMRemoteEmbeddingCache:
                             slot = None
                 api_ms = (time.perf_counter() - api_started) * 1000
                 outcome = "success"
-                self._count("write_success")
-                self.record(
-                    "store_success",
-                    key=key,
-                    trace_id=trace_id,
-                    write_source="encoder_result",
-                    nbytes=buffer.numel(),
-                    tensors=tensors,
-                )
+                record_success()
             except Exception as error:
                 if _is_write_in_progress(error):
                     outcome = "skipped"
@@ -1059,7 +1275,7 @@ class MMRemoteEmbeddingCache:
                     )
                 else:
                     outcome = (
-                        "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
+                        "timeout" if _is_transfer_timeout(error) else "error"
                     )
                     self.record(
                         "write_error",
@@ -1085,7 +1301,7 @@ class MMRemoteEmbeddingCache:
                     queue_ms=queue_ms,
                     sdk_api_ms=api_ms,
                     status=outcome,
-                    scope="snapshot_queue_client_acquire_sdk_save_and_validation",
+                    scope="plan_admission_snapshot_queue_client_acquire_sdk_save_and_validation",
                 )
                 if client is not None:
                     self._release_client(client)
@@ -1150,6 +1366,63 @@ class MMRemoteEmbeddingCache:
             raise ValueError("remote object is not a multimodal result")
         return value, approval
 
+    def _finish_native_read(self, result, size, key, consumer_stream):
+        (
+            state, value, code, inflight, acquire_ns, sdk_ns, restore_ns, held_ns,
+            _, _, header_size, header_bytes, header_copies, header_ns,
+        ) = result
+        status = state.name
+        error = self._gdr_pool.native_read_error(code, inflight) if status == "SdkFailure" else None
+        sdk_timed_out = error is not None and _is_transfer_timeout(error)
+        if status == "Expired" or sdk_timed_out:
+            stage_status = "timeout"
+        elif error is not None and _is_read_miss(error):
+            stage_status = "skipped"
+        elif status in ("SdkFailure", "CudaFailure", "InvalidObject"):
+            stage_status = "error"
+        else:
+            stage_status = "success"
+        if acquire_ns:
+            self._report_stage_latency("read", "gdr_acquire", "success", acquire_ns / 1e6)
+        if held_ns:
+            self._report_stage_latency("read", "gdr_lease_hold", stage_status, held_ns / 1e6)
+        if sdk_ns:
+            sdk_status = "success"
+            if status == "SdkFailure":
+                sdk_status = "timeout" if sdk_timed_out else "error"
+            self._report_stage_latency(
+                "read", "native_load", sdk_status, sdk_ns / 1e6
+            )
+            self._report_stage_latency(
+                "read", "transfer", stage_status, (sdk_ns + restore_ns) / 1e6, size
+            )
+        if restore_ns:
+            self._report_stage_latency(
+                "read", "native_object_restore", stage_status, restore_ns / 1e6
+            )
+        if header_ns:
+            self._report_read_header(header_size, header_bytes, header_copies)
+            self._report_stage_latency("read", "native_restore_header", stage_status, header_ns / 1e6)
+        if status == "Expired":
+            raise TimeoutError("registered EMB read expired")
+        if error is not None:
+            raise error
+        if status == "InvalidObject":
+            raise ValueError("invalid registered EMB object")
+        if status == "CudaFailure":
+            raise RuntimeError("native registered EMB restore failed")
+        if status == "LayoutFallback":
+            # Only the rare unsupported layout takes a host snapshot. The
+            # original transfer is already complete and its lease returned.
+            with cuda_graph_gate.operation(), (
+                torch.cuda.stream(consumer_stream) if consumer_stream is not None else nullcontext()
+            ):
+                return unpack_object(
+                    value, cuda_device=self.cuda_device, max_bytes=self.max_object_bytes,
+                    expected_key=key, observe_stage=self._observe_stage,
+                )
+        return value
+
     def load(
         self, key, *, timeout_ms=None, trace_id=None, entry=None, restore_approval=True
     ):
@@ -1193,13 +1466,34 @@ class MMRemoteEmbeddingCache:
                 client = self._get_client()
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
+                native_read = getattr(type(self._gdr_pool), "try_native_read", None)
+                if self._direct_payload and callable(native_read):
+                    timing["stage"] = "transfer"
+                    api_started = time.perf_counter()
+                    result = native_read(self._gdr_pool, meta, key, trace_id, deadline, consumer_stream)
+                    if result is not None:
+                        try:
+                            value = self._finish_native_read(result, size, key, consumer_stream)
+                        except Exception as error:
+                            if _is_read_miss(error):
+                                timing["outcome"] = "miss"
+                                return None
+                            self._retire_client(client, error)
+                            raise
+                        timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
+                        return value
+                    unwrap = getattr(type(self._gdr_pool), "unwrap_object_meta", None)
+                    if callable(unwrap):
+                        meta = unwrap(meta)
                 if self._gdr_pool is not None:
                     timing["stage"] = "client_acquire"
                     slot_wait = min(
                         self._GDR_READ_SLOT_WAIT_SECONDS,
                         max(0.0, (deadline - time.monotonic()) / 2),
                     )
-                    with self._observe_inflight("read_gdr_wait"):
+                    with self._observe_inflight(
+                        "read_gdr_wait"
+                    ), self._observe_stage("read", "gdr_acquire"):
                         slot = self._gdr_pool.acquire(nbytes=size, timeout=slot_wait)
                     if slot is None:
                         timing["outcome"] = "skipped"
@@ -1229,6 +1523,7 @@ class MMRemoteEmbeddingCache:
                                 consumer_stream=consumer_stream,
                                 expected_key=key,
                                 trace_id=trace_id,
+                                deadline=deadline,
                             )
                         else:
                             # CPU views may outlive the transfer. Give them
@@ -1333,7 +1628,9 @@ class MMRemoteEmbeddingCache:
             if self._direct_payload:
                 # Restore on the leased slot stream, but keep the independent
                 # allocations protected while the request stream consumes them.
-                with cuda_graph_gate.operation():
+                with self._observe_stage(
+                    "read", "consumer_stream"
+                ), cuda_graph_gate.operation():
                     consumer_stream = torch.cuda.current_stream(self.cuda_device)
             if not self._transfer_slots.acquire(blocking=False):
                 self._count("admission_skip")
@@ -1349,7 +1646,11 @@ class MMRemoteEmbeddingCache:
                 release_transfer()
                 raise
             future.add_done_callback(release_cancelled_transfer)
-            buffer = future.result(timeout=max(0, deadline - time.monotonic()))
+            result_wait_started = time.perf_counter()
+            try:
+                buffer = future.result(timeout=max(0, deadline - time.monotonic()))
+            finally:
+                self._report_queue_wait("read_result", result_wait_started)
             if buffer is None:
                 outcome = timing["outcome"]
                 if outcome == "miss":
@@ -1358,6 +1659,8 @@ class MMRemoteEmbeddingCache:
                 return None
             with self._observe_stage("read", "restore"):
                 timing["stage"] = "restore"
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote embedding read expired before restore")
                 value = (
                     buffer
                     if self._direct_payload
@@ -1372,6 +1675,8 @@ class MMRemoteEmbeddingCache:
                 value, approval = self._decode_value(
                     value, key, require_key=self._transport_mode == "gdr"
                 )
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("remote embedding read expired before publication")
                 if (
                     entry is not None
                     and restore_approval
@@ -1389,32 +1694,20 @@ class MMRemoteEmbeddingCache:
                 nbytes=size,
             )
             return value
-        except _TIMEOUT_ERRORS as error:
-            outcome = "timeout"
-            self._count("read_timeout")
-            if future is not None:
-                # A worker can itself raise TimeoutError. Only a caller-side
-                # wait timeout needs a later completion diagnostic; preserve
-                # the race where it finishes just after result() times out.
-                caller_timed_out = not future.done() or (
-                    not future.cancelled() and future.exception() is not error
-                )
-                # The worker keeps its reservation until it actually exits.
-                # A caller timeout cannot release an active transfer.
-            self.record(
-                "read_error",
-                key=key,
-                trace_id=trace_id,
-                stage=timing["stage"],
-                nbytes=timing["nbytes"],
-                timeout_ms=timeout_ms,
-                elapsed_ms=(time.perf_counter() - started) * 1000,
-                caller_timed_out=caller_timed_out,
-                **read_timings(),
-                **self._error_context(error),
-            )
-            return None
         except Exception as error:
+            timeout_fields = {}
+            if _is_transfer_timeout(error):
+                outcome = "timeout"
+                self._count("read_timeout")
+                if future is not None and timing["stage"] != "restore":
+                    # Only caller-side timeouts need a later completion diagnostic.
+                    # SDK timeouts raised by this same worker remain its outcome.
+                    caller_timed_out = not future.done() or (
+                        not future.cancelled() and future.exception() is not error
+                    )
+                    if caller_timed_out:
+                        future.cancel()
+                timeout_fields = {"caller_timed_out": caller_timed_out}
             self.record(
                 "read_error",
                 key=key,
@@ -1423,6 +1716,7 @@ class MMRemoteEmbeddingCache:
                 nbytes=timing["nbytes"],
                 timeout_ms=timeout_ms,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
+                **timeout_fields,
                 **read_timings(),
                 **self._error_context(error),
             )
@@ -1441,9 +1735,8 @@ class MMRemoteEmbeddingCache:
 
             def complete_read(completed):
                 try:
-                    if caller_timed_out:
-                        cancelled = completed.cancelled()
-                        error = None if cancelled else completed.exception()
+                    if caller_timed_out and not completed.cancelled():
+                        error = completed.exception()
                         if error is not None:
                             self.record(
                                 "read_late_error",
@@ -1471,11 +1764,7 @@ class MMRemoteEmbeddingCache:
                                 elapsed_ms=(time.perf_counter() - started) * 1000,
                                 sdk_api_ms=timing.get("sdk_api_ms"),
                                 **read_timings(),
-                                completion_outcome=(
-                                    "cancelled"
-                                    if cancelled
-                                    else timing.get("outcome", "success")
-                                ),
+                                completion_outcome=timing.get("outcome", "success"),
                             )
                 finally:
                     if cost:

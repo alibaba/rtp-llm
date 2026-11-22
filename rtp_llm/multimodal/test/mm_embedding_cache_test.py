@@ -521,6 +521,89 @@ class EmbeddingCacheTurnoverMetricsTest(unittest.TestCase):
 
 
 class EmbeddingCapacityTest(unittest.TestCase):
+    def test_entry_without_pending_waiters_uses_only_shared_ready_events(self):
+        entry = MMEmbeddingCacheEntry()
+        self.assertIsNone(entry._event)
+        self.assertIsNone(entry._greennet_event)
+        verdict = cache_module.GreenNetVerdict(True, 0, "")
+        entry.set_greennet_verdict(verdict)
+        self.assertTrue(entry.complete("result"))
+        self.assertIs(entry._event, cache_module._SIGNALED_EVENT)
+        self.assertIs(entry._greennet_event, cache_module._SIGNALED_EVENT)
+        self.assertIs(entry.wait_greennet(0), verdict)
+        self.assertEqual(entry.wait(0), "result")
+
+    def test_terminal_entries_release_private_wait_events_and_callbacks(self):
+        events = []
+
+        def complete(_entry, value):
+            events.append(value)
+
+        def fail(_entry, error):
+            events.append(type(error))
+
+        entry = MMEmbeddingCacheEntry(on_complete=complete, on_fail=fail)
+        with self.assertRaises(TimeoutError):
+            entry.wait_ready(0)
+        with self.assertRaises(TimeoutError):
+            entry.wait_greennet(0)
+        ready_event = weakref.ref(entry._event)
+        inspection_event = weakref.ref(entry._greennet_event)
+        complete_callback = weakref.ref(complete)
+        fail_callback = weakref.ref(fail)
+        del complete, fail
+        verdict = cache_module.GreenNetVerdict(True, 0, "")
+        with concurrent.futures.ThreadPoolExecutor(2) as executor:
+            ready = executor.submit(entry.wait_ready, 2)
+            inspection = executor.submit(entry.wait_greennet, 2)
+            entry.set_greennet_verdict(verdict)
+            self.assertTrue(entry.complete("result"))
+            ready.result(timeout=3)
+            self.assertIs(inspection.result(timeout=3), verdict)
+        self.assertEqual(events, ["result"])
+        self.assertIsNone(ready_event())
+        self.assertIsNone(inspection_event())
+        self.assertIsNone(complete_callback())
+        self.assertIsNone(fail_callback())
+        self.assertEqual(entry.wait(timeout=0), "result")
+
+    def test_completed_entry_does_not_retain_its_publication_callback(self):
+        class Publisher:
+            def __init__(self, entry, calls):
+                self.entry = entry
+                self.calls = calls
+
+            def publish(self):
+                self.calls.append(self.entry.generation)
+
+        for deferred in (False, True):
+            with self.subTest(deferred=deferred):
+                cache = MMEmbeddingCache(
+                    gpu_max_bytes=0,
+                    cpu_max_bytes=256,
+                    async_publication=deferred,
+                )
+                try:
+                    _, entry = cache.try_acquire("image")
+                    calls = []
+                    publisher = Publisher(entry, calls)
+                    owner = weakref.ref(publisher)
+                    self.assertTrue(
+                        cache.complete(
+                            "image",
+                            entry,
+                            torch.ones(4),
+                            before_publish=publisher.publish,
+                        )
+                    )
+                    del publisher
+                    cache.flush()
+                    self.assertEqual(calls, [entry.generation])
+                    self.assertIs(cache.peek("image"), entry)
+                    self.assertIsNone(owner())
+                finally:
+                    cache.close()
+
     def test_before_publish_runs_once_after_storage_before_ready(self):
         cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
         _, entry = cache.try_acquire("a")
@@ -542,6 +625,21 @@ class EmbeddingCapacityTest(unittest.TestCase):
         )
         self.assertEqual(called, [True])
         self.assertTrue(torch.equal(entry.wait(timeout=0), torch.ones(4)))
+
+    def test_duplicate_completion_preserves_winning_storage_layout(self):
+        cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
+        _, entry = cache.try_acquire("image")
+        payload = torch.ones(4)
+        candidate = (torch.zeros(4), torch.ones(2))
+
+        def duplicate():
+            self.assertFalse(cache.complete("image", entry, candidate))
+            self.assertEqual(entry.original_devices, torch.device("cpu"))
+
+        self.assertTrue(
+            cache.complete("image", entry, payload, before_publish=duplicate)
+        )
+        torch.testing.assert_close(entry.wait(timeout=0), payload)
 
     def test_before_publish_error_rolls_back_and_wakes_waiters(self):
         cache = MMEmbeddingCache(gpu_max_bytes=0, cpu_max_bytes=64)
@@ -1428,8 +1526,12 @@ class CacheLockIsolationTest(unittest.TestCase):
             self.assertTrue(entered.wait(5))
             self.quick(hashes.resize, 0)
             self.quick(hashes.resize, limit)
-            self.quick(hashes.put, "b", [torch.ones(256)], "g")
-            self.assertFalse(hashes.contains("b"))
+            blocked = [torch.ones(256)]
+            for key in ("b", "c", "d"):
+                self.quick(hashes.put, key, blocked, "g")
+                self.assertFalse(hashes.contains(key))
+            self.assertFalse(hashes._pending)
+            self.assertEqual(hashes.stats()["building_bytes"], 0)
             self.assertEqual(hashes.stats()["retired_bytes"], limit)
         self.assertEqual(read.result(5)[0].tolist(), list(range(256)))
         hashes.put("b", [torch.ones(256)], "g")
@@ -1514,6 +1616,31 @@ class CacheLockIsolationTest(unittest.TestCase):
         ):
             self.assertEqual(stats[key], 0, key)
         self.assertFalse(hashes._pending)
+
+    def test_stale_embedding_before_reserve_releases_pending_hash(self):
+        hashes = MMHashKeyCache(8192)
+        embeddings = MMEmbeddingCache(0, 64)
+        _, entry = embeddings.try_acquire("a")
+        entry.complete(torch.ones(2))
+        with_current_entry = embeddings._with_current_entry
+
+        def evict_after_begin(key, candidate, action):
+            result = with_current_entry(key, candidate, action)
+            if action.__name__ == "begin":
+                embeddings.remove(key)
+            return result
+
+        with patch.object(
+            embeddings, "_with_current_entry", side_effect=evict_after_begin
+        ):
+            hashes.put_for_entry("a", [torch.tensor([1])], entry, embeddings)
+        self.assertFalse(hashes._pending)
+        self.assertEqual(hashes.stats()["building_bytes"], 0)
+
+        _, replacement = embeddings.try_acquire("a")
+        replacement.complete(torch.ones(2))
+        hashes.put_for_entry("a", [torch.tensor([2])], replacement, embeddings)
+        self.assertEqual(hashes.get("a")[0].tolist(), [2])
 
     def test_waiting_for_embedding_index_does_not_own_hash_index(self):
         hashes = MMHashKeyCache(8192)

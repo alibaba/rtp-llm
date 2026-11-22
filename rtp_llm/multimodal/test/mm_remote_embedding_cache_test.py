@@ -42,6 +42,69 @@ from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 class RemoteCacheTest(unittest.TestCase):
+    def test_sdk_transfer_timeouts_keep_timeout_metrics_and_original_error(self):
+        result = (torch.ones(3), None)
+        sdk_error = type("KvMetaObjectClientError", (RuntimeError,), {})
+        for code, may_be_inflight in (
+            ("ER_SDK_TIMEOUT_BUFFER_SAFE", False),
+            ("ER_SDK_TIMEOUT", True),
+        ):
+            with self.subTest(code=code):
+                store = Store({"hit": pack_object(plan_object(result))})
+                remote = self.remote(store)
+                write_started = threading.Event()
+
+                def fail(operation):
+                    error = sdk_error(code)
+                    error.operation = operation
+                    error.code = SimpleNamespace(name=code)
+                    error.data_transfer_may_be_inflight = may_be_inflight
+                    if operation == "save":
+                        write_started.set()
+                    raise error
+
+                with (
+                    patch.object(
+                        store, "load_one", side_effect=lambda *a, **kw: fail("load")
+                    ),
+                    patch.object(
+                        store, "save_one", side_effect=lambda *a, **kw: fail("save")
+                    ),
+                    patch(
+                        "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+                    ) as report,
+                    self.assertLogs(level="ERROR") as logs,
+                ):
+                    self.assertIsNone(remote.load("hit"))
+                    remote.submit_result("new", result)
+                    self.assertTrue(write_started.wait(2))
+                    remote.close()
+                self.assertEqual(remote.stats()["read_timeout"], 1)
+                for metric in (
+                    AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC,
+                    AccMetrics.VIT_REMOTE_EMB_WRITE_QPS_METRIC,
+                ):
+                    self.assertEqual(
+                        self.metric_values(report, metric), [(1, {"status": "timeout"})]
+                    )
+                stage_tags = [
+                    tags
+                    for _, tags in self.metric_values(
+                        report, GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC
+                    )
+                ]
+                for operation in ("read", "write"):
+                    self.assertIn(
+                        {"operation": operation, "stage": "transfer", "status": "timeout"},
+                        stage_tags,
+                    )
+                for item in logs.output:
+                    row = json.loads(item.split("MM_EMB_REMOTE_JSON ", 1)[1])
+                    self.assertEqual(row["error_code"], code)
+                    self.assertIs(row["data_transfer_may_be_inflight"], may_be_inflight)
+                    if row["operation"] == "read":
+                        self.assertFalse(row["caller_timed_out"])
+
     def test_gdr_rejects_a_whole_valid_payload_from_a_different_key(self):
         # A late RDMA can replay a complete, internally checksummed old object.
         # Byte integrity alone must not authorize using it for another request.
@@ -189,6 +252,59 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertFalse(event["data_transfer_may_be_inflight"])
         self.assertEqual(event["error_code"], "ER_INVALID_GRPCSTATUS")
         self.assertEqual(event["trace_id"], "native-get")
+
+    def test_metadata_transport_retry_uses_only_remaining_request_time(self):
+        failure = RuntimeError("transport failed")
+        failure.code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")
+        failure.operation = "get_object_meta"
+        failure.data_transfer_may_be_inflight = False
+        result = SimpleNamespace(size_bytes=12)
+        client = Mock()
+        client.get_object_meta.side_effect = [failure, result]
+        remote = self.remote(Store())
+        module = "rtp_llm.multimodal.mm_remote_embedding_cache"
+        with patch(f"{module}._RETRY_METADATA_TRANSPORT", True), patch(
+            f"{module}.time.monotonic", return_value=100.0
+        ), patch(f"{module}.kmonitor.report") as report:
+            self.assertIs(
+                remote._lookup_object_meta(client, "key", "trace", 50, 100.0065),
+                result,
+            )
+        self.assertEqual(
+            client.get_object_meta.call_args_list,
+            [
+                call("key", trace_id="trace", timeout_ms=50),
+                call("key", trace_id="trace", timeout_ms=6),
+            ],
+        )
+        samples = self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC)
+        self.assertIn(
+            dict(operation="read", stage="metadata_retry", status="success"),
+            [tags for _, tags in samples],
+        )
+
+    def test_metadata_transport_retry_preserves_the_original_failure(self):
+        failure = RuntimeError("transport failed")
+        failure.code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")
+        failure.operation = "get_object_meta"
+        failure.data_transfer_may_be_inflight = False
+        remote = self.remote(Store())
+        module = "rtp_llm.multimodal.mm_remote_embedding_cache"
+        with patch(f"{module}._RETRY_METADATA_TRANSPORT", True), patch(
+            f"{module}.time.monotonic", return_value=100.0
+        ):
+            for deadline, expected_calls in ((100.0, 1), (101.0, 2)):
+                with self.subTest(deadline=deadline):
+                    client = Mock()
+                    client.get_object_meta.side_effect = [failure, TimeoutError()]
+                    with self.assertRaises(RuntimeError) as found:
+                        remote._fetch_meta(client, "key", "trace", 50, deadline)
+                    self.assertIs(found.exception, failure)
+                    self.assertEqual(client.get_object_meta.call_count, expected_calls)
+                    if expected_calls == 2:
+                        self.assertEqual(
+                            client.get_object_meta.call_args.kwargs["timeout_ms"], 10
+                        )
 
     def test_error_details_are_bounded_redacted_and_preserve_suppressed_cause(self):
         secret = "do-not-log-this-secret"
@@ -739,6 +855,29 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
+    def test_restore_finishing_after_deadline_is_not_published_as_a_hit(self):
+        value = torch.arange(8)
+        store = Store({"hit": pack_object(plan_object((value, None)))})
+        remote = self.remote(store, read_transfer_workers=1)
+        now = [1.0]
+
+        def restore(*args, **kwargs):
+            now[0] = 3.0
+            return unpack_object(*args, **kwargs)
+
+        with (
+            patch.object(time, "monotonic", side_effect=lambda: now[0]),
+            patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.unpack_object",
+                side_effect=restore,
+            ),
+        ):
+            self.assertIsNone(remote.load("hit"))
+        self.assertEqual(remote.stats().get("hit", 0), 0)
+        self.assertEqual(remote.stats()["read_timeout"], 1)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
     def test_read_timeout_keeps_transfer_permit_until_worker_exits(self):
         value = torch.arange(8)
         store = Store({"hit": pack_object(plan_object((value, None)))})
@@ -758,6 +897,23 @@ class RemoteCacheTest(unittest.TestCase):
         torch.testing.assert_close(remote.load("hit")[0], value)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def test_read_timeout_cancels_queued_transfer_and_returns_budget(self):
+        value = torch.arange(8)
+        store = Store({"hit": pack_object(plan_object((value, None)))})
+        remote = self.remote(store, read_transfer_workers=1)
+        resume = threading.Event()
+        blocker = remote._transfer_executor.submit(resume.wait)
+        try:
+            self.assertIsNone(remote.load("hit", timeout_ms=30))
+            self.assertEqual(remote.stats()["inflight_tasks"], 0)
+            self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        finally:
+            resume.set()
+            blocker.result(timeout=1)
+        remote._transfer_executor.submit(lambda: None).result(timeout=1)
+        self.assertFalse(store.read_started.is_set())
+        torch.testing.assert_close(remote.load("hit")[0], value)
 
     def test_cancelled_or_rejected_transfer_returns_permit(self):
         value = torch.arange(8)
@@ -820,7 +976,7 @@ class RemoteCacheTest(unittest.TestCase):
             )
         )
 
-        def load_object(meta, *, consumer_stream, expected_key, trace_id):
+        def load_object(meta, *, consumer_stream, expected_key, trace_id, deadline):
             target = torch.empty(meta.size_bytes, dtype=torch.uint8)
             slot.load_from_meta(meta, target, trace_id=trace_id)
             return unpack_object(target, expected_key=expected_key)
@@ -1789,6 +1945,31 @@ class RemoteCacheTest(unittest.TestCase):
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
+    def test_remote_write_latency_includes_object_planning(self):
+        remote = self.remote(Store())
+        perf_counter = time.perf_counter
+        planning_seconds = 0
+
+        def measured_plan(*args, **kwargs):
+            nonlocal planning_seconds
+            planning_seconds += 0.125
+            return plan_object(*args, **kwargs)
+
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.time.perf_counter",
+            side_effect=lambda: perf_counter() + planning_seconds,
+        ), patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.plan_object",
+            side_effect=measured_plan,
+        ), patch("rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report") as report:
+            remote.submit_result("key", (torch.ones(3), None))
+            remote._write_executor.shutdown(wait=True)
+        samples = self.metric_values(report, GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC)
+        self.assertEqual(len(samples), 1)
+        elapsed_ms, tags = samples[0]
+        self.assertEqual(tags, {"status": "success"})
+        self.assertGreaterEqual(elapsed_ms, 125)
+
     def test_remote_write_metrics_follow_completed_background_operations(self):
         for failed in (False, True):
             with self.subTest(failed=failed):
@@ -2133,6 +2314,33 @@ class RemoteCacheTest(unittest.TestCase):
                 self.assertFalse(waited.is_set())
             self.assertTrue(store.saved.wait(2))
             self.assertTrue(waited.is_set())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_native_snapshot_orders_caller_and_producer_reuse(self):
+        import librtp_compute_ops
+
+        if not hasattr(librtp_compute_ops, "snapshot_emb_cuda_tensors"):
+            self.skipTest("requires native CUDA snapshot")
+        producer, caller = torch.cuda.Stream(), torch.cuda.Stream()
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache._USE_NATIVE_SNAPSHOT",
+            True,
+        ):
+            for blocking in (False, True):
+                with self.subTest(blocking=blocking), patch(
+                    "rtp_llm.multimodal.mm_remote_embedding_cache._BLOCKING_CUDA_EVENTS",
+                    blocking,
+                ), torch.cuda.stream(producer):
+                    value = torch.full((512, 512), 11.0, device="cuda")
+                    with torch.cuda.stream(caller):
+                        caller.wait_stream(producer)
+                        value.add_(26)
+                        plan = SimpleNamespace(tensors=[value])
+                        (ready,) = MMRemoteEmbeddingCache._snapshot(plan, (producer,))
+                        value.zero_()
+                    ready.synchronize()
+                    caller.synchronize()
+                    self.assertTrue(torch.all(plan.tensors[0] == 37).item())
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_deferred_gpu_snapshot_waits_for_producer_and_is_submitted_once(self):

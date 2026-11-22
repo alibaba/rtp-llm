@@ -1,5 +1,6 @@
 import ctypes
 import json
+import os
 import threading
 import time
 import unittest
@@ -16,12 +17,26 @@ from rtp_llm.multimodal.kvcm.registered_transport import (
     RegisteredTransportPool,
     RegisteredTransportUnavailableError,
     _enable_sync_memops,
+    _new_cuda_stream,
 )
 
 from rtp_llm.multimodal.kvcm.tensor_object import plan_object
 
 
 class CudaRdmaSyncMemopsTest(unittest.TestCase):
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_registered_stream_handles_are_distinct_and_reusable(self):
+        with patch(
+            "rtp_llm.multimodal.kvcm.registered_transport._ISOLATED_CUDA_STREAMS",
+            True,
+        ):
+            streams = [_new_cuda_stream(torch.device("cuda:0")) for _ in range(33)]
+            addresses = {stream.cuda_stream for stream in streams}
+            self.assertEqual(len(addresses), 33)
+            streams.clear()
+            streams = [_new_cuda_stream(torch.device("cuda:0")) for _ in range(33)]
+            self.assertEqual({stream.cuda_stream for stream in streams}, addresses)
+
     def test_enables_and_checks_the_owned_allocation(self):
         arena = Mock()
         arena.data_ptr.return_value = 0x12340000
@@ -62,6 +77,28 @@ class CudaRdmaSyncMemopsTest(unittest.TestCase):
 
 
 class RegisteredObjectTransportTest(unittest.TestCase):
+    def test_native_metadata_lookup_preserves_miss_and_original_handle(self):
+        pool = RegisteredTransportPool.__new__(RegisteredTransportPool)
+        pool._native_read = Mock()
+        pool._client = Mock()
+        meta = SimpleNamespace(size_bytes=4096, userdata1=416)
+        capsule = object()
+        pool._client.get_object_meta.side_effect = ((None, None), (meta, capsule))
+
+        self.assertIsNone(pool.get_object_meta("miss", timeout_ms=12))
+        pool._client.get_object_meta.assert_called_once_with(
+            "miss", native_load=True, timeout_ms=12
+        )
+        pool._client.get_object_meta.reset_mock()
+        hit = pool.get_object_meta("hit", timeout_ms=9)
+        pool._client.get_object_meta.assert_called_once_with(
+            "hit", native_load=True, timeout_ms=9
+        )
+        self.assertEqual(hit.size_bytes, meta.size_bytes)
+        self.assertIs(hit.capsule, capsule)
+        self.assertIs(pool.unwrap_object_meta(hit), meta)
+        pool._native_read.assert_not_called()
+
     def test_invalid_configuration_does_not_construct_client(self):
         def forbidden(**kw):
             self.fail("invalid configuration constructed client")
@@ -249,7 +286,9 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.device = patch("torch.cuda.device", return_value=nullcontext())
         self.device.start()
         self.addCleanup(self.device.stop)
-        stream_factory = patch("torch.cuda.Stream")
+        stream_factory = patch(
+            "rtp_llm.multimodal.kvcm.registered_transport._new_cuda_stream"
+        )
         stream_factory.start()
         self.addCleanup(stream_factory.stop)
         stream_context = patch("torch.cuda.stream", return_value=nullcontext())
@@ -263,7 +302,10 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         allocate = torch.empty
         with patch("torch.cuda.MemPool"), patch(
             "torch.cuda.use_mem_pool", return_value=nullcontext()
-        ), patch("torch.cuda.Stream", return_value=torch.cuda.current_stream()), patch(
+        ), patch(
+            "rtp_llm.multimodal.kvcm.registered_transport._new_cuda_stream",
+            return_value=torch.cuda.current_stream(),
+        ), patch(
             "torch.empty",
             side_effect=lambda size, *, dtype, **kw: allocate(size, dtype=dtype),
         ):
@@ -283,6 +325,12 @@ class RegisteredTransportFailureTest(unittest.TestCase):
 
     def transport(self):
         return self.pool()._slots[0]
+
+    def assert_single_free_range(self, pool, start, size):
+        if pool._native_arena is None:
+            self.assertEqual(pool._free_ranges, [(start, size)])
+        else:
+            self.assertEqual(pool._native_arena.free_space(), (size, size))
 
     def test_one_client_registers_root_and_transfers_disjoint_slices_concurrently(self):
         factory = Mock()
@@ -330,6 +378,221 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         pool.close()
         client.close.assert_called_once()
 
+    def test_lease_metrics_do_not_hold_the_allocator_lock(self):
+        reporting_release = threading.Event()
+        resume_report = threading.Event()
+
+        def observe_lease(for_write, delta, nbytes):
+            if delta == -1 and not reporting_release.is_set():
+                reporting_release.set()
+                resume_report.wait(4)
+
+        pool = self.pool(observe_lease=observe_lease)
+        slot = pool.acquire()
+        acquired = None
+        with ThreadPoolExecutor(2) as workers:
+            released = workers.submit(pool.release, slot)
+            try:
+                self.assertTrue(reporting_release.wait(1))
+                acquired = workers.submit(pool.acquire)
+                self.assertIs(acquired.result(timeout=1), slot)
+            finally:
+                resume_report.set()
+                released.result(timeout=1)
+                if acquired is not None:
+                    next_slot = acquired.result(timeout=1)
+                    if next_slot is not None:
+                        pool.release(next_slot)
+
+    def test_acquire_deadline_includes_contended_allocator_lock(self):
+        observe = Mock()
+        pool = self.pool(observe_acquire_failure=observe)
+        with ThreadPoolExecutor(1) as workers:
+            acquired = None
+            try:
+                with pool._condition:
+                    acquired = workers.submit(pool.acquire, timeout=0.03)
+                    self.assertIsNone(acquired.result(timeout=1))
+            finally:
+                if acquired is not None:
+                    slot = acquired.result(timeout=1)
+                    if slot is not None:
+                        pool.release(slot)
+        observe.assert_called_once_with(False, "lock_timeout")
+        slot = pool.acquire()
+        self.assertIsNotNone(slot)
+        try:
+            self.assertIsNone(pool.acquire())
+            self.assertEqual(
+                observe.call_args_list[-1].args, (False, "extent_unavailable")
+            )
+        finally:
+            pool.release(slot)
+        pool.stop_acquiring()
+        self.assertIsNone(pool.acquire())
+        self.assertEqual(observe.call_args_list[-1].args, (False, "closed"))
+
+    def test_lock_hold_sampling_excludes_condition_wait(self):
+        samples = []
+
+        def observe(for_write, stage, nanoseconds):
+            self.assertFalse(pool._condition._is_owned())
+            samples.append((for_write, stage, nanoseconds))
+
+        pool = self.pool(observe_lock_hold=observe)
+        with patch.object(pool._lock_hold_rng, "getrandbits", return_value=1):
+            slot = pool.acquire(for_write=True)
+        with patch.object(pool._lock_hold_rng, "getrandbits", return_value=0):
+            with patch.object(pool._condition, "wait", return_value=False), patch.object(
+                time, "perf_counter_ns", side_effect=(10, 20, 200, 203)
+            ):
+                self.assertIsNone(pool.acquire(timeout=1))
+            with patch.object(time, "perf_counter_ns", side_effect=(500, 508)):
+                pool.release(slot)
+        self.assertEqual(
+            samples,
+            [(False, "acquire", 13), (True, "release", 8)],
+        )
+
+    def test_sized_lease_materializes_views_outside_the_allocator_lock(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        if pool._native_arena is not None:
+            self.skipTest("native view construction is covered by the ticket tests")
+        view_started, resume_view = threading.Event(), threading.Event()
+        narrow = pool._arena.narrow
+
+        def create_view(dim, offset, size):
+            if offset == pool._GUARD_BYTES:
+                view_started.set()
+                self.assertTrue(resume_view.wait(3))
+                raise RuntimeError("cannot materialize first view")
+            return narrow(dim, offset, size)
+
+        with patch.object(pool._arena, "narrow", side_effect=create_view):
+            with ThreadPoolExecutor(2) as workers:
+                first = workers.submit(pool.acquire, nbytes=64)
+                try:
+                    self.assertTrue(view_started.wait(1))
+                    second = workers.submit(pool.acquire, nbytes=64, timeout=0.1)
+                    slot = second.result(timeout=1)
+                    self.assertIsNotNone(slot)
+                    try:
+                        self.assertEqual(
+                            slot._buffer.storage_offset(), pool._GUARD_BYTES + 64
+                        )
+                    finally:
+                        pool.release(slot)
+                finally:
+                    resume_view.set()
+                with self.assertRaisesRegex(RuntimeError, "cannot materialize"):
+                    first.result(timeout=1)
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
+        self.assertFalse(pool._in_use)
+
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE") == "1", "native sized arena"
+    )
+    def test_native_pending_ticket_blocks_close_without_blocking_other_leases(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        client = pool._client
+        started = threading.Event()
+        resume = threading.Event()
+        stopped = threading.Event()
+        make_slot = RegisteredObjectTransport
+        stop = pool.stop_acquiring
+
+        def delayed_slot(*args, **kwargs):
+            if kwargs["extent"][0] == pool._GUARD_BYTES:
+                started.set()
+                self.assertTrue(resume.wait(3))
+            return make_slot(*args, **kwargs)
+
+        def stopping():
+            stop()
+            stopped.set()
+
+        with patch(
+            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
+            side_effect=delayed_slot,
+        ), patch.object(pool, "stop_acquiring", side_effect=stopping):
+            with ThreadPoolExecutor(2) as workers:
+                first = workers.submit(pool.acquire, nbytes=64)
+                try:
+                    self.assertTrue(started.wait(1))
+                    second = workers.submit(pool.acquire, nbytes=64, timeout=0.025)
+                    slot = second.result(timeout=1)
+                    self.assertIsNotNone(slot)
+                    try:
+                        self.assertEqual(
+                            slot._buffer.storage_offset(), pool._GUARD_BYTES + 64
+                        )
+                    finally:
+                        pool.release(slot)
+                    closing = workers.submit(pool.close)
+                    self.assertTrue(stopped.wait(1))
+                    self.assertFalse(closing.done())
+                    client.close.assert_not_called()
+                finally:
+                    resume.set()
+                self.assertIsNone(first.result(timeout=1))
+                closing.result(timeout=1)
+        client.close.assert_called_once()
+
+    @unittest.skipUnless(
+        os.environ.get("MM_EMB_NATIVE") == "1", "native sized arena"
+    )
+    def test_native_invalid_view_and_stale_ticket_do_not_consume_extents(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        arena = pool._native_arena
+        with self.assertRaises(RuntimeError):
+            arena.acquire(torch.empty(1, dtype=torch.uint8), 64, False, 0, False)
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
+        original = pool.acquire(nbytes=64)
+        pool.release(original)
+        replacement = pool.acquire(nbytes=64)
+        try:
+            self.assertEqual(original._extent, replacement._extent)
+            with self.assertRaisesRegex(ValueError, "stale"):
+                arena.release(original._native_ticket, original._extent[0], True, False)
+        finally:
+            pool.release(replacement)
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
+
+    def test_sized_release_destroys_its_view_outside_the_allocator_lock(self):
+        pool = self.pool(
+            direct_payload=True,
+            max_object_bytes=128,
+            arena_bytes=256,
+            min_block_bytes=64,
+        )
+        destroyed_under_lock = []
+
+        class View:
+            def __del__(self):
+                destroyed_under_lock.append(pool._condition._is_owned())
+
+        slot = pool.acquire(nbytes=64)
+        slot._buffer = View()
+        pool.release(slot)
+        self.assertIsNone(slot._buffer)
+        self.assertEqual(destroyed_under_lock, [False])
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 256)
+
     def test_sized_leases_coalesce_and_preserve_a_contiguous_read_range(self):
         pool = self.pool(
             direct_payload=True,
@@ -365,7 +628,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             pool.release(merged)
         finally:
             pool.release(reader)
-        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 512)])
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 512)
         with self.assertRaises(ValueError):
             pool.acquire(nbytes=257)
 
@@ -403,7 +666,37 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         for (_, end), (start, _) in zip(ranges, ranges[1:]):
             self.assertLessEqual(end, start)
         factory.assert_called_once_with(gpu_tensors=(pool._arena,))
-        self.assertEqual(pool._free_ranges, [(pool._GUARD_BYTES, 512)])
+        self.assert_single_free_range(pool, pool._GUARD_BYTES, 512)
+
+    def test_slow_lease_metrics_do_not_block_another_lease(self):
+        for delayed_delta in (1, -1):
+            with self.subTest(delta=delayed_delta):
+                measuring = threading.Event()
+                finish = threading.Event()
+
+                def observe(for_write, delta, nbytes):
+                    if for_write and delta == delayed_delta:
+                        measuring.set()
+                        finish.wait(timeout=4)
+
+                pool = self.pool(slots=2, direct_payload=True, observe_lease=observe)
+
+                def write():
+                    slot = pool.acquire(for_write=True)
+                    self.assertIsNotNone(slot)
+                    pool.release(slot)
+
+                with ThreadPoolExecutor(2) as executor:
+                    writer = executor.submit(write)
+                    try:
+                        self.assertTrue(measuring.wait(timeout=2))
+                        reader = executor.submit(pool.acquire)
+                        slot = reader.result(timeout=1)
+                        self.assertIsNotNone(slot)
+                        pool.release(slot)
+                    finally:
+                        finish.set()
+                    writer.result(timeout=2)
 
     def test_sized_quarantine_keeps_only_the_unsafe_range_unavailable(self):
         pool = self.pool(
@@ -435,9 +728,49 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 )
         finally:
             pool.release(safe)
-        self.assertEqual(pool._free_ranges, [(start + 64, 192)])
+        self.assert_single_free_range(pool, start + 64, 192)
         pool.close()
         client.close.assert_not_called()
+
+    def test_completed_transfer_after_deadline_skips_restore_without_quarantine(self):
+        pool = self.pool(direct_payload=True)
+        slot = pool.acquire()
+        now = [1.0]
+
+        def finish_load(*args, **kwargs):
+            now[0] = 3.0
+
+        pool._client.load_from_meta.side_effect = finish_load
+        try:
+            with patch.object(time, "monotonic", side_effect=lambda: now[0]), patch(
+                "rtp_llm.multimodal.kvcm.tensor_object.unpack_object"
+            ) as unpack:
+                with self.assertRaisesRegex(TimeoutError, "expired before restore"):
+                    slot.load_object_from_meta(
+                        SimpleNamespace(size_bytes=16),
+                        consumer_stream=None,
+                        deadline=2.0,
+                    )
+                unpack.assert_not_called()
+            self.assertFalse(slot.quarantined)
+        finally:
+            pool.release(slot)
+        reused = pool.acquire()
+        self.assertIs(reused, slot)
+        pool.release(reused)
+
+    def test_blocking_completion_wait_preserves_the_stream_fence(self):
+        pool = self.pool(direct_payload=True)
+        pool.blocking_cuda_events = True
+        slot = pool.acquire()
+        try:
+            with patch("torch.cuda.Event") as make_event:
+                slot._wait_for_stream_completion()
+            make_event.assert_called_once_with(blocking=True)
+            slot._stream.record_event.assert_called_once_with(make_event.return_value)
+            slot._stream.record_event.return_value.synchronize.assert_called_once()
+        finally:
+            pool.release(slot)
 
     def test_observes_contention_and_copies_without_extra_cuda_sync(self):
         transport = self.transport()

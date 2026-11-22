@@ -21,13 +21,19 @@ from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
 
+# Terminal entries share a permanently signaled event. A pending entry only
+# needs its own wait queue if a caller actually waits.
+_SIGNALED_EVENT = threading.Event()
+_SIGNALED_EVENT.set()
+
+
 class _PoolCapacityError(RuntimeError):
     pass
 
 
 def _wait_event(event, timeout, cancellation_event):
     if cancellation_event is None:
-        return event.wait(timeout=timeout)
+        return event is _SIGNALED_EVENT or event.wait(timeout=timeout)
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
         if cancellation_event.is_set():
@@ -321,7 +327,10 @@ def _pool_result(
     copied: Dict[Tuple[int, torch.device], torch.Tensor] = {}
     gpu_bytes = cpu_bytes = 0
     try:
-        collect(result, devices)
+        try:
+            collect(result, devices)
+        finally:
+            del collect
         for pool, identities in grouped.items():
             total = 0
             for identity in identities:
@@ -365,7 +374,10 @@ def _pool_result(
                 return {key: rebuild(item, target[key]) for key, item in value.items()}
             return value
 
-        pooled = rebuild(result, devices)
+        try:
+            pooled = rebuild(result, devices)
+        finally:
+            del rebuild
         events = _record_cuda_events(pooled)
         owners = list(reservations.values())
         for owner in owners:
@@ -376,8 +388,7 @@ def _pool_result(
             reservation.release()
         raise
     finally:
-        # Recursive collectors/rebuilders form closure cycles. Neither producer
-        # tensors nor pool views should wait for cyclic GC to release ownership.
+        # An error can retain this frame through its traceback.
         specs.clear()
         copied.clear()
 
@@ -413,8 +424,7 @@ def _copy_pooled_result_to_devices(result: Any, devices: Any) -> Any:
     try:
         return visit(result, devices)
     finally:
-        # The recursive visitor forms a closure cycle. Drop its tensor owners
-        # immediately, including when copying one of the later leaves fails.
+        del visit
         copied.clear()
 
 
@@ -456,7 +466,10 @@ def _compact_tensor_tier_bytes(result: Any, devices: Any) -> Tuple[int, int]:
             for key, item in value.items():
                 visit(item, target[key])
 
-    visit(result, devices)
+    try:
+        visit(result, devices)
+    finally:
+        del visit
     return tuple(sizes)
 
 
@@ -492,32 +505,29 @@ def _copy_result_to_devices(result: Any, devices: Any) -> Any:
     try:
         return visit(result, devices)
     finally:
-        # The recursive visitor forms a closure cycle. Drop its tensor owners
-        # immediately, including when copying one of the later leaves fails.
+        del visit
         copied.clear()
+
+
+def _tree_output_tokens(value: Any) -> int:
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 0:
+            return 0
+        if value.ndim >= 2 and value.shape[-1] > 0:
+            return value.numel() // value.shape[-1]
+        # A one-dimensional embedding represents a single token vector.
+        return 1
+    if isinstance(value, (list, tuple)):
+        return sum(_tree_output_tokens(item) for item in value)
+    if isinstance(value, dict):
+        return sum(_tree_output_tokens(item) for item in value.values())
+    return 0
 
 
 def _embedding_output_tokens(result: Any) -> int:
     """Count tokens in the primary embedding, excluding position metadata."""
-
-    def output_tokens(value: Any) -> int:
-        if isinstance(value, torch.Tensor):
-            if value.numel() == 0:
-                return 0
-            if value.ndim >= 2 and value.shape[-1] > 0:
-                return value.numel() // value.shape[-1]
-            # A one-dimensional embedding is one token vector, not a sequence
-            # of scalar tokens. Keep this consistent with the request-level
-            # embedding length metric.
-            return 1
-        if isinstance(value, (list, tuple)):
-            return sum(output_tokens(item) for item in value)
-        if isinstance(value, dict):
-            return sum(output_tokens(item) for item in value.values())
-        return 0
-
     primary = result[0] if isinstance(result, tuple) and result else result
-    return output_tokens(primary)
+    return _tree_output_tokens(primary)
 
 
 class MMEmbeddingCacheEntry:
@@ -535,7 +545,9 @@ class MMEmbeddingCacheEntry:
             Callable[["MMEmbeddingCacheEntry", Optional[float]], Any]
         ] = None,
     ):
-        self._event = threading.Event()
+        self._event: Optional[threading.Event] = None
+        # Inspection future callbacks may enter a wait while _state_lock is held.
+        self._wait_lock = threading.Lock()
         self._state_lock = threading.Lock()
         # Claim completion once; _event publishes it after callbacks finish.
         self._terminal = False
@@ -565,7 +577,7 @@ class MMEmbeddingCacheEntry:
         # KVCM approval, instead of auditing the same in-flight URL again.
         self.expects_greennet = False
         self.capture_compute_streams = False
-        self._greennet_event = threading.Event()
+        self._greennet_event: Optional[threading.Event] = None
         self._greennet_verdict: Optional[GreenNetVerdict] = None
         self._greennet_error: Optional[Exception] = None
         self._greennet_checked = False
@@ -619,7 +631,9 @@ class MMEmbeddingCacheEntry:
         cancellation_event: Optional[threading.Event] = None,
     ) -> None:
         """Wait for completion without promoting an offloaded embedding."""
-        if not _wait_event(self._event, timeout, cancellation_event):
+        if not _wait_event(
+            self._waiter_event("_event"), timeout, cancellation_event
+        ):
             raise TimeoutError("Waiting for embedding result timed out")
         if self.error is not None:
             raise self.error
@@ -630,32 +644,43 @@ class MMEmbeddingCacheEntry:
         *,
         before_publish: Optional[Callable[[], None]] = None,
         defer: bool = False,
+        prepared_storage: Optional[Tuple[Any, List[Any]]] = None,
     ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
             self._terminal = True
             self.result = result
-            self._pending_before_publish = before_publish
+            if prepared_storage is not None:
+                self.original_devices, self.ready_events = prepared_storage
+            if defer:
+                self._pending_before_publish = before_publish
+            # Each terminal transition consumes these one-shot callbacks.
+            on_complete, self._on_complete = self._on_complete, None
+            on_fail, self._on_fail = self._on_fail, None
         if defer:
             # Publish the result to waiters immediately; the cache insertion is
             # best-effort and runs on the cache's publication thread. A failed
             # insertion must never turn a successful computation into an error.
-            self._event.set()
+            self._signal_event("_event")
             try:
-                if self._on_complete is not None:
-                    self._on_complete(self, result)
+                if on_complete is not None:
+                    on_complete(self, result)
             except Exception as error:
                 logging.warning("ViT cache publication enqueue failed: %s", error)
                 try:
-                    if self._on_fail is not None:
-                        self._on_fail(self, error)
+                    if on_fail is not None:
+                        on_fail(self, error)
                 except Exception:
                     logging.exception("Failed to remove unqueued ViT cache entry")
+            finally:
+                # The queue owns the callback after handoff. A bound method on
+                # the work item would otherwise keep that whole request alive.
+                self._pending_before_publish = None
             return True
         try:
-            if self._on_complete is not None:
-                self._on_complete(self, result)
+            if on_complete is not None:
+                on_complete(self, result)
             # Publish dependent metadata only after storage succeeds, but
             # before any waiter can observe ready. Duplicate completion never
             # executes this hook. Exceptions use the same rollback as storage.
@@ -672,14 +697,14 @@ class MMEmbeddingCacheEntry:
                 self.producer_streams = []
                 owners, self.pool_owners = self.pool_owners, []
             try:
-                if self._on_fail is not None:
-                    self._on_fail(self, error)
+                if on_fail is not None:
+                    on_fail(self, error)
             finally:
                 for owner in owners:
                     owner.release()
             raise
         finally:
-            self._event.set()
+            self._signal_event("_event")
         return True
 
     def fail(self, error: Exception) -> bool:
@@ -688,16 +713,37 @@ class MMEmbeddingCacheEntry:
                 return False
             self._terminal = True
             self.error = error
+            self._on_complete = None
+            on_fail, self._on_fail = self._on_fail, None
         try:
-            if self._on_fail is not None:
-                self._on_fail(self, error)
+            if on_fail is not None:
+                on_fail(self, error)
         finally:
-            self._event.set()
+            self._signal_event("_event")
         return True
+
+    def _waiter_event(self, attribute: str) -> threading.Event:
+        event = getattr(self, attribute)
+        if event is None:
+            with self._wait_lock:
+                event = getattr(self, attribute)
+                if event is None:
+                    event = threading.Event()
+                    setattr(self, attribute, event)
+        return event
+
+    def _signal_event(self, attribute: str) -> None:
+        # A waiter that already holds the private event must still be woken.
+        with self._wait_lock:
+            event = getattr(self, attribute)
+            if event is not _SIGNALED_EVENT:
+                setattr(self, attribute, _SIGNALED_EVENT)
+                if event is not None:
+                    event.set()
 
     @property
     def is_done(self) -> bool:
-        return self._event.is_set()
+        return self._event is _SIGNALED_EVENT
 
     def inspection_decision(self):
         """A small future which a frontend ticket may retain after eviction."""
@@ -734,7 +780,7 @@ class MMEmbeddingCacheEntry:
             self._greennet_verdict = verdict
             self._greennet_checked = checked
             self._resolve_inspection_decision()
-            self._greennet_event.set()
+            self._signal_event("_greennet_event")
 
     def greennet_snapshot(self) -> Tuple[Optional[GreenNetVerdict], bool]:
         with self._state_lock:
@@ -754,13 +800,13 @@ class MMEmbeddingCacheEntry:
                 return
             self._greennet_error = error
             self._resolve_inspection_decision()
-            self._greennet_event.set()
+            self._signal_event("_greennet_event")
 
     @property
     def greennet_passed(self) -> bool:
         with self._state_lock:
             return (
-                self._greennet_event.is_set()
+                self._greennet_event is _SIGNALED_EVENT
                 and self._greennet_error is None
                 and self._greennet_checked
                 and self._greennet_verdict is not None
@@ -773,7 +819,9 @@ class MMEmbeddingCacheEntry:
         *,
         cancellation_event: Optional[threading.Event] = None,
     ) -> GreenNetVerdict:
-        if not _wait_event(self._greennet_event, timeout, cancellation_event):
+        if not _wait_event(
+            self._waiter_event("_greennet_event"), timeout, cancellation_event
+        ):
             raise TimeoutError("Waiting for greennet verdict timed out")
         with self._state_lock:
             if self._greennet_error is not None:
@@ -782,7 +830,7 @@ class MMEmbeddingCacheEntry:
 
     @property
     def is_greennet_decided(self) -> bool:
-        return self._greennet_event.is_set()
+        return self._greennet_event is _SIGNALED_EVENT
 
 
 class _HashCacheValue:
@@ -944,10 +992,14 @@ class MMHashKeyCache:
                 self._building_bytes += charge_bytes
                 return True
 
-        if not current(reserve):
-            return
+        reserved = False
         published = False
         try:
+            # A rejected reservation or a stale embedding still owns the
+            # pending marker installed by begin, but has no byte charge.
+            reserved = bool(current(reserve))
+            if not reserved:
+                return
             # Hash tensors are a few KB. A fixed first-fit pool only adds a
             # linear free-list scan to every publication; store the CPU tensors
             # directly and let the byte-bounded LRU own eviction.
@@ -977,8 +1029,9 @@ class MMHashKeyCache:
                 with self._lock:
                     if self._pending.get(cache_key) is value:
                         self._pending.pop(cache_key)
-                    self._building_bytes -= charge_bytes
-                    self._drained.notify_all()
+                    if reserved:
+                        self._building_bytes -= charge_bytes
+                        self._drained.notify_all()
 
     def _remove_locked(self, cache_key: str, retired: List[_HashCacheValue]) -> int:
         value = self._entries.pop(cache_key, None)
@@ -1690,6 +1743,8 @@ class MMEmbeddingCache:
                 )
                 self._remove_if_same(cache_key, entry)
             finally:
+                # The blocking get below must not retain the previous work item.
+                del item, entry, result, before_publish
                 with self._publish_cond:
                     self._publish_pending -= 1
                     self._publish_cond.notify_all()
@@ -1866,16 +1921,15 @@ class MMEmbeddingCache:
         *,
         before_publish: Optional[Callable[[], None]] = None,
     ) -> bool:
-        # Prepare reader-visible metadata BEFORE the entry publishes its event.
-        # The deferred (async publication) path wakes waiters before the
-        # publication thread runs _on_complete_sync; without this a waiter can
-        # observe original_devices=None and crash in _copy_result_to_devices.
-        entry.original_devices = _map_tensors(result, lambda tensor: tensor.device)
-        entry.ready_events = self._record_ready_events(result)
+        # Deferred readers may wake before the publication thread runs. The
+        # winning completion publishes its device tree and events with the result.
+        devices = _map_tensors(result, lambda tensor: tensor.device)
+        ready_events = self._record_ready_events(result)
         return entry.complete(
             result,
             before_publish=before_publish,
             defer=self._publish_queue is not None,
+            prepared_storage=(devices, ready_events),
         )
 
     def fail(
@@ -1921,7 +1975,7 @@ class MMEmbeddingCache:
                 entry = self._entries.get(key)
                 if (
                     entry is not None
-                    and entry._event.is_set()
+                    and entry.is_done
                     and entry.error is None
                     and entry.tier in ("gpu", "cpu")
                 ):

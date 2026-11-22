@@ -15,6 +15,8 @@ from typing import Any
 import torch
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 
+from .native import USE_NATIVE_EMB
+
 _MAGIC_V1 = b"RTPMM001"
 _MAGIC_V2 = b"RTPMM002"
 _PREFIX = struct.Struct("<8sQ")
@@ -23,6 +25,11 @@ _CUDA_HEADER_READ_BYTES = 1024
 _MAX_NODES = 4096
 _MAX_DEPTH = 32
 _ALIGNMENT = 64
+
+_USE_NATIVE_RESTORE = USE_NATIVE_EMB
+_USE_NATIVE_OBJECT_RESTORE = USE_NATIVE_EMB
+_USE_NATIVE_PACK = USE_NATIVE_EMB
+_USE_NATIVE_PLAN = USE_NATIVE_EMB
 _DTYPES = {
     str(dtype): dtype
     for dtype in (
@@ -54,10 +61,7 @@ class TensorObjectPlan:
     checksum: bool
 
 
-def plan_object(
-    value: Any, *, devices=None, max_bytes=1024**3, checksum=True
-) -> TensorObjectPlan:
-    """Describe without copying/allocating tensor data; used for admission."""
+def _describe_object(value, devices, max_bytes):
     tensors, specs, identities = [], [], {}
     payload_size = nodes = 0
 
@@ -132,7 +136,26 @@ def plan_object(
         # The recursive closure captures both itself and the tensor list. Break
         # that cycle so releasing the plan releases tensors without waiting for GC.
         del visit
-    header = dict(tree=tree, tensors=specs)
+    return dict(tree=tree, tensors=specs), tensors, payload_size
+
+
+def plan_object(
+    value: Any, *, devices=None, max_bytes=1024**3, checksum=True
+) -> TensorObjectPlan:
+    """Describe without copying/allocating tensor data; used for admission."""
+    description = None
+    if (
+        _USE_NATIVE_PLAN
+        and devices is None
+        and type(max_bytes) is int
+        and 0 <= max_bytes <= (1 << 63) - 1 - _ALIGNMENT
+    ):
+        from librtp_compute_ops import plan_emb_tensor_object
+
+        description = plan_emb_tensor_object(value, max_bytes)
+    if description is None:
+        description = _describe_object(value, devices, max_bytes)
+    header, tensors, payload_size = description
     if checksum:
         header["sha256"] = "0" * 64
     encoded = json.dumps(header, separators=(",", ":"), allow_nan=False).encode()
@@ -145,8 +168,25 @@ def plan_object(
     return TensorObjectPlan(header, tensors, encoded, offset, nbytes, checksum)
 
 
+def native_pack_args(plan: TensorObjectPlan):
+    """The RTPMM002 prefix and byte slices consumed by both native writers."""
+    return (
+        _PREFIX.pack(_MAGIC_V2, len(plan.header_bytes)) + plan.header_bytes,
+        plan.payload_offset,
+        [
+            (plan.payload_offset + spec["offset"], spec["nbytes"], tensor)
+            for tensor, spec in zip(plan.tensors, plan.header["tensors"])
+        ],
+    )
+
+
 def pack_object(
-    plan: TensorObjectPlan, *, out: torch.Tensor | None = None, observe_stage=None
+    plan: TensorObjectPlan,
+    *,
+    out: torch.Tensor | None = None,
+    observe_stage=None,
+    payload_fence=None,
+    blocking_cuda_events=False,
 ) -> torch.Tensor:
     """Pack bytes directly into a supplied host or registered CUDA buffer."""
 
@@ -181,6 +221,24 @@ def pack_object(
             output[len(prefix) : plan.payload_offset].zero_()
 
     with cuda_graph_gate.operation() if output.is_cuda else nullcontext():
+        if output.is_cuda and _USE_NATIVE_PACK:
+            import librtp_compute_ops
+
+            fenced_pack = None
+            if payload_fence is not None and blocking_cuda_events:
+                fenced_pack = getattr(
+                    librtp_compute_ops, "pack_emb_cuda_tensor_slices_and_wait", None
+                )
+            pack_slices = fenced_pack or librtp_compute_ops.pack_emb_tensor_slices
+            with stage("native_pack_fenced" if fenced_pack else "native_pack"):
+                pack_slices(
+                    output,
+                    *native_pack_args(plan),
+                )
+            if payload_fence is not None and fenced_pack is None:
+                with stage("pack_ready_wait"):
+                    payload_fence()
+            return output
         if not plan.checksum:
             write_header(_MAGIC_V2, plan.header_bytes)
         with stage("pack_payload"):
@@ -210,7 +268,61 @@ def pack_object(
                     header, separators=(",", ":"), allow_nan=False
                 ).encode()
             write_header(_MAGIC_V1, encoded)
+        if payload_fence is not None:
+            with stage("pack_ready_wait"):
+                payload_fence()
     return output
+
+
+def _rebuild_tree(tree, tensor_count, referenced, tensors=None):
+    nodes = 0
+
+    def rebuild(node, depth=0):
+        nonlocal nodes
+        nodes += 1
+        if (
+            nodes > _MAX_NODES
+            or depth > _MAX_DEPTH
+            or not isinstance(node, list)
+            or len(node) != 2
+        ):
+            raise ValueError("invalid multimodal structure")
+        kind, content = node
+        if kind == "tensor":
+            if type(content) is not int or not 0 <= content < tensor_count:
+                raise ValueError("invalid multimodal tensor reference")
+            referenced.add(content)
+            return tensors[content] if tensors is not None else None
+        if kind in ("list", "tuple") and isinstance(content, list):
+            result = [rebuild(v, depth + 1) for v in content]
+            return tuple(result) if kind == "tuple" else result
+        if kind == "dict" and isinstance(content, list):
+            result = {}
+            for pair in content:
+                if (
+                    not isinstance(pair, list)
+                    or len(pair) != 2
+                    or not isinstance(pair[0], str)
+                    or pair[0] in result
+                ):
+                    raise ValueError("invalid multimodal dictionary")
+                result[pair[0]] = rebuild(pair[1], depth + 1)
+            return result
+        if kind == "scalar" and (
+            content is None
+            or type(content) in (bool, int, str)
+            or type(content) is float
+            and math.isfinite(content)
+        ):
+            return content
+        raise ValueError("invalid multimodal node")
+
+    try:
+        return rebuild(tree)
+    finally:
+        # A recursive closure otherwise keeps the metadata and tensors alive
+        # until cyclic GC. Release both on parse errors and successful reads.
+        del rebuild
 
 
 def unpack_object(
@@ -222,11 +334,16 @@ def unpack_object(
     observe_stage=None,
     consumer_stream=None,
     expected_key=None,
+    blocking_cuda_events=False,
+    payload_fence=None,
+    observe_restore_timing=None,
+    observe_header=None,
 ):
     """Validate the layout before materializing any destination tensor.
 
     CUDA callers own the source and must wait for all submitted copies before
-    reusing it. CUDA results are allocated independently on the current stream.
+    reusing it. A caller can request completion here by providing its stream
+    fence. CUDA results are allocated independently on the current stream.
     """
 
     def stage(name):
@@ -243,28 +360,100 @@ def unpack_object(
         or not _PREFIX.size <= size <= max_bytes
     ):
         raise ValueError("invalid multimodal object buffer")
-    if buffer.is_cuda:
-        # Fetch the usual prefix and metadata together. Large headers still
-        # copy only the missing suffix after validating the declared length.
-        with stage("d2h_header"):
-            head = buffer[:_CUDA_HEADER_READ_BYTES].cpu()
+    raw_header = None
+    read_object_header = read_native_header = None
+    if buffer.is_cuda and _USE_NATIVE_RESTORE and blocking_cuda_events:
+        import librtp_compute_ops
+
+        if _USE_NATIVE_OBJECT_RESTORE and payload_fence is not None:
+            restore_object = getattr(librtp_compute_ops, "restore_emb_cuda_object", None)
+            target = torch.device(cuda_device or buffer.device)
+            if (
+                restore_object is not None
+                and target.type == "cuda"
+                and (target.index is None or target == buffer.device)
+                and (consumer_stream is None or consumer_stream.device == buffer.device)
+                and (
+                    expected_key is None
+                    or (type(expected_key) is str and expected_key.isascii())
+                )
+            ):
+                restore_observed = (
+                    getattr(librtp_compute_ops, "restore_emb_cuda_object_observed", None)
+                    if observe_restore_timing is not None
+                    else None
+                )
+                restore_profiled = (
+                    getattr(librtp_compute_ops, "restore_emb_cuda_object_profiled", None)
+                    if observe_header is not None
+                    else None
+                )
+                stream_id = (
+                    None if consumer_stream is None else consumer_stream.stream_id
+                )
+                with stage("native_object_restore"):
+                    if restore_profiled is not None:
+                        value, raw_header, timing, length, d2h_bytes, copies = (
+                            restore_profiled(
+                                buffer, expected_key, restore_devices, stream_id
+                            )
+                        )
+                    elif restore_observed is not None:
+                        value, raw_header, timing = restore_observed(
+                            buffer, expected_key, restore_devices, stream_id
+                        )
+                    else:
+                        value, raw_header = restore_object(
+                            buffer, expected_key, restore_devices, stream_id
+                        )
+                        timing = None
+                if restore_profiled is not None:
+                    observe_header(length, d2h_bytes, copies)
+                if timing is not None and observe_restore_timing is not None:
+                    observe_restore_timing(timing)
+                if raw_header is None:
+                    return value
+        read_object_header = getattr(
+            librtp_compute_ops, "read_emb_cuda_object_header", None
+        )
+        if read_object_header is None:
+            read_native_header = getattr(
+                librtp_compute_ops, "read_emb_cuda_header", None
+            )
+
+    view = None
+    if raw_header is not None or read_object_header is not None:
+        if raw_header is None:
+            with stage("d2h_header"):
+                raw_header = read_object_header(buffer)
+        magic = _MAGIC_V2
+        offset = _align(_PREFIX.size + len(raw_header))
     else:
-        head = buffer
-    view = memoryview(head.numpy())
-    magic, length = _PREFIX.unpack_from(view)
-    header_end = _PREFIX.size + length
-    offset = _align(header_end)
-    if (
-        (magic != _MAGIC_V2 and (magic != _MAGIC_V1 or buffer.is_cuda))
-        or length > _MAX_HEADER
-        or offset > size
-    ):
-        raise ValueError("invalid multimodal object header")
-    raw_header = bytes(view[_PREFIX.size : header_end])
-    if header_end > len(view):
-        with stage("d2h_header"):
-            suffix = buffer[len(view) : header_end].cpu()
-        raw_header += suffix.numpy().tobytes()
+        def copy_header(start, end):
+            with stage("d2h_header"):
+                if read_native_header is not None:
+                    return read_native_header(buffer, start, end - start)
+                return buffer[start:end].cpu()
+
+        # Fetch the usual prefix and metadata together. Large headers copy
+        # only the missing suffix after validating the declared length.
+        head = (
+            copy_header(0, min(size, _CUDA_HEADER_READ_BYTES)) if buffer.is_cuda else buffer
+        )
+        view = memoryview(head.numpy())
+        magic, length = _PREFIX.unpack_from(view)
+        header_end = _PREFIX.size + length
+        offset = _align(header_end)
+        if (
+            (magic != _MAGIC_V2 and (magic != _MAGIC_V1 or buffer.is_cuda))
+            or length > _MAX_HEADER
+            or offset > size
+        ):
+            raise ValueError("invalid multimodal object header")
+        raw_header = bytes(view[_PREFIX.size : header_end])
+        if header_end > len(view):
+            suffix = copy_header(len(view), header_end)
+            raw_header += suffix.numpy().tobytes()
     with stage("decode_header"):
         try:
             header = json.loads(raw_header)
@@ -276,6 +465,7 @@ def unpack_object(
         if not isinstance(header, dict) or set(header) != fields:
             raise ValueError("invalid multimodal object schema")
     if magic == _MAGIC_V1:
+        assert view is not None
         with stage("checksum"):
             expected_digest = header["sha256"]
             header["sha256"] = "0" * 64
@@ -322,49 +512,8 @@ def unpack_object(
             end = spec["offset"] + spec["nbytes"]
         if end != size - offset:
             raise ValueError("invalid multimodal object length")
-        nodes, referenced = 0, set()
-
-        def rebuild(node, tensors=None, depth=0):
-            nonlocal nodes
-            nodes += 1
-            if (
-                nodes > _MAX_NODES
-                or depth > _MAX_DEPTH
-                or not isinstance(node, list)
-                or len(node) != 2
-            ):
-                raise ValueError("invalid multimodal structure")
-            kind, content = node
-            if kind == "tensor":
-                if type(content) is not int or not 0 <= content < len(specs):
-                    raise ValueError("invalid multimodal tensor reference")
-                referenced.add(content)
-                return tensors[content] if tensors is not None else None
-            if kind in ("list", "tuple") and isinstance(content, list):
-                result = [rebuild(v, tensors, depth + 1) for v in content]
-                return tuple(result) if kind == "tuple" else result
-            if kind == "dict" and isinstance(content, list):
-                result = {}
-                for pair in content:
-                    if (
-                        not isinstance(pair, list)
-                        or len(pair) != 2
-                        or not isinstance(pair[0], str)
-                        or pair[0] in result
-                    ):
-                        raise ValueError("invalid multimodal dictionary")
-                    result[pair[0]] = rebuild(pair[1], tensors, depth + 1)
-                return result
-            if kind == "scalar" and (
-                content is None
-                or type(content) in (bool, int, str)
-                or type(content) is float
-                and math.isfinite(content)
-            ):
-                return content
-            raise ValueError("invalid multimodal node")
-
-        layout = rebuild(header["tree"])
+        referenced = set()
+        layout = _rebuild_tree(header["tree"], len(specs), referenced)
         if magic == _MAGIC_V2 and expected_key is not None:
             if not isinstance(layout, dict) or layout.get("cache_key") != expected_key:
                 raise ValueError(
@@ -381,7 +530,44 @@ def unpack_object(
         )
 
     tensors = []
-    if buffer.is_cuda:
+    if buffer.is_cuda and _USE_NATIVE_RESTORE:
+        import librtp_compute_ops
+
+        gpu = torch.device(cuda_device or buffer.device)
+        cpu = torch.device("cpu")
+        restore_slices = librtp_compute_ops.restore_emb_tensor_slices
+        fenced_restore = None
+        if (
+            payload_fence is not None
+            and blocking_cuda_events
+            and gpu.type == "cuda"
+            and (gpu.index is None or gpu == buffer.device)
+        ):
+            fenced_restore = getattr(
+                librtp_compute_ops, "restore_emb_cuda_tensor_slices_and_wait", None
+            )
+        restore_stage = (
+            "native_restore_fenced" if fenced_restore else "native_restore_payload"
+        )
+        with stage(restore_stage):
+            slices = [
+                (
+                    offset + spec["offset"],
+                    spec["nbytes"],
+                    _DTYPES[spec["dtype"]],
+                    spec["shape"],
+                    gpu if restore_devices and spec["device"] == "cuda" else cpu,
+                )
+                for spec in specs
+            ]
+            tensors = (fenced_restore or restore_slices)(buffer, slices)
+            if consumer_stream is not None:
+                for tensor in tensors:
+                    if tensor.is_cuda:
+                        tensor.record_stream(consumer_stream)
+        if fenced_restore is not None:
+            payload_fence = None
+    elif buffer.is_cuda:
         for spec in specs:
             target_cuda = restore_devices and spec["device"] == "cuda"
             target = (cuda_device or buffer.device) if target_cuda else "cpu"
@@ -410,5 +596,8 @@ def unpack_object(
                     if spec["device"] == "cuda":
                         tensors[index] = tensors[index].to(cuda_device or "cuda")
     with stage("tree_restore"):
-        nodes = 0
-        return rebuild(header["tree"], tensors)
+        value = _rebuild_tree(header["tree"], len(specs), referenced, tensors)
+    if payload_fence is not None:
+        with stage("restore_ready_wait"):
+            payload_fence()
+    return value

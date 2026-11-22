@@ -2,7 +2,12 @@ import logging
 from enum import Enum
 from typing import Any, Dict, Iterable, Optional, Union
 
-from .emb_interval_metrics import EmbInflightMetric, EmbLatencyMetric, EmbOutcomeMetric
+from .emb_interval_metrics import (
+    EmbInflightMetric,
+    EmbLatencyMetric,
+    EmbOutcomeMetric,
+    EmbSampleMetric,
+)
 
 # Auto-TPM QoS priority header conveyed by the DashScope gateway; the same
 # value the engine forwards to FlexLB as ``Schedule.priority``.
@@ -118,6 +123,9 @@ class AccMetrics(Enum):
         "py_rtp_vit_remote_embedding_cache_operation_qps"
     )
     VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
+    VIT_REMOTE_EMB_GDR_ACQUIRE_FAILURE_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_acquire_failure_qps"
+    )
     VIT_REMOTE_EMB_WRITE_IN_PROGRESS_QPS_METRIC = (
         "py_rtp_vit_remote_embedding_cache_write_in_progress_qps"
     )
@@ -154,6 +162,12 @@ class AccMetrics(Enum):
     VIT_REMOTE_EMB_STAGE_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_stage_qps"
     VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC = (
         "py_rtp_vit_remote_embedding_cache_stage_error_qps"
+    )
+    VIT_REMOTE_EMB_HEADER_OBSERVATION_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_header_observation_qps"
+    )
+    VIT_REMOTE_EMB_HEADER_D2H_BYTES_PER_SECOND_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_header_d2h_bytes_per_second"
     )
     # Accumulated bytes are exported as B/s, not as an average object size.
     VIT_REMOTE_EMB_SDK_OBJECT_BYTES_PER_SECOND_METRIC = (
@@ -223,13 +237,16 @@ class GaugeMetrics(Enum):
     # serialization. source distinguishes mm_embedding_cpp/get_embedding_result;
     # status is success/error. Async submission ACKs are deliberately excluded.
     VIT_REQUEST_RT_METRIC = "py_rtp_vit_request_rt"
-    # Milliseconds, one observation per admitted remote operation. Read includes
-    # queueing, SDK calls, deserialization and device restoration enqueue, without
-    # CUDA synchronization. Write includes queueing, packing and SDK save.
+    # Full observed cache latency in milliseconds. A read hit includes metadata,
+    # queueing, SDK read, validation, and the direct GDR restore fence. A successful
+    # write includes planning, admission, snapshots, queueing, packing, and SDK save.
     VIT_REMOTE_EMB_READ_RT_METRIC = "py_rtp_vit_remote_embedding_cache_read_rt"
     VIT_REMOTE_EMB_WRITE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_write_rt"
 
     VIT_REMOTE_EMB_STAGE_RT_METRIC = "py_rtp_vit_remote_embedding_cache_stage_rt_ms"
+    VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_gdr_lock_hold_ms"
+    )
     # Enqueue to worker start; canceled-before-start work has no observation.
     VIT_REMOTE_EMB_QUEUE_WAIT_METRIC = "py_rtp_vit_remote_embedding_cache_queue_wait_ms"
     # Logical object bytes for completed SDK calls and bytes / SDK wall time.
@@ -375,12 +392,29 @@ class MetricReporter(object):
                     )
                 elif metric in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC,
                 ):
                     backend = self._kmon.register_custom_metric(
                         EmbLatencyMetric(metric.value, tags or {})
+                    )
+                elif metric in (
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC,
+                ):
+                    backend = self._kmon.register_custom_metric(
+                        EmbSampleMetric(
+                            metric.value,
+                            tags or {},
+                            arena=(
+                                metric is GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC
+                            ),
+                        )
                     )
                 else:
                     backend = self._kmon.register_gauge_metric(metric.value, tags or {})

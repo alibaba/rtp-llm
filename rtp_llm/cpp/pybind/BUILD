@@ -89,8 +89,16 @@ cc_library(
     name = "th_compute_lib",
     srcs = [
         "ComputeInit.cc",
+        "EmbTensorObjectDecode.cc",
     ],
-    hdrs = [],
+    hdrs = [
+        "EmbNativeObjectApi.h",
+        "EmbRegisteredArena.h",
+        "EmbRegisteredWrite.h",
+        "EmbTensorCodec.h",
+        "EmbTensorObjectPlan.h",
+        "EmbTransportCudaStreams.h",
+    ],
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:block_info",
@@ -103,6 +111,7 @@ cc_library(
         "//rtp_llm/cpp/utils:device_perf_wrapper",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
+        "@rapidjson//:rapidjson",
     ] + torch_deps() + select_py_bindings() + select({
         "@//:using_cuda12": [
             "//rtp_llm/cpp/utils:device_pin",
@@ -111,6 +120,12 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         ],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+        "//conditions:default": [],
+    }) + select({
+        "@//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
         "//conditions:default": [],
     }) + no_block_copy_link_deps(),
     copts = copts(),

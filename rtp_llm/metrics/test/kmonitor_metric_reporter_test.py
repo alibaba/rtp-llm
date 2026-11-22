@@ -51,9 +51,17 @@ class MetricReporterTest(unittest.TestCase):
                 if metric
                 not in (
                     GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC,
                     GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_OBJECT_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_SDK_EFFECTIVE_SPEED_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_EFFECTIVE_SPEED_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_TASKS_METRIC,
+                    GaugeMetrics.VIT_REMOTE_EMB_INFLIGHT_BYTES_METRIC,
                 )
             ],
         )
@@ -114,6 +122,73 @@ class MetricReporterTest(unittest.TestCase):
                 points = reporter._matic_map[metric.value].fetch_reported_data()
                 self.assertEqual(len(points), 1)
                 self.assertEqual(points[0].value, 1.0)
+
+    def test_gdr_diagnostics_emit_failure_rate_and_sampled_lock_latency(self):
+        reporter, _ = self.make_reporter()
+        failure = AccMetrics.VIT_REMOTE_EMB_GDR_ACQUIRE_FAILURE_QPS_METRIC
+        lock_hold = GaugeMetrics.VIT_REMOTE_EMB_GDR_LOCK_HOLD_RT_METRIC
+        failure_tags = {"operation": "read", "reason": "lock_timeout"}
+        hold_tags = {"operation": "write", "phase": "release"}
+        with mock.patch(
+            "rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric.time"
+        ) as clock:
+            clock.time.return_value = 100.0
+            reporter.init()
+            reporter.report(failure, 1, failure_tags)
+            reporter.report(failure, 1, failure_tags)
+            clock.time.return_value = 102.0
+            failures = reporter._matic_map[failure.value].fetch_reported_data()
+        self.assertEqual([(p.value, p.tags) for p in failures], [(1, failure_tags)])
+
+        reporter.report(lock_hold, 0.015625, hold_tags)
+        reporter.report(lock_hold, 0.03125, hold_tags)
+        samples = reporter._matic_map[lock_hold.value].fetch_reported_data()
+        self.assertEqual(
+            {p.metric_name or lock_hold.value: p.value for p in samples},
+            {
+                lock_hold.value: 0.0234375,
+                lock_hold.value + "_count": 2,
+                lock_hold.value + "_sum": 0.046875,
+                lock_hold.value + "_max": 0.03125,
+            },
+        )
+        self.assertTrue(all(p.tags == hold_tags for p in samples))
+
+    def test_remote_gauges_keep_interval_means_and_arena_watermarks(self):
+        reporter, _ = self.make_reporter()
+        reporter.init(tags={"worker": "a"})
+        size = GaugeMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_METRIC
+        arena = GaugeMetrics.VIT_REMOTE_EMB_GDR_ARENA_BYTES_METRIC
+        for operation, values in (("read", (8, 12, 40)), ("write", (4, 8))):
+            for value in values:
+                reporter.report(size, value, {"operation": operation})
+        for stage, values in (
+            ("total", (96, 128, 96)),
+            ("free", (100, 15, 80)),
+            ("largest_free", (72, 7, 64)),
+        ):
+            for value in values:
+                reporter.report(arena, value, {"stage": stage})
+
+        sizes = reporter._matic_map[size.value]
+        self.assertEqual(
+            [(point.tags, point.value) for point in sizes.fetch_reported_data()],
+            [
+                ({"worker": "a", "operation": "read"}, 20),
+                ({"worker": "a", "operation": "write"}, 6),
+            ],
+        )
+        self.assertEqual(sizes.fetch_reported_data(), [])
+        capacity = reporter._matic_map[arena.value]
+        self.assertEqual(
+            {
+                point.tags["stage"]: point.value
+                for point in capacity.fetch_reported_data()
+            },
+            {"total": 128, "free": 15, "largest_free": 7},
+        )
+        reporter.report(arena, 80, {"stage": "free"})
+        self.assertEqual([point.value for point in capacity.fetch_reported_data()], [80])
 
     def test_emb_stage_distribution_and_qps_use_same_samples(self):
         rt = GaugeMetrics.VIT_REMOTE_EMB_STAGE_RT_METRIC.value
@@ -177,6 +252,34 @@ class MetricReporterTest(unittest.TestCase):
         }
         self.assertEqual(rates, dict(total=3, success=0, error=3, skipped=0))
         self.assertTrue(all(p.tags["worker"] == "a" for p in first + second))
+
+    def test_emb_object_latency_counts_the_100_ms_boundary_for_successes(self):
+        for name, status, excluded in (
+            (GaugeMetrics.VIT_REMOTE_EMB_READ_RT_METRIC, "hit", "miss"),
+            (GaugeMetrics.VIT_REMOTE_EMB_WRITE_RT_METRIC, "success", "timeout"),
+        ):
+            with self.subTest(metric=name):
+                reporter, _ = self.make_reporter()
+                reporter.init(acc_metrics=(), gauge_metrics=(name,))
+                for value in (9.0, 75.0, 100.0, 100.001, 700.0):
+                    reporter.report(name, value, {"status": status})
+                reporter.report(name, 1.0, {"status": excluded})
+                points = reporter._matic_map[name.value].fetch_reported_data()
+                buckets = {
+                    p.tags["le"]: p.value
+                    for p in points
+                    if p.metric_name == name.value + "_bucket"
+                }
+                self.assertEqual(buckets["100"], 3)
+                self.assertEqual(buckets["+Inf"], 5)
+                self.assertEqual(buckets["1000"], 5)
+                self.assertTrue(
+                    all(
+                        p.tags["status"] == status
+                        for p in points
+                        if p.metric_name == name.value + "_bucket"
+                    )
+                )
 
     def test_emb_concurrent_flush_keeps_every_outcome_and_wait_sample(self):
         qps = AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC.value
