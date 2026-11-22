@@ -88,6 +88,12 @@ def _reject_n(value: Any) -> NoReturn:
     )
 
 
+def validate_kimi_k3_top_logprobs(top_logprobs: int | None) -> None:
+    """Reject a candidate count that cannot be used to build a response."""
+    if top_logprobs is not None and top_logprobs < 0:
+        _reject("top_logprobs", top_logprobs, "to be non-negative")
+
+
 def _scalar_float(name: str, value: Any) -> float:
     if not isinstance(value, (int, float)):
         _reject(name, value, "to be a scalar")

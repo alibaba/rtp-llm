@@ -262,6 +262,7 @@ struct MtpExecutorTestConfig {
     bool            enable_batch_record       = false;
     bool            draft_prefill_uses_request_lanes = false;
     double          record_decode_sample_rate = 1.0;
+    std::optional<ReturnAllProbsMode> response_mode;
 };
 
 template<typename T>
@@ -3518,6 +3519,10 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
 
     GenerateStreamPtr stream1 = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info1);
+    if (config_override && config_override->response_mode) {
+        stream1->generateConfig()->return_all_probs = *config_override->response_mode;
+        stream1->setReturnAllProbs(*config_override->response_mode);
+    }
     GenerateStreamPtr prefill_only_stream;
     if (with_prefill_only) {
         prefill_only_stream = createContextStream(
@@ -3630,6 +3635,8 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
         SamplerOutput{torch::tensor({3, 2, 0, 0, 0}, torch::kInt32).reshape({(int64_t)batch_size * 5, 1})};
     sampler_output.all_probs = torch::tensor(target_sample_all_probs_data)
                                    .reshape({(int64_t)batch_size, (int64_t)(propose_step + 1), (int64_t)vocab_size});
+    // No filtering in this fixture: the original and sampled distributions agree.
+    sampler_output.original_all_probs = sampler_output.all_probs.clone();
     components.fake_sampler->setInputs({sampler_input});
     components.fake_sampler->setOutputs({sampler_output});
 
@@ -3722,6 +3729,11 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
     ASSERT_EQ(do_sample.scalar_type(), torch::kBool);
     ASSERT_EQ(do_sample.sizes().vec(), (std::vector<int64_t>{1}));
     EXPECT_FALSE(do_sample[0].item<bool>());
+    if (config_override && config_override->response_mode) {
+        EXPECT_EQ(fake_speculative_sampler->last_params.response_modes,
+                  (std::vector<ReturnAllProbsMode>{*config_override->response_mode}));
+        EXPECT_EQ(stream1->getReturnAllProbs(), ReturnAllProbsMode::DEFAULT);
+    }
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step - 1);
     EXPECT_EQ(draft_prefill_fake_model->forwardCount(), 1u);
     if (with_prefill_only) {
@@ -3737,6 +3749,15 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool                         
 
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     runSingleBatchDecodeScenario(/*with_prefill_only=*/false);
+}
+
+TEST_F(MtpExecutorTest, ReviewResponseModePreservesRequestThroughInternalSampling) {
+    for (const auto mode : {ReturnAllProbsMode::NONE, ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        MtpExecutorTestConfig config;
+        config.response_mode = mode;
+        runSingleBatchDecodeScenario(false, &config);
+    }
 }
 
 TEST_F(MtpExecutorTest, testPdfusionPrefillOnlyDoesNotSkipSingleBatchDecode) {

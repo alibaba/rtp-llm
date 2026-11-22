@@ -23,7 +23,12 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    RoleAddr,
+    ThinkingMode,
+)
 from rtp_llm.dash_sc import grpc_metrics
 from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import (
@@ -1622,6 +1627,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     output_ids=torch.tensor([10, 11, 1, 99], dtype=torch.int32),
                     finished=False,
                     aux_info=AuxInfo(input_len=4, reuse_len=0),
+                    all_probs=torch.nn.functional.one_hot(
+                        torch.tensor([10, 11, 1, 99]), num_classes=100
+                    ).float(),
                 )
             ]
         )
@@ -1631,6 +1639,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     output_ids=torch.tensor([20, 21, 22], dtype=torch.int32),
                     finished=True,
                     aux_info=AuxInfo(input_len=4, reuse_len=0),
+                    all_probs=torch.nn.functional.one_hot(
+                        torch.tensor([20, 21, 22]), num_classes=100
+                    ).float(),
                 )
             ]
         )
@@ -1667,6 +1678,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 [7, 8, 128821],
                 SamplingParams(
                     response_format=json.dumps({"type": "json_object"}),
+                    logprobs=True,
+                    top_logprobs=1,
                 ),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1697,6 +1710,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_gen_ids(chunks[0]), [128821, 10, 11])
         self.assertEqual(_gen_ids(chunks[1]), [128822, 271])
         self.assertEqual(_gen_ids(chunks[2]), [20, 21, 22])
+        self.assertEqual(
+            json.loads(chunks[0].infer_response.parameters["logprobs"].string_param),
+            [{"128821": None}, {"10": 0.0}, {"11": 0.0}],
+        )
+        self.assertNotIn("logprobs", chunks[1].infer_response.parameters)
+        self.assertEqual(
+            json.loads(chunks[2].infer_response.parameters["logprobs"].string_param),
+            [{"20": 0.0}, {"21": 0.0}, {"22": 0.0}],
+        )
         self.assertEqual(chunks[2].infer_response.id, "trace-real-2")
         # phase-2 trace_id mirrors phase-1 (no -2 suffix) so dashscope log search
         # finds both halves under a single trace.
@@ -1707,6 +1729,8 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
         phase1_config = visitor.generate_inputs[0].generate_config
         phase2_config = visitor.generate_inputs[1].generate_config
+        self.assertEqual(phase1_config.return_all_probs, ReturnAllProbsMode.ORIGINAL)
+        self.assertEqual(phase2_config.return_all_probs, ReturnAllProbsMode.ORIGINAL)
         self.assertIsNone(phase1_config.response_format)
         self.assertIsNotNone(phase1_config.structural_tag)
         self.assertIsNone(phase2_config.response_format)

@@ -53,6 +53,7 @@ class ReplayBackend:
         self.calls = []
         self.reply = "answer<|close|>response<|sep|><|close|>message<|sep|>"
         self.chunk_size = 3
+        self.with_probabilities = False
 
     async def enqueue(self, generate_input):
         self.calls.append(generate_input)
@@ -61,10 +62,20 @@ class ReplayBackend:
         async def replay():
             for start in range(0, len(ids), self.chunk_size):
                 end = min(start + self.chunk_size, len(ids))
+                probabilities = None
+                if self.with_probabilities:
+                    probabilities = torch.zeros(
+                        (1, end - start, len(self.tokenizer)), dtype=torch.float32
+                    )
+                    for row, token_id in enumerate(ids[start:end]):
+                        selected = 0.6 + 0.01 * ((start + row) % 10)
+                        probabilities[0, row, token_id] = selected
+                        probabilities[0, row, 0 if token_id != 0 else 1] = 1 - selected
                 yield GenerateOutputs(
                     [
                         GenerateOutput(
                             output_ids=torch.tensor([ids[start:end]], dtype=torch.int),
+                            all_probs=probabilities,
                             finished=torch.tensor([end == len(ids)]),
                             aux_info=AuxInfo(
                                 input_len=generate_input.input_length,
@@ -233,6 +244,56 @@ class KimiK3HttpCheckpointSmokeTest(unittest.TestCase):
         self.assertEqual(config.temperature, 1.0)
         self.assertEqual(config.top_p, 0.95)
         self.assertEqual(self.frontend._global_controller.active, 0)
+
+    def test_streamed_target_probabilities_cross_think_boundary(self):
+        self.backend.reply = (
+            "reasoning<|close|>think<|sep|><|open|>response<|sep|>"
+            "answer<|close|>response<|sep|><|close|>message<|sep|>"
+        )
+        self.backend.with_probabilities = True
+        response = self.client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "kimi_k3",
+                "messages": [{"role": "user", "content": "Question?"}],
+                "enable_thinking": True,
+                "stream": True,
+                "logprobs": True,
+                "top_logprobs": 2,
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        frames = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        reasoning_probs = []
+        content_probs = []
+        for frame in frames:
+            for choice in frame.get("choices", []):
+                delta = choice["delta"]
+                entries = (choice.get("logprobs") or {}).get("content") or []
+                if delta.get("reasoning_content"):
+                    reasoning_probs.extend(entries)
+                elif delta.get("content"):
+                    content_probs.extend(entries)
+                else:
+                    self.assertFalse(entries, choice)
+        self.assertEqual(
+            [entry["token"] for entry in reasoning_probs],
+            [
+                self.tokenizer.decode([token])
+                for token in self.tokenizer.encode("reasoning")
+            ],
+        )
+        self.assertEqual(
+            [entry["token"] for entry in content_probs],
+            [
+                self.tokenizer.decode([token])
+                for token in self.tokenizer.encode("answer")
+            ],
+        )
 
     def test_http_images_reach_checkpoint_vision_embeddings(self):
         sizes = ((28, 28), (56, 28), (28, 28))

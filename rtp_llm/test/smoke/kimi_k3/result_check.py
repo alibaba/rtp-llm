@@ -316,7 +316,17 @@ def _protocol_names() -> set[str]:
         "grammar_mixed_plain",
         "grammar_mixed_json",
         "grammar_mixed_thinking",
+        "logprobs_mixed_none",
+        "logprobs_mixed_default",
+        "logprobs_mixed_original",
     }
+    names.update(
+        f"logprobs_{mode}_{transport}_top{top}"
+        for mode in ("default", "original")
+        for transport in ("sync", "sse")
+        for top in (0, 3)
+    )
+    names.update(f"logprobs_length_stop_{limit}" for limit in (3, 4, 5))
     names.update(f"tail_reuse_slot_{index}" for index in range(4))
     return names
 
@@ -325,6 +335,7 @@ def _check_protocol(
     records: list[dict[str, Any]], directory: pathlib.Path
 ) -> list[str]:
     from rtp_llm.test.smoke.kimi_k3.grammar_smoke import check_json_answer
+    from rtp_llm.test.smoke.kimi_k3.logprobs_smoke import COPY_TEXT, check_logprobs
     from rtp_llm.test.smoke.kimi_k3.request_smoke import (
         merge_sse,
         validate_answer,
@@ -390,8 +401,22 @@ def _check_protocol(
                     raise ValueError("invalid tool call")
             elif name.startswith("grammar_") and name != "grammar_mixed_plain":
                 check_json_answer(body)
+            elif name.startswith("logprobs_") and name != "logprobs_mixed_none":
+                request = row["request"]
+                limited = name.startswith("logprobs_length_stop_")
+                check_logprobs(
+                    body,
+                    mode=request.get("logprobs_mode", "default"),
+                    top_count=request.get("top_logprobs", 0),
+                    expected=None if limited else COPY_TEXT,
+                    finish="length" if limited else "stop",
+                )
             else:
-                validate_answer(body, "5")
+                validate_answer(
+                    body, COPY_TEXT if name == "logprobs_mixed_none" else "5"
+                )
+                if name == "logprobs_mixed_none" and body["choices"][0].get("logprobs"):
+                    raise ValueError("unrequested probabilities")
                 if name == "request_sampling_defaults":
                     config = body["debug_info"]["generate_config"]
                     if (

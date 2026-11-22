@@ -168,6 +168,9 @@ message GenerateConfigPB {
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
     bool frontend_metric_streaming = 77;
+    // SP clients set the legacy probability fields to NONE for old-backend safety.
+    // 0=unset, 2=DEFAULT, 3=ORIGINAL; uses the same offset as return_all_probs_mode.
+    int32 speculative_return_all_probs_mode = 78;
 }
 
 message MMPreprocessConfigPB {

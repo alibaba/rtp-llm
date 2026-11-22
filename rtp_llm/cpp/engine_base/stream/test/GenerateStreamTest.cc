@@ -61,6 +61,24 @@ TEST(CompleteTokenIdsTest, ImageHashIdentityAndShiftedReuseBoundaries) {
     EXPECT_FALSE(tokens.isValidReuseLength(16));
 }
 
+TEST(CompleteTokenIdsTest, stopWordLookaheadDoesNotCommitTokens) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::tensor({9, 1}, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    CompleteTokenIds tokens(1, 1, 16, 2);
+    tokens.init(input);
+    const int candidates[] = {2, 3, 4};
+
+    EXPECT_TRUE(tokens.matchesStopWordsAt(0, {9, 1}, 2));
+    EXPECT_TRUE(tokens.matchesStopWordsAt(0, {1, 2}, 3, candidates));
+    EXPECT_TRUE(tokens.matchesStopWordsAt(0, {2, 3}, 4, candidates));
+    EXPECT_TRUE(tokens.matchesStopWordsAt(0, {}, 3, candidates));
+    EXPECT_FALSE(tokens.matchesStopWordsAt(0, {3, 4}, 4, candidates));
+    EXPECT_FALSE(tokens.matchesStopWordsAt(0, {9, 1, 2}, 2));
+    EXPECT_EQ(tokens.seqLength(), 2);
+    EXPECT_EQ(tokens.completeTokenIdsVec(0), (std::vector<int>{9, 1}));
+}
+
 TEST(GenerateInputTest, PrefixPreservesCustomOutputTokenIdentity) {
     GenerateInput input;
     input.input_ids                    = torch::tensor({7, 8, 9}, torch::kInt32);
@@ -191,6 +209,23 @@ protected:
     // Chunk windows are active only after the stream reaches RUNNING.
     static void markRunning(const GenerateStreamPtr& stream) {
         stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    static GenerateStreamPtr createMtpProbabilityStream(bool streaming) {
+        GenerateStreamBuilder builder;
+        auto                  stream = builder.createChunkedContextStream({9}, RoleType::PDFUSION, 0);
+        markRunning(stream);
+        auto config              = stream->generateConfig();
+        config->return_all_probs = ReturnAllProbsMode::DEFAULT;
+        config->is_streaming     = streaming;
+        config->max_new_tokens   = 4;
+        config->min_new_tokens   = 0;
+        config->ignore_eos       = true;
+        config->aux_info         = true;
+        auto buffer              = std::make_shared<SpeculativeExecutorStreamOutput>();
+        buffer->tokens           = torch::zeros({1, 2}, torch::kInt32);
+        stream->setSPOutputBuffer(buffer);
+        return stream;
     }
 
     static std::vector<int> makeInputIds(int count) {
@@ -391,6 +426,150 @@ TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAux
     ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
     EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.generation_prefill_cuda_graph_status,
               "replayed");
+}
+
+TEST_F(GenerateStreamTest, mtpProbabilitiesMatchOrdinaryOutputWindows) {
+    for (auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        for (int output_mode = 0; output_mode < 3; ++output_mode) {
+            for (int final_count : {3, 4}) {
+                SCOPED_TRACE(::testing::Message() << "mode=" << static_cast<int>(mode) << " output_mode=" << output_mode
+                                                  << " final_count=" << final_count);
+                auto stream              = createMtpProbabilityStream(output_mode == 1);
+                auto config              = stream->generateConfig();
+                config->max_new_tokens   = 8;
+                config->min_new_tokens   = 8;
+                config->pd_separation    = output_mode == 2;
+                config->aux_info         = false;
+                config->return_all_probs = mode;
+                auto expected_tokens     = torch::arange(10, 19, torch::kInt32).reshape({1, 9});
+                auto expected_probs      = torch::arange(1, 37, torch::kFloat32).reshape({1, 9, 4});
+                expected_probs           = expected_probs / expected_probs.sum(-1, true);
+                auto staging             = torch::empty({1, 4, 4}, torch::kFloat32);
+                int  generated           = 0;
+                int  emitted             = 0;
+                for (int count : {1, 4, final_count}) {
+                    auto probs = staging.narrow(1, 0, count);
+                    probs.copy_(expected_probs.narrow(1, generated, count));
+                    StreamSpecUpdateInfo update{expected_tokens.narrow(1, generated, count), count, {}, {}, {}};
+                    update.all_probs              = probs;
+                    update.update_remote_generate = false;
+                    stream->specUpdate(update);
+                    staging.fill_(-1);
+                    generated = std::min(generated + count, 8);
+                    if (output_mode == 0 && generated < 8) {
+                        EXPECT_FALSE(stream->hasOutput());
+                        continue;
+                    }
+                    const int frames = output_mode == 1 ? generated - emitted : 1;
+                    for (int frame = 0; frame < frames; ++frame) {
+                        const int end    = output_mode == 1 ? emitted + 1 : generated;
+                        auto      result = stream->nextOutput(100);
+                        ASSERT_TRUE(result.ok()) << result.status().ToString();
+                        const auto& output = result.value().generate_outputs.at(0);
+                        EXPECT_TRUE(torch::equal(output.output_ids, expected_tokens.narrow(1, emitted, end - emitted)));
+                        ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                        ASSERT_EQ(output.aux_info.all_probs->sizes().vec(), (std::vector<int64_t>{1, 4}));
+                        EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, expected_probs.select(1, end - 1)));
+                        EXPECT_EQ(output.finished, end == 8);
+                        emitted = end;
+                    }
+                }
+                EXPECT_EQ(emitted, 8);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, mtpProbabilitiesFinishWhenSequenceBudgetIsExhausted) {
+    auto stream = createMtpProbabilityStream(false);
+    stream->max_seq_len_ = stream->inputLength();
+    ASSERT_EQ(stream->maxTokenNum(), 1);
+
+    StreamSpecUpdateInfo update{torch::tensor({{42}}, torch::kInt32), 1, {}, {}, {}};
+    update.all_probs = torch::full({1, 1, 4}, .25f);
+    stream->specUpdate(update);
+
+    EXPECT_EQ(stream->seqLength(), 1);
+    EXPECT_FALSE(stream->hasOutput());
+    auto result = stream->nextOutput(100);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::FINISHED);
+}
+
+TEST_F(GenerateStreamTest, mtpProbabilitiesUseLastActuallyCommittedPosition) {
+    struct Case {
+        int                           max_tokens;
+        int                           min_tokens;
+        int                           eos;
+        std::vector<std::vector<int>> stop;
+        int                           expected_tokens;
+    };
+    const std::vector<Case> cases = {
+        {4, 0, -1, {}, 4},
+        {3, 0, -1, {}, 3},
+        {4, 0, 3, {}, 3},
+        {4, 0, -1, {{4}, {2}}, 2},
+        {4, 3, 2, {}, 4},
+        {5, 3, 2, {{4}}, 4},
+        {4, 0, -1, {{1, 2}}, 2},
+        {5, 3, -1, {{}}, 3},
+    };
+    for (bool streaming : {false, true}) {
+        for (const auto& test : cases) {
+            auto stream                          = createMtpProbabilityStream(streaming);
+            auto config                          = stream->generateConfig();
+            config->max_new_tokens               = test.max_tokens;
+            config->min_new_tokens               = test.min_tokens;
+            config->ignore_eos                   = test.eos < 0;
+            stream->special_tokens_.eos_token_id = test.eos;
+            config->stop_words_list              = test.stop;
+            auto probabilities                   = torch::tensor(
+                {{{.1f, .2f, .3f, .4f}, {.4f, .3f, .2f, .1f}, {.2f, .4f, .1f, .3f}, {.3f, .1f, .4f, .2f}}});
+            StreamSpecUpdateInfo first{torch::tensor({{1}}, torch::kInt32), 1, {}, {}, {}};
+            first.all_probs = probabilities.narrow(1, 0, 1);
+            stream->specUpdate(first);
+            if (streaming) {
+                ASSERT_TRUE(stream->nextOutput(100).ok());
+            }
+            StreamSpecUpdateInfo next{torch::tensor({{2, 3, 4}}, torch::kInt32), 3, {}, {}, {}};
+            next.all_probs = probabilities.narrow(1, 1, 3);
+            stream->specUpdate(next);
+            const int count = streaming ? test.expected_tokens - 1 : 1;
+            for (int i = 0; i < count; ++i) {
+                auto result = stream->nextOutput(100);
+                ASSERT_TRUE(result.ok()) << result.status().ToString();
+                const auto& output   = result.value().generate_outputs.at(0);
+                const int   position = streaming ? i + 2 : test.expected_tokens;
+                ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                ASSERT_EQ(output.aux_info.all_probs->sizes().vec(), (std::vector<int64_t>{1, 4}));
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, probabilities.select(1, position - 1)));
+                const auto expected_ids =
+                    torch::arange(streaming ? position : 1, position + 1, torch::kInt32).reshape({1, -1});
+                EXPECT_TRUE(torch::equal(output.output_ids, expected_ids));
+                EXPECT_EQ(output.finished, i == count - 1);
+                EXPECT_EQ(output.aux_info.output_len, position);
+            }
+            EXPECT_EQ(stream->seqLength(), 1 + test.expected_tokens);
+            EXPECT_FALSE(stream->hasOutput());
+        }
+    }
+}
+
+TEST_F(GenerateStreamTest, mtpProbabilitiesRespectOutputQueueCapacity) {
+    auto                 stream = std::dynamic_pointer_cast<NormalGenerateStream>(createMtpProbabilityStream(true));
+    StreamSpecUpdateInfo first{torch::tensor({{1}}, torch::kInt32), 1, {}, {}, {}};
+    first.all_probs = torch::full({1, 1, 4}, .25f);
+    stream->specUpdate(first);
+    ASSERT_TRUE(stream->nextOutput(100).ok());
+    stream->generate_outputs_.resize(999);
+    StreamSpecUpdateInfo next{torch::tensor({{2, 3, 4}}, torch::kInt32), 3, {}, {}, {}};
+    next.all_probs = torch::full({1, 3, 4}, .25f);
+    stream->specUpdate(next);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::OUTPUT_QUEUE_FULL);
+    auto result = stream->nextOutput(100);
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.status().code(), ErrorCode::OUTPUT_QUEUE_FULL);
 }
 
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
@@ -2426,6 +2605,59 @@ TEST_F(GenerateStreamTest, testMultimodalContextPrefillWindows) {
     }
 }
 
+TEST_F(GenerateStreamTest, testChunkedPrefillReturnsOnlyCommittedTokenProbabilities) {
+    GenerateStreamBuilder        builder;
+    const ChunkedInputConfigurer modes[] = {
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; },
+        [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::ORIGINAL; },
+    };
+    for (const auto configure : modes) {
+        for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION}) {
+            auto stream = builder.createChunkedContextStream(makeInputIds(18), role, 8, configure);
+            ASSERT_FALSE(stream->hasError()) << stream->stopReason();
+            ASSERT_TRUE(stream->chunkedPrefillEnabled());
+            stream->generateConfig()->is_streaming   = true;
+            stream->generateConfig()->max_new_tokens = 2;
+            markRunning(stream);
+
+            // Neither intermediate chunk may publish a token or its probabilities.
+            for (int chunk = 0; chunk < 2; ++chunk) {
+                ASSERT_TRUE(stream->isMiddleChunk());
+                updateOneToken(stream, 100);
+                EXPECT_EQ(stream->seqLength(), 18);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+            ASSERT_TRUE(stream->isLastChunk());
+            for (int step = 0; step < 2; ++step) {
+                auto probs           = torch::zeros({1, 1024}, torch::kFloat32);
+                probs[0][101 + step] = 0.75f;
+                probs[0][99]         = 0.25f;
+                StreamUpdateInfo update{torch::full({1, 1}, 101 + step, torch::kInt32),
+                                        1,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        probs,
+                                        torch::Tensor(),
+                                        torch::Tensor(),
+                                        torch::Tensor()};
+                stream->update(update);
+                ASSERT_TRUE(stream->hasOutput());
+                auto result = stream->nextOutput(100);
+                ASSERT_TRUE(result.ok()) << result.status().ToString();
+                ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                const auto& output = result.value().generate_outputs[0];
+                EXPECT_EQ(output.output_ids.item<int32_t>(), 101 + step);
+                ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, update.all_probs));
+                EXPECT_EQ(output.finished, step == 1);
+                EXPECT_FALSE(stream->hasOutput());
+            }
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
     GenerateStreamBuilder builder;
     const auto            input_ids = makeInputIds(9);
@@ -2497,8 +2729,6 @@ TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
         {"return_hidden_states", [](GenerateInput&, GenerateConfig& config) { config.return_hidden_states = true; }},
         {"return_all_hidden_states",
          [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
-        {"return_all_probs",
-         [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
         {"custom_output", [](GenerateInput& input, GenerateConfig&) { input.custom_output_token_position = 3; }},
     };
     for (const auto& test_case : rejection_cases) {

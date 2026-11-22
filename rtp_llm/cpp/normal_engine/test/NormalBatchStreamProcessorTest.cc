@@ -3803,6 +3803,128 @@ TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerInputSki
     EXPECT_TRUE(sampler_inputs.generator[1].defined());
 }
 
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillProbabilityRowsStayAlignedWithDecode) {
+    for (const auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        auto config = make_shared<GenerateConfig>();
+        config->return_all_probs = mode;
+        config->is_streaming = true;
+        config->max_new_tokens = 2;
+        auto chunk = makeMiddleChunkStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, config);
+        auto plain_config = make_shared<GenerateConfig>();
+        plain_config->is_streaming = true;
+        plain_config->max_new_tokens = 2;
+        auto plain = makeRunningStream({1, 2, 3}, plain_config);
+
+        for (int step = 0; step < 2; ++step) {
+            StreamGroups groups({chunk, plain});
+            GptModelOutputs model_output;
+            model_output.logits = torch::zeros({2, model_config_.vocab_size}, torch::kFloat32).cuda();
+            auto gathered = processor_->gatherSamplerInput(groups, GptModelInputs{}, model_output);
+            ASSERT_TRUE(gathered.ok()) << gathered.status().ToString();
+            EXPECT_EQ(gathered->all_probs.sizes().vec(), (vector<int64_t>{2, 2048}));
+            EXPECT_EQ(gathered->return_original_all_probs, mode == ReturnAllProbsMode::ORIGINAL);
+
+            // After step zero, the plain request is decode and moves before the chunk row.
+            const int chunk_row = step == 0 ? 0 : 1;
+            const int plain_row = 1 - chunk_row;
+            auto tokens = torch::empty({2, 1}, torch::kInt32);
+            tokens[chunk_row][0] = 42;
+            tokens[plain_row][0] = 43;
+            auto probs = torch::zeros({2, 2048}, torch::kFloat32);
+            probs[chunk_row][42] = 0.75f;
+            probs[chunk_row][99] = 0.25f;
+            probs[plain_row][43] = 1.0f;
+            MergedOutput outputs;
+            outputs.sampler_output.token_ids = tokens.cuda();
+            outputs.sampler_output.success = torch::tensor({true, true}, torch::kBool);
+            outputs.sampler_output.all_probs = probs.cuda();
+            ASSERT_TRUE(processor_->dispatch(groups, outputs).ok());
+            EXPECT_EQ(chunk->hasOutput(), step == 1);
+            auto plain_output = plain->nextOutput(100);
+            ASSERT_TRUE(plain_output.ok());
+            EXPECT_EQ(plain_output.value().generate_outputs[0].output_ids.item<int32_t>(), 43);
+            EXPECT_FALSE(plain_output.value().generate_outputs[0].aux_info.all_probs.has_value());
+            if (step == 1) {
+                auto result = chunk->nextOutput(100);
+                ASSERT_TRUE(result.ok());
+                const auto& output = result.value().generate_outputs[0];
+                EXPECT_EQ(output.output_ids.item<int32_t>(), 42);
+                ASSERT_TRUE(output.aux_info.all_probs.has_value());
+                EXPECT_TRUE(torch::equal(*output.aux_info.all_probs, probs.narrow(0, chunk_row, 1)));
+            }
+        }
+    }
+}
+
+TEST_F(ChunkedPrefillBatchStreamProcessorTest, testChunkedPrefillSamplerMatchesUnchunkedProbabilities) {
+    for (const auto mode : {ReturnAllProbsMode::DEFAULT, ReturnAllProbsMode::ORIGINAL}) {
+        const auto make_config = [mode]() {
+            auto config = make_shared<GenerateConfig>();
+            config->return_all_probs = mode;
+            config->is_streaming = true;
+            config->max_new_tokens = 2;
+            config->do_sample = true;
+            config->top_k = 2;
+            config->top_p = 1.0f;
+            config->temperature = 1.0f;
+            config->random_seed = 123;
+            return config;
+        };
+        const vector<int32_t> prompt{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        auto chunk = makeMiddleChunkStream(prompt, make_config());
+        auto baseline = makeRunningStream(prompt, make_config());
+        const auto initial_rng_state = chunk->getGenerator().get_state();
+        Sampler sampler(SamplerInitParams{});
+        auto logits = torch::full({2048}, -100.0f, torch::kFloat32);
+        logits[40] = std::log(0.1f);
+        logits[41] = std::log(0.2f);
+        logits[42] = std::log(0.3f);
+        logits[43] = std::log(0.4f);
+        auto expected = torch::zeros({1, 2048}, torch::kFloat32);
+        if (mode == ReturnAllProbsMode::ORIGINAL) {
+            expected[0][40] = 0.1f;
+            expected[0][41] = 0.2f;
+            expected[0][42] = 0.3f;
+            expected[0][43] = 0.4f;
+        } else {
+            expected[0][42] = 3.0f / 7.0f;
+            expected[0][43] = 4.0f / 7.0f;
+        }
+        // Sample the middle chunk too: it must not consume the request's RNG.
+        for (int phase = 0; phase < 3; ++phase) {
+            list<GenerateStreamPtr> streams{chunk};
+            if (phase > 0) {
+                streams.push_back(baseline);
+            }
+            StreamGroups groups(streams);
+            GptModelOutputs model_output;
+            model_output.logits = logits.repeat({static_cast<int64_t>(streams.size()), 1}).cuda();
+            auto gathered = processor_->gatherSamplerInput(groups, GptModelInputs{}, model_output);
+            ASSERT_TRUE(gathered.ok()) << gathered.status().ToString();
+            MergedOutput outputs;
+            outputs.sampler_output = sampler.forward(gathered.value());
+            ASSERT_TRUE(processor_->dispatch(groups, outputs).ok());
+            if (phase == 0) {
+                EXPECT_FALSE(chunk->hasOutput());
+                EXPECT_TRUE(torch::equal(chunk->getGenerator().get_state(), initial_rng_state));
+                continue;
+            }
+            EXPECT_TRUE(torch::equal(chunk->getGenerator().get_state(), baseline->getGenerator().get_state()));
+            auto chunk_result = chunk->nextOutput(100);
+            auto baseline_result = baseline->nextOutput(100);
+            ASSERT_TRUE(chunk_result.ok());
+            ASSERT_TRUE(baseline_result.ok());
+            const auto& actual = chunk_result.value().generate_outputs[0];
+            const auto& reference = baseline_result.value().generate_outputs[0];
+            EXPECT_TRUE(torch::equal(actual.output_ids, reference.output_ids));
+            ASSERT_TRUE(actual.aux_info.all_probs.has_value());
+            ASSERT_TRUE(reference.aux_info.all_probs.has_value());
+            EXPECT_TRUE(torch::allclose(*actual.aux_info.all_probs, expected, 1e-5, 1e-6));
+            EXPECT_TRUE(torch::allclose(*actual.aux_info.all_probs, *reference.aux_info.all_probs, 1e-5, 1e-6));
+        }
+    }
+}
+
 TEST_F(ChunkedPrefillBatchStreamProcessorTest, testMiddleChunkDoesNotAdvanceNormalDeviceState) {
     autil::EnvGuard device_input_env("RTP_LLM_DEVICE_INPUT", "1");
     auto stream = makeRunningStream({1, 2, 3, 4, 5, 6, 7, 8});

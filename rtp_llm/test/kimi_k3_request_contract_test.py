@@ -9,6 +9,7 @@ from rtp_llm.models.kimi_k3.kimi_k3_request_contract import (
     kimi_k3_pending_prompt_token_ids,
     kimi_k3_prompt_channel,
     validate_kimi_k3_tool_history,
+    validate_kimi_k3_top_logprobs,
 )
 
 
@@ -215,6 +216,13 @@ class KimiK3RequestContractTest(unittest.TestCase):
                 apply_kimi_k3_request_contract(
                     config, specified_fields={field}, thinking=True
                 )
+
+    def test_top_logprobs_candidate_count_boundary(self) -> None:
+        for value in (None, 0, 2):
+            with self.subTest(value=value):
+                validate_kimi_k3_top_logprobs(value)
+        with self.assertRaisesRegex(FtRuntimeException, "top_logprobs"):
+            validate_kimi_k3_top_logprobs(-1)
 
     def test_rejects_multiple_sequences_with_public_range_message(self) -> None:
         for thinking in (False, True):

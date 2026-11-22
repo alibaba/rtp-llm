@@ -6,6 +6,7 @@ tokenization and vision execution remain in the checkpoint smoke targets.
 
 import copy
 import json
+import math
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -146,10 +147,17 @@ class TokenSource:
         async def generate():
             for start in range(0, len(ids), self.chunk_size):
                 end = min(start + self.chunk_size, len(ids))
+                probabilities = None
+                if generate_input.generate_config.return_all_probs:
+                    probabilities = torch.zeros((1, end - start, len(self.tokenizer)))
+                    for row, token in enumerate(ids[start:end]):
+                        probabilities[0, row, token] = 0.75
+                        probabilities[0, row, 1 if token != 1 else 2] = 0.25
                 yield GenerateOutputs(
                     [
                         GenerateOutput(
                             output_ids=torch.tensor([ids[start:end]], dtype=torch.int),
+                            all_probs=probabilities,
                             finished=torch.tensor([end == len(ids)]),
                             aux_info=AuxInfo(
                                 input_len=generate_input.input_length,
@@ -281,16 +289,19 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
             sum(choice.get("finish_reason") is not None for choice in choices), 1
         )
         message = {"content": "", "reasoning_content": "", "tool_calls": []}
+        probabilities = []
         for choice in choices:
             delta = choice["delta"]
             for name in ("content", "reasoning_content"):
                 message[name] += delta.get(name) or ""
             message["tool_calls"].extend(delta.get("tool_calls") or [])
+            probabilities.extend((choice.get("logprobs") or {}).get("content") or [])
         return {
             "choices": [
                 {
                     "message": message,
                     "finish_reason": choices[-1]["finish_reason"],
+                    "logprobs": {"content": probabilities},
                 }
             ],
             "frames": frames,
@@ -787,6 +798,68 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
                     self.assertEqual(reply.json().get("error_code"), 605, reply.text)
                     self.assertEqual(len(self.backend.calls), count)
 
+    def test_logprobs_stream_usage_and_length_finish_reach_http(self):
+        for model in ("kimi_k3", "kimi_k31"):
+            client, frontend = self.client(model)
+            for thinking in (False, True):
+                for stream in (False, True):
+                    for mode in ("default", "original"):
+                        with self.subTest(
+                            model=model, thinking=thinking, stream=stream, mode=mode
+                        ):
+                            self.backend.reply = (
+                                ("r" + THINK_TO_RESPONSE if thinking else "")
+                                + "ok"
+                                + RESPONSE_CLOSE
+                                + MESSAGE_CLOSE
+                            )
+                            payload = self.payload(
+                                enable_thinking=thinking,
+                                stream=stream,
+                                logprobs=True,
+                                logprobs_mode=mode,
+                                top_logprobs=2,
+                            )
+                            if stream:
+                                payload["stream_options"] = {"include_usage": True}
+                            body = self.response(client, payload)
+                            choice = body["choices"][0]
+                            self.assertEqual(choice["message"]["content"], "ok")
+                            rows = choice["logprobs"]["content"]
+                            self.assertEqual(
+                                "".join(row["token"] for row in rows),
+                                # SSE carries probabilities on each visible channel;
+                                # the non-streaming content field excludes reasoning.
+                                "rok" if thinking and stream else "ok",
+                            )
+                            for row in rows:
+                                self.assertAlmostEqual(
+                                    row["logprob"], math.log(0.75), places=6
+                                )
+                                self.assertEqual(len(row["top_logprobs"]), 2)
+                            self.assertEqual(
+                                self.backend.calls[-1].generate_config.return_all_probs,
+                                2 if mode == "original" else 1,
+                            )
+                            if stream:
+                                frames = body["frames"]
+                                self.assertEqual(frames[-1]["choices"], [])
+                                self.assertIn("usage", frames[-1])
+                            self.assertEqual(frontend._global_controller.active, 0)
+            self.backend.reply = "abcdef" + RESPONSE_CLOSE + MESSAGE_CLOSE
+            for stream in (False, True):
+                with self.subTest(model=model, stream=stream, finish="length"):
+                    body = self.response(
+                        client,
+                        self.payload(
+                            enable_thinking=False,
+                            stream=stream,
+                            max_completion_tokens=3,
+                        ),
+                    )
+                    self.assertEqual(body["choices"][0]["finish_reason"], "length")
+                    self.assertEqual(body["choices"][0]["message"]["content"], "abc")
+
     def test_invalid_requests_are_rejected_before_enqueue(self):
         for model in ("kimi_k3", "kimi_k31"):
             client, frontend = self.client(model)
@@ -798,6 +871,7 @@ class KimiK3OpenaiEndpointTest(unittest.TestCase):
                 {"max_tokens": 0},
                 {"max_completion_tokens": -1},
                 {"n": 2},
+                {"top_logprobs": -1},
                 {"response_format": {"type": "unknown"}},
                 {"response_format": {"type": "json_schema"}},
                 {"tool_choice": "required"},

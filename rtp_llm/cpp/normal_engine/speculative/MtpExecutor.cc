@@ -267,6 +267,7 @@ speculative::SpeculativeSamplingParams gatherSpeculativeSamplingParams(const std
         params.do_sample.data_ptr<bool>()[row]    = stream->generateConfig()->stochastic();
         params.force_accept.data_ptr<bool>()[row] = stream->forceSpAccept();
         params.generators.push_back(stream->getGenerator());
+        params.response_modes.push_back(stream->generateConfig()->return_all_probs);
     }
     return params;
 }
@@ -1288,6 +1289,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 CHECK_AND_RETURN_REF(
                     sampler_input,
                     batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
+                const auto prefill_streams = stream_groups.allStreams();
+                sampler_input.capture_original_probs =
+                    std::any_of(prefill_streams.begin(), prefill_streams.end(), [](const auto& stream) {
+                        return stream->generateConfig()->return_all_probs == ReturnAllProbsMode::ORIGINAL;
+                    });
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
                 sampler_output     = std::move(sampler_->forward(sampler_input));
                 update_draft_input = !is_block_draft_;
@@ -2020,6 +2026,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 sampler_output           = std::move(sampler_->forward(sampler_input));
                 sampler_output.all_probs = sampler_output.all_probs.reshape(
                     {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
+
+                if (sampler_output.original_all_probs.defined()) {
+                    sampler_output.original_all_probs = sampler_output.original_all_probs.reshape(
+                        {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
+                }
 
                 // rejection sampling
                 auto params = gatherSpeculativeSamplingParams(streams);

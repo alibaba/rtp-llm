@@ -121,6 +121,16 @@ py_test(
 )
 
 py_test(
+    name = "mtp_logprobs_renderer_test",
+    srcs = ["mtp_logprobs_renderer_test.py"],
+    data = ["//rtp_llm:sdk"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_test(
     name = "frontend_review_repro_test",
     srcs = ["frontend_review_repro_test.py"],
     data = ["//rtp_llm:sdk"],

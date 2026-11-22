@@ -11,7 +11,12 @@ from rtp_llm.config.exceptions import (
     ExceptionType,
     FtRuntimeException,
 )
-from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, RoleType
+from rtp_llm.config.generate_config import (
+    GenerateConfig,
+    ReturnAllProbsMode,
+    RoleAddr,
+    RoleType,
+)
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.server.backend_rpc_server_visitor import (
     BackendRPCServerVisitor,
@@ -101,8 +106,22 @@ class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
     def _check_request(self, **overrides):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.sp_config = SimpleNamespace(model_type="draft")
-        request = _FakeInput(generate_config=GenerateConfig(**overrides))
+        options = {
+            "return_all_probs": ReturnAllProbsMode.DEFAULT,
+            **overrides,
+        }
+        request = _FakeInput(generate_config=GenerateConfig(**options))
         visitor.check_sp_supported(request)
+        return request
+
+    def test_probability_request_marks_speculative_wire_mode(self):
+        for mode in (ReturnAllProbsMode.DEFAULT, ReturnAllProbsMode.ORIGINAL):
+            with self.subTest(mode=mode):
+                self.assertTrue(
+                    self._check_request(
+                        return_all_probs=mode
+                    ).speculative_return_all_probs
+                )
 
     def test_speculative_execution_rejects_multiple_sequences_and_beams(self):
         for options in (
@@ -121,7 +140,10 @@ class BackendRPCServerVisitorSpeculativeTest(unittest.TestCase):
 
     def test_single_width_schedule_and_non_speculative_request(self):
         self._check_request(num_beams=1, variable_num_beams=[1, 1])
-        self._check_request(variable_num_beams=[2, 1], force_disable_sp_run=True)
+        request = self._check_request(
+            variable_num_beams=[2, 1], force_disable_sp_run=True
+        )
+        self.assertFalse(request.speculative_return_all_probs)
 
 
 class _FakeRouteTokenIds:

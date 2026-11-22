@@ -2830,8 +2830,9 @@ def main() -> int:
             from grammar_smoke import run_grammar_cases
 
             run_grammar_cases(protocol)
-            from tail_health import run_tail_health
+            from logprobs_smoke import run_logprobs_cases, run_tail_health
 
+            run_logprobs_cases(protocol)
             run_tail_health(protocol)
         finally:
             runner.protocol_results = protocol.records

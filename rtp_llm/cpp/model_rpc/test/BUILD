@@ -31,6 +31,28 @@ py_test(
     ],
 )
 
+py_test(
+    name = "speculative_logprobs_wire_compat_test",
+    srcs = ["speculative_logprobs_wire_compat_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:config_ops",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:protobuf",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/cpp/model_rpc/proto:flexlb_schedule_service_py_proto",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/server:server",
+    ],
+    data = ["//:th_transformer"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+    timeout = "short",
+)
+
 py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],

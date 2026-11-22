@@ -139,10 +139,13 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
     generate_config->force_sp_accept          = config_proto->force_sp_accept();
     generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
-    if (config_proto->return_all_probs_mode() != 0) {
+    const int wire_probs_mode                 = config_proto->speculative_return_all_probs_mode() != 0 ?
+                                                    config_proto->speculative_return_all_probs_mode() :
+                                                    config_proto->return_all_probs_mode();
+    if (wire_probs_mode != 0) {
         // Explicit mode (offset 1). Clamp invalid values to NONE so malformed
         // clients cannot synthesize an undefined ReturnAllProbsMode.
-        int mode = config_proto->return_all_probs_mode() - 1;
+        int mode = wire_probs_mode - 1;
         if (mode < static_cast<int>(ReturnAllProbsMode::NONE)
             || mode > static_cast<int>(ReturnAllProbsMode::ORIGINAL)) {
             mode = static_cast<int>(ReturnAllProbsMode::NONE);

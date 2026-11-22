@@ -18,16 +18,20 @@ from rtp_llm.models.kimi_k3.kimi_k3_grammar import THINK_OPEN
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatCompletionResponseStreamChoice,
+    ChatCompletionTokenLogprob,
     ChatMessage,
+    ChoiceLogprobs,
     DeltaMessage,
     FinisheReason,
     PromptTokensDetails,
+    TopLogprob,
     UsageInfo,
 )
 from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject, ThinkStatus
 from rtp_llm.openai.renderers.kimi_k3_renderer import (
     K3RequestOptions,
     KimiK3Renderer,
+    _K3StreamResponseObject,
     _KimiK3StreamStatus,
 )
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
@@ -45,7 +49,7 @@ class KimiK3RendererTest(unittest.TestCase):
 
     @staticmethod
     def _decode_delta(status, text: str, *, flush: bool = False) -> DeltaMessage:
-        return status.xtml_decoder.decode(text, flush=flush).delta
+        return status.xtml_decoder.decode(text, None, flush=flush).delta
 
     @staticmethod
     def _history_call(call_id: str, name="lookup", arguments='{"q":"x"}'):
@@ -54,6 +58,21 @@ class KimiK3RendererTest(unittest.TestCase):
             "type": "function",
             "function": {"name": name, "arguments": arguments},
         }
+
+    @staticmethod
+    def _logprob(token: str, value: float = -0.1) -> ChatCompletionTokenLogprob:
+        return ChatCompletionTokenLogprob(
+            token=token,
+            logprob=value,
+            bytes=list(token.encode("utf-8")),
+            top_logprobs=[
+                TopLogprob(
+                    token=token,
+                    logprob=value,
+                    bytes=list(token.encode("utf-8")),
+                )
+            ],
+        )
 
     def test_thinking_xtml_is_split_across_stream_chunks(self) -> None:
         status = self.status(True)
@@ -141,6 +160,95 @@ class KimiK3RendererTest(unittest.TestCase):
         self.assertEqual(frames[1].choices[0].delta.reasoning_content, "")
         self.assertEqual(frames[2].choices[0].delta.content, "answer")
         self.assertIsNone(frames[2].choices[0].finish_reason)
+
+    def test_mixed_response_splits_logprobs_by_visible_channel(self) -> None:
+        reasoning_logprob = self._logprob("reasoning", -0.2)
+        content_logprob = self._logprob("answer", -0.3)
+        response = _K3StreamResponseObject(
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(reasoning_content="reasoning", content="answer"),
+                )
+            ],
+            channel_logprobs={
+                0: {
+                    "reasoning_content": [reasoning_logprob],
+                    "content": [content_logprob],
+                    "tool_calls": [],
+                }
+            },
+        )
+
+        frames = KimiK3Renderer._split_exclusive_response(response)
+
+        self.assertEqual(len(frames), 3)
+        self.assertEqual(frames[0].choices[0].logprobs.content, [reasoning_logprob])
+        self.assertIsNone(frames[1].choices[0].logprobs)
+        self.assertEqual(frames[2].choices[0].logprobs.content, [content_logprob])
+
+    def test_logprobs_state_machine_filters_split_xtml_markers(self) -> None:
+        status = self.status(True)
+        reasoning_logprob = self._logprob("reasoning", -0.2)
+        content_logprob = self._logprob("answer", -0.3)
+
+        first = status.xtml_decoder.decode(
+            "",
+            [reasoning_logprob, self._logprob("<|close|>")],
+        ).channel_logprobs
+        second = status.xtml_decoder.decode(
+            "",
+            [
+                self._logprob("think"),
+                self._logprob("<|sep|>"),
+                self._logprob("<|open|>"),
+                self._logprob("response"),
+                self._logprob("<|sep|>"),
+                content_logprob,
+                self._logprob("<|close|>"),
+                self._logprob("response"),
+                self._logprob("<|sep|>"),
+                self._logprob("<|open|>"),
+                self._logprob("tools"),
+                self._logprob("<|sep|>"),
+                self._logprob("tool-body"),
+                self._logprob("<|close|>"),
+                self._logprob("tools"),
+                self._logprob("<|sep|>"),
+                self._logprob("<|end_of_msg|>"),
+            ],
+            flush=True,
+        ).channel_logprobs
+
+        self.assertEqual(first["reasoning_content"], [reasoning_logprob])
+        self.assertEqual(first["content"], [])
+        self.assertEqual(second["reasoning_content"], [])
+        self.assertEqual(second["content"], [content_logprob])
+        self.assertEqual(second["tool_calls"], [])
+        self.assertEqual(status.xtml_decoder.logprobs_marker_pending, [])
+
+    def test_role_frame_drops_empty_reasoning_and_logprobs(self) -> None:
+        response = StreamResponseObject(
+            choices=[
+                ChatCompletionResponseStreamChoice(
+                    index=0,
+                    delta=DeltaMessage(
+                        role="assistant", content="", reasoning_content=""
+                    ),
+                    logprobs=ChoiceLogprobs(content=[]),
+                )
+            ]
+        )
+
+        frames = KimiK3Renderer._split_exclusive_response(response)
+
+        self.assertEqual(len(frames), 1)
+        choice = frames[0].choices[0]
+        self.assertEqual(
+            choice.delta.model_dump(exclude_none=True),
+            {"role": "assistant", "content": ""},
+        )
+        self.assertIsNone(choice.logprobs)
 
     def test_multi_choice_final_is_split_with_per_choice_and_aggregate_usage(
         self,
@@ -1559,6 +1667,33 @@ class KimiK3RendererTest(unittest.TestCase):
                     )
                     self.assertEqual(status.xtml_decoder.xtml_pending, "")
 
+    def test_logprobs_preserve_incomplete_and_invalid_markers_on_flush(self):
+        for tokens in (
+            ["<|close|>"],
+            ["<|close|>", "response"],
+            ["<|close|>", "not-a-channel", "body"],
+            ["<|close|>", "response", "not-a-separator", "body"],
+        ):
+            for thinking in (False, True):
+                with self.subTest(tokens=tokens, thinking=thinking):
+                    status = self.status(thinking)
+                    all_probs = []
+                    for token in tokens:
+                        result = status.xtml_decoder.decode("", [self._logprob(token)])
+                        all_probs.extend(
+                            result.channel_logprobs[
+                                "reasoning_content" if thinking else "content"
+                            ]
+                        )
+                    flushed = status.xtml_decoder.decode("", None, flush=True)
+                    all_probs.extend(
+                        flushed.channel_logprobs[
+                            "reasoning_content" if thinking else "content"
+                        ]
+                    )
+                    self.assertEqual([item.token for item in all_probs], tokens)
+                    self.assertEqual(status.xtml_decoder.logprobs_marker_pending, [])
+
     def test_pending_prompt_usage_rejects_underflow_in_aggregate_or_choice(self):
         for prompt, total in ((2, 10), (10, 2)):
             for per_choice in (False, True):
@@ -1717,6 +1852,7 @@ class KimiK3RendererTest(unittest.TestCase):
             )
         )
         self.assertEqual(pending_response.choices[0].delta.content, "")
+        self.assertEqual(pending_response.channel_logprobs, {})
 
         complete = asyncio.run(
             renderer._update_single_status(

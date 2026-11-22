@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import pathlib
 import threading
 import time
@@ -39,6 +40,7 @@ def merge_sse(events, *, include_usage=False):
     finish = None
     usage = None
     aux = None
+    probabilities = []
     usage_frames = []
     for event_index, event in enumerate(events):
         require(
@@ -81,6 +83,7 @@ def merge_sse(events, *, include_usage=False):
                     tool["function"][field] += (
                         fragment.get("function", {}).get(field) or ""
                     )
+            probabilities.extend((choice.get("logprobs") or {}).get("content") or [])
             if choice.get("finish_reason") is not None:
                 require(finish is None, "duplicate terminal SSE choice")
                 finish = choice["finish_reason"]
@@ -96,6 +99,7 @@ def merge_sse(events, *, include_usage=False):
             {
                 "message": message,
                 "finish_reason": finish,
+                "logprobs": {"content": probabilities} if probabilities else None,
             }
         ],
         "usage": usage,
@@ -123,6 +127,33 @@ def validate_answer(response, expected="5", finish="stop"):
         "inconsistent usage",
     )
     return message
+
+
+def validate_probabilities(rows, top_count, *, greedy=False):
+    require(bool(rows), "missing token probability rows")
+    for row in rows:
+        value = row["logprob"]
+        require(
+            isinstance(value, (int, float)) and math.isfinite(value) and value <= 1e-5,
+            f"invalid selected logprob: {row}",
+        )
+        if greedy:
+            require(
+                abs(value) <= 1e-5, f"top_k=1 filtered probability is not one: {row}"
+            )
+        candidates = row.get("top_logprobs", [])
+        require(len(candidates) <= top_count, "too many top probabilities")
+        for candidate in candidates:
+            require(
+                math.isfinite(candidate["logprob"]) and candidate["logprob"] <= 1e-5,
+                "invalid top probability",
+            )
+        require(
+            all(
+                a["logprob"] >= b["logprob"] for a, b in zip(candidates, candidates[1:])
+            ),
+            "top probabilities are not sorted",
+        )
 
 
 class SmokeRequests:

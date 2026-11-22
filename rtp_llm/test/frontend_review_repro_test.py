@@ -78,11 +78,14 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
         stop_strings=(),
         max_new_tokens=128,
         stream=True,
+        logprobs=True,
     ):
         renderer = self._renderer(renderer_type)
         request = ChatCompletionRequest(
             messages=[ChatMessage(role="user", content="question")],
             stream=stream,
+            logprobs=logprobs,
+            top_logprobs=0 if logprobs else None,
             enable_thinking=False,
             stop=list(stop_strings),
         )
@@ -102,10 +105,13 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
                 tokens = self.tokenizer.encode(text)
                 total += len(tokens)
+                probabilities = torch.zeros(len(tokens), len(self.tokenizer.vocab))
+                probabilities[torch.arange(len(tokens)), tokens] = 1.0
                 yield GenerateOutputs(
                     generate_outputs=[
                         GenerateOutput(
                             output_ids=torch.tensor(tokens),
+                            all_probs=probabilities if logprobs else None,
                             aux_info=AuxInfo(input_len=4, output_len=total),
                         )
                     ]
@@ -126,35 +132,52 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
             for choice in response.choices
         )
 
+    @staticmethod
+    def _probability_text(responses):
+        return "".join(
+            item.token
+            for response in responses
+            for choice in response.choices
+            if choice.logprobs and choice.logprobs.content
+            for item in choice.logprobs.content
+        )
+
     def _assert_finished(self, responses, reason):
         self.assertEqual(responses[-1].choices[0].finish_reason, reason)
         self.assertIsNotNone(responses[-1].usage)
 
-    async def test_id_only_stop_prefix_is_buffered(self):
-        responses = await self._render(
-            CustomChatRenderer,
-            ["A", "S", "T", "OP"],
-            stop_ids=[self.tokenizer.encode("STOP")],
-        )
-        self.assertEqual(self._content(responses), "A")
-        self._assert_finished(responses, FinisheReason.stop)
+    async def test_id_only_stop_prefix_is_buffered_with_its_probabilities(self):
+        for logprobs in (False, True):
+            with self.subTest(logprobs=logprobs):
+                responses = await self._render(
+                    CustomChatRenderer,
+                    ["A", "S", "T", "OP"],
+                    stop_ids=[self.tokenizer.encode("STOP")],
+                    logprobs=logprobs,
+                )
+                self.assertEqual(self._content(responses), "A")
+                if logprobs:
+                    self.assertEqual(self._probability_text(responses), "A")
+                self._assert_finished(responses, FinisheReason.stop)
 
-    async def test_id_only_stop_in_one_frame_drops_stop_and_trailing_text(self):
+    async def test_id_only_stop_in_one_frame_drops_stop_and_trailing_rows(self):
         responses = await self._render(
             CustomChatRenderer,
             ["ASTOPB"],
             stop_ids=[self.tokenizer.encode("STOP")],
         )
         self.assertEqual(self._content(responses), "A")
+        self.assertEqual(self._probability_text(responses), "A")
         self._assert_finished(responses, FinisheReason.stop)
 
-    async def test_failed_id_stop_prefix_is_released(self):
+    async def test_failed_id_stop_prefix_is_released_with_its_probabilities(self):
         responses = await self._render(
             CustomChatRenderer,
             ["A", "S", "T", "X", "<eos>"],
             stop_ids=[self.tokenizer.encode("STOP")],
         )
         self.assertEqual(self._content(responses), "ASTX")
+        self.assertEqual(self._probability_text(responses), "ASTX")
         self._assert_finished(responses, FinisheReason.stop)
 
     async def test_length_limit_releases_incomplete_id_stop_prefix(self):
@@ -165,9 +188,10 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
             max_new_tokens=3,
         )
         self.assertEqual(self._content(responses), "AST")
+        self.assertEqual(self._probability_text(responses), "AST")
         self._assert_finished(responses, FinisheReason.length)
 
-    async def test_k3_string_stop_drops_trailing_text(self):
+    async def test_k3_string_stop_drops_hidden_probability_rows(self):
         # A context-dependent token can contain the stop string and following
         # text without containing its standalone stop-token ID sequence.
         self.tokenizer = _Tokenizer(extra_pieces=["STOPB"])
@@ -180,6 +204,7 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
                     stream=stream,
                 )
                 self.assertEqual(self._content(responses), "A")
+                self.assertEqual(self._probability_text(responses), "A")
                 self._assert_finished(responses, FinisheReason.stop)
 
     async def test_k3_length_flush_reassembles_pending_xtml_before_emitting(self):
@@ -189,6 +214,7 @@ class FrontendStopBoundaryReproTest(unittest.IsolatedAsyncioTestCase):
             chunks,
             stop_strings=["STOP"],
             max_new_tokens=sum(len(self.tokenizer.encode(chunk)) for chunk in chunks),
+            logprobs=False,
         )
         # The stop-prefix buffer contains the rest of the response closure.
         # Reassemble it before flushing; text after the closure is not content.

@@ -240,6 +240,41 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const SpeculativeSamplingPa
     return sample_output;
 }
 
+torch::Tensor SpeculativeSampler::targetResponseProbabilities(const std::vector<ReturnAllProbsMode>& modes,
+                                                              const SamplerOutput& target_sampler_output) {
+    const bool need_response =
+        std::any_of(modes.begin(), modes.end(), [](auto mode) { return mode != ReturnAllProbsMode::NONE; });
+    if (!need_response) {
+        return {};
+    }
+    const auto& filtered_probs = target_sampler_output.all_probs;
+    RTP_LLM_CHECK_WITH_INFO(filtered_probs.defined() && filtered_probs.dim() == 3
+                                && filtered_probs.size(0) == static_cast<int64_t>(modes.size()),
+                            "MTP filtered target probabilities must be [stream, verify_row, vocab]");
+    const bool has_original =
+        std::any_of(modes.begin(), modes.end(), [](auto mode) { return mode == ReturnAllProbsMode::ORIGINAL; });
+    if (!has_original) {
+        return filtered_probs;
+    }
+
+    const auto& original_probs = target_sampler_output.original_all_probs;
+    RTP_LLM_CHECK_WITH_INFO(original_probs.defined() && original_probs.sizes() == filtered_probs.sizes(),
+                            "MTP original target probabilities must match filtered verify rows");
+    const bool has_default =
+        std::any_of(modes.begin(), modes.end(), [](auto mode) { return mode == ReturnAllProbsMode::DEFAULT; });
+    if (!has_default) {
+        return original_probs;
+    }
+
+    auto response_probs = filtered_probs.clone();
+    for (int64_t row = 0; row < static_cast<int64_t>(modes.size()); ++row) {
+        if (modes[row] == ReturnAllProbsMode::ORIGINAL) {
+            response_probs.select(0, row).copy_(original_probs.select(0, row));
+        }
+    }
+    return response_probs;
+}
+
 void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&        sample_output,
                                      const SpeculativeSamplingParams& params,
                                      SamplerOutput&                   draft_sampler_output,

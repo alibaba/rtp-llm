@@ -21,6 +21,38 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST(QueryConverterProbabilityModeTest, PreservesLegacyAndSpeculativeModes) {
+    struct Case {
+        bool               legacy;
+        int                legacy_mode;
+        int                speculative_mode;
+        ReturnAllProbsMode expected;
+    };
+    constexpr Case cases[] = {
+        {false, 0, 0, ReturnAllProbsMode::NONE},
+        {true, 0, 0, ReturnAllProbsMode::DEFAULT},
+        {true, 1, 0, ReturnAllProbsMode::NONE},
+        {true, 2, 0, ReturnAllProbsMode::DEFAULT},
+        {true, 3, 0, ReturnAllProbsMode::ORIGINAL},
+        {true, 4, 0, ReturnAllProbsMode::NONE},
+        {false, 1, 2, ReturnAllProbsMode::DEFAULT},
+        {false, 1, 3, ReturnAllProbsMode::ORIGINAL},
+        {false, 1, 4, ReturnAllProbsMode::NONE},
+    };
+    for (const auto& test : cases) {
+        SCOPED_TRACE(test.speculative_mode);
+        GenerateConfigPB sender;
+        sender.set_max_new_tokens(1);
+        sender.set_return_all_probs(test.legacy);
+        sender.set_return_all_probs_mode(test.legacy_mode);
+        sender.set_speculative_return_all_probs_mode(test.speculative_mode);
+
+        GenerateConfigPB received;
+        ASSERT_TRUE(received.ParseFromString(sender.SerializeAsString()));
+        EXPECT_EQ(QueryConverter::transGenerateConfig(&received)->return_all_probs, test.expected);
+    }
+}
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);

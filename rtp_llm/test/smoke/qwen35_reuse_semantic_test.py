@@ -1,6 +1,7 @@
 """Check Qwen3.5 cold and prefix-reused generation with or without MTP."""
 
 import json
+import math
 import os
 import unittest
 from pathlib import Path
@@ -92,10 +93,14 @@ class Qwen35ReuseSemanticTest(unittest.TestCase):
             "top_p": 0,
             "seed": 42,
             "stream": False,
+            "logprobs": True,
+            "logprobs_mode": "original",
+            "top_logprobs": 5,
             "extra_configs": {"top_k": 1, "reuse_cache": reuse_cache},
         }
         if exact_prompt:
-            # Render the exact raw fixture prompt through the OpenAI endpoint.
+            # Use the raw fixture's prompt bytes through the OpenAI renderer so
+            # its original logprobs can be compared with the raw cache test.
             # Jinja drops a literal final newline from a template, so emit it
             # through an expression instead.
             self.assertTrue(self.prompt.endswith("\n"))
@@ -126,7 +131,7 @@ class Qwen35ReuseSemanticTest(unittest.TestCase):
         )
         return actual
 
-    def test_prefix_hit_preserves_generation(self):
+    def test_prefix_hit_preserves_target_distribution(self):
         reference = self.request("uncached_20", max_new_tokens=20, reuse_cache=False)
         self.assertEqual(reference["aux_info"]["reuse_len"], 0)
         self.reference_input_ids = reference["input_ids"][0]
@@ -178,12 +183,18 @@ class Qwen35ReuseSemanticTest(unittest.TestCase):
         (self.output_dir / "comparison.json").write_text(
             json.dumps(mismatches, ensure_ascii=False, indent=2)
         )
+        # The public logprobs response exposes the target's original top-token
+        # probabilities at the first decode step without relying on draft scores.
         openai_cold = self.request_openai("openai_uncached_2", reuse_cache=False)
         openai_hot = self.request_openai("openai_cached_2", reuse_cache=True)
-        self.assertEqual(
-            openai_cold["choices"][0]["message"]["content"],
-            openai_hot["choices"][0]["message"]["content"],
+        cold_content = (openai_cold["choices"][0].get("logprobs") or {}).get(
+            "content"
         )
+        hot_content = (openai_hot["choices"][0].get("logprobs") or {}).get(
+            "content"
+        )
+        self.assertEqual(len(cold_content), 2)
+        self.assertEqual(cold_content, hot_content)
         self.assertEqual(
             openai_cold["usage"]["prompt_tokens"],
             openai_hot["usage"]["prompt_tokens"],
@@ -201,6 +212,8 @@ class Qwen35ReuseSemanticTest(unittest.TestCase):
                     "hot_prompt_tokens": openai_hot.get("usage", {}).get(
                         "prompt_tokens"
                     ),
+                    "cold_content": cold_content,
+                    "hot_content": hot_content,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -212,6 +225,14 @@ class Qwen35ReuseSemanticTest(unittest.TestCase):
         exact_hot = self.request_openai(
             "openai_exact_cached_2", reuse_cache=True, exact_prompt=True
         )
+        exact_cold_content = (exact_cold["choices"][0].get("logprobs") or {}).get(
+            "content"
+        )
+        exact_hot_content = (exact_hot["choices"][0].get("logprobs") or {}).get(
+            "content"
+        )
+        self.assertEqual(len(exact_cold_content), 2)
+        self.assertEqual(len(exact_hot_content), 2)
         self.assertEqual(
             exact_cold["usage"]["prompt_tokens"], len(self.reference_input_ids)
         )
@@ -225,6 +246,8 @@ class Qwen35ReuseSemanticTest(unittest.TestCase):
         (self.output_dir / "openai_exact_comparison.json").write_text(
             json.dumps(
                 {
+                    "cold_content": exact_cold_content,
+                    "hot_content": exact_hot_content,
                     "cold_prompt_tokens": exact_cold["usage"]["prompt_tokens"],
                     "hot_prompt_tokens": exact_hot["usage"]["prompt_tokens"],
                     "cold_reuse": (
@@ -239,21 +262,60 @@ class Qwen35ReuseSemanticTest(unittest.TestCase):
             )
         )
 
+        # With BF16 KV reuse the target's two most likely tokens can swap when
+        # their probabilities are nearly equal. A greedy string comparison is
+        # then not a sound cache oracle: all later tokens follow different
+        # contexts. Compare the original target distributions at that boundary
+        # and accept only the known whitespace tie, not arbitrary drift.
         self.assertIsNotNone(raw_two)
-        self.assertEqual(raw_two[0]["response"], exact_cold["choices"][0]["message"]["content"])
-        self.assertEqual(raw_two[1]["response"], exact_hot["choices"][0]["message"]["content"])
+        for raw, content in zip(raw_two, (exact_cold_content, exact_hot_content)):
+            self.assertEqual(raw["response"], "".join(item["token"] for item in content))
+        self.assertEqual(exact_cold_content[0]["token"], exact_hot_content[0]["token"])
+
+        for cold, hot in zip(exact_cold_content, exact_hot_content):
+            cold_top = {
+                item["token"]: math.exp(item["logprob"])
+                for item in cold["top_logprobs"]
+            }
+            hot_top = {
+                item["token"]: math.exp(item["logprob"])
+                for item in hot["top_logprobs"]
+            }
+            self.assertEqual(set(cold_top), set(hot_top))
+            self.assertEqual(len(cold_top), len(cold["top_logprobs"]))
+            self.assertEqual(len(hot_top), len(hot["top_logprobs"]))
+            cold_tail = max(0.0, 1.0 - sum(cold_top.values()))
+            hot_tail = max(0.0, 1.0 - sum(hot_top.values()))
+            self.assertLess(cold_tail, 0.01)
+            self.assertLess(hot_tail, 0.01)
+            # Unknown tail tokens may be disjoint; this is an upper bound on
+            # total variation, rather than treating both tails as one token.
+            tv_upper = (
+                sum(abs(cold_top[token] - hot_top[token]) for token in cold_top)
+                + cold_tail
+                + hot_tail
+            ) / 2
+            self.assertLess(tv_upper, 0.05)
+
         if mismatches:
-            # The known BF16 difference is a whitespace choice at token two.
             self.assertNotEqual(raw_two[0]["output_ids"], raw_two[1]["output_ids"])
             self.assertTrue(
                 all(item["first_different_token"] == 1 for item in mismatches),
                 mismatches,
             )
-            for raw in raw_two:
-                self.assertEqual(len(raw["output_ids"][0]), 2)
-            cold_tail, hot_tail = (raw["response"] for raw in raw_two)
-            self.assertNotEqual(cold_tail, hot_tail)
-            self.assertEqual(cold_tail.rstrip(), hot_tail.rstrip())
+            cold_second, hot_second = exact_cold_content[1], exact_hot_content[1]
+            self.assertNotEqual(cold_second["token"], hot_second["token"])
+            self.assertTrue(cold_second["token"].isspace())
+            self.assertTrue(hot_second["token"].isspace())
+            for item in (cold_second, hot_second):
+                top_two = sorted(
+                    item["top_logprobs"], key=lambda entry: entry["logprob"], reverse=True
+                )[:2]
+                self.assertEqual(
+                    {entry["token"] for entry in top_two},
+                    {cold_second["token"], hot_second["token"]},
+                )
+                self.assertLess(top_two[0]["logprob"] - top_two[1]["logprob"], 0.1)
 
 
 if __name__ == "__main__":
