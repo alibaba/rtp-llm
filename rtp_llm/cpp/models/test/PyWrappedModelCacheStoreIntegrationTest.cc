@@ -1190,7 +1190,6 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
                     /*enable_comm_overlap=*/false,
                     MlaOpsType::AUTO);
     });
-}
 
     RTP_LLM_CHECK_WITH_INFO(forward_count > 0, "forward_count must be positive");
 
