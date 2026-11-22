@@ -118,7 +118,7 @@ class PLECommitPrepareTest(unittest.TestCase):
             self.assertEqual(addresses, [x.data_ptr() for x in actual])
 
     def test_unsupported_layout_falls_back_without_writes(self):
-        args = self.fixture(33, 2, 17, 2, 4)
+        args = self.fixture(129, 2, 17, 2, 4)
         self.assertIsNone(prepare_commit_values(*args))
         args = self.fixture(3, 2, 17, 2, 4)
         args[0].state_pool = args[0].state_pool.to(torch.float32)

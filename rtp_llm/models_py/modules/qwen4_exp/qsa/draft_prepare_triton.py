@@ -132,7 +132,7 @@ def try_prepare(q, positions, sources, visible, frequency, *, rope_config):
         and q.stride(-1) == 1
         and q.stride(-2) == 128
         and q.stride(0) >= 512
-        and 1 <= q.shape[0] <= 128
+        and 1 <= q.shape[0] <= 512
         and positions.shape == sources.shape == (q.shape[0],)
         and positions.dtype == sources.dtype == torch.int64
         and visible.dtype == torch.int32
@@ -204,7 +204,7 @@ def try_prepare_metadata(
         and q.stride(-2) == 128
         and q.stride(0) >= 512
         and row_lengths.ndim == prefixes.ndim == cu.ndim == 1
-        and 1 <= row_lengths.numel() <= 32
+        and 1 <= row_lengths.numel() <= 128
         and q.shape[0] == row_lengths.numel() * 4
         and prefixes.shape == row_lengths.shape
         and cu.numel() == row_lengths.numel() + 1

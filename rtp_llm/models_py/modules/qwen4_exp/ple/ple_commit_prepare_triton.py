@@ -126,7 +126,7 @@ def prepare_commit_values(stage, accepted, state_blocks, ctx_blocks):
         and ctx_blocks.is_contiguous()
         and initial.ndim == candidate.ndim == state_pool.ndim == 3
         and context.ndim == ids.ndim == ctx_pool.ndim == 2
-        and 0 < accepted.numel() <= 32
+        and 0 < accepted.numel() <= 128
         and state_blocks.numel() == ctx_blocks.numel() == accepted.numel()
         and initial.shape[0]
         == candidate.shape[0]

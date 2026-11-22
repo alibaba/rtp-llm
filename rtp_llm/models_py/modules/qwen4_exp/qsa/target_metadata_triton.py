@@ -37,7 +37,7 @@ def try_target_metadata(prefixes, query_len, ratio):
         and prefixes.numel() > 0
         and 1 <= query_len <= 4
         and ratio == 4
-        and prefixes.numel() * query_len <= 128
+        and prefixes.numel() * query_len <= 512
     ):
         return None
     shape = (prefixes.numel(), query_len)

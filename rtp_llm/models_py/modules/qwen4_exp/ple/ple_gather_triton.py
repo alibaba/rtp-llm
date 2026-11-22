@@ -89,7 +89,7 @@ def try_gather_hashed_decode(
     """Fuse SM90 single-token hashing and pinned BF16 shard lookup."""
     if not (
         history.ndim == 2
-        and 16 <= history.shape[0] <= 128
+        and 16 <= history.shape[0] <= 512
         and history.shape[1] == 3
         and history.is_contiguous()
         and is_supported(history, shards)

@@ -103,7 +103,7 @@ def _decode_positions_config(
         and sequence.ndim == 1
         and sequence.dtype == torch.int32
         and sequence.is_contiguous()
-        and 1 <= sequence.numel() <= 64
+        and 1 <= sequence.numel() <= 256
         and positions.ndim == 1
         and positions.dtype in (torch.int32, torch.int64)
         and positions.is_contiguous()

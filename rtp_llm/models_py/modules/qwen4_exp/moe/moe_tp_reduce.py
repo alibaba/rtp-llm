@@ -26,8 +26,8 @@ def prepare_moe_communicator(device: torch.device, max_decode_rows: int = 128):
 
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError("MoE communicator must be prepared before graph capture")
-    if max_decode_rows not in (64, 128):
-        raise ValueError("MoE decode row capacity must be 64 or 128")
+    if max_decode_rows not in (64, 128, 256, 512):
+        raise ValueError("MoE decode row capacity must be 64, 128, 256, or 512")
     if os.getenv("FT_DISABLE_CUSTOM_AR", "").strip().lower() in (
         "1",
         "true",

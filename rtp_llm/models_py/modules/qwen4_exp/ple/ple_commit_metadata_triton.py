@@ -178,7 +178,7 @@ def begin_accepted_pair_resolution(transaction, accept_len):
         and accept_len.dtype == torch.int32
         and accept_len.ndim == 1
         and accept_len.is_contiguous()
-        and 0 < accept_len.numel() <= 32
+        and 0 < accept_len.numel() <= 128
         and len(transaction.stages) == 1
         and 0 < transaction.query_len <= 32
     ):

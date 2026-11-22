@@ -131,11 +131,11 @@ class Fp8SM90SharedB64Test(unittest.TestCase):
                 ):
                     self.assertIsNone(quant.try_silu_mul_fp8_quant(x))
                     self.assertIsNone(mlp.down_proj.forward_silu_and_mul(x))
-            for rows in (1, 4, 32, 64, 96, 128, 256):
+            for rows in (1, 4, 32, 64, 96, 128, 256, 512):
                 value = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
                 self.assertIsNotNone(quant.try_silu_mul_fp8_quant(value))
                 self.assertIsNotNone(mlp.down_proj.forward_silu_and_mul(value))
-            for rows in (0, 257, 512):
+            for rows in (0, 513, 1024):
                 value = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
                 self.assertIsNone(quant.try_silu_mul_fp8_quant(value))
                 self.assertIsNone(mlp.down_proj.forward_silu_and_mul(value))

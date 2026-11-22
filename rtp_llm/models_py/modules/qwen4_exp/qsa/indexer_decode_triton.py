@@ -125,7 +125,7 @@ def supports_raw_key_layout(raw_keys: torch.Tensor) -> bool:
         and torch.version.hip is None
         and torch.cuda.get_device_capability(raw_keys.device) == (9, 0)
         and raw_keys.ndim == 2
-        and 1 <= raw_keys.shape[0] <= 64
+        and 1 <= raw_keys.shape[0] <= 256
         and raw_keys.shape[1] == 128
         and raw_keys.dtype == torch.bfloat16
         and raw_keys.stride(1) == 1

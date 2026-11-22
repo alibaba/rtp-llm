@@ -207,7 +207,7 @@ class Qwen4MoeLayer(GenericMoeLayer):
         self._ep_shared_stream = _shared_stream_for_device(device.index)
         self._ep_shared_input_ready = torch.cuda.Event()
         self._ep_shared_output_ready = torch.cuda.Event()
-        self._ep_shared_max_tokens = 128
+        self._ep_shared_max_tokens = 512
         self._tp_shared_pack_reduce = True
         self._tp_shared_packed_comm = prepare_moe_communicator(
             device, max_decode_rows=self._ep_shared_max_tokens

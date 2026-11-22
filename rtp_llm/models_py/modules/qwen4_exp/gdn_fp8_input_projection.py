@@ -132,7 +132,7 @@ def _quantize_ba(x, partial):
     bq = torch.empty((pad, x.shape[1]), dtype=torch.float8_e4m3fn, device=x.device)
     tiles = partial.numel()
     bs = torch.empty(1, device=x.device, dtype=torch.float32)
-    if x.shape[0] > 256:
+    if x.shape[0] > 128:
         # Reduce once for long inputs and reuse the vectorized BA quantizer.
         if tiles > 65536:
             partial = partial.amax().reshape(1)

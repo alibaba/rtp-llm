@@ -269,7 +269,7 @@ class PLEExecution:
                     or any(prefix < 0 for prefix in prefixes)
                 ):
                     raise RuntimeError("PLE prefetch prefill metadata is inconsistent")
-                if len(lengths) > 128:
+                if len(lengths) > 512:
                     continue
                 contexts = ids.new_full(
                     (len(lengths), embedding.context_len), embedding.eos_token_id
@@ -808,7 +808,7 @@ class PLEExecution:
                 )
             state_write_mode = (
                 torch.empty(batch, dtype=torch.int32, device=ids.device)
-                if ids.is_cuda and 16 <= batch <= 128 and state_pool.is_contiguous()
+                if ids.is_cuda and 16 <= batch <= 512 and state_pool.is_contiguous()
                 else None
             )
             decode_plan = self._try_decode_plan(
