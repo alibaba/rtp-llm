@@ -12,7 +12,6 @@ Quantized MoE families are implemented by registered QuantizeMethodBase
 instances; this base class keeps only the unquantized fallback.
 """
 
-import logging
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -31,7 +30,6 @@ from rtp_llm.models_py.runtime_weight_update import (
     TensorUpdate,
 )
 
-logger = logging.getLogger(__name__)
 
 
 class BaseMoEExperts(RtpModule):
@@ -164,20 +162,6 @@ class BaseMoEExperts(RtpModule):
         )
         full_map = {**self._BASE_QUANT_MAP, **self._EXTRA_QUANT_MAP}
         self._quant_family = full_map.get(raw_qt, "none")
-        if layer_idx == 0:
-            logger.info(
-                "[BaseMoEExperts] layer_idx=%d resolved raw_qt=%r -> "
-                "_quant_family=%r (num_experts=%d, hidden=%d, "
-                "moe_inter=%d, tp=%d, ep=%d)",
-                layer_idx,
-                raw_qt,
-                self._quant_family,
-                num_experts,
-                hidden_size,
-                moe_intermediate_size,
-                tp_size,
-                ep_size,
-            )
 
         if num_experts % ep_size != 0:
             raise ValueError(
@@ -297,12 +281,6 @@ class BaseMoEExperts(RtpModule):
         # methods own quantized loading. The built-in fallback is kept only for
         # unquantized weights when no method is registered.
         self.quant_method = self._quant_config.get_moe_quant_method(self, self.prefix)
-        if layer_idx == 0:
-            logger.info(
-                "[BaseMoEExperts] layer_idx=0 quant_method=%s "
-                "(all expert layouts use method delegation)",
-                type(self.quant_method).__name__,
-            )
 
         self._init_buffers(params_dtype)
 
@@ -578,21 +556,6 @@ class BaseMoEExperts(RtpModule):
             if proj == "gate_up_proj":
                 self._dispatch_gate_up_weight(local_expert_id, tensor)
                 return
-            # Log first weight tensor we see, for diagnostics.
-            if self.layer_idx == 0 and not getattr(self, "_logged_first_weight", False):
-                logger.info(
-                    "[BaseMoEExperts] layer_idx=0 first weight: "
-                    "name=%r proj=%r dtype=%s shape=%s buf_dtype=%s "
-                    "buf_shape=%s _quant_family=%r",
-                    name,
-                    proj,
-                    tensor.dtype,
-                    tuple(tensor.shape),
-                    self.w13.dtype if proj != "down_proj" else self.w2.dtype,
-                    tuple(self.w13.shape if proj != "down_proj" else self.w2.shape),
-                    self._quant_family,
-                )
-                self._logged_first_weight = True
             self._dispatch_weight(local_expert_id, proj, tensor)
             return
 
@@ -608,20 +571,6 @@ class BaseMoEExperts(RtpModule):
                 )
             return
 
-        # Log first scale tensor we see, for diagnostics.
-        if self.layer_idx == 0 and not getattr(self, "_logged_first_scale", False):
-            logger.info(
-                "[BaseMoEExperts] layer_idx=0 first non-weight tensor: "
-                "name=%r proj=%r param=%r dtype=%s shape=%s "
-                "_quant_family=%r",
-                name,
-                proj,
-                param_name,
-                tensor.dtype,
-                tuple(tensor.shape),
-                self._quant_family,
-            )
-            self._logged_first_scale = True
         self._dispatch_scale(local_expert_id, proj, param_name, tensor)
 
     def _load_stacked_expert_aux(

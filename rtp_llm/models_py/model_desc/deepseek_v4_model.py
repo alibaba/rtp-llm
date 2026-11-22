@@ -737,10 +737,6 @@ class DeepSeekV4Model(GptModelBase):
         self._build_runtime_backbone()
         if self._captures_aux_hidden:
             self.v4.set_aux_hidden_capture_layer_ids(self._capture_aux_hidden_layer_ids)
-            if self._is_decode_role:
-                from rtp_llm.models_py.modules.dsv4.decode import v4_live_layers
-
-                self.v4._v4_live38 = v4_live_layers.allocate(self.v4, device_str)
 
         # Recompute RoPE on the real device and prebuild the compressors'
         # shared cos_sin_cache before runtime memory allocation starts.
@@ -1268,11 +1264,6 @@ class DeepSeekV4Model(GptModelBase):
         # Phase F: pool views resolved on demand in Attention — no
         # per-layer descriptor cache to stash on metadata.
         return impl
-
-    def get_v4_smoke_verify_row(self, row, width, last_id):
-        from rtp_llm.models_py.modules.dsv4.decode import v4_live_layers
-
-        return v4_live_layers.selected(getattr(self.v4, "_v4_live38", None), row, width, last_id)
 
     def get_mtp_target_hidden_states(self, num_tokens: int) -> Optional[torch.Tensor]:
         """

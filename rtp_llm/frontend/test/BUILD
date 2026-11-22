@@ -1,13 +1,6 @@
 load("@arch_config//:arch_select.bzl", "telemetry_test_deps")
 
 py_test(
-    name = "next_smoke_prefix_test",
-    srcs = ["next_smoke_prefix_test.py"],
-    data = ["//rtp_llm/test/smoke:smoke_model_configs"],
-    deps = ["//rtp_llm:frontend", "//rtp_llm:testlib"],
-)
-
-py_test(
     name = "custom_output_response_test",
     srcs = ["custom_output_response_test.py"],
     deps = [

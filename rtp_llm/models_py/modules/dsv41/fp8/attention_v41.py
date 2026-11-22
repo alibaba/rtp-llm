@@ -2338,13 +2338,6 @@ class AttentionV41FP8(AttentionFP8):
                     + starts[ids_full]
                 )
             try:
-                from rtp_llm.models_py.modules import v41_cache_model_trace
-
-                cache_probe = (
-                    v41_cache_model_trace.active() if self.layer_id == 2 else None
-                )
-                if cache_probe is not None and cache_probe.prefix == 512:
-                    cache_probe.pool("reused_before_write", self, common.cp_ctx)
                 self._produce_global(
                     x_full,
                     pos_full,
@@ -2357,11 +2350,6 @@ class AttentionV41FP8(AttentionFP8):
                     grouped_projection=x_groups is not None,
                     batched_groups=batched_groups,
                 )
-                if cache_probe is not None:
-                    cache_probe.pool("after_write", self, common.cp_ctx)
-                    # Actual per-request output of the physical-pool gather,
-                    # handed to the indexer and the sparse attention kernel.
-                    cache_probe.readback(self, common.cp_ctx)
             finally:
                 if raw_tiles is not None:
                     raw_tiles.close()

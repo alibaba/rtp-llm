@@ -38,7 +38,6 @@ from rtp_llm.models_py.module_base import (
 )
 from rtp_llm.models_py.read_spec import LoadedCheckpointTensor, ReadSpec
 from rtp_llm.models_py.registry import get_model_class, list_models
-from rtp_llm.models_py.v41_fst_memory import V41FstMemoryTrace
 
 logger = logging.getLogger(__name__)
 _CUSTOM_WEIGHT_PREFIX = "__custom__."
@@ -1148,21 +1147,14 @@ class NewModelLoader:
                     raise
 
     @staticmethod
-    def _run_post_load_hooks(model: nn.Module, v4_trace=None) -> None:
+    def _run_post_load_hooks(model: nn.Module) -> None:
         for module in model.modules():
             if getattr(module, "_rtp_borrowed_parameter_names", ()):
                 # The owning model already postprocessed this storage.
                 continue
             hook = getattr(module, "process_weights_after_loading", None)
             if callable(hook):
-                if v4_trace is not None and type(module).__name__ == "AttentionFP8":
-                    module._rtp_v4_fst_trace = v4_trace
-                    try:
-                        hook()
-                    finally:
-                        del module._rtp_v4_fst_trace
-                else:
-                    hook()
+                hook()
 
     @staticmethod
     def _prepare_model_for_fastsafetensors(
@@ -2235,9 +2227,6 @@ class NewModelLoader:
             else:
                 # Construction errors propagate: never retry allocation/I/O
                 # failures by silently switching to a full-tensor loader.
-                v4_trace = getattr(self, "_v4_fst_trace", None)
-                if v4_trace is not None:
-                    read_spec_loader = v4_trace.reader_class(read_spec_loader, checkpoint_files)
                 loader = read_spec_loader(
                     read_spec_resolver=read_spec_resolver,
                     safetensor_slice_expander=safetensor_slice_expander,
@@ -2365,13 +2354,6 @@ class NewModelLoader:
                 else getattr(self.model_config, "num_layers", None)
             ),
         )
-        memory_trace = None
-        if ft_checkpoint is None:
-            memory_trace = V41FstMemoryTrace.for_load(
-                self._model_type(), requested_method.value, self.load_config
-            )
-        if memory_trace is not None:
-            memory_trace.record("before_model")
         with torch.device("cpu"):
             model = self._create_checkpoint_model(ft_checkpoint)
         if expert_filter is not None:
@@ -2506,12 +2488,6 @@ class NewModelLoader:
             method == NewLoaderLoadMethod.FASTSAFETENSORS
             and not self.load_config.force_cpu_load_weights
         )
-        self._v4_fst_trace = None
-        if accelerator_fst and os.environ.get("RTP_V4_XGRAMMAR_FST_DIAG"):
-            if self._model_type() == "deepseek_v4":
-                from rtp_llm.models_py.v4_fst_diagnostic import V4FstTrace
-
-                self._v4_fst_trace = V4FstTrace.from_env(self.load_config.device)
         streamed_scratch = self._arm_streamed_scratch(
             model, method
         ) or self._ppu_streamed_scratch(model, method)
@@ -2599,30 +2575,14 @@ class NewModelLoader:
             model, "_rtp_checkpoint_load_plan", _CHECKPOINT_LOAD_PLAN_UNSET
         )
         model._rtp_checkpoint_load_plan = checkpoint_load_plan
-        wo_a_trace = (
-            self._v4_fst_trace if self._v4_fst_trace is not None
-            and self._v4_fst_trace.mode == "fenced" else None
-        )
-        if wo_a_trace is not None:
-            wo_a_trace.bind_wo_a_route(model, self._checkpoint_catalog(), selected_files)
         dispatch_context = (
             self._scratch_stage("checkpoint dispatch") if streamed_scratch else nullcontext()
         )
         with dispatch_context:
             try:
-                model.load_weights(
-                    wo_a_trace.wo_a_dispatch(weights) if wo_a_trace is not None else weights
-                )
+                model.load_weights(weights)
                 if staged_coordinator is not None:
                     staged_coordinator.finish()
-            except ValueError as exc:
-                # Read diagnostic evidence only on the already-failed V4 smoke,
-                # while the yielded FST tensor is still owned by the reader.
-                if self._v4_fst_trace is not None:
-                    self._v4_fst_trace.compare_bad_router(
-                        exc, self._checkpoint_catalog, selected_files
-                    )
-                raise
             finally:
                 if previous_load_plan is _CHECKPOINT_LOAD_PLAN_UNSET:
                     delattr(model, "_rtp_checkpoint_load_plan")
@@ -2634,8 +2594,6 @@ class NewModelLoader:
                 close_weights = getattr(weights, "close", None)
                 if callable(close_weights):
                     close_weights()
-            if memory_trace is not None:
-                memory_trace.record("after_reader_close")
             self._validate_loaded_weights(model)
         logger.info(
             "Streamed checkpoint tensors with %s in %.2fs",
@@ -2658,23 +2616,10 @@ class NewModelLoader:
                         prepare(module)
             self._migrate_staged_modules(model, self.load_config.device)
         validate_borrowed_parameters(model, self.load_config.device)
-        if wo_a_trace is not None:
-            wo_a_trace.observe_wo_a_owner("reader_closed")
         model.to(self.load_config.device)
         self._validate_loaded_weights(model)
-        if self._v4_fst_trace is None:
-            self._run_post_load_hooks(model)
-        else:
-            self._v4_fst_trace.point("post_load_enter")
-            if self._v4_fst_trace.mode == "fenced":
-                self._v4_fst_trace.verify_wo_a_owners(
-                    model, self._checkpoint_catalog(), selected_files
-                )
-            self._run_post_load_hooks(model, self._v4_fst_trace)
-            self._v4_fst_trace.point("post_load_done")
+        self._run_post_load_hooks(model)
         validate_borrowed_parameters(model)
         model.eval()
-        if memory_trace is not None:
-            memory_trace.record("after_post_load")
         self._selected_load_method = method
         return model

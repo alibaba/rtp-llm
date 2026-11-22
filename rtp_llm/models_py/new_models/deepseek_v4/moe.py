@@ -255,10 +255,10 @@ class OwnedFp8Fp4MoE(RtpModule):
                 lo, hi = torch.aminmax(tensor)
                 lo, hi = lo.item(), hi.item()
                 if lo < 0 or hi >= self.num_experts:
-                    from rtp_llm.models_py.v4_fst_diagnostic import V4RouterRangeError
-
-                    raise V4RouterRangeError(
-                        self.layer_id, self.num_experts, tensor, lo, hi
+                    raise ValueError(
+                        f"gate.tid2eid contains an out-of-range expert index: layer={self.layer_id} "
+                        f"dtype={tensor.dtype} shape={tuple(tensor.shape)} "
+                        f"observed=[{lo},{hi}] valid=[0,{self.num_experts})"
                     )
                 with torch.no_grad():
                     target.copy_(tensor)

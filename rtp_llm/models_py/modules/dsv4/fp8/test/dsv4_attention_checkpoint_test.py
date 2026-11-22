@@ -9,6 +9,7 @@ import torch
 
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.modules.dsv4.fp8._wo_a_layout import prepare_wo_a_stacked
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.weight_mapper import get_all_weights
 
@@ -107,6 +108,20 @@ class Dsv4AttentionCheckpointTest(unittest.TestCase):
             layer.load_weights(get_all_weights([path], read_spec_resolver=resolver))
         NewModelLoader._validate_loaded_weights(layer)
         return layer
+
+    def test_wo_a_runtime_scale_bytes_match_each_checkpoint_shard(self):
+        weights = self._weights()
+        # Different bytes on the two ranks catch accidental reuse of rank 0.
+        raw = torch.tensor([[0, 1, 127, 255], [254, 128, 42, 3]], dtype=torch.uint8)
+        weights["wo_a.scale"] = raw.view(torch.float8_e8m0fnu)
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                layer = self._load(weights, rank=rank)
+                _, packed = prepare_wo_a_stacked(
+                    layer.wo_a_w, layer.wo_a_s, 1, 128, 512
+                )
+                actual = packed.reshape(-1).contiguous().view(torch.uint8).reshape(128, 4)
+                self.assertTrue(torch.equal(actual, raw[rank].expand_as(actual)))
 
     def test_real_checkpoint_swa_csa_hca_tp2_parameter_owners(self):
         for ratio in (0, 4, 128):

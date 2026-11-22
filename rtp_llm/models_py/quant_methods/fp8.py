@@ -1,5 +1,4 @@
 import importlib
-import logging
 from typing import Optional, Tuple
 
 import torch
@@ -19,7 +18,6 @@ from rtp_llm.models_py.quant_methods.base import (
     register_quant_method,
 )
 
-logger = logging.getLogger(__name__)
 
 
 def _convert_e4m3fn_to_fnuz(
@@ -320,14 +318,6 @@ def _prepare_rocm_fp8_ptpc_executor(
     )
 
 
-def _rocm_fp8_ptpc_executor_name(runtime_backend: str, executor) -> str:
-    if runtime_backend not in (_ROCM_AITER_PTPC, _ROCM_HIPBLASLT_PTPC):
-        return "torch._scaled_mm"
-    if executor is None:
-        return runtime_backend
-    return getattr(executor, "__name__", type(executor).__name__)
-
-
 def _run_rocm_fp8_ptpc_executor(
     executor,
     runtime_backend: str,
@@ -603,9 +593,6 @@ class Fp8LinearMethod(QuantizeMethodBase):
     source quantization config.
     """
 
-    # Class-level flag: the diagnostic log fires at most once across ALL
-    # instances in a process. See Fp8OnlineLinearMethod for the assumption.
-    _apply_logged: bool = False
     checkpoint_suffix_family = "fp8_per_tensor"
 
     @property
@@ -664,15 +651,6 @@ class Fp8LinearMethod(QuantizeMethodBase):
         )
         qinput, x_scale = _resolve_per_tensor_quant()(input_2d, input_scale)
 
-        if not Fp8LinearMethod._apply_logged:
-            logger.info(
-                "[Fp8LinearMethod] FIRST forward via torch._scaled_mm: "
-                "prefix=%r, x.shape=%s, weight.shape=%s",
-                getattr(layer, "prefix", "?"),
-                tuple(x.shape),
-                tuple(layer.weight.shape),
-            )
-            Fp8LinearMethod._apply_logged = True
 
         output = torch._scaled_mm(
             qinput,
@@ -739,14 +717,6 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
     activation quantization.
     """
 
-    # Class-level flags: the diagnostic log fires at most once across ALL
-    # instances in a process. Safe under RTP-LLM's process model where each
-    # backend process loads the model once and does not reload. If dynamic
-    # reload (e.g. hot-swap, multi-model serving) is ever added, move these to
-    # __init__ so each instance can log once.
-    _quant_logged: bool = False
-    _apply_logged: bool = False
-    _quant_count: int = 0
     requires_staged_device_postprocess = True
     required_checkpoint_parameters = ("weight",)
 
@@ -816,19 +786,6 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
         if hasattr(layer, "_fp8_cpu_weight_prepared"):
             del layer._fp8_cpu_weight_prepared
 
-        Fp8OnlineLinearMethod._quant_count += 1
-        if not Fp8OnlineLinearMethod._quant_logged:
-            logger.info(
-                "[Fp8OnlineLinearMethod] online-quantized FIRST weight: "
-                "prefix=%r, weight.shape=%s, weight.dtype=%s, "
-                "scale=%.6f, weight.device=%s",
-                getattr(layer, "prefix", "?"),
-                tuple(fp8_weight.shape),
-                fp8_weight.dtype,
-                float(scale.view(1)[0].item()),
-                fp8_weight.device,
-            )
-            Fp8OnlineLinearMethod._quant_logged = True
 
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
@@ -847,20 +804,6 @@ class Fp8OnlineLinearMethod(QuantizeMethodBase):
 
         qinput, x_scale = _resolve_per_tensor_quant()(input_2d)
 
-        if not Fp8OnlineLinearMethod._apply_logged:
-            logger.info(
-                "[Fp8OnlineLinearMethod] FIRST forward via torch._scaled_mm: "
-                "prefix=%r, x.dtype=%s, x.shape=%s, qinput.dtype=%s, "
-                "weight.dtype=%s, weight.shape=%s, total_quanted_weights=%d",
-                getattr(layer, "prefix", "?"),
-                x.dtype,
-                tuple(x.shape),
-                qinput.dtype,
-                layer.weight.dtype,
-                tuple(layer.weight.shape),
-                Fp8OnlineLinearMethod._quant_count,
-            )
-            Fp8OnlineLinearMethod._apply_logged = True
 
         output = torch._scaled_mm(
             qinput,
@@ -889,14 +832,6 @@ class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase
     (rows of [N, K]) and activation quant (rows of [M, K]).
     """
 
-    # Class-level flags: the diagnostic log fires at most once across ALL
-    # instances in a process. Safe under RTP-LLM's process model where each
-    # backend process loads the model once and does not reload. If dynamic
-    # reload (e.g. hot-swap, multi-model serving) is ever added, move these to
-    # __init__ so each instance can log once.
-    _quant_logged: bool = False
-    _apply_logged: bool = False
-    _quant_count: int = 0
     requires_staged_device_postprocess = True
     required_checkpoint_parameters = ("weight",)
 
@@ -972,20 +907,6 @@ class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase
                 nn.Parameter(scale, requires_grad=False),
             )
 
-        Fp8PerChannelOnlineLinearMethod._quant_count += 1
-        if not Fp8PerChannelOnlineLinearMethod._quant_logged:
-            logger.info(
-                "[Fp8PerChannelOnlineLinearMethod] online-quantized FIRST weight: "
-                "prefix=%r, weight.shape=%s, weight.dtype=%s, "
-                "scale.shape=%s, scale.mean=%.6f, weight.device=%s",
-                getattr(layer, "prefix", "?"),
-                tuple(fp8_weight.shape),
-                fp8_weight.dtype,
-                tuple(scale.shape),
-                float(scale.mean().item()),
-                fp8_weight.device,
-            )
-            Fp8PerChannelOnlineLinearMethod._quant_logged = True
 
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
@@ -1003,24 +924,6 @@ class Fp8PerChannelOnlineLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase
         N = layer.output_size
         output_shape = list(x.shape[:-1]) + [N]
 
-        if not Fp8PerChannelOnlineLinearMethod._apply_logged:
-            logger.info(
-                "[Fp8PerChannelOnlineLinearMethod] FIRST forward via %s: "
-                "prefix=%r, x.dtype=%s, x.shape=%s, weight.dtype=%s, "
-                "weight.shape=%s, weight_scale.shape=%s, total_quanted_weights=%d",
-                _rocm_fp8_ptpc_executor_name(
-                    self._runtime_backend,
-                    getattr(self, "_rocm_executor", None),
-                ),
-                getattr(layer, "prefix", "?"),
-                x.dtype,
-                tuple(x.shape),
-                layer.weight.dtype,
-                tuple(layer.weight.shape),
-                tuple(layer.weight_scale.shape),
-                Fp8PerChannelOnlineLinearMethod._quant_count,
-            )
-            Fp8PerChannelOnlineLinearMethod._apply_logged = True
 
         if self._runtime_backend in (
             _ROCM_AITER_PTPC,
@@ -1072,9 +975,6 @@ class Fp8PerChannelLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase):
     torch._scaled_mm.
     """
 
-    # Class-level flag: the diagnostic log fires at most once across ALL
-    # instances in a process. See Fp8OnlineLinearMethod for the assumption.
-    _apply_logged: bool = False
     required_checkpoint_parameters = ("weight", "weight_scale")
 
     def create_weights(
@@ -1159,20 +1059,6 @@ class Fp8PerChannelLinearMethod(_RocmPtpcEpilogueMixin, QuantizeMethodBase):
         N = layer.output_size
         output_shape = list(x.shape[:-1]) + [N]
 
-        if not Fp8PerChannelLinearMethod._apply_logged:
-            logger.info(
-                "[Fp8PerChannelLinearMethod] FIRST forward via %s: "
-                "prefix=%r, x.shape=%s, weight.shape=%s, weight_scale.shape=%s",
-                _rocm_fp8_ptpc_executor_name(
-                    self._runtime_backend,
-                    getattr(self, "_rocm_executor", None),
-                ),
-                getattr(layer, "prefix", "?"),
-                tuple(x.shape),
-                tuple(layer.weight.shape),
-                tuple(layer.weight_scale.shape),
-            )
-            Fp8PerChannelLinearMethod._apply_logged = True
 
         if self._runtime_backend in (
             _ROCM_AITER_PTPC,
@@ -1216,14 +1102,6 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
 
     BLOCK: int = 128
 
-    # Class-level flags: the diagnostic log fires at most once across ALL
-    # instances in a process. Safe under RTP-LLM's process model where each
-    # backend process loads the model once and does not reload. If dynamic
-    # reload (e.g. hot-swap, multi-model serving) is ever added, move these to
-    # __init__ so each instance can log once.
-    _quant_logged: bool = False
-    _apply_logged: bool = False
-    _quant_count: int = 0
     requires_staged_device_postprocess = True
     required_checkpoint_parameters = ("weight",)
 
@@ -1390,22 +1268,6 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
             ),
         )
 
-        Fp8BlockOnlineLinearMethod._quant_count += 1
-        if not Fp8BlockOnlineLinearMethod._quant_logged:
-            logger.info(
-                "[Fp8BlockOnlineLinearMethod] online-quantized FIRST weight: "
-                "prefix=%r, weight.shape=%s, weight.dtype=%s, "
-                "scale.shape=%s, scale.dtype=%s, scale.mean=%.6f, "
-                "weight.device=%s",
-                getattr(layer, "prefix", "?"),
-                tuple(fp8_weight.shape),
-                fp8_weight.dtype,
-                tuple(scale.shape),
-                scale.dtype,
-                float(scale.float().mean().item()),
-                fp8_weight.device,
-            )
-            Fp8BlockOnlineLinearMethod._quant_logged = True
 
     def apply(
         self, layer, x: torch.Tensor, bias: Optional[torch.Tensor] = None
@@ -1456,21 +1318,6 @@ class Fp8BlockOnlineLinearMethod(QuantizeMethodBase):
 
         output = output[:, :logical_n]
 
-        if not Fp8BlockOnlineLinearMethod._apply_logged:
-            logger.info(
-                "[Fp8BlockOnlineLinearMethod] FIRST forward via %s: "
-                "prefix=%r, x.dtype=%s, x.shape=%s, weight.dtype=%s, weight.shape=%s, "
-                "weight_scale.shape=%s, total_quanted_weights=%d",
-                self._runtime_backend,
-                getattr(layer, "prefix", "?"),
-                x.dtype,
-                tuple(x.shape),
-                layer.weight.dtype,
-                tuple(layer.weight.shape),
-                tuple(layer.weight_scale.shape),
-                Fp8BlockOnlineLinearMethod._quant_count,
-            )
-            Fp8BlockOnlineLinearMethod._apply_logged = True
 
         if bias is not None:
             output = output + bias.to(out_dtype)
@@ -1494,7 +1341,6 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
     CUDA DeepGEMM or ROCm AITer using the same runtime state as the online path.
     """
 
-    _create_logged: bool = False
     requires_staged_device_postprocess = False
     required_checkpoint_parameters = ("weight", "weight_scale_inv")
 
@@ -1525,22 +1371,6 @@ class Fp8BlockLinearMethod(Fp8BlockOnlineLinearMethod):
                 "FP8 block runtime supports only "
                 f"{[self.BLOCK, self.BLOCK]}, got {[block_n, block_k]}"
             )
-        if not Fp8BlockLinearMethod._create_logged:
-            logger.info(
-                "[Fp8BlockLinearMethod] create_weights prefix=%r quant_type=%s "
-                "source_config=%s weight_block_size=%s input=%d output=%d",
-                getattr(layer, "prefix", "?"),
-                getattr(layer.quant_config, "quant_type", None),
-                (
-                    type(getattr(layer.quant_config, "source_config", None)).__name__
-                    if getattr(layer.quant_config, "source_config", None) is not None
-                    else None
-                ),
-                getattr(layer.quant_config, "weight_block_size", None),
-                input_size,
-                output_size,
-            )
-            Fp8BlockLinearMethod._create_logged = True
         n_blocks = (output_size + block_n - 1) // block_n
         k_blocks = (input_size + block_k - 1) // block_k
         layer.register_parameter(

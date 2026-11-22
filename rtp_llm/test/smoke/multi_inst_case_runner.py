@@ -610,16 +610,7 @@ class SeparatedCaseRunner(CaseRunner):
                 if frontend_envs is not None
                 else (PREFILL_ROLE_NAME if has_pd else LLM_ROLE_NAME)
             )
-            from smoke import v4_pair_trace
-            pair_ok = True
-            try:
-                state = self.curl_server(managers[curl_role])
-            finally:
-                if os.environ.get("TEST_TARGET") == v4_pair_trace.TARGET:
-                    pair_ok = v4_pair_trace.run_pair(managers)
-            if not pair_ok:
-                state.ret = False
-                state.err_msg = (state.err_msg or "") + " V4 paired trace evidence incomplete"
+            state = self.curl_server(managers[curl_role])
             assert_affinity = str_to_bool(
                 os.environ.get("SMOKE_ASSERT_VIT_CACHE_AFFINITY", "0")
             )

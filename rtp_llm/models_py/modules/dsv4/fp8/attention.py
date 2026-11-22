@@ -1293,9 +1293,6 @@ class AttentionFP8(RtpModule):
             return
         self.validate_weights_loaded()
         self.validate_runtime_device(self.wo_a_w.device)
-        trace = getattr(self, "_rtp_v4_fst_trace", None)
-        if trace is not None:
-            trace.point("attention_enter", layer=self.layer_id)
         self._wo_a_stk_w, self._wo_a_stk_s = _prepare_wo_a_stacked(
             self.wo_a_w,
             self.wo_a_s,
@@ -1303,11 +1300,7 @@ class AttentionFP8(RtpModule):
             self.o_lora_rank,
             self.n_heads * self.head_dim // self.n_groups,
         )
-        if trace is not None:
-            trace.point("wo_a_packed", layer=self.layer_id)
         self.init_rope_cache(self.wo_a_w.device)
-        if trace is not None:
-            trace.point("rope_ready", layer=self.layer_id)
 
     def _apply(self, fn, recurse=True):
         result = super()._apply(fn, recurse=recurse)

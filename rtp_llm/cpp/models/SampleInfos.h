@@ -80,9 +80,6 @@ public:
     // The draft distribution is a one-hot at token_ids and need not be
     // materialized as [batch, speculative_steps, vocab].
     bool token_ids_are_point_mass = false;
-    // Empty outside two explicitly requested diagnostic smoke targets.
-    torch::Tensor next_smoke_top_values;
-    torch::Tensor next_smoke_top_ids;
 };
 
 struct MergedOutput {

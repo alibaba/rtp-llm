@@ -1,48 +1,6 @@
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include "rtp_llm/cpp/utils/Logger.h"
-
 namespace rtp_llm {
-
-namespace {
-// Explicit CI opt-in. Only a single unreused, single-token local prefill
-// of the checked-in test prompt can emit these two vocabulary scores. No
-// arbitrary prompts, request IDs, complete logits or generated text are logged.
-void captureV41Fixture(const StreamGroups& groups, const torch::Tensor& logits) {
-    if (groups.totalDecodeBatchSize() || groups.contextStreams().size() != 1 || groups.totalContextBatchSize() != 1) {
-        return;
-    }
-    const auto& stream = groups.contextStreams().front();
-    const auto& cfg    = *stream->generateConfig();
-    if (stream->isFakeStream() || stream->inputLength() != 783 || stream->seqLength() != 783 || cfg.max_new_tokens != 1
-        || cfg.top_k != 1 || cfg.reuse_cache || cfg.can_use_pd_separation) {
-        return;
-    }
-    const auto ids  = stream->completeTokenIdsVec();
-    uint64_t   hash = UINT64_C(14695981039346656037);
-    for (const auto id : ids) {
-        hash = (hash ^ static_cast<uint32_t>(id)) * UINT64_C(1099511628211);
-    }
-    if (ids.size() != 783 || hash != UINT64_C(0x83ef06b1e7cedebb)) {
-        return;
-    }
-    TORCH_CHECK(logits.defined() && logits.dim() == 2 && logits.size(0) == 1 && logits.size(1) > 1606,
-                "V4.1 fixture expected a single full-vocabulary target logit row");
-    // This is the actual rank-0 target sampler input, before any processor
-    // mutates it. Deliberate synchronization is confined to this CI fixture.
-    const auto row     = logits.select(0, 0);
-    const auto score_a = row.select(0, 1606).item<double>();
-    const auto score_b = row.select(0, 28).item<double>();
-    const auto argmax  = row.argmax().item<int64_t>();
-    RTP_LLM_LOG_INFO("V41_FIXTURE_PREFILL_V1 hash=83ef06b1e7cedebb id1606=%.9g id28=%.9g argmax=%lld",
-                     score_a,
-                     score_b,
-                     static_cast<long long>(argmax));
-}
-}  // namespace
 
 NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     const ModelConfig&                 model_config,
@@ -130,17 +88,7 @@ absl::StatusOr<GptModelInputs> NormalBatchStreamProcessor::gatherModelInput(cons
 
 absl::StatusOr<SamplerInputs> NormalBatchStreamProcessor::gatherSamplerInput(
     const StreamGroups& stream_groups, const GptModelInputs& model_inputs, const GptModelOutputs& model_output) const {
-    auto              result          = sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
-    static const bool fixture_enabled = [] {
-        const auto* value  = std::getenv("RTP_V41_LONG_PREFILL_PROBE");
-        const auto* target = std::getenv("TEST_TARGET");
-        return value && std::strcmp(value, "1") == 0 && target
-               && std::strcmp(target, "//rtp_llm/test/smoke:deepseek_v41_long_prefill_logits_sm100_arm") == 0;
-    }();
-    if (fixture_enabled && model_input_gatherer_config_.role_type == RoleType::PREFILL && result.ok()) {
-        captureV41Fixture(stream_groups, result->logits);
-    }
-    return result;
+    return sampler_input_gatherer_->gather(stream_groups, model_inputs, model_output);
 }
 
 absl::StatusOr<torch::Tensor> NormalBatchStreamProcessor::gatherKvCacheKernelBlockId(

@@ -10,7 +10,6 @@ package(default_visibility = ["//visibility:public"])
 # tag filter, while worker routing comes from exec_properties only.
 _CPU_ONLY_TESTS = [
     "test_cache_specs",
-    "test_v41_cache_model_trace",
     "test_cache_tags",
     "test_deep_gemm_scratch",
     "test_engram",

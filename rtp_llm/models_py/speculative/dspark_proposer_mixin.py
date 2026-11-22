@@ -36,7 +36,6 @@ sampler using each request's real sampling parameters.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import torch
@@ -326,12 +325,6 @@ class DSparkProposerMixin:
             starts, lengths, committed_ends, row_count, inputs
         )
 
-        if os.getenv("RTP_V41_DRAFT_ROLE") and commit_ctx is not None:
-            from rtp_llm.models_py.modules.v41_first_draft import fixed_features
-
-            features = fixed_features(
-                self, features, positions, req, committed_ends, commit_ctx
-            )
         main_x = self.combine_hidden_states(features)
         self.commit_feature_rows(
             main_x,

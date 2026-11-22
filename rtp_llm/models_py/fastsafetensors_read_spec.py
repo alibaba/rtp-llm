@@ -1,5 +1,4 @@
 import copy
-from contextlib import nullcontext
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple, Type
 
 import torch
@@ -354,7 +353,6 @@ def iter_read_spec_tensors(
     safetensor_slice_expander: Optional[Any] = None,
     segmented_tensor_reader=None,
     name_filter=None,
-    wo_a_trace=None,
 ) -> Iterator[Tuple[str, object]]:
     """Consume one FST file buffer using its routing/sharding primitives.
 
@@ -479,11 +477,6 @@ def iter_read_spec_tensors(
             and targets in (None, all_ranks)
             and hasattr(file_buffer, "get_sharded")
         )
-        if wo_a_trace is not None and key == wo_a_trace._wo_a_key:
-            yield read_spec.output_name, wo_a_trace.observe_wo_a_reader(
-                file_buffer, key, read_spec, can_scatter
-            )
-            continue
         if can_scatter:
             tensor = file_buffer.get_sharded(key, read_spec.shard_dim)
             yield read_spec.output_name, read_spec.wrap_sharded_tensor(tensor)
@@ -537,44 +530,27 @@ def build_read_spec_parallel_loader(
                 )
 
             try:
-                diag = getattr(self, "_rtp_v4_fst_trace", None)
-                if diag is not None:
-                    diag.point("consumer_received", batch.batch_id)
                 self._log_message(
                     f"Batch {batch.batch_id}: tensor key len: {len(batch.keys)}"
                 )
-                key_context = (
-                    diag.watch_keys(batch.batch_id, batch.keys)
-                    if diag is not None
-                    else nullcontext(batch.keys)
-                )
                 with timing_context(
                     "get_tensor", self._log_message, batch.batch_id
-                ) as timer, key_context as keys:
+                ) as timer:
                     yield from iter_read_spec_tensors(
                         batch.fb,
-                        keys,
+                        batch.keys,
                         self.read_spec_resolver,
                         self.safetensor_slice_expander,
                         self.segmented_tensor_reader,
                         self.name_filter,
-                        (
-                            diag
-                            if diag is not None and hasattr(diag, "_wo_a_local")
-                            else None
-                        ),
                     )
                 get_tensor_time = timer.elapsed_ms
-                if diag is not None:
-                    diag.point("consumer_before_release", batch.batch_id)
             finally:
                 with timing_context(
                     "fb.close", self._log_message, batch.batch_id
                 ) as timer:
                     batch.fb.close()
                 close_time = timer.elapsed_ms
-            if diag is not None:
-                diag.point("consumer_released", batch.batch_id)
 
             self._log_message(
                 f"Batch {batch.batch_id} summary: "

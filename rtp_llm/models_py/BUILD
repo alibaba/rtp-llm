@@ -42,15 +42,8 @@ py_test(
 )
 
 py_test(
-    name = "v4_fst_diagnostic_test",
-    srcs = ["v4_fst_diagnostic_test.py"],
-    deps = [":new_loader_core"],
-    env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
-)
-
-py_test(
-    name = "v41_fst_memory_test",
-    srcs = ["v41_fst_memory_test.py"],
+    name = "checkpoint_lifecycle_test",
+    srcs = ["checkpoint_lifecycle_test.py"],
     env = {"CUDA_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""},
     deps = [":new_loader_core"],
 )
@@ -199,7 +192,6 @@ py_library(
         "downstream_heads.py",
         "expert_placement.py",
         "fastsafetensors_read_spec.py",
-        "v4_fst_diagnostic.py",
         "finetune_overlay.py",
         "fp4_read_spec.py",
         "fst_host_backend.py",
@@ -213,7 +205,6 @@ py_library(
         "read_spec.py",
         "registry.py",
         "runtime_weight_update.py",
-        "v41_fst_memory.py",
         "v41_fst_file_pool.py",
         "v4_fst_nogds.py",
         "weight_mapper.py",
