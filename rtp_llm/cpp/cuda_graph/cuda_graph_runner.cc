@@ -1275,12 +1275,24 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs,
     // Request-lane draft graphs retain num_tokens_per_bs_ lanes per request
     // even when acceptance leaves fewer packed tokens.
     int required_capacity = state.current_seq_len;
+    const auto request_rows = inputs.attention_inputs.input_lengths.numel();
     if (usesFixedCapacityMtpDraftPrefillCudaGraph()) {
-        const auto requests = inputs.attention_inputs.input_lengths.numel();
-        if (requests <= 0 || requests > static_cast<int64_t>(max_bs_)) {
+        if (request_rows <= 0 || request_rows > static_cast<int64_t>(max_bs_)) {
             return false;
         }
-        required_capacity = std::max(required_capacity, static_cast<int>(requests) * num_tokens_per_bs_);
+        required_capacity = std::max(required_capacity, static_cast<int>(request_rows) * num_tokens_per_bs_);
+    } else if (!isGenerationPrefillCudaGraph() && request_rows > static_cast<int64_t>(max_bs_)) {
+        // Ordinary draft/embedding prefill graphs capture exactly max_bs_
+        // request rows. max_generate_batch_size can admit decode batches past
+        // concurrency_limit, and their packed tokens can still fit a captured
+        // bucket, so reject wider batches here and run them eager instead of
+        // failing the block-table row check during graph preparation.
+        if (observe_fallback) {
+            RTP_LLM_LOG_WARNING("prefill cuda graph: %ld requests exceed captured rows %zu, fallback to normal run",
+                                static_cast<long>(request_rows),
+                                max_bs_);
+        }
+        return false;
     }
     auto it = std::lower_bound(capture_range_.begin(), capture_range_.end(), required_capacity);
     // No captured graph for seq_len >= current (all captures smaller than requested)

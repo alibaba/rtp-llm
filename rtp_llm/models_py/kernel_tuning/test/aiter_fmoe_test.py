@@ -205,7 +205,7 @@ class AiterFmoeTuningTest(unittest.TestCase):
             self.assertFalse(status.applied)
             self.assertIn("exactly once", status.reason)
 
-    def test_valid_explicit_config_set_is_accepted_without_rewriting(self):
+    def test_valid_explicit_config_set_is_accepted_and_published(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             default_config, model_config, overlay_config = self._fixture(root)
@@ -220,11 +220,20 @@ class AiterFmoeTuningTest(unittest.TestCase):
                 status = fmoe.configure_aiter_fmoe_overlays()
 
             self.assertTrue(status.applied)
-            # The explicit set is validated but not rewritten: neither the
-            # injected input state nor the third-party environment variable
-            # is touched.
+            # The explicit set is validated and delivered verbatim: the
+            # injected input state stays untouched, and the third-party
+            # environment variable now carries the validated list so aiter
+            # actually consumes exactly what was validated.
             self.assertEqual(fmoe._explicit_config_paths, explicit)
-            self.assertNotIn("AITER_CONFIG_FMOE", os.environ)
+            published = [
+                str(Path(part).expanduser().resolve())
+                for part in os.environ["AITER_CONFIG_FMOE"].split(os.pathsep)
+            ]
+            expected = [
+                str(path.expanduser().resolve())
+                for path in (default_config, model_config, overlay_config)
+            ]
+            self.assertEqual(published, expected)
 
     def test_explicit_config_rejects_missing_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:

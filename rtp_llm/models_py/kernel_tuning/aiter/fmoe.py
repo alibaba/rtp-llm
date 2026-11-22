@@ -330,7 +330,7 @@ def _configure_aiter_fmoe_overlays() -> KernelTuningStatus:
     existing = _explicit_config_paths
     if existing:
         try:
-            _validated_explicit_config_paths(existing, overlay_config, overlay_keys)
+            config_paths = _validated_explicit_config_paths(existing, overlay_config, overlay_keys)
         except (OSError, ValueError) as error:
             _CONFIG_STATUS = _status(
                 False,
@@ -340,12 +340,14 @@ def _configure_aiter_fmoe_overlays() -> KernelTuningStatus:
             return _CONFIG_STATUS
     else:
         config_paths = [*stock_configs, overlay_config]
-        # Third-party boundary write: the aiter pip package resolves its tuned
-        # FMoE dispatch configs exclusively through this exact process
-        # environment variable, so publishing the composed search path stays
-        # necessary even though the input side above consumes the parsed
-        # server config instead of the raw environment.
-        os.environ["AITER_CONFIG_FMOE"] = os.pathsep.join(map(str, config_paths))
+    # Third-party boundary write: the aiter pip package resolves its tuned
+    # FMoE dispatch configs exclusively through this exact process
+    # environment variable, so publishing the composed search path stays
+    # necessary even though the input side above consumes the parsed
+    # server config instead of the raw environment. Publish the validated
+    # list in BOTH branches: a CLI-provided list must be delivered to aiter,
+    # not only validated, or the overlay silently never takes effect.
+    os.environ["AITER_CONFIG_FMOE"] = os.pathsep.join(map(str, config_paths))
 
     _CONFIG_STATUS = _status(True, "RTP AITER FMoE overlay configured", version)
     _LOGGER.info(
