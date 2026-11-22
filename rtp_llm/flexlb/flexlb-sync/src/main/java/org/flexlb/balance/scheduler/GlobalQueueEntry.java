@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.util.Comparator;
+import java.util.Map;
 
 /** One request identity retained by the model-wide ordered queue. */
 final class GlobalQueueEntry {
@@ -12,6 +13,8 @@ final class GlobalQueueEntry {
 
     final RequestContext context;
     final String routingGroup;
+    static final Map<String, Object> WAITING_FOR_PLACEMENT = Map.of("cause", "waiting for placement");
+    volatile Map<String, Object> currentWait = WAITING_FOR_PLACEMENT;
     boolean knownColdRequest;
     double rescueHitFraction;
     int rescueAttempts;

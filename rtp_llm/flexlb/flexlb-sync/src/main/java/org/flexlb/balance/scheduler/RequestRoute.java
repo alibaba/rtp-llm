@@ -11,6 +11,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
@@ -76,6 +77,16 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     public void releaseTokenPlan() {
         if (tokenPlan != null) { tokenPlan.close(); }
     }
+    // A replacement route starts with no evidence from its predecessor.
+    private volatile WorkerBatcher.QueueWaitSnapshot workerWait;
+
+    void recordWorkerWait(WorkerBatcher.QueueWaitSnapshot wait) { workerWait = wait; }
+
+    Map<String, Object> workerWaitDiagnostics() {
+        var wait = workerWait;
+        return wait == null ? WorkerBatcher.INITIAL_QUEUE_WAIT_SNAPSHOT : wait.asMap();
+    }
+
     private long prefillVersion;
     private long decodeVersion;
     private final DecodeResources.ReservationHandle decodeReservation;

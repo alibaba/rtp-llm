@@ -62,8 +62,9 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         }
         long expires = data.getRequestExpiresAtMs();
         if (expires <= 0L || System.currentTimeMillis() >= expires) {
-            var rejected = CompletableFuture.completedFuture(Response.buildErrorResponse(expiredError,
-                    "request scheduling deadline has expired before placement"));
+            String cause = "request scheduling deadline has expired before placement";
+            if (queued) { data.setSchedulingDiagnostics(Map.of("cause", cause)); }
+            var rejected = CompletableFuture.completedFuture(Response.buildErrorResponse(expiredError, cause));
             data.setFuture(rejected);
             return rejected;
         }

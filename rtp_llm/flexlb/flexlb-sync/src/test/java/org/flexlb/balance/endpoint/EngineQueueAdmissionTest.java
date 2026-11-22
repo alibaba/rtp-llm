@@ -5,6 +5,60 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.flexlb.balance.endpoint.EngineQueueAdmission.State.*;
 
 class EngineQueueAdmissionTest {
+    @Test void alternatingSamplesAtTheLimitCannotReopenAFullWorkerQueue() {
+        var policy = new EngineQueueAdmission(80, 5_000, 1_000, true);
+        policy.observe(79, 0);
+        assertEquals(false, policy.dispatchBlocked(1));
+        for (int sample = 1; sample <= 60; sample++) {
+            policy.observe(sample % 2 == 1 ? 80 : 79, sample * 100L);
+            assertEquals(true, policy.dispatchBlocked());
+        }
+        assertEquals(AVAILABLE, policy.state());
+    }
+
+    @Test void reachingTheWatermarkKeepsWorkAtTheMasterUntilTheWorkerStaysEmpty() {
+        var policy = new EngineQueueAdmission(80, 100, 1000, true);
+        policy.observe(80, 0);
+        policy.observe(79, 99);
+        assertEquals(true, policy.dispatchBlocked(1));
+        policy.observe(80, 100);
+        policy.observe(80, 200);
+        policy.observe(3, 201);
+        assertEquals(true, policy.dispatchBlocked());
+        policy.observe(0, 202);
+        assertEquals(false, policy.dispatchBlocked(1));
+        assertEquals(true, policy.dispatchBlocked(2));
+        policy.observe(1, 290);
+        policy.observe(0, 295);
+        policy.observe(0, 394);
+        assertEquals(true, policy.dispatchBlocked(2));
+        policy.observe(0, 395);
+        assertEquals(false, policy.dispatchBlocked(80));
+    }
+
+    @Test void ordinaryAdmissionKeepsItsConfiguredWatermarkAfterSustainedPressure() {
+        var policy = new EngineQueueAdmission(80, 100, 1000, false);
+        policy.observe(80, 0);
+        policy.observe(80, 100);
+        policy.observe(3, 200);
+        assertEquals(false, policy.dispatchBlocked(77));
+        assertEquals(true, policy.dispatchBlocked(78));
+    }
+
+    @Test void staleOrMissingQueueTelemetryCannotKeepRecoveryArmed() {
+        var policy = new EngineQueueAdmission(80, 100, 1000, true);
+        policy.observe(80, 0);
+        policy.observe(80, 100);
+        policy.observe(-1, 101);
+        assertEquals(false, policy.dispatchBlocked(500));
+        policy.observe(3, 102);
+        assertEquals(false, policy.dispatchBlocked());
+        policy.observe(80, 103);
+        policy.observe(80, 203);
+        policy.observe(3, 1204);
+        assertEquals(false, policy.dispatchBlocked());
+    }
+
     @Test void unobservedAdmissionsReserveHeadroomWithoutClaimingSustainedEngineOverload() {
         var policy = new EngineQueueAdmission(30, 5000);
         policy.observe(0, 0);

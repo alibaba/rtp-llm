@@ -211,7 +211,10 @@ class WorkerBatcherSchedulingTest {
                 () -> firstWait.put("cause", "modified"));
         Map<?, ?> firstCounts = (Map<?, ?>) firstWait.get("priorityCounts");
         assertThrows(UnsupportedOperationException.class, firstCounts::clear);
-        assertTrue(runtime.offer(item(config, endpoint, 2L, 30, System.currentTimeMillis())));
+        RequestRoute follower = item(config, endpoint, 2L, 30, System.currentTimeMillis());
+        assertTrue(runtime.offer(follower));
+        assertEquals(firstWait, head.workerWaitDiagnostics());
+        assertEquals(Map.of("cause", "waiting for Prefill decision"), follower.workerWaitDiagnostics());
 
         TimeUnit.MILLISECONDS.sleep(100L);
         assertEquals(1, delivery.attempts.get(),

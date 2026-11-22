@@ -472,6 +472,33 @@ class GlobalQueueProgressTest {
     }
 
     @Test
+    void deadlineUsesTheBlockerOfTheRequestThatIsExpiring() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            var queue = (QueuedRequestScheduler) f.scheduler;
+            for (var role : List.of(RoleType.PREFILL, RoleType.DECODE)) {
+                String group = role.name();
+                doReturn(PlacementResult.blocked(new PlacementKey(role, group, null), null,
+                        Map.of("workers", role == RoleType.PREFILL ? 40 : 50)))
+                        .when(f.router).select(any(), eq(group));
+                f.submit(role == RoleType.PREFILL ? 994L : 995L, group);
+                awaitCondition(() -> group.equals(queue.getLatestQueueWaitSnapshot().get("group")));
+            }
+            for (var role : List.of(RoleType.PREFILL, RoleType.DECODE)) {
+                long id = role == RoleType.PREFILL ? 994L : 995L;
+                var context = f.contexts.get(id);
+                queue.cancel(context, 0L, CancelReason.DEADLINE_EXCEEDED);
+                Response reply = f.requests.get(id).get(2, TimeUnit.SECONDS);
+                assertEquals(8431, reply.getCode());
+                String cause = role.name() + " placement unavailable";
+                assertTrue(reply.getErrorMessage().contains("trigger=" + cause), reply.getErrorMessage());
+                var pv = context.data().getSchedulingDiagnostics();
+                assertEquals(cause, pv.get("cause"));
+                assertEquals(Map.of("workers", role == RoleType.PREFILL ? 40 : 50), pv.get("decision"));
+            }
+        }
+    }
+
+    @Test
     void handleCloseFailureReportsFailureAndReleasesPlanningSlot() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             f.onAdmission = id -> {

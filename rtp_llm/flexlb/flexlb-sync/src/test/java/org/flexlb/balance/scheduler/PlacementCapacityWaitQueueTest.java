@@ -23,6 +23,44 @@ class PlacementCapacityWaitQueueTest {
     }
 
     @Test
+    void wakingARequestClearsItsPreviousPlacementCause() {
+        var request = entry(50);
+        assertTrue(queue.park(request, A, availability.sequence()));
+        request.currentWait = java.util.Map.of("cause", "PREFILL placement unavailable");
+        queue.capacityChanged(A);
+        queue.resumeReady(1, resumed -> assertEquals(GlobalQueueEntry.WAITING_FOR_PLACEMENT, resumed.currentWait));
+        assertEquals(GlobalQueueEntry.WAITING_FOR_PLACEMENT, request.currentWait);
+    }
+
+    @Test
+    void onlyAnAffinityLeaderOrRelevantPoolPublicationInvalidatesAnOutstandingPlan() {
+        var planned = affinity(A.endpoint());
+        var observed = availability.sequence();
+        availability.changed(B);
+        assertTrue(queue.park(entry(50), planned, observed),
+                "capacity on a nonleader cannot change this affinity plan");
+    }
+
+    @Test
+    void roleWidePublicationDuringPlanningCannotBeLostByAGroupAffinityWaiter() {
+        var observed = availability.sequence();
+        availability.changed(PlacementKey.anyGroup(RoleType.PREFILL));
+        assertFalse(queue.park(entry(50), affinity(A.endpoint()), observed),
+                "the old leader set needs rechecking before the request can sleep");
+    }
+
+    @Test
+    void wildcardGroupAffinityUsesPoolPublicationsFromEveryGroup() {
+        var planned = new PlacementKey(RoleType.PREFILL, null, null, java.util.Set.of(A.endpoint()));
+        var observed = availability.sequence();
+        availability.changed(B);
+        assertTrue(queue.park(entry(50), planned, observed));
+        availability.changed(new PlacementKey(RoleType.PREFILL, "other", null));
+        assertFalse(queue.park(entry(50), planned, observed));
+        assertTrue(queue.park(entry(50), affinity(A.endpoint()), observed));
+    }
+
+    @Test
     void hotCacheCohortsWakeOnlyForTheirOwnCapacityAndRetainOrdering() {
         var a = entry(90);
         var b = entry(10);
@@ -83,6 +121,73 @@ class PlacementCapacityWaitQueueTest {
         assertEquals(List.of(low), drain(8));
         queue.park(low, oldLeader, 0);
         assertTrue(drain(8).isEmpty(), "one cache publication must not start another pass");
+    }
+
+    @Test
+    void exactCapacityPrefersHigherPriorityOverAnOlderCacheRecheck() {
+        var high = entry(50);
+        var low = entry(39);
+        var leaders = affinity(A.endpoint());
+        queue.park(low, leaders, 0);
+        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g", null));
+        queue.park(high, leaders, 0);
+        queue.capacityChanged(A);
+        assertEquals(List.of(high), drain(1));
+        queue.park(high, leaders, 0);
+        assertEquals(List.of(low), drain(1));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void onlyAnUnscannedLowerRetryCanYieldExactCapacity(boolean alreadyScanned) {
+        var ordered = new OrderedRequestQueue(true);
+        var low = entry(39);
+        var high = entry(50);
+        ordered.add(low);
+        ordered.add(high);
+        ordered.scanForPlanningCandidates(2, 2, ignored -> true);
+        var leaders = affinity(A.endpoint());
+        queue.park(low, leaders, 0);
+        var wait = java.util.Map.<String, Object>of("cause", "PREFILL placement unavailable");
+        low.currentWait = wait;
+        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g", null));
+        queue.resumeReady(1, ordered::markRequestReadyForRetry);
+        if (alreadyScanned) {
+            assertEquals(List.of(low), ordered.scanForPlanningCandidates(1, 1, ignored -> true));
+        }
+        queue.park(high, leaders, 0);
+        queue.capacityChanged(A, ordered::withdrawReadyRetry);
+        if (alreadyScanned) {
+            assertTrue(drain(1).isEmpty());
+            queue.park(low, leaders, 0);
+        } else {
+            assertEquals(wait, low.currentWait);
+            assertFalse(ordered.hasUnscannedRequests());
+        }
+        assertEquals(List.of(high), drain(1));
+        assertTrue(drain(1).isEmpty());
+        queue.park(high, leaders, 0);
+        assertEquals(alreadyScanned ? List.of() : List.of(low), drain(1));
+    }
+
+    @Test
+    void handingOffAnUnstartedRetryPreservesItsUncheckedCacheVersion() {
+        var low = entry(39);
+        var peer = entry(39);
+        var high = entry(50);
+        var leaders = affinity(A.endpoint());
+        var publication = new PlacementKey(RoleType.PREFILL, "g", null);
+        queue.park(low, leaders, 0);
+        queue.capacityChanged(publication);
+        assertEquals(List.of(low), drain(1));
+        queue.park(peer, leaders, 0);
+        queue.capacityChanged(publication);
+        queue.capacityChanged(publication);
+        queue.park(high, leaders, 0);
+        queue.capacityChanged(A, retry -> retry == low);
+        assertEquals(List.of(high), drain(1));
+        queue.park(high, leaders, 0);
+        assertEquals(List.of(low), drain(1), "the displaced request has never checked any cache publication");
     }
 
     @Test

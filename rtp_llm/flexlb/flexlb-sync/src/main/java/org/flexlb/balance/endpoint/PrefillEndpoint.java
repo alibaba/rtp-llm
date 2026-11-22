@@ -113,7 +113,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.engineQueueAdmission = balance == null || balance.getEngineQueueAdmissionThreshold() == null ? null
                 : new EngineQueueAdmission(balance.getEngineQueueAdmissionThreshold(), balance.getEngineQueueOverloadDurationMs(),
                         Math.max(1000L, com.google.common.math.LongMath.saturatedMultiply(3L,
-                                config.getWorkerRegistry().getHealth().getStatusPollIntervalMs())));
+                                config.getWorkerRegistry().getHealth().getStatusPollIntervalMs())),
+                        dispatcherType == DispatcherConfig.Type.NON_BATCH && config.isPriorityOrdering()
+                                && config.getScheduler().getOrdering().isPrefillCostOrder()
+                                && balance.getHotspotRescue() == 0);
         this.rescueRequestLimit = engineQueueAdmission == null ? 0L
                 : Math.max(1L, balance.getEngineQueueAdmissionThreshold() / 2L);
         this.rescueSlotLimit = Math.max(1, config.getDispatcher().getMaxInflightPerPrefillWorker() / 2);

@@ -45,13 +45,21 @@ import static com.google.common.math.LongMath.saturatedAdd;
 /** Queue execution for one P generation; endpoint state owns identities and capacity. */
 public final class WorkerBatcher {
 
+    // Retain only the scalars needed by PV, not the full Worker status for every waiting route.
+    private record DecodeWait(String endpoint, long version, int engineLoad, int totalLoad, long kvTotal, long kvAvailable) {
+        DecodeWait(DecodeRoutingView view) {
+            this(view.address(), view.admissionVersion(), view.engineLoad(), view.totalLoad(),
+                    view.totalKv(), view.placementUsage().hardKvAvailable());
+        }
+    }
+
     /** Frozen decision evidence; the log representation is materialized only on failure. */
-    private static final class QueueWaitSnapshot {
+    static final class QueueWaitSnapshot {
         private final String endpoint;
         private final String cause;
         private final long capturedAtMs;
         private final PrefillState.QueueCounters counters;
-        private final DecodeRoutingView decode;
+        private final DecodeWait decode;
         private volatile Map<String, Object> snapshotValues;
 
         private QueueWaitSnapshot(String endpoint, String cause, long capturedAtMs,
@@ -60,10 +68,10 @@ public final class WorkerBatcher {
             this.cause = cause;
             this.capturedAtMs = capturedAtMs;
             this.counters = counters;
-            this.decode = decode;
+            this.decode = decode == null ? null : new DecodeWait(decode);
         }
 
-        private Map<String, Object> asMap() {
+        Map<String, Object> asMap() {
             Map<String, Object> cached = snapshotValues;
             if (cached != null) { return cached; }
             Map<Integer, Integer> priorityCounts = new HashMap<>();
@@ -83,9 +91,9 @@ public final class WorkerBatcher {
             details.put("prefillRequests", counters.outstandingRequests());
             details.put("prefillBatchSlots", counters.batchSlots());
             if (decode != null) {
-                details.put("decode", Map.of("endpoint", decode.address(), "version", decode.admissionVersion(),
+                details.put("decode", Map.of("endpoint", decode.endpoint(), "version", decode.version(),
                         "engineLoad", decode.engineLoad(), "totalLoad", decode.totalLoad(),
-                        "kvTotal", decode.totalKv(), "kvAvailable", decode.placementUsage().hardKvAvailable()));
+                        "kvTotal", decode.kvTotal(), "kvAvailable", decode.kvAvailable()));
             }
             cached = Collections.unmodifiableMap(details);
             snapshotValues = cached;
@@ -135,7 +143,7 @@ public final class WorkerBatcher {
     public static final Comparator<RequestRoute> FIFO_QUEUE_ORDER =
             Comparator.comparingLong(RequestRoute::enqueueSeq);
 
-    private static final Map<String, Object> INITIAL_QUEUE_WAIT_SNAPSHOT =
+    static final Map<String, Object> INITIAL_QUEUE_WAIT_SNAPSHOT =
             Map.of("cause", "waiting for Prefill decision");
 
     private final String key;
@@ -405,7 +413,9 @@ public final class WorkerBatcher {
     private void recordQueueWait(RequestRoute head, String reason) {
         PrefillState.QueueCounters counters = prefillState.captureQueueCounters();
         DecodeRoutingView decode = head.decodeEp() == null ? null : head.decodeEp().routingView();
-        latestQueueWaitSnapshot = new QueueWaitSnapshot(key, reason, System.currentTimeMillis(), counters, decode);
+        var snapshot = new QueueWaitSnapshot(key, reason, System.currentTimeMillis(), counters, decode);
+        head.recordWorkerWait(snapshot);
+        latestQueueWaitSnapshot = snapshot;
     }
 
     // ==================== Queue ownership and projection ====================

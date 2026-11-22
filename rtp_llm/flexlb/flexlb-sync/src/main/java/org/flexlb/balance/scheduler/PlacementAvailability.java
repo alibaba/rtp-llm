@@ -29,6 +29,10 @@ public final class PlacementAvailability {
     private final AtomicLong sequence = new AtomicLong();
     private final ConcurrentMap<PlacementKey, Long> lastChanged =
             new ConcurrentHashMap<>();
+    // Pool publications can change the cache leaders themselves. Ordinary releases only
+    // matter to an affinity plan when they come from one of its candidate addresses.
+    private final ConcurrentMap<PlacementKey, Long> poolPublications = new ConcurrentHashMap<>();
+    private final ConcurrentMap<RoleType, Long> rolePublications = new ConcurrentHashMap<>();
     private final Set<Listener> listeners = ConcurrentHashMap.newKeySet();
 
     void addListener(Listener candidate) {
@@ -55,6 +59,14 @@ public final class PlacementAvailability {
         if (key.group() != null) {
             lastChanged.merge(PlacementKey.anyGroup(key.role()), next, Math::max);
         }
+        if (key.endpoint() == null) {
+            poolPublications.merge(key, next, Math::max);
+            if (key.group() == null) {
+                rolePublications.merge(key.role(), next, Math::max);
+            } else {
+                poolPublications.merge(PlacementKey.anyGroup(key.role()), next, Math::max);
+            }
+        }
         // One physical capacity edge produces one callback. The exact key is
         // sufficient for group/role waiters through their relevance match and
         // avoids three global-lock acquisitions for every endpoint release.
@@ -77,11 +89,15 @@ public final class PlacementAvailability {
     }
 
     long lastChangedSequence(PlacementKey key) {
-        // The pool edge conservatively covers both member capacity and topology
-        // changes while an affinity-aware plan is outside the scheduler lock.
-        PlacementKey versionKey = key.cacheWorkers().isEmpty() ? key.capacityDomain()
-                : new PlacementKey(key.role(), key.group(), null);
-        return lastChanged.getOrDefault(versionKey, 0L);
+        if (key.cacheWorkers().isEmpty()) {
+            return lastChanged.getOrDefault(key.capacityDomain(), 0L);
+        }
+        long latest = Math.max(rolePublications.getOrDefault(key.role(), 0L),
+                poolPublications.getOrDefault(new PlacementKey(key.role(), key.group(), null), 0L));
+        for (String address : key.cacheWorkers()) {
+            latest = Math.max(latest, lastChanged.getOrDefault(PlacementKey.exact(key.role(), null, address), 0L));
+        }
+        return latest;
     }
 
 }

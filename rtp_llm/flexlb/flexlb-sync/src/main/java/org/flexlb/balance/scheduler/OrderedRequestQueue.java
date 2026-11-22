@@ -118,6 +118,11 @@ final class OrderedRequestQueue {
         readyRetries.add(entry);
     }
 
+    /** Succeeds only while the attempt is still waiting for a planning scan. */
+    boolean withdrawReadyRetry(GlobalQueueEntry entry) {
+        return readyRetries.remove(entry);
+    }
+
     boolean remove(GlobalQueueEntry entry) {
         if (entry.removed) { return false; }
         checkState(size > 0, "ordered queue size underflow");

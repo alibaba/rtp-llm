@@ -46,11 +46,8 @@ class RequestTerminalSettlementTest {
     @Test
     void latePlacementDiagnosticsCannotOverwriteQueueTimeoutEvidence() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 42L);
-        var queue = mock(QueuedRequestScheduler.class);
-        var timeoutEvidence = java.util.Map.<String, Object>of("cause", "DECODE placement unavailable");
-        when(queue.getLatestQueueWaitSnapshot()).thenReturn(timeoutEvidence);
+        var timeoutEvidence = GlobalQueueEntry.WAITING_FOR_PLACEMENT;
         AbstractRequestScheduler requestOwner = RequestProtocolTestSupport.initialize(mock(ResponseCompletionExecutor.class), context, mock(ExpirationTimer.class));
-        org.springframework.test.util.ReflectionTestUtils.setField(requestOwner, "latestQueueWaitSnapshot", timeoutEvidence);
         var admission = RequestProtocolTestSupport.beginAdmission(requestOwner, context);
         assertNotNull(admission);
         admission.recordDiagnostics(java.util.Map.of("cause", "earlier placement"));

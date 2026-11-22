@@ -8,6 +8,7 @@ import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.TreeSet;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Queues requests waiting for placement capacity. All methods run under the QueuedRequestScheduler lock.
@@ -25,6 +26,7 @@ import java.util.function.Consumer;
 final class PlacementCapacityWaitQueue {
     private final PlacementAvailability availability;
     private final Comparator<GlobalQueueEntry> order;
+    private final boolean priorityOrdering;
     // Cold token admission and hot Engine-queue admission are different predicates.
     // A failed cold retry is not evidence that a hot waiter cannot proceed.
     private record WaitKey(PlacementKey capacity, boolean cold) { }
@@ -42,6 +44,7 @@ final class PlacementCapacityWaitQueue {
     private final long probeIntervalNanos;
 
     PlacementCapacityWaitQueue(boolean priorityOrdering, PlacementAvailability availability, long probeIntervalNanos) {
+        this.priorityOrdering = priorityOrdering;
         this.probeIntervalNanos = probeIntervalNanos;
         var rescueOrder = Comparator.comparingInt((GlobalQueueEntry e) -> priorityOrdering ? -e.priority() : 0)
                 .thenComparingInt(e -> e.rescueAttempts)
@@ -99,6 +102,10 @@ final class PlacementCapacityWaitQueue {
 
     /** Wake only the cohorts whose cache candidates include this worker. */
     void capacityChanged(PlacementKey key) {
+        capacityChanged(key, entry -> false);
+    }
+
+    void capacityChanged(PlacementKey key, Predicate<GlobalQueueEntry> withdrawReadyRetry) {
         if (key.endpoint() != null) {
             release(key.capacityDomain());
         }
@@ -107,14 +114,15 @@ final class PlacementCapacityWaitQueue {
         }
         release(PlacementKey.anyGroup(key.role()));
         if (key.endpoint() != null) {
-            releaseAffinities(key.capacityDomain(), false);
+            releaseAffinities(key.capacityDomain(), false, withdrawReadyRetry);
         } else {
-            releaseAffinities(key, false);
-            if (key.group() != null) { releaseAffinities(PlacementKey.anyGroup(key.role()), true); }
+            releaseAffinities(key, false, withdrawReadyRetry);
+            if (key.group() != null) { releaseAffinities(PlacementKey.anyGroup(key.role()), true, withdrawReadyRetry); }
         }
     }
 
-    private void releaseAffinities(PlacementKey key, boolean wildcardWaitersOnly) {
+    private void releaseAffinities(PlacementKey key, boolean wildcardWaitersOnly,
+                                   Predicate<GlobalQueueEntry> withdrawReadyRetry) {
         var affected = affinityDomains.get(key);
         if (affected != null) {
             for (Domain domain : affected) {
@@ -125,6 +133,13 @@ final class PlacementCapacityWaitQueue {
                     // Invalidate each parked plan once, issuing one retry per domain at a time.
                     domain.cacheVersion++;
                 } else {
+                    // A cache recheck can already be waiting behind higher-priority work in the
+                    // ordered queue. Give the actual capacity edge to that higher priority.
+                    // Once scanned for planning, the retry is no longer transferable.
+                    if (domain.retry != null && !domain.entries.isEmpty()
+                            && domain.higherPriorityThan(domain.retry) && withdrawReadyRetry.test(domain.retry)) {
+                        domain.restoreRetry();
+                    }
                     domain.available = true;
                 }
                 index(domain);
@@ -170,11 +185,14 @@ final class PlacementCapacityWaitQueue {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();
             GlobalQueueEntry entry = domain.next();
+            domain.retryCacheVersion = domain.checkedVersion == null ? 0L : domain.checkedVersion.get(entry);
             domain.take(entry);
-            if (rescueWaiters != null) { rescueWaiters.remove(entry); }
+            domain.retryRescueEligible = rescueWaiters != null && rescueWaiters.remove(entry);
+            domain.retryWait = entry.currentWait;
             domain.retry = entry;
             domain.available = false;
             // Even completed entries need an owner-side cleanup opportunity.
+            entry.currentWait = GlobalQueueEntry.WAITING_FOR_PLACEMENT;
             resume.accept(entry);
         }
     }
@@ -189,16 +207,19 @@ final class PlacementCapacityWaitQueue {
         domains.clear();
         affinityDomains.clear();
         ready.clear();
+        membership.keySet().forEach(entry -> entry.currentWait = GlobalQueueEntry.WAITING_FOR_PLACEMENT);
         membership.clear();
     }
 
     private void remove(GlobalQueueEntry entry, boolean progress) {
         if (rescueWaiters != null) { rescueWaiters.remove(entry); }
+        entry.currentWait = GlobalQueueEntry.WAITING_FOR_PLACEMENT;
         Domain domain = membership.remove(entry);
         if (domain == null) { return; }
         unindex(domain);
         if (domain.retry == entry) {
             domain.retry = null;
+            domain.retryWait = null;
             // An edge arriving during this retry remains available.
             domain.available |= progress;
         } else {
@@ -241,6 +262,9 @@ final class PlacementCapacityWaitQueue {
         private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
         private boolean available;
         private GlobalQueueEntry retry;
+        private Map<String, Object> retryWait;
+        private boolean retryRescueEligible;
+        private long retryCacheVersion;
 
         private long cacheVersion;
         private final Map<GlobalQueueEntry, Long> checkedVersion;
@@ -274,8 +298,25 @@ final class PlacementCapacityWaitQueue {
                     && checkedVersion.get(cacheOrder.first()) < cacheVersion;
         }
 
+        private boolean higherPriorityThan(GlobalQueueEntry entry) {
+            return priorityOrdering && entries.first().priority() > entry.priority();
+        }
+
+        private void restoreRetry() {
+            // It still owns one cache recheck, even if the replacement attempt finds no room.
+            entries.add(retry);
+            checkedVersion.put(retry, Math.min(retryCacheVersion, cacheVersion - 1));
+            cacheOrder.add(retry);
+            retry.currentWait = retryWait;
+            if (retryRescueEligible) { rescueWaiters.add(retry); }
+            retry = null;
+            retryWait = null;
+        }
+
         private GlobalQueueEntry next() {
-            return hasStaleCachePlan() ? cacheOrder.first() : entries.first();
+            if (!hasStaleCachePlan()) { return entries.first(); }
+            var stale = cacheOrder.first();
+            return available && higherPriorityThan(stale) ? entries.first() : stale;
         }
     }
 }

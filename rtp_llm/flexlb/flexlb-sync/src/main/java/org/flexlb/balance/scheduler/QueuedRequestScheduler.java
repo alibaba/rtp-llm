@@ -111,8 +111,8 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             Collections.newSetFromMap(new IdentityHashMap<>());
     private final ArrayDeque<Plan> completedPlans = new ArrayDeque<>();
     private final ArrayDeque<RequestContext> controlInbox = new ArrayDeque<>();
-    /** Published by the decision thread; timeout readers never acquire the queue lock. */
-    private volatile Map<String, Object> latestQueueWaitSnapshot = Map.of("cause", "waiting for placement");
+    /** Aggregate view of the most recent park, independent of per-request timeout evidence. */
+    private volatile Map<String, Object> latestQueueWaitSnapshot = GlobalQueueEntry.WAITING_FOR_PLACEMENT;
     private final ExecutorService planners;
     private final Thread decisionThread;
     private final Runnable removeDeliveryCapacityListener;
@@ -254,7 +254,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         if (reason != CancelReason.DEADLINE_EXCEEDED) { return null; }
         var state = ctx.snapshot();
         if (state.delivery() != null) { return Map.of("cause", message); }
-        return state.route() != null ? state.route().prefillEp().getLatestQueueWaitSnapshot() : getLatestQueueWaitSnapshot();
+        if (state.route() != null) { return state.route().workerWaitDiagnostics(); }
+        var entry = queuedEntries.get(ctx);
+        return entry == null ? GlobalQueueEntry.WAITING_FOR_PLACEMENT : entry.currentWait;
     }
 
     boolean resolveControl(RequestContext context, boolean shuttingDown) {
@@ -308,10 +310,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                     "request scheduler is not accepting new requests"));
         }
         try {
-            if (context != null && (context.data().getRequestExpiresAtMs() <= 0L
-                    || System.currentTimeMillis() >= context.data().getRequestExpiresAtMs())) {
-                context.data().setSchedulingDiagnostics(getLatestQueueWaitSnapshot());
-            }
             CompletableFuture<Response> future = register(context, onRegistered, StrategyErrorType.RESOURCE_EXHAUSTED);
             var state = context == null ? null : context.snapshot();
             if (!future.isDone() && state.phase() == Phase.OPEN && state.cancellation() == null) {
@@ -374,7 +372,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         QueueEvent event;
         while ((event = events.pollFirst()) != null) {
             switch (event.kind) {
-                case CAPACITY -> waitingRequests.capacityChanged(event.key);
+                case CAPACITY -> waitingRequests.capacityChanged(event.key, orderedQueue::withdrawReadyRetry);
                 case CONTROL -> {
                     controlInbox.addLast(event.context);
                 }
@@ -1025,35 +1023,35 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
 
     private boolean park(Plan plan, Map<String, Object> diagnostics) {
         plan.entry.knownColdRequest = plan.knownColdRequest;
-        int depth;
-        int[] counts;
-        boolean parked;
         lock.lock();
         try {
-            if (!(!plan.entry.removed && !plan.entry.context.data().getFuture().isDone())) { return true; }
-            parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence, plan.hitFraction);
-            depth = orderedQueue.size();
-            counts = orderedQueue.priorityCounts();
+            if (plan.entry.removed || plan.entry.context.data().getFuture().isDone()) { return true; }
+            boolean parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence, plan.hitFraction);
+            var snapshot = describeWait(plan.waitKey, diagnostics);
+            if (parked) { plan.entry.currentWait = snapshot; }
+            latestQueueWaitSnapshot = snapshot;
+            return parked;
         } finally {
             lock.unlock();
         }
+    }
+
+    private Map<String, Object> describeWait(PlacementKey key, Map<String, Object> diagnostics) {
+        int[] counts = orderedQueue.priorityCounts();
         Map<Integer, Integer> priorityCounts = new LinkedHashMap<>();
         for (int priority = 0; priority < counts.length; priority++) {
             if (counts[priority] > 0) { priorityCounts.put(priority, counts[priority]); }
         }
         Map<String, Object> details = new LinkedHashMap<>();
-        details.put("cause", plan.waitKey.role().name() + " placement unavailable");
-        details.put("role", plan.waitKey.role().name());
-        if (plan.waitKey.group() != null) { details.put("group", plan.waitKey.group()); }
-        if (plan.waitKey.endpoint() != null) { details.put("endpoint", plan.waitKey.endpoint()); }
+        details.put("cause", key.role().name() + " placement unavailable");
+        details.put("role", key.role().name());
+        if (key.group() != null) { details.put("group", key.group()); }
+        if (key.endpoint() != null) { details.put("endpoint", key.endpoint()); }
         details.put("capturedAtMs", System.currentTimeMillis());
-        details.put("queueDepth", depth);
+        details.put("queueDepth", orderedQueue.size());
         details.put("priorityCounts", Collections.unmodifiableMap(priorityCounts));
-        if (diagnostics != null) {
-            details.put("decision", diagnostics);
-        }
-        latestQueueWaitSnapshot = Collections.unmodifiableMap(details);
-        return parked;
+        if (diagnostics != null) { details.put("decision", diagnostics); }
+        return Collections.unmodifiableMap(details);
     }
 
     private void removeRequest(GlobalQueueEntry entry) {

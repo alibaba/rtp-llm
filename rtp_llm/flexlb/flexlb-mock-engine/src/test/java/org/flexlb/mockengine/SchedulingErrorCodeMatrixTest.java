@@ -74,6 +74,10 @@ class SchedulingErrorCodeMatrixTest {
             // DIRECT retains 8511; QUEUE reports 8431 and never sends an Engine RPC.
             assertFailure(fixture.schedule(context), fixture.harness.config.isDirect() ? 8511 : 8431,
                     fixture.harness.config.isDirect() ? UNSPECIFIED : RESOURCE_EXHAUSTED, "expired");
+            if (!fixture.harness.config.isDirect()) {
+                assertEquals("request scheduling deadline has expired before placement",
+                        context.data().getSchedulingDiagnostics().get("cause"));
+            }
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
             assertEquals(0, fixture.harness.decodeEndpoint(0).resourceSnapshot().reservedCount());
         }
