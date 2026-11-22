@@ -69,6 +69,10 @@ class AccMetrics(Enum):
     # Accumulated embedding rows; AccMetric normalizes by the flush interval,
     # so the reported value is visual tokens/s.
     VIT_EMBEDDING_TPS_METRIC = "py_rtp_vit_embedding_tps"
+    VIT_PACKED_FORWARD_WORK_QPS_METRIC = "py_rtp_vit_packed_forward_work_qps"
+    VIT_BATCH_SEAL_QPS_METRIC = "py_rtp_vit_batch_seal_qps"
+    VIT_URL_SOURCE_QPS_METRIC = "py_rtp_vit_url_source_qps"
+    VIT_HTTP_CONNECT_RETRY_QPS_METRIC = "py_rtp_vit_http_connect_retry_qps"
     # Incremented when a submission is rejected because the scheduler's waiting
     # queue is full (overload / stalled forward backpressure).
     VIT_EMBEDDING_OVERLOAD_QPS_METRIC = "py_rtp_vit_embedding_overload_qps"
@@ -290,6 +294,11 @@ class GaugeMetrics(Enum):
     VIT_OUTPUT_TOKEN_COUNT_METRIC = "rtp_llm_vit_output_token_count"
     VIT_INPUT_IMAGE_COUNT_METRIC = "rtp_llm_vit_input_image_count"
     VIT_IMAGE_FETCH_RT_US_METRIC = "rtp_llm_vit_image_fetch_rt_us"
+    VIT_HTTP_PHASE_RT_US_METRIC = "rtp_llm_vit_http_phase_rt_us"
+    VIT_HTTP_BODY_BYTES_METRIC = "rtp_llm_vit_http_body_bytes"
+    VIT_PREPROCESS_RESULT_BYTES_METRIC = "rtp_llm_vit_preprocess_result_bytes"
+    VIT_RGB_UPLOAD_PHASE_US_METRIC = "rtp_llm_vit_rgb_upload_phase_us"
+    VIT_RGB_UPLOAD_BYTES_METRIC = "rtp_llm_vit_rgb_upload_bytes"
     VIT_IMAGE_DECODE_RT_US_METRIC = "rtp_llm_vit_image_decode_rt_us"
     VIT_IMAGE_RESIZE_RT_US_METRIC = "rtp_llm_vit_image_resize_rt_us"
     VIT_IMAGE_PROCESSOR_RT_US_METRIC = "rtp_llm_vit_image_processor_rt_us"

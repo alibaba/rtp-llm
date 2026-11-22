@@ -1,10 +1,23 @@
 import contextlib
 import contextvars
+import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Union
 
+from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+
+
+VIT_PHASE_METRICS = os.environ.get("MM_VIT_PHASE_METRICS") == "1"
+
+
+def report_vit_phase(metric, value, tags):
+    try:
+        kmonitor.report(metric, value, tags)
+    except Exception:
+        logging.exception("Failed to report ViT phase metric")
 
 
 @dataclass
