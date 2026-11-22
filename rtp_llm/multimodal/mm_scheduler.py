@@ -1207,10 +1207,12 @@ class MMScheduler:
                 # Clear BEFORE checking the queue: arrivals and consumer demand
                 # after this point set the event, so no wakeup can be lost.
                 self._collect_wakeup.clear()
-                try:
-                    chunk = self._waiting.get_nowait()
-                except queue.Empty:
-                    remaining = deadline - time.monotonic()
+            # Drain queued work before applying the deadline to future arrivals.
+            try:
+                chunk = self._waiting.get_nowait()
+            except queue.Empty:
+                remaining = deadline - time.monotonic()
+                if demanded is not None:
                     if demanded.is_set() and remaining <= 0:
                         reason = "consumer_demand"
                         break
@@ -1219,8 +1221,6 @@ class MMScheduler:
                         timeout = min(timeout, max(0, remaining))
                     self._collect_wakeup.wait(timeout)
                     continue
-            else:
-                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     reason = "deadline"
                     break
