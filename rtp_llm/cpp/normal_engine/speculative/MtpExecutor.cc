@@ -2240,11 +2240,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (pending_target_commit.valid() && !defer_target_commit) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_target_commit)");
         target_commit_guard.wait();
+        pending_target_commit_event_.reset();
         RETURN_IF_STATUS_ERROR(pending_target_commit.get());
     }
     if (defer_target_commit) {
         RTP_LLM_CHECK_WITH_INFO(!pending_target_commit_.valid(), "previous target commit was not consumed");
         pending_target_commit_ = pending_target_commit;
+    } else {
+        pending_target_commit_event_.reset();
     }
 
     if (peer_continuation) {
@@ -2498,12 +2501,28 @@ std::optional<GptModelInputs> MtpExecutor::launchTargetVerifyPrepareAsync(const 
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
     // Device-first inputs are produced on the main stream; the async prepare
-    // stream must wait before it materializes CPU mirrors.
-    auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    // stream must wait before it materializes CPU mirrors. When a previous
+    // transactional target commit is still reading the captured target-verify
+    // block tables/prefixes on target_commit_runner_, wait for it on this
+    // background worker before prepareAttentionInputs zeroes/refills them.
+    auto prior_target_commit       = pending_target_commit_;
+    auto prior_target_commit_event = pending_target_commit_event_;
+    auto input_ready_event         = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
-    target_verify_prepare_runner_.launch([this, input_ready_event, model_input_copy]() mutable {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_attention_inputs)");
-        {
+    target_verify_prepare_runner_.launch(
+        [this, input_ready_event, prior_target_commit, prior_target_commit_event, model_input_copy]() mutable {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_attention_inputs)");
+            if (prior_target_commit.valid()) {
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_wait_prev_commit)");
+                const auto commit_status = prior_target_commit.get();
+                if (!commit_status.ok()) {
+                    return;
+                }
+                if (prior_target_commit_event) {
+                    prior_target_commit_event->block(cuda_graph::graphGetCurrentStream());
+                }
+            }
+            {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_wait_input)");
             input_ready_event->block(cuda_graph::graphGetCurrentStream());
         }
@@ -2763,24 +2782,31 @@ absl::Status MtpExecutor::prepareAndCommitSpeculativeTargetState(
     // commit worker and draft extend cannot reorder TP device collectives.
     if (pending_commit && target_commit_runner_) {
         auto accept_ready = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        auto commit_done  = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         accept_ready->record(cuda_graph::graphGetCurrentStream());
-        auto task       = std::make_shared<std::packaged_task<absl::Status()>>([this, accept_len, accept_ready]() {
+        pending_target_commit_event_ = commit_done;
+        auto task = std::make_shared<std::packaged_task<absl::Status()>>([this, accept_len, accept_ready, commit_done]() {
             accept_ready->block(cuda_graph::graphGetCurrentStream());
-            return commitSpeculativeTargetState(accept_len);
+            auto status = commitSpeculativeTargetState(accept_len);
+            commit_done->record(cuda_graph::graphGetCurrentStream());
+            return status;
         });
         *pending_commit = task->get_future().share();
         target_commit_runner_->launch([task]() { (*task)(); });
         return absl::OkStatus();
     }
+    pending_target_commit_event_.reset();
     return commitSpeculativeTargetState(accept_len);
 }
 
 absl::Status MtpExecutor::waitPendingTargetCommit() {
     if (!pending_target_commit_.valid()) {
+        pending_target_commit_event_.reset();
         return absl::OkStatus();
     }
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_previous_target_commit)");
     auto completion = std::exchange(pending_target_commit_, {});
+    pending_target_commit_event_.reset();
     // Both consumers see the same exception/status; neither consumes the
     // other thread's error. Commit completes its GPU writes before readiness.
     auto status = completion.get();

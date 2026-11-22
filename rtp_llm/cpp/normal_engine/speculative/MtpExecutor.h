@@ -405,6 +405,7 @@ private:
     // GPU continuation can be queued before the host verdict. The next target
     // phase and output worker both consume this immutable completion.
     std::shared_future<absl::Status> pending_target_commit_;
+    std::shared_ptr<torch::Event>    pending_target_commit_event_;
     // Consumed once at the next decode boundary. A peer's transition is lazy:
     // the root must first confirm its batch/cache snapshot is still reusable.
     std::function<void(GptModelInputs&, bool)> next_decode_inputs_;
