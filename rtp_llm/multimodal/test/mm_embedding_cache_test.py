@@ -1,6 +1,8 @@
 import concurrent.futures
 import gc
 import random
+import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -1460,6 +1462,68 @@ class HashCapacityTest(unittest.TestCase):
             cache.resize(0, -1)
 
 
+class NativeHashIndexTest(unittest.TestCase):
+    def setUp(self):
+        try:
+            import librtp_compute_ops
+        except ImportError:
+            self.skipTest("native EMB extension is unavailable")
+        if not hasattr(librtp_compute_ops, "EmbLocalHashCache"):
+            self.skipTest("native EMB hash index is unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMHashKeyCache
+
+        with patch.dict(
+            "os.environ",
+            {
+                "MM_EMB_NATIVE_LOCAL_CACHE": "1",
+                "MM_EMB_NATIVE_LOCAL_CACHE_HOSTS": cache_module.socket.gethostname(),
+            },
+        ):
+            self.embeddings = cache_module.ShardedMMEmbeddingCache(0, 4096, shards=1)
+        self.addCleanup(self.embeddings.close)
+        self.hashes = NativeMMHashKeyCache(8192)
+
+    def test_generation_bound_publish_ignores_stale_writer(self):
+        key = "key"
+        original = torch.arange(5)
+        replacement = torch.ones(5, dtype=torch.int32)
+        _, first = self.embeddings.try_acquire(key)
+        self.hashes.put_for_entry(key, [original], first, self.embeddings)
+        self.assertTrue(self.hashes.mark_greennet_passed(key, first.generation))
+
+        self.embeddings.remove(key)
+        self.assertTrue(self.hashes.greennet_passed(key))
+        _, second = self.embeddings.try_acquire(key)
+        self.hashes.put_for_entry(key, [replacement], second, self.embeddings)
+        self.hashes.put_for_entry(key, [original], first, self.embeddings)
+        self.hashes.put_for_entry(key, [original], second, self.embeddings)
+        self.assertIsNone(self.hashes.get(key, first.generation))
+        self.assertFalse(self.hashes.greennet_passed(key))
+        copy = self.hashes.get(key, second.generation)[0]
+        copy.zero_()
+        self.assertTrue(torch.equal(self.hashes.get(key)[0], replacement))
+        self.hashes.clear()
+        self.assertEqual(self.hashes.stats()["resident_entries"], 0)
+
+    def test_metadata_batch_keeps_order_and_bounds_rows_without_touching_lru(self):
+        self.hashes.put("first", [torch.arange(5)])
+        self.hashes.put("second", [torch.arange(9)])
+        self.hashes.put("empty", [torch.arange(20), torch.empty(0)])
+        self.hashes._MAX_METADATA_ROWS = 9
+        response = self.hashes.metadata(
+            ["empty", "missing", "second"], self.embeddings, binary_hashes=True
+        )
+        self.assertEqual(
+            [(item["key"], item["hash_hit"]) for item in response["entries"]],
+            [("empty", False), ("missing", False), ("second", True)],
+        )
+        self.assertEqual(response["entries"][-1]["split_size"], [9])
+        self.assertEqual(self.hashes.keys(), ["first", "second", "empty"])
+        with self.assertRaisesRegex(ValueError, "exceeds row limit"):
+            self.hashes.metadata(["first", "second"], self.embeddings)
+        self.assertEqual(self.hashes.stats()["retired_bytes"], 0)
+
+
 class CacheLockIsolationTest(unittest.TestCase):
     @contextmanager
     def paused(self, target, method):
@@ -1706,6 +1770,27 @@ class CacheLockIsolationTest(unittest.TestCase):
 
 
 class ShardedEmbeddingCacheTest(unittest.TestCase):
+    def test_native_host_scope_matches_exactly_and_respects_disable(self):
+        host = "node-17"
+        with (
+            patch.object(cache_module.socket, "gethostname", return_value=host),
+            patch.dict(cache_module.os.environ, {}, clear=True),
+        ):
+            env = cache_module.os.environ
+            self.assertFalse(cache_module._native_local_cache_enabled())
+            env["MM_EMB_NATIVE_LOCAL_CACHE"] = "1"
+            self.assertTrue(cache_module._native_local_cache_enabled())
+            for hosts, expected in (
+                ("", False),
+                ("node-170", False),
+                ("node-16, node-17 ", True),
+            ):
+                with self.subTest(hosts=hosts):
+                    env["MM_EMB_NATIVE_LOCAL_CACHE_HOSTS"] = hosts
+                    self.assertEqual(cache_module._native_local_cache_enabled(), expected)
+            env["MM_EMB_NATIVE_LOCAL_CACHE"] = "0"
+            self.assertFalse(cache_module._native_local_cache_enabled())
+
     def test_routes_keys_and_aggregates_stats(self):
         from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
 
@@ -1723,9 +1808,201 @@ class ShardedEmbeddingCacheTest(unittest.TestCase):
         tiers = cache.resident_tiers(keys)
         self.assertEqual(set(tiers), set(keys))
         for key in keys:
-            self.assertIs(cache.peek(key), cache._shard(key).peek(key))
+            entry = cache._shard(key).peek(key)
+            self.assertTrue(cache.is_current(key, entry))
         cache.clear()
         self.assertEqual(cache.stats()["resident_entries"], 0)
+
+    def test_residency_profile_counts_only_published_entries_per_shard(self):
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        with (
+            patch("rtp_llm.multimodal.mm_embedding_cache._PROFILE_LOCAL_HITS", True),
+            patch("rtp_llm.multimodal.mm_embedding_cache.kmonitor.report") as report,
+        ):
+            cache = ShardedMMEmbeddingCache(0, 8192, shards=2, report_metrics=True)
+            self.addCleanup(cache.close)
+            source = torch.arange(64, dtype=torch.bfloat16)
+            keys = {}
+            for number in range(100):
+                key = str(number)
+                keys.setdefault(hash(key) % 2, key)
+                if len(keys) == 2:
+                    break
+            self.assertEqual(len(keys), 2)
+
+            for index, key in keys.items():
+                state, entry = cache.try_acquire(key)
+                self.assertEqual(state, "miss")
+                self.assertTrue(cache.complete(key, entry, source))
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                    1,
+                    {"cache_shard": str(index)},
+                )
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC,
+                    source.nbytes,
+                    {"cache_shard": str(index)},
+                )
+            cache.clear()
+            for index in keys:
+                report.assert_any_call(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                    0,
+                    {"cache_shard": str(index)},
+                )
+
+    def test_native_hash_commit_does_not_invert_gil_order(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+
+        # An isolated process keeps a regression from wedging the test runner.
+        script = """
+import threading
+import time
+import torch
+from librtp_compute_ops import EmbLocalCacheShard
+
+operations = (
+    lambda core, cell: core.claim("other"),
+    lambda core, cell: core.peek("other"),
+    lambda core, cell: core.is_current("live", cell),
+    lambda core, cell: core.resident_tiers(["live"], 1),
+    lambda core, cell: core.resident_tiers(None, 1),
+    lambda core, cell: core.resident_charge(),
+    lambda core, cell: core.stats(),
+    lambda core, cell: core.erase("live", cell),
+    lambda core, cell: core.clear(),
+)
+for operation in operations:
+    core = EmbLocalCacheShard(0, 4096, -1)
+    cell = core.claim("live")[0]
+    entered = threading.Event()
+    committed = []
+    def commit():
+        entered.set()
+        time.sleep(.03)  # Schedule the other Python thread while the index is locked.
+        committed.append(True)
+    thread = threading.Thread(target=lambda: core.with_current("live", cell, commit))
+    thread.start()
+    assert entered.wait(1)
+    operation(core, cell)
+    thread.join(1)
+    assert committed == [True] and not thread.is_alive()
+    core.clear()
+    core.with_current("live", cell, lambda: committed.append(False))
+    assert committed == [True]
+"""
+        subprocess.run([sys.executable, "-c", script], check=True, timeout=20)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_native_deferred_publish_fences_compute_stream(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard  # noqa: F401
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMEmbeddingCache
+
+        cache = NativeMMEmbeddingCache(4096, 0, async_publication=True)
+        self.addCleanup(cache.close)
+        _, entry = cache.try_acquire("key")
+        self.assertTrue(entry.capture_compute_streams)
+        producer = torch.cuda.Stream()
+        with torch.cuda.stream(producer):
+            source = torch.full((64,), 3.25, dtype=torch.bfloat16, device="cuda")
+            entry.producer_streams = _current_cuda_streams(source)
+        self.assertNotEqual(torch.cuda.current_stream(), producer)
+        with patch.object(
+            cache, "_record_native_ready", wraps=cache._record_native_ready
+        ) as record:
+            self.assertTrue(cache.complete("key", entry, source))
+            record.assert_called_once_with(
+                [(producer.cuda_stream, producer.device.index)]
+            )
+        cache.flush()
+        state, reader = cache.try_acquire("key")
+        self.assertEqual(state, "complete")
+        expected = torch.full((64,), 3.25, dtype=torch.bfloat16)
+        self.assertTrue(torch.equal(reader.wait().cpu(), expected))
+
+    def test_native_retired_extent_does_not_evict_unrelated_entries(self):
+        try:
+            from librtp_compute_ops import EmbLocalCacheShard  # noqa: F401
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMEmbeddingCache
+
+        cache = NativeMMEmbeddingCache(0, 1536)
+        self.addCleanup(cache.close)
+
+        def publish(key, elements):
+            state, entry = cache.try_acquire(key)
+            self.assertEqual(state, "miss")
+            value = torch.arange(elements, dtype=torch.bfloat16)
+            self.assertTrue(cache.complete(key, entry, value))
+            return entry, value
+
+        held, held_value = publish("held", 256)
+        publish("a", 256)
+        publish("b", 256)
+        cache.remove("held")
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 512)
+        bypassed, bypassed_value = publish("too-large-while-held", 600)
+        self.assertEqual(cache.resident_tiers(), {"a": "cpu", "b": "cpu"})
+        self.assertTrue(torch.equal(bypassed.wait(), bypassed_value))
+        self.assertTrue(torch.equal(held.wait(), held_value))
+        del held
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 0)
+        publish("fits-after-release", 600)
+        self.assertEqual(cache.resident_tiers(), {"fits-after-release": "cpu"})
+
+    def test_native_publication_releases_python_owners(self):
+        try:
+            import librtp_compute_ops
+        except ImportError:
+            self.skipTest("native local cache extension unavailable")
+        if not hasattr(librtp_compute_ops, "EmbLocalCacheShard"):
+            self.skipTest("native local cache extension unavailable")
+        from rtp_llm.multimodal.mm_embedding_cache import ShardedMMEmbeddingCache
+
+        with patch.dict("os.environ", {"MM_EMB_NATIVE_LOCAL_CACHE": "1"}):
+            cache = ShardedMMEmbeddingCache(0, 8192, shards=1, async_publication=True)
+        self.addCleanup(cache.close)
+
+        def put():
+            state, producer = cache.try_acquire("key")
+            self.assertEqual(state, "miss")
+            self.assertIs(cache.try_acquire("key")[1], producer)
+            source = torch.arange(64, dtype=torch.bfloat16)
+
+            def before_publish():
+                source.numel()
+
+            self.assertTrue(cache.complete(
+                "key", producer, (source, {"alias": source}),
+                before_publish=before_publish,
+            ))
+            return weakref.ref(producer), weakref.ref(source), weakref.ref(before_publish)
+
+        owners = put()
+        cache.flush()
+        gc.collect()
+        self.assertTrue(all(owner() is None for owner in owners))
+        self.assertEqual(cache.stats()["resident_entries"], 1)
+        state, reader = cache.try_acquire("key")
+        self.assertEqual(state, "complete")
+        result = reader.wait()
+        self.assertIs(result[0], result[1]["alias"])
+        cache.remove("key")
+        self.assertFalse(cache.is_current("key", reader))
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 128)
+        self.assertTrue(torch.equal(result[0], torch.arange(64, dtype=torch.bfloat16)))
+        del reader
+        self.assertEqual(cache.stats()["cpu_pool_pending_bytes"], 0)
+
 
     def test_budget_split_is_exact(self):
         from rtp_llm.multimodal.mm_embedding_cache import (

@@ -33,6 +33,11 @@ class InspectionTickets:
                 self._media_count = sum(
                     len(record[1]) for record in self._tickets.values()
                 )
+                while self._completed:
+                    expires_at, _, _ = next(iter(self._completed.values()))
+                    if expires_at > now:
+                        break
+                    self._completed.popitem(last=False)
                 self._next_sweep = now + min(1, self._ttl)
             if self._media_count + len(entries) > self._capacity:
                 raise FtRuntimeException(
@@ -84,6 +89,9 @@ class InspectionTickets:
         if record is not None:
             self._media_count -= len(record[1])
         self._completed[ticket] = (time.monotonic() + self._ttl, verdict, request_id)
+        # Concurrent waiters can finish the same receipt more than once.
+        # A refreshed expiry belongs at the tail of the sweep order.
+        self._completed.move_to_end(ticket)
         if len(self._completed) > self._capacity:
             self._completed.popitem(last=False)
         return verdict

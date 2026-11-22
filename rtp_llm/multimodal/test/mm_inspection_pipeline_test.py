@@ -685,6 +685,94 @@ class InspectionPipelineTest(TestCase):
         with self.assertRaises(FtRuntimeException):
             expired.wait(expired.open([{"key": "c"}]), time.monotonic() + 1)
 
+    def test_ticket_sweep_expires_completed_receipts_without_changing_retries(self):
+        from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
+
+        store = InspectionTickets(ttl=5, capacity=2)
+        entry = {"key": "a", "entry_generation": "1", "greennet_passed": True}
+        with patch("rtp_llm.multimodal.mm_inspection_tickets.time.monotonic") as clock:
+            clock.return_value = 100
+            first = store.open([entry], request_id=1)
+            approved = store.wait(first, 200, request_id=1)
+            clock.return_value = 102
+            second = store.open([entry], request_id=2)
+            other = store.wait(second, 200, request_id=2)
+            clock.return_value = 104
+            self.assertIs(store.wait(first, 200, request_id=1), approved)
+            with self.assertRaises(FtRuntimeException):
+                store.wait(first, 200, request_id=2)
+
+            clock.return_value = 105
+            store.open([entry, {"key": "b"}])
+            self.assertEqual(list(store._completed), [second])
+            self.assertIs(store.wait(second, 200, request_id=2), other)
+            with self.assertRaises(FtRuntimeException):
+                store.wait(first, 200, request_id=1)
+            with self.assertRaises(FtRuntimeException):
+                store.open([entry])
+
+            clock.return_value = 110
+            store.open([entry, {"key": "b"}])
+            self.assertFalse(store._completed)
+            self.assertEqual(store._media_count, 2)
+
+            clock.return_value = 120
+            receipts = [store.open([entry], request_id=rid) for rid in (1, 2)]
+            for rid, receipt in enumerate(receipts, 1):
+                store.wait(receipt, 200, request_id=rid)
+            latest = store.open([entry], request_id=3)
+            store.wait(latest, 200, request_id=3)
+            self.assertEqual(list(store._completed), [receipts[-1], latest])
+            self.assertEqual(store._media_count, 0)
+
+    def test_refinished_ticket_follows_expiration_order(self):
+        from rtp_llm.multimodal.mm_inspection_tickets import InspectionTickets
+
+        store = InspectionTickets(ttl=5, capacity=2)
+        verdict = GreenNetVerdict(passed=False)
+        with patch("rtp_llm.multimodal.mm_inspection_tickets.time.monotonic") as clock:
+            for stamp, key in ((100, "first"), (101, "second"), (102, "first")):
+                clock.return_value = stamp
+                with store._lock:
+                    store._finish(key, 1, verdict)
+            clock.return_value = 106
+            store.open([{"key": "pending"}])
+            self.assertEqual(list(store._completed), ["first"])
+            self.assertIs(store.wait("first", 200, request_id=1), verdict)
+
+    def test_preprocess_callbacks_signal_shared_or_independent_event(self):
+        class ObservedEvent(threading.Event):
+            def wait(self, timeout=None):
+                waiting.set()
+                return super().wait(timeout)
+
+        for result in (None, RuntimeError("failed"), concurrent.futures.CancelledError()):
+            with self.subTest(result=result):
+                waiting = threading.Event()
+                ready = ObservedEvent()
+                media = self._make_input("fake://ready")
+                first = MMWorkItem(
+                    [media], mm_timeout_ms=3000, preprocess_ready_event=ready
+                )
+                second = MMWorkItem([media], preprocess_ready_event=ready)
+                independent = MMWorkItem([media])
+                self.assertIs(first.preprocess_ready_event, second.preprocess_ready_event)
+                self.assertIsNot(independent.preprocess_ready_event, ready)
+
+                executor = object.__new__(MultiprocessPreprocessExecutor)
+                executor.pool = MagicMock()
+                executor._finish_preprocess_task = MagicMock()
+                first.future = executor._apply_async(first, task_id=1)
+                callbacks = executor.pool.apply_async.call_args.kwargs
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as waiter:
+                    pending = waiter.submit(next, executor.iter_ready([first]))
+                    self.assertTrue(waiting.wait(timeout=1))
+                    callback = "callback" if result is None else "error_callback"
+                    callbacks[callback](result)
+                    self.assertIs(pending.result(timeout=1), first)
+                self.assertTrue(first.preprocess_ready)
+                self.assertFalse(independent.preprocess_ready_event.is_set())
+
     def test_unchecked_local_hit_starts_one_audit_without_reencoding(self):
         engine = self._make_engine(SourceModel())
         provider = SourceProvider(hold=True)

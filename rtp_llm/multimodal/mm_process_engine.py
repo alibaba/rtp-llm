@@ -3,6 +3,7 @@ import gc
 import logging
 import multiprocessing.pool
 import os
+import socket
 import threading
 import time
 import uuid
@@ -31,6 +32,8 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     ShardedMMEmbeddingCache,
+    emb_host_feature_enabled,
+    is_current_cache_entry,
 )
 from rtp_llm.multimodal.mm_inspection import (
     MMInspectionCoordinator,
@@ -68,6 +71,39 @@ from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, VitSeparation
 from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+
+_gen2_started = None
+
+
+def _trace_gen2_pause(phase, info):
+    global _gen2_started
+    if info["generation"] != 2:
+        return
+    if phase == "start":
+        _gen2_started = time.time_ns(), time.monotonic_ns()
+    elif _gen2_started is not None:
+        started_ns, started_mono_ns = _gen2_started
+        elapsed_ns = time.monotonic_ns() - started_mono_ns
+        ended_ns = time.time_ns()
+        _gen2_started = None
+        logging.getLogger(__name__).warning(
+            "MM_EMB_GEN2_PAUSE pid=%d started_ns=%d ended_ns=%d pause_ns=%d "
+            "collected=%d uncollectable=%d",
+            os.getpid(),
+            started_ns,
+            ended_ns,
+            elapsed_ns,
+            info["collected"],
+            info["uncollectable"],
+        )
+
+
+def _enable_gen2_pause_trace():
+    hosts = os.environ.get("MM_EMB_TRACE_GEN2_HOSTS", "")
+    if hosts and socket.gethostname() in (host.strip() for host in hosts.split(",")):
+        if _trace_gen2_pause not in gc.callbacks:
+            gc.callbacks.append(_trace_gen2_pause)
 
 
 @contextmanager
@@ -348,9 +384,6 @@ class MMProcessEngine:
 
         # Both caches have explicit byte budgets, independent of model shape
         # estimates and the legacy model-internal item-count cache above.
-        self._hash_key_cache = MMHashKeyCache(
-            max_bytes=self.vit_config.mm_hash_key_cache_max_bytes
-        )
         # Shard the fixed pools so the global transfer lock and the first-fit
         # free-list scan are bounded by one shard's entries, not the whole
         # cache. MM_CACHE_SHARDS=1 preserves the previous single-cache layout.
@@ -370,9 +403,23 @@ class MMProcessEngine:
             report_metrics=True,
             async_publication=self.vit_config.mm_cache_async_publish,
         )
+        hash_cache_class = MMHashKeyCache
+        if (
+            self._embedding_cache.uses_native_index
+            and emb_host_feature_enabled("MM_EMB_NATIVE_HASH_INDEX")
+        ):
+            from rtp_llm.multimodal.mm_embedding_native_cache import NativeMMHashKeyCache
+
+            hash_cache_class = NativeMMHashKeyCache
+        self._hash_key_cache = hash_cache_class(
+            max_bytes=self.vit_config.mm_hash_key_cache_max_bytes
+        )
+        if os.environ.get("MM_EMB_NATIVE_HASH_INDEX") == "1":
+            logging.info("MM_EMB_HASH_CACHE_IMPLEMENTATION %s", hash_cache_class.__name__)
         # Keep the old private name as an alias for callers/tests that inspect
         # async submission state. Both paths now use the same cache instance.
         self._async_cache = self._embedding_cache
+        _enable_gen2_pause_trace()
         logging.info(
             "MMProcessEngine: embedding cache gpu_max_bytes=%d cpu_max_bytes=%d; "
             "hash-key cache max_bytes=%d",
@@ -1223,6 +1270,7 @@ class MMProcessEngine:
                     deadline=deadline,
                     require_cache_key=self._remote_embedding_cache is not None,
                     region=region,
+                    preprocess_ready_event=ready_event,
                 )
                 work_items.append(work_item)
                 # Work-item order survives legacy GreenNet URL rewriting.
@@ -1240,7 +1288,6 @@ class MMProcessEngine:
                 work_item.capture_inspection_sources = capture_inspection_sources
                 if isinstance(inspection_handle, SourceInspection):
                     inspection_handle.bind_work_item(work_item, index)
-                work_item.preprocess_ready_event = ready_event
                 work_item.cache_source = (
                     "local"
                     if work_item.embedding_result is not None
@@ -1805,7 +1852,9 @@ class MMProcessEngine:
                         )
                     if (
                         state == "complete"
-                        and self._embedding_cache.peek(cache_key) is entry
+                        and is_current_cache_entry(
+                            self._embedding_cache, cache_key, entry
+                        )
                     ):
                         self._hash_key_cache.get(cache_key, entry.generation)
                     if state in ("miss", "in_progress"):

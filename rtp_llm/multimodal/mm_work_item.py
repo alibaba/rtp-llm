@@ -15,6 +15,7 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingCacheEntry,
     MMHashKeyCache,
     _current_cuda_streams,
+    is_current_cache_entry,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import MMWorkEstimate
 from rtp_llm.multimodal.multimodal_util import maybe_tensor_to_list
@@ -138,6 +139,7 @@ class MMWorkItem:
         require_cache_key: bool = False,
         region: Optional[str] = None,
         cache_input: Optional[MultimodalInput] = None,
+        preprocess_ready_event: Optional[threading.Event] = None,
     ):
         self.deadline = deadline
         if not mm_inputs:
@@ -173,7 +175,9 @@ class MMWorkItem:
         self.preprocess_ready = False
         self.preprocess_submitted_at = 0.0
         self.preprocess_received_at = 0.0
-        self.preprocess_ready_event = threading.Event()
+        self.preprocess_ready_event = (
+            threading.Event() if preprocess_ready_event is None else preprocess_ready_event
+        )
         self.embedding_result: Optional[Any] = None
         self.feature_hashes: Optional[List[torch.Tensor]] = None
         self.work_estimate: Optional[MMWorkEstimate] = None
@@ -205,7 +209,9 @@ class MMWorkItem:
                 if (
                     self.hash_key_cache is not None
                     and self.embedding_cache is not None
-                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
+                    and is_current_cache_entry(
+                        self.embedding_cache, self.cache_key, self.cache_entry
+                    )
                 ):
                     self.feature_hashes = self.hash_key_cache.get(
                         self.cache_key, self.cache_entry.generation
@@ -218,7 +224,9 @@ class MMWorkItem:
                 self.embedding_result = self.cache_entry.wait()
                 if (
                     self.hash_key_cache is not None
-                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
+                    and is_current_cache_entry(
+                        self.embedding_cache, self.cache_key, self.cache_entry
+                    )
                 ):
                     self.feature_hashes = self.hash_key_cache.get(
                         self.cache_key, self.cache_entry.generation
@@ -294,8 +302,8 @@ class MMWorkItem:
             or self.cache_entry is None
         ):
             return
-        if self.defer_feature_hashes:
-            self.cache_entry.producer_streams = self.embedding_producer_streams or []
+        if self.embedding_producer_streams is not None:
+            self.cache_entry.producer_streams = self.embedding_producer_streams
         try:
             self.embedding_cache.complete(
                 self.cache_key,

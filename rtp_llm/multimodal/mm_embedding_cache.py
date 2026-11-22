@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import random
+import socket
 import sys
 import threading
 import time
@@ -19,6 +22,8 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+
+_PROFILE_LOCAL_HITS = os.environ.get("MM_EMB_LOCAL_HIT_PROFILE") == "1"
 
 
 # Terminal entries share a permanently signaled event. A pending entry only
@@ -544,6 +549,8 @@ class MMEmbeddingCacheEntry:
         on_read: Optional[
             Callable[["MMEmbeddingCacheEntry", Optional[float]], Any]
         ] = None,
+        *,
+        generation=None,
     ):
         self._event: Optional[threading.Event] = None
         # Inspection future callbacks may enter a wait while _state_lock is held.
@@ -555,9 +562,10 @@ class MMEmbeddingCacheEntry:
         self._on_fail = on_fail
         self._on_read = on_read
         self.result: Optional[Any] = None
+        self._cache_hit_implementation = None
         self.error: Optional[Exception] = None
         self._pending_before_publish: Optional[Callable[[], None]] = None
-        self.generation = uuid.uuid4().hex
+        self.generation = generation if generation is not None else uuid.uuid4().hex
         # Error telemetry may be observed from several places (the producer
         # callback, a cache waiter, and an RPC handler). Keep one atomic claim
         # on the entry so a failed result contributes one error-QPS sample.
@@ -609,6 +617,21 @@ class MMEmbeddingCacheEntry:
             remaining = (
                 None if deadline is None else max(0.0, deadline - time.monotonic())
             )
+            if (
+                _PROFILE_LOCAL_HITS
+                and self._cache_hit_implementation
+                and self.tier
+                and random.getrandbits(4) == 0
+            ):
+                tier = self.tier
+                started = time.perf_counter()
+                result = self._on_read(self, remaining)
+                kmonitor.report(
+                    GaugeMetrics.VIT_EMBEDDING_CACHE_HIT_RT_METRIC,
+                    (time.perf_counter() - started) * 1000,
+                    {"tier": tier, "implementation": self._cache_hit_implementation},
+                )
+                return result
             return self._on_read(self, remaining)
         # Cache-free async entries publish GPU work without synchronizing the
         # scheduler. The consumer waits on the producer's streams before using
@@ -1147,6 +1170,11 @@ class MMHashKeyCache:
                 "max_bytes": self._max_bytes,
             }
 
+    _MAX_METADATA_ROWS = 1048576
+
+    def _metadata_snapshots(self, keys):
+        return ((key, self._snapshot(key)) for key in keys)
+
     def metadata(
         self,
         keys: List[str],
@@ -1157,8 +1185,7 @@ class MMHashKeyCache:
         results = []
         total_rows = 0
         tiers = embedding_cache.resident_tiers(keys)
-        for key in keys:
-            value = self._snapshot(key)
+        for key, value in self._metadata_snapshots(keys):
             hash_hit = (
                 value is not None
                 and bool(value[0])
@@ -1178,7 +1205,7 @@ class MMHashKeyCache:
             hashes = value[0]
             split_size = [hash_tensor.numel() for hash_tensor in hashes]
             total_rows += sum(split_size)
-            if total_rows > 1048576:
+            if total_rows > self._MAX_METADATA_ROWS:
                 raise ValueError("multimodal metadata response exceeds row limit")
             result.update(
                 {
@@ -1287,6 +1314,9 @@ class MMEmbeddingCache:
         self._gpu_pool = _TensorMemoryPool(gpu_max_bytes, gpu_device)
         self._cpu_pool = _TensorMemoryPool(cpu_max_bytes, torch.device("cpu"))
         self._report_metrics_enabled = report_metrics
+        self._residency_tags = (
+            {"cache_shard": "0"} if report_metrics and _PROFILE_LOCAL_HITS else None
+        )
         self._owns_lifetime_metrics = lifetime_metrics is None
         self._lifetime_metrics = lifetime_metrics or (
             _CacheLifetimeMetrics(gpu_max_bytes + cpu_max_bytes)
@@ -1312,15 +1342,19 @@ class MMEmbeddingCache:
         self._publish_queue: Optional["queue.Queue"] = None
         self._publish_thread: Optional[threading.Thread] = None
         self._publish_pending = 0
+        self._publication_closing = False
         self._publish_cond = threading.Condition()
         if async_publication:
-            self._publish_queue = queue.Queue(maxsize=max(1, publish_queue_size))
-            self._publish_thread = threading.Thread(
-                target=self._publish_worker,
-                name="mm-cache-publish",
-                daemon=True,
-            )
-            self._publish_thread.start()
+            self._start_publication_thread(publish_queue_size)
+
+    def _start_publication_thread(self, publish_queue_size: int) -> None:
+        self._publish_queue = queue.Queue(maxsize=max(1, publish_queue_size))
+        self._publish_thread = threading.Thread(
+            target=self._publish_worker,
+            name="mm-cache-publish",
+            daemon=True,
+        )
+        self._publish_thread.start()
 
     @staticmethod
     def _validate_limits(gpu_max_bytes: int, cpu_max_bytes: int) -> None:
@@ -1332,13 +1366,16 @@ class MMEmbeddingCache:
         return self._gpu_max_bytes > 0 or self._cpu_max_bytes > 0
 
     def _new_entry(self, cache_key: str) -> MMEmbeddingCacheEntry:
-        return MMEmbeddingCacheEntry(
+        entry = MMEmbeddingCacheEntry(
             on_complete=lambda entry, result: self._on_complete(
                 cache_key, entry, result
             ),
             on_fail=lambda entry, error: self._on_fail(cache_key, entry, error),
             on_read=lambda entry, timeout: self._read_entry(cache_key, entry, timeout),
         )
+        if self._report_metrics_enabled:
+            entry._cache_hit_implementation = "python"
+        return entry
 
     def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
         with self._lock:
@@ -1705,31 +1742,30 @@ class MMEmbeddingCache:
         before_publish: Optional[Callable[[], None]],
     ) -> None:
         with self._publish_cond:
-            if self._publish_pending >= self._publish_queue.maxsize:
-                drop = True
-            else:
-                self._publish_pending += 1
-                drop = False
-        if drop:
-            with self._lock:
-                self._stats["publish_drop"] += 1
-            logging.warning("ViT cache publication queue full; dropping %s", cache_key)
-            self._drop_pending_entry(cache_key, entry)
-            return
-        try:
-            self._publish_queue.put_nowait((cache_key, entry, result, before_publish))
-        except queue.Full:
-            with self._publish_cond:
-                self._publish_pending -= 1
-                self._publish_cond.notify_all()
-            with self._lock:
-                self._stats["publish_drop"] += 1
-            logging.warning("ViT cache publication queue full; dropping %s", cache_key)
-            self._drop_pending_entry(cache_key, entry)
+            publication_queue = self._publish_queue
+            if (
+                publication_queue is not None
+                and not self._publication_closing
+                and self._publish_pending < publication_queue.maxsize
+            ):
+                try:
+                    publication_queue.put_nowait(
+                        (cache_key, entry, result, before_publish)
+                    )
+                except queue.Full:
+                    pass
+                else:
+                    self._publish_pending += 1
+                    return
+        with self._lock:
+            self._stats["publish_drop"] += 1
+        logging.warning("ViT cache publication unavailable; dropping %s", cache_key)
+        self._drop_pending_entry(cache_key, entry)
 
     def _publish_worker(self) -> None:
+        publication_queue = self._publish_queue
         while True:
-            item = self._publish_queue.get()
+            item = publication_queue.get()
             if item is None:
                 break
             cache_key, entry, result, before_publish = item
@@ -1759,13 +1795,17 @@ class MMEmbeddingCache:
 
     def close(self) -> None:
         """Stop the publication thread after draining queued work."""
-        if self._publish_queue is None:
-            return
-        self._publish_queue.put(None)
+        with self._publish_cond:
+            publication_queue = self._publish_queue
+            if publication_queue is None or self._publication_closing:
+                return
+            self._publication_closing = True
+        publication_queue.put(None)
         if self._publish_thread is not None:
             self._publish_thread.join(timeout=10)
-        self._publish_queue = None
-        self._publish_thread = None
+        with self._publish_cond:
+            self._publish_queue = None
+            self._publish_thread = None
 
     def _on_complete_sync(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
@@ -1947,6 +1987,9 @@ class MMEmbeddingCache:
         with self._lock:
             return self._entries.get(cache_key)
 
+    def is_current(self, cache_key, entry):
+        return self.peek(cache_key) is entry
+
     def _with_current_entry(self, cache_key, expected, action):
         """Validate and publish sidecar metadata atomically with index removal.
 
@@ -2070,7 +2113,8 @@ class MMEmbeddingCache:
         with self._lock:
             tokens = self._resident_tokens
             size_bytes = self._gpu_bytes + self._cpu_bytes
-        self._report_resident_metrics(tokens, size_bytes)
+            entries = len(self._gpu_lru) + len(self._cpu_lru)
+        self._report_resident_metrics(tokens, size_bytes, entries)
 
     def _report_admission(self, size_bytes: int) -> None:
         if not self._report_metrics_enabled or self._lifetime_metrics is None:
@@ -2090,17 +2134,47 @@ class MMEmbeddingCache:
         }[state]
         kmonitor.report(metric, 1)
 
-    def _report_resident_metrics(self, tokens: int, size_bytes: int) -> None:
+    def _report_resident_metrics(self, tokens: int, size_bytes: int, entries: int) -> None:
         if not self._report_metrics_enabled:
             return
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_TOKENS_METRIC, tokens)
         kmonitor.report(GaugeMetrics.VIT_EMBEDDING_CACHE_BYTES_METRIC, size_bytes)
+        if self._residency_tags is not None:
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_ENTRIES_METRIC,
+                entries,
+                self._residency_tags,
+            )
+            kmonitor.report(
+                GaugeMetrics.VIT_EMBEDDING_CACHE_RESIDENT_BYTES_METRIC,
+                size_bytes,
+                self._residency_tags,
+            )
+
+
+def is_current_cache_entry(cache, key, entry):
+    check = getattr(type(cache), "is_current", None)
+    return check(cache, key, entry) if check is not None else cache.peek(key) is entry
 
 
 def _split_budget(total: int, shards: int) -> List[int]:
     """Split a byte budget into `shards` parts whose sum is exactly `total`."""
     base, remainder = divmod(total, shards)
     return [base + (1 if index < remainder else 0) for index in range(shards)]
+
+
+def emb_host_feature_enabled(name: str) -> bool:
+    if os.environ.get(name) != "1":
+        return False
+    hosts = os.environ.get(f"{name}_HOSTS")
+    # An explicitly empty list disables the feature on every host.
+    return hosts is None or socket.gethostname() in (
+        host.strip() for host in hosts.split(",")
+    )
+
+
+def _native_local_cache_enabled() -> bool:
+    return emb_host_feature_enabled("MM_EMB_NATIVE_LOCAL_CACHE")
 
 
 class ShardedMMEmbeddingCache:
@@ -2129,21 +2203,40 @@ class ShardedMMEmbeddingCache:
             if report_metrics
             else None
         )
+        cache_class = MMEmbeddingCache
+        eviction_policy = dict(on_cpu_evict=on_cpu_evict, on_gpu_evict=on_gpu_evict)
+        if (
+            _native_local_cache_enabled()
+            and on_cpu_evict is None
+            and on_gpu_evict is None
+        ):
+            import librtp_compute_ops
+
+            if hasattr(librtp_compute_ops, "EmbLocalCacheShard"):
+                from .mm_embedding_native_cache import NativeMMEmbeddingCache
+
+                cache_class = NativeMMEmbeddingCache
+                eviction_policy = {}
+        self.uses_native_index = cache_class is not MMEmbeddingCache
         self._shards = [
-            MMEmbeddingCache(
+            cache_class(
                 gpu_bytes,
                 cpu_bytes,
                 report_metrics=report_metrics,
-                on_cpu_evict=on_cpu_evict,
-                on_gpu_evict=on_gpu_evict,
                 async_publication=async_publication,
                 lifetime_metrics=self._lifetime_metrics,
+                **eviction_policy,
             )
             for gpu_bytes, cpu_bytes in zip(
                 _split_budget(gpu_max_bytes, shards),
                 _split_budget(cpu_max_bytes, shards),
             )
         ]
+        if report_metrics and _PROFILE_LOCAL_HITS:
+            for index, shard in enumerate(self._shards):
+                shard._residency_tags = {"cache_shard": str(index)}
+        if report_metrics and "MM_EMB_NATIVE_LOCAL_CACHE_HOSTS" in os.environ:
+            logging.info("MM_EMB_LOCAL_CACHE_IMPLEMENTATION %s", cache_class.__name__)
         self.instance_id = uuid.uuid4().hex
 
     @property
@@ -2191,6 +2284,9 @@ class ShardedMMEmbeddingCache:
 
     def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
         return self._shard(cache_key).peek(cache_key)
+
+    def is_current(self, cache_key, entry):
+        return self._shard(cache_key).is_current(cache_key, entry)
 
     def _with_current_entry(self, cache_key, expected, action):
         return self._shard(cache_key)._with_current_entry(cache_key, expected, action)

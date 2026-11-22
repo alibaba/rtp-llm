@@ -14,6 +14,7 @@ import time
 from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple
+from weakref import WeakValueDictionary
 
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
@@ -135,6 +136,7 @@ class MMInspectionCoordinator:
         self._greennet_timeout_s = float(vit_config.mm_timeout_ms or 120000) / 1000.0
         self.tickets = InspectionTickets(ttl=max(300, self._greennet_timeout_s * 2))
         self._cached_inspection_lock = threading.Lock()
+        self._native_cached_inspections = WeakValueDictionary()
         self._source_download_executor = SourceDownloadExecutor(
             vit_config.vit_source_download_concurrency
         )
@@ -168,6 +170,12 @@ class MMInspectionCoordinator:
             if entry.expects_greennet or entry.greennet_passed:
                 return entry.inspection_decision()
             scope = (request.user_id, request.service_name)
+            native_key = None
+            if getattr(entry, "_native_cell", None) is not None:
+                native_key = (entry.generation, scope)
+                active = self._native_cached_inspections.get(native_key)
+                if active is not None and not active.done():
+                    return active
             previous = getattr(entry, "_cached_inspection", None)
             if previous is not None:
                 previous_scope, previous_request, future = previous
@@ -180,6 +188,8 @@ class MMInspectionCoordinator:
             )
             handle.supply([], [], [(key, entry, [media], request)])
             entry._cached_inspection = (scope, request.id, future)
+            if native_key is not None:
+                self._native_cached_inspections[native_key] = future
             return future
 
     def _ensure_greennet_loop(self) -> asyncio.AbstractEventLoop:
