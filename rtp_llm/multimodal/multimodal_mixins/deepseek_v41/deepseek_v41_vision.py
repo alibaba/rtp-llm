@@ -52,6 +52,10 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
+from rtp_llm.multimodal.preprocess_ipc import (
+    pack_preprocess_tensors,
+    packed_preprocess_enabled,
+)
 from rtp_llm.multimodal.vit_metrics import (
     VIT_PHASE_METRICS,
     record_vit_preprocess_value,
@@ -68,6 +72,40 @@ class _DecodedImage:
 
     rgb: torch.Tensor
     resize_tables: ResizeTables | None = None
+
+
+def _pack_decoded_images(images):
+    # Flatten only this worker result. The views keep the ordinary model types
+    # and the original RGB and coefficient layouts consumed by the GPU stage.
+    tensors = []
+    for image in images:
+        tables = image.resize_tables
+        tensors.append(image.rgb)
+        if tables.horizontal is not None:
+            tensors.extend(tables.horizontal)
+        if tables.vertical is not None:
+            tensors.extend(tables.vertical)
+        tensors.append(tables.normalization)
+
+    packed = iter(pack_preprocess_tensors(tensors))
+    results = []
+    for image in images:
+        tables = image.resize_tables
+        rgb = next(packed)
+        horizontal = (next(packed), next(packed)) if tables.horizontal is not None else None
+        vertical = (next(packed), next(packed)) if tables.vertical is not None else None
+        results.append(
+            _DecodedImage(
+                rgb,
+                replace(
+                    tables,
+                    horizontal=horizontal,
+                    vertical=vertical,
+                    normalization=next(packed),
+                ),
+            )
+        )
+    return results
 
 
 @dataclass(frozen=True)
@@ -662,6 +700,8 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                 result_bytes,
                 {"representation": "rgb" if gpu_preprocess else "patches"},
             )
+        if gpu_preprocess and packed_preprocess_enabled():
+            results = _pack_decoded_images(results)
         data = results[0] if len(results) == 1 else results
         return (
             MMPreprocessResult(data, inspection_sources, source_identity)
