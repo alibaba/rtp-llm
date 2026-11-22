@@ -16,14 +16,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
 class BlockTreeReclaimer;
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
-class FrozenTask;
 class FullPrefixInvariantScanner;
 struct CacheStats {
     size_t tree_node_count{0};
@@ -174,7 +172,6 @@ public:
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
     void reportUnfreezeZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& pools) const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
@@ -234,7 +231,7 @@ private:
     BlockTreeLoader                                loader_;
     BlockTreeStorer                                storer_;
     std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
-    std::unique_ptr<BlockTreeReclaimer> reclaimer_;
+    std::shared_ptr<BlockTreeReclaimer> reclaimer_;
 
 };
 

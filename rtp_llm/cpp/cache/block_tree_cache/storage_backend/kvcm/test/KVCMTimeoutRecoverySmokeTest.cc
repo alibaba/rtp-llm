@@ -134,7 +134,7 @@ struct NativeWorker {
         manager->block_tree_cache_->reclaimer().configure(parallel.tp_rank,
             config.block_tree_frozen_recovery_interval_ms, config.block_tree_frozen_recovery_query_timeout_ms,
             config.block_tree_frozen_force_release_timeout_ms, std::move(broadcast));
-        manager->block_tree_cache_->reclaimer().bindReclaimers(*backend);
+        backend->setReclaimer(manager->block_tree_cache_->reclaimer_);
         return true;
     }
 
@@ -163,8 +163,8 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, ReadRejectsTraceAlreadyRegisteredByBlockTra
     FilePayload file;
     NativeWorker worker;
     ASSERT_TRUE(worker.init(file, 0, 1));
-    auto& registry = *worker.manager->block_tree_cache_->transfer_dispatcher_->task_registry_;
-    ASSERT_TRUE(registry.begin(uint64_t{71}));
+    auto& registry = *worker.manager->block_tree_cache_->transfer_dispatcher_->reclaimer_;
+    ASSERT_TRUE(registry.registerOnWorkerTaskWithTraceID("71"));
 
     RemoteOperationRequestPB read;
     read.set_op(REMOTE_OPERATION_READ);
@@ -172,8 +172,8 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, ReadRejectsTraceAlreadyRegisteredByBlockTra
     RemoteOperationResponsePB response;
     EXPECT_FALSE(worker.backend->execute(read, response));
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
-    EXPECT_EQ(&worker.backend->taskRegistry(), &registry);
-    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{71}).front(), TransferTaskRegistry::State::RUNNING);
+    EXPECT_EQ(worker.backend->reclaimer_.get(), &registry);
+    EXPECT_EQ(registry.localState("71"), TransferTaskRegistry::State::RUNNING);
 }
 
 TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQueryAndForget) {
@@ -206,13 +206,15 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, LostNativeReadReplyRecoversThroughWorkerQue
     ASSERT_EQ(readResult(*owner.backend, owner.request(10s, target.get()), meta).code(), ErrorCode::DEADLINE_EXCEEDED);
     ASSERT_TRUE(owner.environment.device_pool->isFrozen(target.get().front()));
     auto& reclaimer = owner.manager->block_tree_cache_->reclaimer();
-    ASSERT_EQ(reclaimer.frozenTasks().size(), 1u);
-    EXPECT_EQ(reclaimer.frozenTasks().front()->pendingWorkers(), (std::vector<size_t>{1}));
+    ASSERT_EQ(reclaimer.frozen_.size(), 1u);
+    EXPECT_EQ(reclaimer.frozen_.begin()->second.pending, (std::vector<size_t>{1}));
+    const auto trace = reclaimer.frozen_.begin()->first;
     ASSERT_TRUE(reclaimer.start());
     block_tree_cache_detail::ScopeRollback stop([&] { reclaimer.stop(); });
     ASSERT_TRUE(waitForRecovery([&] {
         return !owner.environment.device_pool->isFrozen(target.get().front())
-               && owner.backend->taskRegistry().size() == 0 && peer.backend->taskRegistry().size() == 0;
+               && owner.backend->reclaimer_->localState(trace) == TransferTaskRegistry::State::UNKNOWN
+               && peer.backend->reclaimer_->localState(trace) == TransferTaskRegistry::State::UNKNOWN;
     }));
     EXPECT_EQ(queries_to_safe_worker.load(), 0u);
 }

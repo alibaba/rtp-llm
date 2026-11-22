@@ -1,17 +1,11 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <set>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 
 namespace rtp_llm {
 namespace {
-
-std::shared_ptr<FrozenTask> onlyFrozenTask(const KVCMStorageBackend& backend) {
-    const auto tasks = backend.frozenTasks();
-    EXPECT_EQ(tasks.size(), 1u);
-    return tasks.size() == 1 ? tasks.front() : nullptr;
-}
 
 TEST(KVCMFrozenTaskTest, TargetsExcludeLocalPrefixFilteredLinearStateAndUnsentTail) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
@@ -40,34 +34,26 @@ TEST(KVCMFrozenTaskTest, TargetsExcludeLocalPrefixFilteredLinearStateAndUnsentTa
     size_t tags = 0;
     EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(4)
         .WillRepeatedly(Invoke([&](const auto&, const auto&, auto&, const auto&) {
-            EXPECT_EQ(backend->taskRegistry().queryLocal(trace).front(), TransferTaskRegistry::State::RUNNING);
+            EXPECT_EQ(backend->reclaimer_->localState(trace.front()), TransferTaskRegistry::State::RUNNING);
             return ++tags < 4;
         }));
     EXPECT_TRUE(readResult(*backend.backend, request, matched.match_meta).ok());
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(backend->taskRegistry().queryLocal(trace).front(), TransferTaskRegistry::State::BUFFER_SAFE);
-    EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_EQ(backend->reclaimer_->localState(trace.front()), TransferTaskRegistry::State::BUFFER_SAFE);
+    EXPECT_TRUE(backend->reclaimer_->frozen_.empty());
     trace.front() = "block_tree_read_2";
     std::promise<ErrorInfo> done;
     auto completed = done.get_future();
     backend->read(std::move(request), std::move(matched.match_meta), [&](ErrorInfo error) {
-        const auto task = onlyFrozenTask(*backend.backend);
-        EXPECT_NE(task, nullptr);
-        if (task) {
-            EXPECT_EQ(task->execution().key.trace_id, trace.front());
-            EXPECT_EQ(task->execution().backend, "kvcm");
-            EXPECT_EQ(task->snapshot().state, FrozenTask::State::FROZEN);
-        }
+        EXPECT_EQ(backend->reclaimer_->frozen_.count(trace.front()), 1u);
         done.set_value(std::move(error));
     });
     EXPECT_FALSE(await(completed).ok());
-    EXPECT_EQ(backend->taskRegistry().queryLocal(trace).front(), TransferTaskRegistry::State::RUNNING);
+    EXPECT_EQ(backend->reclaimer_->localState(trace.front()), TransferTaskRegistry::State::RUNNING);
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    const auto record = onlyFrozenTask(*backend.backend);
-    ASSERT_NE(record, nullptr);
-    EXPECT_EQ(record->snapshot().target_block_count, 3u);
+    const auto& record = backend->reclaimer_->frozen_.at(trace.front());
     std::set<std::pair<IBlockPool*, BlockIdxType>> targets;
-    for (const auto& target : record->execution().target_blocks)
+    for (const auto& target : record.targets)
         targets.emplace(target.pool.get(), target.block);
     EXPECT_EQ(targets, (std::set<std::pair<IBlockPool*, BlockIdxType>>{
         {environment.pools_by_tag.at("full0").get(), blocks[1]},

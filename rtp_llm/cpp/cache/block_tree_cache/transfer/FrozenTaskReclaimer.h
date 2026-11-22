@@ -1,34 +1,22 @@
 #pragma once
 
-#include <map>
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
+struct TransferTargetBlock {
+    std::shared_ptr<IBlockPool> pool;
+    BlockIdxType block;
+};
+
 class FrozenTaskReclaimer {
 public:
-    struct Trace {
-        TransferCompletionKey key;
-        TransferCompletionTarget participants;
-        const TransferResult& result;
-        std::string backend{"local"};
-    };
-
-    explicit FrozenTaskReclaimer(std::shared_ptr<TransferCompletionCleanup> cleanup):
-        cleanup_(std::move(cleanup)) {}
-
-    const std::shared_ptr<TransferCompletionCleanup>& cleanup() const { return cleanup_; }
-
-    void freezeTargetBlocksWithTraceIDAndStillIOWorkerID(const Trace& trace_id,
-                                                        std::vector<FrozenTask::TargetBlock> target_blocks,
-                                                        std::vector<size_t> still_io_worker_ids);
-    bool unfreezeTargetBlocksInOneWorkerWithTraceID(const TransferCompletionKey& trace_id, size_t worker_id);
-    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
-
-private:
-    std::shared_ptr<TransferCompletionCleanup> cleanup_;
-    mutable std::mutex mutex_;
-    mutable std::map<std::string, std::shared_ptr<FrozenTask>> tasks_;
+    virtual ~FrozenTaskReclaimer() = default;
+    virtual void freezeTargetBlocksWithTraceIDAndStillIOWorkerID(const TransferCompletionKey& trace,
+                                                                 std::vector<TransferTargetBlock> target_blocks,
+                                                                 const std::vector<size_t>& pending_workers) noexcept = 0;
+    virtual bool unfreezeTargetBlocksInOneWorkerWithTraceID(const TransferCompletionKey& trace, size_t worker) = 0;
 };
 
 }

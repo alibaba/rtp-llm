@@ -1,12 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
-#include <algorithm>
 #include <atomic>
-#include <exception>
 #include <limits>
 #include <memory>
-#include <numeric>
-#include <optional>
 #include <string>
 #include <utility>
 
@@ -15,7 +11,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageState.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -43,51 +38,25 @@ private:
     const BlockTransferDispatcher& dispatcher_;
 };
 
-// Only this coordinator boundary owns freezing; worker-local dispatch never does.
 struct BlockTransferDispatcher::CoordinatedExecution {
-    CoordinatedExecution(const BlockTransferDispatcher* owner,
-                         const TransferTask&            task,
-                         TransferDoneCallback           done):
-        owner(owner),
-        task(task),
-        done(std::move(done)) {
-        target.remote = owner->multi_rank_engine_ != nullptr;
-        target.rank_count = target.remote ? owner->multi_rank_engine_->workerCount() : 1;
-        if (owner->completion_cleanup_) {
-            cleanup = owner->completion_cleanup_->prepare(target, TransferCompletionKey{task.traceId()});
-        }
-    }
-
-    void freeze(const TransferResult& result) noexcept {
-        auto pending = result.still_io_worker_ids;
-        if (pending.empty()) {
-            pending.resize(target.rank_count);
-            std::iota(pending.begin(), pending.end(), size_t{0});
-        }
-        owner->coordinator_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(
-            {TransferCompletionKey{task->traceId()}, target, result}, owner->targetBlocks(*task), std::move(pending));
-    }
+    CoordinatedExecution(std::shared_ptr<BlockTreeReclaimer> reclaimer, TransferCompletionKey key, TransferDoneCallback done):
+        reclaimer(std::move(reclaimer)), key(std::move(key)), done(std::move(done)) {}
 
     void complete(TransferResult result) {
-        if (claimed.exchange(true, std::memory_order_acq_rel))
+        if (claimed.exchange(true))
             return;
         if (result.checkNeedFreeze())
-            freeze(result);
-        else if (owner->completion_cleanup_)
-            owner->completion_cleanup_->enqueue(std::move(cleanup));
-        task.reset();
-        // A retained or late child callback must not retain the business owner
-        // after completion. Invoke outside all registry/pool/frozen-task locks.
+            reclaimer->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(key, {}, result.still_io_worker_ids);
+        else
+            reclaimer->unregisterTask(key);
         auto notify = std::move(done);
         notify(std::move(result));
     }
 
-    const BlockTransferDispatcher*                owner;
-    std::optional<TransferTask>                    task;
-    TransferDoneCallback                          done;
-    TransferCompletionCleanup::Prepared           cleanup;
-    TransferCompletionTarget                      target;
-    std::atomic<bool>                             claimed{false};
+    std::shared_ptr<BlockTreeReclaimer> reclaimer;
+    TransferCompletionKey key;
+    TransferDoneCallback done;
+    std::atomic<bool> claimed{false};
 };
 
 std::shared_ptr<BlockTransferDispatcher::InflightTicket> BlockTransferDispatcher::trackTransfer() const {
@@ -96,10 +65,7 @@ std::shared_ptr<BlockTransferDispatcher::InflightTicket> BlockTransferDispatcher
 
 BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine,
                                                  std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine):
-    per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=dispatcher_init registry=%s engine=%p",
-                    task_registry_->epoch().c_str(), static_cast<const void*>(per_rank_engine_.get()));
-}
+    per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {}
 
 BlockTransferDispatcher::~BlockTransferDispatcher() {
     shutdown();
@@ -124,16 +90,16 @@ void BlockTransferDispatcher::waitForTransfers() const {
 std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     const auto numeric_trace_id = task.traceId();
     const auto trace_id = std::to_string(numeric_trace_id);
-    RTP_LLM_LOG_INFO("transfer_lifecycle event=worker_execute_enter trace=%s request=%ld registry=%s",
-                      trace_id.c_str(), task.requestId().value_or(-1), task_registry_->epoch().c_str());
+    RTP_LLM_LOG_INFO("transfer_lifecycle event=worker_execute_enter trace=%s request=%ld",
+                      trace_id.c_str(), task.requestId().value_or(-1));
     // Allocate the owner and its completion path before registering execution.
     // The safety callback owns the registry, not the dispatcher's business lifetime.
     const auto ticket = trackTransfer();
     auto context = std::make_shared<TransferBatchAsyncContext>(task.descriptors().size());
-    auto safety = std::make_shared<TransferBufferSafetyTracker>([registry = task_registry_, trace_id] {
+    auto safety = std::make_shared<TransferBufferSafetyTracker>([registry = reclaimer_, trace_id] {
         registry->ioFinishedOnWorkerWithTraceID(trace_id);
     });
-    if (numeric_trace_id == 0 || !task_registry_->registerOnWorkerTaskWithTraceID(trace_id)) {
+    if (numeric_trace_id == 0 || !reclaimer_->registerOnWorkerTaskWithTraceID(trace_id)) {
         const auto* reason = numeric_trace_id == 0 ? "empty transfer trace" : "duplicate transfer trace";
         RTP_LLM_LOG_WARNING("%s: trace=%s", reason, trace_id.c_str());
         TransferResult result(ErrorInfo(ErrorCode::INVALID_PARAMS, std::string(reason) + ": " + trace_id),
@@ -146,7 +112,6 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
     block_tree_cache_detail::ScopeRollback close_submission([safety] {
         safety->finishSubmitting();
     });
-    warnRegistrySize();
     if (task.expired()) {
         TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"),
                               CacheCopyError::NOT_EXECUTED);
@@ -181,28 +146,6 @@ std::shared_ptr<TransferAsyncContext> BlockTransferDispatcher::executePerRank(Tr
     return context;
 }
 
-void BlockTransferDispatcher::warnRegistrySize() const noexcept {
-    try {
-        const auto count = task_registry_->size();
-        auto threshold = next_registry_warning_.load(std::memory_order_relaxed);
-        while (threshold != 0 && count >= threshold) {
-            auto next = threshold;
-            do {
-                next = next > std::numeric_limits<size_t>::max() / 2 ? 0 : next * 2;
-            } while (next != 0 && count >= next);
-            if (next_registry_warning_.compare_exchange_weak(threshold, next, std::memory_order_relaxed)) {
-                RTP_LLM_LOG_WARNING("worker transfer registry retains %zu records (warning threshold=%zu); "
-                                    "records are not deleted and admission remains open",
-                                    count,
-                                    threshold);
-                return;
-            }
-        }
-    } catch (...) {
-        // Diagnostics must not revoke an execution's recorded admission.
-    }
-}
-
 std::shared_ptr<TransferAsyncContext>
 BlockTransferDispatcher::executeMultiRank(TransferTask task, const char* completion_operation) const {
     if (multi_rank_engine_ != nullptr) {
@@ -211,8 +154,8 @@ BlockTransferDispatcher::executeMultiRank(TransferTask task, const char* complet
     return executePerRank(std::move(task));
 }
 
-std::vector<FrozenTask::TargetBlock> BlockTransferDispatcher::targetBlocks(const TransferTask& task) const {
-    std::vector<FrozenTask::TargetBlock> targets;
+std::vector<TransferTargetBlock> BlockTransferDispatcher::targetBlocks(const TransferTask& task) const {
+    std::vector<TransferTargetBlock> targets;
     const auto& groups = multi_rank_engine_ ? multi_rank_engine_->groupSets() : per_rank_engine_->groupSets();
     for (const auto& descriptor : task.descriptors()) {
         const GroupSet* group = descriptor.group_set_id < groups.size() ? groups[descriptor.group_set_id].get() : nullptr;
@@ -235,8 +178,7 @@ std::vector<FrozenTask::TargetBlock> BlockTransferDispatcher::targetBlocks(const
 void BlockTransferDispatcher::submitCoordinated(TransferTask task,
                                                TransferDoneCallback done,
                                                const char* completion_operation) const {
-    auto execution = std::make_shared<CoordinatedExecution>(
-        this, task, std::move(done));
+    auto execution = std::make_shared<CoordinatedExecution>(reclaimer_, task.traceId(), std::move(done));
     // Construct the subscription before starting any I/O. The child's callback
     // vector may still reject it; that path also passes through this finalizer.
     TransferAsyncContext::DoneCallback complete =
@@ -244,6 +186,15 @@ void BlockTransferDispatcher::submitCoordinated(TransferTask task,
     TransferResult observation_failure(
         ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "failed to observe submitted transfer completion"));
     std::shared_ptr<TransferAsyncContext> context;
+    const bool remote = multi_rank_engine_ != nullptr;
+    const auto ranks = remote ? multi_rank_engine_->workerCount() : 1;
+    if (ranks && !reclaimer_->registerTask(execution->key, {remote, ranks}, targetBlocks(task))) {
+        TransferResult duplicate(ErrorInfo(ErrorCode::INVALID_PARAMS, "duplicate or empty transfer trace"),
+                                 CacheCopyError::NOT_EXECUTED);
+        duplicate.buffer_safe = true;
+        execution->done(std::move(duplicate));
+        return;
+    }
     try {
         context = executeMultiRank(std::move(task), completion_operation);
         if (!context) {
@@ -255,10 +206,7 @@ void BlockTransferDispatcher::submitCoordinated(TransferTask task,
         if (execution->claimed.load(std::memory_order_acquire))
             throw; // Preserve exceptions from an inline business completion callback.
         if (!context) {
-            // The caller still owns error classification and settlement.
-            // Preserve the execution's cleanup candidate even without a returned context.
-            if (completion_cleanup_)
-                completion_cleanup_->enqueue(std::move(execution->cleanup));
+            reclaimer_->unregisterTask(execution->key);
             throw;
         }
         auto result = std::move(observation_failure);
@@ -271,17 +219,6 @@ void BlockTransferDispatcher::submitCoordinated(TransferTask task,
         }
         execution->complete(std::move(result));
     }
-}
-
-void BlockTransferDispatcher::setReclaimers(std::shared_ptr<FrozenTaskReclaimer> coordinator,
-                                           std::shared_ptr<TransferTaskRegistry> worker) {
-    coordinator_ = std::move(coordinator);
-    completion_cleanup_ = coordinator_->cleanup();
-    task_registry_ = std::move(worker);
-}
-
-std::vector<std::shared_ptr<FrozenTask>> BlockTransferDispatcher::frozenTasks() const {
-    return coordinator_->frozenTasks();
 }
 
 void BlockTransferDispatcher::runTransfer(TransferTask         task,

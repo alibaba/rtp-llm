@@ -57,11 +57,11 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
     storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
         onWorkflowSettledLocked(check_watermark);
     }) {
-    reclaimer_ = std::make_unique<BlockTreeReclaimer>(*this);
+    reclaimer_ = std::make_shared<BlockTreeReclaimer>(metrics_reporter_);
     if (transfer_dispatcher_)
-        reclaimer_->bindReclaimers(*transfer_dispatcher_);
+        transfer_dispatcher_->setReclaimer(reclaimer_);
     if (storage_backend_) {
-        reclaimer_->bindReclaimers(*storage_backend_);
+        storage_backend_->setReclaimer(reclaimer_);
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
     }
 }
@@ -232,10 +232,6 @@ CacheStats BlockTreeCache::getStats() const {
 std::vector<BlockTreePoolMetricsSnapshot> BlockTreeCache::poolMetricsSnapshots() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return metrics_reporter_->collectPoolMetricsSnapshots(tree_->groupSets());
-}
-
-void BlockTreeCache::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const {
-    metrics_reporter_->reportUnfreezeMetrics(execution, forced);
 }
 
 void BlockTreeCache::reportUnfreezeZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& pools) const {

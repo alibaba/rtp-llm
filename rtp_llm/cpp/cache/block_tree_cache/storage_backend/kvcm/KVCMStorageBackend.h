@@ -7,8 +7,6 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
 class RemoteOperationRequestPB;
@@ -57,11 +55,7 @@ public:
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
-    // Local READ completion evidence; this accessor does not issue a query RPC.
-    const TransferTaskRegistry& taskRegistry() const;
-    void setReclaimers(std::shared_ptr<FrozenTaskReclaimer> coordinator,
-                       std::shared_ptr<TransferTaskRegistry> worker) override;
-    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
+    void setReclaimer(std::shared_ptr<BlockTreeReclaimer> reclaimer) override;
 
     // Optional EOS publication; true means handled/skipped, not committed.
     bool
@@ -90,6 +84,7 @@ protected:
 
 private:
     class Impl;
+    std::shared_ptr<BlockTreeReclaimer> reclaimer_;
     std::unique_ptr<Impl> impl_;
 };
 

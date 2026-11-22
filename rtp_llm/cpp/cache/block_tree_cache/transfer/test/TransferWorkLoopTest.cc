@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
@@ -632,13 +633,12 @@ TEST_F(TransferWorkLoopDeathTest, BeforeCompleteCallbackBadAllocIsFatal) {
 
 TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 1, 8, {});
-    TransferTaskRegistry registry;
+    BlockTreeReclaimer registry;
     auto task = writes();
     const auto trace = std::to_string(task.traceId());
-    ASSERT_TRUE(registry.begin(trace));
-    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&registry, trace] {
-        registry.finish(trace, true);
-    }));
+    ASSERT_TRUE(registry.registerOnWorkerTaskWithTraceID(trace));
+    task.setCompletionProof(
+        std::make_shared<TransferBufferSafety>([&registry, trace] { registry.ioFinishedOnWorkerWithTraceID(trace); }));
     auto context = owner.execute(std::move(task));
     owner.entries_.splice(owner.entries_.end(), owner.incoming_);
     auto& entry    = **owner.entries_.begin();
@@ -648,7 +648,7 @@ TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_TRUE(context->result().buffer_safe);
-    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{trace}).front(), TransferTaskRegistry::State::BUFFER_SAFE);
+    EXPECT_EQ(registry.localState(trace), TransferTaskRegistry::State::BUFFER_SAFE);
     EXPECT_EQ(context->errorInfo().ToString(), "batch preparation failed");
     EXPECT_EQ(owner.outstandingBatches(), 0u);
 }

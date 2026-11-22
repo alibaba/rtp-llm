@@ -14,7 +14,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTask.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskReclaimer.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace kmonitor {
@@ -101,7 +101,7 @@ public:
         return stage_metrics_ != nullptr;
     }
     void flushStageMetrics() const;
-    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
+    void reportUnfreezeMetrics(const std::vector<TransferTargetBlock>& blocks, const std::string& backend, bool forced) const;
     void reportUnfreezeZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& pools) const;
 
     // Durations are per worker batch, except coordinator multi-rank stages.

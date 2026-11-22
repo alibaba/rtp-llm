@@ -30,9 +30,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -2248,56 +2245,52 @@ TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
         auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
         ASSERT_TRUE(manager->init());
         auto& reclaimer = manager->blockTreeCache()->reclaimer();
-        ASSERT_NE(reclaimer.frozen_task_recovery_, nullptr);
-        auto recovery = std::move(reclaimer.frozen_task_recovery_);
-        recovery->stop();
         manager->block_tree_cache_->stopBackgroundTasks();
+        reclaimer.stopped_ = false;
         const auto& groups = manager->blockTreeCache()->groupSets();
         auto engine = std::make_shared<RecordingBatchTransferEngine>(groups);
         engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O outcome unknown");
         auto& dispatcher = manager->block_tree_cache_->transfer_dispatcher_;
         dispatcher = std::make_unique<BlockTransferDispatcher>(engine);
-        reclaimer.bindReclaimers(*dispatcher);
+        dispatcher->setReclaimer(manager->block_tree_cache_->reclaimer_);
         auto pool = groups.front()->hostPool();
         ASSERT_NE(pool, nullptr);
         const auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
-        pool->incTreeRef(*block, BlockTreeRefType::EVICT);
+        pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
         dispatcher->runTransfer(
             TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
             [&](TransferResult result) {
                 EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-                pool->decTreeRef(*block, BlockTreeRefType::EVICT);
+                pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
             }, "evict");
-        const auto records = reclaimer.frozenTasks();
-        ASSERT_EQ(records.size(), 1u);
+        ASSERT_EQ(reclaimer.frozen_.size(), 1u);
         ASSERT_NE(engine->last_proof, nullptr);
-        auto& queue = *reclaimer.completion_cleanup_;
-        auto drain = [&] {
-            return queue.drain([&](const auto& target, const auto& traces, int timeout) {
-                return reclaimer.forgetTransferCompletion(target, traces, timeout);
-            }, 1000);
-        };
-        FrozenTask other(FrozenTask::prepare(records.front()->execution()), records.front()->failure());
-        other.freeze();
+        const auto trace = engine->last_trace;
+        pool->freezeBlock(*block);
         auto age = [&](std::chrono::seconds elapsed) {
-            records.front()->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+            auto it = reclaimer.frozen_.find(std::to_string(trace));
+            if (it != reclaimer.frozen_.end())
+                it->second.frozen_at -= elapsed;
+            reclaimer.releaseExpired();
         };
         age(std::chrono::seconds(2));
-        EXPECT_EQ(recovery->runOnce(1000).released, timeout_ms == 1000 ? 1u : 0u);
+        EXPECT_EQ(reclaimer.frozen_.empty(), timeout_ms == 1000);
         age(std::chrono::minutes(10));
-        EXPECT_EQ(recovery->runOnce(1000).released, 0u);
+        EXPECT_EQ(reclaimer.frozen_.empty(), timeout_ms == 1000);
         age(std::chrono::minutes(10));
-        EXPECT_EQ(recovery->runOnce(1000).released, timeout_ms == 1200000 ? 1u : 0u);
-        EXPECT_EQ(drain().pending, timeout_ms == 0 ? 0u : 1u);
-        EXPECT_EQ(dispatcher->taskRegistry().size(), 1u);
+        EXPECT_EQ(reclaimer.frozen_.empty(), timeout_ms != 0);
+        reclaimer.drainForget();
+        EXPECT_EQ(reclaimer.forget_queue_.size(), timeout_ms == 0 ? 0u : 1u);
+        EXPECT_EQ(reclaimer.records_.size(), 1u);
         engine->last_proof->report(true);
-        EXPECT_EQ(recovery->runOnce(1000).released, timeout_ms == 0 ? 1u : 0u);
-        EXPECT_EQ(drain().forgotten, 1u);
-        EXPECT_EQ(dispatcher->taskRegistry().size(), 0u);
+        reclaimer.queryFrozen();
+        reclaimer.drainForget();
+        EXPECT_TRUE(reclaimer.forget_queue_.empty());
+        EXPECT_EQ(reclaimer.records_.size(), 0u);
         EXPECT_TRUE(pool->isFrozen(*block));
         EXPECT_EQ(pool->treeRefCount(*block), 1u);
-        EXPECT_TRUE(other.completeRecovery(queue));
+        pool->prepareFrozenReferenceRelease({*block})();
         EXPECT_FALSE(pool->isAllocated(*block));
     }
 }
@@ -2309,39 +2302,33 @@ TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorker
     KVCacheManager manager(cache_config, false, nullptr, config);
     ASSERT_TRUE(manager.init());
     auto& reclaimer = manager.block_tree_cache_->reclaimer();
-    ASSERT_EQ(reclaimer.frozen_task_recovery_, nullptr);
     auto check_cleanup = [&](uint64_t trace) {
-        auto& registry = *reclaimer.worker_registry_;
-        ASSERT_TRUE(registry.begin(trace));
-        ASSERT_TRUE(registry.finish(trace, true));
-        reclaimer.completion_cleanup_->enqueue(reclaimer.completion_cleanup_->prepare({false, 1}, trace));
+        const auto id = std::to_string(trace);
+        ASSERT_TRUE(reclaimer.registerOnWorkerTaskWithTraceID(id));
+        reclaimer.ioFinishedOnWorkerWithTraceID(id);
+        ASSERT_TRUE(reclaimer.registerTask(trace, {false, 1}, {}));
+        reclaimer.unregisterTask(trace);
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (reclaimer.completion_cleanup_->size() != 0 && std::chrono::steady_clock::now() < deadline)
+        while (reclaimer.localState(id) != TransferTaskRegistry::State::UNKNOWN && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        EXPECT_EQ(reclaimer.completion_cleanup_->size(), 0u);
-        EXPECT_EQ(registry.size(), 0u);
+        EXPECT_EQ(reclaimer.localState(id), TransferTaskRegistry::State::UNKNOWN);
     };
     ASSERT_NO_FATAL_FAILURE(check_cleanup(1001));
-    const TransferResult failure(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O pending"));
-    reclaimer.coordinator_->freezeTargetBlocksWithTraceIDAndStillIOWorkerID(
-        {uint64_t{1003}, {false, 1}, failure}, {}, {0});
-    std::promise<void> entered;
+    reclaimer.stop();
+    std::promise<void> entered, release;
     auto entered_future = entered.get_future();
-    std::promise<void> release;
-    auto released = release.get_future();
-    std::atomic<bool> first{true};
-    reclaimer.frozen_task_recovery_ = std::make_unique<FrozenTaskRecovery>(
-        *reclaimer.coordinator_, [&](const auto& execution, const auto& pending, int timeout) {
-            if (first.exchange(false)) {
-                entered.set_value();
-                released.wait_for(std::chrono::seconds(5));
-            }
-            return reclaimer.queryTransferCompletion(execution, pending, timeout);
-        });
-    ASSERT_TRUE(reclaimer.frozen_task_recovery_->start(1000, 1000));
+    auto released = release.get_future().share();
+    ASSERT_TRUE(reclaimer.registerOnWorkerTaskWithTraceID("1003", [&] {
+        entered.set_value();
+        released.wait_for(std::chrono::seconds(5));
+    }));
+    ASSERT_TRUE(reclaimer.registerTask(1003, {false, 1}, {}));
+    reclaimer.freezeTargetBlocksWithTraceIDAndStillIOWorkerID(1003, {}, {0});
+    reclaimer.configure(0, 1000, 1000, 0, nullptr);
+    ASSERT_TRUE(reclaimer.start());
     block_tree_cache_detail::ScopeRollback stop([&] {
         release.set_value();
-        reclaimer.stopFrozenTaskRecovery();
+        reclaimer.stop();
     });
     ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     ASSERT_NO_FATAL_FAILURE(check_cleanup(1002));

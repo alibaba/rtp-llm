@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 #include <atomic>
 #include <unordered_map>
 
@@ -29,7 +28,7 @@
 
 namespace rtp_llm {
 
-class FrozenTaskReclaimer;
+class BlockTreeReclaimer;
 class BatchKVCacheResource;
 class BlockTreeCacheMetricsReporter;
 enum class AsyncProfileKind;
@@ -170,7 +169,7 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
-    virtual void setReclaimers(std::shared_ptr<FrozenTaskReclaimer>, std::shared_ptr<TransferTaskRegistry>) {}
+    virtual void setReclaimer(std::shared_ptr<BlockTreeReclaimer>) {}
 
     class ExternalIoGuard {
     public:

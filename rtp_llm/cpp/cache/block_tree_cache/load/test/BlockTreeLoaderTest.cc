@@ -1234,7 +1234,6 @@ TEST(BlockTreeLoaderTest, DecodeSourcesValidateTheActualFallbackSwaWindow) {
 }
 
 TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCompletion) {
-    auto cleanup = std::make_shared<TransferCompletionCleanup>();
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1260,7 +1259,8 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCom
     ASSERT_TRUE(engine->waitForBatches(2));
     engine->completeResult(1, ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "disk completion unknown"), false);
     EXPECT_FALSE(owner->done());
-    const auto frozen_tasks = env->cache->reclaimer().frozenTasks();
+    auto& reclaimer = env->cache->reclaimer();
+    const auto& frozen_tasks = reclaimer.frozen_;
     ASSERT_EQ(frozen_tasks.size(), 1u);
     for (size_t group = 0; group < env->groups.size(); ++group) {
         EXPECT_EQ(env->groups[group]->hostPool()->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
@@ -1285,10 +1285,10 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCom
     releaseTargets(refs);
     env->releaseMatch(match);
     env->reclaimAll();
-    for (const auto& target : frozen_tasks.front()->execution().target_blocks) {
+    for (const auto& target : frozen_tasks.begin()->second.targets) {
         EXPECT_EQ(target.pool->treeRefCount(target.block), 1u);
     }
-    frozen_tasks.front()->completeRecovery(*cleanup);
+    reclaimer.release(frozen_tasks.begin()->first, std::nullopt);
     env->expectFullyReclaimed();
 }
 

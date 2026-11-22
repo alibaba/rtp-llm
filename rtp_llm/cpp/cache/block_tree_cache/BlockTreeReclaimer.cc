@@ -1,43 +1,120 @@
-#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionWire.h"
+
+#include <algorithm>
 #include <limits>
+#include <numeric>
+#include <set>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+
 namespace rtp_llm {
-BlockTreeReclaimer::BlockTreeReclaimer(BlockTreeCache& tree): tree_(tree), completion_cleanup_(std::make_shared<TransferCompletionCleanup>()),
-    coordinator_(std::make_shared<FrozenTaskReclaimer>(completion_cleanup_)) {}
+namespace {
+constexpr size_t kForgetBatchSize = 1024;
+
+void encodeCompletionKey(const TransferCompletionKey& key, TransferCompletionKeyPB& wire) {
+    wire.set_trace_id(key.trace_id);
+    switch (key.legacy_wire_field) {
+        case TransferCompletionKey::LegacyWireField::TRANSFER_TRACE_ID:
+            wire.set_transfer_trace_id(std::stoull(key.trace_id));
+            break;
+        case TransferCompletionKey::LegacyWireField::KVCM_TRACE_ID:
+            wire.set_kvcm_trace_id(key.trace_id);
+            break;
+        case TransferCompletionKey::LegacyWireField::NONE:
+            wire.clear_trace();
+            break;
+    }
+}
+
+std::string decodeCompletionTraceId(const TransferCompletionKeyPB& wire) {
+    std::string legacy_id;
+    switch (wire.trace_case()) {
+        case TransferCompletionKeyPB::kTransferTraceId:
+            if (wire.transfer_trace_id() == 0)
+                return {};
+            legacy_id = std::to_string(wire.transfer_trace_id());
+            break;
+        case TransferCompletionKeyPB::kKvcmTraceId:
+            legacy_id = wire.kvcm_trace_id();
+            break;
+        default:
+            return wire.trace_id();
+    }
+    if (!wire.trace_id().empty() && wire.trace_id() != legacy_id)
+        return {};
+    return legacy_id;
+}
+
+auto callWorkers(BroadcastManager& manager, const std::vector<size_t>& workers, const FunctionRequestPB& request,
+                 std::chrono::steady_clock::time_point deadline, const char* operation) {
+    using namespace std::chrono;
+    const auto remaining = [&] { return ceil<milliseconds>(deadline - steady_clock::now()).count(); };
+    const auto timeout_ms = remaining();
+    using Result = std::shared_ptr<BroadcastResult<FunctionRequestPB, FunctionResponsePB>>;
+    if (timeout_ms <= 0)
+        return Result{};
+    const auto rpc_deadline = system_clock::now() + milliseconds(timeout_ms);
+    auto rpc = manager.broadcastToRanks<FunctionRequestPB, FunctionResponsePB>(
+        workers, request, static_cast<int>(timeout_ms),
+        [rpc_deadline](const auto& stub, const auto& context, const auto& message, auto* queue) {
+            context->set_deadline(rpc_deadline);
+            return stub->AsyncExecuteFunction(context.get(), message, queue);
+        }, std::nullopt, operation);
+    const auto wait_ms = remaining();
+    if (rpc && !rpc->done() && wait_ms > 0)
+        rpc->waitDone(static_cast<int>(wait_ms), false);
+    return rpc;
+}
+
+}
+
+BlockTreeReclaimer::BlockTreeReclaimer(std::shared_ptr<BlockTreeCacheMetricsReporter> metrics):
+    metrics_(std::move(metrics)) {}
+
 BlockTreeReclaimer::~BlockTreeReclaimer() {
     stop();
 }
 
-void BlockTreeReclaimer::configure(int rank, int64_t interval, int64_t timeout, int64_t force_release_timeout, std::shared_ptr<BroadcastManager> broadcast) {
+void BlockTreeReclaimer::configure(int rank, int64_t interval, int64_t timeout, int64_t force_timeout,
+                                   std::shared_ptr<BroadcastManager> broadcast) {
     rank_ = rank;
     interval_ms_ = interval;
     timeout_ms_ = timeout;
-    force_release_timeout_ms_ = force_release_timeout;
-    transfer_broadcast_manager_ = std::move(broadcast);
+    force_release_timeout_ms_ = force_timeout;
+    broadcast_ = std::move(broadcast);
 }
 
-bool BlockTreeReclaimer::validConfig(int64_t interval, int64_t timeout, int64_t force_release_timeout) {
-    return interval >= 0 && interval <= std::numeric_limits<int>::max() && timeout > 0 && timeout <= std::numeric_limits<int>::max()
-           && force_release_timeout >= 0 && force_release_timeout <= std::numeric_limits<int>::max();
+bool BlockTreeReclaimer::validConfig(int64_t interval, int64_t timeout, int64_t force_timeout) {
+    const auto maximum = std::numeric_limits<int>::max();
+    return interval >= 0 && interval <= maximum && timeout > 0 && timeout <= maximum
+           && force_timeout >= 0 && force_timeout <= maximum;
 }
 
 bool BlockTreeReclaimer::start() {
     if (!validConfig(interval_ms_, timeout_ms_, force_release_timeout_ms_))
         return false;
-    if (cleanup_thread_.joinable())
+    if (!threads_.empty())
         return true;
     stopped_ = false;
     try {
-        cleanup_thread_ = std::thread([this] { cleanupLoop(); });
-        if (startFrozenTaskRecovery())
-            return true;
+        auto start_worker = [this](auto method, int64_t interval) {
+            threads_.emplace_back(&BlockTreeReclaimer::periodic, this, method, interval);
+        };
+        start_worker(&BlockTreeReclaimer::cleanupExpiredMissing, 60000);
+        if (rank_ == 0) {
+            start_worker(&BlockTreeReclaimer::drainForget, 100);
+            if (interval_ms_ > 0)
+                start_worker(&BlockTreeReclaimer::queryFrozen, interval_ms_);
+            if (interval_ms_ > 0 && force_release_timeout_ms_ > 0)
+                start_worker(&BlockTreeReclaimer::releaseExpired, std::min(interval_ms_, force_release_timeout_ms_));
+        }
     } catch (...) {
-        RTP_LLM_LOG_ERROR("failed to start block tree reclaimer");
+        stop();
+        return false;
     }
-    stop();
-    return false;
+    return true;
 }
 
 void BlockTreeReclaimer::stop() noexcept {
@@ -46,103 +123,402 @@ void BlockTreeReclaimer::stop() noexcept {
         stopped_ = true;
     }
     cv_.notify_all();
-    stopFrozenTaskRecovery();
-    if (cleanup_thread_.joinable())
-        cleanup_thread_.join();
+    for (auto& worker : threads_)
+        worker.join();
+    threads_.clear();
 }
 
-bool BlockTreeReclaimer::startFrozenTaskRecovery() {
-    if (rank_ != 0 || interval_ms_ == 0 || frozen_task_recovery_)
-        return true;
-    auto recovery = std::make_unique<FrozenTaskRecovery>(*coordinator_,
-        [this](const auto& execution, const auto& pending, int timeout) { return queryTransferCompletion(execution, pending, timeout); },
-        FrozenTaskRecovery::Cleanup{},
-        [this](const auto& execution, bool forced) { tree_.reportUnfreezeMetrics(execution, forced); },
-        static_cast<int>(force_release_timeout_ms_));
-    if (!recovery->start(static_cast<int>(interval_ms_), static_cast<int>(timeout_ms_)))
+void BlockTreeReclaimer::periodic(void (BlockTreeReclaimer::*work)(), int64_t interval) {
+    while (!stopped_) {
+        try {
+            (this->*work)();
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("block tree reclamation failed: %s", error.what());
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("block tree reclamation failed");
+        }
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait_for(lock, std::chrono::milliseconds(interval), [this] { return stopped_.load(); });
+    }
+}
+
+bool BlockTreeReclaimer::registerTask(TransferCompletionKey trace, Participants participants,
+                                      std::vector<TransferTargetBlock> targets, std::string backend) {
+    if (trace.trace_id.empty() || participants.ranks == 0 || (!participants.remote && participants.ranks != 1))
         return false;
-    frozen_task_recovery_ = std::move(recovery);
+    Task task;
+    task.forget.push_back({std::move(trace), participants});
+    task.targets = std::move(targets);
+    task.backend = std::move(backend);
+    const auto& id = task.forget.front().trace.trace_id;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !frozen_.count(id) && registered_.try_emplace(id, std::move(task)).second;
+}
+
+void BlockTreeReclaimer::unregisterTask(const TransferCompletionKey& trace) {
+    TaskMap::node_type task;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        task = registered_.extract(trace.trace_id);
+    }
+    if (task)
+        unregisterTask(std::move(task), false);
+}
+
+void BlockTreeReclaimer::freezeTargetBlocksWithTraceIDAndStillIOWorkerID(const TransferCompletionKey& trace,
+                                                                         std::vector<TransferTargetBlock> target_blocks,
+                                                                         const std::vector<size_t>& workers) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = registered_.find(trace.trace_id);
+    if (it == registered_.end())
+        return;
+    auto& task = it->second;
+    if (!target_blocks.empty())
+        task.targets = std::move(target_blocks);
+    const auto ranks = task.forget.front().participants.ranks;
+    auto& pending = task.pending;
+    pending = workers;
+    if (pending.empty()) {
+        pending.resize(ranks);
+        std::iota(pending.begin(), pending.end(), size_t{0});
+    } else {
+        std::sort(pending.begin(), pending.end());
+        pending.erase(std::unique(pending.begin(), pending.end()), pending.end());
+        RTP_LLM_CHECK(pending.back() < ranks);
+    }
+    std::map<IBlockPool*, std::set<BlockIdxType>> groups;
+    for (const auto& target : task.targets) {
+        RTP_LLM_CHECK(target.pool != nullptr);
+        groups[target.pool.get()].insert(target.block);
+    }
+    std::vector<std::function<void()>> release;
+    for (const auto& [pool, blocks] : groups)
+        release.push_back(pool->prepareFrozenReferenceRelease({blocks.begin(), blocks.end()}));
+    task.release = std::move(release);
+    task.frozen_at = Clock::now();
+    for (const auto& [pool, blocks] : groups)
+        for (const auto block : blocks)
+            pool->freezeBlock(block);
+    frozen_.insert(registered_.extract(it));
+}
+
+bool BlockTreeReclaimer::unfreezeTargetBlocksInOneWorkerWithTraceID(const TransferCompletionKey& trace, size_t worker) {
+    return release(trace, worker);
+}
+
+bool BlockTreeReclaimer::release(const TransferCompletionKey& trace, std::optional<size_t> worker) {
+    TaskMap::node_type task;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = frozen_.find(trace.trace_id);
+        if (it == frozen_.end())
+            return false;
+        if (worker) {
+            auto& pending = it->second.pending;
+            const auto pos = std::lower_bound(pending.begin(), pending.end(), *worker);
+            if (pos == pending.end() || *pos != *worker)
+                return false;
+            pending.erase(pos);
+            if (!pending.empty())
+                return false;
+        }
+        task = frozen_.extract(it);
+    }
+    unregisterTask(std::move(task), !worker.has_value());
     return true;
 }
 
-void BlockTreeReclaimer::stopFrozenTaskRecovery() noexcept {
-    if (frozen_task_recovery_) {
-        frozen_task_recovery_->stop();
-        frozen_task_recovery_.reset();
+void BlockTreeReclaimer::unregisterTask(TaskMap::node_type task, bool forced) {
+    auto& entry = task.mapped();
+    for (auto& release_blocks : entry.release)
+        release_blocks();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        forget_queue_.splice(forget_queue_.end(), entry.forget);
+    }
+    if (metrics_ && entry.frozen_at != Clock::time_point{}) {
+        try {
+            metrics_->reportUnfreezeMetrics(entry.targets, entry.backend, forced);
+        } catch (...) {
+            RTP_LLM_LOG_WARNING("failed to report unfreeze metrics for trace=%s", task.key().c_str());
+        }
     }
 }
 
-void BlockTreeReclaimer::cleanupLoop() noexcept {
-    auto next_missing = std::chrono::steady_clock::now();
-    const auto stopped = [this] { return stopped_.load(); };
-    while (!stopped()) {
+void BlockTreeReclaimer::releaseExpired() {
+    if (force_release_timeout_ms_ == 0)
+        return;
+    std::vector<TransferCompletionKey> expired;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto cutoff = Clock::now() - std::chrono::milliseconds(force_release_timeout_ms_);
+        for (const auto& [id, task] : frozen_)
+            if (task.frozen_at <= cutoff)
+                expired.push_back(task.forget.front().trace);
+    }
+    for (const auto& trace : expired) {
+        if (stopped_)
+            break;
+        if (release(trace, std::nullopt))
+            RTP_LLM_LOG_WARNING("forced release of frozen transfer trace=%s", trace.trace_id.c_str());
+    }
+}
+
+void BlockTreeReclaimer::queryFrozen() {
+    std::vector<std::pair<Route, std::vector<size_t>>> work;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& [id, task] : frozen_)
+            work.emplace_back(task.forget.front(), task.pending);
+    }
+    for (const auto& [route, pending] : work) {
+        if (stopped_)
+            break;
+        std::vector<size_t> safe;
         try {
-            const auto now = std::chrono::steady_clock::now();
-            if (now >= next_missing) {
-                worker_registry_->cleanupExpiredMissing();
-                next_missing = now + std::chrono::minutes(1);
+            safe = query(route, pending);
+        } catch (...) {
+            continue;
+        }
+        for (const auto worker : safe) {
+            if (stopped_)
+                return;
+            unfreezeTargetBlocksInOneWorkerWithTraceID(route.trace, worker);
+        }
+    }
+}
+
+std::vector<size_t> BlockTreeReclaimer::query(const Route& route, const std::vector<size_t>& workers) {
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms_);
+    if (!route.participants.remote) {
+        const auto state = queryOne(route.trace.trace_id);
+        if (Clock::now() <= deadline && (state == State::BUFFER_SAFE || state == State::REJECTED))
+            return {0};
+        return {};
+    }
+    if (!broadcast_ || broadcast_->workerNum() != route.participants.ranks)
+        return {};
+    FunctionRequestPB request;
+    encodeCompletionKey(route.trace, *request.mutable_completion_query()->add_keys());
+    auto rpc = callWorkers(*broadcast_, workers, request, deadline, "completion_query");
+    if (!rpc)
+        return {};
+    std::vector<size_t> safe;
+    for (size_t i = 0; i < workers.size(); ++i) {
+        auto reply = rpc->responseIfSucceeded(i, deadline);
+        if (!reply || !reply->has_completion_query())
+            continue;
+        const auto& response = reply->completion_query();
+        if (response.worker_case() != TransferCompletionQueryResponsePB::kRank || response.rank() != workers[i]
+            || response.entries_size() != 1)
+            continue;
+        const auto& entry = response.entries(0);
+        if (decodeCompletionTraceId(entry.key()) != route.trace.trace_id)
+            continue;
+        if ((entry.state() == TRANSFER_COMPLETION_BUFFER_SAFE && !entry.admission_closed())
+            || (entry.state() == TRANSFER_COMPLETION_UNKNOWN && entry.admission_closed()))
+            safe.push_back(workers[i]);
+    }
+    return safe;
+}
+
+std::vector<bool> BlockTreeReclaimer::forget(const std::vector<TransferCompletionKey>& traces, Participants participants) {
+    const auto deadline = Clock::now() + std::chrono::seconds(1);
+    const auto ranks = participants.ranks;
+    std::vector<bool> done(traces.size(), false);
+    if (!participants.remote) {
+        for (size_t i = 0; i < traces.size() && Clock::now() < deadline && !stopped_; ++i)
+            done[i] = forgetOne(traces[i].trace_id) == ForgetResult::DONE;
+        return done;
+    }
+    if (!broadcast_ || broadcast_->workerNum() != ranks)
+        return done;
+    FunctionRequestPB request;
+    for (const auto& trace : traces)
+        encodeCompletionKey(trace, *request.mutable_completion_forget()->add_keys());
+    std::vector<size_t> workers(ranks);
+    std::iota(workers.begin(), workers.end(), size_t{0});
+    auto rpc = callWorkers(*broadcast_, workers, request, deadline, "completion_forget");
+    if (!rpc)
+        return done;
+    std::fill(done.begin(), done.end(), true);
+    for (size_t i = 0; i < ranks; ++i) {
+        auto reply = rpc->responseIfSucceeded(i, deadline);
+        if (!reply || !reply->has_completion_forget())
+            return std::vector<bool>(traces.size(), false);
+        const auto& response = reply->completion_forget();
+        if (response.worker_case() != TransferCompletionForgetResponsePB::kRank || response.rank() != i
+            || static_cast<size_t>(response.entries_size()) != traces.size())
+            return std::vector<bool>(traces.size(), false);
+        for (size_t j = 0; j < traces.size(); ++j) {
+            const auto& entry = response.entries(j);
+            done[j] = done[j] && decodeCompletionTraceId(entry.key()) == traces[j].trace_id
+                      && entry.status() == TRANSFER_FORGET_DONE;
+        }
+    }
+    return done;
+}
+
+void BlockTreeReclaimer::drainForget() {
+    std::list<Route> work;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        work.swap(forget_queue_);
+    }
+    while (!work.empty() && !stopped_) {
+        const auto& route = work.front();
+        auto end = work.begin();
+        std::vector<TransferCompletionKey> traces;
+        try {
+            while (end != work.end() && end->participants.remote == route.participants.remote
+                   && end->participants.ranks == route.participants.ranks && traces.size() < kForgetBatchSize) {
+                traces.push_back(end->trace);
+                ++end;
             }
-            if (rank_ == 0) {
-                completion_cleanup_->drain(
-                    [this](const auto& target, const auto& traces, int timeout) {
-                        return forgetTransferCompletion(target, traces, timeout);
-                    }, 1000, stopped);
+            const auto done = forget(traces, route.participants);
+            auto it = work.begin();
+            for (bool acknowledged : done) {
+                auto current = it++;
+                if (acknowledged)
+                    work.erase(current);
             }
         } catch (...) {
-            RTP_LLM_LOG_WARNING("block tree daily cleanup failed; retrying next pass");
+            if (end == work.begin())
+                break;
         }
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait_for(lock, std::chrono::milliseconds(100), stopped);
+        std::lock_guard<std::mutex> lock(mutex_);
+        forget_queue_.splice(forget_queue_.end(), work, work.begin(), end);
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    forget_queue_.splice(forget_queue_.end(), work);
+}
+
+bool BlockTreeReclaimer::registerOnWorkerTaskWithTraceID(const std::string& id, OfferedCallback offeredQuery, OfferedCallback offeredForget) {
+    if (id.empty())
+        return false;
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    const auto [it, inserted] = records_.try_emplace(id);
+    if (inserted) {
+        it->second.query = std::move(offeredQuery);
+        it->second.forget = std::move(offeredForget);
+    } else if (it->second.state == State::REJECTED) {
+        expirations_.erase(it->second.expiry);
+        records_.erase(it);
+    }
+    return inserted;
+}
+
+bool BlockTreeReclaimer::ioFinishedOnWorkerWithTraceID(const std::string& id) {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    const auto it = records_.find(id);
+    if (it == records_.end())
+        return false;
+    if (it->second.state == State::REJECTED)
+        extendMissing(it->second);
+    else
+        it->second.state = State::BUFFER_SAFE;
+    return true;
+}
+
+std::vector<TransferTaskRegistry::State> BlockTreeReclaimer::queryIfIoFinishedInOneWorkerWithTraceIDs(const std::vector<std::string>& ids) {
+    std::vector<State> result;
+    result.reserve(ids.size());
+    for (const auto& id : ids)
+        result.push_back(queryOne(id));
+    return result;
+}
+
+std::vector<TransferTaskRegistry::ForgetResult> BlockTreeReclaimer::forgetTaskInfoOnWorker(const std::vector<std::string>& ids) {
+    std::vector<ForgetResult> result;
+    result.reserve(ids.size());
+    for (const auto& id : ids)
+        result.push_back(forgetOne(id));
+    return result;
+}
+
+void BlockTreeReclaimer::cleanupExpiredMissing() {
+    std::unique_lock<std::mutex> lock(worker_mutex_, std::try_to_lock);
+    if (!lock.owns_lock())
+        return;
+    const auto now = now_();
+    size_t removed = 0;
+    while (removed < 128 && !expirations_.empty() && expirations_.begin()->first <= now) {
+        records_.erase(expirations_.begin()->second);
+        expirations_.erase(expirations_.begin());
+        ++removed;
     }
 }
 
-std::vector<std::shared_ptr<FrozenTask>> BlockTreeReclaimer::frozenTasks() const {
-    return coordinator_->frozenTasks();
+TransferTaskRegistry::State BlockTreeReclaimer::localState(const std::string& id) const {
+    std::lock_guard<std::mutex> lock(worker_mutex_);
+    const auto it = records_.find(id);
+    return it == records_.end() ? State::UNKNOWN : it->second.state;
 }
 
+void BlockTreeReclaimer::extendMissing(Record& record) {
+    const auto hour = std::chrono::hours(1);
+    const auto base = std::max(now_(), record.expiry->first);
+    auto node = expirations_.extract(record.expiry);
+    node.key() = std::min(base, Clock::time_point::max() - hour) + hour;
+    record.expiry = expirations_.insert(std::move(node));
+}
 
-TransferTaskRegistry::State BlockTreeReclaimer::localTransferCompletion(const TransferCompletionKey& key) const {
-    if (key.trace_id.empty()) {
-        return TransferTaskRegistry::State::UNKNOWN;
+TransferTaskRegistry::State BlockTreeReclaimer::queryOne(const std::string& id) {
+    if (id.empty())
+        return State::UNKNOWN;
+    std::unique_lock<std::mutex> lock(worker_mutex_);
+    const auto [it, inserted] = records_.try_emplace(id);
+    auto& record = it->second;
+    if (inserted) {
+        try {
+            record.expiry = expirations_.emplace(Clock::time_point::min(), id);
+        } catch (...) {
+            records_.erase(it);
+            throw;
+        }
+        record.state = State::REJECTED;
     }
-    return worker_registry_->queryIfIoFinishedInOneWorkerWithTraceIDs({key.trace_id}).front();
-}
-
-
-TransferTaskRegistry::ForgetResult
-BlockTreeReclaimer::localForgetTransferCompletion(const TransferCompletionKey& key) const {
-    using Result = TransferTaskRegistry::ForgetResult;
-    if (key.trace_id.empty()) {
-        RTP_LLM_LOG_WARNING("completion forget requires a nonempty execution trace");
-        return Result::INVALID;
+    if (record.state == State::REJECTED) {
+        extendMissing(record);
+    } else if (record.query && !record.forgetting) {
+        ++record.queries;
+        lock.unlock();
+        try {
+            record.query();
+        } catch (...) {
+        }
+        lock.lock();
+        --record.queries;
     }
-    return worker_registry_->forgetTaskInfoOnWorker({key.trace_id}).front();
+    return record.state;
 }
 
-
-TransferCompletionForgetResult
-BlockTreeReclaimer::forgetTransferCompletion(const TransferCompletionTarget& target,
-                                        const std::vector<TransferCompletionKey>& traces, int timeout_ms) const {
-    return TransferCompletionForget(transfer_broadcast_manager_,
-                                    [this](const TransferCompletionKey& trace) {
-                                        return localForgetTransferCompletion(trace);
-                                    }).forget(target, traces, timeout_ms);
+TransferTaskRegistry::ForgetResult BlockTreeReclaimer::forgetOne(const std::string& id) {
+    if (id.empty())
+        return ForgetResult::INVALID;
+    std::unique_lock<std::mutex> lock(worker_mutex_);
+    auto it = records_.find(id);
+    if (it == records_.end() || it->second.state == State::REJECTED)
+        return ForgetResult::DONE;
+    auto& record = it->second;
+    if (record.state != State::BUFFER_SAFE || record.queries || record.forgetting)
+        return ForgetResult::RUNNING;
+    if (record.forget) {
+        record.forgetting = true;
+        lock.unlock();
+        try {
+            record.forget();
+        } catch (...) {
+            lock.lock();
+            record.forgetting = false;
+            return ForgetResult::FAILED;
+        }
+        lock.lock();
+    }
+    auto removed = records_.extract(id);
+    lock.unlock();
+    return ForgetResult::DONE;
 }
-
-
-TransferCompletionQueryResult BlockTreeReclaimer::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
-                                                                    const std::vector<size_t>& pending, int timeout_ms) const {
-    TransferCompletionIdentity identity;
-    identity.key                 = execution.key;
-    identity.remote              = execution.uses_rpc;
-    identity.expected_rank_count = execution.rank_count;
-    return TransferCompletionQuery(transfer_broadcast_manager_,
-                                   [this](const TransferCompletionKey& key) {
-                                       return localTransferCompletion(key);
-                                   })
-        .query(identity, pending, timeout_ms);
-}
-
 
 bool BlockTreeReclaimer::executeFunction(BlockTreeReclaimer* owner, int rank, const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_completion_forget()) {
@@ -150,7 +526,7 @@ bool BlockTreeReclaimer::executeFunction(BlockTreeReclaimer* owner, int rank, co
         forget_response->Clear();
         forget_response->set_rank(static_cast<uint32_t>(rank));
         const auto& keys = request.completion_forget().keys();
-        if (static_cast<size_t>(keys.size()) > kTransferCompletionForgetBatchSize) {
+        if (static_cast<size_t>(keys.size()) > kForgetBatchSize) {
             RTP_LLM_LOG_WARNING("completion forget batch exceeds limit: %d", keys.size());
             return false;
         }
@@ -158,17 +534,17 @@ bool BlockTreeReclaimer::executeFunction(BlockTreeReclaimer* owner, int rank, co
             auto* entry = forget_response->add_entries();
             entry->mutable_key()->CopyFrom(key);
             const auto trace_id = decodeCompletionTraceId(key);
-            auto result = TransferTaskRegistry::ForgetResult::INVALID;
+            auto result = ForgetResult::INVALID;
             if (!trace_id.empty())
-                result = owner ? owner->localForgetTransferCompletion(trace_id) : TransferTaskRegistry::ForgetResult::FAILED;
+                result = owner ? owner->forgetOne(trace_id) : ForgetResult::FAILED;
             switch (result) {
-                case TransferTaskRegistry::ForgetResult::DONE:
+                case ForgetResult::DONE:
                     entry->set_status(TRANSFER_FORGET_DONE);
                     break;
-                case TransferTaskRegistry::ForgetResult::RUNNING:
+                case ForgetResult::RUNNING:
                     entry->set_status(TRANSFER_FORGET_RUNNING);
                     break;
-                case TransferTaskRegistry::ForgetResult::INVALID:
+                case ForgetResult::INVALID:
                     entry->set_status(TRANSFER_FORGET_INVALID);
                     break;
                 default:
@@ -186,16 +562,16 @@ bool BlockTreeReclaimer::executeFunction(BlockTreeReclaimer* owner, int rank, co
             auto* entry = query_response->add_entries();
             entry->mutable_key()->CopyFrom(key);
             const auto trace_id = decodeCompletionTraceId(key);
-            const auto state = owner ? owner->localTransferCompletion(trace_id) : TransferTaskRegistry::State::UNKNOWN;
+            const auto state = owner ? owner->queryOne(trace_id) : State::UNKNOWN;
             switch (state) {
-                case TransferTaskRegistry::State::REJECTED:
+                case State::REJECTED:
                     entry->set_state(TRANSFER_COMPLETION_UNKNOWN);
                     entry->set_admission_closed(true);
                     break;
-                case TransferTaskRegistry::State::RUNNING:
+                case State::RUNNING:
                     entry->set_state(TRANSFER_COMPLETION_RUNNING);
                     break;
-                case TransferTaskRegistry::State::BUFFER_SAFE:
+                case State::BUFFER_SAFE:
                     entry->set_state(TRANSFER_COMPLETION_BUFFER_SAFE);
                     break;
                 default:

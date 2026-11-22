@@ -4,14 +4,12 @@
 #include <condition_variable>
 #include <cstddef>
 #include <functional>
-#include <list>
 #include <memory>
 #include <mutex>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskReclaimer.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 
 namespace rtp_llm {
 
@@ -50,27 +48,17 @@ public:
     // queued business settlement must be drained separately afterwards.
     void waitForTransfers() const;
 
-    // Snapshot retained records, retiring RELEASED owners outside the list lock.
-    // FROZEN and RELEASING records remain; enumeration never unfreezes blocks.
-    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
-
-    const TransferTaskRegistry& taskRegistry() const {
-        return *task_registry_;
-    }
-
-    void setReclaimers(std::shared_ptr<FrozenTaskReclaimer> coordinator,
-                       std::shared_ptr<TransferTaskRegistry> worker);
+    void setReclaimer(std::shared_ptr<BlockTreeReclaimer> reclaimer) { reclaimer_ = std::move(reclaimer); }
 
 private:
     class InflightTicket;
     std::shared_ptr<InflightTicket> trackTransfer() const;
     struct CoordinatedExecution;
-    void warnRegistrySize() const noexcept;
 
     std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
                                                            const char*  completion_operation = nullptr) const;
     void submitCoordinated(TransferTask task, TransferDoneCallback done, const char* completion_operation) const;
-    std::vector<FrozenTask::TargetBlock> targetBlocks(const TransferTask& task) const;
+    std::vector<TransferTargetBlock> targetBlocks(const TransferTask& task) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;
@@ -78,11 +66,7 @@ private:
     mutable std::condition_variable               inflight_cv_;
     mutable size_t                                inflight_count_{0};
     std::function<void()>                         drain_observer_for_test_;
-    std::shared_ptr<FrozenTaskReclaimer> coordinator_{std::make_shared<FrozenTaskReclaimer>(
-        std::make_shared<TransferCompletionCleanup>())};
-    std::shared_ptr<TransferTaskRegistry>          task_registry_{std::make_shared<TransferTaskRegistry>()};
-    std::shared_ptr<TransferCompletionCleanup>     completion_cleanup_;
-    mutable std::atomic<size_t>                   next_registry_warning_{4096};
+    std::shared_ptr<BlockTreeReclaimer> reclaimer_{std::make_shared<BlockTreeReclaimer>()};
 };
 
 using BlockTransferDispatcherPtr = std::shared_ptr<BlockTransferDispatcher>;

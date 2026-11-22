@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <future>
@@ -641,7 +642,7 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionWithoutFreezingL
         ASSERT_EQ(requests.size(), 1u);
         EXPECT_EQ(requests.front().op(), REMOTE_OPERATION_WRITE);
     }
-    EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_TRUE(backend->reclaimer_->frozen_.empty());
     backend->shutdown();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count);
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
@@ -1123,7 +1124,7 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-    EXPECT_TRUE(backend->frozenTasks().empty());
+    EXPECT_TRUE(backend->reclaimer_->frozen_.empty());
 }
 
 TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {

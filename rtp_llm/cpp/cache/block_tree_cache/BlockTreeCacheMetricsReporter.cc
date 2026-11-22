@@ -77,7 +77,7 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
 }
 BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
 
-void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const {
+void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const std::vector<TransferTargetBlock>& blocks, const std::string& backend, bool forced) const {
     if (!metrics_reporter_) {
         return;
     }
@@ -86,7 +86,7 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::Exec
         std::unordered_set<BlockIdxType> blocks;
     };
     std::unordered_map<const IBlockPool*, PoolTargets> targets;
-    for (const auto& target : execution.target_blocks) {
+    for (const auto& target : blocks) {
         auto& pool_targets = targets[target.pool.get()];
         switch (target.pool->poolType()) {
             case BlockPoolType::DEVICE: pool_targets.tier = Tier::DEVICE; break;
@@ -100,7 +100,7 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::Exec
         collector.blocks = static_cast<int64_t>(pool_targets.blocks.size());
         kmonitor::MetricsTags tags("pool_name", pool->poolName());
         tags.AddTag("tier", tierName(pool_targets.tier));
-        tags.AddTag("backend", execution.backend);
+        tags.AddTag("backend", backend);
         tags.AddTag("forced", forced ? "true" : "false");
         metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
     }

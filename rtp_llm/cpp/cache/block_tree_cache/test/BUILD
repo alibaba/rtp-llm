@@ -26,6 +26,21 @@ test_deps = [
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
 
 cc_test(
+    name = "block_tree_reclaimer_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["BlockTreeReclaimerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        ":completion_rpc_test_server",
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@grpc//:grpc++",
+    ],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "block_tree_task_pool_test",
     srcs = ["BlockTreeTaskPoolTest.cc"],
     copts = test_copts,

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
@@ -346,7 +347,7 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionWithoutFreezingL
         EXPECT_FALSE(pools_[group]->isFrozen(blocks_[group]));
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
     }
-    EXPECT_TRUE(backend_->frozenTasks().empty());
+    EXPECT_TRUE(backend_->reclaimer_->frozen_.empty());
     backend_->shutdown();
     EXPECT_EQ(state_->destroyed, 3u);
 }
