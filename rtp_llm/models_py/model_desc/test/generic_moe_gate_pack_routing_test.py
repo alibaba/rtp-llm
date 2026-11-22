@@ -116,7 +116,7 @@ class GenericMoeGatePackRoutingTest(TestCase):
                     layer.gate = Mock(
                         return_value=torch.zeros(n, 512, dtype=torch.bfloat16)
                     )
-                    layer(x)
+                    layer(x, expert_load=None)
                     self.assertEqual(
                         backend.calls[-1], "separate" if split and n > 4096 else "fused"
                     )
@@ -167,7 +167,7 @@ class GenericMoeGatePackRoutingTest(TestCase):
                 with patch.object(
                     layer.select_topk, "forward", wraps=layer.select_topk.forward
                 ) as topk:
-                    output = layer(x)
+                    output = layer(x, expert_load=None)
                     self.assertEqual(topk.call_count, int(n > 4096))
                 self.assertIs(output, x)
                 self.assertEqual(

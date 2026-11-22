@@ -660,6 +660,18 @@ class MMScheduler:
         request.remaining_chunks = len(chunks)
         request.next_chunk_index = 1
 
+    @staticmethod
+    def _prepare_items(prepare, work_items):
+        prepared = prepare(
+            [wi.preprocess_result for wi in work_items],
+            [wi.mm_type for wi in work_items],
+        )
+        if len(prepared) != len(work_items):
+            raise OutputCountMismatchError(
+                "prepare_embedding_inputs returned the wrong item count"
+            )
+        return prepared
+
     def _reserve_preparation(self, req: _EmbeddingRequest, deadline: float) -> None:
         with self._admission:
             if self._stopped.is_set():
@@ -759,7 +771,9 @@ class MMScheduler:
                             f"MMScheduler queue full (admission_limit={self._max_queue_size}), "
                             "request rejected"
                         )
-                        vit_media.failure("embedding.queue", error, vit_media.item_media(work_items))
+                        vit_media.failure(
+                            "embedding.queue", error, vit_media.item_media(work_items)
+                        )
                         raise error
                     self._enqueue_chunk(req.chunks[0])
 
@@ -768,14 +782,7 @@ class MMScheduler:
                 # Each model owns producer streams and allocator lifetime;
                 # batched_embedding establishes the dependency on those streams.
                 work_items = req.chunks[0].work_items
-                prepared = prepare(
-                    [wi.preprocess_result for wi in work_items],
-                    [wi.mm_type for wi in work_items],
-                )
-                if len(prepared) != len(work_items):
-                    raise OutputCountMismatchError(
-                        "prepare_embedding_inputs returned the wrong item count"
-                    )
+                prepared = self._prepare_items(prepare, work_items)
                 timeout_s = req.deadline - time.monotonic()
                 with self._lock:
                     if self._stopped.is_set():
@@ -1353,13 +1360,24 @@ class MMScheduler:
             req.future.set_result(None)
             req.chunks = []
             return
+        next_chunk = req.chunks[req.next_chunk_index]
+        prepare = getattr(self._mm_part, "prepare_embedding_inputs", None)
+        if prepare is not None and not self._stopped.is_set():
+            try:
+                items = next_chunk.work_items
+                for wi, data in zip(items, self._prepare_items(prepare, items)):
+                    wi.preprocess_result = data
+            except Exception as error:
+                failure = self._failure_details(error)
+                self._clear_exception_references(error)
+                self._fail(req, *failure)
+                return
         with self._lock:
             if self._stopped.is_set():
                 self._fail(
                     req, "RuntimeError", "MMScheduler closed before request completed"
                 )
                 return
-            next_chunk = req.chunks[req.next_chunk_index]
             req.next_chunk_index += 1
             self._enqueue_chunk(next_chunk)
 

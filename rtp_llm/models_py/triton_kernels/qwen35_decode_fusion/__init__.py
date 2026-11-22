@@ -11,4 +11,3 @@ from rtp_llm.models_py.triton_kernels.qwen35_decode_fusion.env import (
 )
 
 __all__ = ["DECODE_FUSION_ENV", "is_decode_fusion_enabled"]
-

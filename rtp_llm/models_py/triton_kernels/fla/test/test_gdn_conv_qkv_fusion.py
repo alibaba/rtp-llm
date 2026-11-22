@@ -149,6 +149,7 @@ class ConvQkvFusionTest(unittest.TestCase):
 
         from rtp_llm.models_py.model_desc.qwen3_next import (
             Qwen3NextGatedDeltaNetPrefill,
+            Qwen3NextMetadata,
         )
 
         OUT.mkdir(parents=True, exist_ok=True)
@@ -206,10 +207,18 @@ class ConvQkvFusionTest(unittest.TestCase):
                 },
             ):
                 ref = Qwen3NextGatedDeltaNetPrefill._fla(
-                    obj, mixed, b, a, c0, 2048, args
+                    obj, mixed, b, a, c0, 2048, args, Qwen3NextMetadata()
                 )
                 got = Qwen3NextGatedDeltaNetPrefill._fla(
-                    obj, run.x, b, a, c1, 2048, args, normalized_qkv=qkv
+                    obj,
+                    run.x,
+                    b,
+                    a,
+                    c1,
+                    2048,
+                    args,
+                    Qwen3NextMetadata(),
+                    normalized_qkv=qkv,
                 )
             record = {
                 "lengths": lengths,

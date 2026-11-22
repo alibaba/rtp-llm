@@ -194,7 +194,14 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
                 f"smaller than input tokens={tokens}"
             )
 
-    def _launch(self, y: torch.Tensor, tokens: int, device: torch.device, **kwargs):
+    def _launch(
+        self,
+        y: torch.Tensor,
+        tokens: int,
+        device: torch.device,
+        expert_load=None,
+        **kwargs,
+    ):
         from deep_gemm import mega_fp8
 
         self._maybe_pre_kernel_barrier(tokens)
@@ -203,6 +210,10 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             f".tokens{tokens}.before_deepgemm",
             device,
         )
+        if expert_load is not None:
+            kwargs["cumulative_local_expert_recv_stats"] = (
+                expert_load.expert_token_counts
+            )
         mega_fp8.fp8_fp8_mega_moe(
             y,
             self.l1,
@@ -215,7 +226,7 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             **kwargs,
         )
 
-    def forward_gate_pack(self, x, gate_payload):
+    def forward_gate_pack(self, x, gate_payload, *, expert_load=None):
         if not self.supports_gate_pack:
             raise RuntimeError(
                 "MegaMoE FP8 fused gate packing requires the fused packer"
@@ -243,15 +254,15 @@ class MegaMoeFp8Executor(MegaMoeExecutor):
             tid2eid=gate_payload.tid2eid,
         )
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load=expert_load)
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
-    def forward(self, x, weights, indices):
+    def forward(self, x, weights, indices, *, expert_load=None):
         """Return BF16 routed output; participate even for local T=0."""
         tokens = x.size(0)
         buf = self._mega_buf
         self._validate_capacity(tokens)
         self._input_packer.pack(x, weights, indices, buf, tokens)
         y = self._mega_y[:tokens]
-        self._launch(y, tokens, x.device)
+        self._launch(y, tokens, x.device, expert_load=expert_load)
         return y

@@ -138,7 +138,9 @@ class FlashInferDecodeAdapter(unittest.TestCase):
             ssm = (
                 _strided_ssm(pages, hv, device)
                 if strided
-                else torch.randn(pages, hv, 128, 128, device=device, dtype=torch.bfloat16)
+                else torch.randn(
+                    pages, hv, 128, 128, device=device, dtype=torch.bfloat16
+                )
                 * 0.01
             )
             block_map = torch.zeros(batch, n_pages, device=device, dtype=torch.int32)
@@ -207,7 +209,9 @@ class FlashInferDecodeAdapter(unittest.TestCase):
         read_page = (plus_1 - 2) // seq_size
         n_pages = read_page + 1
         pages = 1 + batch
-        ssm = torch.randn(pages, hv, 128, 128, device=device, dtype=torch.bfloat16) * 0.01
+        ssm = (
+            torch.randn(pages, hv, 128, 128, device=device, dtype=torch.bfloat16) * 0.01
+        )
         block_map = torch.zeros(batch, n_pages, device=device, dtype=torch.int32)
         block_map[:, read_page] = torch.arange(
             1, batch + 1, device=device, dtype=torch.int32
@@ -227,6 +231,7 @@ class FlashInferDecodeAdapter(unittest.TestCase):
             head_k_dim=128,
             head_v_dim=128,
             _get_ssm_states=lambda c: c,
+            _is_target_verify=Qwen3NextGatedDeltaNetDecode._is_target_verify,
             _get_fla_block_map=lambda attn: attn.kv_cache_kernel_block_id_device,
             _get_bs_from_attenion_input=lambda mixed, attn, verify: (
                 mixed.shape[0],
@@ -239,7 +244,14 @@ class FlashInferDecodeAdapter(unittest.TestCase):
             with patch.dict(os.environ, {"RTP_QWEN35_GDN_DECODE_BACKEND": backend}):
                 self.assertEqual(gdn_decode_backend(), backend)
                 y = Qwen3NextGatedDeltaNetDecode._fla(
-                    obj, mixed, b, a, cache, seq_size, args, False
+                    obj,
+                    mixed,
+                    b,
+                    a,
+                    cache,
+                    seq_size,
+                    args,
+                    SimpleNamespace(is_target_verify=False),
                 )
             return y, cache
 

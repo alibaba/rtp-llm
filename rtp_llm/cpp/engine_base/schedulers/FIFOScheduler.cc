@@ -46,18 +46,19 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1) {
     cache_load_wakeup_->owner = this;
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
-                     "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
-                     "enable_mixed_continuous_batching is [%d], prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
-                     "scheduler_poll_interval_ms is [%lld]",
-                     max_generate_batch_size_,
-                     max_batch_tokens_size_,
-                     max_batch_tokens_without_cache_,
-                     cp_force_single_prefill_,
-                     enable_mixed_continuous_batching_,
-                     prefill_cp_size_,
-                     max_inited_kv_cache_streams_,
-                     static_cast<long long>(poll_interval_.count()));
+    RTP_LLM_LOG_INFO(
+        "max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
+        "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
+        "enable_mixed_continuous_batching is [%d], prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu], "
+        "scheduler_poll_interval_ms is [%lld]",
+        max_generate_batch_size_,
+        max_batch_tokens_size_,
+        max_batch_tokens_without_cache_,
+        cp_force_single_prefill_,
+        enable_mixed_continuous_batching_,
+        prefill_cp_size_,
+        max_inited_kv_cache_streams_,
+        static_cast<long long>(poll_interval_.count()));
     if (runtime_config.fifo_scheduler_config.enable_mixed_continuous_batching && !enable_mixed_continuous_batching_) {
         RTP_LLM_LOG_WARNING(
             "mixed continuous batching was requested but is currently supported only for the multimodal "
@@ -319,21 +320,14 @@ bool FIFOScheduler::fitsMixedKVCapacity(const GenerateStreamPtr&            cand
     if (candidate->maxBatchSize() != 1) {
         return false;
     }
-    const auto snapshots = cache_manager_->poolMetricsSnapshots();
-    const bool per_pool = !snapshots.empty();
+    const auto           snapshots = cache_manager_->poolMetricsSnapshots();
+    const bool           per_pool  = !snapshots.empty();
     std::vector<int64_t> available_blocks;
     std::vector<int64_t> reserve_blocks;
     if (per_pool) {
-        available_blocks.resize(snapshots.size());
-        reserve_blocks.resize(snapshots.size());
-        std::vector<bool> seen_pool(snapshots.size(), false);
         for (const auto& snapshot : snapshots) {
-            if (snapshot.pool_index >= snapshots.size() || seen_pool[snapshot.pool_index]) {
-                return false;
-            }
-            seen_pool[snapshot.pool_index] = true;
-            available_blocks[snapshot.pool_index] = static_cast<int64_t>(snapshot.available_blocks);
-            reserve_blocks[snapshot.pool_index] = static_cast<int64_t>(snapshot.reserve_blocks);
+            available_blocks.push_back(static_cast<int64_t>(snapshot.available_blocks));
+            reserve_blocks.push_back(static_cast<int64_t>(snapshot.reserve_blocks));
         }
     } else {
         available_blocks.push_back(static_cast<int64_t>(cache_manager_->availableBlocksNum()));
@@ -345,8 +339,12 @@ bool FIFOScheduler::fitsMixedKVCapacity(const GenerateStreamPtr&            cand
         }
         const auto tokens = stream->completeTokenIdsPtr();
         return cache_manager_->estimateSingleSequencePeakNeedBlocksByPool(
-            stream->kvCachePtr(), stream->seqLength(), std::min(tokens->commonSeqLength(), stream->seqLength()),
-            remaining_tokens, tokens->getReserveStep(), stream->streamCacheResource().reuseCache());
+            stream->kvCachePtr(),
+            stream->seqLength(),
+            std::min(tokens->commonSeqLength(), stream->seqLength()),
+            remaining_tokens,
+            tokens->getReserveStep(),
+            stream->streamCacheResource().reuseCache());
     };
 
     // A fresh prefill must fit above every pool's own reserve watermark.
@@ -363,9 +361,9 @@ bool FIFOScheduler::fitsMixedKVCapacity(const GenerateStreamPtr&            cand
         }
     }
 
-    std::vector<int64_t> outstanding_blocks(available_blocks.size(), 0);
+    std::vector<int64_t>                      outstanding_blocks(available_blocks.size(), 0);
     std::unordered_set<const GenerateStream*> seen;
-    const auto account_stream = [&](const GenerateStreamPtr& stream) {
+    const auto                                account_stream = [&](const GenerateStreamPtr& stream) {
         if (!stream || stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone)
             || !seen.insert(stream.get()).second) {
             return true;

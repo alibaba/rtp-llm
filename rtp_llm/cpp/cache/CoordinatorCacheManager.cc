@@ -447,8 +447,8 @@ std::vector<CachePoolMetrics> CoordinatorCacheManager::poolMetrics() const {
             continue;
         }
 
-        const size_t               pool_index = groupIdForTag(group->tag());
-        CachePoolMetrics           metrics_data;
+        const size_t     pool_index = groupIdForTag(group->tag());
+        CachePoolMetrics metrics_data;
         metrics_data.pool_index                  = pool_index;
         metrics_data.pool_name                   = pool->poolName();
         metrics_data.block_size_bytes            = pool->blockSizeBytes();
@@ -752,10 +752,10 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
     std::lock_guard<std::mutex> lock(malloc_mutex_);
     bool                        success = materializeInitialBlocks(malloc_info, prepared, &context, matched_blocks);
     if (success) {
-        auto prefill_info                        = malloc_info;
+        auto prefill_info                         = malloc_info;
         prefill_info.enable_remove_skipped_blocks = false;
-        const auto incr_result                   = incrMalloc(prefill_info);
-        success                = incr_result.success;
+        const auto incr_result                    = incrMalloc(prefill_info);
+        success                                   = incr_result.success;
         if (!success) {
             prepared.materialize_status = incr_result.status;
         }
@@ -1044,13 +1044,17 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         if (skip_remote_reused_write_) {
             // Remote reuse is recorded only after adopting a successful load; counts use canonical keys.
             const auto& resource = kv_cache_resource->cacheResource(batch_id);
-            remote_reuse_end = std::min(resource.reuseBlockNum(), publish_prefix);
+            remote_reuse_end     = std::min(resource.reuseBlockNum(), publish_prefix);
             remote_reuse_begin =
                 std::min(resource.reuseBlockNum() - resource.storageBackendReuseBlockNum(), remote_reuse_end);
         }
-        resident_prefix_length += block_tree_cache_->insert(
-            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
-            remote_reuse_begin, remote_reuse_end);
+        resident_prefix_length += block_tree_cache_->insert(insert_keys,
+                                                            resources,
+                                                            insert_info.target_tier,
+                                                            insert_info.is_resident,
+                                                            insert_info.request_id,
+                                                            remote_reuse_begin,
+                                                            remote_reuse_end);
     }
 }
 
@@ -1076,7 +1080,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     }
 
     const auto ref_type              = is_connector ? DeviceBlockRefType::PD_CONNECTOR : DeviceBlockRefType::REQUEST;
-    auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
+    auto       selected_resource_ptr = new KVCacheResource(kvcache_resource);
     auto       deleter               = [self = shared_from_this(), ref_type](KVCacheResource* resource) {
         self->decrKVCacheRef(*resource, ref_type);
         delete resource;
@@ -1410,8 +1414,7 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
             for (int group_id = 0; group_id < group_nums; ++group_id) {
                 const auto& tag       = config_.groupTags()[static_cast<size_t>(group_id)];
                 auto&       block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
-                kv_cache_groups_[static_cast<size_t>(group_id)]->reference(block_ids,
-                                                                           old_resource.blocks(tag));
+                kv_cache_groups_[static_cast<size_t>(group_id)]->reference(block_ids, old_resource.blocks(tag));
 
                 if (copy_last_block && !block_ids.blocks().empty()) {
                     const int  old_block       = block_ids.popBack();
@@ -1514,7 +1517,11 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
 
 std::vector<int> CoordinatorCacheManager::estimateSingleSequencePeakNeedBlocksByPool(
     const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, bool enable_reuse_cache) const {
+    int                            seq_len,
+    int                            common_seq_len,
+    int                            remaining_tokens,
+    int                            reserve_step,
+    bool                           enable_reuse_cache) const {
     // This admission API deliberately excludes batch fan-out and CP sharding.
     // Those paths retain the existing separated scheduler behavior.
     if (!batch_kv_cache_resource || batch_kv_cache_resource->batchSize() != 1
@@ -1525,19 +1532,29 @@ std::vector<int> CoordinatorCacheManager::estimateSingleSequencePeakNeedBlocksBy
     if (!fresh && batch_kv_cache_resource->groupNums() != static_cast<int>(kv_cache_groups_.size())) {
         return {};
     }
-    common_seq_len = std::clamp(common_seq_len, 0, seq_len);
+    common_seq_len   = std::clamp(common_seq_len, 0, seq_len);
     remaining_tokens = std::max(remaining_tokens, 0);
-    std::vector<int> needs;
-    needs.reserve(kv_cache_groups_.size());
-    for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
-        const auto& group = kv_cache_groups_[gid];
-        const int need = fresh ?
-            group->estimateInitialBatchPeakNeedBlocks(
-                seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache, 1) :
-            group->estimatePeakNeedBlocks(seq_len,
-                                         batch_kv_cache_resource->cacheResource(0).blocks(group->tag()),
-                                         remaining_tokens, reserve_step, enable_reuse_cache);
-        needs.push_back(std::max(need, 0));
+    std::vector<int>                              needs;
+    std::unordered_map<const IBlockPool*, size_t> pool_indices;
+    // Match poolMetrics() order, including layouts with multiple groups sharing a pool.
+    for (const auto& group : kv_cache_groups_) {
+        if (!group || !group->blockPool()) {
+            return {};
+        }
+        auto [entry, inserted] = pool_indices.emplace(group->blockPool().get(), needs.size());
+        if (inserted) {
+            needs.push_back(0);
+        }
+        const int need =
+            fresh ? group->estimateInitialBatchPeakNeedBlocks(
+                        seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache, 1) :
+                    group->estimatePeakNeedBlocks(seq_len,
+                                                  batch_kv_cache_resource->cacheResource(0).blocks(group->tag()),
+                                                  remaining_tokens,
+                                                  reserve_step,
+                                                  enable_reuse_cache);
+        auto& total = needs[entry->second];
+        total += std::min(std::max(need, 0), std::numeric_limits<int>::max() - total);
     }
     return needs;
 }

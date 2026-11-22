@@ -48,8 +48,7 @@ def mega_moe_fp8_se_available():
     except ImportError:
         return False
     return (
-        "shared_expert_gates"
-        in inspect.signature(mega_fp8.fp8_fp8_mega_moe).parameters
+        "shared_expert_gates" in inspect.signature(mega_fp8.fp8_fp8_mega_moe).parameters
         and getattr(mega_fp8, "RTP_GATED_SHARED_EXPERT_SEMANTICS", 0) == 1
     )
 
@@ -228,16 +227,14 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             or shared_gates.device != device
             or not shared_gates.is_contiguous()
         ):
-            raise ValueError(
-                "Shared gates must be contiguous CUDA FP32 [local_tokens]"
-            )
+            raise ValueError("Shared gates must be contiguous CUDA FP32 [local_tokens]")
         return dict(
             shared_l1_weights=self.shared_l1,
             shared_l2_weights=self.shared_l2,
             shared_expert_gates=shared_gates,
         )
 
-    def forward(self, x, weights, indices, extra_expert_args=None):
+    def forward(self, x, weights, indices, extra_expert_args=None, *, expert_load=None):
         """Return BF16 routed+shared output; participate even for local T=0."""
         tokens = x.size(0)
         self._validate_capacity(tokens)
@@ -245,7 +242,11 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         self._input_packer.pack(x, weights, indices, self._mega_buf, tokens, block_m)
         y = self._mega_y[:tokens]
         self._launch(
-            y, tokens, x.device, **self._shared_kwargs(extra_expert_args, tokens, x.device)
+            y,
+            tokens,
+            x.device,
+            expert_load=expert_load,
+            **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y
 
@@ -254,6 +255,8 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         x: torch.Tensor,
         gate_payload: ExpertGatePayload,
         extra_expert_args=None,
+        *,
+        expert_load=None,
     ):
         if not self.supports_gate_pack:
             raise RuntimeError(
@@ -292,7 +295,11 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
         )
         y = self._mega_y[:tokens]
         self._launch(
-            y, tokens, x.device, **self._shared_kwargs(extra_expert_args, tokens, x.device)
+            y,
+            tokens,
+            x.device,
+            expert_load=expert_load,
+            **self._shared_kwargs(extra_expert_args, tokens, x.device),
         )
         return y, buf.topk_weights[:tokens], buf.topk_idx[:tokens]
 
@@ -317,7 +324,10 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             )
         if getattr(payload, "gate_payload", None) is not None:
             output, topk_weights, topk_ids = self.forward_gate_pack(
-                payload.expert_x, payload.gate_payload, extra_expert_args
+                payload.expert_x,
+                payload.gate_payload,
+                extra_expert_args,
+                expert_load=payload.expert_load,
             )
             payload.expert_topk_weights = topk_weights
             payload.expert_topk_ids = topk_ids
@@ -332,7 +342,11 @@ class MegaMoeFp8SEExecutor(MegaMoeFp8Executor):
             fused_expert_output=self._restore_output_dtype(
                 payload,
                 self.forward(
-                    payload.expert_x, topk_weights, topk_ids, extra_expert_args
+                    payload.expert_x,
+                    topk_weights,
+                    topk_ids,
+                    extra_expert_args,
+                    expert_load=payload.expert_load,
                 ),
             )
         )

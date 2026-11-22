@@ -10,7 +10,10 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNetPrefill
+from rtp_llm.models_py.model_desc.qwen3_next import (
+    Qwen3NextGatedDeltaNetPrefill,
+    Qwen3NextMetadata,
+)
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
     RmsNormGated,
     layer_norm_fwd,
@@ -117,7 +120,7 @@ class PrefillDispatch(unittest.TestCase):
                             )
                         )
                     y = Qwen3NextGatedDeltaNetPrefill._fla(
-                        obj, mixed, b, a, c, 2048, args
+                        obj, mixed, b, a, c, 2048, args, Qwen3NextMetadata()
                     )
                 return y, c
 

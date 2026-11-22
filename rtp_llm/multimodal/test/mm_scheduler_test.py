@@ -371,6 +371,25 @@ class MMSchedulerTest(TestCase):
             self.assertTrue(all(value >= 0.0 for value in wait_values))
             self.assertGreater(max(wait_values), 0.0)
 
+    def test_preparation_follows_cost_aware_chunks(self):
+        part = _FakeMMPart(work_budget=MMWorkEstimate(input_patches=1))
+        prepared_sizes = []
+
+        def prepare(data, types):
+            prepared_sizes.append(len(data))
+            return data
+
+        part.prepare_embedding_inputs = prepare
+        scheduler = MMScheduler(part, max_batch_images=1)
+        try:
+            items = [_FakeWorkItem(input_patches=1) for _ in range(3)]
+            scheduler.submit_and_wait(items)
+            self.assertEqual(prepared_sizes, [1, 1, 1])
+            self.assertEqual(part.calls, [1, 1, 1])
+            self.assertEqual(scheduler._preparation_admitted, 0)
+        finally:
+            scheduler.close()
+
     def test_preparation_overlaps_previous_forward(self):
         from concurrent.futures import ThreadPoolExecutor
 

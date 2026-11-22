@@ -229,7 +229,14 @@ class PrefillFourTest(unittest.TestCase):
             ) as original:
                 with self.assertRaisesRegex(RuntimeError, "stop after gating"):
                     model.Qwen3NextGatedDeltaNetPrefill._fla(
-                        obj, object(), object(), object(), None, 2048, SimpleNamespace()
+                        obj,
+                        object(),
+                        object(),
+                        object(),
+                        None,
+                        2048,
+                        SimpleNamespace(),
+                        model.Qwen3NextMetadata(),
                     )
                 supports.assert_called_once()
                 self.assertEqual(tiled.call_count, int(supported))
