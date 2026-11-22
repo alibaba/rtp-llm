@@ -38,6 +38,17 @@ struct ExpertLoadMonitor::Impl {
         }
     }
 
+    torch::Tensor reportWindow() const {
+        const auto& gpu_window = world_size > 1 ? gathered_window : window;
+        return gpu_window.view(
+            {static_cast<int64_t>(world_size), static_cast<int64_t>(capacity), static_cast<int64_t>(layer_count)});
+    }
+
+    double readBalance(const torch::Tensor& gpu_window) {
+        host_moe_lb.copy_(reduceExpertLoadWindow(gpu_window, ep_size), false);
+        return host_moe_lb.item<double>();
+    }
+
     void consumeWindow() {
         RTP_LLM_PROFILE_SCOPE("expert_load_monitor.consume_window");
         // Dense models have no writers on any rank. Preserve the empty-window
@@ -56,19 +67,14 @@ struct ExpertLoadMonitor::Impl {
             }
             return;
         }
-        auto gpu_window = window;
         if (world_size > 1) {
             execAllGather({{gathered_window}, ParallelMode::DP_AND_TP, {window}, false});
             if (world_rank != 0) {
                 return;
             }
-            gpu_window = gathered_window;
         }
-        gpu_window = gpu_window.view(
-            {static_cast<int64_t>(world_size), static_cast<int64_t>(capacity), static_cast<int64_t>(layer_count)});
-        // Copy only the GPU-reduced scalar to the preallocated pinned buffer.
-        host_moe_lb.copy_(reduceExpertLoadWindow(gpu_window, ep_size), false);
-        report(host_moe_lb.item<double>());
+        const auto gpu_window = reportWindow();
+        report(readBalance(gpu_window));
         if (snapshot) {
             snapshot->dump(gpu_window, forward_id, mapping_epoch);
         }
@@ -154,6 +160,17 @@ ExpertLoadMonitor::ExpertLoadMonitor(size_t                       layer_count,
 }
 
 ExpertLoadMonitor::~ExpertLoadMonitor() = default;
+
+void ExpertLoadMonitor::warmup() {
+    auto& state = *impl_;
+    if (state.world_rank != 0 || !state.host_moe_lb.defined()) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(state.forward_id == 0, "Expert load monitor warmup must precede recording");
+    auto gpu_window = state.reportWindow();
+    gpu_window.zero_();
+    state.readBalance(gpu_window);
+}
 
 const torch::Tensor& ExpertLoadMonitor::stepCountsBuffer() const {
     return impl_->step_expert_token_counts;

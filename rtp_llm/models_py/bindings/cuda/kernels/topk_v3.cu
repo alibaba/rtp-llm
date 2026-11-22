@@ -120,7 +120,7 @@ __device__ __forceinline__ void finish_output(const TopKProblemT<Score>& problem
     }
 }
 
-template<int Level, bool kAlignedInput, bool kFilterFinite, typename Score>
+template<int Level, bool kAlignedInput, bool kFilterFinite, typename Score, unsigned kLongMaskWords = 0>
 __global__ __launch_bounds__(kBlockSize, kOccupancy) void main_kernel(const __grid_constant__ Params<Score> params) {
     auto problem = params.problem(blockIdx.x);
     if (problem.seq_len <= problem.topk) {
@@ -139,7 +139,7 @@ __global__ __launch_bounds__(kBlockSize, kOccupancy) void main_kernel(const __gr
         if (problem.seq_len <= kReg4MaxSeqLen) {
             Register4::forward<false, kAlignedInput>(problem, &smem);
         } else {
-            Streaming::forward<false, kAlignedInput>(problem, &smem);
+            Streaming::forward<false, kAlignedInput, kLongMaskWords>(problem, &smem);
         }
     }
     finish_output<kFilterFinite>(problem);
@@ -218,86 +218,105 @@ cudaError_t launch_cluster(
 }
 
 template<bool kAlignedInput, bool kFilterFinite, typename Score>
-cudaError_t launch_topk(const Params<Score>& params, int64_t k, int64_t max_seq_len, cudaStream_t stream) {
+cudaError_t launch_topk(
+    const Params<Score>& params, int64_t k, uint32_t reference_rows, int64_t reference_width, cudaStream_t stream) {
     const uint32_t batch = params.batch;
     cudaError_t    error = cudaSuccess;
-    if (max_seq_len <= kReg1MaxSeqLen && (batch <= 32 || k <= 1024)) {
+    if constexpr (kFilterFinite && std::is_same_v<Score, __nv_bfloat16>) {
+        // These reference dimensions already select ordinary streaming.
+        // Size the classification masks per width to limit register pressure.
+        if (k == 512 && reference_rows > kCluster2LongBatchLimit && reference_width > kCluster32KMaxSeqLen
+            && reference_width <= Streaming::kLongMaskMaxSeqLen<13>) {
+            const auto* properties = at::cuda::getCurrentDeviceProperties();
+            if (properties->major == 10 && properties->minor == 3) {
+                if (reference_width <= Streaming::kLongMaskMaxSeqLen<5>) {
+                    main_kernel<2, kAlignedInput, kFilterFinite, Score, 5><<<batch, kBlockSize, 0, stream>>>(params);
+                } else if (reference_width <= Streaming::kLongMaskMaxSeqLen<8>) {
+                    main_kernel<2, kAlignedInput, kFilterFinite, Score, 8><<<batch, kBlockSize, 0, stream>>>(params);
+                } else {
+                    main_kernel<2, kAlignedInput, kFilterFinite, Score, 13><<<batch, kBlockSize, 0, stream>>>(params);
+                }
+                return cudaGetLastError();
+            }
+        }
+    }
+    if (reference_width <= kReg1MaxSeqLen && (reference_rows <= 32 || k <= 1024)) {
         main_kernel<-1, kAlignedInput, kFilterFinite, Score><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kReg2MaxSeqLen) {
+    } else if (reference_width <= kReg2MaxSeqLen) {
         main_kernel<0, kAlignedInput, kFilterFinite, Score><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kReg4MaxSeqLen) {
+    } else if (reference_width <= kReg4MaxSeqLen) {
         main_kernel<1, kAlignedInput, kFilterFinite, Score><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kCluster32KMaxSeqLen && batch <= kCluster8SmallBatchLimit) {
+    } else if (reference_width <= kCluster32KMaxSeqLen && reference_rows <= kCluster8SmallBatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster8::kClusterSize,
                                stream);
-    } else if (max_seq_len <= kCluster32KMaxSeqLen && batch <= kCluster4SmallBatchLimit) {
+    } else if (reference_width <= kCluster32KMaxSeqLen && reference_rows <= kCluster4SmallBatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster4::kClusterSize,
                                stream);
-    } else if (max_seq_len <= kCluster32KMaxSeqLen) {
+    } else if (reference_width <= kCluster32KMaxSeqLen) {
         main_kernel<2, kAlignedInput, kFilterFinite, Score><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen && batch <= kCluster8SmallBatchLimit) {
+    } else if (reference_width <= kCluster64KMaxSeqLen && reference_rows <= kCluster8SmallBatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster8::kClusterSize,
                                stream);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen && batch <= kCluster4BatchLimit) {
+    } else if (reference_width <= kCluster64KMaxSeqLen && reference_rows <= kCluster4BatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster4::kClusterSize,
                                stream);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen && batch <= kCluster2BatchLimit) {
+    } else if (reference_width <= kCluster64KMaxSeqLen && reference_rows <= kCluster2BatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster2, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster2::kClusterSize,
                                stream);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen) {
+    } else if (reference_width <= kCluster64KMaxSeqLen) {
         main_kernel<2, kAlignedInput, kFilterFinite, Score><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (batch <= kCluster8LongBatchLimit) {
+    } else if (reference_rows <= kCluster8LongBatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster8::kClusterSize,
                                stream);
-    } else if (batch <= kCluster4BatchLimit && max_seq_len <= kCluster4MaxSeqLen) {
+    } else if (reference_rows <= kCluster4BatchLimit && reference_width <= kCluster4MaxSeqLen) {
         error = launch_cluster(direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster4::kClusterSize,
                                stream);
-    } else if (batch <= kCluster4BatchLimit) {
+    } else if (reference_rows <= kCluster4BatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster8::kClusterSize,
                                stream);
-    } else if (batch <= kCluster2BatchLimit && max_seq_len <= kCluster2MaxSeqLen) {
+    } else if (reference_rows <= kCluster2BatchLimit && reference_width <= kCluster2MaxSeqLen) {
         error = launch_cluster(direct_cluster_kernel<Cluster2, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster2::kClusterSize,
                                stream);
-    } else if (batch <= kCluster2BatchLimit) {
+    } else if (reference_rows <= kCluster2BatchLimit) {
         error = launch_cluster(direct_cluster_kernel<Cluster4, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster4::kClusterSize,
                                stream);
-    } else if (batch <= kCluster2LongBatchLimit && max_seq_len > 131072) {
+    } else if (reference_rows <= kCluster2LongBatchLimit && reference_width > 131072) {
         error = launch_cluster(direct_cluster_kernel<Cluster2, kAlignedInput, kFilterFinite, Score>,
                                params,
                                batch,
                                Cluster2::kClusterSize,
                                stream);
-    } else if (!uniform_plan_uses_cluster(batch, static_cast<uint32_t>(max_seq_len))) {
+    } else if (!uniform_plan_uses_cluster(reference_rows, static_cast<uint32_t>(reference_width))) {
         main_kernel<2, kAlignedInput, kFilterFinite, Score><<<batch, kBlockSize, 0, stream>>>(params);
     } else {
         error = launch_cluster(persistent_cluster_kernel<Cluster8, kAlignedInput, kFilterFinite, Score>,
@@ -315,6 +334,8 @@ cudaError_t launch_scores(const torch::Tensor& scores,
                           torch::Tensor&       output,
                           int64_t              k,
                           int64_t              max_seq_len,
+                          uint32_t             reference_rows,
+                          int64_t              reference_width,
                           cudaStream_t         stream) {
     const Params<Score> params{
         .scores      = static_cast<const Score*>(scores.data_ptr()),
@@ -328,8 +349,8 @@ cudaError_t launch_scores(const torch::Tensor& scores,
     constexpr uintptr_t kVectorAlignment = 4 * sizeof(Score);
     const bool          aligned_input    = (reinterpret_cast<uintptr_t>(params.scores) % kVectorAlignment == 0)
                                && ((params.stride * sizeof(Score)) % kVectorAlignment == 0);
-    return aligned_input ? launch_topk<true, kFilterFinite>(params, k, max_seq_len, stream) :
-                           launch_topk<false, kFilterFinite>(params, k, max_seq_len, stream);
+    return aligned_input ? launch_topk<true, kFilterFinite>(params, k, reference_rows, reference_width, stream) :
+                           launch_topk<false, kFilterFinite>(params, k, reference_rows, reference_width, stream);
 }
 
 }  // namespace
@@ -340,7 +361,9 @@ void topk_v3_impl(const torch::Tensor& scores,
                   torch::Tensor&       output,
                   torch::Tensor&       workspace,
                   int64_t              k,
-                  int64_t              max_seq_len) {
+                  int64_t              max_seq_len,
+                  int64_t              reference_rows  = 0,
+                  int64_t              reference_width = 0) {
     TORCH_CHECK(scores.is_cuda() && lengths.is_cuda() && output.is_cuda() && workspace.is_cuda(),
                 "scores, lengths, output, and workspace must be CUDA tensors");
     TORCH_CHECK(lengths.device() == scores.device() && output.device() == scores.device()
@@ -364,13 +387,34 @@ void topk_v3_impl(const torch::Tensor& scores,
         return;
     }
 
+    if (reference_rows == 0 && reference_width == 0) {
+        reference_rows  = scores.size(0);
+        reference_width = max_seq_len;
+    }
+    TORCH_CHECK(reference_rows > 0 && reference_rows <= std::numeric_limits<uint32_t>::max(),
+                "invalid reference row count");
+    TORCH_CHECK(reference_width >= max_seq_len && reference_width <= std::numeric_limits<int32_t>::max(),
+                "reference width must cover the maximum visible score");
     const c10::cuda::CUDAGuard device_guard(scores.device());
 
     const auto        stream = at::cuda::getCurrentCUDAStream(scores.get_device());
-    const cudaError_t error =
-        scores.dtype() == torch::kFloat32 ?
-            launch_scores<float, kFilterFinite>(scores, lengths, output, k, max_seq_len, stream) :
-            launch_scores<__nv_bfloat16, kFilterFinite>(scores, lengths, output, k, max_seq_len, stream);
+    const cudaError_t error  = scores.dtype() == torch::kFloat32 ?
+                                   launch_scores<float, kFilterFinite>(scores,
+                                                                      lengths,
+                                                                      output,
+                                                                      k,
+                                                                      max_seq_len,
+                                                                      static_cast<uint32_t>(reference_rows),
+                                                                      reference_width,
+                                                                      stream) :
+                                   launch_scores<__nv_bfloat16, kFilterFinite>(scores,
+                                                                              lengths,
+                                                                              output,
+                                                                              k,
+                                                                              max_seq_len,
+                                                                              static_cast<uint32_t>(reference_rows),
+                                                                              reference_width,
+                                                                              stream);
     TORCH_CHECK(error == cudaSuccess, "DeepSeek V4 TopK launch failed: ", cudaGetErrorString(error));
 }
 
@@ -390,6 +434,23 @@ void dsv41_topk_v3_finite(const torch::Tensor& scores,
                           int64_t              k,
                           int64_t              max_seq_len) {
     topk_v3_impl<true>(scores, lengths, output, workspace, k, max_seq_len);
+}
+
+void dsv41_topk_v3_with_reference(const torch::Tensor& scores,
+                                  const torch::Tensor& lengths,
+                                  torch::Tensor&       output,
+                                  torch::Tensor&       workspace,
+                                  int64_t              k,
+                                  int64_t              max_seq_len,
+                                  int64_t              reference_rows,
+                                  int64_t              reference_width,
+                                  bool                 filter_finite) {
+    TORCH_CHECK(reference_rows > 0 && reference_width > 0, "dispatch reference must be positive");
+    if (filter_finite) {
+        topk_v3_impl<true>(scores, lengths, output, workspace, k, max_seq_len, reference_rows, reference_width);
+    } else {
+        topk_v3_impl<false>(scores, lengths, output, workspace, k, max_seq_len, reference_rows, reference_width);
+    }
 }
 
 }  // namespace torch_ext

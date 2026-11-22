@@ -6,10 +6,12 @@ twice — once for Attention and once for MoE FFN.
 
 import logging
 import os
+from contextlib import nullcontext
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv41.fp8.attention import (
@@ -691,25 +693,68 @@ class Block(nn.Module):
                     x_pre, positions, shared_quant
                 )
                 del shared_quant
-                residual, post, comb, input_ids = plan.compact_l20(
-                    self, residual, post, comb, input_ids
+                references = (
+                    plan.prepare_early_indexer(self.attn, self.ffn, x_pre)
+                    if plan.early_indexer
+                    else None
                 )
-                x_pre = plan.exchange.compact(x_pre)
-                qkv = qkv._replace(qr=plan.exchange.compact(qkv.qr))
-                common = plan.l20_query_metadata(common)
-                with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
-                    attn_out = self.attn._prefill_query(
-                        x_pre, common, qkv, swa, swa_starts
+                if plan.early_indexer_fallback:
+                    with plan.candidate_publication(self.attn._shared_attention):
+                        attn_out = self.attn._prefill_query(
+                            x_pre, common, qkv, swa, swa_starts
+                        )
+                else:
+                    # Match the full source GEMM shape, then exchange only its
+                    # per-head weights instead of the normalized hidden rows.
+                    weight = self.attn.index_weights
+                    indexer_weights = (
+                        F.linear(x_pre, weight)
+                        if plan.exchange.send_sizes and any(plan.exchange.send_sizes)
+                        else x_pre.new_empty((x_pre.shape[0], weight.shape[0]))
                     )
+                    del x_pre
+                    residual, post, comb, input_ids = plan.compact_l20(
+                        self, residual, post, comb, input_ids
+                    )
+                    indexer_weights = plan.exchange.compact(indexer_weights)
+                    qkv = qkv._replace(qr=plan.exchange.compact(qkv.qr))
+                    common = plan.l20_query_metadata(common, self.attn.freqs_cis)
+                    shared = self.attn._shared_attention
+                    if references is not None:
+                        shared["ced_l20_references"] = references
+                    try:
+                        with bind_attn_cache(self.attn, cp_ctx=common.cp_ctx):
+                            attn_out = self.attn._prefill_query(
+                                None,
+                                common,
+                                qkv,
+                                swa,
+                                swa_starts,
+                                indexer_weights=indexer_weights,
+                            )
+                    finally:
+                        shared.pop("ced_l20_references", None)
+                    del indexer_weights
                 del qkv, swa
             finally:
                 self.attn._clear_compressor_pool_context()
+        # Stage0 can preserve its normal prepared MegaMoE inputs on fallback.
+        moe_inputs = (
+            self.ffn.prepare_mhc_inputs(attn_out)
+            if plan.early_indexer_fallback and type(self.ffn) is MoE
+            else None
+        )
         fused = self._try_mega_mhc(
             attn_out,
             residual,
             post,
             comb,
-            original_tokens=plan.original_context.chunk_length,
+            original_tokens=(
+                None
+                if plan.early_indexer_fallback
+                else plan.original_context.chunk_length
+            ),
+            **({"moe_inputs": moe_inputs} if moe_inputs is not None else {}),
         )
         x = attn_post(attn_out, residual, post, comb) if fused is None else fused[0]
         self._sync_after_first_cp_prefill_attention()
@@ -719,8 +764,19 @@ class Block(nn.Module):
             x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         else:
             _, x_pre, post, comb = fused
-        with plan.router_projection(self.ffn):
-            ffn_out = self.ffn(x_pre, input_ids, expert_load=expert_load)
+        if plan.early_indexer_fallback:
+            routing = nullcontext()
+        elif plan.early_indexer:
+            routing = plan.original_native_routing(self.ffn)
+        else:
+            routing = plan.router_projection(self.ffn)
+        with routing:
+            if fused is not None and moe_inputs is not None:
+                ffn_out = self.ffn(
+                    x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
+                )
+            else:
+                ffn_out = self.ffn(x_pre, input_ids, expert_load=expert_load)
         return ffn_post(ffn_out, residual, post, comb), input_ids
 
     def forward(

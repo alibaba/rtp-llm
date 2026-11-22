@@ -935,10 +935,177 @@ struct TopKRegister: TopKRadixBase<12> {
 // ---------------------------------------------------------------------------
 
 struct TopKStreaming: TopKRegister<2> {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+private:
+    template<bool Aligned, typename Callback>
+    SGL_DEVICE static void visit_pairs(const __nv_bfloat16* in, uint32_t seq_len, Callback&& callback) {
+        using Vector             = AlignedVector<__nv_bfloat16, kVecSize>;
+        const uint32_t threads_x = threadIdx.x;
+        const uint32_t full      = seq_len / kVecSize;
+        uint32_t       vec       = threads_x;
+        Vector         prefetched;
+        const auto     read = [&](Vector& value, uint32_t i) {
+            if constexpr (Aligned)
+                value.load(in, i);
+            else
+                value.load_unaligned(in, i);
+        };
+        if (vec < full)
+            read(prefetched, vec);
+        while (vec < full) {
+            const Vector   current = prefetched;
+            const uint32_t base    = vec * kVecSize;
+            vec += kBlockSize;
+            if (vec < full)
+                read(prefetched, vec);
+            callback(__halves2bfloat162(current[0], current[1]), base);
+            callback(__halves2bfloat162(current[2], current[3]), base + 2);
+        }
+    }
+
+    template<bool Aligned>
+    SGL_DEVICE static void
+    collect_from_masks(const TopKProblemT<__nv_bfloat16>& problem, Smem* smem, float v_lo, float v_hi) {
+        const auto high    = __bfloat162bfloat162(__float2bfloat16_ru(v_hi));
+        const auto low     = __bfloat162bfloat162(__float2bfloat16_ru(v_lo));
+        const auto pack    = [](uint32_t mask) { return (mask & 1u) | ((mask >> 15) & 2u); };
+        uint32_t   greater = 0;
+        uint32_t   equal   = 0;
+        uint32_t   shift   = 0;
+        visit_pairs<Aligned>(problem.in, problem.seq_len, [&](const __nv_bfloat162 x, uint32_t) {
+            const uint32_t gt = v_hi < FLT_MAX ? __hgeu2_mask(x, high) : __hneu2_mask(x, x);
+            const uint32_t eq = __hge2_mask(x, low) & ~gt;
+            greater |= pack(gt) << shift;
+            equal |= pack(eq) << shift;
+            shift += 2;
+        });
+
+        const uint32_t tail       = problem.seq_len / kVecSize * kVecSize;
+        const uint32_t lane       = threadIdx.x;
+        const bool     has_tail   = lane < problem.seq_len - tail;
+        const float    tail_score = has_tail ? problem.load(tail + lane) : 0.0f;
+        const bool     tail_gt    = has_tail && above_coarse_threshold(tail_score, v_hi);
+        const bool     tail_eq    = has_tail && !tail_gt && tail_score >= v_lo;
+
+        // At most 32768 entries. The two counts never carry across 16-bit fields.
+        __syncthreads();
+        const uint32_t count  = (__popc(greater) + tail_gt) | ((__popc(equal) + tail_eq) << 16);
+        const uint32_t prefix = block_exclusive_prefix(count, smem->warp_sum, &smem->threshold_bin);
+        if (lane == 0) {
+            smem->count_gt = smem->threshold_bin & 0xffffu;
+            smem->count_eq = smem->threshold_bin >> 16;
+        }
+
+        // Preserve thread-major and then vector-major order, including the tail.
+        const auto input_index = [&](uint32_t bit) {
+            return (bit / kVecSize * kBlockSize + lane) * kVecSize + bit % kVecSize;
+        };
+        uint32_t pos_gt = prefix & 0xffffu;
+        uint32_t pos_eq = prefix >> 16;
+        while (greater != 0 && pos_gt < problem.topk) {
+            const uint32_t bit = __ffs(greater) - 1;
+            greater &= greater - 1;
+            problem.emit(pos_gt++, input_index(bit));
+        }
+        while (equal != 0 && pos_eq < kMaxNumTie) {
+            const uint32_t bit = __ffs(equal) - 1;
+            equal &= equal - 1;
+            const uint32_t idx         = input_index(bit);
+            smem->tie.values[pos_eq++] = {problem.load(idx), idx};
+        }
+        if (tail_gt && pos_gt < problem.topk) {
+            problem.emit(pos_gt, tail + lane);
+        }
+        if (tail_eq && pos_eq < kMaxNumTie) {
+            smem->tie.values[pos_eq] = {tail_score, tail + lane};
+        }
+    }
+
+    template<bool Aligned, unsigned kLongMaskWords>
+    SGL_DEVICE static void
+    collect_from_long_masks(const TopKProblemT<__nv_bfloat16>& problem, Smem* smem, float v_lo, float v_hi) {
+        const auto high = __bfloat162bfloat162(__float2bfloat16_ru(v_hi));
+        const auto low  = __bfloat162bfloat162(__float2bfloat16_ru(v_lo));
+        const auto pack = [](uint32_t mask) { return (mask & 1u) | ((mask >> 15) & 2u); };
+        // Cache classifications so only boundary ties reload their score.
+        uint32_t    greater[kLongMaskWords]{};
+        uint32_t    equal[kLongMaskWords]{};
+        const auto* in         = problem.in;
+        using Vector           = AlignedVector<__nv_bfloat16, kVecSize>;
+        const uint32_t vectors = problem.seq_len / kVecSize;
+#pragma unroll
+        for (unsigned word = 0; word < kLongMaskWords; ++word) {
+#pragma unroll
+            for (unsigned index = 0; index < 8; ++index) {
+                const uint32_t vec = threadIdx.x + (word * 8 + index) * kBlockSize;
+                if (vec < vectors) {
+                    Vector values;
+                    if constexpr (Aligned)
+                        values.load(in, vec);
+                    else
+                        values.load_unaligned(in, vec);
+                    const auto     first  = __halves2bfloat162(values[0], values[1]);
+                    const auto     second = __halves2bfloat162(values[2], values[3]);
+                    const uint32_t hi_a   = v_hi < FLT_MAX ? __hgeu2_mask(first, high) : __hneu2_mask(first, first);
+                    const uint32_t hi_b   = v_hi < FLT_MAX ? __hgeu2_mask(second, high) : __hneu2_mask(second, second);
+                    const uint32_t lo_a   = __hge2_mask(first, low) & ~hi_a;
+                    const uint32_t lo_b   = __hge2_mask(second, low) & ~hi_b;
+                    greater[word] |= (pack(hi_a) | (pack(hi_b) << 2)) << (4 * index);
+                    equal[word] |= (pack(lo_a) | (pack(lo_b) << 2)) << (4 * index);
+                }
+            }
+        }
+
+        const uint32_t tail       = problem.seq_len / kVecSize * kVecSize;
+        const uint32_t lane       = threadIdx.x;
+        const bool     has_tail   = lane < problem.seq_len - tail;
+        const float    tail_score = has_tail ? problem.load(tail + lane) : 0.0f;
+        const bool     tail_gt    = has_tail && above_coarse_threshold(tail_score, v_hi);
+        const bool     tail_eq    = has_tail && !tail_gt && tail_score >= v_lo;
+
+        uint32_t n_gt = tail_gt;
+        uint32_t n_eq = tail_eq;
+#pragma unroll
+        for (unsigned word = 0; word < kLongMaskWords; ++word) {
+            n_gt += __popc(greater[word]);
+            n_eq += __popc(equal[word]);
+        }
+        __syncthreads();
+        uint32_t   pos_gt      = block_exclusive_prefix(n_gt, smem->warp_sum, &smem->count_gt);
+        uint32_t   pos_eq      = block_exclusive_prefix(n_eq, smem->warp_sum, &smem->count_eq);
+        const auto input_index = [&](uint32_t bit) {
+            return (bit / kVecSize * kBlockSize + lane) * kVecSize + bit % kVecSize;
+        };
+#pragma unroll
+        for (unsigned word = 0; word < kLongMaskWords; ++word) {
+            uint32_t gt = greater[word];
+            uint32_t eq = equal[word];
+            while (gt && pos_gt < problem.topk) {
+                const uint32_t bit = __ffs(gt) - 1;
+                gt &= gt - 1;
+                problem.emit(pos_gt++, input_index(32 * word + bit));
+            }
+            while (eq && pos_eq < kMaxNumTie) {
+                const uint32_t bit = __ffs(eq) - 1;
+                eq &= eq - 1;
+                const uint32_t idx         = input_index(32 * word + bit);
+                smem->tie.values[pos_eq++] = {problem.load(idx), idx};
+            }
+        }
+        if (tail_gt && pos_gt < problem.topk) {
+            problem.emit(pos_gt, tail + lane);
+        }
+        if (tail_eq && pos_eq < kMaxNumTie) {
+            smem->tie.values[pos_eq] = {tail_score, tail + lane};
+        }
+    }
+#endif
 public:
     static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
+    template<unsigned Words>
+    static constexpr uint32_t kLongMaskMaxSeqLen = kBlockSize * 32 * Words;
 
-    template<bool kUsePDL, bool kAlignedInput, typename Score>
+    template<bool kUsePDL, bool kAlignedInput, unsigned kLongMaskWords = 0, typename Score>
     SGL_DEVICE static void forward(const TopKProblemT<Score> problem, void* _smem) {
         const auto tx   = threadIdx.x;
         const auto smem = static_cast<Smem*>(_smem);
@@ -974,36 +1141,21 @@ public:
         const float v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
         const float v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
         const auto  topk          = problem.topk;
-        // Deterministic positions: one extra counting sweep, a thread-order
-        // block prefix, then emit/append in the same iteration order. The
-        // atomicAdd version ordered emissions and tie-buffer fill by SM arrival
-        // (run-to-run output order and tie membership varied).
-        uint32_t my_gt = 0;
-        uint32_t my_eq = 0;
-        for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t) {
-            if (above_coarse_threshold(val, v_hi))
-                ++my_gt;
-            else if (val >= v_lo)
-                ++my_eq;
-        });
-        __syncthreads();  // warp_sum scratch is dead past find_threshold
-        const auto base_gt = block_exclusive_prefix(my_gt, smem->warp_sum, &smem->count_gt);
-        const auto base_eq = block_exclusive_prefix(my_eq, smem->warp_sum, &smem->count_eq);
-        uint32_t   run_gt  = 0;
-        uint32_t   run_eq  = 0;
-        for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
-            if (above_coarse_threshold(val, v_hi)) {
-                const auto pos = base_gt + run_gt++;
-                if (pos < topk) [[likely]] {
-                    problem.emit(pos, idx);
-                }
-            } else if (val >= v_lo) {
-                const auto pos = base_eq + run_eq++;
-                if (pos < kMaxNumTie) [[likely]] {
-                    smem->tie.values[pos] = {val, idx};
-                }
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+        if constexpr (std::is_same_v<Score, __nv_bfloat16>) {
+            // Each thread keeps at most 32 classifications in its two masks.
+            if (topk == 512 && problem.seq_len <= kBlockSize * 32) {
+                collect_from_masks<kAlignedInput>(problem, smem, v_lo, v_hi);
+            } else if constexpr (kLongMaskWords != 0) {
+                collect_from_long_masks<kAlignedInput, kLongMaskWords>(problem, smem, v_lo, v_hi);
+            } else {
+                collect<kAlignedInput>(problem, smem, v_lo, v_hi);
             }
-        });
+        } else
+#endif
+        {
+            collect<kAlignedInput>(problem, smem, v_lo, v_hi);
+        }
 
         // Phase 4: Handle ties. Drive the output layout from the *collect* counts so it
         // is self-consistent with the fp32 classification above (rather than the fp16
@@ -1023,6 +1175,104 @@ public:
         const auto remain_topk = above_count < topk ? topk - above_count : 0;
         const auto tie_count   = min(equal_count, kMaxNumTie);
         handle_tie(smem->tie.values, problem, above_count, tie_count, remain_topk, &smem->tie.handle);
+    }
+
+private:
+    template<bool kAlignedInput, typename Score>
+    SGL_DEVICE static void collect(const TopKProblemT<Score>& problem, Smem* smem, float v_lo, float v_hi) {
+        const auto tx   = threadIdx.x;
+        const auto topk = problem.topk;
+        // Deterministic positions: one extra counting sweep, a thread-order
+        // block prefix, then emit/append in the same iteration order. The
+        // atomicAdd version ordered emissions and tie-buffer fill by SM arrival
+        // (run-to-run output order and tie membership varied).
+        uint32_t my_gt = 0;
+        uint32_t my_eq = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+        // A BF16 score is >= the FP32 boundary iff it is >= its BF16 ceiling.
+        const auto high         = __bfloat162bfloat162(__float2bfloat16_ru(v_hi));
+        const auto low          = __bfloat162bfloat162(__float2bfloat16_ru(v_lo));
+        const auto greater_mask = [&](const __nv_bfloat162 x) {
+            return v_hi < FLT_MAX ? __hgeu2_mask(x, high) : __hneu2_mask(x, x);
+        };
+        const uint32_t tail = problem.seq_len / kVecSize * kVecSize;
+        if constexpr (std::is_same_v<Score, __nv_bfloat16>) {
+            visit_pairs<kAlignedInput>(problem.in, problem.seq_len, [&](const __nv_bfloat162 x, uint32_t) {
+                const uint32_t gt = greater_mask(x);
+                const uint32_t eq = __hge2_mask(x, low) & ~gt;
+                my_gt += __popc(gt & 0x10001u);
+                my_eq += __popc(eq & 0x10001u);
+            });
+            if (tx < problem.seq_len - tail) {
+                const float x  = problem.load(tail + tx);
+                const bool  gt = above_coarse_threshold(x, v_hi);
+                my_gt += gt;
+                my_eq += !gt && x >= v_lo;
+            }
+        } else
+#endif
+        {
+            for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t) {
+                if (above_coarse_threshold(val, v_hi))
+                    ++my_gt;
+                else if (val >= v_lo)
+                    ++my_eq;
+            });
+        }
+        __syncthreads();  // warp_sum scratch is dead past find_threshold
+        const auto base_gt = block_exclusive_prefix(my_gt, smem->warp_sum, &smem->count_gt);
+        const auto base_eq = block_exclusive_prefix(my_eq, smem->warp_sum, &smem->count_eq);
+        uint32_t   run_gt  = 0;
+        uint32_t   run_eq  = 0;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 1030
+        if constexpr (std::is_same_v<Score, __nv_bfloat16>) {
+            const auto emit_gt = [&](uint32_t idx) {
+                const uint32_t pos = base_gt + run_gt++;
+                if (pos < topk)
+                    problem.emit(pos, idx);
+            };
+            const auto emit_eq = [&](const __nv_bfloat16 x, uint32_t idx) {
+                const uint32_t pos = base_eq + run_eq++;
+                if (pos < kMaxNumTie)
+                    smem->tie.values[pos] = {cast<float>(x), idx};
+            };
+            visit_pairs<kAlignedInput>(problem.in, problem.seq_len, [&](const __nv_bfloat162 x, uint32_t base) {
+                const uint32_t gt = greater_mask(x);
+                const uint32_t eq = __hge2_mask(x, low) & ~gt;
+                if (gt & 1u)
+                    emit_gt(base);
+                else if (eq & 1u)
+                    emit_eq(__low2bfloat16(x), base);
+                if (gt & 0x10000u)
+                    emit_gt(base + 1);
+                else if (eq & 0x10000u)
+                    emit_eq(__high2bfloat16(x), base + 1);
+            });
+            if (tx < problem.seq_len - tail) {
+                const auto  x     = problem.in[tail + tx];
+                const float value = cast<float>(x);
+                if (above_coarse_threshold(value, v_hi))
+                    emit_gt(tail + tx);
+                else if (value >= v_lo)
+                    emit_eq(x, tail + tx);
+            }
+        } else
+#endif
+        {
+            for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
+                if (above_coarse_threshold(val, v_hi)) {
+                    const auto pos = base_gt + run_gt++;
+                    if (pos < topk) [[likely]] {
+                        problem.emit(pos, idx);
+                    }
+                } else if (val >= v_lo) {
+                    const auto pos = base_eq + run_eq++;
+                    if (pos < kMaxNumTie) [[likely]] {
+                        smem->tie.values[pos] = {val, idx};
+                    }
+                }
+            });
+        }
     }
 };
 

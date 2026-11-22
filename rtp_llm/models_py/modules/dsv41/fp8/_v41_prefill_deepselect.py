@@ -46,6 +46,9 @@ def is_available(
 
 def is_supported(logits, ends, out=None, *, filter_finite=True, enabled=None) -> bool:
     """Metadata-only admission; no score or bound is read back to the host."""
+    # BF16 TMA requires complete 512-element tiles. Reject before probing it.
+    if logits.dtype == torch.bfloat16 and logits.ndim == 2 and logits.shape[1] % 512:
+        return False
     if not logits.is_cuda or not is_available(
         logits.device, logits.dtype, enabled=enabled
     ):
@@ -65,9 +68,6 @@ def is_supported(logits, ends, out=None, *, filter_finite=True, enabled=None) ->
         and ends.is_contiguous()
         and (filter_finite or out is not None)
     ):
-        return False
-    if logits.dtype == torch.bfloat16 and logits.shape[1] % 512:
-        # The BF16 TMA loader currently requires complete 512-element tiles.
         return False
     if logits.shape[1] % 32:
         # TMA describes complete 128-byte rows, including the final allocation

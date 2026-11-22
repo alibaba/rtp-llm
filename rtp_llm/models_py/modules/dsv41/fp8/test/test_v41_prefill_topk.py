@@ -435,5 +435,76 @@ class V41PrefillTopKCUDA(unittest.TestCase):
                     self.assertTrue(torch.equal(runs[0], run), name)
 
 
+@unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+class V41RetainedTopKOrderTest(unittest.TestCase):
+    def test_uses_original_dispatch_on_shortened_rows(self):
+        if not hasattr(rtp_llm_ops, "dsv41_topk_v3_with_reference"):
+            self.skipTest("requires the retained-row native binding")
+        if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
+            self.skipTest("requires SM100 or SM103")
+        device = torch.device("cuda")
+        cases = (
+            (96, 32001, 512, torch.bfloat16, True),
+            (145, 65537, 512, torch.bfloat16, True),
+            (145, 163841, 512, torch.bfloat16, True),
+            (145, 262144, 512, torch.bfloat16, True),
+            (145, 262145, 512, torch.bfloat16, True),
+            (145, 425984, 512, torch.bfloat16, True),
+            (145, 425985, 512, torch.bfloat16, True),
+            (96, 49153, 512, torch.bfloat16, False),
+            (48, 7359, 2048, torch.float32, False),
+            (92, 31871, 2048, torch.float32, False),
+        )
+        workspace = topk._get_topk_workspace(device)
+        for rows, width, k, dtype, finite in cases:
+            with self.subTest(rows=rows, width=width, k=k, finite=finite):
+                gen = torch.Generator(device=device).manual_seed(8673)
+                # Many equal values expose order and tie membership changes.
+                scores = torch.randint(
+                    -24, 24, (rows, width), device=device, generator=gen
+                ).to(dtype)
+                ends = torch.full((rows,), width - 11, device=device, dtype=torch.int32)
+                ends[1], ends[3] = 0, 7
+                if rows == 145:
+                    ends[0] = width
+                    scores[0, -1] = 100
+                scores[2, : k // 2] = torch.inf
+                scores[5, : k // 3] = torch.nan
+                kept = torch.tensor([1, 2, 3, 5, rows - 1], device=device)
+                full = torch.empty((rows, k), device=device, dtype=torch.int32)
+                compact = torch.empty(
+                    (kept.numel(), k), device=device, dtype=torch.int32
+                )
+                baseline = (
+                    rtp_llm_ops.dsv41_topk_v3_finite if finite else rtp_llm_ops.topk_v3
+                )
+                baseline(scores, ends, full, workspace, k, width)
+                if rows == 145:
+                    self.assertTrue((full[0] == width - 1).any().item())
+                    raw = torch.empty_like(full)
+                    rtp_llm_ops.topk_v3(scores, ends, raw, workspace, k, width)
+                    finite_mask = torch.isfinite(
+                        scores.gather(1, raw.clamp_min(0).long())
+                    )
+                    torch.testing.assert_close(
+                        full, raw.masked_fill(~finite_mask, -1), rtol=0, atol=0
+                    )
+                # Slicing changes stride and keeps the original visible prefix.
+                storage = scores.index_select(0, kept)
+                actual_width = width - 9
+                rtp_llm_ops.dsv41_topk_v3_with_reference(
+                    storage[:, :actual_width],
+                    ends[kept],
+                    compact,
+                    workspace,
+                    k,
+                    actual_width,
+                    rows,
+                    width,
+                    finite,
+                )
+                torch.testing.assert_close(compact, full[kept], rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()

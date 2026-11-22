@@ -438,21 +438,8 @@ def _split_rows(tensor, partitions):
     return tuple(views[index] for index in selected)
 
 
-def try_gather(
-    attn,
-    main,
-    index,
-    ends,
-    seq_ends,
-    *,
-    groups,
-    workspace=None,
-    swa=None,
-    output_stream=None,
-):
-    """Choose the schedule from common host geometry and prepared pool layouts."""
-    if not 1 <= len(ends) <= 1024:
-        return None
+def _resolve_layout(attn, main, index):
+    """Resolve native block tables and their physical pool layout."""
     cp, cache = getattr(attn, "_cp_ctx", None), getattr(attn, "_kv_cache", None)
     tables = getattr(attn, "_block_tables_by_type", None)
     if (
@@ -486,18 +473,78 @@ def try_gather(
         cp_size=cp.cp_size,
     ):
         return None
-    layout = (
-        ratio,
-        owner,
-        mtpb,
-        itpb,
-        rank,
-        mt.dtype,
-        it.dtype,
-        main_entries,
-        index_entries,
-        cp.cp_size,
+    return (
+        mt,
+        it,
+        (
+            ratio,
+            owner,
+            mtpb,
+            itpb,
+            rank,
+            mt.dtype,
+            it.dtype,
+            main_entries,
+            index_entries,
+            cp.cp_size,
+        ),
     )
+
+
+def prepare_owned_layout(attn, widths, device):
+    """Describe ordinary owned slabs before any cache writes or gather."""
+    from . import _v41_owned_pool as owned
+    from . import _v41_prefill_indexer as indexer
+
+    main = attn._source_pool(attn._global_region())
+    index = attn._source_pool(INDEXER_KV)
+    if (
+        main is None
+        or index is None
+        or main.device != device
+        or not indexer.is_supported(
+            device, attn.index_n_heads, attn._owner().index_wk.shape[0]
+        )
+    ):
+        return None
+    resolved = _resolve_layout(attn, main, index)
+    if resolved is None:
+        return None
+    mt, it, layout = resolved
+    kernels = _READY.get((device.index, *layout))
+    if kernels is None or kernels[5] is None:
+        return None
+    ratio, owner, *_, cp = layout
+    plan = owned.plan_groups(widths, cp_size=cp, owner_rows=owner // ratio)
+    if plan is None:
+        return None
+    try:
+        owned._validate_storage(main, index, device, mt, it, len(widths), layout)
+    except ValueError:
+        return None
+    return plan.groups
+
+
+def try_gather(
+    attn,
+    main,
+    index,
+    ends,
+    seq_ends,
+    *,
+    groups,
+    workspace=None,
+    swa=None,
+    output_stream=None,
+):
+    """Choose the schedule from common host geometry and prepared pool layouts."""
+    if not 1 <= len(ends) <= 1024:
+        return None
+    resolved = _resolve_layout(attn, main, index)
+    if resolved is None:
+        return None
+    mt, it, layout = resolved
+    ratio = layout[0]
     if not isinstance(seq_ends, torch.Tensor):
         raise ValueError("Joint pool requires the prepared sequence-end tensor")
     kernels = _READY.get((seq_ends.device.index, *layout))

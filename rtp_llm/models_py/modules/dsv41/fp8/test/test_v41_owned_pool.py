@@ -1,5 +1,6 @@
 """Logical ownership, bounded scratch, and byte-exact owned-row transport."""
 
+import os
 import random
 import tempfile
 import unittest
@@ -623,6 +624,7 @@ class OwnedPoolCudaTest(unittest.TestCase):
         token_blocks=(128, 128),
         main_storage=(1, 11),
         segmented=False,
+        workspace_offset=0,
     ):
         ranks, host, ends = self.fixture(
             counts, cp, ratio, dtypes, token_blocks, main_storage
@@ -657,8 +659,11 @@ class OwnedPoolCudaTest(unittest.TestCase):
                     cursor += count + i % 3 + 1
                 workspace = SimpleNamespace(
                     output=torch.full(
-                        (cursor + 3, 512), 7.25, dtype=torch.bfloat16, device="cuda"
-                    ),
+                        ((cursor + 3) * 512 + workspace_offset,),
+                        7.25,
+                        dtype=torch.bfloat16,
+                        device="cuda",
+                    )[workspace_offset:].view(-1, 512),
                     global_sizes=tuple(counts),
                     global_starts=tuple(starts),
                     device_offsets=torch.tensor(
@@ -800,6 +805,39 @@ class OwnedPoolCudaTest(unittest.TestCase):
                     main_storage=storage,
                 )
 
+    def test_block_restore_dispatch_respects_workspace_alignment(self):
+        if torch.cuda.get_device_capability() != (10, 3):
+            self.skipTest("SM103 required")
+
+        gather = owned._gather_planned
+        getitem = triton.compiler.CompiledKernel.__getitem__
+        names = []
+
+        def tracked_getitem(kernel, grid):
+            if kernel.name.startswith("_owned_pool_restore"):
+                names.append(kernel.name)
+            return getitem(kernel, grid)
+
+        def tracked_gather(*args, **kwargs):
+            with patch.object(
+                triton.compiler.CompiledKernel, "__getitem__", tracked_getitem
+            ):
+                return gather(*args, **kwargs)
+
+        with (
+            patch.dict(os.environ, {"DSV41_PREFILL_OWNED_BLOCK_RESTORE": "1"}),
+            patch.object(joint, "_READY", {}),
+            patch.object(owned, "_gather_planned", tracked_gather),
+        ):
+            for offset, kernel in (
+                (0, "_owned_pool_restore_block"),
+                (1, "_owned_pool_restore"),
+            ):
+                with self.subTest(offset=offset):
+                    names.clear()
+                    self.check((17, 257), 4, 2, direct=True, workspace_offset=offset)
+                    self.assertEqual(names, [kernel] * 4)
+
     def test_restore_partial_tiles_and_negative_destinations_preserve_canaries(self):
         rows, local, cp = 35, 19, 4
         packet = torch.randint(
@@ -855,6 +893,32 @@ class OwnedPoolCudaTest(unittest.TestCase):
                 self.assertEqual(q_backing[:4].cpu().tolist(), [93] * 4)
                 self.assertEqual(q_backing[-4:].cpu().tolist(), [93] * 4)
                 self.assertEqual(s_backing[[0, -1]].cpu().tolist(), [-777, -777])
+
+                if torch.cuda.get_device_capability() == (10, 3):
+                    block_out = torch.full_like(backing, 7.25)
+                    block_q = torch.full(
+                        (rows + 2, 64), 93, dtype=oq.dtype, device="cuda"
+                    )
+                    block_s = torch.full(
+                        (rows + 8,), -777, dtype=os.dtype, device="cuda"
+                    )
+                    owned._owned_pool_restore_block[(triton.cdiv(rows, 8),)](
+                        packet,
+                        inverse,
+                        block_out[1:-1],
+                        block_q[1:-1],
+                        block_s[4:-4],
+                        rows,
+                        local,
+                        direct,
+                        num_warps=2,
+                    )
+                    self.assert_bits(block_out, expected)
+                    self.assert_bits(block_q[1:-1], expected_q)
+                    self.assert_bits(block_s[4:-4], expected_s)
+                    self.assertTrue(torch.all(block_q[[0, -1]] == 93))
+                    self.assertTrue(torch.all(block_s[:4] == -777))
+                    self.assertTrue(torch.all(block_s[-4:] == -777))
 
     def test_inverse_metadata_matches_owner_rows_padding_and_direct_destinations(self):
         counts = (0, 1, 0, 127, 128, 129, 0, 257, 1027, 0)

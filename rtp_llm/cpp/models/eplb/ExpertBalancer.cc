@@ -48,6 +48,13 @@ ExpertBalancer::ExpertBalancer(const std::optional<MoeConfigs>& moe, const GptMo
                                                   model_id_ == 0 ? "target" : "draft");
     }
     if (load_monitor_) {
+#if USING_CUDA
+        if (model_id_ == 0 && params.parallelism_config.role_type == RoleType::PREFILL
+            && params.parallelism_config.prefill_cp_config.is_enabled()
+            && params.sp_config.model_type == "deepseek_v41_dspark") {
+            load_monitor_->warmup();
+        }
+#endif
         if (moe && (ep_size_ > 1 || params.parallelism_config.tp_rank == 0)) {
             expert_token_counts_ = load_monitor_->stepCountsBuffer();
         }

@@ -108,6 +108,18 @@ def balanced_mqa_schedule_builder():
     return None
 
 
+def balanced_mqa_schedule(builder, starts, ends, kv_rows, heads, cache):
+    key = (id(starts), id(ends), kv_rows, heads)
+    cached = cache.get(key) if cache is not None else None
+    if cached is not None:
+        return cached[2]
+    schedule = builder(starts, ends, kv_rows, heads)
+    if cache is not None:
+        # Keep the bound objects alive for the identity key.
+        cache[key] = (starts, ends, schedule)
+    return schedule
+
+
 def fp8_fp4_mqa_indexer_score(
     q_payload: torch.Tensor,  # [M, H, 64] int8
     q_sf: torch.Tensor,  # [M, H] int32
@@ -154,17 +166,14 @@ def fp8_fp4_mqa_indexer_score(
         balanced_mqa_schedule_builder() if balance_kv_tiles and return_bf16 else None
     )
     if build_schedule is not None:
-        kv_rows, heads = k_payload.shape[0], q_payload.shape[1]
-        key = (id(starts), id(ends), kv_rows, heads)
-        cached = schedule_cache.get(key) if schedule_cache is not None else None
-        if cached is None:
-            schedule = build_schedule(starts, ends, kv_rows, heads)
-            if schedule_cache is not None:
-                # Keep the bound objects alive for the identity key.
-                schedule_cache[key] = (starts, ends, schedule)
-        else:
-            schedule = cached[2]
-        options["schedule_meta"] = schedule
+        options["schedule_meta"] = balanced_mqa_schedule(
+            build_schedule,
+            starts,
+            ends,
+            k_payload.shape[0],
+            q_payload.shape[1],
+            schedule_cache,
+        )
     scores = operation(
         (q_payload.contiguous(), q_sf.contiguous()),
         (k_payload.contiguous(), k_sf.contiguous()),

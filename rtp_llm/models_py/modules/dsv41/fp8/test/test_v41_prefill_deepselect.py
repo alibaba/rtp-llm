@@ -212,6 +212,18 @@ class PrefillDeepSelectCPU(unittest.TestCase):
                 tensors[2].untyped_storage = tensors[index].untyped_storage
                 self.assertFalse(selector.is_supported(*tensors))
 
+    def test_bf16_incomplete_tile_skips_backend_probe(self):
+        logits, ends, _ = metadata_fixture()
+        logits.dtype = torch.bfloat16
+        logits.shape = (7, 768)
+        logits.stride = lambda axis: (1024, 1)[axis]
+        with patch.object(selector, "is_available", return_value=True) as available:
+            self.assertFalse(selector.is_supported(logits, ends))
+            available.assert_not_called()
+            logits.shape = (7, 1024)
+            self.assertTrue(selector.is_supported(logits, ends))
+            available.assert_called_once_with(logits.device, logits.dtype, enabled=None)
+
     def test_non32_width_requires_real_last_row_padding(self):
         with patch.object(selector, "is_available", return_value=True):
             for width, stride in (

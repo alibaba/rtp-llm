@@ -22,6 +22,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/per_token_group_quant_8bit_v3.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #ifndef USE_PPU
+#include "rtp_llm/models_py/bindings/cuda/kernels/dsv41_grouped_score_bounds.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
 #endif
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
@@ -249,6 +250,15 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("max_seq_len"));
 
 #ifndef USE_PPU
+    rtp_ops_m.def("dsv41_grouped_score_bounds",
+                  &dsv41_grouped_score_bounds,
+                  "Build three planes of score bounds from CPU group descriptors",
+                  py::arg("descriptors"),
+                  py::arg("positions"),
+                  py::arg("requests"),
+                  py::arg("key_counts"),
+                  py::arg("out"),
+                  py::arg("ratio"));
     rtp_ops_m.def("topk_v3",
                   &topk_v3,
                   "DeepSeek V4 decode indexer exact SGLang radix-select TopK",
@@ -258,6 +268,53 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+    // DeepGEMM remains the score producer. Consume each group before
+    // allocating the next score tile and write K512 directly into its rows.
+    rtp_ops_m.def("dsv41_submit_grouped_k512",
+                  [](py::function      score,
+                     const at::Tensor& q,
+                     const at::Tensor& q_scale,
+                     const at::Tensor& weights,
+                     at::Tensor        output,
+                     at::Tensor        workspace,
+                     const py::list&   groups,
+                     bool              deepselect) {
+                      int64_t covered = 0;
+                      for (const auto item : groups) {
+                          const auto group = py::cast<py::tuple>(item);
+                          TORCH_CHECK(group.size() == 8, "invalid grouped K512 descriptor");
+                          const auto stop = group[6].cast<int64_t>();
+                          TORCH_CHECK(stop > covered && stop <= output.size(0), "invalid grouped K512 rows");
+                          covered = stop;
+                      }
+                      TORCH_CHECK(covered == output.size(0), "grouped K512 does not cover the output");
+                      int64_t start = 0;
+                      for (const auto item : groups) {
+                          const auto group = py::cast<py::tuple>(item);
+                          const auto stop  = group[6].cast<int64_t>();
+                          const auto width = group[7].cast<int64_t>();
+                          const auto rows  = stop - start;
+                          auto logits = score(py::make_tuple(q.narrow(0, start, rows), q_scale.narrow(0, start, rows)),
+                                              py::make_tuple(group[0], group[1]),
+                                              weights.narrow(0, start, rows),
+                                              group[2],
+                                              group[3],
+                                              py::arg("max_seqlen_k")  = width,
+                                              py::arg("schedule_meta") = group[5])
+                                            .cast<at::Tensor>();
+                          const auto visible = group[4].cast<at::Tensor>();
+                          auto       target  = output.narrow(0, start, rows);
+                          if (deepselect && width % 512 == 0 && width < (1 << 23) && logits.size(1) == width
+                              && logits.stride(1) == 1 && logits.stride(0) >= width && logits.stride(0) % 512 == 0
+                              && reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 == 0
+                              && reinterpret_cast<uintptr_t>(target.data_ptr()) % 32 == 0) {
+                              deepselect_bf16_dense(logits, visible, target, true);
+                          } else {
+                              dsv41_topk_v3_finite(logits, visible, target, workspace, 512, width);
+                          }
+                          start = stop;
+                      }
+                  });
     rtp_ops_m.def("dsv41_topk_v3_finite",
                   &dsv41_topk_v3_finite,
                   "DeepSeek V4.1 FP32/BF16 TopK with selected nonfinite entries filtered",
@@ -267,6 +324,18 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("workspace"),
                   py::arg("k"),
                   py::arg("max_seq_len"));
+    rtp_ops_m.def("dsv41_topk_v3_with_reference",
+                  &dsv41_topk_v3_with_reference,
+                  "Select retained DSV4.1 rows using the original kernel dispatch",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"),
+                  py::arg("reference_rows"),
+                  py::arg("reference_width"),
+                  py::arg("filter_finite"));
 #endif  // !USE_PPU
 
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).

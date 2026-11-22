@@ -150,7 +150,7 @@ def try_select_tokens(
             and tensor.dtype == torch.int32
             and tensor.shape == (logits.shape[0],)
             and tensor.is_contiguous()
-            for tensor in bounds
+            for tensor in (bounds[1:] if bounds[0] is None else bounds)
         )
     ):
         return None

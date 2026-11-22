@@ -235,6 +235,15 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "dsv41_grouped_score_bounds",
+    srcs = ["dsv41_grouped_score_bounds.cu"],
+    hdrs = ["dsv41_grouped_score_bounds.h"],
+    deps = [":cuda_utils_common"] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
 # Exact radix-select TopK for the DeepSeek V4 decode indexer. This is kept separate
 # from the vLLM-derived dsv4_persistent_topk so real-inference A/B tests can
 # select either implementation without rebuilding.

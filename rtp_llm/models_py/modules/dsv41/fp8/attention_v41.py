@@ -1892,10 +1892,20 @@ class AttentionV41FP8(AttentionFP8):
         # these globals; republishing them invalidates that cache.
         self._shared_attention.pop("prefill_chunk_meta", None)
 
-    def _select_indices(self, x, qr, positions, req_ids, *, request_row_slices=None):
+    def _select_indices(
+        self,
+        x,
+        qr,
+        positions,
+        req_ids,
+        *,
+        request_row_slices=None,
+        indexer_weights=None,
+    ):
         shared = self._shared_attention
         if not self.is_index_source:
             return shared["topk"][self.index_source_layer_id]
+        rows_input = x if indexer_weights is None else indexer_weights
         globals_by_req = shared["global"][self.kv_source_layer_id]
         config = getattr(self, "v41_config", {})
         candidate_source = int(config.get("candidate_source_layer_id", -1))
@@ -1913,7 +1923,7 @@ class AttentionV41FP8(AttentionFP8):
                 self.index_topk == 512
                 and self.index_n_heads == 32
                 and candidate_size == 8
-                and prefill_deepselect.is_available(x.device)
+                and prefill_deepselect.is_available(rows_input.device)
             )
             max_blocks = max(
                 (
@@ -1924,9 +1934,9 @@ class AttentionV41FP8(AttentionFP8):
             )
             shared["candidates"] = (
                 torch.empty(
-                    (x.shape[0], candidate_blocks),
+                    (rows_input.shape[0], candidate_blocks),
                     dtype=torch.int32,
-                    device=x.device,
+                    device=rows_input.device,
                 )
                 if max_blocks > candidate_blocks
                 else None
@@ -1934,22 +1944,22 @@ class AttentionV41FP8(AttentionFP8):
             if (
                 shared["candidates"] is not None
                 and not shared["prefill_sparse_candidates"]
-                and x.is_cuda
+                and rows_input.is_cuda
                 and prefill_candidates.bitmap_is_bounded(
-                    x.shape[0], max_blocks * candidate_size, candidate_size
+                    rows_input.shape[0], max_blocks * candidate_size, candidate_size
                 )
             ):
                 shared["prefill_candidate_mask"] = (
                     shared["candidates"],
                     torch.empty(
                         (
-                            x.shape[0],
+                            rows_input.shape[0],
                             prefill_candidates.bitmap_words(
                                 max_blocks * candidate_size, candidate_size
                             ),
                         ),
                         dtype=torch.int32,
-                        device=x.device,
+                        device=rows_input.device,
                     ),
                     candidate_size,
                 )
@@ -1958,7 +1968,9 @@ class AttentionV41FP8(AttentionFP8):
         if max((len(k) for _, k in globals_by_req), default=0) <= self.index_topk:
             if candidates_out is not None:
                 candidates_out.fill_(-1)
-            ids = torch.arange(self.index_topk, device=x.device, dtype=torch.int32)
+            ids = torch.arange(
+                self.index_topk, device=rows_input.device, dtype=torch.int32
+            )
             out = torch.where(
                 ids[None] < ((positions + 1) // self.compress_ratio)[:, None],
                 ids[None],
@@ -1966,16 +1978,18 @@ class AttentionV41FP8(AttentionFP8):
             )
         else:
             out = torch.empty(
-                (x.shape[0], self.index_topk), dtype=torch.int32, device=x.device
+                (rows_input.shape[0], self.index_topk),
+                dtype=torch.int32,
+                device=rows_input.device,
             )
             q = self._lin(self.index_wq, qr).view(
                 -1, self.index_n_heads, self.index_head_dim
             )
-            ced_projection = shared.get("ced_indexer_projection")
-            if ced_projection is None:
-                raw_weights = F.linear(x, self.index_weights)
-            else:
-                raw_weights = ced_projection(x, self.index_weights)
+            raw_weights = indexer_weights
+            if raw_weights is None:
+                ced_projection = shared.get("ced_indexer_projection")
+                project = F.linear if ced_projection is None else ced_projection
+                raw_weights = project(x, self.index_weights)
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
@@ -2033,9 +2047,16 @@ class AttentionV41FP8(AttentionFP8):
                     candidate_size=candidate_size,
                     candidate_blocks=candidate_blocks,
                     req_ids=req_ids,
+                    **(
+                        {"retained_references": references}
+                        if (references := shared.get("ced_l20_references")) is not None
+                        else {}
+                    ),
                 ):
                     shared["topk"] = {self.layer_id: out}
                     return out
+            if shared.get("ced_l20_references") is not None:
+                raise RuntimeError("CED retained score layout rejected after admission")
             single_request = len(globals_by_req) == 1
             for b, (_, keys) in enumerate(globals_by_req):
                 # Production queries are packed in request order. Host slices
@@ -2045,7 +2066,7 @@ class AttentionV41FP8(AttentionFP8):
                 if request_row_slices is not None:
                     rows = request_row_slices[b]
                 elif single_request:
-                    rows = slice(0, x.shape[0])
+                    rows = slice(0, rows_input.shape[0])
                 else:
                     rows = torch.where(req_ids == b)[0]
                 row_count = rows.stop - rows.start if contiguous else rows.numel()
@@ -2062,7 +2083,7 @@ class AttentionV41FP8(AttentionFP8):
                     and candidate_source >= 0
                     and self.layer_id > candidate_source
                     and self.index_topk == 512
-                    and prefill_deepselect.is_available(x.device)
+                    and prefill_deepselect.is_available(rows_input.device)
                     and sparse_prefill_indexer.is_supported(
                         q_fp4[probe],
                         q_sf[probe],
@@ -2174,7 +2195,7 @@ class AttentionV41FP8(AttentionFP8):
                             "thd,kd->thk", q[chunk], keys.float()
                         ).relu_()
                         logits = (logits * weights[chunk, :, None]).sum(1)
-                        ids = torch.arange(key_count, device=x.device)
+                        ids = torch.arange(key_count, device=rows_input.device)
                         logits.masked_fill_(ids[None] >= visible[:, None], -torch.inf)
                     candidates = shared.get("candidates")
                     if candidates is not None:
@@ -2666,7 +2687,17 @@ class AttentionV41FP8(AttentionFP8):
         del x_full
         return common, qkv, swa, swa_starts, None
 
-    def _prefill_query(self, x, common, qkv, swa, swa_starts, swa_only_workspace=None):
+    def _prefill_query(
+        self,
+        x,
+        common,
+        qkv,
+        swa,
+        swa_starts,
+        swa_only_workspace=None,
+        *,
+        indexer_weights=None,
+    ):
         """Consume query rows without regenerating or writing source KV."""
         if not self.compress_ratio:
             if swa_only_workspace is not None:
@@ -2708,6 +2739,11 @@ class AttentionV41FP8(AttentionFP8):
             positions,
             req_ids,
             request_row_slices=getattr(common, "request_row_slices", None),
+            **(
+                {"indexer_weights": indexer_weights}
+                if indexer_weights is not None
+                else {}
+            ),
         )
         pending = self._shared_attention.pop("prefill_pool_ready", None)
         if pending is not None:
@@ -2716,8 +2752,9 @@ class AttentionV41FP8(AttentionFP8):
             with record_function_range("dsv41.prefill.pool.wait"):
                 pending.wait()
         globals_by_req = self._shared_attention["global"][self.kv_source_layer_id]
+        device = indexer_weights.device if x is None else x.device
         offsets, ns, swstart = self._prefill_chunk_meta(
-            globals_by_req, swa, swa_starts, req_ids, x.device, common=common
+            globals_by_req, swa, swa_starts, req_ids, device, common=common
         )
         # Cross-layer index plan cache: within one index-source group every
         # layer consumes the same ``selected`` tensor against the same
@@ -2741,7 +2778,7 @@ class AttentionV41FP8(AttentionFP8):
                     positions[:, None]
                     - self.window_size
                     + 1
-                    + torch.arange(self.window_size, device=x.device)[None]
+                    + torch.arange(self.window_size, device=device)[None]
                 )
                 swidx = torch.where(
                     swpos >= swstart, offsets + ns + swpos - swstart, -1

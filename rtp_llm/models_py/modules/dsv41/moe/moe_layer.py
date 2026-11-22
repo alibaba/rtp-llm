@@ -339,6 +339,12 @@ class MoE(nn.Module):
     def _forward_gate_pack(self, x: torch.Tensor, input_ids: torch.Tensor, expert_load):
         from .mega_gate import can_use_mega_gate, mega_gate
 
+        ced_route = getattr(self, "_ced_native_routing", None)
+        if ced_route is not None:
+            with record_function_range("dsv4.moe.deepgemm_mega_gate"):
+                weights, indices = ced_route(x)
+            # This path admits standard routing only and already emits physical IDs.
+            return self._strategy(x, weights, indices, expert_load=expert_load)
         if can_use_mega_gate(x, self.gate):
             layer = self.eplb_layer
             with record_function_range("dsv4.moe.deepgemm_mega_gate"):

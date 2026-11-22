@@ -29,6 +29,9 @@ public:
                                                      std::string                  model_type = "target");
     ~ExpertLoadMonitor();
 
+    // Prime the rank-0 report reduction and readback before any forward is recorded.
+    void warmup();
+
     // Int32 accumulators at a fixed address for eager kernels and CUDA graph capture.
     const torch::Tensor& stepCountsBuffer() const;
     // Clear graph capture/warmup counts without recording a forward.

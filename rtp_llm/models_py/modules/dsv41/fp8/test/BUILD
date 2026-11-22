@@ -19,6 +19,39 @@ py_test(
     legacy_create_init = 0,
 )
 
+[
+    py_test(
+        name = name + "_sm103",
+        srcs = [
+            name + ".py",
+            "//rtp_llm/test/pytest:pytest_main.py",
+        ],
+        main = "//rtp_llm/test/pytest:pytest_main.py",
+        args = ["--cuda-devices", "1", "$(location :" + name + ".py)"],
+        deps = [
+            "//rtp_llm:testlib",
+            "//rtp_llm/models_py:modules",
+            "//rtp_llm/models_py:tile_kernels_mhc",
+            "//rtp_llm:jit_cache_env",
+            test_requirement("pytest"),
+        ],
+        tags = ["dsv41_cuda13", "SM103_TEST"],
+        exec_properties = {"gpu": "SM103_TEST", "gpu_count": "1"},
+        target_compatible_with = select({
+            "@//:using_cuda13_x86": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        env = {"DSV41_GROUPED_SCORE_GPU_TEST": "1"} if name == "test_v41_grouped_prefill_score" else {},
+        legacy_create_init = 0,
+    )
+    for name in [
+        "test_v41_grouped_prefill_score",
+        "test_v41_owned_pool",
+        "test_v41_prefill_topk",
+    ]
+]
+
+
 _TESTS = [
     "test_v41_attention_pool_warmup",
     "test_attention_v41",

@@ -44,4 +44,16 @@ void dsv41_topk_v3_finite(const torch::Tensor& logits,
                           int64_t              k,
                           int64_t              max_seq_len);
 
+// Select the original kernel family when executing only retained source rows.
+// Bounds and strides still describe the actual score tensor.
+void dsv41_topk_v3_with_reference(const torch::Tensor& scores,
+                                  const torch::Tensor& lengths,
+                                  torch::Tensor&       output,
+                                  torch::Tensor&       workspace,
+                                  int64_t              k,
+                                  int64_t              max_seq_len,
+                                  int64_t              reference_rows,
+                                  int64_t              reference_width,
+                                  bool                 filter_finite);
+
 }  // namespace torch_ext

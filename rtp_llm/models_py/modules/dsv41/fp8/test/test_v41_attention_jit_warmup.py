@@ -527,6 +527,62 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "native launch failed"):
                 warmup._warm_native_selectors(512, "cpu")
 
+    def test_native_selector_warms_sm103_long_masks_with_bounded_storage(self):
+        import torch
+
+        select = Mock()
+        topk = SimpleNamespace(
+            _TOPK_V3_OK=True,
+            rtp_llm_ops=SimpleNamespace(
+                topk_v3=Mock(), dsv41_topk_v3_with_reference=select
+            ),
+            _get_topk_workspace=Mock(return_value=object()),
+            supports_bf16=lambda: True,
+        )
+        disabled = SimpleNamespace(is_available=lambda *args, **kwargs: False)
+        package = "rtp_llm.models_py.modules.dsv41.fp8"
+        real_zeros, real_full, real_empty = torch.zeros, torch.full, torch.empty
+
+        def on_cpu(fn):
+            return lambda *a, **kw: fn(*a, **dict(kw, device="cpu"))
+
+        modules = {
+            package: SimpleNamespace(
+                _v41_deepselect=disabled,
+                _v41_prefill_deepselect=SimpleNamespace(
+                    is_available=disabled.is_available, rtp_llm_ops=SimpleNamespace()
+                ),
+                _v41_prefill_topk=topk,
+            ),
+        }
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(torch.cuda, "get_device_capability", return_value=(10, 3)),
+            patch.object(torch, "zeros", on_cpu(real_zeros)),
+            patch.object(torch, "full", on_cpu(real_full)),
+            patch.object(torch, "empty", on_cpu(real_empty)),
+        ):
+            warmup._warm_native_selectors(262145, "cuda")
+
+        self.assertEqual(select.call_count, 6)
+        for call, expected in zip(
+            select.call_args_list, (32769, 32769, 163841, 163841, 262145, 262145)
+        ):
+            logits, ends, output, _, k, width, rows, reference_width, finite = call.args
+            self.assertEqual(
+                (k, width, rows, reference_width, finite),
+                (512, 513, 145, expected, True),
+            )
+            self.assertEqual(
+                (tuple(logits.shape), ends.tolist(), tuple(output.shape)),
+                ((1, 513), [513], (1, 512)),
+            )
+            self.assertEqual(logits.dtype, torch.bfloat16)
+            self.assertLess(logits.untyped_storage().nbytes(), 2048)
+        self.assertEqual(
+            [c.args[0].storage_offset() for c in select.call_args_list], [0, 1] * 3
+        )
+
     def test_topk_witnesses_cover_actual_native_dispatcher(self):
         # Read conditions from the native source, rather than maintaining a
         # second handwritten dispatcher. A native routing change must update
@@ -554,9 +610,10 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                     return width > threshold
             return False
 
-        dispatch = source.split("cudaError_t launch_topk(", 1)[1].split(
-            "return error ==", 1
-        )[0]
+        # These witnesses exercise the ordinary dispatcher. The device-gated
+        # finite BF16 path uses independent reference-geometry witnesses.
+        ordinary = source.index("if (reference_width <= kReg1MaxSeqLen")
+        dispatch = source[ordinary:].split("return error ==", 1)[0]
         branches = re.findall(
             r"(?:else )?if \((.*?)\) \{(.*?)\}\s*(?=else|$)", dispatch, re.S
         )
@@ -565,14 +622,14 @@ class V41AttentionWarmupCPU(unittest.TestCase):
         def family(batch, width):
             values = dict(
                 constants,
-                batch=batch,
-                max_seq_len=width,
+                reference_rows=batch,
+                reference_width=width,
                 k=512,
                 uniform_plan_uses_cluster=uniform_plan_uses_cluster,
             )
             for condition, body in branches:
                 expression = condition.replace(
-                    "static_cast<uint32_t>(max_seq_len)", "max_seq_len"
+                    "static_cast<uint32_t>(reference_width)", "reference_width"
                 )
                 expression = (
                     expression.replace("&&", " and ")

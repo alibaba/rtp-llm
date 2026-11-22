@@ -976,6 +976,39 @@ def _warm_native_selectors(max_seq_len, device):
                     select(logits, ends, output, workspace, 512, width)
                 del logits, storage
 
+    # The finite BF16 SM103 streaming masks dispatch on reference geometry.
+    # Use one short row to load the CUDA functions without large score buffers.
+    reference_select = getattr(ops, "dsv41_topk_v3_with_reference", None)
+    if (
+        reference_select is not None
+        and torch.bfloat16 in dtypes
+        and max_seq_len > 32768
+        and torch.device(device).type == "cuda"
+        and torch.cuda.get_device_capability(device) == (10, 3)
+    ):
+        width = 513
+        ends = torch.full((1,), width, dtype=torch.int32, device=device)
+        output = torch.empty((1, 512), dtype=torch.int32, device=device)
+        stride = (width + 3) // 4 * 4
+        storage = torch.zeros(stride + 1, dtype=torch.bfloat16, device=device)
+        for reference_width in (32769, 163841, 262145):
+            if reference_width <= max_seq_len:
+                for offset in (0, 1):
+                    logits = storage[offset : offset + stride].view(1, stride)[
+                        :, :width
+                    ]
+                    reference_select(
+                        logits,
+                        ends,
+                        output,
+                        workspace,
+                        512,
+                        width,
+                        145,
+                        reference_width,
+                        True,
+                    )
+
 
 def _warm_swa_refresh(device):
     from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_refresh_triton

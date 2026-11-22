@@ -154,6 +154,11 @@ TEST_F(ExpertLoadMonitorTest, LayerAndWindowTotalsUseInt64) {
 TEST_F(ExpertLoadMonitorTest, UnwrittenFirstForwardAfterWarmupHasZeroLoad) {
     auto recorder = monitor();
     recorder->stepCountsBuffer().fill_(99);
+    const auto* counts = recorder->stepCountsBuffer().data_ptr<int32_t>();
+    recorder->warmup();
+    EXPECT_EQ(recorder->stepCountsBuffer().data_ptr<int32_t>(), counts);
+    EXPECT_EQ(recorder->stepCountsBuffer().sum().item<int64_t>(), 198);
+    EXPECT_TRUE(snapshots().empty());
     // Warmup clears without recording; an unsupported backend writes no counts
     // on the following real forward.
     recorder->clearRecordBuffer();
