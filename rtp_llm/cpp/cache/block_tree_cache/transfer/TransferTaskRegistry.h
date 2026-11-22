@@ -21,11 +21,6 @@ namespace rtp_llm {
 
 // Local completion evidence keyed by the caller's unique execution trace.
 // Completed entries remain queryable until explicitly forgotten or this registry is destroyed.
-// Missing executions remain barred until their sole late arrival is rejected
-// or this worker registry is destroyed. Expiring access/rotation metadata must
-// never reopen admission after a closed-admission proof authorized release.
-// Rejection records have no capacity limit. Safe reclamation requires proof
-// that the delayed execution can no longer arrive at this registry.
 // Execution IDs are never resent to a worker within the worker group's lifetime.
 // Ordinary transfer reuses its numeric trace ID; KVCM can reuse its existing string
 // identity in a separate registry instance. No per-task identity is generated here.
@@ -124,10 +119,6 @@ public:
         return trace_id != 0 && finish(std::to_string(trace_id), buffer_safe);
     }
 
-    // Admitted executions require safety proof before deletion. Absent records
-    // are already forgotten; a later finish never recreates them. Missing fences
-    // survive client cleanup: DONE lets the caller retire its cleanup record,
-    // while the server still rejects its sole late execution regardless of age.
     ForgetResult forget(const std::string& trace_id) {
         if (trace_id.empty()) {
             logEvent("forget", trace_id, State::UNKNOWN, "invalid");
@@ -176,7 +167,6 @@ public:
                 } catch (...) {
                     // A new fence is not published until its retention metadata
                     // owns a valid queue position. No query proof escapes on failure.
-                    // An existing compact fence survives a failed metadata rebuild.
                     if (inserted.second)
                         records_.erase(inserted.first);
                     throw;
@@ -232,9 +222,6 @@ public:
         return expected_epoch == epoch_ ? queryLocal(trace_ids) : std::vector<State>(trace_ids.size(), State::UNKNOWN);
     }
 
-    // Called once per minute by cache maintenance. Expire only access/rotation
-    // metadata, retaining the compact REJECTED identity until its sole arrival
-    // is rejected. Proof-bearing admission bans cannot expire with this queue.
     // A busy request path takes priority; defer this bounded batch rather than wait.
     size_t cleanupExpiredMissing(size_t budget = 128) {
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
@@ -247,6 +234,8 @@ public:
             const auto first   = missing_queue_.begin();
             const auto missing = missing_.find(*first);
             if (missing->second.expire_time <= now) {
+                records_.erase(*first);
+                logged_query_states_.erase(*first);
                 missing_.erase(missing);
                 missing_queue_.erase(first);
                 ++removed;

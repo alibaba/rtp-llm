@@ -84,7 +84,7 @@ TransferCompletionQueryResult proof(const FrozenTask::ExecutionInfo& execution, 
     return result;
 }
 
-TEST(FrozenTaskRecoveryTest, MissingFenceStillRejectsLateAdmissionAfterReleaseReuseAndMetadataExpiry) {
+TEST(FrozenTaskRecoveryTest, MissingRecordExpiresAfterBlockReleaseAndReuse) {
     auto                 now = TransferTaskRegistry::Clock::time_point{};
     TransferTaskRegistry registry([&] { return now; });
     auto                 pool  = makePool(2);
@@ -104,11 +104,11 @@ TEST(FrozenTaskRecoveryTest, MissingFenceStillRejectsLateAdmissionAfterReleaseRe
     ASSERT_TRUE(replacement.has_value());
     ASSERT_EQ(*replacement, block);
     pool->incTreeRef(*replacement, BlockTreeRefType::CACHE);
-    now += std::chrono::hours(2);
-    ASSERT_EQ(registry.cleanupExpiredMissing(), 1u);
     EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{808}).front(), State::REJECTED);
     EXPECT_EQ(registry.forget(uint64_t{808}), TransferTaskRegistry::ForgetResult::DONE);
-    EXPECT_FALSE(registry.begin(uint64_t{808}));
+    now += std::chrono::hours(1);
+    ASSERT_EQ(registry.cleanupExpiredMissing(), 1u);
+    EXPECT_EQ(registry.size(), 0u);
     EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{808}).front(), State::UNKNOWN);
     EXPECT_FALSE(task->unfreeze());
     EXPECT_TRUE(pool->isAllocated(*replacement));

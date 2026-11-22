@@ -210,15 +210,11 @@ TEST(TransferTaskRegistryTest, LateExecutionConsumesMissingFenceWithoutAdmission
     EXPECT_FALSE(registry.finish("late", true));
     EXPECT_FALSE(registry.finish("late", false));
     EXPECT_EQ(registry.forget("late"), ForgetResult::DONE);
-    // The consumed entry leaves the rotating queue. Other entries lose only
-    // their access metadata, never the ban protecting already-released buffers.
-    now += std::chrono::hours(2);
+    now += std::chrono::hours(1);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 1u);
-    EXPECT_EQ(registry.size(), 1u);
-    EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
-    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"never-arrives"}).front(), State::REJECTED);
-    EXPECT_FALSE(registry.begin("never-arrives"));
     EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"never-arrives"}).front(), State::UNKNOWN);
 }
 
 TEST(TransferTaskRegistryTest, MissingRetentionAccumulatesAndDiagnosticReadsDoNotRenew) {
@@ -233,12 +229,9 @@ TEST(TransferTaskRegistryTest, MissingRetentionAccumulatesAndDiagnosticReadsDoNo
     EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
     now += std::chrono::minutes(1);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 1u);
-    EXPECT_EQ(registry.queryLocal(ids).front(), State::REJECTED);
-    EXPECT_EQ(registry.size(), 1u);
-    EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
-    EXPECT_EQ(registry.forget("missing"), ForgetResult::DONE);
-    EXPECT_FALSE(registry.begin("missing"));
     EXPECT_EQ(registry.queryLocal(ids).front(), State::UNKNOWN);
+    EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
 }
 
 TEST(TransferTaskRegistryTest, LateCompletionCannotTurnMissingIntoSafetyProof) {
@@ -280,10 +273,8 @@ TEST(TransferTaskRegistryTest, ForgetAcknowledgesMissingWithoutRemovingOrRenewin
     EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"late"}).front(), State::UNKNOWN);
     now += std::chrono::minutes(1);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 1u);
-    EXPECT_EQ(registry.size(), 1u);
-    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"never-arrives"}).front(), State::REJECTED);
-    EXPECT_FALSE(registry.begin("never-arrives"));
     EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"never-arrives"}).front(), State::UNKNOWN);
 }
 
 TEST(TransferTaskRegistryTest, CleanupRotatesSurvivorsAndSkipsNormalExecutions) {
@@ -301,13 +292,10 @@ TEST(TransferTaskRegistryTest, CleanupRotatesSurvivorsAndSkipsNormalExecutions) 
     EXPECT_EQ(registry.cleanupExpiredMissing(1), 1u);  // reaches cold next
     EXPECT_EQ(
         registry.queryLocal(std::vector<std::string>{"running", "safe", "hot", "cold", "forgotten"}),
-        (std::vector<State>{State::RUNNING, State::BUFFER_SAFE, State::REJECTED, State::REJECTED, State::REJECTED}));
+        (std::vector<State>{State::RUNNING, State::BUFFER_SAFE, State::REJECTED, State::UNKNOWN, State::REJECTED}));
     now += std::chrono::hours(1);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 2u);
-    EXPECT_EQ(registry.size(), 5u);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
-    for (const auto* trace : {"hot", "cold", "forgotten"})
-        EXPECT_FALSE(registry.begin(trace));
     EXPECT_EQ(registry.size(), 2u);
 }
 
@@ -320,14 +308,13 @@ TEST(TransferTaskRegistryTest, CleanupDefaultBatchIsBoundedAndEventuallyVisitsEv
     registry.queryAndBlockMissing(ids);
     now += std::chrono::hours(1);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 128u);
+    EXPECT_EQ(registry.size(), 172u);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 128u);
+    EXPECT_EQ(registry.size(), 44u);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 44u);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);
-    EXPECT_EQ(registry.size(), ids.size());
-    EXPECT_EQ(registry.queryLocal(ids), std::vector<State>(ids.size(), State::REJECTED));
-    for (const auto& trace : ids)
-        EXPECT_FALSE(registry.begin(trace));
     EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.queryLocal(ids), std::vector<State>(ids.size(), State::UNKNOWN));
 }
 
 TEST(TransferTaskRegistryTest, CleanupDefersWhenRequestHoldsRegistryLock) {
@@ -355,13 +342,11 @@ TEST(TransferTaskRegistryTest, CleanupDefersWhenRequestHoldsRegistryLock) {
     EXPECT_EQ(request.get(), State::REJECTED);
     now += std::chrono::hours(3);
     EXPECT_EQ(registry.cleanupExpiredMissing(), 1u);
-    EXPECT_EQ(registry.size(), 1u);
-    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"late"}).front(), State::REJECTED);
-    EXPECT_FALSE(registry.begin("late"));
     EXPECT_EQ(registry.size(), 0u);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"late"}).front(), State::UNKNOWN);
 }
 
-TEST(TransferTaskRegistryTest, FailedMetadataRebuildPreservesPublishedAdmissionFence) {
+TEST(TransferTaskRegistryTest, FailedRecoveryQueryPreservesExistingFenceAndRollsBackNewFence) {
     auto                           now        = Registry::Clock::time_point{};
     bool                           fail_clock = false;
     Registry                       registry([&] {
@@ -371,9 +356,6 @@ TEST(TransferTaskRegistryTest, FailedMetadataRebuildPreservesPublishedAdmissionF
     });
     const std::vector<std::string> ids{"published-fence"};
     ASSERT_EQ(registry.queryAndBlockMissing(ids).front(), State::REJECTED);
-    now += std::chrono::hours(2);
-    ASSERT_EQ(registry.cleanupExpiredMissing(), 1u);
-    ASSERT_EQ(registry.queryLocal(ids).front(), State::REJECTED);
     fail_clock = true;
     EXPECT_THROW(registry.queryAndBlockMissing(ids), std::bad_alloc);
     EXPECT_EQ(registry.queryLocal(ids).front(), State::REJECTED);
@@ -381,13 +363,10 @@ TEST(TransferTaskRegistryTest, FailedMetadataRebuildPreservesPublishedAdmissionF
     EXPECT_THROW(registry.queryAndBlockMissing(std::vector<std::string>{"new-fence"}), std::bad_alloc);
     EXPECT_EQ(registry.queryLocal(std::vector<std::string>{"new-fence"}).front(), State::UNKNOWN);
     fail_clock = false;
-    ASSERT_EQ(registry.queryAndBlockMissing(ids).front(), State::REJECTED);
-    EXPECT_EQ(registry.cleanupExpiredMissing(), 0u);  // Metadata was rebuilt.
-    EXPECT_EQ(registry.forget(ids.front()), ForgetResult::DONE);
-    now += std::chrono::hours(2);
+    now += std::chrono::hours(1);
     ASSERT_EQ(registry.cleanupExpiredMissing(), 1u);
-    EXPECT_FALSE(registry.begin(ids.front()));  // No metadata remains to erase.
     EXPECT_EQ(registry.queryLocal(ids).front(), State::UNKNOWN);
+    EXPECT_EQ(registry.size(), 0u);
 }
 
 TEST(TransferTaskRegistryTest, RecoveryQueryPreservesAdmittedExecutionsAndInputOrder) {

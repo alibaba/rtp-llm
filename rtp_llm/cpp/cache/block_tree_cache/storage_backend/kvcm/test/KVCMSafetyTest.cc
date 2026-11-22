@@ -292,7 +292,7 @@ TEST(KVCMSafetyTest, RejectedBroadcastHasNoSubmittedWorkersAndDoesNotFreeze) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
 }
 
-TEST(KVCMSafetyTest, TimedOutReadAndWriteStayProtectedUntilLateWorkerFinishes) {
+TEST(KVCMSafetyTest, TimeoutKeepsReadDestinationFrozenAndReleasesAbortedWriteSource) {
     for (const bool is_write : {false, true}) {
         SafetyBroadcastGroup group;
         ASSERT_TRUE(group.start());
@@ -306,17 +306,14 @@ TEST(KVCMSafetyTest, TimedOutReadAndWriteStayProtectedUntilLateWorkerFinishes) {
         void*          device_address = buffers.front().addr;
         const uint32_t initial_value  = 0x29;
         const uint32_t late_value     = 0x71;
+        const uint32_t reused_value   = 0x9b;
         ASSERT_EQ(cudaMemcpy(device_address, &initial_value, sizeof(initial_value), cudaMemcpyHostToDevice),
                   cudaSuccess);
-        group.states[1]->worker_action = [entered, released, device_address, is_write, initial_value, late_value] {
+        group.states[1]->worker_action = [entered, released, device_address, is_write, late_value] {
             entered->set_value();
             EXPECT_EQ(released.wait_for(std::chrono::seconds(5)), std::future_status::ready);
             EXPECT_EQ(cudaSetDevice(0), cudaSuccess);
-            if (is_write) {
-                uint32_t copied = 0;
-                EXPECT_EQ(cudaMemcpy(&copied, device_address, sizeof(copied), cudaMemcpyDeviceToHost), cudaSuccess);
-                EXPECT_EQ(copied, initial_value);
-            } else {
+            if (!is_write) {
                 EXPECT_EQ(cudaMemcpy(device_address, &late_value, sizeof(late_value), cudaMemcpyHostToDevice),
                           cudaSuccess);
             }
@@ -333,7 +330,11 @@ TEST(KVCMSafetyTest, TimedOutReadAndWriteStayProtectedUntilLateWorkerFinishes) {
             write_location.locations = tp2Locations();
             EXPECT_CALL(*wrapper, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, write_location)));
-            EXPECT_CALL(*wrapper, finishWrite(_, _, "safety_session", _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*wrapper,
+                        finishWrite(_, _, "safety_session",
+                                    ::testing::VariantWith<kv_cache_manager::BlockMaskOffset>(::testing::Eq(0u)),
+                                    ::testing::IsEmpty()))
+                .WillOnce(Return(true));
             EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
         } else {
             EXPECT_CALL(*wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, tp2Locations())));
@@ -364,31 +365,29 @@ TEST(KVCMSafetyTest, TimedOutReadAndWriteStayProtectedUntilLateWorkerFinishes) {
             EXPECT_EQ(await(read_future).code(), ErrorCode::DEADLINE_EXCEEDED);
         }
         // Drop the caller's hold while the remote worker is still running.
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), is_write ? 1u : 2u);
         environment.device_pool->decRef(environment.block_id);
-        EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
-        auto available = environment.device_pool->malloc(environment.device_pool->availableBlocksNum());
-        EXPECT_TRUE(available.has_value());
-        if (available) {
-            EXPECT_EQ(std::count(available->begin(), available->end(), environment.block_id), 0);
-            environment.device_pool->incRef(*available);
+        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !is_write);
+        EXPECT_EQ(environment.device_pool->isAllocated(environment.block_id), !is_write);
+        ScopedReferencedBlocks available(environment.device_pool, environment.device_pool->availableBlocksNum());
+        EXPECT_EQ(std::count(available.get().begin(), available.get().end(), environment.block_id), is_write ? 1 : 0);
+        if (is_write) {
+            EXPECT_EQ(cudaMemcpy(device_address, &reused_value, sizeof(reused_value), cudaMemcpyHostToDevice),
+                      cudaSuccess);
         }
         EXPECT_FALSE(environment.device_pool->malloc().has_value());
         release.set_value();
         group.servers.clear();
         uint32_t final_value = 0;
         EXPECT_EQ(cudaMemcpy(&final_value, device_address, sizeof(final_value), cudaMemcpyDeviceToHost), cudaSuccess);
-        EXPECT_EQ(final_value, is_write ? initial_value : late_value);
-        EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-        if (available) {
-            environment.device_pool->decRef(*available);
-        }
+        EXPECT_EQ(final_value, is_write ? reused_value : late_value);
+        EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !is_write);
         // BackendEnvironment owns a normal reference for its destructor.
         environment.device_pool->incRef(environment.block_id);
     }
 }
 
-TEST(KVCMSafetyTest, UnknownWriteCompensationFailurePreservesFrozenProtection) {
+TEST(KVCMSafetyTest, UnknownWriteReleasesSourceWhenSessionAbortFails) {
     for (const bool compensation_throws : {false, true}) {
         auto environment = makeBackendEnvironment("kvcm_safety_write_cleanup");
         auto wrapper     = std::make_shared<MockClientWrapper>();
@@ -417,11 +416,11 @@ TEST(KVCMSafetyTest, UnknownWriteCompensationFailurePreservesFrozenProtection) {
             }));
         EXPECT_TRUE(backend->write(backend->prepareWrite(makeStorageRequest(environment))));
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-        EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
         backend->shutdown();
-        EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 2u);
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), 1u);
     }
 }
 

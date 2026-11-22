@@ -121,36 +121,27 @@ TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadl
     EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
 }
 
-TEST(WorkerTransferRegistryTest, ExpiredMissingMetadataCannotAdmitLateIoWithFreshDeadline) {
+TEST(WorkerTransferRegistryTest, RecoveryQueryAfterExpiryCanBlockMissingExecutionAgain) {
     auto                    now      = TransferTaskRegistry::Clock::time_point{};
     auto                    registry = std::make_shared<TransferTaskRegistry>([&] { return now; });
     auto                    engine   = std::make_shared<ControlledProducer>();
     BlockTransferDispatcher dispatcher(engine);
     dispatcher.task_registry_ = registry;
-    for (const bool query_again : {false, true}) {
-        const auto original = task(3);
-        const auto trace    = original.traceId();
-        ASSERT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
-        now += std::chrono::hours(2);
-        ASSERT_EQ(registry->cleanupExpiredMissing(), 1u);
-        ASSERT_EQ(state(dispatcher, trace), State::REJECTED);
-        if (query_again) {
-            EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
-        }
-        EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
-        auto late = task(3);
-        late.setTraceId(trace);
-        ASSERT_FALSE(late.expired());
-        auto context = dispatcher.executePerRank(std::move(late));
-        ASSERT_TRUE(context->done());
-        EXPECT_FALSE(context->success());
-        EXPECT_TRUE(context->result().buffer_safe);
-        EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
-        EXPECT_EQ(engine->submissions, 0u);
-        EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
-        EXPECT_EQ(registry->size(), 0u);
-        EXPECT_EQ(registry->cleanupExpiredMissing(), 0u);
-    }
+    auto       execution = task(3);
+    const auto trace     = execution.traceId();
+    ASSERT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+    now += std::chrono::hours(1);
+    ASSERT_EQ(registry->cleanupExpiredMissing(), 1u);
+    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
+    EXPECT_EQ(registry->size(), 0u);
+    ASSERT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
+    auto context = dispatcher.executePerRank(std::move(execution));
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->result().buffer_safe);
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(engine->submissions, 0u);
+    EXPECT_EQ(registry->size(), 0u);
 }
 
 TEST(WorkerTransferRegistryTest, RecoveryQueryPreservesAlreadyAdmittedExecution) {

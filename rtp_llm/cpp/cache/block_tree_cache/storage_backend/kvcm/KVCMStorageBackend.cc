@@ -803,11 +803,12 @@ public:
     }
 
     [[noreturn]] void rethrowWritePayloadFailure(bool source_may_be_touched) const {
-        // Ordinary WRITE borrows the selected source pages from StorageBackend.
-        // With no publication owner, UNKNOWN must retain the existing source
-        // protection until shutdown drains the SDK; no local target is needed
-        // to make those still-borrowed source pages unsafe to reuse.
-        rethrowPayloadFailure(source_may_be_touched);
+        try {
+            rethrowPayloadFailure(source_may_be_touched);
+        } catch (const StorageOperationCompletionUnknown&) {
+            std::rethrow_exception(
+                withTargetProtection(std::current_exception(), StorageLocalTargetProtection::NO_LOCAL_TARGETS));
+        }
     }
 
     bool writeTransaction(const StorageRequest& request,
