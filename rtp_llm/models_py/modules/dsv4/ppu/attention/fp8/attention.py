@@ -127,6 +127,14 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, *, platform_provider=None):
 class AttentionFP8(_BaseAttentionFP8):
     prefill_fast_protocol = "dsv4.fp8-attention.v1"
 
+    def _get_fp8_decode_op(self):
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.writer_backend import get_writer_backend
+
+        op = super()._get_fp8_decode_op()
+        if op._flash_mla_backend is None:
+            op._flash_mla_backend = get_writer_backend()
+        return op
+
     def _prefill_output_all_reduce(self, out: torch.Tensor) -> None:
         """Match the official TP contract: accumulate wo_b partials in FP32."""
         if self.tp_size <= 1:

@@ -38,6 +38,7 @@ _PPU_CONTRACT_TESTS = [
     "prefill_communication", "tp_prefill_workspace_dims",
     "dspark_q6_numeric", "dspark_swa_pd_contract",
     "dspark_draft_platform", "dspark_index_geometry",
+    "flashmla_writer_backend",
 ]]
 
 py_library(
