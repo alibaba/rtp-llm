@@ -33,6 +33,11 @@ class HeadIpcGatherTest(unittest.TestCase):
                 changed = SimpleNamespace(**{**vars(pc), key: value})
                 self.assertIsNone(prepare_head_ipc_gather(config, changed, head))
             self.assertIsNone(prepare_head_ipc_gather(config, pc, head))
+            sm90_cfg = SimpleNamespace(_qwen4_full_fp8=True, _qwen4_full_fp8_nvfp4=False)
+            sm90_pc = SimpleNamespace(
+                role_type="PDFUSION", tp_size=2, dp_size=1, local_world_size=2
+            )
+            self.assertIsNone(prepare_head_ipc_gather(sm90_cfg, sm90_pc, head))
 
     def test_invalid_tensor_domains_do_not_touch_native_ops(self):
         workspace = object.__new__(Qwen4HeadIpcGather)

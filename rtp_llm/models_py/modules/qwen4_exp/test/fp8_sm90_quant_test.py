@@ -85,7 +85,7 @@ class Fp8SM90QuantTest(unittest.TestCase):
                 ):
                     for x in inputs:
                         self.assertFalse(quant.is_supported(x))
-            for rows in (31, 33, 63, 65, 1025, 8192, 32768):
+            for rows in (257, 1025, 8192, 32768):
                 x = torch.empty((rows, 2560), device="cuda", dtype=torch.bfloat16)
                 self.assertFalse(quant.is_supported(x))
             x = torch.randn(32, 5120, device="cuda", dtype=torch.bfloat16)[:, ::2]

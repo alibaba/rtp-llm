@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
+
 _TORCH_GIT = "70d99e998b4955e0049d13a98d77ae1b14db1f45"
 
 
@@ -18,7 +20,10 @@ def _mtp_embedding_rms_norm(
     L: tl.constexpr,
     EPS: tl.constexpr,
     WRITE_VARIANCE: tl.constexpr = False,
+    PDL: tl.constexpr = False,
 ):
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     row = tl.program_id(0)
     lane = tl.arange(0, L)
     a = tl.full((L,), 0, tl.float32)
@@ -45,6 +50,8 @@ def _mtp_embedding_rms_norm(
     columns = tl.arange(0, 4096)
     values = tl.load(X + row * 2560 + columns, columns < 2560, other=0.0).to(tl.float32)
     gain = 1.0 + tl.load(G + columns, columns < 2560, other=0.0).to(tl.float32)
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(Y + row * 2560 + columns, (values * inverse) * gain, columns < 2560)
 
 
@@ -67,7 +74,7 @@ def try_mtp_embedding_rms_norm(x, gamma, eps):
         and isinstance(eps, (float, int))
         and math.isfinite(eps)
         and eps >= 0
-        and torch.cuda.get_device_capability(x.device) == (12, 0)
+        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
     ):
         return None
     rows = x.shape[0]
@@ -75,6 +82,7 @@ def try_mtp_embedding_rms_norm(x, gamma, eps):
     # rows select its x/y block dimensions; preserve that reduction order.
     lanes = max(32, 512 // (1 << (rows.bit_length() - 1)))
     output = torch.empty_like(x)
+    pdl = sm90_pdl_enabled(x.device)
     _mtp_embedding_rms_norm[(rows,)](
         x,
         gamma,
@@ -82,7 +90,9 @@ def try_mtp_embedding_rms_norm(x, gamma, eps):
         output,
         L=lanes,
         EPS=eps,
+        PDL=pdl,
         num_warps=4,
         enable_fp_fusion=False,
+        launch_pdl=pdl,
     )
     return output

@@ -18,6 +18,10 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hy
     DeepGemmHybridExecutor,
     _is_cuda_graph_warmup_or_capture,
 )
+from rtp_llm.models_py.modules.qwen4_exp.moe.compact_fp8_decode import (
+    _H20_COMPACT_EAGER_MAX_ROWS,
+    h20_compact_moe_phase,
+)
 from rtp_llm.models_py.utils.arch import get_sm
 
 
@@ -91,10 +95,19 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
+        compact_limit = (
+            _H20_COMPACT_EAGER_MAX_ROWS
+            if (
+                self._h20_compact_fp8
+                and h20_compact_moe_phase.get() == "eager"
+                and getattr(payload, "expert_ids_are_local", False)
+            )
+            else self.masked_max_token_num
+        )
         if (
             self._qwen4_sm90_mixed_graph
             and payload.expert_x is not None
-            and payload.expert_x.shape[0] > self.masked_max_token_num
+            and payload.expert_x.shape[0] > compact_limit
             and not _is_cuda_graph_warmup_or_capture()
         ):
             if isinstance(

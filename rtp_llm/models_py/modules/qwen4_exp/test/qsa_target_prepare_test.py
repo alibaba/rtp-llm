@@ -129,6 +129,7 @@ class QsaTargetPrepareTest(unittest.TestCase):
                 [32749],
                 [5, page_size - 1, 4093],
                 list(range(page_size - 4, page_size + 3)),
+                *([list(range(4, 4 + 32))] if torch.cuda.get_device_capability() == (9, 0) else []),
             ):
                 for dtype in (torch.bfloat16, torch.float32):
                     with self.subTest(

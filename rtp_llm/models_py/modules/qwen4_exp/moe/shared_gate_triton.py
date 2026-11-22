@@ -44,7 +44,7 @@ def is_supported(gate, shared, out=None):
         and gate.device == shared.device
         and gate.dtype == shared.dtype == torch.bfloat16
         and shared.ndim == 2
-        and 1 <= shared.shape[0] <= 256
+        and 1 <= shared.shape[0] <= 32768
         and shared.shape[1] == 2560
         and gate.shape == (shared.shape[0], 1)
         and gate.is_contiguous()

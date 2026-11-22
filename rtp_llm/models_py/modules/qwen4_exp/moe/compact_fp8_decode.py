@@ -1,6 +1,7 @@
 """Compact block-scaled MoE for replicated inputs on Hopper."""
 
 from contextvars import ContextVar
+import os
 from typing import Literal
 
 import torch
@@ -25,6 +26,7 @@ compact_moe_output_buffer: ContextVar[torch.Tensor | None] = ContextVar(
 
 _STABLE_ALIGNMENT_MAX_ROUTES = 2560
 _DENSE_EXPERT_ROWS = 128
+_H20_COMPACT_EAGER_MAX_ROWS = 5120
 
 # H20 WGMMA sees the 64 output columns as its M dimension. The token
 # dimension is 16, so each expert needs only ceil(actual_rows / 16) tiles.
@@ -159,19 +161,45 @@ def compact_fp8_decode(
             raise ValueError("large compact MoE requires local expert IDs and counts")
         if ids.dtype != torch.int32 or not ids.is_contiguous():
             ids = ids.to(dtype=torch.int32).contiguous()
-        # Keep smaller tiles for sparse routes. Group heavily used experts
-        # into 64-row tiles to reuse the same weights across more tokens.
-        small_m, small_n = (32, 64) if tokens >= 1024 else (16, 128)
-        small_config = dict(_GEMM_CONFIG, BLOCK_SIZE_M=small_m, BLOCK_SIZE_N=small_n)
-        dense_config = dict(_GEMM_CONFIG, BLOCK_SIZE_M=64)
-        small, dense = moe_align_large_decode(
-            ids,
-            expert_counts,
-            small_m,
-            dense_config["BLOCK_SIZE_M"],
-            _DENSE_EXPERT_ROWS,
+        is_graph = (
+            torch.cuda.is_current_stream_capturing()
+            or os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
         )
-        plans = ((small_config, True, small), (dense_config, False, dense))
+        if not is_graph:
+            if tokens < 768:
+                bm, bn, nw, ns, sw = 16, 128, 4, 3, True
+            elif tokens < 1792:
+                bm, bn, nw, ns, sw = 32, 64, 4, 3, True
+            elif tokens <= 4096:
+                bm, bn, nw, ns, sw = 64, 128, 8, 4, False
+            else:
+                bm, bn, nw, ns, sw = 32, 64, 4, 3, True
+            single_cfg = {
+                "BLOCK_SIZE_M": bm,
+                "BLOCK_SIZE_N": bn,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 4,
+                "num_warps": nw,
+                "num_stages": ns,
+            }
+            small, _ = moe_align_large_decode(
+                ids, expert_counts, bm, 64, routes + 1
+            )
+            plans = ((single_cfg, sw, small),)
+        else:
+            # Keep smaller tiles for sparse routes. Group heavily used experts
+            # into 64-row tiles to reuse the same weights across more tokens.
+            small_m, small_n = (32, 64) if tokens >= 1024 else (16, 128)
+            small_config = dict(_GEMM_CONFIG, BLOCK_SIZE_M=small_m, BLOCK_SIZE_N=small_n)
+            dense_config = dict(_GEMM_CONFIG, BLOCK_SIZE_M=64)
+            small, dense = moe_align_large_decode(
+                ids,
+                expert_counts,
+                small_m,
+                dense_config["BLOCK_SIZE_M"],
+                _DENSE_EXPERT_ROWS,
+            )
+            plans = ((small_config, True, small), (dense_config, False, dense))
     else:
         if not ids.is_contiguous():
             ids = ids.contiguous()
@@ -194,14 +222,15 @@ def compact_fp8_decode(
     down_scale = x.new_empty((routes, groups), dtype=torch.float32)
     pdl = sm90_pdl_enabled(x.device)
     if large:
-        _silu_mul_quantize_tiles[(triton.cdiv(routes, 4), groups)](
+        tile_rows = 8 if routes >= 5120 else 4
+        _silu_mul_quantize_tiles[(triton.cdiv(routes, tile_rows), groups)](
             up,
             flat_ids,
             down_input,
             down_scale,
             routes,
             groups,
-            4,
+            tile_rows,
             GLOBAL_START=global_start,
             EXPERTS=experts,
             PDL=pdl,

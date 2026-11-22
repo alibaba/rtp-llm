@@ -29,7 +29,7 @@ class DraftQsaMetadataTest(unittest.TestCase):
         frequency = 10000000.0 ** (
             -2.0 * torch.arange(32, device="cuda", dtype=torch.float32) / 64
         )
-        for batch in (*range(1, 9), 16):
+        for batch in (*range(1, 9), 16, 32):
             rows = batch * 4
             q = torch.randn(rows, 600, device="cuda", dtype=torch.bfloat16)[
                 :, :512

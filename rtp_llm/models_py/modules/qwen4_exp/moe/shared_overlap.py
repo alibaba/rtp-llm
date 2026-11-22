@@ -274,6 +274,11 @@ class Qwen4MoeLayer(GenericMoeLayer):
 
     def _forward_ep_shared_overlap(self, hidden_states):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+        from rtp_llm.models_py.modules.base.common.fp8_linear import (
+            Fp8Linear,
+            _prequantized_fp8_input,
+            prequantize_fp8_linear_input,
+        )
         from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
 
         rows = hidden_states.shape[0]
@@ -289,21 +294,64 @@ class Qwen4MoeLayer(GenericMoeLayer):
         )
         main = torch.cuda.current_stream(hidden_states.device)
         capturing = torch.cuda.is_current_stream_capturing()
-        self._ep_shared_input_ready.record(main)
+        use_aux_stream = (
+            capturing or rows <= self._ep_shared_max_tokens or rows >= 1536
+        )
+        prequant_entry = None
+        prequant_scope = None
+        gate_proj = getattr(self, "gate", None)
+        up_proj = getattr(self.shared_expert, "up_proj", None)
+        if (
+            type(gate_proj) is Fp8Linear
+            and type(up_proj) is Fp8Linear
+            and gate_proj.use_scaled_mm
+            and up_proj.use_scaled_mm
+            and gate_proj.compute_weight is None
+            and up_proj.compute_weight is None
+            and gate_proj.weight.shape[1]
+            == up_proj.weight.shape[1]
+            == hidden_states.shape[1]
+            and gate_proj.weight.dtype == up_proj.weight.dtype
+            and gate_proj.role == up_proj.role
+            and not any(
+                "forward" in proj.__dict__
+                or proj._forward_pre_hooks
+                or proj._forward_hooks
+                for proj in (gate_proj, up_proj)
+            )
+            and not torch.nn.modules.module._global_forward_pre_hooks
+            and not torch.nn.modules.module._global_forward_hooks
+        ):
+            prequant_entry = prequantize_fp8_linear_input(gate_proj, hidden_states)
+            if prequant_entry is not None:
+                prequant_scope = _prequantized_fp8_input.set(prequant_entry)
+                if not capturing and use_aux_stream:
+                    prequant_entry[3].record_stream(self._ep_shared_stream)
+                    prequant_entry[4].record_stream(self._ep_shared_stream)
+        if use_aux_stream:
+            self._ep_shared_input_ready.record(main)
         # Keep TP collectives on the original stream, preserving rank order.
         # Only independent local shared-expert arithmetic uses the auxiliary.
         try:
-            with torch.cuda.stream(self._ep_shared_stream):
-                self._ep_shared_input_ready.wait(self._ep_shared_stream)
-                try:
-                    shared = self.shared_expert(hidden_states, skip_allreduce=True)
-                    shared = self._gate_shared_expert_output(
-                        hidden_states,
-                        shared,
-                        out=packed[rows:] if packed is not None else None,
-                    )
-                finally:
-                    self._ep_shared_output_ready.record(self._ep_shared_stream)
+            if use_aux_stream:
+                with torch.cuda.stream(self._ep_shared_stream):
+                    self._ep_shared_input_ready.wait(self._ep_shared_stream)
+                    try:
+                        shared = self.shared_expert(hidden_states, skip_allreduce=True)
+                        shared = self._gate_shared_expert_output(
+                            hidden_states,
+                            shared,
+                            out=packed[rows:] if packed is not None else None,
+                        )
+                    finally:
+                        self._ep_shared_output_ready.record(self._ep_shared_stream)
+            else:
+                shared = self.shared_expert(hidden_states, skip_allreduce=True)
+                shared = self._gate_shared_expert_output(
+                    hidden_states,
+                    shared,
+                    out=packed[rows:] if packed is not None else None,
+                )
             if self._ep_two_batch is not None and self._ep_two_batch.supports(
                 hidden_states
             ):
@@ -321,10 +369,13 @@ class Qwen4MoeLayer(GenericMoeLayer):
             else:
                 experts = self._forward_routed(hidden_states)
         finally:
+            if prequant_scope is not None:
+                _prequantized_fp8_input.reset(prequant_scope)
             # Allocator reuse on the original stream is ordered after the join,
             # including when either branch raises during eager execution.
-            self._ep_shared_output_ready.wait(main)
-        if not capturing:
+            if use_aux_stream:
+                self._ep_shared_output_ready.wait(main)
+        if not capturing and use_aux_stream:
             shared.record_stream(main)
         reduce = getattr(self, "tp_all_reduce", all_reduce)
         if use_pack:
@@ -334,7 +385,11 @@ class Qwen4MoeLayer(GenericMoeLayer):
             if shared.data_ptr() != packed[rows:].data_ptr():
                 packed[rows:].copy_(shared)
             comm = self._tp_shared_packed_comm
-            if comm is not None and comm.should_use(packed):
+            if (
+                comm is not None
+                and packed.shape[0] <= 2 * self._ep_shared_max_tokens
+                and comm.should_use(packed)
+            ):
                 with record_function_range("qwen4.tp_all_reduce"):
                     packed = comm.all_reduce(packed)
             else:
@@ -397,10 +452,24 @@ class Qwen4MoeLayer(GenericMoeLayer):
             and hidden_states.ndim == 2
             and hidden_states.dtype == torch.bfloat16
             and hidden_states.is_contiguous()
-            and 1 <= hidden_states.shape[0] <= self._ep_shared_max_tokens
             and hidden_states.shape[1] == 2560
         ):
-            return self._forward_ep_shared_overlap(hidden_states)
+            rows = hidden_states.shape[0]
+            use_ep_overlap = 1 <= rows <= self._ep_shared_max_tokens
+            if not use_ep_overlap and 1 <= rows <= 5120:
+                from .compact_fp8_decode import (
+                    _H20_COMPACT_EAGER_MAX_ROWS,
+                    h20_compact_moe_phase,
+                )
+
+                use_ep_overlap = (
+                    rows <= _H20_COMPACT_EAGER_MAX_ROWS
+                    and h20_compact_moe_phase.get() == "eager"
+                    and not torch.cuda.is_current_stream_capturing()
+                    and os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") != "1"
+                )
+            if use_ep_overlap:
+                return self._forward_ep_shared_overlap(hidden_states)
         if (
             self._pack_ep_shared_reduce
             and self._sm90_mega_moe is None

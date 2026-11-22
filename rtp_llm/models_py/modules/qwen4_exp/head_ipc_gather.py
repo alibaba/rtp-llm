@@ -81,8 +81,11 @@ class Qwen4HeadIpcGather:
 def prepare_head_ipc_gather(config, parallelism, head):
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
     if not (
-        role == "DECODE"
-        and getattr(config, "_qwen4_full_fp8_nvfp4", False)
+        role in ("DECODE", "PDFUSION")
+        and (
+            getattr(config, "_qwen4_full_fp8", False)
+            or getattr(config, "_qwen4_full_fp8_nvfp4", False)
+        )
         and parallelism.tp_size == 2
         and parallelism.dp_size == 1
         and parallelism.local_world_size == 2
@@ -91,7 +94,7 @@ def prepare_head_ipc_gather(config, parallelism, head):
         and head.weight.dtype == torch.float8_e4m3fn
         and head.weight.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(head.weight.device) == (12, 0)
+        and torch.cuda.get_device_capability(head.weight.device) in ((9, 0), (12, 0))
         and torch.cuda.device_count() == 2
         and torch.cuda.can_device_access_peer(0, 1)
         and torch.cuda.can_device_access_peer(1, 0)

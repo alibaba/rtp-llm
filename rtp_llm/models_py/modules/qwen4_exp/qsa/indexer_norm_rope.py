@@ -87,7 +87,7 @@ def _norm_rope_supported(q, cos, sin, gamma):
             or (
                 torch.cuda.get_device_capability(q.device) == (9, 0)
                 and q.ndim == 3
-                and 1 <= q.shape[0] <= 64
+                and 1 <= q.shape[0] <= 512
                 and q.shape[1] == 4
             )
         )

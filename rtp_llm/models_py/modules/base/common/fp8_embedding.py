@@ -79,7 +79,7 @@ class Fp8VocabEmbedding(nn.Module):
             self.tp_size == 2
             and self.hidden_size == 1280
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(self.device) == (12, 0)
+            and torch.cuda.get_device_capability(self.device) in ((9, 0), (12, 0))
         ):
             return
         scales = all_gather(self.weight_scale, group=Group.TP)

@@ -21,6 +21,7 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     qsa_assert_valid,
     qsa_strict_validation_enabled,
 )
+from rtp_llm.models_py.utils.device_capability import sm90_pdl_enabled
 
 _BLOCK_K = 64
 
@@ -575,10 +576,22 @@ def _merge_sparse_paged_splits_kernel(
     QUERIES,
     WITH_GATE: tl.constexpr,
     OUT_BTHD: tl.constexpr = False,
+    PDL: tl.constexpr = False,
 ):
     row = tl.program_id(0)
     splits = tl.arange(0, NUM_SPLITS)
     rd = tl.arange(0, D)
+    if WITH_GATE or OUT_BTHD:
+        batch = row // (HEADS * QUERIES)
+        head = (row // QUERIES) % HEADS
+        query = row % QUERIES
+        offset = ((batch * QUERIES + query) * HEADS + head) * D + rd
+        if WITH_GATE:
+            gate = tl.load(gate_ptr + offset).to(tl.float32)
+    else:
+        offset = row * D + rd
+    if PDL:
+        tl.extra.cuda.gdc_wait()
     base = partial_ptr + row * NUM_SPLITS * (D + 2)
     maxima = tl.load(base + splits * (D + 2) + D)
     sums = tl.load(base + splits * (D + 2) + D + 1)
@@ -589,17 +602,11 @@ def _merge_sparse_paged_splits_kernel(
     numerator = tl.sum(partial * scale[:, None], axis=0)
     denominator = tl.sum(sums * scale, axis=0)
     out = tl.where(denominator > 0, numerator / denominator, 0.0)
-    if WITH_GATE or OUT_BTHD:
-        batch = row // (HEADS * QUERIES)
-        head = (row // QUERIES) % HEADS
-        query = row % QUERIES
-        offset = ((batch * QUERIES + query) * HEADS + head) * D + rd
-        if WITH_GATE:
-            gate = tl.load(gate_ptr + offset).to(tl.float32)
-            sigmoid = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
-            out = out.to(tl.bfloat16).to(tl.float32) * sigmoid
-    else:
-        offset = row * D + rd
+    if WITH_GATE:
+        sigmoid = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
+        out = out.to(tl.bfloat16).to(tl.float32) * sigmoid
+    if PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     tl.store(out_ptr + offset, out.to(out_ptr.dtype.element_ty))
 
 
@@ -1250,6 +1257,7 @@ def sparse_paged_gqa_attn(
             if splits > 1
             else output
         )
+        pdl = sm90_pdl_enabled(q.device)
         _sparse_paged_grouped_split_kernel[(batch * query_len * splits, kv_heads)](
             q,
             kv_cache,
@@ -1303,6 +1311,8 @@ def sparse_paged_gqa_attn(
                 QUERIES=query_len,
                 WITH_GATE=output_gate is not None,
                 OUT_BTHD=bthd_output,
+                PDL=pdl,
+                launch_pdl=pdl,
             )
         return output
     splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))

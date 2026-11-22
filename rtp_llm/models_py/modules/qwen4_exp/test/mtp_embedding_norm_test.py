@@ -16,8 +16,8 @@ MODULE = "rtp_llm.models_py.modules.qwen4_exp.mtp_norm_triton"
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class MtpEmbeddingNormTest(unittest.TestCase):
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 pinned Torch reduction")
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("SM90/SM120 pinned Torch reduction")
         torch.manual_seed(112201)
 
     def test_fp32_variance_and_bf16_bytes_match_native_mean(self):
