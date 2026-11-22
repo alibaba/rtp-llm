@@ -39,18 +39,12 @@ GRAPH_BATCHED_WO_A_ENV = "RTP_V41_PPU_GRAPH_BATCHED_WO_A"
 
 
 def _try_batched_wo_a(
-    output: torch.Tensor, weight: torch.Tensor, *,
-    verify_q4: bool = False, proposal_q3: bool = False,
+    output: torch.Tensor, weight: torch.Tensor,
 ) -> torch.Tensor | None:
-    """Project qualified BF16 Graph buckets directly into the wo_b layout."""
-    rows = (1, 8)
-    if verify_q4:
-        rows = (32,)
-    elif proposal_q3:
-        rows = (24,)
+    """Project a compatible BF16 batch directly into the wo_b layout."""
     if (
         output.ndim != 3
-        or output.shape[0] not in rows
+        or output.shape[0] == 0
         or output.shape[1:] != (8, 4096)
         or weight.shape != (8192, 4096)
         or not output.is_cuda
@@ -548,14 +542,9 @@ def forward_graph_attention(attn, x, state):
     )
     output = rotated.reshape(-1, g.o_groups, g.n_heads * g.head_dim // g.o_groups)
     def bf16_projection(output, weight):
-        verify_q4 = (
-            verify_packed
-            and state.metadata.batch_size == 8
-            and state.metadata.q_len_per_req == 4
-        )
         projected = (
-            _try_batched_wo_a(output, weight, verify_q4=verify_q4)
-            if (native_packed or verify_q4)
+            _try_batched_wo_a(output, weight)
+            if (native_packed or verify_packed)
             and state.grouped_moe is None and g.o_lora_rank == 1024
             else None
         )

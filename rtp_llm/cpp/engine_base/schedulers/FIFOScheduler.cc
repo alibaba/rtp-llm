@@ -63,14 +63,16 @@ void FIFOScheduler::cancelGroups(StreamGroupQueue& group_queue) {
 void FIFOScheduler::cancelExtraStreams() {
     cancelGroups(waiting_group_queue_);
     cancelGroups(loading_cache_group_queue_);
+    cancelStreams(pending_prefill_outputs_);
 }
 
 bool FIFOScheduler::hasExtraStreams() const {
-    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty();
+    return !waiting_group_queue_.empty() || !loading_cache_group_queue_.empty() || !pending_prefill_outputs_.empty();
 }
 
 int64_t FIFOScheduler::extraOnflightStreams() const {
-    return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_);
+    return groupQueueStreamsSize(waiting_group_queue_) + groupQueueStreamsSize(loading_cache_group_queue_)
+           + pending_prefill_outputs_.size();
 }
 
 void FIFOScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {
@@ -286,7 +288,8 @@ size_t FIFOScheduler::countInitedKVCacheStreams() const {
     };
 
     size_t count = count_inited(waiting_streams_) + count_inited(loading_cache_streams_)
-                   + count_inited(running_streams_) + count_inited(new_streams_);
+                   + count_inited(running_streams_) + count_inited(new_streams_)
+                   + count_inited(pending_prefill_outputs_);
     for (const auto& group : waiting_group_queue_) {
         count += count_inited(group);
     }
@@ -319,7 +322,9 @@ bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
     // Pending loads and capacity-blocked waiters are polled by the timed wait below. They are not
     // wakeup events themselves, otherwise a retryable KV shortage spins the scheduler.
-    return stop_ || schedule_trigger_ || !running_streams_.empty();
+    return stop_ || schedule_trigger_ || !running_streams_.empty()
+           || std::any_of(pending_prefill_outputs_.begin(), pending_prefill_outputs_.end(),
+                          [](const auto& stream) { return !stream->hasDeferredPrefillOutput(); });
 }
 
 void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_streams,
@@ -614,7 +619,7 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
 absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
-        || !waiting_group_queue_.empty()) {
+        || !waiting_group_queue_.empty() || !pending_prefill_outputs_.empty()) {
         cond_.wait_for(lock, poll_interval_, [this] { return waitPredicate(); });
     } else if (!waiting_streams_.empty()) {
         // No running work can release capacity. Poll PD-held block releases without turning a
@@ -629,6 +634,22 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
 
+    // These requests still own KV and need the usual completion/cancellation
+    // transition, but their prompt has already been submitted.
+    for (auto it = pending_prefill_outputs_.begin(); it != pending_prefill_outputs_.end();) {
+        auto current = it++;
+        if (!(*current)->hasDeferredPrefillOutput()) {
+            running_streams_.splice(running_streams_.end(), pending_prefill_outputs_, current);
+        }
+    }
+    if (pd_sep_config_.role_type == RoleType::PREFILL) {
+        for (auto it = running_streams_.begin(); it != running_streams_.end();) {
+            auto current = it++;
+            if ((*current)->hasDeferredPrefillOutput()) {
+                pending_prefill_outputs_.splice(pending_prefill_outputs_.end(), running_streams_, current);
+            }
+        }
+    }
     evaluateAndUpdateStreams(running_streams_);
 
     if (running_streams_.empty()) {

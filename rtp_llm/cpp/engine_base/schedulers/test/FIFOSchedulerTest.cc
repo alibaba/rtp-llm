@@ -5362,6 +5362,59 @@ TEST_F(FIFOSchedulerTest, testPdDecodePreCanRunWithPendingAsyncStillCountsRunnin
     ASSERT_EQ(stream2->getStatus(), StreamState::RUNNING);
 }
 
+TEST_F(FIFOSchedulerTest, deferredPrefillOutputKeepsKvWithoutReschedulingPrompt) {
+    auto cache_config = makeMhaCacheConfig(1, 12, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resources;
+    resources.cache_manager = cache_manager;
+    resources.role_type = RoleType::PREFILL;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size = 1;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
+    FIFOScheduler scheduler(runtime_config, model_config, pd_sep_config, {}, {}, cache_manager);
+
+    const auto make_stream = [&](int request_id) {
+        auto input = std::make_shared<GenerateInput>();
+        input->request_id = request_id;
+        input->input_ids = torch::tensor({1, 2}, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        return std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resources, nullptr);
+    };
+    auto first = make_stream(1);
+    auto second = make_stream(2);
+    ASSERT_TRUE(scheduler.enqueue(first).ok());
+    auto initial = scheduler.schedule();
+    ASSERT_TRUE(initial.ok());
+    ASSERT_EQ(initial->size(), 1);
+    EXPECT_EQ(initial->front(), first);
+
+    first->incPendingAsyncBookkeeping();
+    first->setDeferredPrefillOutput(true);
+    ASSERT_TRUE(scheduler.enqueue(second).ok());
+    auto next = scheduler.schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->size(), 1);
+    EXPECT_EQ(next->front(), second);
+    EXPECT_GT(first->curBlocksNum(), 0);
+    EXPECT_EQ(scheduler.onflightStreams(), 2);
+
+    first->reportError(ErrorCode::CANCELLED, "cancel while output is pending");
+    first->decPendingAsyncBookkeepingAndMaybeRelease();
+    first->setDeferredPrefillOutput(false);
+    next = scheduler.schedule();
+    ASSERT_TRUE(next.ok());
+    ASSERT_EQ(next->size(), 1);
+    EXPECT_EQ(next->front(), second);
+    EXPECT_EQ(first->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(first->curBlocksNum(), 0);
+}
+
 TEST_F(FIFOSchedulerTest, testCpPrefillBatchesMultipleStreams) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);

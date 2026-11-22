@@ -22,11 +22,11 @@ class SharedPPUDecodeGraphImpl(PPUDecodeGraphImpl):
         args, views = model._v4_args, model.shared_weight_views
         attn = as_tagged_attention_inputs(inputs.attention_inputs)
         if not model._is_decode_role or bool(attn.is_prefill):
-            raise ValueError("shared Graph requires ordinary DP8 Decode; Prefill stays eager")
+            raise ValueError("shared Graph requires ordinary Decode; Prefill stays eager")
         if model._is_speculative or bool(getattr(attn, "is_target_verify", False)):
             raise ValueError("shared speculative Graph modes belong to N9")
-        if (args.dp_size, args.ep_size, args.tp_size) != (8, 8, 1):
-            raise ValueError("shared Graph requires DP8/EP8 with Attention TP1")
+        if args.tp_size != 1 or args.dp_size != args.ep_size or args.dp_size not in (8, 32):
+            raise ValueError("shared Graph requires matching DP/EP of 8 or 32 with Attention TP1")
         batch = int(attn.input_lengths.numel())
         if not 0 < batch <= model.shared_graph_runtime.max_batch_size or inputs.input_ids.numel() != batch:
             raise ValueError("shared Graph requires one token per captured request within capacity")

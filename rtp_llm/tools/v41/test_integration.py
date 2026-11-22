@@ -16,6 +16,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from rtp_llm.config.v41_runtime import (
+    DSPARK_DENSE_DECODE_DEFAULTS,
+    DSPARK_CROSS_ROUND_OVERLAP_ENV,
     DSPARK_OVERLAP_ENV,
     DSPARK_OVERLAP_FLAGS,
     MEGAMOE_DSPARK_ASYNC_FLAGS,
@@ -139,11 +141,12 @@ class IntegrationTest(unittest.TestCase):
             "RTP_V41_PPU_MOE_BACKEND": "megamoe", "RTP_V41_PPU_MOE_PRECISION": "w4a4",
             "PRIVATE_TEST_SENTINEL": "do-not-print",
             "ENABLE_DEVICE_CACHE": "1", "ENABLE_MEMORY_CACHE": "1", "MEMORY_CACHE_SIZE_MB": "65536",
+            "FRONTEND_SERVER_COUNT": "4",
         }), patch.object(sys, "argv", argv), redirect_stdout(output):
             self.assertEqual(main(), 0)
         for assignment in ("KV_CACHE_MEM_MB=26000", "CONCURRENCY_LIMIT=8",
                            "DECODE_CAPTURE_CONFIG=1,2,4,8", "REUSE_CACHE=1",
-                           "MAX_BATCH_TOKENS_WITHOUT_CACHE=32768"):
+                           "MAX_BATCH_TOKENS_WITHOUT_CACHE=32768", "FRONTEND_SERVER_COUNT=4"):
             self.assertIn(assignment, output.getvalue())
         for assignment in ("ENABLE_DEVICE_CACHE=1", "ENABLE_MEMORY_CACHE=1", "MEMORY_CACHE_SIZE_MB=65536"):
             self.assertIn(assignment, output.getvalue())
@@ -208,6 +211,28 @@ class IntegrationTest(unittest.TestCase):
                 self.assertEqual(env[DSPARK_OVERLAP_ENV], "1")
                 for key, value in DSPARK_OVERLAP_FLAGS.items():
                     self.assertEqual(env[key], value)
+
+    def test_frontend_worker_count_can_override_preset(self):
+        for role in ("prefill", "decode"):
+            with self.subTest(role=role):
+                default_env = preset_env(role, "/weights", parent={})
+                self.assertEqual(default_env["FRONTEND_SERVER_COUNT"], "1")
+                configured = preset_env(role, "/weights", parent={"FRONTEND_SERVER_COUNT": "4"})
+                self.assertEqual(configured["FRONTEND_SERVER_COUNT"], "4")
+
+    def test_dspark_cross_round_overlap_is_opt_in_on_both_roles(self):
+        for role in ("prefill", "decode"):
+            with self.subTest(role=role):
+                flags = {DSPARK_OVERLAP_ENV: "0", "RTP_V41_PPU_MOE_BACKEND": "megamoe"}
+                graph = role == "decode"
+                options = dict(parent=flags, shared_decode_graph=graph, dspark_gamma=3)
+                baseline = preset_env(role, "/weights", **options)
+                self.assertNotIn(DSPARK_CROSS_ROUND_OVERLAP_ENV, baseline)
+                flags[DSPARK_CROSS_ROUND_OVERLAP_ENV] = "true"
+                enabled = preset_env(role, "/weights", **options)
+                self.assertEqual(enabled[DSPARK_CROSS_ROUND_OVERLAP_ENV], "1")
+                self.assertEqual(enabled[DSPARK_OVERLAP_ENV], "1" if graph else "0")
+                self.assertEqual(V41RuntimeConfig.from_env(enabled).role, role.upper())
 
     def test_encoder_recovery_is_explicit_and_requires_bounded_decoder_replay(self):
         with self.assertRaisesRegex(ValueError, "requires --ced-mode bounded"):
@@ -573,6 +598,51 @@ class IntegrationTest(unittest.TestCase):
             runtime = V41RuntimeConfig.from_server(config)
         self.assertEqual((runtime.attention_dp, runtime.attention_cp), (8, 1))
 
+    def test_dp32_launch_routes_each_local_rank_and_keeps_prefill_cp8(self):
+        nodes = ("192.0.2.20", "192.0.2.21", "192.0.2.22", "192.0.2.23")
+        options = dict(
+            parent={"RTP_V41_PPU_MOE_BACKEND": "megamoe"},
+            prefill_address="192.0.2.10:18090",
+            decode_address="192.0.2.20:19090",
+            decode_nodes=nodes,
+            max_seq_len=98304,
+            dspark_gamma=3,
+        )
+        prefill = preset_env("prefill", "/weights", **options)
+        self.assertEqual((prefill["WORLD_SIZE"], prefill["TP_SIZE"], prefill["EP_SIZE"]),
+                         ("8", "8", "8"))
+        for node_rank in range(4):
+            with self.subTest(node_rank=node_rank):
+                env = preset_env("decode", "/weights", decode_node_rank=node_rank,
+                                 shared_decode_graph=True, capture_batches="1,4,8,16,32",
+                                 concurrency_limit=32, **options)
+                runtime = V41RuntimeConfig.from_env(env)
+                self.assertEqual((runtime.world_size, runtime.attention_dp, runtime.ep, runtime.enp),
+                                 (32, 32, 32, 32))
+                self.assertEqual((env["LOCAL_WORLD_SIZE"], env["WORLD_RANK"]),
+                                 ("8", str(node_rank * 8)))
+                self.assertIn("name:decode_part0,ip:192.0.2.20,port:19090",
+                              env["GANG_CONFIG_STRING"])
+                self.assertEqual(runtime.speculative, "DSPARK")
+                self.assertEqual(env["RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE"], "0")
+                self.assertEqual(env["RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE"], "0")
+                with self.assertRaisesRegex(ValueError, "world_size=EP=ENP=32"):
+                    V41RuntimeConfig.from_env(dict(env, RTP_V41_ENP_SIZE="8"))
+                with self.assertRaisesRegex(ValueError, "EP32 PPU Decode requires MegaMoE"):
+                    V41RuntimeConfig.from_env(dict(env, RTP_V41_PPU_MOE_BACKEND="grouped"))
+        for role_env in (prefill, env):
+            endpoints = json.loads(role_env["MODEL_SERVICE_CONFIG"])["role_endpoints"][0]
+            self.assertEqual(endpoints["decode_endpoint"]["address"].split(","),
+                             [f"{host}:{19090 + rank * 9}" for host in nodes for rank in range(8)])
+        with self.assertRaisesRegex(ValueError, "first Decode node"):
+            preset_env("prefill", "/weights", **dict(options, decode_address="192.0.2.21:19090"))
+        host_parent = dict(options["parent"], RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE="1")
+        host_env = preset_env(
+            "decode", "/weights", shared_decode_graph=True, **dict(options, parent=host_parent)
+        )
+        self.assertEqual(host_env["RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE"], "1")
+        self.assertEqual(host_env["RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE"], "1")
+
     def test_decode_graph_requires_explicit_megamoe_w4a4(self):
         env = preset_env("decode", "/weights", parent={})
         env.update(ENABLE_CUDA_GRAPH="1", RTP_V41_PPU_MOE_BACKEND="megamoe")
@@ -605,6 +675,8 @@ class IntegrationTest(unittest.TestCase):
             ("DSPARK", True, "w4a4"),
         )
         self.assertNotIn("GENERATION_PREFILL_CAPTURE_CONFIG", env)
+        for flag in DSPARK_DENSE_DECODE_DEFAULTS:
+            self.assertEqual(env[flag], "1")
         for flag in MEGAMOE_DSPARK_ASYNC_FLAGS:
             self.assertEqual(env[flag], "0")
             with self.subTest(flag=flag), self.assertRaisesRegex(ValueError, "synchronous dense"):

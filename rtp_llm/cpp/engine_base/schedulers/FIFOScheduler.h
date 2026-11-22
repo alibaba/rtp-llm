@@ -117,6 +117,7 @@ private:
     // residual members at the queue head.
     StreamGroupQueue waiting_group_queue_;
     StreamGroupQueue loading_cache_group_queue_;
+    StreamGroup      pending_prefill_outputs_;
 
     // Context-parallel prefill can opt into single-request admission until
     // the model-side path supports per-request layouts.

@@ -1,4 +1,4 @@
-"""CP8 or DP8 Prefill / DP8 Decode presets for the existing native server."""
+"""CP8 or DP8 Prefill and DP8 or DP32 Decode presets for the native server."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 
 from rtp_llm.config.v41_runtime import (
+    DSPARK_CROSS_ROUND_OVERLAP_ENV,
     DSPARK_DECODE_DEFAULTS,
+    DSPARK_DENSE_DECODE_DEFAULTS,
     DSPARK_OVERLAP_ENV,
     DSPARK_OVERLAP_FLAGS,
     MEGAMOE_DSPARK_ASYNC_FLAGS,
@@ -63,6 +65,8 @@ def preset_env(
     parent=None,
     prefill_address=None,
     decode_address=None,
+    decode_nodes=(),
+    decode_node_rank=0,
     start_port=None,
     prefill_parallel="cp",
     ced_mode="off",
@@ -102,6 +106,19 @@ def preset_env(
 ):
     if role not in ("prefill", "decode"):
         raise ValueError("role must be prefill or decode")
+    if decode_nodes:
+        from ipaddress import IPv4Address
+
+        decode_nodes = tuple(str(IPv4Address(node)) for node in decode_nodes)
+        if len(decode_nodes) != 4 or len(set(decode_nodes)) != 4:
+            raise ValueError("DP32 requires four distinct Decode node IPv4 addresses")
+        if not prefill_address or not decode_address:
+            raise ValueError("DP32 requires both Prefill and Decode endpoints")
+    if type(decode_node_rank) is not int or not 0 <= decode_node_rank < (len(decode_nodes) or 1):
+        raise ValueError("Decode node rank must index the configured Decode nodes")
+    if role == "prefill" and decode_node_rank:
+        raise ValueError("Decode node rank applies only to the Decode process")
+    world_size = 32 if role == "decode" and decode_nodes else 8
     if fake_balance_expert is None:
         fake_balance_expert = env_bool(
             os.environ if parent is None else parent, "FAKE_BALANCE_EXPERT"
@@ -166,6 +183,7 @@ def preset_env(
         raise ValueError("DSpark options require positive gamma")
     cp_prefill = prefill_parallel == "cp"
     env = dict(os.environ if parent is None else parent)
+    env.setdefault("FRONTEND_SERVER_COUNT", "1")
     if type(shared_eplb) is not bool or type(eplb_rearrange_after_prefill) is not bool:
         raise ValueError("shared EPLB opt-in and after-prefill must be explicit booleans")
     if eplb_mode not in ("NONE", "STATS", "EPLB", "ALL"):
@@ -192,20 +210,20 @@ def preset_env(
     env.update(
         {
             "RTP_V41_BACKEND": "ppu",
-            "RTP_V41_ENP_SIZE": "8",
+            "RTP_V41_ENP_SIZE": str(world_size),
             "RTP_V41_COORDINATED_STOP": "1",
             "RTP_V41_PPU_STRATEGY": PPU_STRATEGY,
             "MODEL_TYPE": "deepseek_v41",
             "CHECKPOINT_PATH": str(checkpoint),
             "TOKENIZER_PATH": str(checkpoint),
             "ROLE_TYPE": role.upper(),
-            "WORLD_SIZE": "8",
+            "WORLD_SIZE": str(world_size),
             "LOCAL_WORLD_SIZE": "8",
-            "WORLD_RANK": "0",
+            "WORLD_RANK": str(decode_node_rank * 8),
             "WORKER_INFO_PORT_NUM": "9",
             "TP_SIZE": "8" if role == "prefill" and cp_prefill else "1",
-            "DP_SIZE": "1" if role == "prefill" and cp_prefill else "8",
-            "EP_SIZE": "8",
+            "DP_SIZE": "1" if role == "prefill" and cp_prefill else str(world_size),
+            "EP_SIZE": str(world_size),
             "CP_ROTATE_METHOD": (
                 ("ALL_GATHER" if role == "prefill" else "PREFILL_CP")
                 if cp_prefill
@@ -256,7 +274,6 @@ def preset_env(
             "START_PORT": str(start_port or (8090 if role == "prefill" else 9090)),
             "WARM_UP": "0",
             "MODEL_WARM_UP": "0",
-            "FRONTEND_SERVER_COUNT": "1",
             "KV_CACHE_MEM_MB": str(kv_cache_mem_mb),
             "MAX_CONTEXT_BATCH_SIZE": "1",
             "PREFILL_CHUNK_SIZE": "0",
@@ -328,12 +345,23 @@ def preset_env(
         env["START_PORT"] = str(port)
         env["REMOTE_RPC_SERVER_IP"] = parsed[peer][0]
         env["REMOTE_SERVER_PORT"] = str(parsed[peer][1])
+        if decode_nodes:
+            decode_host, decode_port = parsed["decode"]
+            if decode_host != decode_nodes[0]:
+                raise ValueError("Decode endpoint must identify the first Decode node")
+            if role == "decode":
+                env["GANG_CONFIG_STRING"] = ";".join(
+                    f"name:decode_part{index},ip:{node},port:{decode_port}"
+                    for index, node in enumerate(decode_nodes)
+                )
+                env.pop("DISTRIBUTE_CONFIG_FILE", None)
         route_addresses = dict(addresses)
         for name in ("prefill", "decode"):
             host, base_port = parsed[name]
             owners = 1 if name == "prefill" and cp_prefill else 8
+            hosts = decode_nodes if name == "decode" and decode_nodes else (host,)
             route_addresses[name] = ",".join(
-                f"{host}:{base_port + rank * 9}" for rank in range(owners)
+                f"{node}:{base_port + rank * 9}" for node in hosts for rank in range(owners)
             )
         env["MODEL_SERVICE_CONFIG"] = json.dumps(
             {
@@ -356,6 +384,9 @@ def preset_env(
             },
             separators=(",", ":"),
         )
+    cross_round_overlap = env_bool(env, DSPARK_CROSS_ROUND_OVERLAP_ENV)
+    if DSPARK_CROSS_ROUND_OVERLAP_ENV in env:
+        env[DSPARK_CROSS_ROUND_OVERLAP_ENV] = str(int(cross_round_overlap))
     if shared_decode_graph and shared_grouped_graph:
         raise ValueError("choose one shared PPU Decode Graph backend")
     if shared_graph_async and not shared_grouped_graph:
@@ -366,7 +397,7 @@ def preset_env(
         from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
 
         if role != "decode":
-            raise ValueError("shared Decode Graph requires shared DP8 Decode")
+            raise ValueError("shared Decode Graph requires Decode")
         expected = ("grouped", "w4a8") if shared_grouped_graph else ("megamoe", "w4a4")
         if (moe_backend(env), moe_precision(env)) != expected:
             raise ValueError(f"shared Decode Graph requires {expected[0]}/{expected[1]}")
@@ -378,7 +409,16 @@ def preset_env(
         elif dspark_gamma:
             env.update(dict.fromkeys(MEGAMOE_DSPARK_ASYNC_FLAGS, "0"))
             qualified_overlap = dspark_gamma == 3 and dspark_verify_mode == "dense" and dspark_confidence == "off"
-            if env_bool(env, DSPARK_OVERLAP_ENV, default=qualified_overlap):
+            overlap = (cross_round_overlap and qualified_overlap) or env_bool(
+                env, DSPARK_OVERLAP_ENV, default=qualified_overlap
+            )
+            if qualified_overlap or overlap:
+                if decode_nodes and env.setdefault("RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE", "0") == "0":
+                    # Use the device group for multi-node Decode graph admission.
+                    env.setdefault("RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE", "0")
+                for key, value in DSPARK_DENSE_DECODE_DEFAULTS.items():
+                    env.setdefault(key, value)
+            if overlap:
                 env[DSPARK_OVERLAP_ENV] = "1"
                 env.update(DSPARK_OVERLAP_FLAGS)
                 for key, value in DSPARK_DECODE_DEFAULTS.items():
@@ -423,6 +463,10 @@ def main():
     parser.add_argument(
         "--decode-address", help="D HTTP endpoint, e.g. 192.0.2.20:19090"
     )
+    parser.add_argument("--decode-nodes", nargs=4, default=(), metavar="IP",
+                        help="Four Decode node IPv4 addresses, with the leader first")
+    parser.add_argument("--decode-node-rank", type=int, default=0,
+                        help="This Decode node's index in --decode-nodes")
     parser.add_argument("--start-port", type=int)
     parser.add_argument("--kv-cache-mem-mb", type=positive_integer, default=8192,
                         help="KV cache budget per device in MB; default8192")
@@ -523,6 +567,8 @@ def main():
         rdma=args.rdma,
         prefill_address=args.prefill_address,
         decode_address=args.decode_address,
+        decode_nodes=args.decode_nodes,
+        decode_node_rank=args.decode_node_rank,
         start_port=args.start_port,
         kv_cache_mem_mb=args.kv_cache_mem_mb,
         load_cache_timeout_ms=args.load_cache_timeout_ms,
@@ -573,7 +619,9 @@ def main():
                 name: env[name]
                 for name in ("RTP_V41_PPU_MOE_BACKEND", "RTP_V41_PPU_MOE_PRECISION",
                              "RTP_V41_PPU_QUANT_MODE", "RTP_V41_PPU_WEIGHT_AUDIT_DIR",
-                             "ENABLE_DEVICE_CACHE", "ENABLE_MEMORY_CACHE", "MEMORY_CACHE_SIZE_MB")
+                             "ENABLE_DEVICE_CACHE", "ENABLE_MEMORY_CACHE", "MEMORY_CACHE_SIZE_MB",
+                             "FRONTEND_SERVER_COUNT",
+                             DSPARK_CROSS_ROUND_OVERLAP_ENV)
                 if name in env
             },
             **{**options, "fake_balance_expert": env_bool(env, "FAKE_BALANCE_EXPERT")},

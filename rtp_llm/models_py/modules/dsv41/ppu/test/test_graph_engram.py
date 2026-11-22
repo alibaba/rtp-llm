@@ -4,6 +4,7 @@ Collective mocks exercise the fixed-capacity protocol; actual PCCL capture and
 multi-rank execution are verified by the PPU integration target.
 """
 
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +16,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.engram import (
     EngramShardLayout,
     HostShard,
     compute_engram_hash_ids,
+    engram_lookup,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import ENV, engram_in_hbm_flag
 from rtp_llm.models_py.modules.dsv41.ppu.graph_engram import GraphEngram
 
 
@@ -168,6 +171,69 @@ class GraphEngramTest(unittest.TestCase):
         self.assertEqual(binding.payload.data_ptr(), pointer)
         with self.assertRaisesRegex(RuntimeError, "backing storage changed"):
             graph.validate()
+
+    def test_hbm_lookup_reuses_graph_storage_and_skips_decode_collectives(self):
+        geometry = _geometry()
+        payload, scales = _table()
+        layout = EngramShardLayout.from_table(300, 2)
+        shard = HostShard.from_tensors(payload, scales, layout, 1)
+        group = SimpleNamespace(pg=object(), all_gather_ids=lambda _: self.fail("eager ID gather"))
+        ops = SimpleNamespace(_engram={3: (shard, layout, group)})
+
+        def lookup(ids, owner, shard_layout, *, out=None):
+            self.assertIs(owner, shard)
+            self.assertIs(shard_layout, layout)
+            expected = _rows_reference(payload, scales, ids)
+            return expected if out is None else out.copy_(expected)
+
+        shard._peer_table = SimpleNamespace(decode=True, lookup=lookup, validate=lambda *_: None)
+        with (
+            patch("torch.distributed.is_initialized", return_value=True),
+            patch("torch.distributed.get_world_size", return_value=2),
+            patch("torch.distributed.get_rank", return_value=1),
+            patch("torch.distributed.all_gather_into_tensor", side_effect=AssertionError("Graph ID gather")),
+            patch("torch.distributed.all_reduce", side_effect=AssertionError("Graph contribution reduction")),
+        ):
+            graph = GraphEngram(ops, geometry, device="cpu", max_batch_size=3)
+            binding = graph._bindings[3]
+            self.assertEqual(binding.gathered.numel(), 0)
+            self.assertEqual(binding.contribution.shape, (18, 64))
+            graph.validate()
+            for ids, mask in (
+                (torch.tensor([[1, 256, 299, 300, -1, 8]]), torch.tensor([False])),
+                (torch.tensor([[14, 4, 290, 141, 155, 1], [1, 256, 299, 300, -1, 8]]), torch.tensor([True, False])),
+            ):
+                eager = engram_lookup(ids, layer_id=3, shard=shard, layout=layout, group=group)
+                expected = _rows_reference(payload, scales, ids)
+                torch.testing.assert_close(eager, expected, rtol=0, atol=0)
+                actual = graph.lookup(ids, layer_id=3, valid_mask=mask)
+                self.assertEqual(actual.data_ptr(), binding.contribution.data_ptr())
+                torch.testing.assert_close(
+                    actual, expected.masked_fill(~mask[:, None, None], 0), rtol=0, atol=0,
+                )
+            shard._peer_table = None
+            with self.assertRaisesRegex(RuntimeError, "backing storage changed"):
+                graph.validate()
+
+    def test_hbm_flag_takes_precedence_over_legacy_aliases(self):
+        prefill = "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_PEER_SHARDS"
+        vram = "RTP_V41_PPU_ENGRAM_IN_VRAM"
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(engram_in_hbm_flag(decode=False), "0")
+            self.assertEqual(engram_in_hbm_flag(decode=True), "0")
+            os.environ[prefill] = "1"
+            self.assertEqual(engram_in_hbm_flag(decode=False), "1")
+            self.assertEqual(engram_in_hbm_flag(decode=True), "0")
+            os.environ[vram] = "0"
+            self.assertEqual(engram_in_hbm_flag(decode=False), "0")
+            os.environ[vram] = "1"
+            self.assertEqual(engram_in_hbm_flag(decode=True), "1")
+            os.environ[ENV] = "0"
+            self.assertEqual(engram_in_hbm_flag(decode=False), "0")
+            self.assertEqual(engram_in_hbm_flag(decode=True), "0")
+            os.environ[vram] = "0"
+            os.environ[ENV] = "1"
+            self.assertEqual(engram_in_hbm_flag(decode=True), "1")
 
     def test_capacity_width_and_validity_contracts(self):
         graph, _, _ = self._single(capacity=1)

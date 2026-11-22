@@ -93,19 +93,25 @@ def _wait_verify_candidates(shared):
         pending.wait_done(pending.caller)
 
 
-def _publish_verify_candidates(tiles, visible, block_size, topk_blocks, shared):
+def _publish_verify_candidates(
+    tiles, visible, block_size, topk_blocks, shared, *, sail_inputs=None,
+):
     plan = shared.get(_CANDIDATE_OVERLAP_PLAN)
     if plan is None:
-        return _candidate_tiles(tiles, visible, block_size, topk_blocks)
+        return _candidate_tiles(
+            tiles, visible, block_size, topk_blocks, sail_inputs=sail_inputs,
+        )
 
     with plan.submission():
         plan.fork(plan.caller)
         shared[_CANDIDATE_OVERLAP_PENDING] = plan
         try:
             with torch.cuda.stream(plan.side_stream):
-                record_stream(tiles, plan.side_stream)
+                record_stream(tiles if sail_inputs is None else sail_inputs, plan.side_stream)
                 record_stream(visible, plan.side_stream)
-                result = _candidate_tiles(tiles, visible, block_size, topk_blocks)
+                result = _candidate_tiles(
+                    tiles, visible, block_size, topk_blocks, sail_inputs=sail_inputs,
+                )
                 record_stream(result, plan.caller)
         finally:
             plan.record_done()
@@ -651,6 +657,80 @@ def _compact_kernels():
             tl.store(native_lengths + row, tl.where(live_row & (length > topk), padded, 0))
 
     @triton.jit
+    def pack_sail_verify_sparse(
+        scores, logical_ids, compact_lengths, first, tentative, visible, valid,
+        allowed, candidate_active, packed, lengths, pages,
+        score_stride: tl.constexpr, first_stride: tl.constexpr,
+        tail_row: tl.constexpr, tail_col: tl.constexpr,
+        visible_stride: tl.constexpr, valid_stride: tl.constexpr,
+        active_stride: tl.constexpr, allowed_stride: tl.constexpr,
+        blocks: tl.constexpr, capacity: tl.constexpr, tail_width: tl.constexpr,
+        BLOCK: tl.constexpr,
+    ):
+        row = tl.program_id(0)
+        col = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        slot = col // 8
+        live = tl.load(valid + row * valid_stride)
+        length = tl.maximum(tl.minimum(tl.load(visible + row * visible_stride), capacity), 0)
+        length = tl.where(live, length, 0)
+        split = tl.load(first + row * first_stride)
+        count = tl.load(compact_lengths + row) // 8
+        last_prefix = tl.load(logical_ids + row * blocks + count - 1, count > 0, other=-1)
+        active = tl.load(candidate_active + row * active_stride)
+        tail_end = tl.minimum(length, split + tail_width)
+        first_tail_page = split // 8
+        last_tail_page = (tail_end - 1) // 8
+        # A short journal can complete the last committed block and add up
+        # to two new ones. Only retained candidates enter the compact table.
+        has_tail = tail_end > split
+        allowed_first = tl.load(
+            allowed + row * allowed_stride + first_tail_page,
+            has_tail & active & (first_tail_page >= 0) & (first_tail_page < allowed_stride), other=0,
+        )
+        allowed_last = tl.load(
+            allowed + row * allowed_stride + last_tail_page,
+            has_tail & active & (last_tail_page >= 0) & (last_tail_page < allowed_stride), other=0,
+        )
+        append_first = (has_tail & (first_tail_page > last_prefix)
+                        & ((~active) | (allowed_first != 0)) & (count < blocks))
+        first_count = count + append_first.to(tl.int32)
+        append_last = (has_tail & (last_tail_page > first_tail_page)
+                       & ((~active) | (allowed_last != 0)) & (first_count < blocks))
+        total = first_count + append_last.to(tl.int32)
+        last_page = tl.where(
+            append_last, last_tail_page, tl.where(append_first, first_tail_page, last_prefix),
+        )
+        page = tl.load(logical_ids + row * blocks + slot, slot < count, other=-1)
+        page = tl.where(append_first & (slot == count), first_tail_page, page)
+        page = tl.where(append_last & (slot == first_count), last_tail_page, page)
+        logical = page * 8 + col % 8
+        prefix = live & (slot < count) & (logical >= 0) & (logical < split) & (logical < length)
+        tail = live & (slot < total) & (logical >= split) & (logical < tail_end)
+        prefix_score = tl.load(scores + row * score_stride + col, prefix, other=-float("inf"))
+        tail_score = tl.load(tentative + row * tail_row + (logical - split) * tail_col,
+                             tail, other=-float("inf"))
+        tl.store(packed + row * blocks * 8 + col, tl.where(prefix, prefix_score, tail_score),
+                 col < blocks * 8)
+        # The kernel's short-row path emits ordinal IDs, matching Verify.
+        short = length <= 512
+        tl.store(pages + row * blocks + slot, tl.where(short, slot, page),
+                 (col % 8 == 0) & (slot < blocks))
+        compact = tl.maximum(total - 1, 0) * 8 + tl.minimum(tl.maximum(tail_end - last_page * 8, 0), 8)
+        compact = tl.where(total > 0, compact, 0)
+        tl.store(lengths + row, tl.where(short, length, compact), tl.program_id(1) == 0)
+
+    @triton.jit
+    def filter_sail_verify_topk(scores, lengths, output, width: tl.constexpr, topk: tl.constexpr):
+        row = tl.program_id(0)
+        lane = tl.arange(0, topk)
+        length = tl.load(lengths + row)
+        picked = tl.load(output + row * topk + lane)
+        keep = (picked >= 0) & (picked < length)
+        score = tl.load(scores + row * width + picked, keep & (length > topk), other=0)
+        keep = keep & ((length <= topk) | (tl.abs(score) < float("inf")))
+        tl.store(output + row * topk + lane, tl.where(keep, picked, -1))
+
+    @triton.jit
     def finish_verify_compact(
         packed, picked, logical_ids, compact_lengths, first, visible, valid, output,
         first_stride: tl.constexpr, visible_stride: tl.constexpr, valid_stride: tl.constexpr,
@@ -858,6 +938,7 @@ def _compact_kernels():
         prepare_sparse_candidates=prepare_sparse_candidates, pack_sparse_ranks=pack_sparse_ranks,
         finish_sparse_selection=finish_sparse_selection,
         pack_verify_compact=pack_verify_compact, finish_verify_compact=finish_verify_compact,
+        pack_sail_verify_sparse=pack_sail_verify_sparse, filter_sail_verify_topk=filter_sail_verify_topk,
         verify_sparse_map=verify_sparse_map, write_verify_sparse_logits=write_verify_sparse_logits,
         collect_tile=collect_tile, finish_topk=finish_topk, merge_topk=merge_topk,
         verify_topk_lengths=verify_topk_lengths,
@@ -865,9 +946,13 @@ def _compact_kernels():
     )
 
 
-def _candidate_tiles(score_tiles, visible, block_size, topk_blocks):
+def _candidate_tiles(score_tiles, visible, block_size, topk_blocks, *, sail_inputs=None):
     from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import select_candidate_blocks
 
+    if sail_inputs is not None:
+        from .local_prefill_sg_topk import select_decode_blocks
+
+        return select_decode_blocks(*sail_inputs, topk_blocks)
     tiles = [logits for logits, _, _ in score_tiles]
     if any(tile.shape[1] % block_size for tile in tiles[:-1]):
         return select_candidate_blocks(_join_tiles(tiles), visible, block_size, topk_blocks)
@@ -1153,10 +1238,30 @@ def _pack_verify_compact_logits(
 
 def _select_verify_compact_topk(
     scored, first, tentative, visible, valid_mask, allowed, candidate_active, topk,
-    *, bf16_tail_provenance=False,
+    *, bf16_tail_provenance=False, sail_topk=False,
 ):
     """Select plain scores, then map compact positions to logical KV IDs."""
     from rtp_llm.models_py.modules.dsv41.ppu.sparse_selection import try_select_sparse
+
+    if (
+        sail_topk and bf16_tail_provenance and scored.scores.dtype == torch.bfloat16
+        and scored.tile == 8 and 64 <= scored.blocks <= 2048 and tentative.shape[1] <= 8
+    ):
+        from .local_prefill_sg_topk import select_decode_sparse
+
+        kernels = scored.kernels
+        rows = visible.numel()
+        width = scored.blocks * 8
+        packed = torch.empty((rows, width), dtype=torch.bfloat16, device=visible.device)
+        pages = torch.empty((rows, scored.blocks), dtype=torch.int32, device=visible.device)
+        lengths = torch.empty(rows, dtype=torch.int32, device=visible.device)
+        kernels.pack_sail_verify_sparse[(rows, kernels.triton.cdiv(width, 1024))](
+            scored.scores, scored.logical_ids, scored.lengths, first, tentative, visible, valid_mask,
+            allowed, candidate_active, packed, lengths, pages, scored.scores.stride(0), first.stride(0),
+            *tentative.stride(), visible.stride(0), valid_mask.stride(0), candidate_active.stride(0),
+            allowed.shape[1], scored.blocks, scored.capacity, tentative.shape[1], 1024,
+        )
+        return select_decode_sparse(packed, lengths, pages, topk)
 
     fused = try_select_sparse(
         scored, visible, valid_mask, topk, first=first, tentative=tentative,
@@ -1250,10 +1355,11 @@ def _verify_tentative_scores(
 def _select_verify_sparse_indices(
     query, head_weights, *, cache, source_layer, ratio, positions, valid_mask,
     topk, candidate_block_size, candidates, candidate_active, candidate_inactive_limit, shared,
+    sail_topk=False,
 ):
     """Consume existing candidates without materializing dense Verify tiles."""
     if (
-        not _quant.is_ppu() or query.shape[0] != 32 or topk != 512
+        not _quant.is_ppu() or query.shape[0] == 0 or topk != 512
         or candidates is None or candidate_inactive_limit is None
         or os.environ.get(_SPARSE_INDEXER_ENV, "1") == "0"
     ):
@@ -1296,7 +1402,7 @@ def _select_verify_sparse_indices(
     allowed = _cached_candidate_flags(candidates, scored.capacity, candidate_block_size, shared)
     return _select_verify_compact_topk(
         scored, first, tentative, visible, valid_mask, allowed, candidate_active, topk,
-        bf16_tail_provenance=True,
+        bf16_tail_provenance=True, sail_topk=sail_topk,
     )
 
 
@@ -1577,13 +1683,17 @@ def select_verify_indices(
         or os.environ.get(_VERIFY_FUSED_TOPK_ENV, "1") != "1"
     ):
         return None
+    sail_topk = (
+        _quant.is_ppu() and query.shape[0] > 0 and topk == 512
+        and torch.cuda.get_device_capability(query.device) == (8, 9)
+    )
     if candidate_topk_blocks == 0 and os.environ.get(_VERIFY_COMPACT_TOPK_ENV, "1") != "0":
         selected = _select_verify_sparse_indices(
             query, head_weights, cache=cache, source_layer=source_layer, ratio=ratio,
             positions=positions, valid_mask=valid_mask, topk=topk,
             candidate_block_size=candidate_block_size, candidates=candidates,
             candidate_active=candidate_active, candidate_inactive_limit=candidate_inactive_limit,
-            shared=shared,
+            shared=shared, sail_topk=sail_topk,
         )
         if selected is not None:
             return selected, None, shared[("verify_indexer_visible", id(positions), ratio)]
@@ -1598,13 +1708,30 @@ def select_verify_indices(
     if visible_key not in shared:
         shared[visible_key] = (positions + 1) // ratio
     visible = shared[visible_key]
+    sail_inputs = None
+    if sail_topk:
+        scores = _join_tiles([logits for logits, _, _ in tiles])
+        rows, width = scores.shape
+        lengths = torch.empty(rows, dtype=torch.int32, device=scores.device)
+        kernels = _compact_kernels()
+        kernels.verify_topk_lengths[(1, kernels.triton.cdiv(rows, 128))](
+            visible, valid_mask, lengths, rows, 1, width,
+            visible.stride(0), valid_mask.stride(0), width, 128,
+        )
+        sail_inputs = (scores, lengths)
     published = None
     if candidate_topk_blocks > 0:
-        # Keep the legacy candidate torch.topk order on equal block scores.
         candidate_tiles = [(logits, lengths, False) for logits, lengths, _ in tiles]
         published = _publish_verify_candidates(
             candidate_tiles, visible, candidate_block_size, candidate_topk_blocks, shared,
+            sail_inputs=sail_inputs if candidate_block_size == 8 and candidate_topk_blocks <= 2048 else None,
         )
+    if sail_inputs is not None:
+        from .local_prefill_sg_topk import select_decode_tokens
+
+        selected = select_decode_tokens(*sail_inputs, topk)
+        kernels.filter_sail_verify_topk[(rows,)](scores, lengths, selected, width, topk)
+        return selected, published, visible
     # shared is required here, so _verify_score_tiles used the explicit
     # BF16-rounding Verify reducer for every journal score.
     selected = _select_verify_topk(

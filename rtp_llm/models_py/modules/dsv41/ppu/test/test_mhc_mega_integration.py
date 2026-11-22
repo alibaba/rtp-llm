@@ -198,6 +198,129 @@ class MegaIntegrationTest(unittest.TestCase):
         self.assertFalse(adapter.execution_stats()["fallbacks"])
 
     @unittest.skipUnless(os.environ.get("RTP_V41_TEST_MHC_DEVICE") == "1", "PPU only")
+    @torch.inference_mode()
+    def test_graph_verify_aux_boundary(self):
+        from types import SimpleNamespace
+        from rtp_llm.models_py.modules.dsv41.hc.decode_transition import PendingDecodePost
+        from rtp_llm.models_py.modules.dsv41.ppu._mhc_triton import try_verify_mhc_post
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_mhc import (
+            finish_decode_boundary, prepare_decode_boundary,
+        )
+        from rtp_llm.models_py.modules.dsv41.ppu.model import SharedPPUTargetBlock
+        from rtp_llm.models_py.modules.dsv41.transformer import V4Transformer
+
+        device = torch.device("cuda:0")
+        stream = torch.cuda.Stream(device=device)
+        ops = PPUOps(num_local_experts=384, mhc_config=MHCConfig(rms_eps=1e-20))
+        for batch in (4, 8, 16, 32):
+            rows = batch * 4
+            inputs, _, _, _ = _make_case(torch, rows, device, "normal")
+            shape = (batch, 4)
+            residual = inputs["residual"].view(*shape, 4, 5120)
+            branch = inputs["x"].view(*shape, 5120)
+            mix = PPUStepMix(
+                hidden=None,
+                pre_mix=inputs["shifted_prev_mix"].view(*shape, 4),
+                post_mix=inputs["post_mix"].view(*shape, 4, 1),
+                residual_mix=inputs["comb_res_mix"].view(*shape, 4, 4),
+            )
+            v4 = SimpleNamespace(
+                layers=[], capture_aux_hidden_layer_ids=(1, 0),
+                _mtp_hidden_buffer=torch.empty((rows, 10240), dtype=torch.bfloat16, device=device),
+            )
+            state = SimpleNamespace(shared={}, is_graph=True, verify=True, cache=None)
+            model = SimpleNamespace(v4=v4, parallelism_config=SimpleNamespace(tp_size=1))
+            runtime = SimpleNamespace(current=state, model=model)
+            for layer_id in (0, 1):
+                layer = SharedPPUTargetBlock.__new__(SharedPPUTargetBlock)
+                torch.nn.Module.__init__(layer)
+                layer.layer_id = layer_id
+                layer.query_only = False
+                layer._mhc_phase = "graph_verify"
+                layer.ops = ops
+                layer.attn = SimpleNamespace(runtime=runtime)
+                layer.engram = None
+                v4.layers.append(layer)
+            src, dst = v4.layers
+            src.ffn_hc = SimpleNamespace(state=mix)
+            params = dict(fn=inputs["fn"], base=inputs["mix_bases"], scale=inputs["mix_scales"])
+            accepted = []
+            dst.attn_hc = SimpleNamespace(
+                **params, parameters_map=params, _previous_ref=lambda: src.ffn_hc,
+                accept_transition=accepted.append,
+            )
+            dst.attn_norm = SimpleNamespace(weight=inputs["rmsnorm_weight"], variance_epsilon=1e-20)
+            metadata = SimpleNamespace(batch_size=batch, q_len_per_req=4)
+            ids = torch.zeros(shape, device=device, dtype=torch.int64)
+            pending = PendingDecodePost(branch, residual, mix.post_mix, mix.residual_mix, src.ffn_hc)
+
+            def run():
+                _, target, scope = prepare_decode_boundary(src, state, residual, metadata, ids, {})
+                self.assertIs(target, dst)
+                completed = finish_decode_boundary(src, state, pending, target, scope)
+                V4Transformer.capture_aux_hidden(v4, dst.layer_id, completed)
+                prepared, _, _ = prepare_decode_boundary(dst, state, completed, metadata, ids, {})
+                self.assertIs(prepared[0], completed)
+                return completed
+
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                run()
+            torch.cuda.current_stream(device).wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                actual = run()
+            branch.neg_()
+            graph.replay()
+            expected = try_verify_mhc_post(branch, residual, mix.post_mix, mix.residual_mix, mode="dot")
+            aux = v4._mtp_hidden_buffer[:, :5120]
+            torch.testing.assert_close(
+                aux, actual.mean(dim=-2).view(rows, 5120),
+                rtol=0, atol=0,
+            )
+            for name, observed, reference in (
+                ("residual", actual.view(rows, 4, 5120), expected.view(rows, 4, 5120)),
+                ("aux", aux, expected.mean(dim=-2).view(rows, 5120)),
+            ):
+                metric = _qualification_metric(torch, observed, reference)
+                self.assertEqual(metric["qualified_status"], "PASS", metric["global"])
+                print(f"batch={batch} {name} sse_over_energy={metric['global']['score']:.3g}", flush=True)
+
+    @unittest.skipUnless(os.environ.get("RTP_V41_TEST_MHC_DEVICE") == "1", "PPU only")
+    @torch.inference_mode()
+    def test_graph_proposal_mhc_post_batch_sizes(self):
+        from rtp_llm.models_py.modules.dsv41.ppu._mhc_triton import try_verify_mhc_post
+        from rtp_llm.models_py.modules.dsv41.ppu.mhc import mhc_post
+
+        device = torch.device("cuda:0")
+        stream = torch.cuda.Stream(device=device)
+        for batch in (4, 8, 16, 32):
+            with self.subTest(batch=batch):
+                rows = batch * 3
+                inputs, _, _, _ = _make_case(torch, rows, device, "normal")
+                residual = inputs["residual"].view(batch, 3, 4, 5120)
+                branch = inputs["x"].view(batch, 3, 5120)
+                post = inputs["post_mix"].view(batch, 3, 4, 1)
+                comb = inputs["comb_res_mix"].view(batch, 3, 4, 4)
+                state = PPUStepMix(hidden=None, post_mix=post, residual_mix=comb)
+
+                stream.wait_stream(torch.cuda.current_stream(device))
+                with torch.cuda.stream(stream):
+                    warm = try_verify_mhc_post(branch, residual, post, comb, mode="dot", proposal_q3=True)
+                self.assertIsNotNone(warm)
+                torch.cuda.current_stream(device).wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = try_verify_mhc_post(branch, residual, post, comb, mode="dot", proposal_q3=True)
+                branch.neg_()
+                graph.replay()
+                expected = mhc_post(residual, branch, state=state).hidden
+                self.assertFalse(torch.equal(actual, warm))
+                metric = _qualification_metric(torch, actual.view(rows, 4, 5120), expected.view(rows, 4, 5120))
+                self.assertEqual(metric["qualified_status"], "PASS", metric["global"])
+                print(f"proposal batch={batch} post sse_over_energy={metric['global']['score']:.3g}", flush=True)
+
+    @unittest.skipUnless(os.environ.get("RTP_V41_TEST_MHC_DEVICE") == "1", "PPU only")
     def test_device_transition_state_and_consumers(self):
         reports, first_rows = [], {}
         with patch.dict(os.environ):

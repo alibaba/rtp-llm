@@ -54,7 +54,7 @@ def score_indexer_entries(
     if (
         score_reducer is not None
         and quantized_query is not None
-        and batch == 32 and 1 <= columns <= 4 and ratio in (1, 2)
+        and 1 <= columns <= 4 and ratio in (1, 2)
         and os.environ.get(_VERIFY_FP4_DEQUANT_ENV, "1") == "1"
     ):
         from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal

@@ -107,12 +107,14 @@ class LocalPrefillSGTopKCPU(unittest.TestCase):
         root = _bundle()
         manifest = json.loads((root / "source-manifest.json").read_text())
         self.assertEqual(manifest["upstream_commit"], "3bc4f87d5f9bb6f04b724540fb12a3acdc62d2fa")
+        self.assertEqual(manifest["decode_topk_upstream_commit"], "631e12a966b6ebb9da093a4618d2da586f3cef68")
         for name, expected in manifest["sources"].items():
             self.assertEqual(hashlib.sha256((root / name).read_bytes()).hexdigest(), expected, name)
         expected = {
             "block_amax.cuh": "57edc969d1ad4edaece2a1c4e1b7182c8c134ae94d059404ba8a6d0e6edba794",
             "topk_v2.cuh": "158292a6c3cd43002b6bf4254df9abf691347e7ad49e55a4662a3a11336e0f80",
-            "topk_bf16_small.cuh": "7c53f8c13e6cbf0ae1ba96cab0566def897b681abfddb2b951bb9df1503b7408",
+            "topk_bf16_small.cuh": "9213f824fae44b4465b33cd0f51145d47950c4142ebba061fe8e0f9d151d1dfa",
+            "topk_v1.cuh": "075de3df14bc3df7bd384f30859dac7346953a83e0f7642618b70d0884880266",
         }
         for name, digest in expected.items():
             self.assertEqual(manifest["sources"]["csrc/deepseek_v4/" + name], digest)

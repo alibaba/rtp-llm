@@ -63,6 +63,10 @@ public:
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
                                              SamplerOutput&                      target_sampler_output);
+    SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
+                                     SamplerOutput&                      draft_sampler_output,
+                                     SamplerOutput&                      target_sampler_output,
+                                     bool                                stage_host_output);
 
     // Per-position calibration statistics, FP32 [gamma, 6]: valid attempted
     // count, accepted count, prediction sum, absolute-error sum, squared-error
@@ -150,7 +154,8 @@ private:
     void                                     batchSample(SpeculativeSamplerOutput&           sample_output,
                                                          const std::list<GenerateStreamPtr>& streams,
                                                          SamplerOutput&                      draft_sampler_output,
-                                                         SamplerOutput&                      target_sampler_output) const;
+                                                         SamplerOutput&                      target_sampler_output,
+                                                         bool                                stage_host_output) const;
 
     void streamSample(SpeculativeSamplerOutput&           sample_output,
                       const std::list<GenerateStreamPtr>& streams,

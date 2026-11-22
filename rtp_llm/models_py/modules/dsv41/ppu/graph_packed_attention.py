@@ -24,12 +24,13 @@ _PACKED_WIDTHS = {"swa_kv": 528, "global_kv_1": 288, "global_kv_2": 288}
 
 
 def _can_fuse_tail_copies(pages, payloads):
-    if optimization_env_value("RTP_V41_PPU_DECODE_LAUNCH_REUSE", "0") != "1" or len(pages) not in (1, 2):
+    if (optimization_env_value("RTP_V41_PPU_DECODE_LAUNCH_REUSE", "0") != "1"
+            or len(pages) not in (1, 2) or len(pages) != len(payloads)):
         return False
     tensors = [*pages, *payloads]
     if not all(
         type(t) is torch.Tensor and t.is_cuda and t.dtype == torch.uint8
-        and t.ndim == 2 and t.shape[0] in (1, 8, 24, 32)
+        and t.ndim == 2 and 0 < t.numel() <= torch.iinfo(torch.int32).max
         and t.shape[1] in (288, 528) and t.is_contiguous()
         and t.device == pages[0].device for t in tensors
     ) or any(page.shape != payload.shape for page, payload in zip(pages, payloads)):
@@ -263,7 +264,7 @@ class GraphPackedAttention:
             )
             if tag == "swa_kv":
                 self.swa_domains[owner] = (domain, tensor.shape[0])
-        if (journal is not None and journal.rows in (8, 32)
+        if (journal is not None
             and optimization_env_value("RTP_V41_PPU_DECODE_LAUNCH_REUSE", "0") == "1"
             and optimization_env_value("RTP_V41_PPU_VERIFY_BATCHED_JOURNAL", "0") == "1"):
             pages = [view[0, :journal.rows, 0] for view in self.views.values()]
@@ -285,7 +286,7 @@ class GraphPackedAttention:
                 if optimization_env_value(VERIFY_DIRECT_JOURNAL_ENV, "0") == "1":
                     from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
 
-                    # The B32 publication descriptor proves that the full
+                    # The publication descriptor proves that the full
                     # native pool ranges do not alias (not just block zero).
                     if (
                         type(journal) is VerifyGraphJournal

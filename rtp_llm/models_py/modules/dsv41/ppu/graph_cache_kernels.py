@@ -21,6 +21,20 @@ import torch
 
 
 _EARLY_PUBLICATION_WAKE = os.environ.get("RTP_V41_PPU_DSPARK_EARLY_PUBLICATION_WAKE") == "1"
+_VERIFY_PAIR_WIDTH = 4
+_VERIFY_PAIR_COUNT_WORD_ROWS = 16
+_VERIFY_PAIR_BATCH_CAPACITY = 2 * _VERIFY_PAIR_COUNT_WORD_ROWS
+_VERIFY_PAIR_TABLE_BLOCK = 256
+
+
+def supports_verify_pair_layout(batch, width):
+    # The device planner uses a power-of-two row block. Two scalar words
+    # carry the accepted counts without an additional host-to-device copy.
+    return (
+        width == _VERIFY_PAIR_WIDTH
+        and 0 < batch <= _VERIFY_PAIR_BATCH_CAPACITY
+        and (batch & (batch - 1)) == 0
+    )
 
 
 @lru_cache(maxsize=1)
@@ -343,22 +357,28 @@ def _kernels():
                 output, pool - TARGET_POOLS, BATCH, ROWS, FIELDS,
             )
 
-    @triton.jit(do_not_specialize=["packed_counts", "expected0", "expected1", "expected2"])
+    @triton.jit
+    def unpack_verify_counts(row, packed_counts, WORD_ROWS: tl.constexpr):
+        word = tl.where(row < WORD_ROWS, packed_counts[0], packed_counts[1]).to(tl.int64)
+        return (word >> (3 * (row % WORD_ROWS))) & 7
+
+    @triton.jit(do_not_specialize=["packed_counts", "expected_prefixes"])
     def prepare_verify_pair(
-        supplied, target, draft, lengths, output, packed_counts,
-        expected0, expected1, expected2,
-        BATCH: tl.constexpr, WIDTH: tl.constexpr,
+        supplied, target, draft, lengths, output, packed_counts, expected_prefixes,
+        BATCH: tl.constexpr, WIDTH: tl.constexpr, WORD_ROWS: tl.constexpr,
     ):
         row = tl.arange(0, BATCH)
         prefix = tl.load(supplied + row).to(tl.int64)
         target_prefix = tl.load(target + row).to(tl.int64)
         draft_prefix = tl.load(draft + row).to(tl.int64)
         draft_length = tl.load(lengths + row)
-        packed = tl.where(row < 3, expected0, tl.where(row < 6, expected1, expected2)).to(tl.int64)
+        packed = tl.full((BATCH,), 0, tl.int64)
+        for group in tl.static_range(len(expected_prefixes)):
+            packed = tl.where(row // 3 == group, expected_prefixes[group], packed)
         expected = (packed >> (21 * (row % 3))) & ((1 << 21) - 1)
         target_bad = tl.max(((prefix != target_prefix) | (prefix != expected)).to(tl.int32), 0)
         draft_bad = tl.max(((prefix != draft_prefix) | (draft_length != WIDTH)).to(tl.int32), 0)
-        counts = (packed_counts >> (3 * row)) & 7
+        counts = unpack_verify_counts(row, packed_counts, WORD_ROWS)
         tl.store(output + row, prefix + counts)
         tl.store(output + BATCH, tl.where(target_bad != 0, 1, tl.where(draft_bad != 0, 2, 0)))
 
@@ -367,13 +387,21 @@ def _kernels():
     ])
     def prepare_verify_pair_from_receipt(
         supplied, target, draft, lengths, receipt, initial_flags, output,
-        packed_counts, generation_floor, table_flags, max_seq_len, live_limit,
-        BATCH: tl.constexpr, WIDTH: tl.constexpr, FLAG_BLOCK: tl.constexpr,
-        WINDOW_WIDTH: tl.constexpr, WINDOW_BLOCK: tl.constexpr,
+        accepted_counts, accepted_tokens, vocab_size, generation_floor, table_flags, max_seq_len, live_limit,
+        BATCH: tl.constexpr, WIDTH: tl.constexpr, WORD_ROWS: tl.constexpr, FLAG_BLOCK: tl.constexpr,
+        WINDOW_WIDTH: tl.constexpr, WINDOW_BLOCK: tl.constexpr, DEVICE_COUNTS: tl.constexpr,
     ):
         row = tl.arange(0, BATCH)
         prefix = tl.load(supplied + row).to(tl.int64)
-        counts = (packed_counts >> (3 * row)) & 7
+        packet_bad = tl.full((BATCH,), False, tl.int1)
+        if DEVICE_COUNTS:
+            counts = tl.load(accepted_counts + row)
+            columns = tl.arange(0, WIDTH)
+            tokens = tl.load(accepted_tokens + row[:, None] * WIDTH + columns[None, :])
+            invalid = ((tokens < 0) | (tokens >= vocab_size)) & (columns[None, :] < counts[:, None])
+            packet_bad = (counts <= 0) | (counts > WIDTH) | (tl.max(invalid.to(tl.int32), 1) != 0)
+        else:
+            counts = unpack_verify_counts(row, accepted_counts, WORD_ROWS)
         ends = prefix + counts
         replay_prefix = tl.load(receipt + 2 + BATCH + row)
         replay_width = tl.load(receipt + 2 + row)
@@ -381,6 +409,7 @@ def _kernels():
             (prefix != replay_prefix) | (prefix != tl.load(target + row))
             | (replay_width != WIDTH) | (prefix < 0) | (prefix >= (1 << 21))
             | (prefix + WIDTH > max_seq_len) | ((counts != 0) & (ends > live_limit))
+            | packet_bad
         )
         draft_bad = (prefix != tl.load(draft + row)) | (tl.load(lengths + row) != WIDTH)
         mismatch = (tl.load(receipt + 1) != 0) | (tl.load(receipt) <= generation_floor)
@@ -796,11 +825,11 @@ def try_plan_verify_publication(
 
 
 class BatchedVerifyPublication:
-    """Static pool descriptors for one B32 Verify journal and its native cache."""
+    """Static pool descriptors for a Verify journal and its native cache."""
 
     @classmethod
     def try_create(cls, pools, rows, device):
-        if rows != 32 or device.type != "cuda":
+        if rows <= 0 or rows & (rows - 1) or device.type != "cuda":
             return None
         plan, transfer, storage, ranges = [], [], [], []
         words_per_row = max_words = 0
@@ -1056,15 +1085,28 @@ class _PreparedVerifyPair:
         )
         self.target_pools, self.draft_pools = target[0].plan.shape[0], draft[0].plan.shape[0]
 
-    def publish(self, counts, expected_prefixes=None, *, replay_check=None) -> bool:
-        """Launch the guarded pair only after the host approves its row counts."""
-        batch, width, rows, table_block = 8, 4, 32, 256
-        if (
-            not isinstance(counts, tuple) or len(counts) != batch
-            or any(type(count) is not int or not 0 <= count <= width for count in counts)
-        ):
-            return False
-        packed_counts = sum(count << (3 * request) for request, count in enumerate(counts))
+    def publish(self, counts, expected_prefixes=None, *, replay_check=None, accepted_tokens=None, vocab_size=0) -> bool:
+        """Validate and publish both KV journals on the bound stream."""
+        batch, width, rows = self.prefixes.numel(), _VERIFY_PAIR_WIDTH, self.target[0].rows
+        word_rows = _VERIFY_PAIR_COUNT_WORD_ROWS
+        device_counts = accepted_tokens is not None
+        if device_counts:
+            if replay_check is None or not 0 < vocab_size < (1 << 31):
+                return False
+            for tensor, shape in ((counts, (batch,)), (accepted_tokens, (batch, width))):
+                if (not isinstance(tensor, torch.Tensor) or tensor.shape != shape or tensor.device != self.device
+                        or tensor.dtype != torch.int32 or not tensor.is_contiguous()):
+                    return False
+            count_args = counts
+        else:
+            if (not isinstance(counts, tuple) or len(counts) != batch
+                    or any(type(count) is not int or not 0 <= count <= width for count in counts)):
+                return False
+            # Reserve bit 63 so the scalar ABI is always signed i64.
+            count_args = tuple(
+                sum(count << (3 * index) for index, count in enumerate(counts[start:start + word_rows])) - (1 << 63)
+                for start in (0, word_rows)
+            )
         if replay_check is None:
             if (
                 not isinstance(expected_prefixes, tuple) or len(expected_prefixes) != batch
@@ -1104,8 +1146,8 @@ class _PreparedVerifyPair:
                 target_plans, draft_plans = workspace.target_plans, workspace.draft_plans
                 if replay_check is None:
                     kernels.prepare_verify_pair[(1,)](
-                        prefixes, target_prefixes, draft_prefixes, lengths, layout, packed_counts,
-                        *expected, batch, width, num_warps=1,
+                        prefixes, target_prefixes, draft_prefixes, lengths, layout, count_args,
+                        tuple(expected), batch, width, word_rows, num_warps=1,
                     )
                 else:
                     gpu_receipt = replay_check.replay.device_result(stream)
@@ -1114,10 +1156,11 @@ class _PreparedVerifyPair:
                         return False
                     kernels.prepare_verify_pair_from_receipt[(1,)](
                         prefixes, target_prefixes, draft_prefixes, lengths, gpu_receipt, initial_flags, layout,
-                        packed_counts, replay_check.staged_completion, initial_flags.numel(),
+                        count_args, accepted_tokens, vocab_size, replay_check.staged_completion, initial_flags.numel(),
                         replay_check.max_seq_len, replay_check.live_limit,
-                        batch, width, 1024, replay_check.engram_width,
-                        kernels.triton.next_power_of_2(max(1, rows * replay_check.engram_width)), num_warps=4,
+                        batch, width, word_rows, 1024, replay_check.engram_width,
+                        kernels.triton.next_power_of_2(max(1, rows * replay_check.engram_width)),
+                        device_counts, num_warps=4,
                     )
                 kernels.plan_verify_publication_pair[(target_pools + draft_pools,)](
                     target_pub.plan, target_requests, target_prefixes, target_valid,
@@ -1125,7 +1168,7 @@ class _PreparedVerifyPair:
                     target_pools, batch, rows, target_pub.plan.shape[1], num_warps=4,
                 )
                 _launch_joint_table_checks(
-                    *self.tables, *self.table_args, flags, batch, table_block, stream,
+                    *self.tables, *self.table_args, flags, batch, _VERIFY_PAIR_TABLE_BLOCK, stream,
                 )
                 kernels.validate_verify_pair[(1,)](
                     layout, target_plans, draft_plans, flags, status, batch, rows, flag_count,
@@ -1133,7 +1176,7 @@ class _PreparedVerifyPair:
                 )
                 workspace.host_status.copy_(status, non_blocking=True)
                 workspace.ready.record(stream)
-                if packed_counts:
+                if device_counts or any(counts):
                     target_words = target_pub.backup_words
                     backup = workspace.get_backup()
                     _copy_verify_pair(kernels, target_pub, draft_pub, plans, backup, status)
@@ -1177,12 +1220,15 @@ class _PreparedVerifyPair:
 
 def prepare_verify_pair(target, draft, prefixes) -> _PreparedVerifyPair | None:
     """Prepare fixed host metadata without submitting device work."""
-    batch, rows, table_block = 8, 32, 256
-    if not isinstance(prefixes, torch.Tensor):
+    if not isinstance(prefixes, torch.Tensor) or prefixes.ndim != 1:
         return None
+    batch = prefixes.numel()
+    if not supports_verify_pair_layout(batch, _VERIFY_PAIR_WIDTH):
+        return None
+    rows = batch * _VERIFY_PAIR_WIDTH
     device = prefixes.device
     if (
-        device.type != "cuda" or prefixes.shape != (batch,) or not prefixes.is_contiguous()
+        device.type != "cuda" or not prefixes.is_contiguous()
         or prefixes.dtype not in (torch.int32, torch.int64)
         or not isinstance(target, tuple) or len(target) != 5
         or not isinstance(draft, tuple) or len(draft) != 6
@@ -1217,7 +1263,7 @@ def prepare_verify_pair(target, draft, prefixes) -> _PreparedVerifyPair | None:
     )
     offsets = [0]
     for columns, *_ in geometry:
-        offsets.append(offsets[-1] + cdiv(batch * columns, table_block))
+        offsets.append(offsets[-1] + cdiv(batch * columns, _VERIFY_PAIR_TABLE_BLOCK))
     block = kernels.triton.next_power_of_2(
         max(offsets[-1], target_pub.plan.shape[0], draft_pub.plan.shape[0])
     )
@@ -1240,7 +1286,7 @@ def prepare_verify_pair(target, draft, prefixes) -> _PreparedVerifyPair | None:
 
 
 def try_publish_verify_pair(target, draft, prefixes, counts, expected_prefixes) -> bool:
-    """Validate both B8/Q4 journals once and publish them on the current stream."""
+    """Validate both dense Q4 journals once and publish them on the current stream."""
     prepared = prepare_verify_pair(target, draft, prefixes)
     return prepared is not None and prepared.publish(counts, expected_prefixes)
 

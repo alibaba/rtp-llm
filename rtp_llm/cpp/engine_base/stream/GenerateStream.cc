@@ -253,13 +253,15 @@ void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
     int prev = async_bookkeeping_->count.fetch_sub(1, std::memory_order_acq_rel);
     RTP_LLM_CHECK(prev >= 1);
     if (prev == 1) {
+        bool release;
         {
             std::lock_guard<std::mutex> lk(async_bookkeeping_->mu);
+            release = async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel);
         }
         async_bookkeeping_->cv.notify_all();
         // The last worker performs any deferred release after its update lock
         // has unwound, so releaseResource() can safely re-enter mutex_.
-        if (async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel)) {
+        if (release) {
             releaseResource();
         }
     }
@@ -274,8 +276,13 @@ void GenerateStream::waitPendingAsyncBookkeeping() {
     async_bookkeeping_->cv.wait(lk, [this] { return async_bookkeeping_->count.load(std::memory_order_acquire) == 0; });
 }
 
-void GenerateStream::markDeferredRelease() {
+bool GenerateStream::markDeferredRelease() {
+    std::lock_guard<std::mutex> lock(async_bookkeeping_->mu);
+    if (!hasPendingAsyncBookkeeping()) {
+        return false;
+    }
     async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+    return true;
 }
 
 bool GenerateStream::isDeferredReleasePending() const {

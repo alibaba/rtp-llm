@@ -58,7 +58,8 @@ def _private_draft_request_ids(request_ids):
         not isinstance(request_ids, torch.Tensor)
         or request_ids.device.type != "cpu"
         or request_ids.dtype not in (torch.int32, torch.int64)
-        or request_ids.shape != (8,)
+        or request_ids.ndim != 1
+        or request_ids.numel() == 0
     ):
         return None
     ids = tuple(request_ids.tolist())
@@ -110,7 +111,8 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         self._shared_ops = None
         self.shared_runtime = None
         self.shared_graph_runtime = None
-        self._private_draft_capture = None
+        self._multi_bucket_private_draft_commit = False
+        self._private_draft_captures = weakref.WeakValueDictionary()
         self._private_draft_armed_ids = None
         self._private_draft_pending = None
         self._commit_ptpc_input = None
@@ -221,23 +223,24 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
             impl.writes = torch.zeros(
                 self.shared_runtime.geometry.num_layers, dtype=torch.int64, device=impl.device
             )
-            if (
-                getattr(impl, "private_draft_journal", None) is not None
-                and (impl.batch_size, impl.width) == (8, 4)
-            ):
-                self._private_draft_capture = weakref.ref(impl)
+            if impl.private_draft_journal is not None:
+                self._private_draft_captures[impl.batch_size] = impl
         return impl
+
+    def enable_multi_bucket_private_draft_commit(self):
+        """Advertise native scheduling support before constructing Commit captures."""
+        self._multi_bucket_private_draft_commit = True
 
     def arm_private_draft_commit(self, request_ids):
         if self._private_draft_armed_ids is not None or self._private_draft_pending is not None:
             raise RuntimeError("another private Draft KV commit is active")
         if os.environ.get("RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV") != "1":
             return False
-        impl = self._private_draft_capture() if self._private_draft_capture is not None else None
-        if impl is None or not impl.cuda_graph_preparation_in_graph:
-            return False
         ids = _private_draft_request_ids(request_ids)
         if ids is None:
+            return False
+        impl = self._private_draft_captures.get(len(ids))
+        if impl is None or not impl.cuda_graph_preparation_in_graph:
             return False
         self._private_draft_armed_ids = ids
         return True
@@ -253,7 +256,7 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
             impl.publish_dense_private_draft_commit(inputs)
             return
         if (
-            self._private_draft_capture() is not impl
+            self._private_draft_captures.get(len(ids)) is not impl
             or _private_draft_request_ids(inputs.request_id) != ids
         ):
             raise ValueError("private Draft KV replay does not match the armed requests")

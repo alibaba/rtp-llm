@@ -1,5 +1,17 @@
 package(default_visibility = ["//visibility:public"])
 
+sh_test(
+    name = "graph_cache_device_test",
+    srcs = ["test_graph_cache_device.sh"],
+    data = ["test_graph_cache.py", "test_native_cache.py"],
+    env = {"GPU_COUNT": "1", "RTP_V41_TEST_GRAPH_DEVICE": "1"},
+    tags = ["manual", "PPU-ZW890P"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 [
     sh_test(
         name = "mega_gate_" + mode + "_test",

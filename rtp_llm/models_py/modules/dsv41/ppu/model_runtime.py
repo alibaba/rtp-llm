@@ -14,6 +14,7 @@ import torch.distributed as dist
 
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_tagged_attention_inputs
 from rtp_llm.models_py.modules.dsv41.ppu.engram import EngramHashParams, compute_engram_hash_ids
+from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import supports_verify_pair_layout
 from rtp_llm.models_py.modules.dsv41.ppu.native_model import _NATIVE_RUNNERS, _native_shutdown_group, record_reference_prefill
 from rtp_llm.models_py.modules.dsv41.ppu.native_protocol import native_cache_protocol
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import SharedPrefillPolicy
@@ -96,6 +97,21 @@ class _DeferredGraphVerify:
     receipt: object
     bindings: object
     joint_checks: tuple | None
+    prepared_joint_publication: tuple | None = None
+
+
+def _matches_prepared_verify_pair(publication, receipt, prefixes):
+    if publication is None:
+        return False
+    prepared_receipt, prepared_prefixes, _ = publication
+    return (
+        receipt is prepared_receipt
+        and prefixes.data_ptr() == prepared_prefixes.data_ptr()
+        and prefixes.shape == prepared_prefixes.shape
+        and prefixes.dtype == prepared_prefixes.dtype
+        and prefixes.device == prepared_prefixes.device
+        and prefixes.stride() == prepared_prefixes.stride()
+    )
 
 
 @dataclass(frozen=True)
@@ -252,8 +268,12 @@ class SharedNativeRuntime:
             return self._finish_vote(packet, host=True)
         value = torch.tensor(
             [count, int(self._requested())], dtype=torch.int64,
-            device="cpu" if host else self.device,
+            device="cpu", pin_memory=not host and self.device.type == "cuda",
         )
+        if not host:
+            # Queue the packet ahead of the reduction on the engine stream.
+            # Direct construction on the device waits for the preceding Proposal.
+            value = value.to(self.device, non_blocking=True)
         if dist.is_initialized():
             if host:
                 dist.all_reduce(value, group=_native_shutdown_group())
@@ -714,7 +734,7 @@ class SharedNativeRuntime:
             batch = attn.input_lengths.numel()
             joint_checks = None
             if (
-                (batch, impl.width) == (8, 4)
+                batch == impl.batch_size and supports_verify_pair_layout(batch, impl.width)
                 and os.environ.get("RTP_V41_PPU_DSPARK_JOINT_KV_PUBLISH") == "1"
                 and os.environ.get("RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE") == "1"
             ):
@@ -851,11 +871,40 @@ class SharedNativeRuntime:
             self.pending_verify = None
             self.pending_verify = self._finish_deferred_graph_stage(pending)
 
+    @staticmethod
+    def _prepare_deferred_verify_pair(pending, receipt, prefixes):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import prepare_verify_pair
+
+        target_inputs = pending.impl.cache.joint_publication_inputs(
+            pending.cache, -1, checks=pending.joint_checks,
+        )
+        draft_inputs = receipt.joint_inputs_if_covered(-1)
+        if target_inputs is None or draft_inputs is None:
+            return None
+        prepared = prepare_verify_pair(target_inputs, draft_inputs, prefixes)
+        if prepared is not None:
+            return receipt, prefixes, prepared
+        return None
+
     def prepare_speculative_forward_completion_with_private_draft(self, draft, prefixes):
         """Bind this round's launch descriptors while the sampler is in flight."""
         from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import prepare_verify_pair
         from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyTransaction
 
+        pending = self.pending_verify
+        if (
+            isinstance(pending, _DeferredGraphVerify)
+            and pending.joint_checks
+            and prefixes.is_cuda
+            and os.environ.get("RTP_V41_PPU_DSPARK_GPU_VERIFY_RECEIPT") == "1"
+        ):
+            # Bind only fixed launch metadata here. Leave the replay receipt
+            # queued until the host-approved counts can use device validation.
+            receipt = draft.private_draft_commit_receipt(tuple(pending.request_ids.tolist()))
+            publication = self._prepare_deferred_verify_pair(pending, receipt, prefixes)
+            if publication is not None:
+                self.pending_verify = replace(pending, prepared_joint_publication=publication)
+            return
         self.prepare_speculative_forward_completion()
         tx = self.pending_verify
         if not isinstance(tx, SharedVerifyTransaction) or tx.joint_binding_checks is None:
@@ -873,11 +922,11 @@ class SharedNativeRuntime:
             if prepared is not None:
                 tx.prepared_joint_publication = (receipt, prefixes, prepared)
 
-    def try_finish_speculative_forward_with_private_draft(self, draft, request_ids, prefixes, accepted_rows):
-        """Publish two private journals from the same host-approved row counts."""
-        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
-            prepare_verify_pair, try_publish_verify_pair,
-        )
+    def try_finish_speculative_forward_with_private_draft(
+        self, draft, request_ids, prefixes, accepted_rows, accepted_tokens=None, vocab_size=0,
+    ):
+        """Publish both journals from the same acceptance packet."""
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_publish_verify_pair
         from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import SharedVerifyTransaction
 
         pending = self.pending_verify
@@ -891,31 +940,30 @@ class SharedNativeRuntime:
             and request_ids.device.type == "cpu"
             and torch.equal(request_ids, pending.request_ids)
         ):
-            # Pool and table descriptors exist before the replay receipt is ready.
-            # Prepare them on the publication worker while Verify still runs.
-            # The receipt and accepted position checks below authorize the write.
             receipt = draft.private_draft_commit_receipt(tuple(request_ids.tolist()))
-            target_inputs = pending.impl.cache.joint_publication_inputs(
-                pending.cache, -1, checks=pending.joint_checks,
-            )
-            draft_inputs = receipt.joint_inputs_if_covered(-1)
-            if target_inputs is not None and draft_inputs is not None:
-                prepared = prepare_verify_pair(target_inputs, draft_inputs, prefixes)
-                if prepared is not None:
-                    if device_receipt and self._try_publish_queued_verify_pair(
-                        draft, pending, receipt, prepared, request_ids, accepted_rows,
-                    ):
-                        return True
-                    prepared_early = (receipt, prefixes, prepared)
+            prepared_early = pending.prepared_joint_publication
+            if not _matches_prepared_verify_pair(prepared_early, receipt, prefixes):
+                prepared_early = self._prepare_deferred_verify_pair(pending, receipt, prefixes)
+            if prepared_early is not None and device_receipt and self._try_publish_queued_verify_pair(
+                draft, pending, receipt, prepared_early[2], request_ids, accepted_rows, accepted_tokens, vocab_size,
+            ):
+                return True
 
+        if accepted_tokens is not None:
+            # The caller still owns the original CPU output packet and can
+            # retry with the ordinary preview and publication path.
+            return False
         self.prepare_speculative_forward_completion()
         tx = self.pending_verify
+        if not isinstance(tx, SharedVerifyTransaction):
+            return False
+        batch = len(tx.layout.lengths)
         if (
-            not isinstance(tx, SharedVerifyTransaction)
-            or tx.graph_journal is None or not tx.batch_binding_checks
-            or tx.layout.lengths != (4,) * 8
+            tx.graph_journal is None or not tx.batch_binding_checks
+            or not supports_verify_pair_layout(batch, 4)
+            or tx.layout.lengths != (4,) * batch
             or any(
-                value.device.type != "cpu" or value.shape != (8,)
+                value.device.type != "cpu" or value.shape != (batch,)
                 or value.dtype not in (torch.int32, torch.int64)
                 for value in (request_ids, accepted_rows)
             )
@@ -936,24 +984,16 @@ class SharedNativeRuntime:
             receipt = draft.private_draft_commit_receipt(tx.request_ids)
             published = False
             prepared_publication = prepared_early or tx.prepared_joint_publication
-            if prepared_publication is not None:
-                prepared_receipt, prepared_prefixes, prepared = prepared_publication
-                if (
-                    receipt is prepared_receipt
-                    and prefixes.data_ptr() == prepared_prefixes.data_ptr()
-                    and prefixes.shape == prepared_prefixes.shape
-                    and prefixes.dtype == prepared_prefixes.dtype
-                    and prefixes.device == prepared_prefixes.device
-                    and prefixes.stride() == prepared_prefixes.stride()
-                ):
-                    receipt.check_joint_publication(bases, last_accepted)
-                    # The early descriptor was built before the accepted end was
-                    # available; the live target table must still cover that end.
-                    target_covers = prepared_early is None or tx.graph_journal.joint_publication_inputs(
-                        tx.cache, last_accepted, checks=tx.joint_binding_checks,
-                    ) is not None
-                    if target_covers:
-                        published = prepared.publish(counts, bases)
+            if _matches_prepared_verify_pair(prepared_publication, receipt, prefixes):
+                prepared = prepared_publication[2]
+                receipt.check_joint_publication(bases, last_accepted)
+                # The early descriptor was built before the accepted end was
+                # available; the live target table must still cover that end.
+                target_covers = prepared_early is None or tx.graph_journal.joint_publication_inputs(
+                    tx.cache, last_accepted, checks=tx.joint_binding_checks,
+                ) is not None
+                if target_covers:
+                    published = prepared.publish(counts, bases)
             if not published:
                 target_inputs = tx.graph_journal.joint_publication_inputs(
                     tx.cache, last_accepted, checks=tx.joint_binding_checks,
@@ -976,29 +1016,36 @@ class SharedNativeRuntime:
         draft.abort_private_draft_commit()
         return True
 
-    def _try_publish_queued_verify_pair(self, draft, pending, receipt, prepared, request_ids, accepted_rows):
+    def _try_publish_queued_verify_pair(
+        self, draft, pending, receipt, prepared, request_ids, accepted_rows, accepted_tokens, vocab_size,
+    ):
         from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import VerifyPublicationReceipt
 
         replay = pending.receipt
+        batch, width = replay.batch, pending.impl.width
         if (
-            (replay.batch, replay.capture_batch, replay.rows, pending.impl.width) != (8, 8, 32, 4)
-            or self.policy.max_rollback_tokens < 4
-            or any(
-                value.device.type != "cpu" or value.shape != (8,)
-                or value.dtype not in (torch.int32, torch.int64)
-                for value in (request_ids, accepted_rows)
-            )
-            or len(set(request_ids.tolist())) != 8
+            not supports_verify_pair_layout(batch, width)
+            or replay.capture_batch != batch or replay.rows != batch * width
+            or self.policy.max_rollback_tokens < width
+            or request_ids.device.type != "cpu" or request_ids.shape != (batch,)
+            or request_ids.dtype not in (torch.int32, torch.int64)
+            or len(set(request_ids.tolist())) != batch
         ):
             return False
-        counts = tuple(accepted_rows.tolist())
-        if any(not 0 <= count <= 4 for count in counts):
-            return False
+        if accepted_tokens is None:
+            if (accepted_rows.device.type != "cpu" or accepted_rows.shape != (batch,)
+                    or accepted_rows.dtype not in (torch.int32, torch.int64)):
+                return False
+            counts = tuple(accepted_rows.tolist())
+            if any(not 0 <= count <= width for count in counts):
+                return False
+        else:
+            counts = accepted_rows
         engram_width = 0
         if pending.cache.geometry.engram_enabled():
             engram_width = pending.cache.geometry.engram_max_ngram_size
             if not (0 < engram_width == replay.window_width <= 16
-                    and pending.windows.shape == (32, engram_width)):
+                    and pending.windows.shape == (replay.rows, engram_width)):
                 return False
         receipt.check_joint_replay()
         target_limit = min(live.shape[1] * pending.cache.pools[key].span
@@ -1009,7 +1056,9 @@ class SharedNativeRuntime:
             min(pending.impl.cache.max_seq_len, receipt.journal.max_seq_len),
             min(target_limit, draft_limit), engram_width,
         )
-        if not prepared.publish(counts, replay_check=verify):
+        if not prepared.publish(
+            counts, replay_check=verify, accepted_tokens=accepted_tokens, vocab_size=vocab_size,
+        ):
             return False
         # The publication status event follows both receipts and validates the
         # generation. No separate blocking receipt read or transaction is needed.

@@ -223,6 +223,204 @@ class DecodeGraphMetadataTest(unittest.TestCase):
 class VerifyTableGeometryDeviceTest(unittest.TestCase):
     """Changing page widths must retain exact checks without new JIT variants."""
 
+    @patch.dict(os.environ, {"RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV": "1"})
+    def test_private_draft_receipt_is_bound_to_exact_capture(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_model import DeepSeekV41PPUDSparkModel
+
+        draft = DeepSeekV41PPUDSparkModel
+        captures = {
+            batch: SimpleNamespace(
+                cuda_graph_preparation_in_graph=True,
+                stage_private_draft_commit=lambda inputs: inputs,
+            )
+            for batch in (4, 8, 16, 32)
+        }
+        model = SimpleNamespace(
+            _private_draft_captures=captures, _private_draft_armed_ids=None, _private_draft_pending=None,
+        )
+        for batch in (32, 4, 16, 8):
+            ids = torch.arange(100, 100 + batch, dtype=torch.int64)
+            inputs = SimpleNamespace(request_id=ids, warmup=False, is_fake_stream=False)
+            self.assertTrue(draft.arm_private_draft_commit(model, ids))
+            with self.assertRaisesRegex(ValueError, "does not match the armed requests"):
+                draft.note_private_draft_replay(model, captures[4 if batch != 4 else 8], inputs)
+            draft.note_private_draft_replay(model, captures[batch], inputs)
+            self.assertTrue(draft.finish_private_draft_stage(model))
+            order = tuple(ids.tolist())
+            self.assertIs(draft.private_draft_commit_receipt(model, order), inputs)
+            with self.assertRaisesRegex(ValueError, "request order changed"):
+                draft.private_draft_commit_receipt(model, order[::-1])
+            draft.abort_private_draft_commit(model)
+        self.assertFalse(draft.arm_private_draft_commit(model, torch.arange(5)))
+
+    @torch.inference_mode()
+    def test_joint_verify_pair_publishes_dense_buckets(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
+            BatchedVerifyPublication,
+            VerifyPublicationReceipt,
+            prepare_verify_pair,
+            try_enqueue_verify_table_check,
+        )
+        from rtp_llm.models_py.modules.dsv41.ppu.verify_transaction import (
+            _QueuedGraphVerifyReceipt,
+        )
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        for batch in (4, 8, 16, 32):
+            with self.subTest(batch=batch):
+                width, span, row_bytes = 4, 128, 16
+                rows = batch * width
+                bases = tuple(77824 + 257 * index for index in range(batch))
+                counts = tuple(index % (width + 1) for index in range(batch))
+                prefixes = torch.tensor(bases, dtype=torch.long, device=device)
+                lengths = torch.full((batch,), width, dtype=torch.int32, device=device)
+                offsets = torch.arange(width, device=device)
+                requests = torch.arange(batch, device=device).repeat_interleave(width)
+                raw = (prefixes[:, None] + offsets).flatten()
+                valid = torch.ones(rows, dtype=torch.bool, device=device)
+                accepted = (offsets < torch.tensor(counts, device=device)[:, None]).flatten()
+
+                def make_journal(name, seed):
+                    table = (1 + torch.arange(batch, dtype=torch.int32, device=device))[:, None]
+                    table = table.expand(batch, 768).contiguous()
+                    live_table = table[:, :704].clone()
+                    pool = torch.zeros((batch + 1, span * row_bytes), dtype=torch.uint8, device=device)
+                    payload = (
+                        (torch.arange(rows * row_bytes, device=device) + seed) % 251
+                    ).to(torch.uint8).view(rows, row_bytes)
+                    publisher = BatchedVerifyPublication.try_create(
+                        [(raw, payload, pool, table, span, span, 1, False, False, False)],
+                        rows, device,
+                    )
+                    self.assertIsNotNone(publisher)
+                    slots = table[requests, raw // span].to(torch.int64) * span + raw % span
+                    expected = torch.zeros_like(pool)
+                    expected.view(-1, row_bytes)[slots[accepted]] = payload[accepted]
+                    binding = ((name, table, live_table),)
+                    return (publisher, requests, prefixes, valid, binding), pool, expected
+
+                target, target_pool, target_expected = make_journal("target", 1)
+                draft, draft_pool, draft_expected = make_journal("draft", 97)
+                prepared = prepare_verify_pair(target, (*draft, lengths), prefixes)
+                self.assertIsNotNone(prepared)
+
+                with self.assertRaisesRegex(ValueError, "stale acceptance"):
+                    prepared.publish(counts, (*bases[:-1], bases[-1] + 1))
+                live_draft = draft[4][0][2]
+                live_draft[-1, -1].add_(1)
+                with self.assertRaisesRegex(RuntimeError, "block table changed for draft"):
+                    prepared.publish(counts, bases)
+                live_draft[-1, -1].sub_(1)
+                self.assertTrue(prepared.publish((0,) * batch, bases))
+                self.assertFalse(bool(target_pool.any() or draft_pool.any()))
+                self.assertTrue(prepared.publish(counts, bases))
+                self.assertTrue(torch.equal(target_pool, target_expected))
+                self.assertTrue(torch.equal(draft_pool, draft_expected))
+
+                target_pool.zero_()
+                draft_pool.zero_()
+                tokens = tuple(100 + row for row in range(rows))
+                windows = tuple(
+                    tokens[row - column] if row % width >= column else -1
+                    for row in range(rows)
+                    for column in range(3)
+                )
+                raw_receipt = torch.tensor(
+                    (2, 0, *((width,) * batch), *bases, *tokens, *windows),
+                    dtype=torch.long, device=device,
+                )
+                ready = torch.cuda.Event()
+                ready.record()
+                replay = _QueuedGraphVerifyReceipt(
+                    ready, torch.empty(0), (raw_receipt,), rows, batch, batch, 3
+                )
+                bindings = try_enqueue_verify_table_check((*target[4], *draft[4]), batch)
+                self.assertIsNotNone(bindings)
+                receipt = VerifyPublicationReceipt(replay, bindings, 1, 98304, 90112, 3)
+                raw_receipt[-1].add_(1)
+                self.assertFalse(prepared.publish(counts, replay_check=receipt))
+                self.assertFalse(bool(target_pool.any() or draft_pool.any()))
+                raw_receipt[-1].sub_(1)
+                self.assertTrue(prepared.publish(counts, replay_check=receipt))
+                self.assertTrue(torch.equal(target_pool, target_expected))
+                self.assertTrue(torch.equal(draft_pool, draft_expected))
+
+                device_counts = torch.tensor([max(1, count) for count in counts], dtype=torch.int32, device=device)
+                emitted = torch.tensor(tokens, dtype=torch.int32, device=device).view(batch, width)
+                target_pool.zero_()
+                draft_pool.zero_()
+                live_draft[-1, -1].add_(1)
+                self.assertFalse(prepared.publish(
+                    device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                ))
+                live_draft[-1, -1].sub_(1)
+                emitted[0, 0] = 1024
+                self.assertFalse(prepared.publish(
+                    device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                ))
+                emitted[0, 0] = tokens[0]
+                device_counts[0] = 0
+                self.assertFalse(prepared.publish(
+                    device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                ))
+                device_counts[0] = 1
+                raw_receipt[0] = 1
+                self.assertFalse(prepared.publish(
+                    device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                ))
+                self.assertFalse(bool(target_pool.any() or draft_pool.any()))
+                raw_receipt[0] = 2
+                self.assertTrue(prepared.publish(
+                    device_counts, replay_check=receipt, accepted_tokens=emitted, vocab_size=1024,
+                ))
+                device_result = (target_pool.clone(), draft_pool.clone())
+                target_pool.zero_()
+                draft_pool.zero_()
+                self.assertTrue(prepared.publish(tuple(device_counts.tolist()), replay_check=receipt))
+                self.assertTrue(torch.equal(device_result[0], target_pool))
+                self.assertTrue(torch.equal(device_result[1], draft_pool))
+
+    @patch.dict(os.environ, {"RTP_V41_PPU_FUSED_DSPARK_COMMIT_METADATA": "1"})
+    @torch.inference_mode()
+    def test_private_draft_row_mapper_replays_dense_buckets(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import try_stage_private_draft_rows
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        stream = torch.cuda.Stream(device=device)
+        for batch in (4, 8, 16, 32):
+            with self.subTest(batch=batch), torch.cuda.stream(stream):
+                ends = 81920 + torch.arange(batch, dtype=torch.int32, device=device)
+                active = torch.ones(batch, dtype=torch.bool, device=device)
+                requests = torch.arange(batch, dtype=torch.int32, device=device).repeat_interleave(4)
+                positions = (ends[:, None] - torch.arange(4, 0, -1, dtype=torch.int32, device=device)).flatten()
+
+                def stage():
+                    return try_stage_private_draft_rows(
+                        requests, positions, ends, active, window=128, max_seq_len=98304,
+                    )
+
+                self.assertIsNotNone(stage())
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    mapped = stage()
+                requests[0] = -1
+                requests[-1] = batch
+                active[1] = False
+                positions[2] = 98304
+                positions[3] = -1
+                graph.replay()
+                safe = requests.long().clamp(0, batch - 1)
+                live = (
+                    (requests >= 0) & (requests < batch) & active[safe]
+                    & (positions >= ends[safe] - 128) & (positions < ends[safe])
+                )
+                reference = (
+                    safe, positions.long().clamp(0, 98303),
+                    torch.where(live, positions.long(), -1), live, live.sum(),
+                )
+                for actual, expected in zip(mapped, reference):
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     @torch.inference_mode()
     def test_single_table_growth_strides_masks_and_jit_reuse(self):
         from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import _verify_table_check

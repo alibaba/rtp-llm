@@ -878,7 +878,7 @@ def _engram_host_tensor_key(tensor):
             tensor.storage_offset(), tensor.dtype, tensor.device, version)
 
 
-def _capture_local_engram_bindings(bindings, rank):
+def _capture_local_engram_bindings(bindings, rank, *, world_size=8):
     """Keep the exact native host tensor identities alive with their keys."""
     import torch.distributed as dist
 
@@ -890,7 +890,7 @@ def _capture_local_engram_bindings(bindings, rank):
             if not (
                 isinstance(shard, HostShard) and isinstance(layout, EngramShardLayout)
                 and type(adapter) is DistributedEnpmGroup and adapter.pg is dist.group.WORLD
-                and shard.layout is layout and shard.rank == rank and layout.enp_size == 8
+                and shard.layout is layout and shard.rank == rank and layout.enp_size == world_size
                 and shard.dim == 256
                 and tensors[0].dtype == torch.float8_e4m3fn and tensors[1].dtype == torch.uint8
                 and tensors[0].shape == (layout.valid_rows(rank), 256)
@@ -1180,6 +1180,8 @@ def engram_lookup(
             record.update(backend="peer_shards", reduce_scatter=False, complete=True)
             return out
         max_rows_per_round = round_schedule.round_cap
+    elif shard._peer_table is not None and shard._peer_table.decode:
+        return shard._peer_table.lookup(rows.detach(), shard, layout)
     flat = rows.detach().reshape(-1).to(torch.int64)
     if adapter is None:
         # Single-process direct lookup: the lone shard owns every valid row.
@@ -1503,11 +1505,16 @@ def _triton_kernels() -> Optional[types.SimpleNamespace]:
         dst = out_ptr + (token * n_cols + heads[:, None]) * DIM + offsets[None, :]
         tl.store(dst, value, mask=head_valid[:, None])
 
-    def engram_gather_peer(ids, weight_ptrs, scale_ptrs, n_rows, rows_per_shard):
+    def engram_gather_peer(ids, weight_ptrs, scale_ptrs, n_rows, rows_per_shard, *, out=None):
         if ids.dtype not in (torch.int32, torch.int64):
             raise TypeError("Engram peer lookup requires int32 or int64 IDs")
         tokens, heads = ids.shape
-        out = torch.empty((tokens, heads, 256), dtype=torch.bfloat16, device=ids.device)
+        shape = (tokens, heads, 256)
+        if out is None:
+            out = torch.empty(shape, dtype=torch.bfloat16, device=ids.device)
+        elif (out.shape != shape or out.dtype != torch.bfloat16 or out.device != ids.device
+              or not out.is_contiguous()):
+            raise ValueError("Engram peer lookup output must be contiguous BF16 on the IDs' device")
         if tokens:
             _engram_gather_peer_kernel[(tokens, triton.cdiv(heads, 8))](
                 ids, *ids.stride(), weight_ptrs, scale_ptrs, out, heads,

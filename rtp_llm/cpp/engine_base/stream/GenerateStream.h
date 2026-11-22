@@ -658,8 +658,14 @@ public:
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
     void waitPendingAsyncBookkeeping();
-    void markDeferredRelease();
+    bool markDeferredRelease();
     bool isDeferredReleasePending() const;
+    bool hasDeferredPrefillOutput() const {
+        return async_bookkeeping_->deferred_prefill_output.load(std::memory_order_acquire);
+    }
+    void setDeferredPrefillOutput(bool pending) {
+        async_bookkeeping_->deferred_prefill_output.store(pending, std::memory_order_release);
+    }
 
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
@@ -1069,6 +1075,7 @@ protected:
     struct AsyncBookkeepingCoordinator {
         std::atomic<int>        count{0};
         std::atomic<bool>       defer_release{false};
+        std::atomic<bool>       deferred_prefill_output{false};
         std::mutex              mu;
         std::condition_variable cv;
     };

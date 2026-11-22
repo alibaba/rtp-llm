@@ -772,14 +772,13 @@ def _verify_mhc_post_kernel(
 
 
 def try_verify_mhc_post(x, residual, post, comb, *, mode, proposal_q3=False):
-    """Apply dot-first post to dense Verify or B8/Q3 Proposal activations."""
+    """Apply dot-first post to dense Q4 Verify or Q3 Proposal activations."""
     width = 3 if proposal_q3 else 4
     if (
         mode not in ("dot", "epilogue")
         or not residual.is_cuda
         or residual.ndim != 4
         or residual.shape[0] <= 0
-        or (proposal_q3 and residual.shape[0] != 8)
         or residual.shape[1:] != (width, 4, 5120)
         or x.shape != (*residual.shape[:2], 5120)
         or post.shape != (*residual.shape[:3], 1)

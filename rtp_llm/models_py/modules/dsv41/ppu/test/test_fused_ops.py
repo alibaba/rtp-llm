@@ -544,7 +544,7 @@ class GraphOutputProjectionDevice(unittest.TestCase):
         grouped_weight[:, 1, 2] = torch.arange(1, 9, device="cuda")
         weight = grouped_weight.flatten(0, 1)
         reference_weight = grouped_weight.cpu().double().transpose(1, 2)
-        for rows in (1, 8):
+        for rows in (1, 8, 16, 32, 64, 128):
             with self.subTest(rows=rows):
                 output = torch.randn(
                     (rows, 8, 4096), device="cuda", dtype=torch.bfloat16

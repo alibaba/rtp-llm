@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Startup-only FABRIC mappings for immutable DP8 Prefill Engram shards."""
+"""Startup-only FABRIC mappings for immutable Engram shards."""
 
 import json
 import logging
+import os
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import timedelta
@@ -21,15 +22,23 @@ from .engram import (
 
 
 ENV = "RTP_V41_PPU_ENGRAM_IN_HBM"
+_LEGACY_VRAM_ENV = "RTP_V41_PPU_ENGRAM_IN_VRAM"
+_LEGACY_PREFILL_ENV = "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_PEER_SHARDS"
 _STARTUP_EPOCH = count()
 # A local module destructor cannot know whether other ranks still read its
 # tables. Keep device mappings and their descriptors until process teardown.
 _LIVE_TABLES = []
 
 
-def _exchange(store, prefix, rank, payload):
+def engram_in_hbm_flag(*, decode):
+    """Resolve the HBM switch, the VRAM alias and the Prefill-only alias."""
+    prefill_default = "0" if decode else os.environ.get(_LEGACY_PREFILL_ENV, "0")
+    return os.environ.get(ENV, os.environ.get(_LEGACY_VRAM_ENV, prefill_default))
+
+
+def _exchange(store, prefix, rank, world_size, payload):
     store.set(f"{prefix}/{rank}", json.dumps(payload))
-    keys = [f"{prefix}/{peer}" for peer in range(8)]
+    keys = [f"{prefix}/{peer}" for peer in range(world_size)]
     store.wait(keys, timedelta(seconds=120))
     return [json.loads(store.get(key)) for key in keys]
 
@@ -100,14 +109,20 @@ class _PeerTable:
     rows_per_shard: int
     kernels: object
     host_keys: tuple
+    decode: bool
 
-    def lookup(self, ids, shard, layout):
+    def validate(self, shard, layout):
         if (layout.num_embeddings, layout.num_per_part) != (self.table_rows, self.rows_per_shard) or (
             self.host_keys != tuple(_engram_host_tensor_key(t) for t in (shard.payload, shard.scale))
         ):
             raise RuntimeError("Engram peer shard changed after startup")
+
+    def lookup(self, ids, shard, layout, *, out=None):
+        self.validate(shard, layout)
+        if ids.device != self.weight_ptrs.device:
+            raise ValueError("Engram lookup IDs must be on the peer table's model device")
         return self.kernels.engram_gather_peer(
-            ids, self.weight_ptrs, self.scale_ptrs, self.table_rows, self.rows_per_shard,
+            ids, self.weight_ptrs, self.scale_ptrs, self.table_rows, self.rows_per_shard, out=out,
         )
 
 
@@ -117,37 +132,44 @@ def _errors(votes, phase):
         raise RuntimeError(f"Engram peer shards {phase} failed: {errors}")
 
 
-def prepare_peer_shards(bindings, device, *, flag, eligible):
-    """Publish both layer mappings together after all WORLD8 owners are ready.
+def prepare_peer_shards(bindings, device, *, flag, eligible, decode=False):
+    """Publish both layer mappings together after all owners are ready.
 
-    Every member of the Prefill world calls this once, even when disabled.
+    Every member of the model world calls this once, even when disabled.
     A requested but unsupported configuration fails collectively at startup.
     Host shards also serve the existing unadmitted lookup paths.
     """
     world = dist.group.WORLD
-    rank = dist.get_rank(world)
+    rank, world_size = dist.get_rank(world), dist.get_world_size(world)
     store = dist.distributed_c10d._get_default_store()
     epoch = next(_STARTUP_EPOCH)
 
     def exchange(phase, payload):
-        return _exchange(store, f"rtp_llm/ppu_engram_peer/{epoch}/{phase}", rank, payload)
+        return _exchange(store, f"rtp_llm/ppu_engram_peer/{epoch}/{phase}", rank, world_size, payload)
 
-    flags = [vote["flag"] for vote in exchange("flag", {"flag": flag})]
-    if flags == ["0"] * 8:
+    modes = exchange("flag", {"flag": flag, "decode": decode})
+    flags = [vote["flag"] for vote in modes]
+    if flags == ["0"] * world_size:
         return
-    if flags != ["1"] * 8:
-        raise ValueError(f"{ENV} must be uniformly 0 or 1 across the Prefill world")
+    if flags != ["1"] * world_size:
+        raise ValueError(f"{ENV} must be uniformly 0 or 1 across the model world")
+    if any(vote["decode"] != decode for vote in modes):
+        raise ValueError(f"{ENV} requires one consistent model role across the world")
 
     error = None
     geometry = None
+    reuse = False
     try:
         from cuda.bindings import driver
 
         from ._quant import is_ppu
 
-        captured, geometry, bad = _capture_local_engram_bindings(bindings, rank)
+        captured, geometry, bad = _capture_local_engram_bindings(bindings, rank, world_size=world_size)
         if not eligible or bad or not is_ppu() or torch.cuda.get_device_capability(device) != (8, 9):
-            raise RuntimeError("requires PPU M890 non-speculative TP1/DP8/EP8/CP1 eager Prefill with local rounds")
+            raise RuntimeError(
+                "requires PPU M890 TP1 Decode with DP/EP/ENP matching the role world, or non-speculative Prefill "
+                "with DP8 local rounds or sharded CP8 YOCO compact140"
+            )
         if any(not shard.pinned or shard.bytes_estimate == 0 for _, shard, *_ in captured):
             raise RuntimeError("requires pinned, nonempty Engram host shards on every rank")
         boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
@@ -156,19 +178,38 @@ def prepare_peer_shards(bindings, device, *, flag, eligible):
         kernels = _triton_kernels()
         if not boot_id or not uuid or kernels is None:
             raise RuntimeError("missing physical device identity or Triton Engram kernels")
-        required = sum(shard.bytes_estimate for _, shard, *_ in captured)
-        free, _ = torch.cuda.mem_get_info(device)
-        if free < required:
-            raise RuntimeError(f"needs {required} bytes of device memory for both tables, found {free}")
+        existing = [shard._peer_table for _, shard, *_ in captured]
+        reuse = all(table is not None for table in existing)
+        if any(table is not None for table in existing) != reuse:
+            raise RuntimeError("Engram peer shards are only partially bound")
+        if reuse:
+            for (_, shard, layout, *_), table in zip(captured, existing):
+                table.validate(shard, layout)
+                if table.decode != decode or table.weight_ptrs.device != device:
+                    raise RuntimeError("Engram peer shards changed model role or device")
+        else:
+            required = sum(shard.bytes_estimate for _, shard, *_ in captured)
+            free, _ = torch.cuda.mem_get_info(device)
+            if free < required:
+                raise RuntimeError(f"needs {required} bytes of device memory for both tables, found {free}")
     except Exception as exc:
         error = repr(exc)
         boot_id = uuid = None
-    votes = exchange("eligibility", {"geometry": geometry, "boot_id": boot_id, "uuid": uuid, "error": error})
+    votes = exchange("eligibility", {
+        "geometry": geometry, "boot_id": boot_id, "uuid": uuid, "error": error, "reuse": reuse,
+    })
     _errors(votes, "eligibility")
     if (len({tuple(v["geometry"]) for v in votes}) != 1
-            or len({v["boot_id"] for v in votes}) != 1
-            or len({v["uuid"] for v in votes}) != 8):
-        raise RuntimeError("Engram peer shards require matching tables and eight distinct devices on one host")
+            or len({v["uuid"] for v in votes}) != world_size):
+        raise RuntimeError("Engram peer shards require matching tables and a distinct device per rank")
+    if not decode and len({v["boot_id"] for v in votes}) != 1:
+        raise RuntimeError("Prefill Engram peer shards require one host")
+    if any(v["reuse"] != reuse for v in votes):
+        raise RuntimeError("Engram peer shards must be initialized consistently across ranks")
+    if reuse:
+        # PyWrappedModel initializes the same Python model for eager and Graph execution.
+        logging.info("%s Engram peer shards reused for model reinitialization", "Decode" if decode else "Prefill")
+        return
 
     with torch.cuda.device(device), ExitStack() as owner:
         tables = []
@@ -197,7 +238,7 @@ def prepare_peer_shards(bindings, device, *, flag, eligible):
                 tables.append((shard, _PeerTable(
                     torch.tensor(weights, dtype=torch.int64, device=device),
                     torch.tensor(scales, dtype=torch.int64, device=device),
-                    layout.num_embeddings, layout.num_per_part, kernels, host_keys,
+                    layout.num_embeddings, layout.num_per_part, kernels, host_keys, decode,
                 )))
                 torch.cuda.current_stream(device).synchronize()
             except Exception as exc:
@@ -207,4 +248,5 @@ def prepare_peer_shards(bindings, device, *, flag, eligible):
         _LIVE_TABLES.append((owner.pop_all(), tuple(tables)))
         for shard, table in tables:
             shard._peer_table = table
-        logging.info("DP8 Prefill Engram peer shards ready: layers 1/14, FABRIC, %d local bytes", total_bytes)
+        logging.info("%s Engram peer shards ready: layers 1/14, FABRIC, %d local bytes",
+                     "Decode" if decode else "Prefill", total_bytes)

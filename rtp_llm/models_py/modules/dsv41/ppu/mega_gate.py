@@ -169,6 +169,7 @@ def _pack_kernel():
         routed_count,
         M,
         ROUTES: tl.constexpr,
+        OUTPUT_SLOTS: tl.constexpr,
         COUNT_ROWS: tl.constexpr,
         BLOCK_ROWS: tl.constexpr,
     ):
@@ -183,9 +184,10 @@ def _pack_kernel():
         weights = tl.load(
             native_weights + rows[:, None] * ROUTES + slots[None, :], live, other=0.0
         )
-        destination = rows[:, None] * 8 + slots[None, :]
-        tl.store(packed_ids + destination, ids, rows[:, None] < M)
-        tl.store(packed_weights + destination, weights, rows[:, None] < M)
+        destination = rows[:, None] * OUTPUT_SLOTS + slots[None, :]
+        store = (rows[:, None] < M) & (slots[None, :] < OUTPUT_SLOTS)
+        tl.store(packed_ids + destination, ids, store)
+        tl.store(packed_weights + destination, weights, store)
         if pid == 0:
             # As in the existing fused router, the native contract gives every
             # valid row ROUTES nonnegative IDs. Counting valid rows therefore
@@ -200,14 +202,15 @@ def _pack_kernel():
     return triton, pack_dispatch
 
 
-def _pack_dispatch_triton(ids, weights, valid, count):
+def _pack_dispatch_triton(ids, weights, valid, count, output_slots):
     triton, operation = _pack_kernel()
     rows = ids.shape[0]
-    packed_ids = ids.new_empty((rows, COMM_SLOTS))
-    packed_weights = weights.new_empty((rows, COMM_SLOTS))
+    packed_ids = ids.new_empty((rows, output_slots))
+    packed_weights = weights.new_empty((rows, output_slots))
     operation[(triton.cdiv(rows, 128),)](
         ids, weights, valid, packed_ids, packed_weights, count, rows,
         ROUTES=ids.shape[1],
+        OUTPUT_SLOTS=output_slots,
         COUNT_ROWS=triton.next_power_of_2(rows), BLOCK_ROWS=128, num_warps=4,
     )
     return packed_ids, packed_weights
@@ -217,12 +220,12 @@ def _use_triton_pack(ids):
     return ids.is_cuda
 
 
-def _pack_dispatch(ids, weights, valid, count):
+def _pack_dispatch(ids, weights, valid, count, output_slots=COMM_SLOTS):
     if _use_triton_pack(ids):
-        return _pack_dispatch_triton(ids, weights, valid, count)
+        return _pack_dispatch_triton(ids, weights, valid, count, output_slots)
     # CPU native doubles retain the independent portable adapter contract.
     rows = ids.shape[0]
-    slots = COMM_SLOTS - ids.shape[1]
+    slots = output_slots - ids.shape[1]
     ids = torch.cat((ids, ids.new_full((rows, slots), -1)), dim=1)
     weights = torch.cat(
         (weights, weights.new_zeros((rows, slots))), dim=1
@@ -247,11 +250,13 @@ def _execute_gate(
     operation,
     valid_mask=None,
     compact_graph_routes=False,
+    pack_graph_top_k=False,
 ):
     """Dispatch after admission; errors propagate, including device finite checks."""
     rows = hidden.shape[0]
+    output_slots = top_k if pack_graph_top_k else COMM_SLOTS
     if rows == 0:
-        slots = COMM_SLOTS if graph_routes is not None else top_k
+        slots = output_slots if graph_routes is not None else top_k
         if graph_routes is not None:
             graph_routes[1].zero_()
         return (
@@ -277,7 +282,9 @@ def _execute_gate(
         out=(ids, weights),
     )
     if graph_routes is not None and not compact_graph_routes:
-        ids, weights = _pack_dispatch(ids, weights, valid, graph_routes[1])
+        ids, weights = _pack_dispatch(
+            ids, weights, valid, graph_routes[1], output_slots
+        )
     return ids, weights
 
 
@@ -347,7 +354,8 @@ class PPUMegaGate:
     the native finite-domain/epsilon semantics; it is not a numerical PASS.
     Forward returns logical ``(ids int64, weights float32)``. With graph_routes
     it also pads 6 target or 3 draft routes to 8, applies the live mask and
-    writes the row count.
+    writes the row count. The ``pack_graph_top_k`` option retains the mask and
+    count writes while packing directly to the model's route width.
     A separate valid_mask admits non-direct callers without changing their
     native route width or moving their existing output masking/packing.
 
@@ -389,10 +397,17 @@ class PPUMegaGate:
         ep_rank=0,
         valid_mask=None,
         compact_graph_routes=False,
+        pack_graph_top_k=False,
     ):
         if not self.enabled or not self.finite_domain_qualified:
             return None
-        if type(compact_graph_routes) is not bool or (compact_graph_routes and graph_routes is None):
+        if (
+            type(compact_graph_routes) is not bool
+            or type(pack_graph_top_k) is not bool
+            or ((compact_graph_routes or pack_graph_top_k) and graph_routes is None)
+            or (compact_graph_routes and pack_graph_top_k)
+            or (pack_graph_top_k and is_graph is not True)
+        ):
             return None
         if phase not in ("prefill", "decode", "verify", "proposal") or type(is_graph) is not bool:
             return None
@@ -433,7 +448,7 @@ class PPUMegaGate:
         signature = (
             hidden.device, phase, rows, router_weight.shape[0], top_k, router_bias is not None,
             image_rows is not None, graph_routes is not None,
-            valid_mask is not None, stream, compact_graph_routes,
+            valid_mask is not None, stream, compact_graph_routes, pack_graph_top_k,
         )
         if capturing and signature not in self._warmed:
             return None
@@ -461,6 +476,7 @@ class PPUMegaGate:
             operation=operation,
             valid_mask=valid_mask,
             compact_graph_routes=compact_graph_routes,
+            pack_graph_top_k=pack_graph_top_k,
         )
         if is_graph and not capturing:
             self._warmed.add(signature)

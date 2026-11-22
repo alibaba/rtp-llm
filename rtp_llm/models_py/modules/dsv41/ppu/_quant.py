@@ -944,14 +944,16 @@ def quantize_indexer_q_ppu(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
 
 
 def try_dequantize_verify_indexer(q_payload, q_scales, packed_keys):
-    """Decode fixed B32 Verify dot operands directly into the FP32 bmm layout."""
+    """Decode Verify dot operands directly into the FP32 bmm layout."""
     if not (
-        q_payload.shape == (32, 32, 64)
+        q_payload.ndim == 3
+        and q_payload.shape[0] > 0
+        and q_payload.shape[1:] == (32, INDEXER_HEAD_DIM // 2)
         and q_payload.dtype == torch.int8
-        and q_scales.shape == (32, 32)
+        and q_scales.shape == q_payload.shape[:-1]
         and q_scales.dtype == torch.int32
         and packed_keys.ndim == 3
-        and packed_keys.shape[0] == 32
+        and packed_keys.shape[0] == q_payload.shape[0]
         and 1 <= packed_keys.shape[1] <= 4
         and packed_keys.shape[2] == INDEXER_K_ENTRY_BYTES
         and packed_keys.dtype == torch.uint8

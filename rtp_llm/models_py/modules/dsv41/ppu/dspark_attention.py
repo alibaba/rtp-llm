@@ -1,9 +1,12 @@
 """PPU projection/codec seams for the inherited DSpark layer and commit loops."""
 
+import os
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.config.v41_runtime import env_bool
 from rtp_llm.models_py.modules.dsv41.ppu._quant import dequantize_swa_kv_rows
 from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.grouped_projection import project_wo_a
@@ -19,6 +22,21 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import (
     unique_commit_swa_slots,
 )
 from rtp_llm.utils.model_weight import W
+
+
+def _draft_sparse_attention(q, kv, indices, sm_scale, attn_sink, lengths):
+    native = None
+    if env_bool(os.environ, "RTP_V41_PPU_DSPARK_PACKED_BF16_PROVIDER"):
+        from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import load_packed_backend
+
+        provider, _ = load_packed_backend()
+        native = getattr(provider, "flash_mla_sparse_fwd", None)
+        if not callable(native):
+            raise RuntimeError("Configured Draft FlashMLA provider lacks BF16 sparse attention")
+    return flash_mla_sparse_fwd_ppu(
+        q.contiguous(), kv, indices, sm_scale, attn_sink=attn_sink, topk_length=lengths,
+        native=native,
+    )[0]
 
 
 class SharedPPUCommitAttention(nn.Module):
@@ -149,7 +167,7 @@ def _project_query_output(
         if valid_mask is not None and proposal_batched_wo_a:
             from rtp_llm.models_py.modules.dsv41.ppu.graph_attention_layer import _try_batched_wo_a
 
-            projected = _try_batched_wo_a(output, weight, proposal_q3=True)
+            projected = _try_batched_wo_a(output, weight)
             if projected is not None:
                 return projected
         if valid_mask is not None and weight.is_contiguous() and not (
@@ -218,9 +236,7 @@ def forward_graph_query(model, layer_id, x, positions, prefixes, active):
         indices, lengths = _compact_workspace_indices(indices[:, None])
         indices = indices.repeat_interleave(width, dim=0)
         lengths = lengths.repeat_interleave(width)
-    output, _, _ = flash_mla_sparse_fwd_ppu(
-        q.contiguous(), kv, indices, g.sm_scale(), attn_sink=attn.attn_sink, topk_length=lengths,
-    )
+    output = _draft_sparse_attention(q, kv, indices, g.sm_scale(), attn.attn_sink, lengths)
     return _project_query_output(
         attn, g, output, freqs, x.shape, valid_mask=state.metadata.valid_mask,
         proposal_batched_wo_a=getattr(state, "proposal_batched_wo_a", False),
@@ -298,9 +314,9 @@ def forward_query(model, layer_id, x, positions, prefixes, active, indices):
         cache.release_swa(layer_id)
         return torch.zeros_like(x)
     kv = torch.cat(workspace).reshape(-1, 1, g.head_dim)
-    output, _, _ = flash_mla_sparse_fwd_ppu(
-        q.contiguous(), kv, mapped[:, None].contiguous(), g.sm_scale(),
-        attn_sink=attn.attn_sink, topk_length=lengths.repeat_interleave(width).contiguous(),
+    output = _draft_sparse_attention(
+        q, kv, mapped[:, None].contiguous(), g.sm_scale(), attn.attn_sink,
+        lengths.repeat_interleave(width).contiguous(),
     )
     cache.release_swa(layer_id)
     return _project_query_output(attn, g, output, freqs, x.shape)

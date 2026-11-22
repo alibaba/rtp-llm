@@ -13,6 +13,7 @@ from rtp_llm.models_py.modules.dsv41.kv_cache_utils import (
     as_attention_inputs_by_tag,
     primary_attention_inputs,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import supports_verify_pair_layout
 
 
 @lru_cache(maxsize=1)
@@ -49,14 +50,14 @@ def _decode_kernels():
     @triton.jit
     def stage_private_draft_rows(
         requests, positions, ends, active, req_out, pos_out, raw_out, valid_out, count,
-        window: tl.constexpr, limit: tl.constexpr,
+        BATCH: tl.constexpr, ROWS: tl.constexpr, window: tl.constexpr, limit: tl.constexpr,
     ):
-        row = tl.arange(0, 32)
+        row = tl.arange(0, ROWS)
         request = tl.load(requests + row)
         position = tl.load(positions + row)
-        safe = tl.minimum(tl.maximum(request, 0), 7)
+        safe = tl.minimum(tl.maximum(request, 0), BATCH - 1)
         end = tl.load(ends + safe)
-        live = (request >= 0) & (request < 8) & tl.load(active + safe) & (position >= 0)
+        live = (request >= 0) & (request < BATCH) & tl.load(active + safe) & (position >= 0)
         live = live & (position >= end - window) & (position < end) & (position < limit)
         position = tl.minimum(tl.maximum(position, 0), limit - 1)
         tl.store(req_out + row, safe.to(tl.int64))
@@ -87,16 +88,19 @@ def increment_decode_counters(layers, moe, engram, engram_mask):
 
 
 def try_stage_private_draft_rows(requests, positions, ends, active, *, window, max_seq_len):
-    """Stage rows emitted by the private B8/Q4 request mapper in one launch."""
+    """Stage rows emitted by the dense Q4 request mapper in one launch."""
     if os.environ.get("RTP_V41_PPU_FUSED_DSPARK_COMMIT_METADATA") != "1":
         return None
     from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 
     if not requests.is_cuda or not is_ppu():
         return None
+    batch, rows = ends.numel(), requests.numel()
+    if not supports_verify_pair_layout(batch, 4) or rows != batch * 4:
+        return None
     layout = (
-        (requests, (32,), torch.int32), (positions, (32,), torch.int32),
-        (ends, (8,), torch.int32), (active, (8,), torch.bool),
+        (requests, (rows,), torch.int32), (positions, (rows,), torch.int32),
+        (ends, (batch,), torch.int32), (active, (batch,), torch.bool),
     )
     if any(
         tensor.shape != shape or tensor.dtype != dtype
@@ -112,7 +116,7 @@ def try_stage_private_draft_rows(requests, positions, ends, active, *, window, m
     valid = torch.empty_like(positions, dtype=torch.bool)
     count = torch.empty((), device=positions.device, dtype=torch.int64)
     kernel[(1,)](requests, positions, ends, active, req, pos, raw, valid, count,
-                 window, max_seq_len, num_warps=1)
+                 batch, rows, window, max_seq_len, num_warps=1)
     return req, pos, raw, valid, count
 
 

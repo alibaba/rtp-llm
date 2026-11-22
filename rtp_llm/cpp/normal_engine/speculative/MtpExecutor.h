@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <future>
+#include <initializer_list>
 #include <deque>
 #include <list>
 #include <map>
@@ -218,7 +219,8 @@ protected:
                                       const torch::Tensor&                         engram_anchor,
                                       torch::Tensor&                               engram_output,
                                       std::function<std::shared_ptr<torch::Event>()>  deferred_verify = {},
-                                      int                                            simulated_accept_len = 0);
+                                      int                                            simulated_accept_len = 0,
+                                      std::shared_ptr<torch::Event>                   device_kv_ready = {});
 
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
@@ -256,6 +258,9 @@ protected:
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
     bool usePpuOverlapScheduler() const;
+    bool usePpuCrossRoundOverlap() const;
+    std::shared_ptr<torch::Event> stagePpuOutputCopy(std::initializer_list<torch::Tensor*> tensors);
+    void deferPpuPrefillOutput(const StreamGroups& stream_groups, std::function<absl::Status()> dispatch);
 
     // Device-state feature gates. Defaults stay off; each consumer keeps its
     // own runtime guard before taking an async path.
@@ -283,7 +288,8 @@ protected:
                                      const torch::Tensor&                         engram_anchor,
                                      torch::Tensor&                               engram_output,
                                      std::function<std::shared_ptr<torch::Event>()>  deferred_verify = {},
-                                     int                                            simulated_accept_len = 0);
+                                     int                                            simulated_accept_len = 0,
+                                     std::shared_ptr<torch::Event>                   device_kv_ready = {});
 
     // Synchronous dispatch also publishes the same per-stream device state as
     // the async path, using the host seqLength after specUpdate as truth.
@@ -425,8 +431,11 @@ private:
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
     std::shared_future<std::shared_ptr<torch::Event>> ppu_verify_publication_;
+    std::shared_ptr<torch::Event> ppu_verify_ready_;
     std::function<void()> deferred_ppu_publication_;
     std::function<void()> deferred_ppu_output_;
+    std::optional<torch::Stream> ppu_output_copy_stream_;
+    bool ppu_prefill_cross_round_overlap_ = false;
 
     torch::Stream             dspark_cache_store_sync_stream_;
     torch::Tensor             dspark_cache_store_status_;

@@ -238,12 +238,18 @@ bool PyWrappedModel::prepareSpeculativeForwardCompletionWithPrivateDraft(PyWrapp
 bool PyWrappedModel::tryFinishSpeculativeForwardWithPrivateDraft(PyWrappedModel& draft,
                                                                   const torch::Tensor& request_ids,
                                                                   const torch::Tensor& prefixes,
-                                                                  const torch::Tensor& accepted_rows) {
+                                                                  const torch::Tensor& accepted_rows,
+                                                                  const torch::Tensor& accepted_tokens,
+                                                                  int64_t vocab_size) {
     py::gil_scoped_acquire gil;
-    return py_model_ && draft.py_model_ && py::hasattr(py_model_, "try_finish_speculative_forward_with_private_draft")
-           && py_model_.attr("try_finish_speculative_forward_with_private_draft")(
-                           draft.py_model_, request_ids, prefixes, accepted_rows)
-                  .cast<bool>();
+    if (!py_model_ || !draft.py_model_ || !py::hasattr(py_model_, "try_finish_speculative_forward_with_private_draft")) {
+        return false;
+    }
+    auto publish = py_model_.attr("try_finish_speculative_forward_with_private_draft");
+    if (accepted_tokens.defined()) {
+        return publish(draft.py_model_, request_ids, prefixes, accepted_rows, accepted_tokens, vocab_size).cast<bool>();
+    }
+    return publish(draft.py_model_, request_ids, prefixes, accepted_rows).cast<bool>();
 }
 
 void PyWrappedModel::publishPrivateDraftCommit(const torch::Tensor& request_ids,

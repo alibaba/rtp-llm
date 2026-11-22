@@ -16,6 +16,7 @@ MEGAMOE_DSPARK_ASYNC_FLAGS = (
     "RTP_LLM_MTP_ASYNC_DEVICE_STATE",
 )
 DSPARK_OVERLAP_ENV = "RTP_V41_PPU_DSPARK_OVERLAP_SCHEDULER"
+DSPARK_CROSS_ROUND_OVERLAP_ENV = "RTP_V41_PPU_DSPARK_CROSS_ROUND_OVERLAP"
 DSPARK_SIMULATED_ACCEPT_ENV = "RTP_V41_PPU_DSPARK_SIMULATED_ACCEPT_LEN"
 DSPARK_OVERLAP_FLAGS = {
     "RTP_LLM_STREAM_ASYNC": "1",
@@ -27,16 +28,22 @@ DSPARK_OVERLAP_FLAGS = {
     "RTP_V41_PPU_DSPARK_JOINT_KV_PUBLISH": "1",
     "RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE": "1",
 }
+DSPARK_DENSE_DECODE_DEFAULTS = {
+    "RTP_V41_PPU_DSPARK_EARLY_DRAFT_COMMIT_PREPARE": "1",
+    "RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE": "1",
+    "RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE": "1",
+    "RTP_V41_PPU_DSPARK_PRIVATE_DRAFT_KV": "1",
+    "RTP_V41_PPU_DSPARK_JOINT_KV_PUBLISH": "1",
+    "RTP_V41_PPU_DSPARK_OVERLAP_VERIFY_EPILOGUE": "1",
+    "RTP_V41_PPU_DSPARK_PREPARE_JOINT_PUBLICATION": "1",
+    "RTP_V41_PPU_VERIFY_DEFERRED_STAGE": "1",
+}
 DSPARK_DECODE_DEFAULTS = {
     "ENGINE_CPU_AFFINITY": "auto",
-    "RTP_V41_PPU_DSPARK_EARLY_DRAFT_COMMIT_PREPARE": "1",
     "RTP_V41_PPU_DSPARK_EARLY_PUBLICATION_WAKE": "1",
-    "RTP_V41_PPU_DSPARK_EARLY_VERIFY_VOTE": "1",
     "RTP_V41_PPU_DSPARK_FOLD_PROPOSAL_SAMPLER": "1",
     "RTP_V41_PPU_DSPARK_GPU_VERIFY_RECEIPT": "1",
-    "RTP_V41_PPU_DSPARK_HOST_GRAPH_VOTE": "1",
     "RTP_V41_PPU_DSPARK_PREPARE_GRAPH_BEFORE_PUBLICATION": "1",
-    "RTP_V41_PPU_DSPARK_PREPARE_JOINT_PUBLICATION": "1",
     "RTP_V41_PPU_DSPARK_PREPARE_PROPOSAL_DURING_PUBLICATION": "1",
     "RTP_V41_PPU_DSPARK_PROPOSAL_SAMPLER_GRAPH_LOGITS": "1",
     "RTP_V41_PPU_DSPARK_PUBLISH_ON_ENGINE": "1",
@@ -44,7 +51,6 @@ DSPARK_DECODE_DEFAULTS = {
     "RTP_V41_PPU_FUSED_DSPARK_COMMIT_METADATA": "1",
     "RTP_V41_PPU_FUSED_DSPARK_CONTEXT_ROWS": "1",
     "RTP_V41_PPU_VERIFY_CANDIDATE_OVERLAP": "1",
-    "RTP_V41_PPU_VERIFY_DEFERRED_STAGE": "1",
     "RTP_V41_PPU_VERIFY_DIRECT_JOURNAL": "1",
     "RTP_V41_PPU_VERIFY_INDEXER_JOURNAL_OVERLAP": "1",
     "RTP_V41_PPU_VERIFY_MOE_ROUTED_ON_CALLER": "1",
@@ -137,9 +143,10 @@ class V41RuntimeConfig:
         return 1
 
     def validate(self, *, env=None):
+        decode_dp = 32 if self.world_size == 32 else 8
         expected = {
             "PREFILL": ((8, 1, "ALL_GATHER", 8), (1, 8, "DISABLED", 1)),
-            "DECODE": ((1, 8, "PREFILL_CP", 8), (1, 8, "DISABLED", 1)),
+            "DECODE": ((1, decode_dp, "PREFILL_CP", 8), (1, decode_dp, "DISABLED", 1)),
         }
         errors = []
         if self.role not in expected:
@@ -154,8 +161,14 @@ class V41RuntimeConfig:
                 f"{self.role} requires (tp, dp, cp_method, source_cp) in "
                 f"{expected[self.role]}"
             )
-        if (self.world_size, self.ep, self.enp) != (8, 8, 8):
-            errors.append("world_size=EP=ENP=8 (separate P/D worlds)")
+        role_world_size = decode_dp if self.role == "DECODE" else 8
+        if (self.world_size, self.ep, self.enp) != (role_world_size,) * 3:
+            errors.append(f"world_size=EP=ENP={role_world_size} for {self.role}")
+        if self.world_size == 32 and (
+            (self.moe_backend, self.moe_precision) != ("megamoe", "w4a4")
+            or self.eplb != "NONE" or self.redundant_experts
+        ):
+            errors.append("EP32 PPU Decode requires MegaMoE/W4A4 without EPLB or expert replicas")
         if self.max_seq_len <= 0:
             errors.append("max_seq_len must be positive and cover input + output")
         if self.kv_sharded and (self.source_cp != 8 or (self.role == "PREFILL" and self.physical_tp != 8)):
@@ -173,7 +186,7 @@ class V41RuntimeConfig:
         elif self.cuda_graph and (
             self.role != "DECODE" or (self.moe_backend, self.moe_precision) != ("megamoe", "w4a4")
         ):
-            errors.append("PPU Graph requires DP8 DECODE with MegaMoE/W4A4")
+            errors.append("PPU Graph requires DECODE with MegaMoE/W4A4")
         if self.speculative not in ("NONE", "DSPARK"):
             errors.append("PPU speculative execution supports DSpark or NONE")
         megamoe_dspark = self.speculative == "DSPARK" and self.cuda_graph and self.moe_backend == "megamoe"

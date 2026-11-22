@@ -2,7 +2,7 @@
 
 The existing router, MegaMoE, shared expert and BF16 addition do all math.
 This plan owns only stream ordering and its capture-external resources.
-It does not establish that concurrent MegaMoE makes progress on WORLD8.
+Collective progress must be verified on the deployed provider and topology.
 """
 
 import os
@@ -33,7 +33,7 @@ def _metadata(value):
 
 
 class VerifyMoEOverlap:
-    """One nonreentrant caller/side-stream DAG for target40, M32, Q4.
+    """One nonreentrant caller/side-stream DAG for dense target Verify.
 
     Construct after ``engine.prepare_shared_graph``. Register the actual C++
     runner's nondefault capture stream with ``bind_caller`` in eager warmup;
@@ -50,8 +50,8 @@ class VerifyMoEOverlap:
             self.device = torch.device("cuda", torch.cuda.current_device())
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("create Verify MoE overlap before capture")
-        if target_layers != 40 or max_rows != 32:
-            raise ValueError("Verify MoE overlap is fixed to target40/M32")
+        if target_layers != 40 or max_rows <= 0:
+            raise ValueError("Verify MoE overlap requires target40 and positive row capacity")
         self.engine = engine
         self.target_layers, self.max_rows = target_layers, max_rows
         if not self._engine_ready() or not all(
@@ -96,7 +96,7 @@ class VerifyMoEOverlap:
         engine = self.engine
         return (
             (getattr(engine, "backend", None), getattr(engine, "precision", None)) == ("megamoe", "w4a4")
-            and getattr(engine, "ep_size", None) == 8
+            and getattr(engine, "ep_size", 0) > 0
             and getattr(engine, "hidden_size", None) == 5120
             and getattr(engine, "inter_dim", None) == 2304
             and getattr(engine, "num_routed_experts", None) == 384
@@ -151,7 +151,8 @@ class VerifyMoEOverlap:
             or getattr(state, "packed_attention", None) is None
             or not isinstance(flat, torch.Tensor)
             or flat.device != self.device or flat.dtype != torch.bfloat16
-            or flat.shape != (32, 5120) or not flat.is_contiguous()
+            or flat.ndim != 2 or not 0 < flat.shape[0] <= self.max_rows
+            or flat.shape[1] != self.engine.hidden_size or not flat.is_contiguous()
             or torch.is_grad_enabled() or flat.requires_grad
             or not 0 <= getattr(owner, "layer_id", -1) < self.target_layers
             or not getattr(owner, "routed_enabled", False)
@@ -167,11 +168,13 @@ class VerifyMoEOverlap:
         current = getattr(self.engine, "_processed", {}).get((owner.layer_id, self.device))
         if current is not original or _metadata(current) != signature:
             return False
-        if getattr(metadata, "q_len_per_req", None) != 4 or getattr(metadata, "batch_size", None) != 8:
+        rows = flat.shape[0]
+        batch = getattr(metadata, "batch_size", None)
+        if getattr(metadata, "q_len_per_req", None) != 4 or type(batch) is not int or batch * 4 != rows:
             return False
         positions, valid = getattr(metadata, "positions", None), getattr(metadata, "valid_mask", None)
         for value, dtype, shape in (
-            (positions, torch.int64, (32,)), (valid, torch.bool, (32,)),
+            (positions, torch.int64, (rows,)), (valid, torch.bool, (rows,)),
             (getattr(state, "moe_calls", None), torch.int64, (40,)),
             (getattr(state, "routed_rows_device", None), torch.int64, (40,)),
         ):
@@ -196,13 +199,22 @@ class VerifyMoEOverlap:
         return combine_routed_and_shared(routed, shared).reshape(shape)
 
     def _enqueue_branches(self, owner, flat, state, expert_load, caller):
-        from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import enabled, compact_routes_enabled
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import (
+            compact_routes_enabled,
+            enabled,
+            pack_graph_top_k_enabled,
+        )
 
         compact = compact_routes_enabled(self.engine)
         route_options = {
             "routed_count": state.routed_rows_device[owner.layer_id],
             "route_valid_mask": state.metadata.valid_mask,
         } if compact else {}
+        gate_options = {}
+        if compact:
+            gate_options["compact_graph_routes"] = True
+        elif pack_graph_top_k_enabled(self.engine, getattr(owner.gate, "top_k", None)):
+            gate_options["pack_graph_top_k"] = True
         forked, failure = False, None
         try:
             self._python_calls += 1
@@ -224,7 +236,7 @@ class VerifyMoEOverlap:
                 ids, weights = owner.gate(
                     flat, graph_routes=(state.metadata.valid_mask, state.routed_rows_device[owner.layer_id]),
                     allow_top3_graph_routes=False,
-                    **({"compact_graph_routes": True} if compact else {}),
+                    **gate_options,
                 )
                 # Preserve the original gate-success counter boundary: a
                 # router exception must not count an attempted MegaMoE call.
@@ -255,7 +267,7 @@ class VerifyMoEOverlap:
             caller=self._caller_key, side=_stream_key(self.side_stream),
             python_calls=self._python_calls, forks=self._forks, joins=self._joins,
             closed=self._closed, storage_signature=self.storage_signature(),
-            scope="stream DAG only; WORLD8 MegaMoE progress requires provider validation",
+            scope="stream DAG only; MegaMoE progress requires provider and topology validation",
         )
 
     def close(self):

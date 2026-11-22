@@ -151,7 +151,7 @@ class DecodeLaunchReuseDevice(unittest.TestCase):
             _can_fuse_tail_copies,
         )
 
-        for rows in (1, 8, 24, 32):
+        for rows in (1, 8, 16, 24, 32, 64, 128):
             for widths in ((528,), (528, 288)):
                 adapter = GraphPackedAttention.__new__(GraphPackedAttention)
                 keys = [
@@ -209,6 +209,7 @@ class DecodeLaunchReuseDevice(unittest.TestCase):
                     aliases = [*payloads.values()]
                     aliases[0] = pages[0]
                     self.assertFalse(_can_fuse_tail_copies(pages, aliases))
+                    self.assertFalse(_can_fuse_tail_copies(pages, []))
                     strided = [
                         torch.empty(
                             (rows, width * 2), device="cuda", dtype=torch.uint8
@@ -241,6 +242,68 @@ class DecodeLaunchReuseDevice(unittest.TestCase):
                             any("backup_and_stage" in name for name in kernels)
                         )
                         self.assertTrue(any("restore_tail" in name for name in kernels))
+
+    @patch.dict(os.environ, {
+        "RTP_V41_PPU_DECODE_LAUNCH_REUSE": "1",
+        "RTP_V41_PPU_VERIFY_BATCHED_JOURNAL": "1",
+        "RTP_V41_PPU_VERIFY_BATCHED_PUBLICATION": "1",
+        "RTP_V41_PPU_VERIFY_DIRECT_JOURNAL": "1",
+    })
+    @torch.inference_mode()
+    def test_direct_verify_journal_uses_native_page_capacity(self):
+        from rtp_llm.models_py.modules.dsv41.ppu import graph_packed_attention
+        from rtp_llm.models_py.modules.dsv41.ppu.dspark_graph import VerifyGraphJournal
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        widths = {(0, "swa_kv"): 528, (0, "global_kv_1"): 288}
+        entries = {tag: 128 for _, tag in widths}
+        pools = {
+            key: torch.empty((2, 128 * width), dtype=torch.uint8, device=device)
+            for key, width in widths.items()
+        }
+        geometry = NS(window=128, head_dim=512, n_heads=64, pool_keys=lambda: widths, ratio=lambda _: 1)
+        cache = NS(
+            native=object(), geometry=geometry, device=device, entries=entries,
+            spans=entries, max_seq_len=256, _table_tag=lambda _, tag: tag,
+            pool=lambda owner, tag: pools[owner, tag],
+            tables={tag: torch.ones((32, 2), dtype=torch.int32, device=device) for tag in entries},
+        )
+        provider = NS(flash_mla_with_kvcache=None, get_mla_metadata=None)
+        with patch.object(graph_packed_attention, "load_packed_backend", return_value=(provider, None)):
+            for rows in (4, 8, 16, 32, 64, 128):
+                with self.subTest(rows=rows):
+                    journal = VerifyGraphJournal(cache, rows)
+                    adapter = graph_packed_attention.GraphPackedAttention(cache, geometry, journal=journal)
+                    private = journal.payloads
+                    current = {key: torch.empty_like(payload) for key, payload in private.items()}
+
+                    def forward():
+                        with adapter.verify_tail_transaction():
+                            with adapter._stage_verify_tail(list(widths)):
+                                for key, value in current.items():
+                                    page = adapter.views[key][0, :rows, 0]
+                                    self.assertEqual(journal.payloads[key].data_ptr(), page.data_ptr())
+                                    journal.payloads[key].copy_(value)
+                        self.assertIs(journal.payloads, private)
+
+                    for tensor in (*pools.values(), *private.values(), *current.values()):
+                        tensor.zero_()
+                    forward()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        forward()
+                    for _ in range(2):
+                        for tensor in (*pools.values(), *current.values()):
+                            tensor.random_(0, 256)
+                        before = {key: pool.clone() for key, pool in pools.items()}
+                        graph.replay()
+                        for key in widths:
+                            self.assertTrue(torch.equal(private[key], current[key]), key)
+                            self.assertTrue(torch.equal(pools[key], before[key]), key)
+
+            entries["global_kv_1"] = 64
+            with self.assertRaisesRegex(ValueError, "reserved page capacity"):
+                graph_packed_attention.GraphPackedAttention(cache, geometry, journal=journal)
 
     @torch.inference_mode()
     def test_owned_mask_graph_preserves_live_nan_signed_zero_and_idle_zero(self):

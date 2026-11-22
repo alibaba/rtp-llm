@@ -176,11 +176,12 @@ class MegaGateAdapterContracts(unittest.TestCase):
         valid = torch.tensor([True, False, True])
         count = torch.tensor(91, dtype=torch.int64)
 
-        def injected_pack(ids, weights, borrowed_valid, borrowed_count):
+        def injected_pack(ids, weights, borrowed_valid, borrowed_count, output_slots):
             self.assertEqual(ids.shape, (3, 6))
             self.assertEqual(weights.shape, (3, 6))
             self.assertIs(borrowed_valid, valid)
             self.assertIs(borrowed_count, count)
+            self.assertEqual(output_slots, 8)
             # This double validates only adapter dispatch. Existing PPU tests
             # exercise the actual fused kernel and its complete-chain timing.
             with patch.object(GATE, "_use_triton_pack", return_value=False):
@@ -383,6 +384,76 @@ class MegaGateProposalContracts(unittest.TestCase):
         self.assertEqual(self.native.call_count, calls)
         self.assertEqual(count.item(), 91)
 
+    def test_top_k_packing_requires_its_own_graph_warmup(self):
+        valid = torch.tensor([True, False, True])
+        count = torch.tensor(91)
+        routes = (valid, count)
+        self.assertIsNone(self.call(pack_graph_top_k=True, graph_routes=routes))
+        self.assertIsNone(self.call(is_graph=True, pack_graph_top_k=True))
+        self.assertIsNone(self.call(
+            is_graph=True, graph_routes=routes,
+            pack_graph_top_k=True, compact_graph_routes=True,
+        ))
+        self.native.assert_not_called()
+        self.assertEqual(count.item(), 91)
+
+        padded = self.call(is_graph=True, graph_routes=routes)
+        count.fill_(91)
+        self.capturing.return_value = True
+        self.assertIsNone(
+            self.call(is_graph=True, graph_routes=routes, pack_graph_top_k=True)
+        )
+        self.assertEqual(self.native.call_count, 1)
+        self.assertEqual(count.item(), 91)
+        self.capturing.return_value = False
+        self.call(is_graph=True, graph_routes=routes, pack_graph_top_k=True)
+        self.capturing.return_value = True
+        compact = self.call(is_graph=True, graph_routes=routes, pack_graph_top_k=True)
+        for actual, expected in zip(compact, padded):
+            self.assertTrue(actual.is_contiguous())
+            torch.testing.assert_close(actual, expected[:, :3], rtol=0, atol=0)
+        self.assertEqual(count.item(), 2)
+
+    def test_top_k_packing_empty_graph_writes_zero_without_native_launch(self):
+        count = torch.tensor(91)
+        ids, weights = self.adapter.forward(
+            self.x[:0], self.weight, self.bias, phase="proposal", top_k=3,
+            is_graph=True, pack_graph_top_k=True,
+            graph_routes=(torch.empty(0, dtype=torch.bool), count),
+        )
+        self.native.assert_not_called()
+        self.assertEqual(count.item(), 0)
+        self.assertEqual(ids.shape, (0, 3))
+        self.assertEqual(weights.shape, (0, 3))
+        self.assertEqual(ids.dtype, torch.int64)
+        self.assertEqual(weights.dtype, torch.float32)
+
+    def test_top_k_packing_selector_requires_unmapped_real_megamoe(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import (
+            pack_graph_top_k_enabled,
+        )
+
+        engine = dict(
+            backend="megamoe", precision="w4a4", top_k=6,
+            num_routed_experts=384, num_physical_experts=384,
+            _eplb_layers={}, _fake_balance_config=(False, 6, 0, 32),
+        )
+        flag = "RTP_V41_PPU_MEGA_GATE_PACK_TOP_K"
+        with patch.dict(os.environ, {flag: "0"}):
+            self.assertFalse(pack_graph_top_k_enabled(NS(**engine), 6))
+        with patch.dict(os.environ, {flag: "1"}):
+            self.assertTrue(pack_graph_top_k_enabled(NS(**engine), 6))
+            self.assertFalse(pack_graph_top_k_enabled(NS(**engine), 3))
+            for override in (
+                {"backend": "grouped"},
+                {"precision": "w4a8"},
+                {"num_physical_experts": 416},
+                {"_eplb_layers": {0: object()}},
+                {"_fake_balance_config": (True, 6, 0, 32)},
+            ):
+                with self.subTest(override=override):
+                    self.assertFalse(pack_graph_top_k_enabled(NS(**(engine | override)), 6))
+
     def test_native_failure_propagates_without_router_retry(self):
         self.native.side_effect = RuntimeError("proposal native failed")
         count = torch.tensor(91)
@@ -400,19 +471,29 @@ class MegaGateProposalContracts(unittest.TestCase):
         gate.top_k, gate.route_scale = 3, 1.5
         gate._mega_gate = self.adapter
         valid, count = torch.tensor([True, False, True]), torch.tensor(91)
-        for graph in (False, True):
+        for graph, compact in ((False, False), (True, False), (True, True)):
             state = NS(proposal=True, is_graph=graph, prefill=False, idle=False,
                        active_token_mask=valid, metadata=NS(valid_mask=valid))
             gate.runtime = NS(current=state)
             kwargs = dict(graph_routes=(valid, count), allow_top3_graph_routes=True) if graph else {}
+            if compact:
+                kwargs["pack_graph_top_k"] = True
             actual = gate(self.x, **kwargs)
             expected = _reference(self.x, self.weight, self.bias, top_k=3, valid=valid)
             for value, reference in zip(actual, expected):
                 torch.testing.assert_close(value[:, :3], reference, rtol=0, atol=0)
             if graph:
-                self.assertEqual(actual[0].shape, (3, 8))
+                self.assertEqual(actual[0].shape, (3, 3 if compact else 8))
                 self.assertEqual(count.item(), 2)
-        self.assertEqual(self.native.call_count, 2)
+        self.assertEqual(self.native.call_count, 3)
+
+        self.adapter.enabled = False
+        count.fill_(-1)
+        ids, weights = gate(self.x, **kwargs)
+        self.assertEqual(ids.shape, (3, 8))
+        self.assertEqual(weights.shape, (3, 8))
+        self.assertEqual(count.item(), 2)
+        self.assertEqual(self.native.call_count, 3)
 
 
 @unittest.skipUnless(
@@ -575,6 +656,74 @@ class MegaGatePPUQualification(unittest.TestCase):
                     self.assertEqual(int(count), int(valid.sum()))
                     if changed and not idle:
                         self.assertFalse(torch.equal(actual[0][valid], first_ids[valid]))
+
+    def test_top_k_packing_matches_padded_routes_on_graph_replay(self):
+        stream = torch.cuda.Stream()
+        for phase, q_len, top_k, experts in (
+            ("proposal", 3, 3, 128),
+            ("verify", 4, 6, 384),
+        ):
+            for batch in (4, 8, 16, 32):
+                with self.subTest(phase=phase, batch=batch):
+                    rows = batch * q_len
+                    x, weight, bias = _case(
+                        rows, device="cuda", generator=self.generator, experts=experts
+                    )
+                    pattern = torch.arange(rows, device="cuda") % q_len
+                    valid = pattern != 0
+                    count = torch.full((), -1, dtype=torch.int64, device="cuda")
+                    padded_count = torch.empty_like(count)
+                    adapter = GATE.PPUMegaGate(enabled=True, finite_domain_qualified=True)
+
+                    def run(pack_top_k, route_count):
+                        return adapter.forward(
+                            x, weight, bias, phase=phase, top_k=top_k, is_graph=True,
+                            graph_routes=(valid, route_count), pack_graph_top_k=pack_top_k,
+                        )
+
+                    caller = torch.cuda.current_stream()
+                    stream.wait_stream(caller)
+                    with torch.cuda.stream(stream):
+                        self.assertIsNotNone(run(True, count))
+                    caller.wait_stream(stream)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        compact = run(True, count)
+                    self.assertIsNotNone(compact)
+                    ids, weights = compact
+                    self.assertEqual(ids.shape, (rows, top_k))
+                    self.assertEqual(weights.shape, ids.shape)
+                    self.assertEqual(ids.dtype, torch.int64)
+                    self.assertEqual(weights.dtype, torch.float32)
+                    self.assertTrue(ids.is_contiguous())
+                    self.assertTrue(weights.is_contiguous())
+
+                    excluded_slots = (0, q_len - 1, None, -1, 1)
+                    for excluded in excluded_slots:
+                        if excluded is None:
+                            valid.zero_()
+                        else:
+                            valid.copy_(pattern != excluded)
+                        x.neg_()
+                        count.fill_(-1)
+                        graph.replay()
+                        padded_ids, padded_weights = run(False, padded_count)
+                        self.assertTrue(torch.equal(ids, padded_ids[:, :top_k]))
+                        self.assertTrue(
+                            torch.equal(
+                                weights.view(torch.int32),
+                                padded_weights[:, :top_k].view(torch.int32),
+                            )
+                        )
+                        self.assertTrue(bool((ids[~valid] == -1).all()))
+                        self.assertTrue(bool((weights[~valid] == 0).all()))
+                        self.assertEqual(int(count), int(valid.sum()))
+                        self.assertEqual(int(count), int(padded_count))
+
+                    self.records.append(dict(
+                        case="top_k_graph_pack", phase=phase, batch=batch,
+                        rows=rows, top_k=top_k, exact_replays=len(excluded_slots),
+                    ))
 
     def test_existing_ptpc_dense_bytes_survive_native_mega_gate_call(self):
         """Prove runtime coexistence; setUp has already resolved MegaGate.

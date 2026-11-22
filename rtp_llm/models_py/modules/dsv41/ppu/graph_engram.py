@@ -1,9 +1,8 @@
-"""Fixed-capacity Engram hashing and ENP lookup for PPU decode Graphs.
+"""Fixed-capacity Engram hashing and lookup for PPU decode Graphs.
 
 The scheduler owns token history and supplies a most-recent-first window.
-Every Graph bucket uses the same model-wide ENP capacity, including idle DP
-ranks. Only query IDs and table contributions change between replays; neither
-the communication shape nor the host table backing storage changes.
+Every Graph bucket uses model-wide workspace capacity, including idle DP
+ranks. Peer mappings and workspace addresses stay fixed across replays.
 """
 
 from __future__ import annotations
@@ -42,6 +41,7 @@ class _LookupBuffers:
     scale_pointer: int
     row_start: int
     row_stop: int
+    peer_table: Any
 
 
 class GraphEngram:
@@ -156,6 +156,7 @@ class GraphEngram:
                     raise ValueError(
                         "Single-rank Graph Engram requires owner rank zero"
                     )
+            peer_table = shard._peer_table
             self._bindings[layer_id] = _LookupBuffers(
                 shard=shard,
                 payload=shard.payload,
@@ -168,10 +169,11 @@ class GraphEngram:
                     (capacity,), DEAD_ID, dtype=torch.int64, device=self.device
                 ),
                 gathered=torch.full(
-                    (size * capacity,), DEAD_ID, dtype=torch.int64, device=self.device
+                    (0 if peer_table is not None else size * capacity,),
+                    DEAD_ID, dtype=torch.int64, device=self.device,
                 ),
                 contribution=torch.empty(
-                    (size * capacity, shard.dim),
+                    (capacity if peer_table is not None else size * capacity, shard.dim),
                     dtype=torch.bfloat16,
                     device=self.device,
                 ),
@@ -179,6 +181,7 @@ class GraphEngram:
                 scale_pointer=shard.scale.data_ptr(),
                 row_start=layout.row_start(rank),
                 row_stop=layout.row_start(rank) + layout.valid_rows(rank),
+                peer_table=peer_table,
             )
 
     def validate(self):
@@ -187,12 +190,15 @@ class GraphEngram:
             if (
                 binding.shard.payload is not binding.payload
                 or binding.shard.scale is not binding.scale
+                or binding.shard._peer_table is not binding.peer_table
                 or binding.payload.data_ptr() != binding.payload_pointer
                 or binding.scale.data_ptr() != binding.scale_pointer
             ):
                 raise RuntimeError(
                     "Graph Engram table backing storage changed; recapture is required"
                 )
+            if binding.peer_table is not None:
+                binding.peer_table.validate(binding.shard, binding.layout)
 
     def hash(self, windows):
         """Hash scheduler windows on device without reconstructing history."""
@@ -239,7 +245,7 @@ class GraphEngram:
         return hashes.masked_fill(~live[:, None, None], DEAD_ID)
 
     def lookup(self, rows, *, layer_id, valid_mask):
-        """Return owned-table contributions in this rank's original row order."""
+        """Return embeddings in this rank's original row order."""
         if layer_id not in self._bindings:
             raise ValueError(f"Graph Engram layer {layer_id} has no bound lookup")
         binding = self._bindings[layer_id]
@@ -256,13 +262,17 @@ class GraphEngram:
             raise ValueError("Graph Engram validity must be one bool per captured row")
         if valid_mask.device != self.device:
             raise ValueError("Graph Engram validity must remain on the model device")
-        if self._fuse_metadata:
+        if self._fuse_metadata or (self._device_path and binding.peer_table is not None):
             self._kernels.engram_graph_ids(rows, valid_mask, binding.ids)
         else:
             binding.ids.fill_(DEAD_ID)
             binding.ids[: rows.numel()].copy_(
                 rows.masked_fill(~valid_mask[:, None], DEAD_ID).reshape(-1)
             )
+        if binding.peer_table is not None:
+            ids = binding.ids[:rows.numel()].view(batch, self.hash_columns)
+            out = binding.contribution[:rows.numel()].view(batch, self.hash_columns, binding.shard.dim)
+            return binding.peer_table.lookup(ids, binding.shard, binding.layout, out=out)
         if binding.size > 1:
             dist.all_gather_into_tensor(
                 binding.gathered, binding.ids, group=binding.process_group

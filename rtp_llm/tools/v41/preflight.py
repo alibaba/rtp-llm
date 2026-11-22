@@ -132,7 +132,7 @@ def checkpoint_metadata(path, expected=None):
 
 def host_memory_budget(env, metadata, available_bytes=None):
     """Admit ENP loading and every local backend's configured L2 allocation."""
-    local_ranks = int(env.get("WORLD_SIZE", "8"))
+    local_ranks = int(env.get("LOCAL_WORLD_SIZE", env.get("WORLD_SIZE", "8")))
     if local_ranks != 8:
         raise ValueError("V4.1 PPU host budget requires eight local backend ranks")
     per_rank = 0

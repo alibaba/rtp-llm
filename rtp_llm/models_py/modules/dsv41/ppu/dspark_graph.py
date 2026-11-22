@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import NativeGraphCache, _F
 from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
     BatchedVerifyPublication,
     position_slots,
+    supports_verify_pair_layout,
     try_enqueue_verify_table_check,
     try_plan_verify_publication,
 )
@@ -126,7 +127,8 @@ class SharedDSparkGraphImpl:
             self.armed_verify = None
             self.staged_completion = 0
         elif (
-            mode == "commit" and (batch, self.width) == (8, 4)
+            mode == "commit" and supports_verify_pair_layout(batch, self.width)
+            and (batch == 8 or getattr(model, "_multi_bucket_private_draft_commit", False))
             and not attn.is_packed_target_verify and enabled(_PRIVATE_DRAFT_KV_ENV)
             and self.native_cache.geometry.window >= self.width
             and tuple(self.native_cache.geometry.pool_keys()) == tuple((layer, "swa_kv") for layer in range(3))
@@ -218,7 +220,7 @@ class SharedDSparkGraphImpl:
             or attn.is_packed_target_verify or attn.input_lengths.numel() != self.batch_size
             or inputs.input_ids.numel() != self.rows
         ):
-            raise ValueError("private Draft KV requires a live dense B8/Q4 replay")
+            raise ValueError("private Draft KV requires a live dense replay of the armed bucket")
         require_device_tables(inputs.attention_inputs, native.native, self.device)
         cache = SharedNativeCache(
             native.config, native.geometry, native.native, inputs.attention_inputs, (),
@@ -305,7 +307,7 @@ class VerifyGraphJournal:
         self.completions = torch.zeros((), dtype=torch.int64, device=native.device)
         self.consumed_tables = {tag: torch.empty_like(table) for tag, table in native.tables.items()}
         self._batched_publication = None
-        if rows == 32 and enabled(_VERIFY_BATCHED_PUBLICATION_ENV, default=True):
+        if enabled(_VERIFY_BATCHED_PUBLICATION_ENV, default=True):
             self._batched_publication = self._build_publication_batch()
 
     def _build_publication_batch(self):

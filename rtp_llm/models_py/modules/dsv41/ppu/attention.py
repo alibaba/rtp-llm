@@ -87,10 +87,11 @@ def _pad_heads(q, attn_sink):
 
 
 def flash_mla_sparse_fwd_ppu(
-    q, kv, indices, sm_scale, d_v=HEAD_DIM, attn_sink=None, topk_length=None
+    q, kv, indices, sm_scale, d_v=HEAD_DIM, attn_sink=None, topk_length=None, *, native=None
 ):
     """Lazy-importing ``flash_mla_sparse_fwd`` with rtp's head padding."""
-    native = _bf16_sparse_native(q)
+    if native is None:
+        native = _bf16_sparse_native(q)
 
     q, sink, heads = _pad_heads(q, attn_sink)
     output, maximum, lse = native(

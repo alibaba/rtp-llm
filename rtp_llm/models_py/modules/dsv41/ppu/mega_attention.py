@@ -149,6 +149,13 @@ def _backend():
     from rtp_llm.models_py.kernels.ppu.runtime import install_deep_gemm_build_lock
 
     install_deep_gemm_build_lock()
+    readonly_decode = _readonly_prefill_binding(
+        module, decode, name="decode", entry_name="fused_norm_rope_attn_rope_cast_decode",
+    )
+    verify_schedule_max_rows = (
+        getattr(readonly_decode[3], "verify_schedule_max_query_rows", None)
+        if readonly_decode is not None else None
+    )
     # PPU wheels expose a single token-interleaved kernel set and omit this
     # keyword. Newer dual-layout wheels require use_legacy=False for our pools.
     return SimpleNamespace(
@@ -156,9 +163,8 @@ def _backend():
         prefill_kwargs={"use_legacy": False} if _accepts_interleaved_flag(prefill) else {},
         decode_kwargs={"use_legacy": False} if _accepts_interleaved_flag(decode) else {},
         readonly_prefill=_readonly_prefill_binding(module, prefill),
-        readonly_decode=_readonly_prefill_binding(
-            module, decode, name="decode", entry_name="fused_norm_rope_attn_rope_cast_decode",
-        ),
+        readonly_decode=readonly_decode,
+        verify_schedule_max_rows=verify_schedule_max_rows,
     )
 
 
@@ -487,8 +493,10 @@ class PPUMegaAttention:
             common = self._common(self._query(q, packed_q), positions, plan.valid_mask)
         extra = plan.global_indices
         decode_options = self.backend.decode_kwargs
+        schedule_max_rows = getattr(self.backend, "verify_schedule_max_rows", None)
         if (
-            phase == "verify" and shared is not None and q.shape[0] == 32
+            phase == "verify" and shared is not None
+            and (q.shape[0] == 32 or (type(schedule_max_rows) is int and q.shape[0] <= schedule_max_rows))
             and self.heads == 64 and plan.swa_lengths is not None
             and optimization_env_value("RTP_V41_PPU_VERIFY_SHARED_MLA_SCHEDULE", "0") == "1"
             and readonly_decode_positions(self)
@@ -496,8 +504,17 @@ class PPUMegaAttention:
             and torch.cuda.get_device_properties(self.device).multi_processor_count == 39
         ):
             lengths = plan.swa_lengths, plan.global_lengths
+            # A packed dispatch bypasses the split-KV workspace. Include its
+            # storage conditions so it cannot become the producer for a
+            # later split-KV call even when both share the same lengths.
+            layouts = tuple(
+                (tuple(tensor.shape), tensor.stride(), tensor.dtype, tensor.data_ptr() % 16)
+                if tensor is not None else None
+                for tensor in (common["q"], plan.swa_cache, plan.global_cache)
+            )
             key = ("mega_verify_schedule", id(lengths[0]), id(lengths[1]),
-                   plan.swa_indices.shape[-1], 0 if extra is None else extra.shape[-1])
+                   plan.swa_indices.shape[-1], 0 if extra is None else extra.shape[-1],
+                   common["enable_q_norm"], common["num_per_channels"], layouts)
             entry = shared.get(key)
             reuse = entry is not None
             if entry is None:

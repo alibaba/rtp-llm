@@ -140,7 +140,10 @@ def _call_eligible(block, state, x, metadata, input_ids, kwargs):
     return not (
         optimized_diagnostics_enabled()
         or _record_tensor.should_record_layer(block.layer_id)
-        or block.layer_id in model.v4.capture_aux_hidden_layer_ids
+        or (
+            block._mhc_phase != "graph_verify"
+            and block.layer_id in model.v4.capture_aux_hidden_layer_ids
+        )
     )
 
 
@@ -157,7 +160,10 @@ def _adjacent(block, target):
         or layers[target.layer_id] is not target
         or target.attn.runtime is not runtime
         or target.engram is not None
-        or target.layer_id in runtime.model.v4.capture_aux_hidden_layer_ids
+        or (
+            block._mhc_phase != "graph_verify"
+            and target.layer_id in runtime.model.v4.capture_aux_hidden_layer_ids
+        )
         or previous is None or previous() is not block.ffn_hc
     ):
         return False
@@ -243,6 +249,8 @@ def finish_decode_boundary(block, state, pending, target, scope):
     )
     if transition is None:
         return pending.materialize()
+    # Graph Verify captures auxiliary features from this completed residual
+    # at layer entry, independently of the prepared attention input.
     # Native outputs are disjoint from the source residual. If the consumer
     # later declines this ticket, its ordinary pre recomputes from this correct
     # updated residual and the unchanged previous FFN coefficients.

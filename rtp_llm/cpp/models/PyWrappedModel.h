@@ -109,7 +109,9 @@ public:
     bool                       tryFinishSpeculativeForwardWithPrivateDraft(PyWrappedModel& draft,
                                                                              const torch::Tensor& request_ids,
                                                                              const torch::Tensor& prefixes,
-                                                                             const torch::Tensor& accepted_rows);
+                                                                             const torch::Tensor& accepted_rows,
+                                                                             const torch::Tensor& accepted_tokens = {},
+                                                                             int64_t vocab_size = 0);
     void                       publishPrivateDraftCommit(const torch::Tensor& request_ids,
                                                          const torch::Tensor& prefixes,
                                                          const torch::Tensor& accepted_rows);
@@ -454,6 +456,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
+
+#if USE_PPU
+        if (dspark_model_role_ == DSparkModelRole::COMMIT && init_resources.is_decode_role
+            && py::hasattr(py_model_, "enable_multi_bucket_private_draft_commit")) {
+            py_model_.attr("enable_multi_bucket_private_draft_commit")();
+        }
+#endif
 
         // Create GraphParams from individual config fields
         GraphParams graph_params;

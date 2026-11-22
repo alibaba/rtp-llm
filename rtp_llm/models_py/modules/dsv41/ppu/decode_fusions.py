@@ -28,6 +28,25 @@ def compact_routes_enabled(engine):
     )
 
 
+def pack_graph_top_k_enabled(engine, top_k):
+    """Use compact native output only when no route override or mapping runs."""
+    if os.environ.get("RTP_V41_PPU_MEGA_GATE_PACK_TOP_K") != "1":
+        return False
+    logical_experts = getattr(engine, "num_routed_experts", None)
+    config = getattr(engine, "_fake_balance_config", None)
+    return (
+        (getattr(engine, "backend", None), getattr(engine, "precision", None))
+        == ("megamoe", "w4a4")
+        and type(logical_experts) is int
+        and logical_experts > 0
+        and logical_experts == getattr(engine, "num_physical_experts", None)
+        and type(top_k) is int
+        and top_k == getattr(engine, "top_k", None)
+        and getattr(engine, "_eplb_layers", None) == {}
+        and (config is None or config[0] is False)
+    )
+
+
 def _rows_supported(value, widths):
     return (
         type(value) is torch.Tensor
@@ -35,7 +54,7 @@ def _rows_supported(value, widths):
         and value.layout == torch.strided
         and value.dtype == torch.bfloat16
         and value.ndim == 2
-        and value.shape[0] in (1, 8, 24, 32)
+        and value.shape[0] > 0
         and value.shape[1] in widths
         and value.is_contiguous()
         and not value.is_neg()
@@ -159,7 +178,7 @@ def supports_mask_quant(linear, valid):
         and valid.is_cuda
         and valid.dtype == torch.bool
         and valid.ndim == 1
-        and valid.numel() in (1, 8, 24, 32)
+        and valid.numel() > 0
         and valid.is_contiguous()
         and valid.device == linear.weight.device
         and not torch.is_grad_enabled()
@@ -168,7 +187,8 @@ def supports_mask_quant(linear, valid):
 
 def masked_output_projection(linear, output, valid):
     flat = output.flatten(1)
-    if not supports_mask_quant(linear, valid) or not _rows_supported(flat, (8192,)):
+    if (not supports_mask_quant(linear, valid) or not _rows_supported(flat, (8192,))
+            or flat.shape[0] != valid.numel()):
         raise ValueError("Decode masked PTPC projection changed its admitted metadata")
     payload, scale = _allocate_quant(flat, flat.shape[1])
     triton, _, kernel = _quant_kernels()

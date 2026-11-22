@@ -1,4 +1,4 @@
-"""Thin local-Prefill adapter for pinned SGLang's native selection pipeline.
+"""Adapters for pinned SGLang's native Indexer selection pipeline.
 
 The caller owns phase/rollout admission and proves device length values are in
 range. Dense scores are FP32, sparse scores BF16, and neither path sanitizes,
@@ -92,6 +92,8 @@ def _module(kind):
         "select": ("compat/prefill_topk_entry.cuh", "sglang::PrefillTopKEntry::forward"),
         "small": ("csrc/deepseek_v4/topk_bf16_small.cuh",
                   "sglang::TopKBF16Kernel<false>::transform"),
+        "decode": ("csrc/deepseek_v4/topk_v1.cuh",
+                   "sglang::TopKKernel<false>::transform"),
     }[kind]
     return load_sglang_kernel("prefill_topk_" + kind, header, symbol, (8, 9),
                              bundle="prefill_topk")
@@ -132,3 +134,27 @@ def select_sparse(scores, valid_lens, blocks, out=None):
         out = torch.empty((scores.shape[0], TOKEN_K), dtype=torch.int32, device=scores.device)
     small.forward(scores, valid_lens, blocks, out, BLOCK_SIZE)
     return out
+
+
+def select_decode_tokens(scores, lengths, topk):
+    """Call Sail's paged V1 TopK in raw-position mode for RTP logical IDs."""
+    output = torch.empty((scores.shape[0], topk), dtype=torch.int32, device=scores.device)
+    _module("decode").forward(scores, lengths, None, output, 1, None)
+    return output
+
+
+def select_decode_blocks(scores, lengths, topk):
+    """Sail Decode block publication: varlen amax8 then raw-position V1 TopK."""
+    rows, width = scores.shape
+    key_width = ((width + 31) // 32) * 4
+    keys = torch.empty((rows, key_width), dtype=torch.float32, device=scores.device)
+    block_lengths = torch.div(lengths + 7, 8, rounding_mode="floor")
+    _module("amax").forward(scores, lengths, keys, 0)
+    return select_decode_tokens(keys, block_lengths, topk)
+
+
+def select_decode_sparse(scores, lengths, pages, topk):
+    """Select BF16 scores and map through the prepared logical page table."""
+    output = torch.empty((scores.shape[0], topk), dtype=torch.int32, device=scores.device)
+    _module("small").forward(scores, lengths, pages, output, BLOCK_SIZE)
+    return output

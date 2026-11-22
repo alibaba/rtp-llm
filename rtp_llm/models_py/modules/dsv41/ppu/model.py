@@ -153,7 +153,22 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         # legacy generic KV dtype hint used by the common constructor.
         self._v4_args.fp8_kv_cache = self.fp8_kv_cache = True
         self.materialize_modules()
-        if not self._is_decode_role and dist.is_initialized() and dist.get_world_size() == 8:
+        if self._is_decode_role and dist.is_initialized():
+            from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import engram_in_hbm_flag, prepare_peer_shards
+
+            rank, world_size = dist.get_rank(), dist.get_world_size()
+            args = self._v4_args
+            prepare_peer_shards(
+                self._shared_ops._engram, self.v4.embed.weight.device,
+                flag=engram_in_hbm_flag(decode=True),
+                eligible=(
+                    self.parallelism_config.tp_size == args.tp_size == 1
+                    and args.dp_size == args.ep_size == world_size
+                    and args.dp_rank == args.ep_rank == rank
+                ),
+                decode=True,
+            )
+        elif not self._is_decode_role and dist.is_initialized() and dist.get_world_size() == 8:
             from rtp_llm.models_py.modules.dsv41.ppu.engram import LOCAL_PREFILL_ENGRAM_ROUNDS_ENV
             from rtp_llm.models_py.modules.dsv41.ppu.engram_peer import ENV, prepare_peer_shards
             from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value
@@ -197,9 +212,11 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
     def finish_speculative_forward(self, request_ids, prefixes, accepted_rows):
         return self.shared_runtime.finish_speculative_forward(request_ids, prefixes, accepted_rows)
 
-    def try_finish_speculative_forward_with_private_draft(self, draft, request_ids, prefixes, accepted_rows):
+    def try_finish_speculative_forward_with_private_draft(
+        self, draft, request_ids, prefixes, accepted_rows, accepted_tokens=None, vocab_size=0,
+    ):
         return self.shared_runtime.try_finish_speculative_forward_with_private_draft(
-            draft, request_ids, prefixes, accepted_rows,
+            draft, request_ids, prefixes, accepted_rows, accepted_tokens, vocab_size,
         )
 
     def abort_speculative_forward(self):

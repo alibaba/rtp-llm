@@ -138,7 +138,7 @@ class SharedGraphRuntime:
             raise ValueError("PPU Graph requires grouped W4A8 or MegaMoE W4A4")
         self.verify_moe_overlap = None
         if (
-            not draft and row_width == 4 and self.max_rows == 32 and self.grouped is None
+            not draft and row_width == 4 and self.grouped is None
             and env_bool(os.environ, "RTP_V41_PPU_VERIFY_MOE_OVERLAP", default=True)
         ):
             from rtp_llm.models_py.modules.dsv41.ppu.verify_moe_overlap import VerifyMoEOverlapPlans
@@ -226,7 +226,6 @@ class SharedGraphRuntime:
             mode == "proposal"
             and self.grouped is None
             and impl.width == 3
-            and metadata.valid_mask.numel() == 24
         )
         mhc_phase = None
         if (
@@ -248,7 +247,7 @@ class SharedGraphRuntime:
         bulk_counters = self._bulk_counters and not verify
         bulk_verify_counters = (
             getattr(self, "_bulk_verify_counters", False) and mode == "dense"
-            and metadata.batch_size == 8 and metadata.q_len_per_req == 4
+            and metadata.q_len_per_req == 4
             and torch.cuda.is_current_stream_capturing()
         )
         hashes = None
@@ -269,7 +268,7 @@ class SharedGraphRuntime:
             verify_moe_overlap=(
                 self.verify_moe_overlap.lookup_current_stream()
                 if self.verify_moe_overlap is not None and mode == "dense"
-                and metadata.valid_mask.numel() == 32 else None
+                else None
             ),
             verify_moe_overlap_allowed=mode == "dense",
             proposal_batched_wo_a=proposal_batched_wo_a,
@@ -314,7 +313,7 @@ class SharedGraphRuntime:
         if rows != impl.rows or rows > self.max_rows:
             raise ValueError("shared Graph input does not fit captured row geometry")
         verify = getattr(impl, "mode", None) in ("dense", "packed")
-        if self.verify_moe_overlap is not None and getattr(impl, "mode", None) == "dense" and rows == 32:
+        if self.verify_moe_overlap is not None and getattr(impl, "mode", None) == "dense":
             if torch.cuda.is_current_stream_capturing():
                 self.verify_moe_overlap.lookup_current_stream(required=True)
             elif os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1":

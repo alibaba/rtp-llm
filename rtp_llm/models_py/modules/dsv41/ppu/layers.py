@@ -643,8 +643,16 @@ class PPUSharedGate(nn.Module):
             finite_domain_qualified=optimization_enabled(MEGA_GATE_FINITE_DOMAIN),
         )
 
-    def forward(self, hidden, *, image_rows=None, graph_routes=None, allow_top3_graph_routes=False,
-                compact_graph_routes=False):
+    def forward(
+        self,
+        hidden,
+        *,
+        image_rows=None,
+        graph_routes=None,
+        allow_top3_graph_routes=False,
+        compact_graph_routes=False,
+        pack_graph_top_k=False,
+    ):
         state = getattr(self.runtime, "current", None)
         if (
             state is not None and not getattr(state, "idle", False)
@@ -678,6 +686,7 @@ class PPUSharedGate(nn.Module):
                 graph_routes=graph_routes,
                 valid_mask=valid_mask,
                 **({"compact_graph_routes": True} if compact_graph_routes else {}),
+                **({"pack_graph_top_k": True} if pack_graph_top_k else {}),
             )
             if result is not None:
                 return result
@@ -759,9 +768,13 @@ class PPUSharedMoE(nn.Module):
         if getattr(state, "is_graph", False):
             real = state.metadata.valid_mask
             routed_rows = state.routed_rows_device[self.layer_id]
-            from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import compact_routes_enabled
+            from rtp_llm.models_py.modules.dsv41.ppu.decode_fusions import (
+                compact_routes_enabled,
+                pack_graph_top_k_enabled,
+            )
 
-            compact = state.grouped_moe is None and compact_routes_enabled(self.ops.moe_engine)
+            engine = self.ops.moe_engine
+            compact = state.grouped_moe is None and compact_routes_enabled(engine)
             route_options = {"routed_count": routed_rows, "route_valid_mask": real} if compact else {}
             ordinary = _ordinary_decode_graph(runtime)
             verify = _verify_packed_attention_graph(state) and state.grouped_moe is None
@@ -784,11 +797,16 @@ class PPUSharedMoE(nn.Module):
                     )
                 )
             ):
+                gate_options = {}
+                if compact:
+                    gate_options["compact_graph_routes"] = True
+                elif pack_graph_top_k_enabled(engine, getattr(self.gate, "top_k", None)):
+                    gate_options["pack_graph_top_k"] = True
                 ids, weights = self.gate(
                     flat,
                     graph_routes=(real, routed_rows),
                     allow_top3_graph_routes=proposal,
-                    **({"compact_graph_routes": True} if compact else {}),
+                    **gate_options,
                 )
             else:
                 ids, weights = pad_topk_for_dispatch(*self.gate(flat))
@@ -797,7 +815,6 @@ class PPUSharedMoE(nn.Module):
                 routed_rows.copy_((ids >= 0).any(-1).sum())
             if not (getattr(state, "bulk_counters", False) or getattr(state, "bulk_verify_counters", False)):
                 state.moe_calls[self.layer_id].add_(1)
-            engine = self.ops.moe_engine
             if state.grouped_moe is None:
                 routed = engine.forward_shared_graph(
                     flat,

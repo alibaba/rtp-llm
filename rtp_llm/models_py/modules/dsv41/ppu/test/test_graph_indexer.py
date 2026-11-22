@@ -20,6 +20,115 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_indexer import (
 
 class PagedGraphIndexerTest(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "PPU required")
+    @torch.no_grad()
+    def test_sail_verify_dense_and_candidate_topk_replay(self):
+        if "ZW-" not in torch.cuda.get_device_name():
+            self.skipTest("PPU required")
+        for rows in (4, 16, 32, 64, 128):
+            with self.subTest(rows=rows):
+                self._assert_sail_verify_dense_and_candidate_topk_replay(rows)
+
+    def _assert_sail_verify_dense_and_candidate_topk_replay(self, rows):
+        from rtp_llm.models_py.modules.dsv41.ppu import graph_indexer
+        from rtp_llm.models_py.modules.dsv41.ppu import local_prefill_sg_topk
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        width = 70000
+        scores = torch.arange(width, dtype=torch.float32, device=device).repeat(rows, 1)
+        positions = torch.full((rows,), width - 1, dtype=torch.int64, device=device)
+        positions[1] = 8
+        valid = torch.ones(rows, dtype=torch.bool, device=device)
+        valid[2] = False
+        query = torch.empty((rows, 32, 128), dtype=torch.bfloat16, device=device)
+        tiles = [(scores[:, :65536].contiguous(), None, True),
+                 (scores[:, 65536:].contiguous(), None, True)]
+
+        def select():
+            return graph_indexer.select_verify_indices(
+                query, None, cache=None, source_layer=20, ratio=1,
+                positions=positions, valid_mask=valid, topk=512, shared={},
+                candidate_block_size=8, candidate_topk_blocks=2048,
+            )[:2]
+
+        with (
+            patch.object(graph_indexer, "_verify_score_tiles", return_value=(tiles, None, None)),
+            patch.object(local_prefill_sg_topk, "select_decode_tokens",
+                         wraps=local_prefill_sg_topk.select_decode_tokens) as native_tokens,
+            patch.object(local_prefill_sg_topk, "select_decode_blocks",
+                         wraps=local_prefill_sg_topk.select_decode_blocks) as native_blocks,
+        ):
+            select()
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                tokens, blocks = select()
+            native_tokens.assert_called()
+            native_blocks.assert_called()
+        positions[0] = width - 9
+        graph.replay()
+        torch.cuda.synchronize()
+        self.assertEqual(sorted(tokens[0].tolist()), list(range(width - 520, width - 8)))
+        self.assertEqual(sorted(blocks[0].tolist()), list(range(width // 8 - 2049, width // 8 - 1)))
+        self.assertEqual(tokens[1].tolist(), list(range(9)) + [-1] * 503)
+        self.assertEqual(blocks[1].tolist(), [0, 1] + [-1] * 2046)
+        self.assertTrue((tokens[2] == -1).all().item())
+        self.assertTrue((blocks[2] == -1).all().item())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "PPU required")
+    @torch.no_grad()
+    def test_sail_verify_sparse_topk_includes_only_allowed_journal_blocks(self):
+        if "ZW-" not in torch.cuda.get_device_name():
+            self.skipTest("PPU required")
+        for rows in (4, 16, 32, 64, 128):
+            with self.subTest(rows=rows):
+                self._assert_sail_verify_sparse_topk_includes_only_allowed_journal_blocks(rows)
+
+    def _assert_sail_verify_sparse_topk_includes_only_allowed_journal_blocks(self, rows):
+        from rtp_llm.models_py.modules.dsv41.ppu import graph_indexer
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        blocks = 2048
+        ids = torch.arange(1, blocks + 1, dtype=torch.int32, device=device).repeat(rows, 1)
+        scored = SimpleNamespace(
+            scores=torch.ones((rows, blocks * 8), dtype=torch.bfloat16, device=device),
+            logical_ids=ids,
+            lengths=torch.full((rows,), (blocks - 1) * 8, dtype=torch.int32, device=device),
+            blocks=blocks, tile=8, capacity=20000, kernels=graph_indexer._compact_kernels(),
+        )
+        first = torch.full((rows,), 16382, dtype=torch.int64, device=device)
+        visible = first + 4
+        visible[2] = 9
+        tentative = torch.full((rows, 4), 256, dtype=torch.float32, device=device)
+        valid = torch.ones(rows, dtype=torch.bool, device=device)
+        valid[3] = False
+        active = torch.ones_like(valid)
+        allowed = torch.ones((rows, 2500), dtype=torch.uint8, device=device)
+        allowed[1, 2048] = 0
+
+        def select():
+            return graph_indexer._select_verify_compact_topk(
+                scored, first, tentative, visible, valid, allowed, active, 512,
+                bf16_tail_provenance=True, sail_topk=True,
+            )
+
+        select()
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = select()
+        graph.replay()
+        torch.cuda.synchronize()
+        selected = set(output[0].tolist())
+        self.assertEqual(len(selected), 512)
+        self.assertTrue(set(range(16382, 16386)).issubset(selected))
+        self.assertTrue(all(8 <= index < 16386 for index in selected))
+        selected = set(output[1].tolist())
+        self.assertTrue({16382, 16383}.issubset(selected))
+        self.assertTrue(all(8 <= index < 16384 for index in selected))
+        self.assertEqual(output[2].tolist(), list(range(9)) + [-1] * 503)
+        self.assertTrue((output[3] == -1).all().item())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "PPU required")
     def test_verify_fullwidth_native_topk_math_and_graph(self):
         self._assert_verify_fullwidth_topk_math_and_graph()
 
@@ -458,7 +567,11 @@ class PagedGraphIndexerTest(unittest.TestCase):
         from rtp_llm.ops.compute_ops import rtp_llm_ops
 
         with patch.object(graph_indexer, "_verify_topk_op", return_value=(rtp_llm_ops.dsv4_persistent_topk, False)):
-            self._assert_verify_sparse_tiles_match_dense(nonuniform=True, compact=True)
+            for owners in (4, 8, 16, 32):
+                with self.subTest(owners=owners):
+                    self._assert_verify_sparse_tiles_match_dense(
+                        nonuniform=True, compact=True, owners=owners,
+                    )
 
     @unittest.skipUnless(torch.cuda.is_available(), "PPU required")
     def test_verify_bf16_compact_provider_tail_math_and_replay(self):
@@ -691,7 +804,9 @@ class PagedGraphIndexerTest(unittest.TestCase):
                     check(actual)
                 stream.synchronize()
 
-    def _assert_verify_sparse_tiles_match_dense(self, *, nonuniform, compact=False, bf16_api=False):
+    def _assert_verify_sparse_tiles_match_dense(
+        self, *, nonuniform, compact=False, bf16_api=False, owners=8,
+    ):
         if "ZW-" not in torch.cuda.get_device_name():
             self.skipTest("PPU required")
         from rtp_llm.models_py.modules.dsv41.ppu.graph_indexer import _verify_score_tiles
@@ -699,7 +814,7 @@ class PagedGraphIndexerTest(unittest.TestCase):
 
         device = torch.device("cuda", torch.cuda.current_device())
         _quant.prepare_e2m1_codebooks(device)
-        owners, width, capacity, page, topk = 8, 4, 131840, 256, 512
+        width, capacity, page, topk = 4, 131840, 256, 512
         block, count = 8, 512
         pages = (capacity + page - 1) // page
         pool = torch.empty((pages + 1, page * 68), dtype=torch.uint8, device=device)
@@ -739,9 +854,10 @@ class PagedGraphIndexerTest(unittest.TestCase):
         replacement[64:] = 127
         for ratio in (1, 2):
             with self.subTest(ratio=ratio):
-                prefixes = torch.tensor([131072, 131071, 4090 * ratio, 510 * ratio,
-                                         131070, 0, 131072, 131072], device=device)
-                valid = (requests != 7)
+                prefix_pattern = (131072, 131071, 4090 * ratio, 510 * ratio, 131070, 0, 131072, 131072)
+                patterns = (owners + len(prefix_pattern) - 1) // len(prefix_pattern)
+                prefixes = torch.tensor((prefix_pattern * patterns)[:owners], device=device)
+                valid = requests.remainder(len(prefix_pattern)) != len(prefix_pattern) - 1
                 live_table = table[requests].contiguous()
                 candidate_ids = ((torch.arange(count, device=device) * 29) % (capacity // ratio // block)).int()
                 candidates = candidate_ids.repeat(owners * width, 1)
@@ -780,19 +896,19 @@ class PagedGraphIndexerTest(unittest.TestCase):
                                              first, visible, scored.blocks, scored.tile))
                             return logits, lengths
 
-                        with patch.dict("os.environ", {"RTP_V41_PPU_VERIFY_COMPACT_TOPK": "1"}), patch.object(
+                        with patch.object(
                             graph_indexer, "_pack_verify_compact_logits", side_effect=capture,
                         ):
-                            result = graph_indexer.select_verify_indices(
+                            # Exercise the existing persistent fallback's packing and replay contract.
+                            selected = graph_indexer._select_verify_sparse_indices(
                                 query, weights, cache=journal, source_layer=0, ratio=ratio,
                                 positions=positions, valid_mask=valid, topk=topk,
                                 candidates=candidates, candidate_active=active, candidate_block_size=block,
                                 shared={}, candidate_inactive_limit=count * block,
                             )
-                        self.assertIsNotNone(result)
-                        self.assertIsNone(result[1])
+                        self.assertIsNotNone(selected)
                         self.assertEqual(len(captured), 8, "compact provider unexpectedly fell back")
-                        return (result[0], *captured)
+                        return (selected, *captured)
                     tiles, _, _ = _verify_score_tiles(
                         query, weights, cache=journal, source_layer=0, ratio=ratio,
                         positions=positions, valid_mask=valid, fused=True,

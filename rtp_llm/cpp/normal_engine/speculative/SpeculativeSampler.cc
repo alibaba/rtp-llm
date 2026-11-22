@@ -956,11 +956,18 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraftEager(const torch::Tensor& ba
 SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
                                                      SamplerOutput&                      draft_sampler_output,
                                                      SamplerOutput&                      target_sampler_output) {
+    return forward(streams, draft_sampler_output, target_sampler_output, /*stage_host_output=*/true);
+}
+
+SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStreamPtr>& streams,
+                                                     SamplerOutput&                      draft_sampler_output,
+                                                     SamplerOutput&                      target_sampler_output,
+                                                     bool                                stage_host_output) {
     // TensorHolder release point (SpeculativeSampler): advances host tensors
     // staged for rejection sampling H2D in the previous forward.
     buffer_holder_.release();
     SpeculativeSamplerOutput sample_output;
-    batchSample(sample_output, streams, draft_sampler_output, target_sampler_output);
+    batchSample(sample_output, streams, draft_sampler_output, target_sampler_output, stage_host_output);
 
     return sample_output;
 }
@@ -968,7 +975,8 @@ SpeculativeSamplerOutput SpeculativeSampler::forward(const std::list<GenerateStr
 void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_output,
                                      const std::list<GenerateStreamPtr>& streams,
                                      SamplerOutput&                      draft_sampler_output,
-                                     SamplerOutput&                      target_sampler_output) const {
+                                     SamplerOutput&                      target_sampler_output,
+                                     bool                                stage_host_output) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.batchSample");
     torch::Device target_device = getTorchCudaDevice();
 
@@ -1224,9 +1232,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 
-    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
-    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
-    sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    if (stage_host_output) {
+        sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
+        sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+        sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+    }
 }
 
 void SpeculativeSampler::streamSample(SpeculativeSamplerOutput&           sample_output,
