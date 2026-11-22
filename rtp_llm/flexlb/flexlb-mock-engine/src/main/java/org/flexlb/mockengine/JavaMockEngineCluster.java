@@ -686,6 +686,22 @@ public final class JavaMockEngineCluster {
         // prefill enqueue / decode run-start, grown per decode step, handed to
         // the LRU on completion, returned to free on cancel). Occupied tokens
         // are derived from the pool — never tracked as an independent counter.
+        // In the image-compatible replay, a queued request owns no physical KV yet.
+        private static final MockLruBlockCache.BlockLease QUEUED_LEASE =
+                new MockLruBlockCache.BlockLease(List.of(), 0);
+        private boolean batchStartMatching;
+        private volatile IllegalStateException batchPreparationFailure;
+
+        void enableBatchStartMatching() {
+            batchStartMatching = true;
+        }
+
+        void checkBatchPreparation() {
+            if (batchPreparationFailure != null) {
+                throw batchPreparationFailure;
+            }
+        }
+
         private final Map<Long, MockLruBlockCache.BlockLease> activeBlockLeases = new ConcurrentHashMap<>();
         /** Decode-side KV admission/growth failures of the RETRYABLE family
          *  (LACK_MEM, production-aligned 20260903): every bump is a REQUEST
@@ -803,7 +819,7 @@ public final class JavaMockEngineCluster {
          * prices the whole step, exactly like production where a step's duration
          * is fixed by the batch that entered it. The tick consumes this value
          * for exec accounting, so booked time always matches elapsed time. */
-        private long pendingStepDelayMs = 0;
+        private double pendingStepDelayMs = 0;
 
         /** One decode stream occupying a running slot in the per-step loop. */
         private static final class DecodeStream {
@@ -1181,13 +1197,7 @@ public final class JavaMockEngineCluster {
                             requestStates.put(requestId, "rejected");
                             continue;
                         }
-                        MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
-                        // Key-level cache-hit accounting at the admission hit
-                        // computation point (recorded whether or not the request
-                        // later admits — a rejected request still observed the
-                        // engine's index state for its keys).
-                        cacheKeyHits.add(shape.hitBlocks());
-                        cacheKeysRequested.add(shape.blockKeys().size());
+                        MockPerformanceModel.RequestShape shape = incomingShape(input.getInput());
                         // Phase 1.5 (KV capacity model v2): block-pool admission.
                         // A request whose blocks cannot be provisioned (free + LRU
                         // below need, or the reserve watermark would be breached) is
@@ -1423,7 +1433,17 @@ public final class JavaMockEngineCluster {
                     // implicit unlimited fallback.
                     .setMaxSeqLen(1048576L)
                     .setMaxBatchTokensSize(1048576L);
-            status.addAllRunningTaskInfo(runningTasks.values().stream()
+            var reportedTasks = new java.util.HashMap<>(runningTasks);
+            if (roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
+                activeBlockLeases.forEach((id, lease) -> {
+                    if (lease.decodeInputLength >= 0 && !reportedTasks.containsKey(id)) {
+                        reportedTasks.put(id, EngineRpcService.TaskInfoPB.newBuilder()
+                                .setRequestId(id).setInputLength(lease.decodeInputLength)
+                                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED).build());
+                    }
+                });
+            }
+            status.addAllRunningTaskInfo(reportedTasks.values().stream()
                     .map(FastRpcService::withLegacyTaskState)
                     .toList());
             for (VersionedTask completion : visibleCompletions) {
@@ -1571,11 +1591,7 @@ public final class JavaMockEngineCluster {
             }
 
             long requestId = request.getRequestId();
-            MockPerformanceModel.RequestShape shape = performance.shape(request, cache);
-            // Key-level cache-hit accounting (direct path, same admission hit
-            // computation point as the enqueue-batch path above).
-            cacheKeyHits.add(shape.hitBlocks());
-            cacheKeysRequested.add(shape.blockKeys().size());
+            MockPerformanceModel.RequestShape shape = incomingShape(request);
             acceptedCount.incrementAndGet();
             lastEnqueueTime.set(System.nanoTime());
             requestStates.put(requestId, "running");
@@ -2943,7 +2959,45 @@ public final class JavaMockEngineCluster {
          * one running batch regardless of which EnqueueBatch delivered each
          * stream).
          */
-        private void runPrefillBatch(List<BatchMember> members) {
+        private MockPerformanceModel.RequestShape incomingShape(EngineRpcService.GenerateInputPB input) {
+            if (batchStartMatching) {
+                return performance.unpricedShape(input);
+            }
+            var shape = performance.shape(input, cache);
+            cacheKeyHits.add(shape.hitBlocks());
+            cacheKeysRequested.add(shape.blockKeys().size());
+            return shape;
+        }
+
+        private BatchMember prepareBatchMember(BatchMember member) {
+            var shape = member.shape();
+            int reusable = Math.min(shape.blockKeys().size(), Math.max(0, shape.inputLen() - 1) / seqSizePerBlock);
+            int demand = (int) (((long) shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock);
+            // Removing a queued request cancels its marker. Never recreate its lease after cancellation.
+            var lease = activeBlockLeases.computeIfPresent(shape.input().getRequestId(), (id, pending) -> {
+                if (pending != QUEUED_LEASE) {
+                    throw new IllegalStateException("duplicate batch preparation for " + id);
+                }
+                var acquired = cache.acquire(demand, shape.blockKeys().subList(0, reusable));
+                if (acquired == null) {
+                    // Replay bounds its selected batch to fit physical KV. Invalidate a run that
+                    // violates that assumption rather than pricing a request which could not start.
+                    batchPreparationFailure = new IllegalStateException("replay batch could not reserve KV for " + id);
+                    throw batchPreparationFailure;
+                }
+                return acquired;
+            });
+            if (lease == null) {
+                return member; // Existing cancellation cleanup owns this terminal request.
+            }
+            cacheKeyHits.add(lease.hitKeys.size());
+            cacheKeysRequested.add(shape.blockKeys().size());
+            return new BatchMember(shape.withHits(lease.hitKeys.size(), seqSizePerBlock), member.batchId(), member.dpRank());
+        }
+
+        private void runPrefillBatch(List<BatchMember> selected) {
+            List<BatchMember> members = batchStartMatching
+                    ? selected.stream().map(this::prepareBatchMember).toList() : selected;
             List<MockPerformanceModel.RequestShape> shapes = shapesOf(members);
             long executionMs = performance.prefillMs(shapes);
             long generateDelayMs = faultConfig.getGenerateDelayMs();
@@ -3556,7 +3610,7 @@ public final class JavaMockEngineCluster {
                 // batch size at that boundary priced the whole step, so booked
                 // exec time always matches elapsed time. The count read here
                 // only decides WHO advances, not how long the step was.
-                long stepDelayMs = pendingStepDelayMs;
+                double stepDelayMs = pendingStepDelayMs;
                 for (Iterator<DecodeStream> it = decodeRunning.values().iterator(); it.hasNext(); ) {
                     DecodeStream stream = it.next();
                     if (stream.awaitsFirstStep) {
@@ -3633,8 +3687,8 @@ public final class JavaMockEngineCluster {
             if (decodeStepScheduled || decodeRunning.isEmpty() || shuttingDown) {
                 return;
             }
-            long delayMs = performance.decodeStepDelayMs(decodeRunning.size());
-            pendingStepDelayMs = delayMs; // lock in this step's price at arm time
+            long delayNanos = performance.decodeStepDelayNanos(decodeRunning.size());
+            pendingStepDelayMs = delayNanos / 1_000_000.0; // lock in this step's price at arm time
             decodeStepScheduled = true;
             // Crash fence: a tick armed before a crash_after must not advance
             // the wiped engine — the late callback drops out on epoch mismatch.
@@ -3643,7 +3697,7 @@ public final class JavaMockEngineCluster {
                 if (crashEpoch.get() == epoch) {
                     runDecodeStep();
                 }
-            }, delayMs, TimeUnit.MILLISECONDS);
+            }, delayNanos, TimeUnit.NANOSECONDS);
         }
 
         /**
@@ -4112,7 +4166,8 @@ public final class JavaMockEngineCluster {
          */
         private MockLruBlockCache.BlockLease acquireBlockLease(long requestId,
                                                                 MockPerformanceModel.RequestShape shape) {
-            MockLruBlockCache.BlockLease lease = cache.acquire(needBlocks(shape), shape.blockKeys());
+            MockLruBlockCache.BlockLease lease = batchStartMatching
+                    ? QUEUED_LEASE : cache.acquire(needBlocks(shape), shape.blockKeys());
             if (lease == null) {
                 return null;
             }
@@ -4178,6 +4233,7 @@ public final class JavaMockEngineCluster {
             // blocks this decode admission did NOT re-allocate — the
             // net-demand deduction, accumulated for the /metrics counter.
             decodeReuseBlocks.add(outcome.lease().hitKeys.size());
+            outcome.lease().decodeInputLength = shape.inputLen();
             activeBlockLeases.put(requestId, outcome.lease());
             return outcome;
         }

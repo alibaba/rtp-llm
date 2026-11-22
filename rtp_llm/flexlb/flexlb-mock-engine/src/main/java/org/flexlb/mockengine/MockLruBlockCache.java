@@ -458,6 +458,8 @@ final class MockLruBlockCache {
     static final class BlockLease {
         final List<Long> hitKeys;
         int nakedBlocks;
+        // Set before publishing a Decode reservation. It is observable until run or release.
+        int decodeInputLength = -1;
 
         BlockLease(List<Long> hitKeys, int nakedBlocks) {
             this.hitKeys = hitKeys;

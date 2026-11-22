@@ -1,0 +1,38 @@
+{
+  "dispatchTimeoutMs": 30000,
+  "scheduler": {
+    "decision": {
+      "type": "SINGLE"
+    },
+    "ordering": {
+      "type": "PRIORITY",
+      "defaultPriority": 50,
+      "prefillCostOrder": true,
+      "preemption": {
+        "allowedVictimStages": [
+          "PREFILL_QUEUED",
+          "DECODE_RESERVED",
+          "DECODE_ENGINE_OWNED"
+        ],
+        "timeoutMs": 1000
+      }
+    }
+  },
+  "dispatcher": {
+    "maxInflightPerPrefillWorker": 256
+  },
+  "router": {
+    "roles": {
+      "prefill": {
+        "tokenBalance": {
+          "engineQueueAdmissionThreshold": 80
+        }
+      },
+      "decode": {
+        "availability": {
+          "maxEngineRequests": 1024
+        }
+      }
+    }
+  }
+}

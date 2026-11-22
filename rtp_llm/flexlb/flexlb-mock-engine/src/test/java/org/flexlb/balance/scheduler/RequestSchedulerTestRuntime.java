@@ -54,13 +54,23 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
             EngineGrpcClient engineClient) {
+        this(configService, delivery, deliveryReporter, requestReporter, engineClient, true);
+    }
+
+    public RequestSchedulerTestRuntime(
+            ConfigService configService,
+            DeliveryDispatcher delivery,
+            DeliveryMetricsReporter deliveryReporter,
+            RequestSchedulerReporter requestReporter,
+            EngineGrpcClient engineClient,
+            boolean retainMockCalls) {
         Objects.requireNonNull(delivery, "delivery");
         var capacity = new PlacementConfiguration().decodeAdmissionCapacity(configService);
         this.registry = new EndpointRegistry(configService, requests, deliveryReporter, delivery, placementAvailability);
         this.router = new BindingRouter(registry, configService, capacity);
-        this.runtime = org.mockito.Mockito.spy(new SchedulerRuntime(requests, registry, deliveryReporter, requestReporter,
-                delivery, configService, engineClient));
-        var facilities = org.mockito.Mockito.spy(runtime.deliveries());
+        this.runtime = spy(new SchedulerRuntime(requests, registry, deliveryReporter, requestReporter,
+                delivery, configService, engineClient), SchedulerRuntime.class, retainMockCalls);
+        var facilities = spy(runtime.deliveries(), runtime.deliveries().getClass(), retainMockCalls);
         org.springframework.test.util.ReflectionTestUtils.setField(runtime, "deliveries", facilities);
         // Keep transport and Dispatcher real; inject capacity pressure at its infrastructure owner.
         org.mockito.Mockito.doAnswer(invocation -> deliveryPaused
@@ -78,6 +88,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         this.scheduler = PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
                 router, deliveryReporter, decodeCapacity, placementAvailability, capacity, new org.flexlb.service.RecentCacheKeyTraceReporter());
         runtime.registerScheduler(scheduler);
+    }
+
+    private static <T> T spy(T object, Class<? extends T> type, boolean retainMockCalls) {
+        if (retainMockCalls) return org.mockito.Mockito.spy(object);
+        return org.mockito.Mockito.mock(type, org.mockito.Mockito.withSettings().spiedInstance(object)
+                .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS).stubOnly());
     }
 
     public RequestRepository requestRegistry() {

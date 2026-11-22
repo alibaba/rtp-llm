@@ -75,6 +75,15 @@ class ProductionCaliberDecodeTest {
     // ──────────── config surface ────────────
 
     @Test
+    void subMillisecondDecodeStepsKeepTheirConfiguredDuration() throws Exception {
+        var configured = model(Map.of("step_ms_by_batch", List.of(List.of(1, 0.0010343)),
+                "tokens_per_step", 2.874334269284765));
+        assertEquals(1034L, configured.decodeStepDelayNanos(1));
+        assertEquals(1034L, configured.decodeStepDelayNanos(17));
+        assertEquals(348, configured.decodeSteps(1000));
+    }
+
+    @Test
     void defaultsAreTheProductionLinearFitWithMtpFold() throws Exception {
         MockPerformanceModel model = model(Map.of()); // no decode declaration at all
         assertEquals(2.6, model.tokensPerStep(), 1e-9, "MTP fold default");

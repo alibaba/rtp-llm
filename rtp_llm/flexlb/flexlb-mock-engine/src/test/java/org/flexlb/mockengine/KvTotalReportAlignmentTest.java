@@ -71,6 +71,23 @@ class KvTotalReportAlignmentTest {
         model = MockEngineTestSupport.performanceModel(tempDir, "10", 1.0, 1.0);
     }
 
+    @Test
+    void replayDecodePoolIsVisibleToPlacementAtItsActualSize() throws Exception {
+        var config = org.flexlb.config.ConfigService.parse(
+                "{\"router\":{\"roles\":{\"decode\":{\"availability\":{\"maxEngineRequests\":1024}}}}}");
+        try (var harness = new AutoTpmE2EHarness(58180, 1, 1, "10", 1, true, false,
+                config.queueScheduler().getDecision(), true, config, 0,
+                Map.of("test_decode_pool_blocks", 9918939, "test_decode_block_size", 128))) {
+            long expected = 9918939L * 128;
+            for (int tick = 0; tick < 2; tick++) {
+                var usage = harness.decodeEndpoint(0).routingView().placementUsage();
+                assertEquals(expected, usage.totalKvTokens());
+                assertEquals(expected, usage.hardKvAvailable());
+                harness.pumpDecodeOnce(0);
+            }
+        }
+    }
+
     @AfterEach
     void tearDown() throws InterruptedException {
         for (Server server : serversByPort.values()) {

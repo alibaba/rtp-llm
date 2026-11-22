@@ -118,6 +118,15 @@ class DecodeReserveNetAllocationTest {
         assertEquals(0, ack.getErrorsCount(), "the net-demand reservation must admit: " + ack);
         assertEquals(1, ack.getSuccessesCount());
 
+        var reserved = MockEngineTestSupport.workerStatus(decode, 0);
+        var tasks = reserved.getRunningTaskInfoList().stream()
+                .filter(t -> t.getRequestId() == 901L).toList();
+        assertEquals(1, tasks.size());
+        assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED, tasks.getFirst().getPhase());
+        assertEquals(5 * SPB, tasks.getFirst().getInputLength());
+        assertEquals(0, reserved.getRunningQueryLen());
+        assertEquals(0, reserved.getWaitingQueryLen());
+
         // The reservation holds ONLY the delta; the hits pin as references.
         assertEquals(2, cache.heldBlocks(),
                 "held = ceil(il/spb) − own-LRU hits = 5 − 3 (a full-total reservation would hold 5)");
@@ -125,6 +134,10 @@ class DecodeReserveNetAllocationTest {
                 "the 3 parked hits are pinned as references, never re-allocated");
         assertEquals(5, cache.availableBlocks(),
                 "available = 10 − 2 held − 3 referenced — reuse did not consume fresh capacity");
+        prefill.cancelRequest(901L);
+        assertEquals(10, cache.availableBlocks());
+        assertTrue(MockEngineTestSupport.workerStatus(decode, 0).getRunningTaskInfoList().stream()
+                .noneMatch(task -> task.getRequestId() == 901L));
     }
 
     /**

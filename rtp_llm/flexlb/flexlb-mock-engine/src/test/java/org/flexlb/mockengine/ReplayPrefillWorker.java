@@ -23,19 +23,25 @@ final class ReplayPrefillWorker {
     // Preserve access ordering and refcounts; containsKey does not refresh access order.
     private static final class Membership extends LinkedHashMap<Long, Integer> {
         final Set<Long> changed = new HashSet<>();
+        boolean touched;
+        private void recordTransition(Long key) {
+            touched = true;
+            // Entering and leaving between two replies cancels the membership change.
+            if (!changed.add(key)) { changed.remove(key); }
+        }
         Membership() { super(16, 0.75f, true); }
         @Override public Integer put(Long key, Integer value) {
             Integer old = super.put(key, value);
-            if (old == null) { changed.add(key); }
+            if (old == null) { recordTransition(key); }
             return old;
         }
         @Override public Integer remove(Object key) {
             Integer old = super.remove(key);
-            if (old != null) { changed.add((Long) key); }
+            if (old != null) { recordTransition((Long) key); }
             return old;
         }
         @Override public void clear() {
-            changed.addAll(keySet());
+            keySet().forEach(this::recordTransition);
             super.clear();
         }
     }
@@ -52,17 +58,35 @@ final class ReplayPrefillWorker {
         }
     }
 
-    boolean publish(GlobalCacheIndex index, PrefillEndpoint worker) {
+    record Delta(Long[] added, Long[] removed, boolean touched) {
+        boolean changed() { return added.length != 0 || removed.length != 0; }
+
+        void apply(GlobalCacheIndex index, String address) {
+            for (Long key : added) { index.addCacheBlock(key, address); }
+            for (Long key : removed) { index.removeCacheBlock(address, key); }
+        }
+    }
+
+    private static final Delta EMPTY = new Delta(new Long[0], new Long[0], false);
+
+    Delta captureDelta() {
         synchronized (cache) {
-            if (membership.changed.isEmpty()) { return false; }
-            String address = worker.ipPort();
-            for (long key : membership.changed) {
-                if (membership.containsKey(key)) { index.addCacheBlock(key, address); }
-                else { index.removeCacheBlock(address, key); }
+            if (!membership.touched) { return EMPTY; }
+            membership.touched = false;
+            var added = new java.util.ArrayList<Long>();
+            var removed = new java.util.ArrayList<Long>();
+            for (Long key : membership.changed) {
+                (membership.containsKey(key) ? added : removed).add(key);
             }
             membership.changed.clear();
-            return true;
+            return new Delta(added.toArray(Long[]::new), removed.toArray(Long[]::new), true);
         }
+    }
+
+    boolean publish(GlobalCacheIndex index, PrefillEndpoint worker) {
+        var delta = captureDelta();
+        delta.apply(index, worker.ipPort());
+        return delta.touched();
     }
 
     int physicalKeys() {

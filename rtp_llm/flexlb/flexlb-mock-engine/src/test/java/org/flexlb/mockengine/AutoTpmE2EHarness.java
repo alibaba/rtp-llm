@@ -89,14 +89,14 @@ import static org.mockito.Mockito.when;
 final class AutoTpmE2EHarness implements AutoCloseable {
 
     final FlexlbConfig config;
-    final ConfigService configService = mock(ConfigService.class);
+    final ConfigService configService;
     private final java.util.concurrent.atomic.AtomicReference<Throwable> pumpFailure =
             new java.util.concurrent.atomic.AtomicReference<>();
-    final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
-    final CacheAwareService cache = mock(CacheAwareService.class);
-    final EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
-    final DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
-    final RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
+    final RequestWorkerSelector router;
+    final CacheAwareService cache;
+    final EngineGrpcClient grpcClient;
+    final DeliveryMetricsReporter reporter;
+    final RequestSchedulerReporter requestReporter;
 
     final Map<Integer, JavaMockEngineCluster.FastRpcService> services = new ConcurrentHashMap<>();
     final List<JavaMockEngineCluster.FastRpcService> prefillEngines = new ArrayList<>();
@@ -182,6 +182,31 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                       boolean preemptionSupported, boolean autoTpm,
                       DecisionPolicyConfig decisionPolicy, boolean productionRouting,
                       FlexlbConfig initialConfig, long transportDelayMs, Map<String, Object> performanceOverrides) {
+        this(basePort, nPrefill, nDecode, prefillFormulaMs, decodeStepMs, preemptionSupported, autoTpm,
+                decisionPolicy, productionRouting, initialConfig, transportDelayMs, performanceOverrides, true);
+    }
+
+    private final boolean retainMockCalls;
+
+    private <T> T harnessMock(Class<T> type) {
+        return retainMockCalls ? mock(type) : mock(type, org.mockito.Mockito.withSettings().stubOnly());
+    }
+
+    AutoTpmE2EHarness(int basePort, int nPrefill, int nDecode,
+                      String prefillFormulaMs, double decodeStepMs,
+                      boolean preemptionSupported, boolean autoTpm,
+                      DecisionPolicyConfig decisionPolicy, boolean productionRouting,
+                      FlexlbConfig initialConfig, long transportDelayMs, Map<String, Object> performanceOverrides,
+                      boolean retainMockCalls) {
+        this.retainMockCalls = retainMockCalls;
+        configService = harnessMock(ConfigService.class);
+        router = harnessMock(RequestWorkerSelector.class);
+        cache = harnessMock(CacheAwareService.class);
+        grpcClient = harnessMock(EngineGrpcClient.class);
+        reporter = harnessMock(DeliveryMetricsReporter.class);
+        requestReporter = harnessMock(RequestSchedulerReporter.class);
+        healthReporter = harnessMock(EngineHealthReporter.class);
+        cacheReporter = harnessMock(CacheMetricsReporter.class);
         this.transportDelayMs = transportDelayMs;
         this.performanceOverrides = performanceOverrides;
         this.config = initialConfig == null ? new FlexlbConfig() : initialConfig;
@@ -207,13 +232,19 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             services.put(port, svc);
             prefillEngines.add(svc);
         }
+        int decodeBlocks = ((Number) performanceOverrides.getOrDefault("test_decode_pool_blocks", poolBlocks)).intValue();
+        MockPerformanceModel decodeModel = model;
+        if (performanceOverrides.containsKey("test_decode_block_size")) {
+            decodeModel = model(prefillFormulaMs, decodeStepMs);
+            decodeModel.setBlockSize(((Number) performanceOverrides.get("test_decode_block_size")).intValue());
+        }
+        long decodeKvTokens = (long) decodeBlocks * decodeModel.blockSize();
         for (int i = 0; i < nDecode; i++) {
             int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService svc = new JavaMockEngineCluster.FastRpcService(
-                    "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, engineScheduler, model,
-                    ((Number) performanceOverrides.getOrDefault("test_decode_pool_blocks", poolBlocks)).intValue(),
-                    new JavaMockEngineCluster.ClusterStats());
+                    "decode-" + port, "127.0.0.1", "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                    port, services, engineScheduler, decodeModel, decodeBlocks, new JavaMockEngineCluster.ClusterStats(),
+                    decodeKvTokens, JavaMockEngineCluster.DEFAULT_DECODE_MAX_CONCURRENCY);
             services.put(port, svc);
             decodeEngines.add(svc);
         }
@@ -300,7 +331,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 dispatcher,
                 reporter,
                 requestReporter,
-                grpcClient);
+                grpcClient, retainMockCalls);
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
         requests = schedulerRuntime.requestRegistry();
@@ -470,8 +501,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return schedulerRuntime.routeResult(context, defaultRoute(context));
     }
 
-    private final EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
-    private final CacheMetricsReporter cacheReporter = mock(CacheMetricsReporter.class);
+    private final EngineHealthReporter healthReporter;
+    private final CacheMetricsReporter cacheReporter;
 
     /** Long open-loop replays inspect engine results directly, so old Mockito calls can be discarded. */
     void discardRecordedCalls() {
@@ -483,7 +514,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         EndpointRegistry workers = endpointRegistry;
         when(cache.findMatchingEngines(any(), any(), any()))
                 .thenReturn(Map.of());
-        ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
+        ModelMetaConfig modelMeta = harnessMock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(
                 List.of(RoleType.DECODE, RoleType.PREFILL));
         return new RequestWorkerSelector(
@@ -592,6 +623,19 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 status, statusResponse(role, snapshot))); }
     }
 
+    // Each replay lane has one outstanding response for its endpoint.
+    Runnable captureReplayStatus(JavaMockEngineCluster.FastRpcService engine, RoleType role) {
+        var status = statusByPort.get(engine.getGrpcPort());
+        var response = statusResponse(role, workerStatus(engine,
+                status.appliedStatusCursor().latestFinishedTaskVersion()));
+        return () -> {
+            schedulerRuntime.applyStatus(status, response);
+            if (status.appliedStatusCursor().statusVersion() != response.getStatusVersion()) {
+                throw new IllegalStateException("uncommitted replay status");
+            }
+        };
+    }
+
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
         TaskInfo info = new TaskInfo();
         info.setRequestId(task.getRequestId());
@@ -610,6 +654,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         }
         if (task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RUNNING) {
             info.setPhase(TaskPhase.RUNNING);
+        } else if (task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED) {
+            info.setPhase(TaskPhase.KV_ALLOCATED);
         } else if (task.getPhase() == EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED) {
             info.setPhase(TaskPhase.RECEIVED);
         }

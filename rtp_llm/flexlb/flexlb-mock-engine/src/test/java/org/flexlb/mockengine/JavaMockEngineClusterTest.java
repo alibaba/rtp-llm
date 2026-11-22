@@ -1,15 +1,19 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +56,66 @@ class JavaMockEngineClusterTest {
 
         assertTrue(batchMs > singleMs,
                 "batch duration must be computed from the complete task set");
+    }
+
+    @Test
+    void queuedPrefillMatchesPublishedBlocksWhenItsBatchStarts() throws Exception {
+        verifyQueuedPrefixReuse(false);
+    }
+
+    @Test
+    void directPrefillMatchesPublishedBlocksWhenItsBatchStarts() throws Exception {
+        verifyQueuedPrefixReuse(true);
+    }
+
+    private void verifyQueuedPrefixReuse(boolean direct) throws Exception {
+        var model = model("10 + 0.0125 * sum(computeTokens)", 1);
+        model.setBlockSize(512);
+        var worker = service(model);
+        worker.enableBatchStartMatching();
+        var measured = new ReplayPrefillWorker(worker);
+        var keys = List.of(11L, 22L);
+        var unblock = new CountDownLatch(1);
+        List<CompletableFuture<Void>> responses = new ArrayList<>();
+        // Keep the first completion pending until both requests have been acknowledged.
+        for (int i = 0; i < 2; i++) {
+            scheduler.submit(() -> { unblock.await(); return null; });
+        }
+        try {
+            for (int id = 1; id <= 2; id++) {
+                var input = MockEngineTestSupport.inputWithBlockKeys(id, 1025, keys);
+                if (direct) {
+                    var done = new CompletableFuture<Void>();
+                    responses.add(done);
+                    worker.generateStreamCall(input, new StreamObserver<>() {
+                        public void onNext(EngineRpcService.GenerateOutputsPB frame) {
+                            if (frame.hasErrorInfo() && frame.getErrorInfo().getErrorCodeValue() != 0) {
+                                done.completeExceptionally(new AssertionError(frame.getErrorInfo()));
+                            }
+                        }
+                        public void onError(Throwable error) { done.completeExceptionally(error); }
+                        public void onCompleted() { done.complete(null); }
+                    });
+                } else {
+                    assertEquals(1, enqueue(worker, batch(id, slot(0, input))).getSuccessesCount());
+                }
+            }
+            assertEquals(1, measured.waiting.get());
+            assertEquals(0, measured.cache.prefixHitBlocks(keys));
+        } finally {
+            unblock.countDown();
+        }
+        for (var done : responses) {
+            done.get(2, TimeUnit.SECONDS);
+        }
+        var status = awaitStatus(worker, s -> s.getFinishedTaskListCount() == 2 && measured.input.get() == 2050, 2000);
+        var done = status.getFinishedTaskListList();
+        assertEquals(22, done.stream().filter(t -> t.getRequestId() == 1).findFirst().orElseThrow().getExecutionTimeMs());
+        assertEquals(10, done.stream().filter(t -> t.getRequestId() == 2).findFirst().orElseThrow().getExecutionTimeMs());
+        worker.checkBatchPreparation();
+        assertEquals(2050, measured.input.get());
+        assertEquals(1024, measured.hits.get());
+        assertEquals(1025 + 1, measured.fresh.get());
     }
 
     @Test

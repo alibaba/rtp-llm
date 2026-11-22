@@ -363,6 +363,12 @@ final class MockPerformanceModel {
     }
 
     RequestShape shape(EngineRpcService.GenerateInputPB input, MockLruBlockCache cache) {
+        RequestShape shape = unpricedShape(input);
+        int hits = cache.prefixHitBlocks(shape.blockKeys());
+        return shape.withHits(hits, blockSize);
+    }
+
+    RequestShape unpricedShape(EngineRpcService.GenerateInputPB input) {
         int inputLen = input.getTokenIdsCount();
         int outputLen = Math.max(1, input.getGenerateConfig().getMaxNewTokens());
         List<Long> blockKeys = new ArrayList<>();
@@ -382,17 +388,7 @@ final class MockPerformanceModel {
                 // Fall back to protobuf lengths when metadata is absent or malformed.
             }
         }
-        // hitBlocks carries the RAW prefix-match run length (key count) — the
-        // key-level cache-hit caliber (production recent_cache_key_hit_count /
-        // total_count analogue) recorded by the engine at this admission hit
-        // computation point. Unlike hitTokens it is NOT clamped to inputLen, so
-        // a trace whose bh keys exceed the request's own block count keeps an
-        // honest requested/hit key pair.
-        int hitBlocks = cache.prefixHitBlocks(blockKeys);
-        long hitTokens = (long) hitBlocks * blockSize;
-        hitTokens = Math.min(hitTokens, inputLen);
-        return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys),
-                hitTokens, hitBlocks);
+        return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys), 0, 0);
     }
 
     long prefillMs(List<RequestShape> requests) {
@@ -557,6 +553,10 @@ final class MockPerformanceModel {
         return scaledMs(stepMs(activeBatchSize) * effectiveDecodeScale());
     }
 
+    long decodeStepDelayNanos(int activeBatchSize) {
+        return Math.max(1L, Math.round(1_000_000 * scaledDelay(stepMs(activeBatchSize) * effectiveDecodeScale())));
+    }
+
     private double interpolateStepMs(int activeBatchSize) {
         if (activeBatchSize <= decodePoints.get(0).batchSize) {
             return decodePoints.get(0).stepMs;
@@ -578,12 +578,16 @@ final class MockPerformanceModel {
     }
 
     private long scaledMs(double latencyMs) {
+        return Math.max(1L, Math.round(scaledDelay(latencyMs)));
+    }
+
+    private double scaledDelay(double latencyMs) {
         double scaled = Math.max(0.0, latencyMs) * sleepScale;
         if (jitterPct > 0) {
             double factor = 1.0 + ThreadLocalRandom.current().nextDouble(-jitterPct, jitterPct);
             scaled = scaled * factor;
         }
-        return Math.max(1L, Math.round(scaled));
+        return scaled;
     }
 
     int blockSize() {
@@ -596,6 +600,10 @@ final class MockPerformanceModel {
                         List<Long> blockKeys,
                         long hitTokens,
                         int hitBlocks) {
+        RequestShape withHits(int blocks, int blockSize) {
+            return new RequestShape(input, inputLen, outputLen, blockKeys,
+                    Math.min((long) blocks * blockSize, inputLen), blocks);
+        }
     }
 
     private record DecodePoint(int batchSize, double stepMs) {

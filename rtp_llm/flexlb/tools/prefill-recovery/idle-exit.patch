@@ -1,0 +1,51 @@
+--- a/EngineQueueAdmission.java
++++ b/EngineQueueAdmission.java
+@@ -40,7 +40,9 @@
+     }
+
+     // Endpoint status ownership serializes observations; readers consume one published state.
+-    void observe(long waiting, long nowMs) {
++    void observe(long waiting, long nowMs) { observe(waiting, -1L, nowMs); }
++
++    void observe(long waiting, long running, long nowMs) {
+         boolean stale = lastObservedMs == Long.MIN_VALUE || nowMs - lastObservedMs > rescueMaxAgeMs;
+         if (stale || waiting < 0L) {
+             draining = false;
+@@ -63,7 +65,7 @@
+             if (waiting >= threshold) {
+                 draining = true;
+             }
+-            if (draining && waiting == 0L) {
++            if (draining && waiting == 0L && running <= 0L) {
+                 if (emptySinceMs < 0L) { emptySinceMs = nowMs; }
+                 if (nowMs - emptySinceMs >= durationMs) { draining = false; }
+             } else {
+--- a/PrefillEndpoint.java
++++ b/PrefillEndpoint.java
+@@ -194,7 +194,7 @@
+     private void observeEngineQueue() {
+         if (engineQueueAdmission == null) { return; }
+         var status = getStatus().committedWorkerStatus();
+-        engineQueueAdmission.observe(status.cursor().statusVersion() < 0L ? -1L : status.fields().waitingQueryLen(),
++        engineQueueAdmission.observe(status.cursor().statusVersion() < 0L ? -1L : status.fields().waitingQueryLen(), status.fields().runningQueryLen(),
+                 System.nanoTime() / 1_000_000L);
+     }
+
+@@ -456,7 +456,7 @@
+         requireStatusGeneration(ws);
+         PrefillState.StatusReconciliation reconciliation = reduceStatus(ws, observation, null);
+         if (engineQueueAdmission != null) {
+-            engineQueueAdmission.observe(observation.engine().waitingQueryLen(), System.nanoTime() / 1_000_000L);
++            engineQueueAdmission.observe(observation.engine().waitingQueryLen(), observation.engine().runningQueryLen(), System.nanoTime() / 1_000_000L);
+         }
+         checkState(reconciliation.requestStatuses().isEmpty() && reconciliation.batchCompletions().isEmpty(),
+                 "Private Prefill candidate produced locally-owned request statuses");
+@@ -566,7 +566,7 @@
+             reconciliation = ownership.commitStatusLocked(PrefillObservation.prepareLocked(ownership, observation, false), Map.of());
+             var queueBefore = engineQueueAdmissionState();
+             if (engineQueueAdmission != null) {
+-                engineQueueAdmission.observe(observation.engine().waitingQueryLen(), System.nanoTime() / 1_000_000L);
++                engineQueueAdmission.observe(observation.engine().waitingQueryLen(), observation.engine().runningQueryLen(), System.nanoTime() / 1_000_000L);
+             }
+             if (queueBefore != engineQueueAdmissionState() || blockedBefore != ownership.engineQueueAdmissionBlocked()
+                     || dispatchBlockedBefore != ownership.engineQueueDispatchBlocked()) {
