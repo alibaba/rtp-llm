@@ -251,6 +251,7 @@ def compact_fp8_decode(
             num_warps=1,
             launch_pdl=pdl,
         )
+    del up
     down = x.new_empty((routes, hidden), dtype=torch.bfloat16)
     _project(
         down_input,
@@ -263,6 +264,7 @@ def compact_fp8_decode(
         plans,
         pre_ready_routing=True,
     )
+    del down_input, down_scale, plans
 
     staged_out = compact_moe_output_buffer.get()
     if (
